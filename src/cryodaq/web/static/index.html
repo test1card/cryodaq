@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CryoDAQ — Мониторинг</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+        header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        header h1 { font-size: 1.3em; color: #58a6ff; }
+        #conn-status {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        .connected { background: #238636; color: #fff; }
+        .disconnected { background: #da3633; color: #fff; }
+        .stats {
+            display: flex;
+            gap: 16px;
+            font-size: 0.85em;
+            color: #8b949e;
+        }
+        main { padding: 16px 24px; }
+        h2 {
+            font-size: 1.1em;
+            margin: 16px 0 8px;
+            color: #58a6ff;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 16px;
+        }
+        th, td {
+            text-align: left;
+            padding: 6px 12px;
+            border-bottom: 1px solid #21262d;
+        }
+        th {
+            background: #161b22;
+            color: #8b949e;
+            font-weight: 600;
+            font-size: 0.85em;
+            text-transform: uppercase;
+        }
+        td { font-variant-numeric: tabular-nums; }
+        tr:hover { background: #161b22; }
+        .value { font-weight: bold; color: #7ee787; font-size: 1.05em; }
+        .value.warn { color: #f0883e; }
+        .value.error { color: #f85149; }
+        .unit { color: #8b949e; font-size: 0.9em; }
+        .alarm-row { background: #2d1b1b !important; }
+        .alarm-critical { color: #f85149; font-weight: bold; }
+        .alarm-warning { color: #f0883e; }
+        #alarm-section { display: none; }
+        #alarm-section.has-alarms { display: block; }
+        .empty-msg {
+            text-align: center;
+            padding: 32px;
+            color: #484f58;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>CryoDAQ — Мониторинг</h1>
+            <div class="stats">
+                <span>Uptime: <b id="uptime">--:--:--</b></span>
+                <span>Каналов: <b id="ch-count">0</b></span>
+                <span>Показаний: <b id="total">0</b></span>
+            </div>
+        </div>
+        <span id="conn-status" class="disconnected">Отключено</span>
+    </header>
+
+    <main>
+        <!-- Тревоги -->
+        <div id="alarm-section">
+            <h2>Тревоги</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Уровень</th>
+                        <th>Имя</th>
+                        <th>Канал</th>
+                        <th>Значение</th>
+                        <th>Время</th>
+                    </tr>
+                </thead>
+                <tbody id="alarm-body"></tbody>
+            </table>
+        </div>
+
+        <!-- Температуры -->
+        <h2>Температурные каналы</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Канал</th>
+                    <th>Значение</th>
+                    <th>Ед.</th>
+                    <th>Статус</th>
+                    <th>Обновлено</th>
+                </tr>
+            </thead>
+            <tbody id="temp-body">
+                <tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>
+            </tbody>
+        </table>
+
+        <!-- Прочие каналы -->
+        <h2>Прочие каналы</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Канал</th>
+                    <th>Значение</th>
+                    <th>Ед.</th>
+                    <th>Статус</th>
+                    <th>Обновлено</th>
+                </tr>
+            </thead>
+            <tbody id="other-body">
+                <tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>
+            </tbody>
+        </table>
+    </main>
+
+    <script>
+        const channels = {};
+        let ws = null;
+        let reconnectTimer = null;
+
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+            ws.onopen = () => {
+                document.getElementById('conn-status').textContent = 'Подключено';
+                document.getElementById('conn-status').className = 'connected';
+                if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('conn-status').textContent = 'Отключено';
+                document.getElementById('conn-status').className = 'disconnected';
+                if (!reconnectTimer) {
+                    reconnectTimer = setInterval(connect, 3000);
+                }
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'reading') {
+                    channels[msg.channel] = msg;
+                    renderTables();
+                }
+            };
+        }
+
+        function renderTables() {
+            const tempRows = [];
+            const otherRows = [];
+            let total = 0;
+
+            const sorted = Object.values(channels).sort((a, b) =>
+                a.channel.localeCompare(b.channel, 'ru')
+            );
+
+            for (const ch of sorted) {
+                total++;
+                const time = new Date(ch.timestamp).toLocaleTimeString('ru-RU');
+                const valueClass = ch.status === 'ok' ? 'value' :
+                    (ch.status === 'sensor_error' || ch.status === 'timeout') ? 'value error' : 'value warn';
+
+                const row = `<tr>
+                    <td>${esc(ch.channel)}</td>
+                    <td class="${valueClass}">${Number(ch.value).toPrecision(6)}</td>
+                    <td class="unit">${esc(ch.unit)}</td>
+                    <td>${esc(ch.status)}</td>
+                    <td>${time}</td>
+                </tr>`;
+
+                if (ch.unit === 'K' || ch.channel.startsWith('Т')) {
+                    tempRows.push(row);
+                } else {
+                    otherRows.push(row);
+                }
+            }
+
+            document.getElementById('temp-body').innerHTML =
+                tempRows.length ? tempRows.join('') : '<tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>';
+            document.getElementById('other-body').innerHTML =
+                otherRows.length ? otherRows.join('') : '<tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>';
+            document.getElementById('ch-count').textContent = total;
+        }
+
+        // Периодический запрос статуса
+        async function fetchStatus() {
+            try {
+                const resp = await fetch('/status');
+                const data = await resp.json();
+                document.getElementById('uptime').textContent = data.uptime || '--:--:--';
+                document.getElementById('total').textContent = data.total_readings || 0;
+            } catch (e) { /* ignore */ }
+        }
+
+        function esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Запуск
+        connect();
+        setInterval(fetchStatus, 2000);
+        fetchStatus();
+    </script>
+</body>
+</html>

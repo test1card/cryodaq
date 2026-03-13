@@ -26,6 +26,11 @@ dev = [
     "pytest-cov>=4",
     "ruff>=0.3",
 ]
+web = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "websockets>=12.0",
+]
 
 [project.scripts]
 cryodaq-engine = "cryodaq.engine:main"

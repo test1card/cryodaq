@@ -10,8 +10,11 @@ LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
 
 ```bash
 pip install -e ".[dev]"        # Install in editable mode with dev deps
-cryodaq-engine                 # Run the engine (headless)
-cryodaq-gui                    # Run the GUI
+pip install -e ".[web]"        # Install with web dashboard deps (FastAPI)
+cryodaq-engine                 # Run the engine (headless, real instruments)
+cryodaq-engine --mock          # Run the engine with simulated data
+cryodaq-gui                    # Run the GUI (connects to engine via ZMQ)
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # Web dashboard
 pytest                         # Run all tests
 pytest tests/drivers/          # Run driver tests only
 pytest tests/core/             # Run core tests only
@@ -23,6 +26,7 @@ ruff format src/ tests/        # Format
 ## Architecture
 
 Two-process system: **cryodaq-engine** (headless, asyncio) + **cryodaq-gui** (PySide6).
+Optional: **web dashboard** (FastAPI + WebSocket) for remote monitoring.
 
 ### Engine data flow
 
@@ -32,7 +36,9 @@ InstrumentDriver.read_channels()
     → DataBroker (fan-out, bounded asyncio.Queue, DROP_OLDEST)
       → SQLiteWriter (WAL, batch insert 1s, data_YYYY-MM-DD.db)
       → ZMQPublisher (PUB tcp://127.0.0.1:5555, msgpack)
+      → AlarmEngine (threshold + hysteresis → notifiers)
       → InterlockEngine (regex channel matching → emergency_off/stop_source)
+      → PluginPipeline (hot-reload analytics → DerivedMetric → back to broker)
 ```
 
 ### GUI data flow
@@ -40,28 +46,70 @@ InstrumentDriver.read_channels()
 ```
 ZMQSubscriber (SUB, msgpack deserialize)
   → Qt Signal (thread-safe crossing)
-    → TemperaturePanel (24x ChannelCard + pyqtgraph, deque(3600) ring buffers, 2Hz refresh)
+    → MainWindow (tabs: Температуры, Keithley, Аналитика, Алармы, Статус)
+      → TemperaturePanel (24x ChannelCard + pyqtgraph, deque(3600), 2Hz refresh)
+      → AlarmPanel (severity-sorted table, acknowledge buttons)
+      → InstrumentStatusPanel (per-instrument cards, liveness timeout)
 ```
 
-### Key modules
+### Module index
 
+**Entry points:**
+- `src/cryodaq/engine.py` — headless engine: loads config, wires subsystems, graceful shutdown, watchdog
+- `src/cryodaq/gui/app.py` — GUI entry point: QApplication + asyncio + ZMQSubscriber
+
+**Core:**
+- `src/cryodaq/core/broker.py` — DataBroker: bounded queues, overflow policies, fan-out
+- `src/cryodaq/core/scheduler.py` — per-instrument polling, isolated tasks, exponential backoff
+- `src/cryodaq/core/alarm.py` — AlarmEngine: OK/ACTIVE/ACKNOWLEDGED, hysteresis, severity, notifiers
+- `src/cryodaq/core/interlock.py` — InterlockEngine: ARMED/TRIPPED/ACKNOWLEDGED, regex matching, cooldown
+- `src/cryodaq/core/experiment.py` — ExperimentManager: start/stop, config snapshot, SQLite persistence
+- `src/cryodaq/core/zmq_bridge.py` — ZMQPublisher + ZMQSubscriber (msgpack)
+
+**Drivers:**
 - `src/cryodaq/drivers/base.py` — Reading (frozen dataclass) + InstrumentDriver ABC
 - `src/cryodaq/drivers/transport/gpib.py` — async pyvisa wrapper (GPIB, run_in_executor)
 - `src/cryodaq/drivers/transport/usbtmc.py` — async pyvisa wrapper (USB-TMC)
 - `src/cryodaq/drivers/instruments/lakeshore_218s.py` — LakeShore 218S: KRDG? 0, 8ch SCPI
 - `src/cryodaq/drivers/instruments/keithley_2604b.py` — Keithley 2604B: TSP/Lua supervisor, heartbeat, emergency_off
-- `src/cryodaq/core/broker.py` — DataBroker: bounded queues, overflow policies
-- `src/cryodaq/core/scheduler.py` — per-instrument polling, isolated tasks, backoff
-- `src/cryodaq/core/zmq_bridge.py` — ZMQPublisher + ZMQSubscriber (msgpack)
-- `src/cryodaq/core/interlock.py` — InterlockEngine: ARMED/TRIPPED/ACKNOWLEDGED, regex matching
+
+**Storage:**
 - `src/cryodaq/storage/sqlite_writer.py` — SQLiteWriter: WAL, daily rotation, batch insert
-- `src/cryodaq/gui/widgets/temp_panel.py` — TemperaturePanel + ChannelCard
-- `tsp/p_const_single.lua` — Keithley TSP: P=const feedback, watchdog 30s, compliance check
+- `src/cryodaq/storage/hdf5_export.py` — HDF5Exporter: SQLite → HDF5 (groups per instrument/channel)
+- `src/cryodaq/storage/csv_export.py` — CSVExporter: time-range export with filters
+- `src/cryodaq/storage/replay.py` — ReplaySource: historical data → DataBroker with speed control
+
+**Analytics:**
+- `src/cryodaq/analytics/base_plugin.py` — AnalyticsPlugin ABC + DerivedMetric dataclass
+- `src/cryodaq/analytics/plugin_loader.py` — PluginPipeline: hot-reload, batch processing, error isolation
+- `src/cryodaq/analytics/calibration.py` — CalibrationStore (stub for ГОСТ Р 8.879 recalibration)
+
+**Plugins (hot-reloadable):**
+- `plugins/thermal_calculator.py` — R_thermal = (T_hot - T_cold) / P
+- `plugins/cooldown_estimator.py` — exponential decay fit → cooldown ETA
+
+**GUI:**
+- `src/cryodaq/gui/main_window.py` — MainWindow: tabs, menu (export CSV/HDF5), status bar
+- `src/cryodaq/gui/widgets/temp_panel.py` — TemperaturePanel + ChannelCard (24ch, pyqtgraph)
+- `src/cryodaq/gui/widgets/alarm_panel.py` — AlarmPanel: severity table, acknowledge
+- `src/cryodaq/gui/widgets/instrument_status.py` — InstrumentStatusPanel: per-instrument cards
+
+**Web:**
+- `src/cryodaq/web/server.py` — FastAPI: WebSocket stream, GET /status, static dashboard
+- `src/cryodaq/web/static/index.html` — single-page dashboard (temperatures, alarms, auto-refresh)
+
+**Notifications:**
+- `src/cryodaq/notifications/telegram.py` — TelegramNotifier: alarm → Telegram Bot API (aiohttp)
+
+**TSP (Keithley instrument scripts):**
+- `tsp/p_const_single.lua` — P=const feedback, watchdog 30s, compliance check
 
 ### Config files
 
 - `config/instruments.yaml` — instrument definitions (resource strings, channel labels)
 - `config/interlocks.yaml` — safety interlocks (thresholds, actions, cooldowns)
+- `config/alarms.yaml` — alarm thresholds (severity, hysteresis)
+- `config/notifications.yaml` — Telegram bot token, chat_id
 
 ## Instruments
 
