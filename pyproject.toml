@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cryodaq"
+version = "0.1.0"
+description = "Система сбора данных для криогенной лаборатории (АКЦ ФИАН, Millimetron)"
+requires-python = ">=3.12"
+dependencies = [
+    "pyside6>=6.6",
+    "pyqtgraph>=0.13",
+    "pyvisa>=1.14",
+    "pyserial-asyncio>=0.6",
+    "pyzmq>=25",
+    "h5py>=3.10",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+cryodaq-engine = "cryodaq.engine:main"
+cryodaq-gui = "cryodaq.gui.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cryodaq"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "ASYNC"]
