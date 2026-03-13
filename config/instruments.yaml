@@ -40,3 +40,8 @@ instruments:
       6: "Т22 Резерв 2"
       7: "Т23 Резерв 3"
       8: "Т24 Резерв 4"
+
+  - type: keithley_2604b
+    name: "Keithley_1"
+    resource: "USB0::0x05E6::0x2604::04052028::INSTR"
+    poll_interval_s: 1.0
