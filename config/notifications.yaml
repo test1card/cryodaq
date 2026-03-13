@@ -1,0 +1,13 @@
+# Конфигурация уведомлений CryoDAQ
+#
+# telegram — отправка тревог через Telegram Bot API
+#   bot_token:    Токен от @BotFather
+#   chat_id:      ID чата или группы (отрицательное число для групп)
+#   send_cleared: Отправлять уведомление при сбросе тревоги (true/false)
+#   timeout_s:    Таймаут HTTP-запроса к Telegram API
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: -1001234567890
+  send_cleared: true
+  timeout_s: 10.0
