@@ -69,7 +69,8 @@ async def test_mock_returns_8_channels() -> None:
         assert isinstance(r, Reading)
         assert r.unit == "K"
         assert r.status == ChannelStatus.OK
-        assert 4.0 <= r.value <= 300.0, f"Temperature {r.value} K out of expected range"
+        # Mock base temps range from 3.9 to 300 K, with ±0.5% noise
+        assert 3.5 <= r.value <= 302.0, f"Temperature {r.value} K out of expected range"
 
     await driver.disconnect()
 
@@ -195,12 +196,16 @@ async def test_timeout_handling() -> None:
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=asyncio.TimeoutError)
+    # First call (IDN during connect) succeeds; read_channels query times out
+    transport.query = AsyncMock(
+        side_effect=["LSCI,MODEL218S,MOCK001,010101", asyncio.TimeoutError],
+    )
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._transport = transport
 
     await driver.connect()
+    assert driver.connected
 
     # Driver must either raise a clearly typed exception OR return 8 TIMEOUT readings
     # — both are acceptable contracts; we just must not get an unhandled crash.

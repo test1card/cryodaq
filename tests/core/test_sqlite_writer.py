@@ -68,11 +68,13 @@ def _read_db(db_path: Path) -> list[dict]:
 
 async def test_write_batch_creates_db(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
-    today = date.today()
+    batch = _batch(5)
+    # Use the UTC date from the batch (not local date.today())
+    expected_date = batch[0].timestamp.date()
 
-    writer._write_batch(_batch(5))
+    writer._write_batch(batch)
 
-    expected_db = tmp_path / f"data_{today.isoformat()}.db"
+    expected_db = tmp_path / f"data_{expected_date.isoformat()}.db"
     assert expected_db.exists(), f"Expected DB file {expected_db} not found"
 
 
@@ -111,12 +113,15 @@ async def test_readings_persisted(tmp_path: Path) -> None:
 
 async def test_wal_mode_enabled(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
-    writer._write_batch(_batch(1))
+    batch = _batch(1)
+    writer._write_batch(batch)
 
-    db_path = tmp_path / f"data_{date.today().isoformat()}.db"
-    conn = sqlite3.connect(str(db_path))
-    row = conn.execute("PRAGMA journal_mode;").fetchone()
-    conn.close()
+    utc_date = batch[0].timestamp.date()
+    db_path = tmp_path / f"data_{utc_date.isoformat()}.db"
+    # The writer's own connection has WAL set; a fresh connection inherits it
+    # only if WAL was fully checkpointed. Check via the writer's connection instead.
+    assert writer._conn is not None, "Writer connection should be open after write"
+    row = writer._conn.execute("PRAGMA journal_mode;").fetchone()
 
     assert row[0].lower() == "wal", f"Expected WAL journal mode, got: {row[0]}"
 
@@ -159,7 +164,8 @@ async def test_batch_insert_performance(tmp_path: Path) -> None:
     writer._write_batch(big_batch)
     elapsed = time.monotonic() - t0
 
-    db_path = tmp_path / f"data_{date.today().isoformat()}.db"
+    utc_date = big_batch[0].timestamp.date()
+    db_path = tmp_path / f"data_{utc_date.isoformat()}.db"
     rows = _read_db(db_path)
 
     assert len(rows) == 1000, f"Expected 1000 persisted rows, got {len(rows)}"
