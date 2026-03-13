@@ -14,6 +14,10 @@ import asyncio
 import logging
 import sys
 
+# Windows: pyzmq требует SelectorEventLoop (не Proactor)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
