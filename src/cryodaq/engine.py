@@ -219,6 +219,17 @@ async def _run_engine(*, mock: bool = False) -> None:
     if keithley_driver is not None:
         interlock_actions["emergency_off"] = keithley_driver.emergency_off
         interlock_actions["stop_source"] = keithley_driver.stop_source
+    else:
+        # Stub-действия: Keithley не подключён — логируем, но не падаем
+        async def _noop_emergency_off() -> None:
+            logger.warning("INTERLOCK emergency_off: Keithley не подключён, действие пропущено")
+
+        async def _noop_stop_source() -> None:
+            logger.warning("INTERLOCK stop_source: Keithley не подключён, действие пропущено")
+
+        interlock_actions["emergency_off"] = _noop_emergency_off
+        interlock_actions["stop_source"] = _noop_stop_source
+        logger.info("Keithley не найден — блокировки используют stub-действия")
 
     interlock_engine = InterlockEngine(broker, actions=interlock_actions)
     if interlocks_cfg.exists():

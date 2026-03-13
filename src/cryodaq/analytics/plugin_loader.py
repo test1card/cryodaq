@@ -173,7 +173,15 @@ class PluginPipeline:
                 )
                 return
 
-            plugin = plugin_cls(plugin_id)
+            # Плагин может определять __init__(self) без аргументов (с plugin_id
+            # как атрибутом класса) или __init__(self, plugin_id).
+            try:
+                plugin = plugin_cls(plugin_id)
+            except TypeError:
+                plugin = plugin_cls()
+                # Если плагин не задал plugin_id — установить принудительно
+                if plugin.plugin_id != plugin_id:
+                    plugin._plugin_id = plugin_id
 
             config_path = path.with_suffix(".yaml")
             if config_path.exists():
