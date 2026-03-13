@@ -1,0 +1,39 @@
+# Конфигурация оповещений CryoDAQ
+#
+# Структура каждой тревоги:
+#   name            — уникальный идентификатор (используется в API и логах)
+#   description     — текстовое описание (отображается в интерфейсе при срабатывании)
+#   channel_pattern — регулярное выражение для сопоставления с Reading.channel
+#   threshold       — пороговое значение
+#   comparison      — оператор: ">" (больше) или "<" (меньше)
+#   severity        — уровень критичности: INFO, WARNING или CRITICAL
+#   hysteresis_k    — зона нечувствительности при сбросе (threshold ± hysteresis_k)
+#   enabled         — включить/отключить тревогу без удаления из конфигурации
+
+alarms:
+
+  # ─── Температурные тревоги криостата ─────────────────────────────────────────
+  - name: "overheat_sample"
+    description: "Перегрев образца — температура выше допустимой"
+    channel_pattern: "Т1 Криостат верх"
+    threshold: 100.0
+    comparison: ">"
+    severity: "WARNING"
+    hysteresis_k: 5.0
+
+  - name: "cryogenics_loss"
+    description: "Потеря криогеники — критический нагрев криостата"
+    channel_pattern: "Т1 Криостат верх"
+    threshold: 20.0
+    comparison: ">"
+    severity: "CRITICAL"
+    hysteresis_k: 2.0
+
+  # ─── Защита источника тока Keithley ──────────────────────────────────────────
+  - name: "keithley_overpower"
+    description: "Keithley перегрузка — мощность нагревателя выше допустимой"
+    channel_pattern: ".*/smua/power"
+    threshold: 5.0
+    comparison: ">"
+    severity: "CRITICAL"
+    hysteresis_k: 0.5

@@ -1,0 +1,3 @@
+hot_sensor: "Т1 Криостат верх"
+cold_sensor: "Т7 Детектор"
+heater_channel: "Keithley_1/smua/power"
