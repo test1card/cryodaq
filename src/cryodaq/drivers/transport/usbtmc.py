@@ -1,0 +1,237 @@
+"""Асинхронная обёртка над pyvisa для USB-TMC коммуникации."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+# Имитированные ответы Keithley 2604B для mock-режима
+_MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
+# smua.measure.iv() возвращает ток\tнапряжение
+_MOCK_IV_RESPONSE = "0.01\t5.0"
+
+
+class USBTMCTransport:
+    """Асинхронный транспорт USB-TMC на основе pyvisa.
+
+    Все блокирующие вызовы pyvisa выполняются в пуле потоков через
+    ``run_in_executor``, чтобы не блокировать event loop.
+
+    Интерфейс аналогичен :class:`~cryodaq.drivers.transport.gpib.GPIBTransport`,
+    адаптирован для USB-TMC приборов (в частности Keithley 2604B с TSP).
+
+    Parameters
+    ----------
+    mock:
+        Если ``True`` — работает без реального VISA-бэкенда,
+        возвращает предопределённые ответы Keithley 2604B.
+    """
+
+    def __init__(self, *, mock: bool = False) -> None:
+        self.mock = mock
+        self._resource: Any = None
+        self._rm: Any = None
+        self._resource_str: str = ""
+        # Внутренний счётчик для mock: имитация буфера измерений
+        self._mock_buf_index: int = 0
+
+    # ------------------------------------------------------------------
+    # Публичный API
+    # ------------------------------------------------------------------
+
+    async def open(self, resource_str: str) -> None:
+        """Открыть соединение с USB-TMC ресурсом.
+
+        Parameters
+        ----------
+        resource_str:
+            VISA-строка ресурса, например
+            ``"USB0::0x05E6::0x2604::SERIALNUM::INSTR"``.
+        """
+        self._resource_str = resource_str
+
+        if self.mock:
+            log.info("USBTMC [mock]: имитация открытия ресурса %s", resource_str)
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._blocking_open, resource_str)
+            log.info("USBTMC: ресурс %s успешно открыт", resource_str)
+        except Exception as exc:
+            log.error("USBTMC: ошибка открытия ресурса %s — %s", resource_str, exc)
+            raise
+
+    async def close(self) -> None:
+        """Закрыть соединение с ресурсом (идемпотентно)."""
+        if self.mock:
+            log.info("USBTMC [mock]: имитация закрытия ресурса %s", self._resource_str)
+            return
+
+        if self._resource is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._blocking_close)
+            log.info("USBTMC: ресурс %s закрыт", self._resource_str)
+        except Exception as exc:
+            log.warning(
+                "USBTMC: ошибка при закрытии ресурса %s — %s",
+                self._resource_str,
+                exc,
+            )
+        finally:
+            self._resource = None
+
+    async def write(self, cmd: str) -> None:
+        """Отправить TSP-команду прибору без ожидания ответа.
+
+        Parameters
+        ----------
+        cmd:
+            TSP-команда на языке Lua, например
+            ``"smua.source.output = smua.OUTPUT_OFF"``.
+        """
+        if self.mock:
+            log.debug("USBTMC [mock] write: %s", cmd)
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._resource.write, cmd)
+            log.debug("USBTMC write → %s: %s", self._resource_str, cmd)
+        except Exception as exc:
+            log.error(
+                "USBTMC: ошибка записи команды '%s' в %s — %s",
+                cmd,
+                self._resource_str,
+                exc,
+            )
+            raise
+
+    async def write_raw(self, data: bytes) -> None:
+        """Отправить сырые байты прибору (для загрузки больших TSP-скриптов).
+
+        Parameters
+        ----------
+        data:
+            Байтовая последовательность для передачи в прибор.
+        """
+        if self.mock:
+            log.debug(
+                "USBTMC [mock] write_raw: %d байт",
+                len(data),
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._resource.write_raw, data)
+            log.debug(
+                "USBTMC write_raw → %s: %d байт",
+                self._resource_str,
+                len(data),
+            )
+        except Exception as exc:
+            log.error(
+                "USBTMC: ошибка write_raw в %s — %s",
+                self._resource_str,
+                exc,
+            )
+            raise
+
+    async def query(self, cmd: str, timeout_ms: int = 5000) -> str:
+        """Отправить TSP-запрос и вернуть ответ прибора.
+
+        Parameters
+        ----------
+        cmd:
+            TSP-команда, возвращающая значение через ``print()``,
+            например ``"print(smua.measure.iv())"``.
+        timeout_ms:
+            Таймаут ожидания ответа в миллисекундах (по умолчанию 5000).
+
+        Returns
+        -------
+        str
+            Ответ прибора без завершающих пробелов и символов новой строки.
+        """
+        if self.mock:
+            response = self._mock_response(cmd)
+            log.debug("USBTMC [mock] query '%s' → '%s'", cmd, response)
+            return response
+
+        loop = asyncio.get_running_loop()
+        try:
+            response: str = await loop.run_in_executor(
+                None, self._blocking_query, cmd, timeout_ms
+            )
+            log.debug("USBTMC query '%s' → '%s'", cmd, response)
+            return response
+        except Exception as exc:
+            log.error(
+                "USBTMC: ошибка запроса '%s' к %s — %s",
+                cmd,
+                self._resource_str,
+                exc,
+            )
+            raise
+
+    # ------------------------------------------------------------------
+    # Блокирующие вспомогательные методы (выполняются в executor)
+    # ------------------------------------------------------------------
+
+    def _blocking_open(self, resource_str: str) -> None:
+        """Синхронное открытие VISA-ресурса (вызывается в executor)."""
+        import pyvisa  # импорт здесь, чтобы не падать при отсутствии библиотеки в mock-режиме
+
+        self._rm = pyvisa.ResourceManager()
+        self._resource = self._rm.open_resource(resource_str)
+
+    def _blocking_close(self) -> None:
+        """Синхронное закрытие VISA-ресурса (вызывается в executor)."""
+        self._resource.close()
+        if self._rm is not None:
+            self._rm.close()
+            self._rm = None
+
+    def _blocking_query(self, cmd: str, timeout_ms: int) -> str:
+        """Синхронный query с установкой таймаута (вызывается в executor)."""
+        self._resource.timeout = timeout_ms
+        return self._resource.query(cmd).strip()
+
+    # ------------------------------------------------------------------
+    # Mock-утилиты
+    # ------------------------------------------------------------------
+
+    def _mock_response(self, cmd: str) -> str:
+        """Сформировать имитированный ответ для известных TSP-команд Keithley."""
+        cmd_stripped = cmd.strip()
+        cmd_upper = cmd_stripped.upper()
+
+        if cmd_upper == "*IDN?":
+            return _MOCK_IDN
+
+        # print(smua.measure.iv()) — возвращает ток\tнапряжение
+        if "SMUA.MEASURE.IV" in cmd_upper:
+            return _MOCK_IV_RESPONSE
+
+        # Чтение буфера через printbuffer(...)
+        if cmd_upper.startswith("PRINTBUFFER"):
+            self._mock_buf_index += 1
+            # Имитируем: timestamp, voltage, current
+            ts = float(self._mock_buf_index) * 0.5
+            return f"{ts}\t5.0\t0.01"
+
+        # Чтение флага ошибки TSP-скрипта
+        if "SCRIPT_ERROR" in cmd_upper:
+            return "NONE"
+
+        # Общий print() без распознанного паттерна
+        if cmd_stripped.startswith("print("):
+            return "0"
+
+        return ""
