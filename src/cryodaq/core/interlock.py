@@ -79,15 +79,17 @@ class InterlockCondition:
     action: str
     cooldown_s: float = 0.0
 
+    # Скомпилированное регулярное выражение — заполняется в __post_init__
+    _pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
             raise ValueError(
                 f"Блокировка '{self.name}': недопустимый оператор сравнения "
                 f"'{self.comparison}'. Допустимы: '>' и '<'."
             )
-        # Проверка корректности регулярного выражения на этапе создания
         try:
-            re.compile(self.channel_pattern)
+            self._pattern = re.compile(self.channel_pattern)
         except re.error as exc:
             raise ValueError(
                 f"Блокировка '{self.name}': некорректный channel_pattern "
@@ -96,7 +98,7 @@ class InterlockCondition:
 
     def matches_channel(self, channel: str) -> bool:
         """Проверить, соответствует ли имя канала шаблону блокировки."""
-        return bool(re.match(self.channel_pattern, channel))
+        return bool(self._pattern.match(channel))
 
     def is_triggered(self, value: float) -> bool:
         """Проверить, выполнено ли условие срабатывания для данного значения."""

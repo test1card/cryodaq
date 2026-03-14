@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         # Вкладка «Температуры»
-        self._channel_mgr = ChannelManager()
+        self._channel_mgr = get_channel_manager()
         self._temp_panel = TemperaturePanel(self._channel_mgr.get_channel_configs())
         self._tabs.addTab(self._temp_panel, "Температуры")
 

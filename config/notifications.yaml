@@ -1,17 +1,19 @@
+# Конфигурация уведомлений CryoDAQ (ШАБЛОН)
+# Реальный токен — в notifications.local.yaml (не коммитится в git)
+
 telegram:
-  bot_token: "8230533922:AAGGCyAnE5II_6ZRVLd7CXF55VUdAEaBAqU"
-  chat_id: 770134831
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: 0
   send_cleared: true
   timeout_s: 10
-
-  allowed_chat_ids: []            # пустой = все разрешены; [770134831] = только этот
+  allowed_chat_ids: []
 
 periodic_report:
-  enabled: true
-  report_interval_s: 60
-  chart_hours: 2
+  enabled: false
+  report_interval_s: 1800
+  chart_hours: 2.0
   include_channels: null
 
 commands:
-  enabled: true                    # интерактивный бот (/status, /temps и т.д.)
+  enabled: false
   poll_interval_s: 2.0

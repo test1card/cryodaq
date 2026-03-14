@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ class SQLiteWriter:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_written: int = 0
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite")
 
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
@@ -152,6 +154,7 @@ class SQLiteWriter:
     async def _consume_loop(self, queue: asyncio.Queue[Reading]) -> None:
         """Основной цикл: собирает батч из очереди, пишет в БД."""
         loop = asyncio.get_running_loop()
+        executor = self._executor
         while self._running:
             batch: list[Reading] = []
             deadline = asyncio.get_event_loop().time() + self._flush_interval_s
@@ -166,7 +169,7 @@ class SQLiteWriter:
                     break
             if batch:
                 try:
-                    await loop.run_in_executor(None, self._write_batch, batch)
+                    await loop.run_in_executor(executor, self._write_batch, batch)
                 except Exception:
                     logger.exception("Ошибка записи батча (%d записей)", len(batch))
 
@@ -189,6 +192,7 @@ class SQLiteWriter:
         if self._conn:
             self._conn.close()
             self._conn = None
+        self._executor.shutdown(wait=False)
         logger.info("SQLiteWriter остановлен (записано: %d)", self._total_written)
 
     @property

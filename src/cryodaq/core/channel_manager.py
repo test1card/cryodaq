@@ -59,20 +59,9 @@ class ChannelManager:
         mgr.save()
     """
 
-    _instance: ChannelManager | None = None
-
-    def __new__(cls) -> ChannelManager:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self) -> None:
-        if self._initialized:
-            return
-        self._initialized = True
+    def __init__(self, config_path: Path | None = None) -> None:
         self._channels: dict[str, dict[str, Any]] = {}
-        self._config_path: Path = _DEFAULT_CONFIG
+        self._config_path: Path = config_path or _DEFAULT_CONFIG
         self._callbacks: list[Any] = []
         self.load()
 
@@ -184,3 +173,15 @@ class ChannelManager:
                 cb()
             except Exception as exc:
                 logger.error("Ошибка в callback ChannelManager: %s", exc)
+
+
+# Module-level default instance
+_default_instance: ChannelManager | None = None
+
+
+def get_channel_manager() -> ChannelManager:
+    """Получить глобальный экземпляр ChannelManager (lazy init)."""
+    global _default_instance
+    if _default_instance is None:
+        _default_instance = ChannelManager()
+    return _default_instance

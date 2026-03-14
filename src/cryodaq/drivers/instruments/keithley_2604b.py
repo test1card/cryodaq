@@ -479,7 +479,7 @@ class Keithley2604B(InstrumentDriver):
     def _start_heartbeat(self) -> None:
         """Запустить фоновую задачу сердцебиения."""
         self._cancel_heartbeat()
-        self._heartbeat_task = asyncio.get_event_loop().create_task(
+        self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(),
             name=f"heartbeat:{self.name}",
         )
@@ -716,26 +716,9 @@ class Keithley2604B(InstrumentDriver):
     # Деструктор — последний рубеж безопасности
     # ------------------------------------------------------------------
 
-    def __del__(self) -> None:
-        """Попытка аварийного отключения при сборке мусора.
-
-        Это лишь «последний рубеж» — не гарантирует выполнение.
-        Правильный способ: использовать ``async with`` или явно
-        вызывать ``disconnect()``.
-        """
-        if self._p_target > 0.0 or self._connected:
-            # В деструкторе нет event loop — можно только попытаться
-            # создать новый или использовать существующий
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Планируем задачу в существующем loop
-                    loop.create_task(
-                        self.emergency_off(),
-                        name=f"destructor_emergency_off:{self.name}",
-                    )
-                else:
-                    loop.run_until_complete(self.emergency_off())
-            except Exception:
-                # В деструкторе никогда не бросаем исключений
-                pass
+    # __del__ намеренно отсутствует:
+    # В Python 3.12+ event loop закрыт при сборке мусора.
+    # Безопасность обеспечивается через:
+    # 1. SafetyManager (непрерывный мониторинг)
+    # 2. Keithley TSP watchdog (30с аппаратный таймер)
+    # 3. async with / explicit disconnect()

@@ -85,7 +85,7 @@ class DataBroker:
     async def publish(self, reading: Reading) -> None:
         """Разослать Reading всем подписчикам."""
         self._total_published += 1
-        for sub in self._subscribers.values():
+        for sub in tuple(self._subscribers.values()):
             if sub.filter_fn and not sub.filter_fn(reading):
                 continue
             if sub.queue.full():

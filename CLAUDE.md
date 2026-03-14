@@ -22,6 +22,11 @@ ruff check src/ tests/         # Lint
 ruff format src/ tests/        # Format
 ```
 
+## Environment Variables
+
+- `CRYODAQ_ROOT` — override project root directory (default: auto-detected from `engine.py` location)
+- `CRYODAQ_MOCK=1` — start engine in mock mode (same as `--mock` flag)
+
 ## Deployment
 
 Config override: `config/*.local.yaml` takes priority over `config/*.yaml`.

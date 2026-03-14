@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.channel_manager import get_channel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class ChannelEditorDialog(QDialog):
         self.setWindowTitle("Редактор каналов — CryoDAQ")
         self.setMinimumSize(600, 500)
 
-        self._mgr = ChannelManager()
+        self._mgr = get_channel_manager()
         self._edits: dict[str, QLineEdit] = {}
         self._checks: dict[str, QCheckBox] = {}
 

@@ -45,13 +45,50 @@ logger = logging.getLogger("cryodaq.engine")
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(os.environ["CRYODAQ_ROOT"]) if "CRYODAQ_ROOT" in os.environ else Path(__file__).resolve().parent.parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 _PLUGINS_DIR = _PROJECT_ROOT / "plugins"
 _DATA_DIR = _PROJECT_ROOT / "data"
 
 # Интервал самодиагностики (секунды)
 _WATCHDOG_INTERVAL_S = 30.0
+
+
+def _get_memory_mb() -> float:
+    """Получить потребление памяти в MB (кроссплатформенно)."""
+    try:
+        import resource as _resource  # Unix only
+        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
+    except ImportError:
+        pass
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.wintypes.DWORD),
+                ("PageFaultCount", ctypes.wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = _PMC()
+        counters.cb = ctypes.sizeof(_PMC)
+        ctypes.windll.psapi.GetProcessMemoryInfo(
+            ctypes.windll.kernel32.GetCurrentProcess(),
+            ctypes.byref(counters),
+            counters.cb,
+        )
+        return counters.WorkingSetSize / (1024 * 1024)
+    except Exception:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -123,41 +160,7 @@ async def _watchdog(
             hours, remainder = divmod(int(uptime_s), 3600)
             minutes, secs = divmod(remainder, 60)
 
-            # Потребление памяти (кроссплатформенно через os, без psutil)
-            try:
-                import resource as _resource  # Unix only
-
-                mem_mb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
-            except ImportError:
-                # Windows — fallback через ctypes
-                try:
-                    import ctypes
-                    import ctypes.wintypes
-
-                    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-                        _fields_ = [
-                            ("cb", ctypes.wintypes.DWORD),
-                            ("PageFaultCount", ctypes.wintypes.DWORD),
-                            ("PeakWorkingSetSize", ctypes.c_size_t),
-                            ("WorkingSetSize", ctypes.c_size_t),
-                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                            ("PagefileUsage", ctypes.c_size_t),
-                            ("PeakPagefileUsage", ctypes.c_size_t),
-                        ]
-
-                    counters = PROCESS_MEMORY_COUNTERS()
-                    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-                    ctypes.windll.psapi.GetProcessMemoryInfo(
-                        ctypes.windll.kernel32.GetCurrentProcess(),
-                        ctypes.byref(counters),
-                        counters.cb,
-                    )
-                    mem_mb = counters.WorkingSetSize / (1024 * 1024)
-                except Exception:
-                    mem_mb = 0.0
+            mem_mb = _get_memory_mb()
 
             broker_stats = broker.stats
             sched_stats = scheduler.stats
@@ -235,10 +238,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     zmq_queue = await broker.subscribe("zmq_publisher")
     zmq_pub = ZMQPublisher()
 
-    # ZMQ Command Server (REP — для управления из GUI)
-    # Обработчик команд создаём после нахождения keithley_driver (ниже)
-    cmd_server = ZMQCommandServer()
-
     # Alarm Engine
     alarm_engine = AlarmEngine(broker)
     if alarms_cfg.exists():
@@ -287,70 +286,55 @@ async def _run_engine(*, mock: bool = False) -> None:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
             return {"ok": False, "error": str(exc)}
 
-    cmd_server._handler = _handle_gui_command
+    cmd_server = ZMQCommandServer(handler=_handle_gui_command)
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
 
-    # Periodic Reporter (Telegram-отчёты с графиками)
+    # --- Уведомления (один раз разбираем YAML) ---
     periodic_reporter: PeriodicReporter | None = None
+    telegram_bot: TelegramCommandBot | None = None
     notifications_cfg = _cfg("notifications")
     if notifications_cfg.exists():
         try:
             with notifications_cfg.open(encoding="utf-8") as fh:
-                notifications_raw: dict[str, Any] = yaml.safe_load(fh)
-            pr_cfg = notifications_raw.get("periodic_report", {})
-            tg_cfg = notifications_raw.get("telegram", {})
-            if pr_cfg.get("enabled", False):
-                bot_token = str(tg_cfg.get("bot_token", ""))
-                chat_id = tg_cfg.get("chat_id", 0)
-                # Пропускаем, если токен не задан (placeholder)
-                if bot_token and bot_token != "YOUR_BOT_TOKEN_HERE":
-                    include_channels = pr_cfg.get("include_channels")
-                    periodic_reporter = PeriodicReporter(
-                        broker,
-                        alarm_engine,
-                        bot_token=bot_token,
-                        chat_id=chat_id,
-                        report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
-                        chart_hours=float(pr_cfg.get("chart_hours", 2.0)),
-                        include_channels=include_channels,
-                    )
-                    logger.info(
-                        "PeriodicReporter создан: интервал=%.0f с, глубина=%.1f ч",
-                        float(pr_cfg.get("report_interval_s", 1800)),
-                        float(pr_cfg.get("chart_hours", 2.0)),
-                    )
-                else:
-                    logger.info(
-                        "PeriodicReporter: periodic_report.enabled=true, но bot_token — "
-                        "заглушка. Настройте токен в config/notifications.yaml."
-                    )
-        except Exception as exc:
-            logger.error("Ошибка загрузки конфигурации PeriodicReporter: %s", exc)
-    else:
-        logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
+                notif_raw: dict[str, Any] = yaml.safe_load(fh) or {}
 
-    # Telegram Command Bot
-    telegram_bot: TelegramCommandBot | None = None
-    if notifications_cfg.exists():
-        try:
-            with notifications_cfg.open(encoding="utf-8") as fh:
-                _nr: dict[str, Any] = yaml.safe_load(fh)
-            cmd_cfg = _nr.get("commands", {})
-            _tg = _nr.get("telegram", {})
-            _token = str(_tg.get("bot_token", ""))
-            if cmd_cfg.get("enabled", False) and _token and _token != "YOUR_BOT_TOKEN_HERE":
-                allowed = _tg.get("allowed_chat_ids") or []
+            tg_cfg = notif_raw.get("telegram", {})
+            bot_token = str(tg_cfg.get("bot_token", ""))
+            token_valid = bot_token and bot_token != "YOUR_BOT_TOKEN_HERE"
+
+            # PeriodicReporter
+            pr_cfg = notif_raw.get("periodic_report", {})
+            if pr_cfg.get("enabled", False) and token_valid:
+                periodic_reporter = PeriodicReporter(
+                    broker, alarm_engine,
+                    bot_token=bot_token,
+                    chat_id=tg_cfg.get("chat_id", 0),
+                    report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
+                    chart_hours=float(pr_cfg.get("chart_hours", 2.0)),
+                    include_channels=pr_cfg.get("include_channels"),
+                )
+                logger.info("PeriodicReporter создан")
+
+            # TelegramCommandBot
+            cmd_cfg = notif_raw.get("commands", {})
+            if cmd_cfg.get("enabled", False) and token_valid:
+                allowed = tg_cfg.get("allowed_chat_ids") or []
                 telegram_bot = TelegramCommandBot(
                     broker, alarm_engine,
-                    bot_token=_token,
+                    bot_token=bot_token,
                     allowed_chat_ids=[int(x) for x in allowed] if allowed else None,
                     poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
                 )
                 logger.info("TelegramCommandBot создан")
+
+            if not token_valid:
+                logger.info("Telegram-уведомления отключены (bot_token не настроен)")
         except Exception as exc:
-            logger.error("Ошибка создания TelegramCommandBot: %s", exc)
+            logger.error("Ошибка загрузки конфигурации уведомлений: %s", exc)
+    else:
+        logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
 
     # --- Запуск всех подсистем ---
     await safety_manager.start()
