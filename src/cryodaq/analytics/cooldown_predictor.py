@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """CryoDAQ Cooldown Predictor v1.0
 
 Dual-channel progress-variable predictor for GM cryocooler cooldown.
@@ -17,20 +16,12 @@ Physics:
     - N2 plateau: S-bend around 20-40K (OFHC Cu conductivity peak)
     - Phase 2: 50K -> 4K (~11h), 2nd stage dominates
     - Dual-channel (cold + warm) disambiguates the S-bend region
-
-Usage:
-    python cooldown_predictor.py build    --data cooldown_v5/ --output model/
-    python cooldown_predictor.py predict  --model model/ --T_cold 50.0 --T_warm 120.0 --t_elapsed 8.0
-    python cooldown_predictor.py validate --data cooldown_v5/ --output validation/
-    python cooldown_predictor.py demo     --output demo/
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
-import warnings
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -39,12 +30,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
-
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -156,7 +142,7 @@ class EnsembleModel:
 
 
 # ============================================================================
-# Loading & synthetic generation
+# Loading
 # ============================================================================
 
 def load_curves(data_dir: Path) -> list[ReferenceCurve]:
@@ -171,10 +157,10 @@ def load_curves(data_dir: Path) -> list[ReferenceCurve]:
             tc = np.array(d["T_cold"], dtype=float)
             tw = np.array(d.get("T_warm", []), dtype=float)
             if len(t_h) < MIN_SAMPLES:
-                print(f"  skip {fp.name}: {len(t_h)} samples < {MIN_SAMPLES}")
+                logger.warning("Пропуск %s: %d точек < %d", fp.name, len(t_h), MIN_SAMPLES)
                 continue
             if tc[0] < 100:
-                print(f"  skip {fp.name}: T_start={tc[0]:.0f}K")
+                logger.warning("Пропуск %s: T_start=%.0f K", fp.name, tc[0])
                 continue
             if len(tw) == 0 or len(tw) != len(tc):
                 tw = np.full_like(tc, np.nan)
@@ -189,82 +175,8 @@ def load_curves(data_dir: Path) -> list[ReferenceCurve]:
             )
             curves.append(rc)
         except Exception as e:
-            print(f"  error loading {fp.name}: {e}")
-    print(f"Loaded {len(curves)} reference curves")
-    return curves
-
-
-def generate_synthetic_curves(model_path: Path, n_curves: int = 9, seed: int = 42) -> list[ReferenceCurve]:
-    """Generate synthetic cooldown curves from model statistics.
-
-    Double-exponential + sigmoid S-bend matching GM cryocooler physics.
-    """
-    stats = json.loads(model_path.read_text(encoding="utf-8"))["statistics"]
-    rng = np.random.RandomState(seed)
-
-    dur_mean = stats["total_duration_hours"]["mean"]
-    dur_std = stats["total_duration_hours"]["std"]
-    ph1_mean = stats["phase1_hours"]["mean"]
-    ph1_std = stats["phase1_hours"]["std"]
-    tc_base_mean = stats["T_cold_baseline"]["mean"]
-    tc_base_std = stats["T_cold_baseline"]["std"]
-    tw_base_mean = stats["T_warm_baseline"]["mean"]
-    tw_base_std = stats["T_warm_baseline"]["std"]
-
-    curves = []
-    for i in range(n_curves):
-        duration = max(15.0, rng.normal(dur_mean, dur_std))
-        phase1 = max(5.0, min(duration - 5, rng.normal(ph1_mean, ph1_std)))
-        T_cold_final = max(3.5, rng.normal(tc_base_mean, tc_base_std))
-        T_warm_final = max(70.0, min(110.0, rng.normal(tw_base_mean, tw_base_std)))
-
-        dt_h = 10.0 / 3600.0
-        t = np.arange(0, duration + dt_h, dt_h)
-        n = len(t)
-
-        # Cold: double exponential + S-bend
-        T_start = 280 + rng.uniform(-15, 15)
-        tau1 = phase1 / 2.5 + rng.normal(0, 0.2)
-        tau2 = (duration - phase1) / 2.0 + rng.normal(0, 0.3)
-        A1 = (T_start - 50) * 0.6
-        A2 = (50 - T_cold_final) * 1.0
-
-        T_cold = T_cold_final + A1 * np.exp(-t / tau1) + A2 * np.exp(-t / tau2)
-
-        # S-bend (Cu conductivity peak)
-        t_bend = phase1 + (duration - phase1) * 0.3
-        bend_w = 1.5 + rng.uniform(-0.3, 0.3)
-        bend_a = 8.0 + rng.normal(0, 2)
-        sigmoid = bend_a / (1 + np.exp(-(t - t_bend) / bend_w))
-        mask = (T_cold > 10) & (T_cold < 80)
-        T_cold[mask] += sigmoid[mask] * 0.3
-
-        T_cold = np.maximum.accumulate(T_cold[::-1])[::-1]
-        T_cold = np.clip(T_cold, T_cold_final, T_start + 10)
-        T_cold += rng.normal(0, 0.1, n)
-        T_cold = np.clip(T_cold, T_cold_final * 0.95, 400)
-
-        # Warm: single exponential
-        T_start_w = T_start + rng.uniform(-5, 5)
-        tau_w = duration / 3.0 + rng.normal(0, 0.3)
-        T_warm = T_warm_final + (T_start_w - T_warm_final) * np.exp(-t / tau_w)
-        T_warm += rng.normal(0, 0.2, n)
-        T_warm = np.clip(T_warm, T_warm_final * 0.9, 400)
-
-        cross_idx = np.searchsorted(-T_cold, -T_PHASE_BOUNDARY)
-        actual_ph1 = float(t[min(cross_idx, n - 1)])
-
-        rc = ReferenceCurve(
-            name=f"synthetic_{i+1:02d}", date=f"2025-{6+i:02d}-01",
-            t_hours=t, T_cold=T_cold, T_warm=T_warm,
-            duration_hours=float(t[-1]),
-            phase1_hours=actual_ph1, phase2_hours=float(t[-1]) - actual_ph1,
-            T_cold_final=float(np.min(T_cold)),
-            T_warm_final=float(np.min(T_warm)),
-        )
-        curves.append(rc)
-
-    print(f"Generated {len(curves)} synthetic curves")
+            logger.error("Ошибка загрузки %s: %s", fp.name, e)
+    logger.info("Загружено %d кривых охлаждения", len(curves))
     return curves
 
 
@@ -313,7 +225,7 @@ def _compute_initial_rate(t_hours: np.ndarray, T: np.ndarray, window_h: float) -
         return 0.0
     t_v = t_w[valid]
     T_v = T_w[valid]
-    # Linear fit: T = a*t + b → a = dT/dt [K/h]
+    # Linear fit: T = a*t + b -> a = dT/dt [K/h]
     if t_v[-1] - t_v[0] < 0.1:
         return 0.0
     a = float(np.polyfit(t_v, T_v, 1)[0])
@@ -345,7 +257,7 @@ def prepare_curve(rc: ReferenceCurve) -> ReferenceCurve:
     rc._p_of_t = interp1d(rc.t_hours, rc.progress, kind="linear",
                           bounds_error=False, fill_value=(0.0, 1.0))
 
-    # t(p), Tc(p), Tw(p) — need unique progress values
+    # t(p), Tc(p), Tw(p) -- need unique progress values
     _, unique_idx = np.unique(rc.progress, return_index=True)
     if len(unique_idx) >= 2:
         p_u = rc.progress[unique_idx]
@@ -370,10 +282,10 @@ def prepare_all(curves: list[ReferenceCurve]) -> list[ReferenceCurve]:
             if rc._t_of_p is not None:
                 prepared.append(rc)
             else:
-                print(f"  skip {rc.name}: interpolator build failed")
+                logger.warning("Пропуск %s: ошибка построения интерполятора", rc.name)
         except Exception as e:
-            print(f"  skip {rc.name}: {e}")
-    print(f"Prepared {len(prepared)}/{len(curves)} curves")
+            logger.warning("Пропуск %s: %s", rc.name, e)
+    logger.info("Подготовлено %d/%d кривых", len(prepared), len(curves))
     return prepared
 
 
@@ -429,7 +341,10 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
         duration_mean=float(np.mean(durations)),
         duration_std=float(np.std(durations)),
     )
-    print(f"Ensemble: {n} curves, duration {model.duration_mean:.1f} +/- {model.duration_std:.1f} h")
+    logger.info(
+        "Ансамбль: %d кривых, длительность %.1f +/- %.1f ч",
+        n, model.duration_mean, model.duration_std,
+    )
     return model
 
 
@@ -449,7 +364,7 @@ def predict(
     """Predict remaining cooldown time from current state.
 
     Weighting scheme (multiplicative):
-        w = w_progress × w_rate
+        w = w_progress x w_rate
 
     w_progress: Gaussian kernel on t(p_now) vs t_elapsed.
         Curves whose timing matches the observed elapsed time score higher.
@@ -457,7 +372,7 @@ def predict(
     w_rate: Gaussian kernel on initial cooling rate similarity.
         If observed_rate_cold is provided (typically after 0.5-1.5h of cooldown),
         curves with similar dT/dt in the first hours dominate.
-        This is the key: fast cooldown → fast references, slow → slow.
+        This is the key: fast cooldown -> fast references, slow -> slow.
 
     Without observed_rate: falls back to progress-only weighting (v1.0 behavior).
     """
@@ -476,8 +391,8 @@ def predict(
     rate_warm_mean = float(np.mean(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 0.0
     rate_warm_std = float(np.std(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 999.0
 
-    # Determine if observed rate is an outlier (>2σ from mean)
-    # Only warm rate is used — cold rate depends on T_start which varies.
+    # Determine if observed rate is an outlier (>2sigma from mean)
+    # Only warm rate is used -- cold rate depends on T_start which varies.
     # Warm rate is the true heat-load discriminator (e.g., illuminator: -3.6 vs typical -22 K/h)
     use_rate_cold = False  # disabled: unreliable when T_start varies
     use_rate_warm = False
@@ -525,11 +440,8 @@ def predict(
         )
 
     # --- Fallback: if rate weighting killed all references, disable it ---
-    # This happens when observed rate is outlier but no reference has similar rate
-    # (e.g., first illuminator test — nothing to match against)
     rate_weights = np.array([e[5] for e in estimates])
     if (use_rate_cold or use_rate_warm) and np.max(rate_weights) < 0.01:
-        # No good rate match exists → fall back to progress-only (v1.0)
         estimates = [(n, r, d, wp, wp, 1.0) for n, r, d, _, wp, _ in estimates]
 
     t_rems = np.array([e[1] for e in estimates])
@@ -710,15 +622,18 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
         )
         results.append(vr)
         mae = float(np.mean(np.abs(err)))
-        print(f"  LOO {held.name}: MAE={mae:.2f}h, max|err|={np.max(np.abs(err)):.2f}h")
+        logger.info("LOO %s: MAE=%.2f ч, max|err|=%.2f ч", held.name, mae, np.max(np.abs(err)))
     return results
 
 
 # ============================================================================
-# Plotting
+# Plotting (matplotlib imported lazily)
 # ============================================================================
 
 def plot_ensemble(model: EnsembleModel, output: Path):
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
     fig = plt.figure(figsize=(18, 14))
     gs = GridSpec(3, 2, figure=fig, hspace=0.35, wspace=0.25)
     cmap = plt.cm.tab10
@@ -755,7 +670,7 @@ def plot_ensemble(model: EnsembleModel, output: Path):
     ax3.set_title("Progress Variable"); ax3.set_ylim(-0.05, 1.05)
     ax3.grid(True, alpha=0.3); ax3.legend(fontsize=8)
 
-    # t(p) envelope — THE predictor
+    # t(p) envelope -- THE predictor
     ax4 = fig.add_subplot(gs[1, 1])
     for i in range(model.n_curves):
         ax4.plot(model.p_grid, model.t_matrix[i], color=cmap(i % 10), alpha=0.4, lw=0.6)
@@ -785,10 +700,12 @@ def plot_ensemble(model: EnsembleModel, output: Path):
     fig.suptitle("CryoDAQ Cooldown Predictor - Ensemble Model", fontsize=14, fontweight="bold")
     fig.savefig(output, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"Ensemble plot: {output}")
+    logger.info("График ансамбля сохранён: %s", output)
 
 
 def plot_prediction(model, pred, T_cold_now, T_warm_now, t_elapsed, output):
+    import matplotlib.pyplot as plt
+
     fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
     for rc in model.curves:
         axes[0].plot(rc.t_hours, rc.T_cold_smooth, color="lightgray", lw=0.5, alpha=0.5)
@@ -823,10 +740,12 @@ def plot_prediction(model, pred, T_cold_now, T_warm_now, t_elapsed, output):
 
     fig.suptitle("CryoDAQ Cooldown Prediction", fontsize=13, fontweight="bold")
     fig.savefig(output, dpi=150, bbox_inches="tight"); plt.close(fig)
-    print(f"Prediction plot: {output}")
+    logger.info("График прогноза сохранён: %s", output)
 
 
 def plot_validation(results: list[ValidationResult], output: Path):
+    import matplotlib.pyplot as plt
+
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     cmap = plt.cm.tab10
 
@@ -879,7 +798,7 @@ def plot_validation(results: list[ValidationResult], output: Path):
 
     fig.suptitle("CryoDAQ Predictor - LOO Validation", fontsize=14, fontweight="bold")
     fig.tight_layout(); fig.savefig(output, dpi=150, bbox_inches="tight"); plt.close(fig)
-    print(f"Validation plot: {output}")
+    logger.info("График валидации сохранён: %s", output)
 
 
 # ============================================================================
@@ -906,7 +825,7 @@ def save_model(model: EnsembleModel, output_dir: Path):
     }
     out = output_dir / "predictor_model.json"
     out.write_text(json.dumps(md, ensure_ascii=False), encoding="utf-8")
-    print(f"Model saved: {out} ({out.stat().st_size/1024:.0f} KB)")
+    logger.info("Модель сохранена: %s (%.0f KB)", out, out.stat().st_size / 1024)
 
 
 def load_model(model_dir: Path) -> EnsembleModel:
@@ -991,12 +910,6 @@ def ingest_curve(
 
     Returns:
         (success, message, updated_model_or_None)
-
-    Usage from CryoDAQ engine:
-        from cooldown_predictor import ingest_curve
-        ok, msg, model = ingest_curve(Path("model/"), Path("new_cooldown.json"))
-        if ok:
-            print(f"Model updated: {model.n_curves} curves")
     """
     model_file = model_dir / "predictor_model.json"
     if not model_file.exists():
@@ -1060,7 +973,7 @@ def ingest_curve(
         n_drop = len(model_data["curves"]) - max_curves
         dropped = [c["name"] for c in model_data["curves"][:n_drop]]
         model_data["curves"] = model_data["curves"][n_drop:]
-        print(f"  Dropped {n_drop} oldest curves: {dropped}")
+        logger.info("Удалено %d старых кривых: %s", n_drop, dropped)
 
     # Rebuild ensemble
     curves = []
@@ -1123,7 +1036,7 @@ def ingest_curve(
     msg = (f"OK: added '{new_rc.name}' ({new_rc.duration_hours:.1f}h). "
            f"Model v{model_data['version']}: {model.n_curves} curves, "
            f"{model.duration_mean:.1f}+/-{model.duration_std:.1f}h")
-    print(f"  {msg}")
+    logger.info(msg)
     return True, msg, model
 
 
@@ -1140,13 +1053,6 @@ def ingest_from_raw_arrays(
 
     Call this when a cooldown cycle completes and you have the data in memory.
     No intermediate JSON file needed.
-
-    Usage:
-        from cooldown_predictor import ingest_from_raw_arrays
-        ok, msg, model = ingest_from_raw_arrays(
-            Path("model/"), t_hours, T_cold, T_warm,
-            name="experiment_2026-03-15"
-        )
     """
     if not name:
         from datetime import datetime as _dt
@@ -1182,135 +1088,3 @@ def ingest_from_raw_arrays(
             tmp_path.unlink()
 
     return result
-
-
-# ============================================================================
-# CLI
-# ============================================================================
-
-def cmd_update(args):
-    """CLI: add a new curve to existing model."""
-    model_dir = Path(args.model)
-    curve_path = Path(args.curve)
-
-    if not curve_path.exists():
-        sys.exit(f"Curve file not found: {curve_path}")
-
-    ok, msg, model = ingest_curve(model_dir, curve_path, force=args.force)
-    print(msg)
-
-    if ok and model:
-        plot_ensemble(model, model_dir / "ensemble_overview.png")
-
-    sys.exit(0 if ok else 1)
-
-
-def cmd_build(args):
-    curves = load_curves(Path(args.data))
-    if not curves:
-        sys.exit("No curves loaded")
-    curves = prepare_all(curves)
-    model = build_ensemble(curves)
-    out = Path(args.output)
-    save_model(model, out)
-    plot_ensemble(model, out / "ensemble_overview.png")
-    print(f"\nModel: {model.n_curves} curves, {model.duration_mean:.1f}+/-{model.duration_std:.1f} h")
-
-
-def cmd_predict(args):
-    model = load_model(Path(args.model))
-    rate_c = args.rate_cold if hasattr(args, 'rate_cold') else None
-    rate_w = args.rate_warm if hasattr(args, 'rate_warm') else None
-    pred = predict(model, args.T_cold, args.T_warm, args.t_elapsed,
-                   observed_rate_cold=rate_c, observed_rate_warm=rate_w)
-    print(format_prediction(pred))
-    if args.output:
-        plot_prediction(model, pred, args.T_cold, args.T_warm, args.t_elapsed, Path(args.output))
-
-
-def cmd_validate(args):
-    curves = load_curves(Path(args.data))
-    if len(curves) < 3:
-        sys.exit(f"Need >=3 curves, got {len(curves)}")
-    curves = prepare_all(curves)
-    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
-    results = validate_loo(curves)
-    if results:
-        plot_validation(results, out / "loo_validation.png")
-        summary = [{"curve": vr.curve_name,
-                     "mae_h": float(np.mean(np.abs(vr.t_remaining_err))),
-                     "rmse_h": float(np.sqrt(np.mean(vr.t_remaining_err**2))),
-                     "max_err_h": float(np.max(np.abs(vr.t_remaining_err)))}
-                    for vr in results]
-        (out / "loo_results.json").write_text(json.dumps(summary, indent=2))
-    print(f"\nValidation: {len(results)} folds")
-
-
-def cmd_demo(args):
-    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
-    mp = Path(args.model_json) if args.model_json else None
-    if mp and mp.exists():
-        curves = generate_synthetic_curves(mp)
-    else:
-        default = {"statistics": {
-            "total_duration_hours": {"mean":19.3,"std":1.0,"min":17.7,"max":21.0},
-            "phase1_hours": {"mean":8.0,"std":0.5,"min":7.0,"max":9.0},
-            "T_cold_baseline": {"mean":4.7,"std":1.5,"min":4.0,"max":9.0},
-            "T_warm_baseline": {"mean":87.0,"std":6.0,"min":78.0,"max":98.0},
-        }}
-        tmp = out / "_tmp.json"; tmp.write_text(json.dumps(default))
-        curves = generate_synthetic_curves(tmp); tmp.unlink()
-
-    curves = prepare_all(curves)
-    model = build_ensemble(curves)
-    save_model(model, out)
-    plot_ensemble(model, out / "ensemble_overview.png")
-
-    print("\n" + "=" * 60 + "\nDEMO PREDICTIONS\n" + "=" * 60)
-    demos = [
-        ("early_2h", 200.0, 260.0, 2.0),
-        ("phase1_mid", 100.0, 200.0, 5.0),
-        ("50K_crossing", 50.0, 140.0, 8.0),
-        ("S_bend_30K", 30.0, 110.0, 12.0),
-        ("phase2_10K", 10.0, 95.0, 16.0),
-        ("near_end_5K", 5.0, 88.0, 18.0),
-    ]
-    for label, Tc, Tw, t_el in demos:
-        pred = predict(model, Tc, Tw, t_el)
-        h, m = int(pred.t_remaining_hours), int((pred.t_remaining_hours % 1) * 60)
-        print(f"\n  {label}: Tc={Tc:.0f}K, Tw={Tw:.0f}K, t={t_el:.1f}h")
-        print(f"    -> {h}h{m:02d}m left (p={pred.progress:.1%}, {pred.phase})")
-        plot_prediction(model, pred, Tc, Tw, t_el, out / f"pred_{label}.png")
-
-    print("\n" + "=" * 60 + "\nLOO VALIDATION\n" + "=" * 60)
-    val = validate_loo(curves)
-    if val:
-        plot_validation(val, out / "loo_validation.png")
-    print(f"\nDemo complete -> {out}/")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="CryoDAQ Cooldown Predictor")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p = sub.add_parser("build"); p.add_argument("--data", required=True); p.add_argument("--output", required=True)
-    p = sub.add_parser("predict"); p.add_argument("--model", required=True)
-    p.add_argument("--T_cold", type=float, required=True); p.add_argument("--T_warm", type=float, required=True)
-    p.add_argument("--t_elapsed", type=float, default=0.0); p.add_argument("--output")
-    p.add_argument("--rate_cold", type=float, default=None, help="Observed dT_cold/dt [K/h] (negative=cooling)")
-    p.add_argument("--rate_warm", type=float, default=None, help="Observed dT_warm/dt [K/h]")
-    p = sub.add_parser("validate"); p.add_argument("--data", required=True); p.add_argument("--output", required=True)
-    p = sub.add_parser("demo"); p.add_argument("--output", default="demo_output")
-    p.add_argument("--model-json", dest="model_json")
-    p = sub.add_parser("update", help="Add new curve to existing model")
-    p.add_argument("--model", required=True, help="Model directory")
-    p.add_argument("--curve", required=True, help="New cooldown JSON file")
-    p.add_argument("--force", action="store_true", help="Skip quality gate")
-
-    args = parser.parse_args()
-    {"build": cmd_build, "predict": cmd_predict, "validate": cmd_validate,
-     "demo": cmd_demo, "update": cmd_update}[args.command](args)
-
-
-if __name__ == "__main__":
-    main()

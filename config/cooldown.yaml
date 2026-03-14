@@ -1,0 +1,15 @@
+cooldown:
+  enabled: true
+  channel_cold: "Т7 Детектор"
+  channel_warm: "Т5 Экран 77К"
+  model_dir: "data/cooldown_model"
+  detect:
+    start_rate_threshold: -5.0
+    start_confirm_minutes: 10
+    end_T_cold_threshold: 6.0
+    end_rate_threshold: 0.1
+    end_confirm_minutes: 30
+  predict_interval_s: 30
+  rate_window_h: 1.5
+  auto_ingest: true
+  min_cooldown_hours: 10.0

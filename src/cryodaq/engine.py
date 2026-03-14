@@ -291,6 +291,25 @@ async def _run_engine(*, mock: bool = False) -> None:
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
 
+    # --- CooldownService (прогноз охлаждения) ---
+    cooldown_service: Any = None
+    cooldown_cfg_path = _cfg("cooldown")
+    if cooldown_cfg_path.exists():
+        try:
+            with cooldown_cfg_path.open(encoding="utf-8") as fh:
+                _cd_raw = yaml.safe_load(fh) or {}
+            _cd_cfg = _cd_raw.get("cooldown", {})
+            if _cd_cfg.get("enabled", False):
+                from cryodaq.analytics.cooldown_service import CooldownService
+                cooldown_service = CooldownService(
+                    broker=broker,
+                    config=_cd_cfg,
+                    model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
+                )
+                logger.info("CooldownService создан")
+        except Exception as exc:
+            logger.error("Ошибка создания CooldownService: %s", exc)
+
     # --- Уведомления (один раз разбираем YAML) ---
     periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
@@ -345,6 +364,8 @@ async def _run_engine(*, mock: bool = False) -> None:
     await alarm_engine.start()
     await interlock_engine.start()
     await plugin_pipeline.start()
+    if cooldown_service is not None:
+        await cooldown_service.start()
     if periodic_reporter is not None:
         await periodic_reporter.start()
     if telegram_bot is not None:
@@ -398,6 +419,10 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await plugin_pipeline.stop()
     logger.info("Пайплайн плагинов остановлен")
+
+    if cooldown_service is not None:
+        await cooldown_service.stop()
+        logger.info("CooldownService остановлен")
 
     if periodic_reporter is not None:
         await periodic_reporter.stop()

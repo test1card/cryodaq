@@ -39,6 +39,7 @@ web = [
 cryodaq-engine = "cryodaq.engine:main"
 cryodaq-gui = "cryodaq.gui.app:main"
 cryodaq = "cryodaq.launcher:main"
+cryodaq-cooldown = "cryodaq.tools.cooldown_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cryodaq"]
