@@ -26,7 +26,10 @@ from PySide6.QtWidgets import (
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
+from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
+from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
+from cryodaq.gui.widgets.pressure_panel import PressurePanel
 from cryodaq.gui.widgets.temp_panel import TemperaturePanel
 
 logger = logging.getLogger(__name__)
@@ -104,17 +107,17 @@ class MainWindow(QMainWindow):
         self._temp_panel = TemperaturePanel(_TEMP_CHANNELS)
         self._tabs.addTab(self._temp_panel, "Температуры")
 
-        # Вкладка «Keithley» (заглушка — будет заполнена при наличии данных)
-        self._keithley_widget = QWidget()
-        _kl = QVBoxLayout(self._keithley_widget)
-        _kl.addWidget(QLabel("Данные Keithley 2604B — источник тока/напряжения"))
-        self._tabs.addTab(self._keithley_widget, "Keithley")
+        # Вкладка «Keithley»
+        self._keithley_panel = KeithleyPanel()
+        self._tabs.addTab(self._keithley_panel, "Keithley")
 
-        # Вкладка «Аналитика» (заглушка)
-        self._analytics_widget = QWidget()
-        _al = QVBoxLayout(self._analytics_widget)
-        _al.addWidget(QLabel("Аналитические плагины: R_thermal, cooldown ETA"))
-        self._tabs.addTab(self._analytics_widget, "Аналитика")
+        # Вкладка «Давление»
+        self._pressure_panel = PressurePanel()
+        self._tabs.addTab(self._pressure_panel, "Давление")
+
+        # Вкладка «Аналитика»
+        self._analytics_panel = AnalyticsPanel()
+        self._tabs.addTab(self._analytics_panel, "Аналитика")
 
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
@@ -191,6 +194,18 @@ class MainWindow(QMainWindow):
         # Температурные каналы → TemperaturePanel
         if channel.startswith("Т") and reading.unit == "K":
             self._temp_panel.on_reading(reading)
+
+        # Keithley каналы → KeithleyPanel
+        if "/smua/" in channel:
+            self._keithley_panel.on_reading(reading)
+
+        # Давление → PressurePanel
+        if reading.unit == "mbar":
+            self._pressure_panel.on_reading(reading)
+
+        # Аналитика → AnalyticsPanel
+        if channel.startswith("analytics/"):
+            self._analytics_panel.on_reading(reading)
 
         # Алармы (все каналы — AlarmPanel оценивает сам)
         self._alarm_panel.on_reading(reading)
