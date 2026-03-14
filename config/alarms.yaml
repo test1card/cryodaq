@@ -37,3 +37,20 @@ alarms:
     comparison: ">"
     severity: "CRITICAL"
     hysteresis_k: 0.5
+
+  # ─── Мониторинг диска ─────────────────────────────────────────────────────
+  - name: "disk_space_warning"
+    description: "Мало свободного места на диске"
+    channel_pattern: "system/disk_free_gb"
+    threshold: 10.0
+    comparison: "<"
+    severity: "WARNING"
+    hysteresis_k: 2.0
+
+  - name: "disk_space_critical"
+    description: "Критически мало места на диске"
+    channel_pattern: "system/disk_free_gb"
+    threshold: 2.0
+    comparison: "<"
+    severity: "CRITICAL"
+    hysteresis_k: 0.5

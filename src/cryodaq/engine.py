@@ -29,6 +29,7 @@ import yaml
 
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
@@ -377,6 +378,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         _watchdog(broker, scheduler, writer, start_ts), name="engine_watchdog",
     )
 
+    # DiskMonitor
+    disk_monitor = DiskMonitor(data_dir=_DATA_DIR, broker=broker)
+    await disk_monitor.start()
+
     logger.info(
         "═══ CryoDAQ Engine запущен ═══ | "
         "приборов=%d | тревог=%d | блокировок=%d | mock=%s",
@@ -440,6 +445,9 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await safety_manager.stop()
     logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
+
+    await disk_monitor.stop()
+    logger.info("DiskMonitor остановлен")
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))

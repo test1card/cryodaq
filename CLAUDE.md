@@ -193,3 +193,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 
 - Calibration per ГОСТ Р 8.879-2014
 - DT-670B1-CU silicon diodes, individual curves per sensor
+
+## TODO (planned)
+
+- **Режим калибровки**: отдельная вкладка/режим. Одновременная запись KRDG (температура по текущей кривой) + SRDG (сырое напряжение сенсора) на выбранных каналах LakeShore 218S. Выбор эталонного датчика (reference thermometer) через GUI. Цель: построение индивидуальных калибровочных кривых DT-670B1-CU для CalibrationStore per ГОСТ Р 8.879-2014.

@@ -1,7 +1,8 @@
 """Главное окно CryoDAQ GUI.
 
-QMainWindow с вкладками: Температуры, Keithley, Аналитика, Алармы, Статус приборов.
-Меню: Файл (экспорт), Эксперимент (старт/стоп).
+QMainWindow с вкладками: Обзор, Keithley, Аналитика, Теплопроводность,
+Автоизмерение, Алармы, Статус приборов.
+Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп).
 Статусная строка: подключение, uptime, скорость данных.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QTimer, Signal, Slot
 from PySide6.QtGui import QAction
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenuBar,
+    QMessageBox,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -34,8 +37,7 @@ from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.connection_settings import ConnectionSettingsDialog
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
-from cryodaq.gui.widgets.pressure_panel import PressurePanel
-from cryodaq.gui.widgets.temp_panel import TemperaturePanel
+from cryodaq.gui.widgets.overview_panel import OverviewPanel
 
 logger = logging.getLogger(__name__)
 
@@ -86,18 +88,15 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self.setCentralWidget(self._tabs)
 
-        # Вкладка «Температуры»
         self._channel_mgr = get_channel_manager()
-        self._temp_panel = TemperaturePanel(self._channel_mgr.get_channel_configs())
-        self._tabs.addTab(self._temp_panel, "Температуры")
+
+        # Вкладка «Обзор» — главная домашняя вкладка
+        self._overview_panel = OverviewPanel(self._channel_mgr)
+        self._tabs.addTab(self._overview_panel, "Обзор")
 
         # Вкладка «Keithley»
         self._keithley_panel = KeithleyPanel()
         self._tabs.addTab(self._keithley_panel, "Keithley")
-
-        # Вкладка «Давление»
-        self._pressure_panel = PressurePanel()
-        self._tabs.addTab(self._pressure_panel, "Давление")
 
         # Вкладка «Аналитика»
         self._analytics_panel = AnalyticsPanel()
@@ -133,6 +132,10 @@ class MainWindow(QMainWindow):
         export_hdf5_action = QAction("Экспорт HDF5...", self)
         export_hdf5_action.triggered.connect(self._on_export_hdf5)
         file_menu.addAction(export_hdf5_action)
+
+        export_xlsx_action = QAction("Экспорт Excel...", self)
+        export_xlsx_action.triggered.connect(self._on_export_xlsx)
+        file_menu.addAction(export_xlsx_action)
 
         file_menu.addSeparator()
 
@@ -194,9 +197,11 @@ class MainWindow(QMainWindow):
 
         channel = reading.channel
 
-        # Температурные каналы → TemperaturePanel + ConductivityPanel + AutoSweep
+        # Все показания → OverviewPanel (маршрутизирует внутри себя)
+        self._overview_panel.on_reading(reading)
+
+        # Температурные каналы → ConductivityPanel + AutoSweep
         if channel.startswith("Т") and reading.unit == "K":
-            self._temp_panel.on_reading(reading)
             self._conductivity_panel.on_reading(reading)
             self._autosweep_panel.on_reading(reading)
 
@@ -206,10 +211,6 @@ class MainWindow(QMainWindow):
             if channel.endswith("/power"):
                 self._conductivity_panel.on_reading(reading)
                 self._autosweep_panel.on_reading(reading)
-
-        # Давление → PressurePanel
-        if reading.unit == "mbar":
-            self._pressure_panel.on_reading(reading)
 
         # Аналитика → AnalyticsPanel
         if channel.startswith("analytics/"):
@@ -256,7 +257,19 @@ class MainWindow(QMainWindow):
             self, "Экспорт в CSV", "", "CSV файлы (*.csv)",
         )
         if path:
-            logger.info("Экспорт CSV: %s (TODO)", path)
+            try:
+                from cryodaq.storage.csv_export import CSVExporter
+
+                exporter = CSVExporter(data_dir=Path("data"))
+                count = exporter.export(Path(path))
+                QMessageBox.information(
+                    self, "Экспорт CSV", f"Экспортировано {count} записей",
+                )
+            except Exception as exc:
+                logger.error("Ошибка экспорта CSV: %s", exc)
+                QMessageBox.warning(
+                    self, "Ошибка экспорта", f"Не удалось экспортировать CSV:\n{exc}",
+                )
 
     @Slot()
     def _on_export_hdf5(self) -> None:
@@ -264,7 +277,35 @@ class MainWindow(QMainWindow):
             self, "Экспорт в HDF5", "", "HDF5 файлы (*.h5 *.hdf5)",
         )
         if path:
-            logger.info("Экспорт HDF5: %s (TODO)", path)
+            try:
+                from cryodaq.storage.hdf5_export import HDF5Exporter
+
+                # Найти последний daily-файл SQLite
+                data_dir = Path("data")
+                db_files = sorted(data_dir.glob("data_*.db"))
+                if not db_files:
+                    QMessageBox.warning(
+                        self, "Ошибка экспорта", "Файлы данных не найдены в data/",
+                    )
+                    return
+
+                exporter = HDF5Exporter()
+                total = 0
+                for db_path in db_files:
+                    total += exporter.export(db_path=db_path, output_path=Path(path))
+                QMessageBox.information(
+                    self, "Экспорт HDF5", f"Экспортировано {total} записей",
+                )
+            except Exception as exc:
+                logger.error("Ошибка экспорта HDF5: %s", exc)
+                QMessageBox.warning(
+                    self, "Ошибка экспорта", f"Не удалось экспортировать HDF5:\n{exc}",
+                )
+
+    @Slot()
+    def _on_export_xlsx(self) -> None:
+        """Экспорт Excel — заглушка (Backend #2 реализует диалог)."""
+        logger.info("Экспорт Excel: диалог будет реализован в Backend #2")
 
     @Slot()
     def _on_start_experiment(self) -> None:
