@@ -90,7 +90,7 @@ class SQLiteWriter:
             self._conn.close()
         db_path = self._db_path(day)
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=5000;")

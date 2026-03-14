@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.5",
     "msgpack>=1.0",
     "matplotlib>=3.8",
+    "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ web = [
 [project.scripts]
 cryodaq-engine = "cryodaq.engine:main"
 cryodaq-gui = "cryodaq.gui.app:main"
+cryodaq = "cryodaq.launcher:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cryodaq"]
