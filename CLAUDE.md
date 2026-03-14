@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # CryoDAQ
 
 LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 16k+ lines, 151 tests.
+Python 3.12+, asyncio, PySide6, 20k+ lines, 184 tests.
 
 ## Build & Development Commands
 
@@ -18,9 +18,12 @@ cryodaq-gui                    # Run GUI only (connects to running engine via ZM
 uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # Web dashboard
 install.bat                    # One-click Windows installer
 python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
-pytest                         # Run all 151 tests (~38s)
+cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
+cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
+pytest                         # Run all 184 tests (~42s)
 pytest tests/core/             # Core subsystem tests only
 pytest -k test_safety          # Run safety manager tests
+pytest -k test_cooldown        # Run cooldown predictor + service tests
 ruff check src/ tests/         # Lint
 ruff format src/ tests/        # Format
 ```
@@ -58,19 +61,23 @@ SafetyBroker (dedicated, overflow=FAULT)
     Double protection: SafetyManager (Python) + TSP watchdog (hardware, 30s)
 ```
 
-### Engine data flow
+### Engine data flow (persistence-first ordering)
 
 ```
 InstrumentDriver.read_channels()
-  → Scheduler ──► DataBroker (fan-out, DROP_OLDEST)       → SQLiteWriter, ZMQ, Alarms, Plugins
-              └──► SafetyBroker (dedicated, overflow=FAULT) → SafetyManager (continuous monitoring)
+  → Scheduler
+      1. SQLiteWriter.write_immediate() → WAL commit (BLOCKING — data on disk first)
+      2. THEN DataBroker.publish_batch() → ZMQ, Alarms, Plugins, CooldownService
+      3. THEN SafetyBroker.publish_batch() → SafetyManager
+  Invariant: if DataBroker has it, it's already on disk.
   → InterlockEngine (threshold detection → SafetyManager action delegation)
   → ZMQCommandServer (REP :5556, GUI commands → SafetyManager)
+  → CooldownService (auto-detects cooldown, predict every 30s, auto-ingest)
 ```
 
 ### GUI tabs
 
-Температуры | Keithley (smua+smub, controls) | Давление (log scale) | Аналитика (R_thermal, ETA) | Теплопроводность (chain R/G + predictor) | Автоизмерение (power sweep) | Алармы | Статус приборов
+Температуры | Keithley (smua+smub, controls) | Давление (log scale) | Аналитика (R_thermal + cooldown predictor: ETA, progress, CI trajectory) | Теплопроводность (chain R/G + T∞ predictor) | Автоизмерение (power sweep) | Алармы | Статус приборов
 
 Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
 
@@ -113,6 +120,8 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `src/cryodaq/analytics/base_plugin.py` — AnalyticsPlugin ABC + DerivedMetric dataclass
 - `src/cryodaq/analytics/plugin_loader.py` — PluginPipeline: hot-reload, batch processing, error isolation
 - `src/cryodaq/analytics/steady_state.py` — SteadyStatePredictor: T∞ prediction via scipy curve_fit
+- `src/cryodaq/analytics/cooldown_predictor.py` — dual-channel progress-variable predictor: ensemble model, rate-adaptive weighting, LOO validation, quality-gated ingest (~900 lines library, no CLI)
+- `src/cryodaq/analytics/cooldown_service.py` — CooldownService: auto-detects cooldown (IDLE→COOLING→STABILIZING→COMPLETE), periodic predict via executor, publishes DerivedMetric with trajectory+CI, auto-ingest on completion
 - `src/cryodaq/analytics/calibration.py` — CalibrationStore (stub for ГОСТ Р 8.879)
 
 **Plugins (hot-reloadable):**
@@ -124,7 +133,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `src/cryodaq/gui/widgets/temp_panel.py` — TemperaturePanel: 24ch cards + pyqtgraph
 - `src/cryodaq/gui/widgets/keithley_panel.py` — KeithleyPanel: smua+smub tabs, controls, ZMQ commands
 - `src/cryodaq/gui/widgets/pressure_panel.py` — PressurePanel: log-scale plot, color-coded value
-- `src/cryodaq/gui/widgets/analytics_panel.py` — AnalyticsPanel: R_thermal plot + cooldown ETA
+- `src/cryodaq/gui/widgets/analytics_panel.py` — AnalyticsPanel: R_thermal + cooldown ETA with ±CI, progress bar, phase, prediction trajectory + CI band on plot
 - `src/cryodaq/gui/widgets/conductivity_panel.py` — ConductivityPanel: chain R/G + T∞ prediction
 - `src/cryodaq/gui/widgets/autosweep_panel.py` — AutoSweepPanel: automated power sweep measurement
 - `src/cryodaq/gui/widgets/alarm_panel.py` — AlarmPanel: severity table, acknowledge
@@ -141,6 +150,9 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `src/cryodaq/notifications/telegram_commands.py` — TelegramCommandBot: /status /temps /pressure /keithley /alarms
 - `src/cryodaq/notifications/periodic_report.py` — PeriodicReporter: matplotlib charts + text summary
 
+**Tools (CLI):**
+- `src/cryodaq/tools/cooldown_cli.py` — CLI: `cryodaq-cooldown build|predict|validate|demo|update`
+
 **TSP (Keithley instrument scripts):**
 - `tsp/p_const_single.lua` — P=const feedback, watchdog 30s, compliance check
 
@@ -152,6 +164,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `config/safety.yaml` — SafetyManager params (critical channels, stale timeout, rate limits, recovery)
 - `config/notifications.yaml` — Telegram config TEMPLATE (real token in *.local.yaml)
 - `config/channels.yaml` — channel display names and visibility
+- `config/cooldown.yaml` — CooldownService: channels, model_dir, detection thresholds, predict interval, auto-ingest
 - `config/*.local.yaml.example` — templates for machine-specific overrides
 
 ## Instruments
@@ -174,6 +187,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - Telegram bot token NEVER committed — use config/*.local.yaml (gitignored).
 - DataBroker.publish() iterates tuple snapshot (concurrent-safe).
 - SQLiteWriter uses dedicated ThreadPoolExecutor (thread-safe day rotation).
+- **Persistence-first**: Scheduler writes to SQLite BEFORE publishing to DataBroker. Invariant: if broker has it, it's on disk.
 
 ## Standards
 
