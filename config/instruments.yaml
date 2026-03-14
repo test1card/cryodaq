@@ -45,3 +45,9 @@ instruments:
     name: "Keithley_1"
     resource: "USB0::0x05E6::0x2604::04052028::INSTR"
     poll_interval_s: 1.0
+
+  - type: thyracont_vsp63d
+    name: "VSP63D_1"
+    resource: "COM3"
+    baudrate: 9600
+    poll_interval_s: 2.0

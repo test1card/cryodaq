@@ -11,3 +11,9 @@ telegram:
   chat_id: -1001234567890
   send_cleared: true
   timeout_s: 10.0
+
+periodic_report:
+  enabled: true
+  report_interval_s: 1800        # 30 минут между отчётами
+  chart_hours: 2.0               # глубина истории на графике
+  include_channels: null         # null = все каналы

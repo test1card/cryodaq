@@ -3,6 +3,7 @@
 Лёгкий FastAPI-сервер для доступа к данным engine из браузера:
 - WebSocket ``/ws`` — поток показаний в реальном времени
 - GET ``/status`` — JSON со статусом приборов, тревог, uptime
+- GET ``/history`` — JSON с историческими данными из SQLite (последние N минут)
 - GET ``/`` — статическая HTML-страница (single-page dashboard)
 
 Запуск::
@@ -20,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,9 @@ from cryodaq.drivers.base import Reading
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Директория с файлами данных SQLite (data_YYYY-MM-DD.db)
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 
 # ---------------------------------------------------------------------------
 # Глобальное состояние сервера
@@ -163,6 +169,59 @@ def _on_reading_callback(reading: Reading) -> None:
 
 
 # ---------------------------------------------------------------------------
+# История из SQLite
+# ---------------------------------------------------------------------------
+
+def _find_recent_db(data_dir: Path) -> Path | None:
+    """Найти самый свежий файл data_YYYY-MM-DD.db в директории."""
+    if not data_dir.exists():
+        return None
+    db_files = sorted(data_dir.glob("data_????-??-??.db"))
+    return db_files[-1] if db_files else None
+
+
+def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
+    """Запросить данные из SQLite за последние N минут.
+
+    Возвращает словарь: channel → [{"t": iso, "v": float, "u": unit}, ...]
+    """
+    db_path = _find_recent_db(_DATA_DIR)
+    if db_path is None:
+        return {}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    cutoff_iso = cutoff.isoformat()
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT timestamp, channel, value, unit FROM readings "
+                "WHERE timestamp >= ? ORDER BY timestamp ASC",
+                (cutoff_iso,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Ошибка чтения истории из %s", db_path)
+        return {}
+
+    for row in rows:
+        ch = row["channel"]
+        if ch not in result:
+            result[ch] = []
+        result[ch].append({
+            "t": row["timestamp"],
+            "v": row["value"],
+            "u": row["unit"],
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # FastAPI приложение
 # ---------------------------------------------------------------------------
 
@@ -208,6 +267,23 @@ def create_app() -> FastAPI:
     async def status() -> dict[str, Any]:
         """JSON-статус системы."""
         return _state.status_json()
+
+    @application.get("/history")
+    async def history(minutes: int = 60) -> dict[str, Any]:
+        """Исторические данные из SQLite за последние N минут.
+
+        Возвращает::
+
+            {
+              "channels": {
+                "Т1": [{"t": "2026-03-14T10:00:00+00:00", "v": 4.2, "u": "K"}, ...],
+                ...
+              }
+            }
+        """
+        loop = asyncio.get_running_loop()
+        channels = await loop.run_in_executor(None, _query_history, minutes)
+        return {"channels": channels}
 
     @application.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:

@@ -4,236 +4,797 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CryoDAQ — Мониторинг</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* ------------------------------------------------------------------ */
+        /* Сброс и базовые стили                                               */
+        /* ------------------------------------------------------------------ */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-page:    #0d1117;
+            --bg-panel:   #161b22;
+            --bg-card:    #1c2128;
+            --border:     #30363d;
+            --border-sub: #21262d;
+            --text:       #c9d1d9;
+            --text-muted: #8b949e;
+            --blue:       #58a6ff;
+            --green:      #3fb950;
+            --yellow:     #d29922;
+            --orange:     #f0883e;
+            --red:        #f85149;
+            --value-ok:   #7ee787;
+        }
+
         body {
             font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
+            background: var(--bg-page);
+            color: var(--text);
             min-height: 100vh;
+            font-size: 14px;
+            line-height: 1.5;
         }
+
+        /* ------------------------------------------------------------------ */
+        /* Шапка                                                               */
+        /* ------------------------------------------------------------------ */
         header {
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
-            padding: 12px 24px;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 24px;
             display: flex;
-            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
             align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
         }
-        header h1 { font-size: 1.3em; color: #58a6ff; }
-        #conn-status {
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 0.85em;
-            font-weight: bold;
+
+        header h1 {
+            font-size: 1.25em;
+            color: var(--blue);
+            white-space: nowrap;
         }
-        .connected { background: #238636; color: #fff; }
-        .disconnected { background: #da3633; color: #fff; }
-        .stats {
+
+        .header-stats {
             display: flex;
+            flex-wrap: wrap;
             gap: 16px;
-            font-size: 0.85em;
-            color: #8b949e;
+            font-size: 0.82em;
+            color: var(--text-muted);
+            flex: 1;
         }
-        main { padding: 16px 24px; }
-        h2 {
-            font-size: 1.1em;
-            margin: 16px 0 8px;
-            color: #58a6ff;
-            border-bottom: 1px solid #21262d;
-            padding-bottom: 4px;
+
+        .header-stats span b {
+            color: var(--text);
         }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 16px;
-        }
-        th, td {
-            text-align: left;
-            padding: 6px 12px;
-            border-bottom: 1px solid #21262d;
-        }
-        th {
-            background: #161b22;
-            color: #8b949e;
+
+        #conn-badge {
+            padding: 3px 12px;
+            border-radius: 12px;
+            font-size: 0.8em;
             font-weight: 600;
-            font-size: 0.85em;
-            text-transform: uppercase;
+            white-space: nowrap;
+            transition: background 0.3s;
         }
-        td { font-variant-numeric: tabular-nums; }
-        tr:hover { background: #161b22; }
-        .value { font-weight: bold; color: #7ee787; font-size: 1.05em; }
-        .value.warn { color: #f0883e; }
-        .value.error { color: #f85149; }
-        .unit { color: #8b949e; font-size: 0.9em; }
-        .alarm-row { background: #2d1b1b !important; }
-        .alarm-critical { color: #f85149; font-weight: bold; }
-        .alarm-warning { color: #f0883e; }
-        #alarm-section { display: none; }
-        #alarm-section.has-alarms { display: block; }
-        .empty-msg {
-            text-align: center;
-            padding: 32px;
-            color: #484f58;
+
+        .badge-connected    { background: #1a4731; color: #3fb950; border: 1px solid #238636; }
+        .badge-disconnected { background: #3d1a1a; color: #f85149; border: 1px solid #da3633; }
+        .badge-connecting   { background: #2d2508; color: #d29922; border: 1px solid #9e6a03; }
+
+        /* ------------------------------------------------------------------ */
+        /* Основной контент                                                    */
+        /* ------------------------------------------------------------------ */
+        main {
+            padding: 16px 24px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 16px;
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Секции / заголовки                                                  */
+        /* ------------------------------------------------------------------ */
+        .section-title {
+            font-size: 1em;
+            font-weight: 600;
+            color: var(--blue);
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border-sub);
+            margin-bottom: 10px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Карточки-панели                                                    */
+        /* ------------------------------------------------------------------ */
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 14px 16px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Графики                                                             */
+        /* ------------------------------------------------------------------ */
+        .chart-wrapper {
+            position: relative;
+            height: 300px;
+        }
+
+        .chart-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: var(--text-muted);
             font-style: italic;
+            border: 1px dashed var(--border);
+            border-radius: 4px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Аларм-панель                                                        */
+        /* ------------------------------------------------------------------ */
+        #alarm-panel {
+            display: none;
+        }
+
+        #alarm-panel.visible {
+            display: block;
+        }
+
+        .alarm-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .alarm-badge {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.82em;
+            line-height: 1.3;
+            border: 1px solid transparent;
+        }
+
+        .alarm-badge .alarm-level {
+            font-weight: 700;
+            font-size: 0.75em;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .alarm-badge .alarm-channel { font-weight: 600; color: inherit; }
+        .alarm-badge .alarm-value   { color: inherit; opacity: 0.85; }
+
+        .alarm-critical {
+            background: #3d1212;
+            border-color: var(--red);
+            color: #ff8080;
+        }
+        .alarm-critical .alarm-level { color: var(--red); }
+
+        .alarm-warning {
+            background: #2d1f08;
+            border-color: #9e6a03;
+            color: var(--orange);
+        }
+        .alarm-warning .alarm-level { color: var(--orange); }
+
+        .alarm-info {
+            background: #0d2340;
+            border-color: #1f6feb;
+            color: #79c0ff;
+        }
+        .alarm-info .alarm-level { color: var(--blue); }
+
+        /* ------------------------------------------------------------------ */
+        /* Карточки приборов                                                   */
+        /* ------------------------------------------------------------------ */
+        .instruments-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 10px;
+        }
+
+        .inst-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .inst-card-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .inst-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .inst-dot-ok      { background: var(--green);  box-shadow: 0 0 4px var(--green); }
+        .inst-dot-warn    { background: var(--yellow); box-shadow: 0 0 4px var(--yellow); }
+        .inst-dot-error   { background: var(--red);    box-shadow: 0 0 4px var(--red); }
+        .inst-dot-unknown { background: #484f58; }
+
+        .inst-name {
+            font-weight: 600;
+            font-size: 0.9em;
+            color: var(--text);
+        }
+
+        .inst-meta {
+            font-size: 0.78em;
+            color: var(--text-muted);
+            padding-left: 18px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Легенда каналов                                                     */
+        /* ------------------------------------------------------------------ */
+        .channel-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.75em;
+            color: var(--text-muted);
+            background: var(--bg-card);
+            border: 1px solid var(--border-sub);
+            border-radius: 4px;
+            padding: 2px 8px;
+        }
+
+        .legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Адаптивность                                                        */
+        /* ------------------------------------------------------------------ */
+        @media (max-width: 700px) {
+            header { padding: 10px 12px; }
+            main   { padding: 10px 12px; }
+
+            .chart-wrapper { height: 220px; }
+
+            .instruments-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 420px) {
+            .instruments-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
-    <header>
-        <div>
-            <h1>CryoDAQ — Мониторинг</h1>
-            <div class="stats">
-                <span>Uptime: <b id="uptime">--:--:--</b></span>
-                <span>Каналов: <b id="ch-count">0</b></span>
-                <span>Показаний: <b id="total">0</b></span>
+
+<!-- ============================================================ ШАПКА -->
+<header>
+    <h1>CryoDAQ — Мониторинг</h1>
+    <div class="header-stats">
+        <span>Аптайм: <b id="hd-uptime">--:--:--</b></span>
+        <span>Каналов: <b id="hd-channels">0</b></span>
+        <span>Показаний: <b id="hd-readings">0</b></span>
+        <span>Скорость: <b id="hd-rate">0</b> пок/с</span>
+    </div>
+    <span id="conn-badge" class="badge-disconnected">Отключено</span>
+</header>
+
+<!-- ============================================================ КОНТЕНТ -->
+<main>
+
+    <!-- Тревоги -->
+    <div id="alarm-panel" class="panel">
+        <div class="section-title">Активные тревоги</div>
+        <div id="alarm-badges" class="alarm-badges"></div>
+    </div>
+
+    <!-- График температур -->
+    <div class="panel">
+        <div class="section-title">Температура (K)</div>
+        <div class="chart-wrapper">
+            <canvas id="chart-temp"></canvas>
+        </div>
+        <div id="legend-temp" class="channel-legend"></div>
+    </div>
+
+    <!-- График давления -->
+    <div class="panel">
+        <div class="section-title">Давление (мбар)</div>
+        <div id="pressure-placeholder" class="chart-placeholder">
+            Ожидание данных давления...
+        </div>
+        <div id="pressure-chart-area" style="display:none;">
+            <div class="chart-wrapper">
+                <canvas id="chart-pressure"></canvas>
+            </div>
+            <div id="legend-pressure" class="channel-legend"></div>
+        </div>
+    </div>
+
+    <!-- Статус приборов -->
+    <div class="panel">
+        <div class="section-title">Статус приборов</div>
+        <div id="instruments-grid" class="instruments-grid">
+            <div class="inst-card">
+                <div class="inst-card-header">
+                    <span class="inst-dot inst-dot-unknown"></span>
+                    <span class="inst-name" style="color:var(--text-muted)">Ожидание данных...</span>
+                </div>
             </div>
         </div>
-        <span id="conn-status" class="disconnected">Отключено</span>
-    </header>
+    </div>
 
-    <main>
-        <!-- Тревоги -->
-        <div id="alarm-section">
-            <h2>Тревоги</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Уровень</th>
-                        <th>Имя</th>
-                        <th>Канал</th>
-                        <th>Значение</th>
-                        <th>Время</th>
-                    </tr>
-                </thead>
-                <tbody id="alarm-body"></tbody>
-            </table>
-        </div>
+</main>
 
-        <!-- Температуры -->
-        <h2>Температурные каналы</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Канал</th>
-                    <th>Значение</th>
-                    <th>Ед.</th>
-                    <th>Статус</th>
-                    <th>Обновлено</th>
-                </tr>
-            </thead>
-            <tbody id="temp-body">
-                <tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>
-            </tbody>
-        </table>
+<script>
+/* ================================================================
+   Конфигурация
+   ================================================================ */
+const MAX_POINTS = 3600;           // максимум точек на канал в буфере
+const CHART_UPDATE_MS = 1000;      // период обновления графиков
+const STATUS_POLL_MS  = 2000;      // период опроса /status
+const RECONNECT_MS    = 3000;      // задержка переподключения WS
+const HISTORY_MINUTES = 60;        // глубина истории при загрузке
 
-        <!-- Прочие каналы -->
-        <h2>Прочие каналы</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Канал</th>
-                    <th>Значение</th>
-                    <th>Ед.</th>
-                    <th>Статус</th>
-                    <th>Обновлено</th>
-                </tr>
-            </thead>
-            <tbody id="other-body">
-                <tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>
-            </tbody>
-        </table>
-    </main>
+/* Палитра цветов для каналов */
+const COLOR_PALETTE = [
+    '#58a6ff', '#3fb950', '#f0883e', '#bc8cff', '#ff7b72',
+    '#79c0ff', '#56d364', '#ffa657', '#d2a8ff', '#ffa198',
+    '#1f6feb', '#238636', '#9e6a03', '#8957e5', '#cf222e',
+    '#388bfd', '#2ea043', '#d29922', '#6e40c9', '#b91c1c',
+    '#0ea5e9', '#10b981', '#f59e0b', '#a855f7', '#ef4444',
+    '#06b6d4', '#059669', '#d97706', '#7c3aed', '#dc2626',
+];
 
-    <script>
-        const channels = {};
-        let ws = null;
-        let reconnectTimer = null;
+/* ================================================================
+   Состояние
+   ================================================================ */
+/** @type {Map<string, Array<{x: number, y: number}>>} */
+const tempBuffers     = new Map();
+/** @type {Map<string, Array<{x: number, y: number}>>} */
+const pressureBuffers = new Map();
+/** @type {Map<string, string>} Канал → цвет */
+const channelColors   = new Map();
+let colorIndex = 0;
 
-        function connect() {
-            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${proto}//${location.host}/ws`);
+let ws = null;
+let reconnectTimer = null;
+let lastReadingTime = 0;
+let readingsThisSecond = 0;
+let displayedRate = 0;
+let rateTimer = null;
 
-            ws.onopen = () => {
-                document.getElementById('conn-status').textContent = 'Подключено';
-                document.getElementById('conn-status').className = 'connected';
-                if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
-            };
+/* ================================================================
+   Вспомогательные функции
+   ================================================================ */
+function getColor(channel) {
+    if (!channelColors.has(channel)) {
+        channelColors.set(channel, COLOR_PALETTE[colorIndex % COLOR_PALETTE.length]);
+        colorIndex++;
+    }
+    return channelColors.get(channel);
+}
 
-            ws.onclose = () => {
-                document.getElementById('conn-status').textContent = 'Отключено';
-                document.getElementById('conn-status').className = 'disconnected';
-                if (!reconnectTimer) {
-                    reconnectTimer = setInterval(connect, 3000);
-                }
-            };
+function pushPoint(buffers, channel, ts, value) {
+    if (!buffers.has(channel)) {
+        buffers.set(channel, []);
+    }
+    const buf = buffers.get(channel);
+    buf.push({ x: ts, y: value });
+    if (buf.length > MAX_POINTS) {
+        buf.splice(0, buf.length - MAX_POINTS);
+    }
+}
 
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'reading') {
-                    channels[msg.channel] = msg;
-                    renderTables();
-                }
-            };
+function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = String(str);
+    return d.innerHTML;
+}
+
+/* ================================================================
+   Chart.js — общие настройки
+   ================================================================ */
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#21262d';
+
+function makeTimeAxis() {
+    return {
+        type: 'linear',
+        ticks: {
+            maxTicksLimit: 8,
+            callback: (v) => {
+                const d = new Date(v);
+                return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            },
+            color: '#8b949e',
+            font: { size: 11 },
+        },
+        grid: { color: '#21262d' },
+    };
+}
+
+function makeChartOptions(yOptions = {}) {
+    return {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: '#1c2128',
+                borderColor: '#30363d',
+                borderWidth: 1,
+                titleColor: '#c9d1d9',
+                bodyColor: '#8b949e',
+                callbacks: {
+                    title: (items) => {
+                        const ts = items[0]?.parsed?.x;
+                        if (!ts) return '';
+                        return new Date(ts).toLocaleString('ru-RU');
+                    },
+                    label: (item) => ` ${item.dataset.label}: ${Number(item.parsed.y).toPrecision(6)}`,
+                },
+            },
+        },
+        scales: {
+            x: makeTimeAxis(),
+            y: {
+                grid: { color: '#21262d' },
+                ticks: { color: '#8b949e', font: { size: 11 } },
+                ...yOptions,
+            },
+        },
+    };
+}
+
+/* ================================================================
+   Инициализация графиков
+   ================================================================ */
+const ctxTemp = document.getElementById('chart-temp').getContext('2d');
+const tempChart = new Chart(ctxTemp, {
+    type: 'line',
+    data: { datasets: [] },
+    options: makeChartOptions({ title: { display: false } }),
+});
+
+let pressureChart = null;
+
+function initPressureChart() {
+    const placeholder = document.getElementById('pressure-placeholder');
+    const area = document.getElementById('pressure-chart-area');
+    placeholder.style.display = 'none';
+    area.style.display = 'block';
+
+    const ctxP = document.getElementById('chart-pressure').getContext('2d');
+    pressureChart = new Chart(ctxP, {
+        type: 'line',
+        data: { datasets: [] },
+        options: makeChartOptions({
+            type: 'logarithmic',
+            ticks: {
+                color: '#8b949e',
+                font: { size: 11 },
+                callback: (v) => {
+                    const exp = Math.log10(v);
+                    if (Number.isInteger(exp)) return `1e${exp}`;
+                    return null;
+                },
+            },
+        }),
+    });
+}
+
+/* ================================================================
+   Обновление графика из буфера
+   ================================================================ */
+function syncDatasets(chart, buffers, legendEl) {
+    const channelNames = Array.from(buffers.keys()).sort((a, b) => a.localeCompare(b, 'ru'));
+    const existingLabels = chart.data.datasets.map(ds => ds.label);
+
+    // Добавить новые датасеты
+    for (const ch of channelNames) {
+        if (!existingLabels.includes(ch)) {
+            const color = getColor(ch);
+            chart.data.datasets.push({
+                label: ch,
+                data: buffers.get(ch),
+                borderColor: color,
+                backgroundColor: color + '18',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.1,
+                fill: false,
+            });
+        } else {
+            // Обновить данные существующего датасета
+            const ds = chart.data.datasets.find(d => d.label === ch);
+            if (ds) ds.data = buffers.get(ch);
         }
+    }
 
-        function renderTables() {
-            const tempRows = [];
-            const otherRows = [];
-            let total = 0;
+    // Удалить датасеты для каналов, которых больше нет (не трогаем: они могут вернуться)
 
-            const sorted = Object.values(channels).sort((a, b) =>
-                a.channel.localeCompare(b.channel, 'ru')
-            );
+    // Легенда
+    legendEl.innerHTML = channelNames.map(ch => {
+        const color = getColor(ch);
+        return `<span class="legend-item">
+            <span class="legend-swatch" style="background:${esc(color)}"></span>
+            ${esc(ch)}
+        </span>`;
+    }).join('');
+}
 
-            for (const ch of sorted) {
-                total++;
-                const time = new Date(ch.timestamp).toLocaleTimeString('ru-RU');
-                const valueClass = ch.status === 'ok' ? 'value' :
-                    (ch.status === 'sensor_error' || ch.status === 'timeout') ? 'value error' : 'value warn';
+/* ================================================================
+   Периодическое обновление графиков
+   ================================================================ */
+function updateCharts() {
+    syncDatasets(tempChart, tempBuffers, document.getElementById('legend-temp'));
+    tempChart.update('none');
 
-                const row = `<tr>
-                    <td>${esc(ch.channel)}</td>
-                    <td class="${valueClass}">${Number(ch.value).toPrecision(6)}</td>
-                    <td class="unit">${esc(ch.unit)}</td>
-                    <td>${esc(ch.status)}</td>
-                    <td>${time}</td>
-                </tr>`;
+    if (pressureChart) {
+        syncDatasets(pressureChart, pressureBuffers, document.getElementById('legend-pressure'));
+        pressureChart.update('none');
+    }
+}
 
-                if (ch.unit === 'K' || ch.channel.startsWith('Т')) {
-                    tempRows.push(row);
-                } else {
-                    otherRows.push(row);
+setInterval(updateCharts, CHART_UPDATE_MS);
+
+/* ================================================================
+   Обработка входящих показаний
+   ================================================================ */
+function handleReading(msg) {
+    const ts = new Date(msg.timestamp).getTime();
+    const ch = msg.channel;
+    const val = Number(msg.value);
+    const unit = msg.unit || '';
+
+    readingsThisSecond++;
+    lastReadingTime = Date.now();
+
+    const isTemp     = unit === 'K' || ch.startsWith('Т');
+    const isPressure = unit === 'mbar';
+
+    if (isTemp) {
+        pushPoint(tempBuffers, ch, ts, val);
+    } else if (isPressure) {
+        if (!pressureChart) initPressureChart();
+        pushPoint(pressureBuffers, ch, ts, val);
+    }
+}
+
+/* ================================================================
+   Скорость показаний
+   ================================================================ */
+setInterval(() => {
+    displayedRate = readingsThisSecond;
+    readingsThisSecond = 0;
+    document.getElementById('hd-rate').textContent = displayedRate;
+}, 1000);
+
+/* ================================================================
+   WebSocket
+   ================================================================ */
+function setBadge(state) {
+    const el = document.getElementById('conn-badge');
+    if (state === 'connected') {
+        el.textContent = 'Подключено';
+        el.className = 'badge-connected';
+    } else if (state === 'connecting') {
+        el.textContent = 'Подключение...';
+        el.className = 'badge-connecting';
+    } else {
+        el.textContent = 'Отключено';
+        el.className = 'badge-disconnected';
+    }
+}
+
+function connect() {
+    if (ws && ws.readyState <= WebSocket.OPEN) return;
+
+    setBadge('connecting');
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+        setBadge('connected');
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    };
+
+    ws.onclose = () => {
+        setBadge('disconnected');
+        if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, RECONNECT_MS);
+        }
+    };
+
+    ws.onerror = () => {
+        ws.close();
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'reading') handleReading(msg);
+            else if (msg.type === 'alarm')  handleAlarm(msg);
+        } catch (e) { /* игнорируем некорректные сообщения */ }
+    };
+}
+
+/* ================================================================
+   Тревоги
+   ================================================================ */
+/** @type {Map<string, object>} */
+const activeAlarms = new Map();
+
+function handleAlarm(msg) {
+    const key = msg.alarm_id || msg.channel;
+    if (msg.state === 'OK' || msg.state === 'ACKNOWLEDGED') {
+        activeAlarms.delete(key);
+    } else {
+        activeAlarms.set(key, msg);
+    }
+    renderAlarms();
+}
+
+function renderAlarms() {
+    const panel = document.getElementById('alarm-panel');
+    const container = document.getElementById('alarm-badges');
+
+    if (activeAlarms.size === 0) {
+        panel.classList.remove('visible');
+        return;
+    }
+
+    panel.classList.add('visible');
+    const html = Array.from(activeAlarms.values()).map(a => {
+        const severity = (a.severity || 'info').toLowerCase();
+        let cls = 'alarm-info';
+        let lvlText = 'ИНФО';
+        if (severity === 'critical') { cls = 'alarm-critical'; lvlText = 'КРИТИЧНО'; }
+        else if (severity === 'warning') { cls = 'alarm-warning'; lvlText = 'ПРЕДУПРЕЖДЕНИЕ'; }
+        return `<div class="alarm-badge ${esc(cls)}">
+            <span class="alarm-level">${lvlText}</span>
+            <span class="alarm-channel">${esc(a.channel || '')}</span>
+            <span class="alarm-value">${esc(a.value !== undefined ? Number(a.value).toPrecision(5) : '')} ${esc(a.unit || '')}</span>
+        </div>`;
+    }).join('');
+    container.innerHTML = html;
+}
+
+/* ================================================================
+   Статус приборов
+   ================================================================ */
+function renderInstruments(instruments) {
+    const grid = document.getElementById('instruments-grid');
+    const names = Object.keys(instruments).sort();
+    if (names.length === 0) return;
+
+    grid.innerHTML = names.map(id => {
+        const inst = instruments[id];
+        const status = inst.status || 'unknown';
+        let dotClass = 'inst-dot-unknown';
+        if (status === 'ok')                                          dotClass = 'inst-dot-ok';
+        else if (status === 'overrange' || status === 'underrange')   dotClass = 'inst-dot-warn';
+        else if (status === 'sensor_error' || status === 'timeout')   dotClass = 'inst-dot-error';
+
+        const lastSeen = inst.last_seen
+            ? new Date(inst.last_seen).toLocaleTimeString('ru-RU')
+            : '—';
+        const total = inst.total_readings || 0;
+
+        return `<div class="inst-card">
+            <div class="inst-card-header">
+                <span class="inst-dot ${esc(dotClass)}"></span>
+                <span class="inst-name">${esc(id)}</span>
+            </div>
+            <div class="inst-meta">Последнее: ${esc(lastSeen)}</div>
+            <div class="inst-meta">Показаний: ${esc(total)}</div>
+        </div>`;
+    }).join('');
+}
+
+/* ================================================================
+   Периодический опрос /status
+   ================================================================ */
+async function fetchStatus() {
+    try {
+        const resp = await fetch('/status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        document.getElementById('hd-uptime').textContent   = data.uptime || '--:--:--';
+        document.getElementById('hd-channels').textContent = data.channels || 0;
+        document.getElementById('hd-readings').textContent = data.total_readings || 0;
+
+        if (data.instruments) renderInstruments(data.instruments);
+
+        // Тревоги из /status (статические, не потоковые)
+        if (data.active_alarms) {
+            for (const [key, alarm] of Object.entries(data.active_alarms)) {
+                activeAlarms.set(key, alarm);
+            }
+            renderAlarms();
+        }
+    } catch (_) { /* игнорируем */ }
+}
+
+setInterval(fetchStatus, STATUS_POLL_MS);
+fetchStatus();
+
+/* ================================================================
+   Загрузка истории при старте
+   ================================================================ */
+async function loadHistory() {
+    try {
+        const resp = await fetch(`/history?minutes=${HISTORY_MINUTES}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const channels = data.channels || {};
+
+        for (const [ch, points] of Object.entries(channels)) {
+            const unit = points.length > 0 ? (points[0].u || '') : '';
+            const isTemp     = unit === 'K' || ch.startsWith('Т');
+            const isPressure = unit === 'mbar';
+
+            for (const p of points) {
+                const ts  = new Date(p.t).getTime();
+                const val = Number(p.v);
+                if (isTemp) {
+                    pushPoint(tempBuffers, ch, ts, val);
+                } else if (isPressure) {
+                    if (!pressureChart) initPressureChart();
+                    pushPoint(pressureBuffers, ch, ts, val);
                 }
             }
-
-            document.getElementById('temp-body').innerHTML =
-                tempRows.length ? tempRows.join('') : '<tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>';
-            document.getElementById('other-body').innerHTML =
-                otherRows.length ? otherRows.join('') : '<tr><td colspan="5" class="empty-msg">Ожидание данных...</td></tr>';
-            document.getElementById('ch-count').textContent = total;
         }
 
-        // Периодический запрос статуса
-        async function fetchStatus() {
-            try {
-                const resp = await fetch('/status');
-                const data = await resp.json();
-                document.getElementById('uptime').textContent = data.uptime || '--:--:--';
-                document.getElementById('total').textContent = data.total_readings || 0;
-            } catch (e) { /* ignore */ }
-        }
+        // Немедленно отрисовать
+        updateCharts();
+    } catch (e) {
+        console.warn('Не удалось загрузить историю:', e);
+    }
+}
 
-        function esc(str) {
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
-        }
-
-        // Запуск
-        connect();
-        setInterval(fetchStatus, 2000);
-        fetchStatus();
-    </script>
+/* ================================================================
+   Запуск
+   ================================================================ */
+connect();
+loadHistory();
+</script>
 </body>
 </html>

@@ -34,6 +34,7 @@ from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.zmq_bridge import ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.drivers.base import Reading
+from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
@@ -82,6 +83,11 @@ def _load_drivers(config_path: Path, *, mock: bool) -> list[InstrumentConfig]:
             from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
             driver = Keithley2604B(name, resource, mock=mock)
+        elif itype == "thyracont_vsp63d":
+            from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
+
+            baudrate = int(entry.get("baudrate", 9600))
+            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, mock=mock)
         else:
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
@@ -244,12 +250,53 @@ async def _run_engine(*, mock: bool = False) -> None:
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
 
+    # Periodic Reporter (Telegram-отчёты с графиками)
+    periodic_reporter: PeriodicReporter | None = None
+    notifications_cfg = _CONFIG_DIR / "notifications.yaml"
+    if notifications_cfg.exists():
+        try:
+            with notifications_cfg.open(encoding="utf-8") as fh:
+                notifications_raw: dict[str, Any] = yaml.safe_load(fh)
+            pr_cfg = notifications_raw.get("periodic_report", {})
+            tg_cfg = notifications_raw.get("telegram", {})
+            if pr_cfg.get("enabled", False):
+                bot_token = str(tg_cfg.get("bot_token", ""))
+                chat_id = tg_cfg.get("chat_id", 0)
+                # Пропускаем, если токен не задан (placeholder)
+                if bot_token and bot_token != "YOUR_BOT_TOKEN_HERE":
+                    include_channels = pr_cfg.get("include_channels")
+                    periodic_reporter = PeriodicReporter(
+                        broker,
+                        alarm_engine,
+                        bot_token=bot_token,
+                        chat_id=chat_id,
+                        report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
+                        chart_hours=float(pr_cfg.get("chart_hours", 2.0)),
+                        include_channels=include_channels,
+                    )
+                    logger.info(
+                        "PeriodicReporter создан: интервал=%.0f с, глубина=%.1f ч",
+                        float(pr_cfg.get("report_interval_s", 1800)),
+                        float(pr_cfg.get("chart_hours", 2.0)),
+                    )
+                else:
+                    logger.info(
+                        "PeriodicReporter: periodic_report.enabled=true, но bot_token — "
+                        "заглушка. Настройте токен в config/notifications.yaml."
+                    )
+        except Exception as exc:
+            logger.error("Ошибка загрузки конфигурации PeriodicReporter: %s", exc)
+    else:
+        logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
+
     # --- Запуск всех подсистем ---
     await writer.start(sqlite_queue)
     await zmq_pub.start(zmq_queue)
     await alarm_engine.start()
     await interlock_engine.start()
     await plugin_pipeline.start()
+    if periodic_reporter is not None:
+        await periodic_reporter.start()
     await scheduler.start()
 
     # Watchdog
@@ -299,6 +346,10 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await plugin_pipeline.stop()
     logger.info("Пайплайн плагинов остановлен")
+
+    if periodic_reporter is not None:
+        await periodic_reporter.stop()
+        logger.info("PeriodicReporter остановлен")
 
     await alarm_engine.stop()
     logger.info("Движок тревог остановлен")
