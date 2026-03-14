@@ -31,7 +31,7 @@ from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
-from cryodaq.core.zmq_bridge import ZMQPublisher
+from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications.periodic_report import PeriodicReporter
@@ -216,6 +216,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     zmq_queue = await broker.subscribe("zmq_publisher")
     zmq_pub = ZMQPublisher()
 
+    # ZMQ Command Server (REP — для управления из GUI)
+    # Обработчик команд создаём после нахождения keithley_driver (ниже)
+    cmd_server = ZMQCommandServer()
+
     # Alarm Engine
     alarm_engine = AlarmEngine(broker)
     if alarms_cfg.exists():
@@ -252,6 +256,29 @@ async def _run_engine(*, mock: bool = False) -> None:
         interlock_engine.load_config(interlocks_cfg)
     else:
         logger.warning("Файл блокировок не найден: %s", interlocks_cfg)
+
+    # Обработчик команд от GUI (Keithley start/stop/emergency_off)
+    async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
+        action = cmd.get("cmd", "")
+        try:
+            if action == "keithley_emergency_off" and keithley_driver is not None:
+                await keithley_driver.emergency_off()
+                return {"ok": True, "action": "emergency_off"}
+            if action == "keithley_stop" and keithley_driver is not None:
+                await keithley_driver.stop_source()
+                return {"ok": True, "action": "stop_source"}
+            if action == "keithley_start" and keithley_driver is not None:
+                p = float(cmd.get("p_target", 0))
+                v = float(cmd.get("v_comp", 40))
+                i = float(cmd.get("i_comp", 1.0))
+                await keithley_driver.start_source(p, v, i)
+                return {"ok": True, "action": "start_source", "p_target": p}
+            return {"ok": False, "error": f"unknown command: {action}"}
+        except Exception as exc:
+            logger.error("Ошибка выполнения команды '%s': %s", action, exc)
+            return {"ok": False, "error": str(exc)}
+
+    cmd_server._handler = _handle_gui_command
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
@@ -319,6 +346,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Запуск всех подсистем ---
     await writer.start(sqlite_queue)
     await zmq_pub.start(zmq_queue)
+    await cmd_server.start()
     await alarm_engine.start()
     await interlock_engine.start()
     await plugin_pipeline.start()
@@ -392,6 +420,9 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))
+
+    await cmd_server.stop()
+    logger.info("ZMQ CommandServer остановлен")
 
     await zmq_pub.stop()
     logger.info("ZMQ Publisher остановлен")

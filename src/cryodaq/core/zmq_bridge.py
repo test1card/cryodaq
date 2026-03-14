@@ -2,14 +2,16 @@
 
 ZMQPublisher — PUB-сокет в engine, сериализует Reading через msgpack.
 ZMQSubscriber — SUB-сокет в GUI-процессе, десериализует и вызывает callback.
+ZMQCommandServer — REP-сокет в engine, принимает JSON-команды от GUI.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 import msgpack
 import zmq
@@ -20,6 +22,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 logger = logging.getLogger(__name__)
 
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
+DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
 
@@ -190,3 +193,87 @@ class ZMQSubscriber:
             self._ctx.term()
             self._ctx = None
         logger.info("ZMQSubscriber остановлен (получено: %d)", self._total_received)
+
+
+class ZMQCommandServer:
+    """REP-сокет: engine принимает JSON-команды от GUI.
+
+    Использование::
+
+        async def handler(cmd: dict) -> dict:
+            return {"ok": True}
+
+        srv = ZMQCommandServer(handler=handler)
+        await srv.start()
+        ...
+        await srv.stop()
+    """
+
+    def __init__(
+        self,
+        address: str = DEFAULT_CMD_ADDR,
+        *,
+        handler: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> None:
+        self._address = address
+        self._handler = handler
+        self._ctx: zmq.asyncio.Context | None = None
+        self._socket: zmq.asyncio.Socket | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._running = False
+
+    async def _serve_loop(self) -> None:
+        while self._running:
+            try:
+                raw = await asyncio.wait_for(self._socket.recv(), timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                logger.exception("Ошибка приёма команды ZMQ")
+                continue
+
+            try:
+                cmd = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                await self._socket.send(json.dumps(
+                    {"ok": False, "error": "invalid JSON"}).encode())
+                continue
+
+            try:
+                if self._handler:
+                    result = self._handler(cmd)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    reply = result if isinstance(result, dict) else {"ok": True}
+                else:
+                    reply = {"ok": False, "error": "no handler"}
+            except Exception as exc:
+                logger.exception("Ошибка обработки команды: %s", cmd)
+                reply = {"ok": False, "error": str(exc)}
+
+            await self._socket.send(json.dumps(reply).encode())
+
+    async def start(self) -> None:
+        self._ctx = zmq.asyncio.Context()
+        self._socket = self._ctx.socket(zmq.REP)
+        self._socket.bind(self._address)
+        self._running = True
+        self._task = asyncio.create_task(self._serve_loop(), name="zmq_cmd_server")
+        logger.info("ZMQCommandServer запущен: %s", self._address)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        if self._socket:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._ctx:
+            self._ctx.term()
+            self._ctx = None
+        logger.info("ZMQCommandServer остановлен")
