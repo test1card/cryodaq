@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # CryoDAQ
 
 LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 21k+ lines, 194 tests.
+Python 3.12+, asyncio, PySide6, 22k+ lines, 217 tests.
 
 ## Build & Development Commands
 
@@ -20,7 +20,7 @@ install.bat                    # One-click Windows installer
 python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
 cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
-pytest                         # Run all 194 tests (~44s)
+pytest                         # Run all 217 tests (~73s)
 pytest tests/core/             # Core subsystem tests only
 pytest -k test_safety          # Run safety manager tests
 pytest -k test_cooldown        # Run cooldown predictor + service tests

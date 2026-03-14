@@ -223,6 +223,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         safety_broker,
         keithley_driver=keithley_driver,
         mock=mock,
+        data_broker=broker,
     )
     safety_manager.load_config(safety_cfg)
 
@@ -286,6 +287,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 name = cmd.get("alarm_name", "")
                 try:
                     alarm_engine.acknowledge(name)
+                    await alarm_engine._publish_alarm_count()
                     return {"ok": True, "action": "alarm_acknowledge"}
                 except (KeyError, ValueError) as exc:
                     return {"ok": False, "error": str(exc)}

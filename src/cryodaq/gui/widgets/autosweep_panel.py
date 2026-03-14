@@ -172,7 +172,7 @@ class AutoSweepPanel(QWidget):
 
         pl.addWidget(QLabel("Канал:"), 3, 0)
         self._smu_combo = QComboBox()
-        self._smu_combo.addItems(["smua", "smub"])
+        self._smu_combo.addItems(["smua"])
         pl.addWidget(self._smu_combo, 3, 1)
 
         pl.addWidget(QLabel("Готовность (%):"), 4, 0)

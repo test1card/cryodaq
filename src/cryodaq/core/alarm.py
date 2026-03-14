@@ -329,6 +329,7 @@ class AlarmEngine:
         self._queue = await self._broker.subscribe(
             _SUBSCRIPTION_NAME,
             maxsize=10_000,
+            filter_fn=lambda r: not r.channel.startswith(("alarm/", "analytics/", "system/")),
         )
         self._task = asyncio.create_task(
             self._check_loop(), name="alarm_check_loop"
@@ -337,6 +338,8 @@ class AlarmEngine:
             "AlarmEngine запущен. Зарегистрировано тревог: %d.",
             len(self._alarms),
         )
+        # Опубликовать начальное значение alarm_count=0
+        await self._publish_alarm_count()
 
     async def stop(self) -> None:
         """Остановить движок оповещений.
@@ -467,6 +470,33 @@ class AlarmEngine:
             logger.debug("Цикл проверки тревог завершён по отмене задачи.")
             raise
 
+    async def _publish_alarm_reading(self, event: AlarmEvent) -> None:
+        """Опубликовать событие тревоги как Reading в DataBroker."""
+        reading = Reading.now(
+            channel=f"alarm/{event.alarm_name}",
+            value=event.value,
+            unit="",
+            metadata={
+                "alarm_name": event.alarm_name,
+                "event_type": event.event_type,
+                "severity": event.severity.value,
+                "threshold": event.threshold,
+                "channel": event.channel,
+            },
+        )
+        await self._broker.publish(reading)
+
+    async def _publish_alarm_count(self) -> None:
+        """Опубликовать текущее количество активных тревог."""
+        unresolved = self.get_active_alarms()
+        reading = Reading.now(
+            channel="analytics/alarm_count",
+            value=float(len(unresolved)),
+            unit="",
+            metadata={"active_names": unresolved},
+        )
+        await self._broker.publish(reading)
+
     async def _process_reading(self, reading: Reading) -> None:
         """Проверить показание против всех подходящих тревог.
 
@@ -474,6 +504,10 @@ class AlarmEngine:
         - OK + is_triggered → ACTIVE (активировать, диспетчеризировать).
         - ACTIVE/ACKNOWLEDGED + is_cleared → OK (сбросить, диспетчеризировать).
         """
+        # Не обрабатывать собственные публикации и системные каналы
+        if reading.channel.startswith(("alarm/", "analytics/", "system/")):
+            return
+
         for record in self._alarms.values():
             condition = record.condition
 
@@ -520,6 +554,8 @@ class AlarmEngine:
                     record.activation_count,
                 )
                 await self._dispatch(event)
+                await self._publish_alarm_reading(event)
+                await self._publish_alarm_count()
 
             elif (
                 record.state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED)
@@ -552,6 +588,8 @@ class AlarmEngine:
                     now.isoformat(),
                 )
                 await self._dispatch(event)
+                await self._publish_alarm_reading(event)
+                await self._publish_alarm_count()
 
     async def _dispatch(self, event: AlarmEvent) -> None:
         """Вызвать все notifier-коллбэки для данного события.

@@ -49,6 +49,13 @@ _SEVERITY_ORDER: dict[str, int] = {
     "INFO": 2,
 }
 
+# Канонизация event_type (от AlarmEngine) → внутреннее состояние строки
+_EVENT_TO_STATE: dict[str, str] = {
+    "activated": "active",
+    "acknowledged": "acknowledged",
+    "cleared": "cleared",
+}
+
 # Столбцы таблицы
 _COLUMNS = [
     "Уровень",
@@ -150,7 +157,7 @@ class AlarmPanel(QWidget):
             row.value = reading.value
             row.channel = meta.get("channel", channel)
             row.trigger_count += 1 if event_type == "activated" else 0
-            row.state = event_type if event_type in ("active", "cleared", "acknowledged") else row.state
+            row.state = _EVENT_TO_STATE.get(event_type, row.state)
         else:
             row = _AlarmRow(
                 severity=severity,
@@ -160,7 +167,7 @@ class AlarmPanel(QWidget):
                 threshold=threshold,
                 first_triggered=time.monotonic(),
                 trigger_count=1 if event_type == "activated" else 0,
-                state=event_type if event_type else "ok",
+                state=_EVENT_TO_STATE.get(event_type, "ok"),
             )
             self._alarms[alarm_name] = row
 
@@ -228,7 +235,6 @@ class AlarmPanel(QWidget):
                     "ok": "Норма",
                     "cleared": "Сброшена",
                     "acknowledged": "Подтв.",
-                    "activated": "Активна",
                 }.get(alarm.state, alarm.state)
                 self._table.setItem(row_idx, 7, QTableWidgetItem(state_text))
 

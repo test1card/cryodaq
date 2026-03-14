@@ -71,7 +71,7 @@ uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # web
 
 # Тесты
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # модель cooldown
-pytest tests/ -v                 # 184 теста
+pytest tests/ -v                 # 217 тестов
 ruff check src/ tests/           # линтинг
 ```
 
@@ -215,7 +215,7 @@ docs/
 ├── operator_manual.md           — руководство оператора (русский)
 └── deployment.md                — развёртывание на новом ПК
 
-tests/                           — 194 теста (23 файла)
+tests/                           — 217 тестов (25 файлов)
 ├── core/                        — broker, alarm, interlock, safety, scheduler, zmq, experiment, persistence, disk_monitor
 ├── drivers/                     — lakeshore, keithley, thyracont
 ├── analytics/                   — thermal, cooldown_estimator, cooldown_predictor, cooldown_service, plugins
@@ -237,14 +237,14 @@ tests/                           — 194 теста (23 файла)
 
 | Метрика | Значение |
 |---------|----------|
-| Python-файлов | **94** |
-| Строк Python | **21 700+** |
-| Тестов | **194** (все проходят) |
+| Python-файлов | **96** |
+| Строк Python | **22 700+** |
+| Тестов | **217** (все проходят) |
 | Приборов (mock) | **5** (3× LakeShore + Keithley + Thyracont) |
 | Каналов данных | **29** (24 температуры + 4 Keithley + 1 давление) |
 | GUI вкладок | **7** (была 8 — Температуры+Давление объединены в «Обзор») |
 | Telegram команд | **6** |
-| Коммитов | **38** |
+| Коммитов | **42** |
 
 ## Стандарты
 

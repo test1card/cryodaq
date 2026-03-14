@@ -30,3 +30,9 @@ rate_limits:
 recovery:
   require_reason: true             # оператор обязан указать причину при acknowledge
   cooldown_before_rearm_s: 60.0   # минимум 60с после аварии до повторного запуска
+
+# Аппаратные лимиты источника тока
+source_limits:
+  max_power_w: 5.0
+  max_voltage_v: 40.0
+  max_current_a: 1.0

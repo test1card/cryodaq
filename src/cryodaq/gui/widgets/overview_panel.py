@@ -542,6 +542,7 @@ class KeithleyStrip(QFrame):
         self._smub_label = QLabel("smub: OFF")
         self._smub_label.setFont(lbl_font)
         self._smub_label.setStyleSheet("color: #888888; border: none;")
+        self._smub_label.setVisible(False)
         layout.addWidget(self._smub_label)
 
         layout.addStretch()
@@ -562,10 +563,6 @@ class KeithleyStrip(QFrame):
             self._update_smu_label(self._smua_label, "smua", self._smua_data)
             self._is_on = True
             self.setVisible(True)
-        elif "/smub/" in ch:
-            param = ch.split("/")[-1]
-            self._smub_data[param] = val
-            self._update_smu_label(self._smub_label, "smub", self._smub_data)
 
     def set_safety_state(self, state: str) -> None:
         """Скрыть при SAFE_OFF."""

@@ -96,6 +96,9 @@ class SafetyConfig:
     max_dT_dt_K_per_min: float = 5.0
     require_reason: bool = True
     cooldown_before_rearm_s: float = 60.0
+    max_power_w: float = 5.0
+    max_voltage_v: float = 40.0
+    max_current_a: float = 1.0
 
 
 class SafetyManager:
@@ -111,10 +114,12 @@ class SafetyManager:
         *,
         keithley_driver: Any | None = None,
         mock: bool = False,
+        data_broker: Any | None = None,
     ) -> None:
         self._broker = safety_broker
         self._keithley = keithley_driver
         self._mock = mock
+        self._data_broker = data_broker
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
@@ -159,6 +164,7 @@ class SafetyManager:
             except re.error as exc:
                 logger.error("Некорректный regex в critical_channels: '%s': %s", p, exc)
 
+        src_limits = raw.get("source_limits", {})
         self._config = SafetyConfig(
             critical_channels=patterns,
             stale_timeout_s=float(raw.get("stale_timeout_s", 10.0)),
@@ -168,6 +174,9 @@ class SafetyManager:
             max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
             require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
             cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
+            max_power_w=float(src_limits.get("max_power_w", 5.0)),
+            max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
+            max_current_a=float(src_limits.get("max_current_a", 1.0)),
         )
         logger.info(
             "SafetyManager: конфигурация загружена. Критических каналов: %d, stale=%.0fs",
@@ -191,6 +200,7 @@ class SafetyManager:
             "SafetyManager запущен. Состояние: %s. Mock: %s.",
             self._state.value, self._mock,
         )
+        await self._publish_state("initial")
 
     async def stop(self) -> None:
         """Остановить SafetyManager. Гарантировать источник OFF."""
@@ -241,6 +251,17 @@ class SafetyManager:
         if not ok:
             return {"ok": False, "state": self._state.value, "error": reason}
 
+        # Проверить лимиты источника
+        if p_target > self._config.max_power_w:
+            return {"ok": False, "state": self._state.value,
+                    "error": f"P={p_target}W превышает лимит {self._config.max_power_w}W"}
+        if v_comp > self._config.max_voltage_v:
+            return {"ok": False, "state": self._state.value,
+                    "error": f"V={v_comp}V превышает лимит {self._config.max_voltage_v}V"}
+        if i_comp > self._config.max_current_a:
+            return {"ok": False, "state": self._state.value,
+                    "error": f"I={i_comp}A превышает лимит {self._config.max_current_a}A"}
+
         # Перейти в RUN_PERMITTED
         self._transition(SafetyState.RUN_PERMITTED, f"Запуск запрошен: P={p_target}W")
 
@@ -285,9 +306,15 @@ class SafetyManager:
         await self._ensure_output_off()
         if self._state != SafetyState.FAULT_LATCHED:
             self._transition(SafetyState.SAFE_OFF, "Аварийное отключение оператором")
+            return {"ok": True, "state": self._state.value}
         else:
             logger.warning("emergency_off: FAULT_LATCHED сохранён, выход выключен")
-        return {"ok": True, "state": self._state.value}
+            return {
+                "ok": True,
+                "state": self._state.value,
+                "latched": True,
+                "warning": "Выход отключён, но авария не снята — используйте acknowledge_fault",
+            }
 
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
         """Оператор подтверждает аварию и указывает причину.
@@ -336,6 +363,21 @@ class SafetyManager:
         """Зарегистрировать callback(from_state, to_state, reason)."""
         self._on_state_change.append(callback)
 
+    async def _publish_state(self, reason: str = "") -> None:
+        """Опубликовать текущее состояние безопасности в DataBroker."""
+        if self._data_broker is None:
+            return
+        r = Reading.now(
+            channel="analytics/safety_state",
+            value=0.0,
+            unit="",
+            metadata={"state": self._state.value, "reason": reason},
+        )
+        try:
+            await self._data_broker.publish(r)
+        except Exception as exc:
+            logger.warning("Не удалось опубликовать safety state: %s", exc)
+
     # ------------------------------------------------------------------
     # Внутренние переходы
     # ------------------------------------------------------------------
@@ -367,6 +409,12 @@ class SafetyManager:
                 cb(old, new_state, reason)
             except Exception:
                 logger.exception("Ошибка в safety state_change callback")
+
+        # Опубликовать изменение состояния в DataBroker (async из sync контекста)
+        try:
+            asyncio.get_running_loop().create_task(self._publish_state(reason))
+        except RuntimeError:
+            pass  # Нет event loop (например, в тестах)
 
     async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:
         """Перевести в FAULT_LATCHED + emergency_off."""

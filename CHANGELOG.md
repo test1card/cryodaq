@@ -7,6 +7,21 @@
 
 ---
 
+## [0.9.0] — 2026-03-15
+
+### P0 Critical Fixes (external audit — 5 defects)
+
+- **P0-01: Alarm pipeline end-to-end** — AlarmEngine publishes alarm events (`alarm/{name}`) and `analytics/alarm_count` to DataBroker; filter_fn prevents feedback loops; initial count=0 on start; GUI canonicalizes "activated"→"active"; metadata values are strings (not enums)
+- **P0-02: SafetyManager publishes `analytics/safety_state`** — Reading on every transition + initial snapshot (safe_off); data_broker param added to constructor; publish failure doesn't crash safety path
+- **P0-03: P/V/I backend limits** — max_power_w=5W, max_voltage_v=40V, max_current_a=1A validated in request_run() BEFORE RUN_PERMITTED; `>` rejects, `==` allows; loaded from safety.yaml source_limits
+- **P0-04: emergency_off latched flag** — returns `{latched: true, warning: "..."}` when FAULT_LATCHED (operator knows fault preserved)
+- **P0-05: smub cleanup** — tab disabled in GUI, removed from autosweep dropdown, hidden in overview, docs updated
+
+### Статистика
+- 96 файлов, 22 700+ строк, 217 тестов
+
+---
+
 ## [0.8.0] — 2026-03-14
 
 ### Добавлено
