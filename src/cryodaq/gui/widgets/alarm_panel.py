@@ -233,8 +233,10 @@ class AlarmPanel(QWidget):
                 self._table.setItem(row_idx, 7, QTableWidgetItem(state_text))
 
     def _acknowledge(self, alarm_name: str) -> None:
-        """Подтвердить тревогу."""
-        if alarm_name in self._alarms:
-            self._alarms[alarm_name].state = "acknowledged"
-            self._refresh_table()
-            logger.info("Тревога '%s' подтверждена оператором", alarm_name)
+        """Send acknowledge to engine via ZMQ."""
+        from cryodaq.gui.widgets.keithley_panel import _send_command
+        reply = _send_command({"cmd": "alarm_acknowledge", "alarm_name": alarm_name})
+        if reply.get("ok"):
+            logger.info("Тревога '%s' подтверждена через engine", alarm_name)
+        else:
+            logger.warning("Ошибка подтверждения тревоги '%s': %s", alarm_name, reply.get("error"))

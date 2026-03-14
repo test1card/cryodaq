@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS readings (
 """
 
 SCHEMA_SOURCE_DATA = """
+-- Reserved for future Keithley raw SMU buffer recording.
+-- Currently unused — Keithley data goes through standard Reading path.
 CREATE TABLE IF NOT EXISTS source_data (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   TEXT    NOT NULL,
@@ -141,7 +143,11 @@ class SQLiteWriter:
         resistance: float | None = None,
         power: float | None = None,
     ) -> None:
-        """Записать строку в source_data (для Keithley raw-данных)."""
+        """Reserved for future Keithley raw data recording.
+
+        Currently unused — Keithley data goes through standard Reading path.
+        Kept for future direct SMU buffer recording.
+        """
         day = timestamp.date()
         conn = self._ensure_connection(day)
         conn.execute(

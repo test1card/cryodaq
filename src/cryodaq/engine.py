@@ -167,7 +167,7 @@ async def _watchdog(
             sched_stats = scheduler.stats
             writer_stats = writer.stats
 
-            total_queued = sum(s.get("size", 0) for s in broker_stats.values())
+            total_queued = sum(s.get("queued", 0) for s in broker_stats.values())
             total_dropped = sum(s.get("dropped", 0) for s in broker_stats.values())
 
             logger.info(
@@ -282,6 +282,13 @@ async def _run_engine(*, mock: bool = False) -> None:
             if action == "safety_acknowledge":
                 reason = cmd.get("reason", "")
                 return await safety_manager.acknowledge_fault(reason)
+            if action == "alarm_acknowledge":
+                name = cmd.get("alarm_name", "")
+                try:
+                    alarm_engine.acknowledge(name)
+                    return {"ok": True, "action": "alarm_acknowledge"}
+                except (KeyError, ValueError) as exc:
+                    return {"ok": False, "error": str(exc)}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)

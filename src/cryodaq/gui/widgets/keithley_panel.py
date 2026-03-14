@@ -329,7 +329,12 @@ class KeithleyPanel(QWidget):
         for smu_name, colors in _SMU_COLORS.items():
             tab = _SmuTab(smu_name, colors)
             self._smu_tabs[smu_name] = tab
-            self._tab_widget.addTab(tab, smu_name.upper())
+            label = smu_name.upper()
+            self._tab_widget.addTab(tab, label)
+            if smu_name == "smub":
+                idx = self._tab_widget.count() - 1
+                self._tab_widget.setTabEnabled(idx, False)
+                self._tab_widget.setTabToolTip(idx, "Не реализовано / Planned")
 
         root.addWidget(self._tab_widget)
 

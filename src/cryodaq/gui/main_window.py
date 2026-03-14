@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._reading_count: int = 0
         self._rate_count: int = 0
         self._last_rate_time: float = time.monotonic()
+        self._last_reading_time: float = 0.0
 
         self.setWindowTitle("CryoDAQ — Система сбора данных")
         self.setMinimumSize(1280, 800)
@@ -194,6 +195,7 @@ class MainWindow(QMainWindow):
         """Маршрутизация Reading к нужным панелям (Qt main thread)."""
         self._reading_count += 1
         self._rate_count += 1
+        self._last_reading_time = time.monotonic()
 
         channel = reading.channel
 
@@ -230,7 +232,7 @@ class MainWindow(QMainWindow):
     def _update_status_bar(self) -> None:
         """Обновить метки подключения, uptime и скорости."""
         # Подключение
-        connected = self._reading_count > 0
+        connected = (time.monotonic() - self._last_reading_time) < 3.0
         if connected:
             elapsed = time.monotonic() - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
@@ -240,6 +242,12 @@ class MainWindow(QMainWindow):
             self._conn_label.setText("⬤ Подключено")
             self._conn_label.setStyleSheet("color: #2ECC40; font-weight: bold;")
             self._rate_label.setText(f"{rate:.0f} изм/с")
+        elif self._reading_count > 0:
+            self._conn_label.setText("⬤ Нет данных")
+            self._conn_label.setStyleSheet("color: #FFDC00; font-weight: bold;")
+        else:
+            self._conn_label.setText("⬤ Отключено")
+            self._conn_label.setStyleSheet("color: #FF4136; font-weight: bold;")
 
         # Uptime
         uptime_s = int(time.monotonic() - self._start_time)
@@ -273,39 +281,30 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_export_hdf5(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт в HDF5", "", "HDF5 файлы (*.h5 *.hdf5)",
-        )
-        if path:
-            try:
-                from cryodaq.storage.hdf5_export import HDF5Exporter
-
-                # Найти последний daily-файл SQLite
-                data_dir = Path("data")
-                db_files = sorted(data_dir.glob("data_*.db"))
-                if not db_files:
-                    QMessageBox.warning(
-                        self, "Ошибка экспорта", "Файлы данных не найдены в data/",
-                    )
-                    return
-
-                exporter = HDF5Exporter()
-                total = 0
-                for db_path in db_files:
-                    total += exporter.export(db_path=db_path, output_path=Path(path))
-                QMessageBox.information(
-                    self, "Экспорт HDF5", f"Экспортировано {total} записей",
-                )
-            except Exception as exc:
-                logger.error("Ошибка экспорта HDF5: %s", exc)
-                QMessageBox.warning(
-                    self, "Ошибка экспорта", f"Не удалось экспортировать HDF5:\n{exc}",
-                )
+        directory = QFileDialog.getExistingDirectory(self, "Выберите папку для HDF5")
+        if not directory:
+            return
+        from cryodaq.storage.hdf5_export import HDF5Exporter
+        data_dir = Path("data")
+        exporter = HDF5Exporter()
+        total = 0
+        for db_file in sorted(data_dir.glob("data_*.db")):
+            out = Path(directory) / db_file.name.replace(".db", ".h5")
+            total += exporter.export(db_file, out)
+        QMessageBox.information(self, "HDF5", f"Экспортировано: {total} записей")
 
     @Slot()
     def _on_export_xlsx(self) -> None:
-        """Экспорт Excel — заглушка (Backend #2 реализует диалог)."""
-        logger.info("Экспорт Excel: диалог будет реализован в Backend #2")
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт Excel", "", "Excel (*.xlsx)")
+        if not path:
+            return
+        from cryodaq.storage.xlsx_export import XLSXExporter
+        exporter = XLSXExporter(Path("data"))
+        try:
+            count = exporter.export(Path(path))
+            QMessageBox.information(self, "Excel", f"Экспортировано: {count} записей")
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка экспорта: {exc}")
 
     @Slot()
     def _on_start_experiment(self) -> None:

@@ -34,6 +34,15 @@ async def _drain_queue(q: asyncio.Queue[Reading], wait_s: float = 0.5) -> list[R
     return results
 
 
+def _mock_usage(free_gb: float) -> MagicMock:
+    """Return a mock shutil.disk_usage result with the given free space."""
+    usage = MagicMock()
+    usage.free = int(free_gb * 1024**3)
+    usage.total = int(100 * 1024**3)
+    usage.used = usage.total - usage.free
+    return usage
+
+
 # ---------------------------------------------------------------------------
 # 1. DiskMonitor starts and stops cleanly
 # ---------------------------------------------------------------------------
@@ -43,9 +52,13 @@ async def test_disk_monitor_starts_and_stops(tmp_path: Path) -> None:
     broker = DataBroker()
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
 
-    await monitor.start()
-    await asyncio.sleep(0.2)
-    await monitor.stop()  # must not raise
+    with patch(
+        "cryodaq.core.disk_monitor.shutil.disk_usage",
+        return_value=_mock_usage(50),
+    ):
+        await monitor.start()
+        await asyncio.sleep(0.2)
+        await monitor.stop()  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +71,14 @@ async def test_disk_monitor_publishes_reading(tmp_path: Path) -> None:
     q = await broker.subscribe("test_sub", maxsize=100)
 
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
-    await monitor.start()
-    await asyncio.sleep(0.3)
-    await monitor.stop()
+
+    with patch(
+        "cryodaq.core.disk_monitor.shutil.disk_usage",
+        return_value=_mock_usage(50),
+    ):
+        await monitor.start()
+        await asyncio.sleep(0.3)
+        await monitor.stop()
 
     readings = await _drain_queue(q, wait_s=0.1)
 
@@ -72,7 +90,7 @@ async def test_disk_monitor_publishes_reading(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Published value is within a reasonable real-world range
+# 3. Published value matches mocked free space
 # ---------------------------------------------------------------------------
 
 
@@ -81,16 +99,21 @@ async def test_disk_monitor_value_is_reasonable(tmp_path: Path) -> None:
     q = await broker.subscribe("test_sub", maxsize=100)
 
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
-    await monitor.start()
-    await asyncio.sleep(0.3)
-    await monitor.stop()
+
+    with patch(
+        "cryodaq.core.disk_monitor.shutil.disk_usage",
+        return_value=_mock_usage(50),
+    ):
+        await monitor.start()
+        await asyncio.sleep(0.3)
+        await monitor.stop()
 
     readings = await _drain_queue(q, wait_s=0.1)
     assert len(readings) > 0
 
     for r in readings:
-        assert 0.1 <= r.value <= 10_000, (
-            f"disk_free_gb={r.value} is outside plausible range [0.1, 10000]"
+        assert abs(r.value - 50.0) < 0.1, (
+            f"disk_free_gb={r.value} does not match mocked 50 GB"
         )
 
 
@@ -109,7 +132,7 @@ async def test_disk_monitor_warning_threshold(tmp_path: Path) -> None:
 
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
 
-    with patch("shutil.disk_usage", return_value=fake_usage):
+    with patch("cryodaq.core.disk_monitor.shutil.disk_usage", return_value=fake_usage):
         await monitor.start()
         await asyncio.sleep(0.2)
         await monitor.stop()
@@ -139,7 +162,7 @@ async def test_disk_monitor_critical_threshold(
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
 
     with caplog.at_level(logging.CRITICAL), patch(
-        "shutil.disk_usage", return_value=fake_usage
+        "cryodaq.core.disk_monitor.shutil.disk_usage", return_value=fake_usage
     ):
         await monitor.start()
         await asyncio.sleep(0.2)

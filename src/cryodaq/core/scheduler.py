@@ -80,6 +80,8 @@ class Scheduler:
         name = driver.name
 
         while self._running:
+            next_deadline = asyncio.get_event_loop().time() + cfg.poll_interval_s
+
             # Подключение / переподключение
             if not driver.connected:
                 try:
@@ -132,8 +134,9 @@ class Scheduler:
                 logger.exception("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
                 await self._handle_error(state)
 
-            # Пауза до следующего цикла
-            await asyncio.sleep(cfg.poll_interval_s)
+            # Пауза до следующего цикла (fixed cadence — компенсирует время опроса)
+            sleep_remaining = max(0, next_deadline - asyncio.get_event_loop().time())
+            await asyncio.sleep(sleep_remaining)
 
     async def _handle_error(self, state: _InstrumentState) -> None:
         """При 3+ ошибках подряд — переподключение с backoff."""

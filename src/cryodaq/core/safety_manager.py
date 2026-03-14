@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -121,8 +122,8 @@ class SafetyManager:
         self._fault_time: float = 0.0
         self._recovery_reason: str = ""
 
-        # Текущие значения каналов: channel → (monotonic_time, value)
-        self._latest: dict[str, tuple[float, float]] = {}
+        # Текущие значения каналов: channel → (monotonic_time, value, status)
+        self._latest: dict[str, tuple[float, float, str]] = {}
         # Скорости изменения: channel → deque[(monotonic, value)]
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
 
@@ -261,20 +262,31 @@ class SafetyManager:
             await self._fault(f"Ошибка запуска источника: {exc}")
             return {"ok": False, "state": self._state.value, "error": str(exc)}
 
+    async def _ensure_output_off(self) -> None:
+        """Turn off hardware output WITHOUT changing safety state."""
+        if self._keithley is not None:
+            try:
+                await self._keithley.emergency_off()
+            except Exception as exc:
+                logger.critical("_ensure_output_off FAILED: %s", exc)
+
     async def request_stop(self) -> dict[str, Any]:
         """Оператор запрашивает штатную остановку."""
+        if self._state == SafetyState.FAULT_LATCHED:
+            await self._ensure_output_off()
+            return {"ok": False, "state": self._state.value,
+                    "error": "Система в аварии — сброс через acknowledge_fault"}
         await self._safe_off("Штатная остановка оператором")
         return {"ok": True, "state": self._state.value}
 
     async def emergency_off(self) -> dict[str, Any]:
         """Аварийное отключение. Bypasses state machine — прямое отключение."""
         logger.critical("АВАРИЙНОЕ ОТКЛЮЧЕНИЕ — прямая команда")
-        if self._keithley is not None:
-            try:
-                await self._keithley.emergency_off()
-            except Exception as exc:
-                logger.critical("Ошибка emergency_off: %s", exc)
-        self._transition(SafetyState.SAFE_OFF, "Аварийное отключение оператором")
+        await self._ensure_output_off()
+        if self._state != SafetyState.FAULT_LATCHED:
+            self._transition(SafetyState.SAFE_OFF, "Аварийное отключение оператором")
+        else:
+            logger.warning("emergency_off: FAULT_LATCHED сохранён, выход выключен")
         return {"ok": True, "state": self._state.value}
 
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
@@ -328,7 +340,7 @@ class SafetyManager:
     # Внутренние переходы
     # ------------------------------------------------------------------
 
-    def _transition(self, new_state: SafetyState, reason: str) -> None:
+    def _transition(self, new_state: SafetyState, reason: str, *, channel: str = "", value: float = 0.0) -> None:
         """Выполнить переход состояния с логированием и уведомлением."""
         old = self._state
         self._state = new_state
@@ -338,6 +350,8 @@ class SafetyManager:
             from_state=old,
             to_state=new_state,
             reason=reason,
+            channel=channel,
+            value=value,
         )
         self._events.append(event)
 
@@ -366,10 +380,15 @@ class SafetyManager:
             except Exception as exc:
                 logger.critical("FAULT: emergency_off FAILED: %s", exc)
 
-        self._transition(SafetyState.FAULT_LATCHED, reason)
+        self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
 
     async def _safe_off(self, reason: str) -> None:
         """Штатный переход в SAFE_OFF + остановка источника."""
+        if self._state == SafetyState.FAULT_LATCHED:
+            await self._ensure_output_off()
+            logger.warning("_safe_off: FAULT_LATCHED сохранён, переход в SAFE_OFF отклонён")
+            return
+
         if self._keithley is not None and self._state == SafetyState.RUNNING:
             try:
                 await self._keithley.stop_source()
@@ -389,15 +408,19 @@ class SafetyManager:
         """
         now = time.monotonic()
 
-        # 1. Критические каналы — свежие данные
+        # 1. Критические каналы — свежие данные, статус, валидность
         for pattern in self._config.critical_channels:
             matched = False
-            for ch, (ts, _val) in self._latest.items():
+            for ch, (ts, val, status) in self._latest.items():
                 if pattern.match(ch):
                     matched = True
                     age = now - ts
                     if age > self._config.stale_timeout_s:
                         return False, f"Устаревшие данные: {ch} ({age:.1f}s > {self._config.stale_timeout_s}s)"
+                    if status != "ok":
+                        return False, f"Канал {ch} в ошибке: status={status}"
+                    if math.isnan(val) or math.isinf(val):
+                        return False, f"Канал {ch}: невалидное значение ({val})"
             if not matched and not self._mock:
                 return False, f"Нет данных для критического канала: {pattern.pattern}"
 
@@ -425,12 +448,15 @@ class SafetyManager:
             while True:
                 reading = await self._queue.get()
                 now = time.monotonic()
-                self._latest[reading.channel] = (now, reading.value)
+                self._latest[reading.channel] = (now, reading.value, reading.status.value)
+                if reading.status.value != "ok":
+                    logger.warning("SafetyManager: канал %s status=%s", reading.channel, reading.status.value)
 
-                # Буфер скоростей для rate limit check
-                if reading.channel not in self._rate_buffers:
-                    self._rate_buffers[reading.channel] = deque(maxlen=120)
-                self._rate_buffers[reading.channel].append((now, reading.value))
+                # Буфер скоростей для rate limit check — только температурные каналы
+                if reading.unit == "K":
+                    if reading.channel not in self._rate_buffers:
+                        self._rate_buffers[reading.channel] = deque(maxlen=120)
+                    self._rate_buffers[reading.channel].append((now, reading.value))
         except asyncio.CancelledError:
             return
 
@@ -467,7 +493,7 @@ class SafetyManager:
 
         # 1. Staleness check
         for pattern in self._config.critical_channels:
-            for ch, (ts, _val) in self._latest.items():
+            for ch, (ts, _val, _status) in self._latest.items():
                 if pattern.match(ch):
                     age = now - ts
                     if age > self._config.stale_timeout_s:
@@ -477,7 +503,31 @@ class SafetyManager:
                         )
                         return
 
-        # 2. Rate-of-change check
+        # 2. Status and NaN/Inf check on critical channels
+        for ch, (ts, val, status) in self._latest.items():
+            if any(p.match(ch) for p in self._config.critical_channels):
+                if status != "ok":
+                    await self._fault(f"Канал {ch} status={status}", channel=ch, value=val)
+                    return
+                if math.isnan(val) or math.isinf(val):
+                    await self._fault(f"Канал {ch}: NaN/Inf", channel=ch, value=val)
+                    return
+
+        # 3. Keithley heartbeat: if source is ON, Keithley must be sending data
+        if self._keithley is not None and not self._mock:
+            keithley_fresh = False
+            for ch, (ts, _val, _status) in self._latest.items():
+                if "/smu" in ch:  # Keithley channel
+                    if now - ts < self._config.heartbeat_timeout_s:
+                        keithley_fresh = True
+                        break
+            if not keithley_fresh:
+                await self._fault(
+                    f"Keithley heartbeat timeout: нет данных {self._config.heartbeat_timeout_s}s",
+                )
+                return
+
+        # 4. Rate-of-change check
         for ch, buf in self._rate_buffers.items():
             if len(buf) < 10:
                 continue

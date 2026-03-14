@@ -13,7 +13,7 @@
 │  LakeShore 218S ×3 ──┐                                                  │
 │  (GPIB, 24 канала)    │                                                  │
 │  Keithley 2604B ×1 ───┤──► Scheduler ──► DataBroker ──► SQLiteWriter    │
-│  (USB-TMC, smua+smub) │    (backoff)  │               ──► ZMQPublisher  │
+│  (USB-TMC, smua (smub planned)) │    (backoff)  │               ──► ZMQPublisher  │
 │  Thyracont VSP63D ×1 ─┘              │               ──► AlarmEngine   │
 │  (RS-232, вакуум)                     │               ──► PluginPipeline│
 │                                       │                                  │
@@ -102,7 +102,7 @@ cryodaq                          # или дважды кликнуть по я�
 | Прибор | Интерфейс | Каналы | Описание |
 |--------|-----------|--------|----------|
 | LakeShore 218S ×3 | GPIB | 24 температуры (K) | Кремниевые диоды DT-670B1-CU |
-| Keithley 2604B ×1 | USB-TMC | V, I, R, P (smua+smub) | TSP/Lua, P=const, watchdog 30s |
+| Keithley 2604B ×1 | USB-TMC | V, I, R, P (smua (smub planned)) | TSP/Lua, P=const, watchdog 30s |
 | Thyracont VSP63D ×1 | RS-232 | давление (мбар) | Протокол MV00, 1e-6…1e3 мбар |
 
 ## Функции GUI (7 вкладок)
@@ -177,7 +177,7 @@ src/cryodaq/
 │   ├── main_window.py           — MainWindow (7 вкладок, 3 меню)
 │   └── widgets/
 │       ├── overview_panel.py    — домашняя вкладка «Обзор» (объединение T + P + статус)
-│       ├── keithley_panel.py    — smua+smub + управление
+│       ├── keithley_panel.py    — smua (smub planned) + управление
 │       ├── analytics_panel.py   — R_thermal + ETA + cooldown predictor
 │       ├── conductivity_panel.py — цепочка R/G + T∞
 │       ├── autosweep_panel.py   — автоизмерение по мощности
