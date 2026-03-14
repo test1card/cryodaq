@@ -27,6 +27,7 @@ from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
+from cryodaq.gui.widgets.autosweep_panel import AutoSweepPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
@@ -124,6 +125,10 @@ class MainWindow(QMainWindow):
         self._conductivity_panel = ConductivityPanel()
         self._tabs.addTab(self._conductivity_panel, "Теплопроводность")
 
+        # Вкладка «Автоизмерение»
+        self._autosweep_panel = AutoSweepPanel()
+        self._tabs.addTab(self._autosweep_panel, "Автоизмерение")
+
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
         self._tabs.addTab(self._alarm_panel, "Алармы")
@@ -196,16 +201,18 @@ class MainWindow(QMainWindow):
 
         channel = reading.channel
 
-        # Температурные каналы → TemperaturePanel + ConductivityPanel
+        # Температурные каналы → TemperaturePanel + ConductivityPanel + AutoSweep
         if channel.startswith("Т") and reading.unit == "K":
             self._temp_panel.on_reading(reading)
             self._conductivity_panel.on_reading(reading)
+            self._autosweep_panel.on_reading(reading)
 
-        # Keithley каналы → KeithleyPanel + ConductivityPanel (power)
+        # Keithley каналы → KeithleyPanel + ConductivityPanel + AutoSweep (power)
         if "/smua/" in channel or "/smub/" in channel:
             self._keithley_panel.on_reading(reading)
             if channel.endswith("/power"):
                 self._conductivity_panel.on_reading(reading)
+                self._autosweep_panel.on_reading(reading)
 
         # Давление → PressurePanel
         if reading.unit == "mbar":

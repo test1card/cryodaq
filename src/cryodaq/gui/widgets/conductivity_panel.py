@@ -1,8 +1,8 @@
-"""Панель измерения теплопроводности.
+"""Панель измерения теплопроводности с предсказанием стационара.
 
-Позволяет выбрать цепочку температурных датчиков, отображает
-тепловое сопротивление R = dT/P и проводимость G = P/dT между
-соседними парами, а также суммарные значения.
+Позволяет выбрать цепочку температурных датчиков, отображает R и G
+между соседними парами, прогнозирует стационарные значения T∞
+и показывает степень стабилизации (percent_settled).
 """
 
 from __future__ import annotations
@@ -13,38 +13,34 @@ import math
 import time
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QFrame,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
 
 _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
-_STABILITY_THRESHOLD = 0.01  # К/мин — порог стабильности
+_STABILITY_THRESHOLD = 0.01
 
-# 24 температурных канала
 _ALL_CHANNELS = [
     "Т1 Криостат верх", "Т2 Криостат низ", "Т3 Радиатор 1", "Т4 Радиатор 2",
     "Т5 Экран 77К", "Т6 Экран 4К", "Т7 Детектор", "Т8 Калибровка",
@@ -61,9 +57,22 @@ _LINE_COLORS = [
     "#ff7b72", "#79c0ff", "#56d364", "#ffa657", "#d2a8ff",
 ]
 
+_COL_HEADERS = [
+    "Пара", "T гор. (К)", "T хол. (К)", "dT (К)", "R (К/Вт)", "G (Вт/К)",
+    "T∞ прогноз", "τ (мин)", "Готово %", "R прогноз", "G прогноз",
+]
+
+
+def _pct_color(pct: float) -> str:
+    if pct >= 99.0:
+        return "#2ECC40"
+    if pct >= 90.0:
+        return "#FFDC00"
+    return "#FF4136"
+
 
 class ConductivityPanel(QWidget):
-    """Панель измерения теплопроводности цепочки датчиков."""
+    """Панель измерения теплопроводности с предсказанием стационара."""
 
     _reading_signal = Signal(object)
 
@@ -71,21 +80,18 @@ class ConductivityPanel(QWidget):
         super().__init__(parent)
         self.setStyleSheet("background-color: #1A1A1A;")
 
-        # Текущие значения температур: channel → float
         self._temps: dict[str, float] = {}
-        # Текущая мощность Keithley
         self._power: float = 0.0
         self._power_channel: str = ""
-        # Буферы для графиков: channel → deque[(ts, value)]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
-        # Выбранные каналы (упорядоченная цепочка)
         self._chain: list[str] = []
-        # Чекбоксы
         self._checkboxes: dict[str, QCheckBox] = {}
-        # Линии графика
         self._plot_items: dict[str, pg.PlotDataItem] = {}
-        # Буферы для dT/dt
+        self._pred_lines: dict[str, pg.InfiniteLine] = {}
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
+
+        # Предсказатель стационара
+        self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
 
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
@@ -100,7 +106,7 @@ class ConductivityPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # --- Левая панель: выбор каналов ---
+        # --- Левая панель ---
         left = QVBoxLayout()
         left.setSpacing(6)
 
@@ -136,23 +142,19 @@ class ConductivityPanel(QWidget):
         scroll.setWidget(ch_container)
         left.addWidget(scroll, stretch=1)
 
-        # Источник мощности
         src_lbl = QLabel("Источник P:")
         src_lbl.setStyleSheet("color: #c9d1d9;")
         left.addWidget(src_lbl)
 
         self._power_combo = QComboBox()
         self._power_combo.addItems([
-            "Keithley_1/smua/power",
-            "Keithley_1/smub/power",
+            "Keithley_1/smua/power", "Keithley_1/smub/power",
         ])
         self._power_combo.currentTextChanged.connect(self._on_power_changed)
         self._power_channel = self._power_combo.currentText()
         left.addWidget(self._power_combo)
 
-        # Кнопки
         btn_layout = QHBoxLayout()
-
         up_btn = QPushButton("Вверх")
         up_btn.setStyleSheet(
             "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; "
@@ -168,7 +170,6 @@ class ConductivityPanel(QWidget):
         )
         down_btn.clicked.connect(self._on_move_down)
         btn_layout.addWidget(down_btn)
-
         left.addLayout(btn_layout)
 
         export_btn = QPushButton("Экспорт CSV")
@@ -182,11 +183,21 @@ class ConductivityPanel(QWidget):
 
         root.addLayout(left)
 
-        # --- Правая панель: таблица + индикатор + график ---
+        # --- Правая панель ---
         right = QVBoxLayout()
         right.setSpacing(8)
 
-        # Индикатор стабильности
+        # Баннер стационара
+        self._banner = QLabel("")
+        self._banner.setFont(QFont("", 11, QFont.Weight.Bold))
+        self._banner.setAlignment(Qt.AlignCenter)
+        self._banner.setStyleSheet(
+            "background: #1e2430; color: #888; border: 1px solid #30363d; "
+            "border-radius: 6px; padding: 8px;"
+        )
+        right.addWidget(self._banner)
+
+        # Индикаторы
         stab_row = QHBoxLayout()
         self._stability_label = QLabel("Стабильность: —")
         self._stability_label.setFont(title_font)
@@ -200,20 +211,18 @@ class ConductivityPanel(QWidget):
         stab_row.addStretch()
         right.addLayout(stab_row)
 
-        # Таблица R и G
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels([
-            "Пара", "T горячая (К)", "T холодная (К)", "dT (К)", "R (К/Вт)", "G (Вт/К)",
-        ])
+        # Таблица R и G + прогноз
+        self._table = QTableWidget(0, len(_COL_HEADERS))
+        self._table.setHorizontalHeaderLabels(_COL_HEADERS)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setMaximumHeight(250)
+        self._table.setMaximumHeight(280)
         right.addWidget(self._table)
 
-        # График температур
+        # График
         self._plot = pg.PlotWidget()
         self._plot.setBackground("#111111")
         pi = self._plot.getPlotItem()
@@ -228,7 +237,6 @@ class ConductivityPanel(QWidget):
                 ax.setTextPen(pg.mkPen(color="#AAAAAA"))
 
         right.addWidget(self._plot, stretch=1)
-
         root.addLayout(right, stretch=1)
 
     # ------------------------------------------------------------------
@@ -242,7 +250,6 @@ class ConductivityPanel(QWidget):
                 if ch_name not in self._buffers:
                     self._buffers[ch_name] = deque(maxlen=_BUFFER_MAXLEN)
                     self._rate_buffers[ch_name] = deque(maxlen=120)
-                # Add plot line
                 idx = len(self._plot_items)
                 color = _LINE_COLORS[idx % len(_LINE_COLORS)]
                 item = self._plot.plot([], [], pen=pg.mkPen(color=color, width=2), name=ch_name)
@@ -252,9 +259,10 @@ class ConductivityPanel(QWidget):
                 self._chain.remove(ch_name)
             if ch_name in self._plot_items:
                 self._plot.removeItem(self._plot_items.pop(ch_name))
+            if ch_name in self._pred_lines:
+                self._plot.removeItem(self._pred_lines.pop(ch_name))
 
     def _on_move_up(self) -> None:
-        # Find first checked channel and move it up
         for i, ch in enumerate(self._chain):
             if i > 0 and self._checkboxes.get(ch, QCheckBox()).hasFocus():
                 self._chain[i - 1], self._chain[i] = self._chain[i], self._chain[i - 1]
@@ -279,12 +287,15 @@ class ConductivityPanel(QWidget):
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
         ch = reading.channel
+        ts = reading.timestamp.timestamp()
 
         if ch in self._checkboxes and reading.unit == "K":
             self._temps[ch] = reading.value
             if ch in self._buffers:
-                self._buffers[ch].append((reading.timestamp.timestamp(), reading.value))
-                self._rate_buffers[ch].append((reading.timestamp.timestamp(), reading.value))
+                self._buffers[ch].append((ts, reading.value))
+                self._rate_buffers[ch].append((ts, reading.value))
+            # Кормить предсказатель
+            self._predictor.add_point(ch, ts, reading.value)
 
         if ch == self._power_channel:
             self._power = reading.value
@@ -295,21 +306,27 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _refresh(self) -> None:
-        self._update_table()
+        now = time.time()
+        preds = self._predictor.update(now)
+        all_preds = self._predictor.get_all_predictions()
+
+        self._update_table(all_preds)
         self._update_stability()
+        self._update_banner(all_preds)
+        self._update_pred_lines(all_preds)
         self._update_plot()
         self._power_label.setText(f"P = {self._power:.6g} Вт")
 
-    def _update_table(self) -> None:
+    def _update_table(self, preds: dict) -> None:
         if len(self._chain) < 2:
             self._table.setRowCount(0)
             return
 
         pairs = list(zip(self._chain[:-1], self._chain[1:]))
-        # +1 row for total
         self._table.setRowCount(len(pairs) + 1)
 
         total_r = 0.0
+        total_r_pred = 0.0
         P = self._power
 
         for row, (hot_ch, cold_ch) in enumerate(pairs):
@@ -317,20 +334,55 @@ class ConductivityPanel(QWidget):
             t_cold = self._temps.get(cold_ch, float("nan"))
             dt = t_hot - t_cold
 
-            if P != 0 and math.isfinite(dt):
-                R = dt / P
-                G = P / dt if dt != 0 else float("inf")
+            R = dt / P if P != 0 and math.isfinite(dt) else float("nan")
+            G = P / dt if dt != 0 and P != 0 else float("nan")
+            if math.isfinite(R):
                 total_r += R
-            else:
-                R = float("nan")
-                G = float("nan")
+
+            # Прогноз
+            p_hot = preds.get(hot_ch)
+            p_cold = preds.get(cold_ch)
+
+            t_inf_str = ""
+            tau_str = ""
+            pct_str = ""
+            r_pred_str = "—"
+            g_pred_str = "—"
+            pct_val = 0.0
+
+            if p_hot and p_hot.valid and p_cold and p_cold.valid:
+                t_inf_hot = p_hot.t_predicted
+                t_inf_cold = p_cold.t_predicted
+                dt_inf = t_inf_hot - t_inf_cold
+                t_inf_str = f"{t_inf_hot:.3f} / {t_inf_cold:.3f}"
+                tau_avg = (p_hot.tau_s + p_cold.tau_s) / 2
+                tau_str = f"{tau_avg / 60:.1f}"
+                pct_val = min(p_hot.percent_settled, p_cold.percent_settled)
+                pct_str = f"{pct_val:.0f}%"
+
+                if P != 0 and abs(dt_inf) > 1e-10:
+                    r_pred = dt_inf / P
+                    g_pred = P / dt_inf
+                    r_pred_str = f"{r_pred:.4g}"
+                    g_pred_str = f"{g_pred:.4g}"
+                    if math.isfinite(r_pred):
+                        total_r_pred += r_pred
 
             self._table.setItem(row, 0, QTableWidgetItem(f"{hot_ch} → {cold_ch}"))
             self._table.setItem(row, 1, QTableWidgetItem(f"{t_hot:.4f}"))
             self._table.setItem(row, 2, QTableWidgetItem(f"{t_cold:.4f}"))
-            self._table.setItem(row, 3, QTableWidgetItem(f"{dt:.4f}"))
+            self._table.setItem(row, 3, QTableWidgetItem(f"{dt:.4f}" if math.isfinite(dt) else "—"))
             self._table.setItem(row, 4, QTableWidgetItem(f"{R:.4g}" if math.isfinite(R) else "—"))
             self._table.setItem(row, 5, QTableWidgetItem(f"{G:.4g}" if math.isfinite(G) else "—"))
+            self._table.setItem(row, 6, QTableWidgetItem(t_inf_str))
+            self._table.setItem(row, 7, QTableWidgetItem(tau_str))
+
+            pct_item = QTableWidgetItem(pct_str)
+            if pct_str:
+                pct_item.setForeground(QColor(_pct_color(pct_val)))
+            self._table.setItem(row, 8, pct_item)
+            self._table.setItem(row, 9, QTableWidgetItem(r_pred_str))
+            self._table.setItem(row, 10, QTableWidgetItem(g_pred_str))
 
         # Total row
         total_row = len(pairs)
@@ -338,23 +390,87 @@ class ConductivityPanel(QWidget):
         t_last = self._temps.get(self._chain[-1], float("nan"))
         total_dt = t_first - t_last
         total_G = P / total_dt if total_dt != 0 and P != 0 else float("nan")
+        total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
 
         self._table.setItem(total_row, 0, QTableWidgetItem("ИТОГО"))
-        self._table.setItem(total_row, 1, QTableWidgetItem(f"{t_first:.4f}"))
-        self._table.setItem(total_row, 2, QTableWidgetItem(f"{t_last:.4f}"))
-        self._table.setItem(total_row, 3, QTableWidgetItem(f"{total_dt:.4f}"))
-        self._table.setItem(total_row, 4, QTableWidgetItem(
-            f"{total_r:.4g}" if math.isfinite(total_r) else "—"))
-        self._table.setItem(total_row, 5, QTableWidgetItem(
-            f"{total_G:.4g}" if math.isfinite(total_G) else "—"))
+        self._table.setItem(total_row, 1, QTableWidgetItem(f"{t_first:.4f}" if math.isfinite(t_first) else "—"))
+        self._table.setItem(total_row, 2, QTableWidgetItem(f"{t_last:.4f}" if math.isfinite(t_last) else "—"))
+        self._table.setItem(total_row, 3, QTableWidgetItem(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—"))
+        self._table.setItem(total_row, 4, QTableWidgetItem(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"))
+        self._table.setItem(total_row, 5, QTableWidgetItem(f"{total_G:.4g}" if math.isfinite(total_G) else "—"))
+        self._table.setItem(total_row, 9, QTableWidgetItem(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—"))
+        self._table.setItem(total_row, 10, QTableWidgetItem(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—"))
 
-        # Bold total row
         bold_font = QFont()
         bold_font.setBold(True)
-        for col in range(6):
+        for col in range(len(_COL_HEADERS)):
             item = self._table.item(total_row, col)
             if item:
                 item.setFont(bold_font)
+
+    def _update_banner(self, preds: dict) -> None:
+        if len(self._chain) < 2:
+            self._banner.setText("")
+            self._banner.setStyleSheet(
+                "background: #1e2430; color: #888; border: 1px solid #30363d; "
+                "border-radius: 6px; padding: 8px;"
+            )
+            return
+
+        valid_preds = [preds.get(ch) for ch in self._chain if preds.get(ch) and preds[ch].valid]
+        if not valid_preds:
+            self._banner.setText("Прогноз: сбор данных...")
+            return
+
+        min_pct = min(p.percent_settled for p in valid_preds)
+        max_tau = max(p.tau_s for p in valid_preds) if valid_preds else 0
+
+        if min_pct >= 99.0:
+            self._banner.setText("ГОТОВО — стационар достигнут")
+            self._banner.setStyleSheet(
+                "background: #0f2d1a; color: #2ECC40; border: 2px solid #2ECC40; "
+                "border-radius: 6px; padding: 8px; font-weight: bold;"
+            )
+        elif min_pct >= 95.0:
+            remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
+            self._banner.setText(
+                f"Стабилизация {min_pct:.0f}% — ещё ~{remaining:.0f} мин"
+            )
+            self._banner.setStyleSheet(
+                "background: #2d2508; color: #FFDC00; border: 1px solid #9e6a03; "
+                "border-radius: 6px; padding: 8px;"
+            )
+        else:
+            remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
+            self._banner.setText(
+                f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин"
+            )
+            self._banner.setStyleSheet(
+                "background: #1e2430; color: #c9d1d9; border: 1px solid #30363d; "
+                "border-radius: 6px; padding: 8px;"
+            )
+
+    def _update_pred_lines(self, preds: dict) -> None:
+        """Обновить горизонтальные пунктирные линии T∞ на графике."""
+        for ch in self._chain:
+            p = preds.get(ch)
+            if p and p.valid and p.t_predicted != 0:
+                if ch not in self._pred_lines:
+                    idx = list(self._plot_items.keys()).index(ch) if ch in self._plot_items else 0
+                    color = _LINE_COLORS[idx % len(_LINE_COLORS)]
+                    line = pg.InfiniteLine(
+                        pos=p.t_predicted, angle=0,
+                        pen=pg.mkPen(color=color, width=1, style=Qt.PenStyle.DashLine),
+                    )
+                    self._plot.addItem(line)
+                    self._pred_lines[ch] = line
+                else:
+                    self._pred_lines[ch].setValue(p.t_predicted)
+
+        # Удалить линии для каналов, которых нет в цепочке
+        for ch in list(self._pred_lines.keys()):
+            if ch not in self._chain:
+                self._plot.removeItem(self._pred_lines.pop(ch))
 
     def _update_stability(self) -> None:
         if not self._chain:
@@ -372,7 +488,6 @@ class ConductivityPanel(QWidget):
                 self._stability_label.setStyleSheet("color: #888888;")
                 return
 
-            # dT/dt за последнюю минуту (К/мин)
             t0, v0 = buf[0]
             t1, v1 = buf[-1]
             dt_s = t1 - t0
@@ -383,7 +498,7 @@ class ConductivityPanel(QWidget):
                     stable = False
 
         if stable:
-            self._stability_label.setText(f"Стабильно (dT/dt < {max_rate:.4f} К/мин)")
+            self._stability_label.setText(f"Стабильно (dT/dt = {max_rate:.4f} К/мин)")
             self._stability_label.setStyleSheet("color: #2ECC40; font-weight: bold;")
         else:
             self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
@@ -420,24 +535,42 @@ class ConductivityPanel(QWidget):
 
         now = datetime.now(timezone.utc)
         P = self._power
+        preds = self._predictor.get_all_predictions()
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            # Header
-            w.writerow(["timestamp", "P_W"] + [f"T_{ch}_K" for ch in self._chain]
-                       + ["pair", "dT_K", "R_KW", "G_WK"])
-            # Data rows per pair
+            w.writerow([
+                "timestamp", "P_W",
+                *[f"T_{ch}_K" for ch in self._chain],
+                "pair", "dT_K", "R_KW", "G_WK",
+                "T_inf_hot", "T_inf_cold", "R_pred", "G_pred", "settled_%",
+            ])
+
             for hot_ch, cold_ch in zip(self._chain[:-1], self._chain[1:]):
                 t_hot = self._temps.get(hot_ch, float("nan"))
                 t_cold = self._temps.get(cold_ch, float("nan"))
                 dt = t_hot - t_cold
                 R = dt / P if P != 0 else float("nan")
                 G = P / dt if dt != 0 else float("nan")
-
                 t_values = [self._temps.get(ch, float("nan")) for ch in self._chain]
-                w.writerow(
-                    [now.isoformat(), P] + t_values
-                    + [f"{hot_ch} → {cold_ch}", dt, R, G]
+
+                # Prediction data
+                p_hot = preds.get(hot_ch)
+                p_cold = preds.get(cold_ch)
+                t_inf_hot = p_hot.t_predicted if p_hot and p_hot.valid else float("nan")
+                t_inf_cold = p_cold.t_predicted if p_cold and p_cold.valid else float("nan")
+                dt_inf = t_inf_hot - t_inf_cold
+                r_pred = dt_inf / P if P != 0 and math.isfinite(dt_inf) else float("nan")
+                g_pred = P / dt_inf if dt_inf != 0 and P != 0 else float("nan")
+                settled = min(
+                    p_hot.percent_settled if p_hot and p_hot.valid else 0,
+                    p_cold.percent_settled if p_cold and p_cold.valid else 0,
                 )
+
+                w.writerow([
+                    now.isoformat(), P, *t_values,
+                    f"{hot_ch} → {cold_ch}", dt, R, G,
+                    t_inf_hot, t_inf_cold, r_pred, g_pred, settled,
+                ])
 
         logger.info("Теплопроводность экспортирована: %s", path)
