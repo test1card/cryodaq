@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # CryoDAQ
 
 LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 20k+ lines, 184 tests.
+Python 3.12+, asyncio, PySide6, 21k+ lines, 194 tests.
 
 ## Build & Development Commands
 
@@ -20,7 +20,7 @@ install.bat                    # One-click Windows installer
 python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
 cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
-pytest                         # Run all 184 tests (~42s)
+pytest                         # Run all 194 tests (~44s)
 pytest tests/core/             # Core subsystem tests only
 pytest -k test_safety          # Run safety manager tests
 pytest -k test_cooldown        # Run cooldown predictor + service tests
@@ -75,11 +75,11 @@ InstrumentDriver.read_channels()
   → CooldownService (auto-detects cooldown, predict every 30s, auto-ingest)
 ```
 
-### GUI tabs
+### GUI tabs (7 tabs)
 
-Температуры | Keithley (smua+smub, controls) | Давление (log scale) | Аналитика (R_thermal + cooldown predictor: ETA, progress, CI trajectory) | Теплопроводность (chain R/G + T∞ predictor) | Автоизмерение (power sweep) | Алармы | Статус приборов
+Обзор (home: temps+pressure+Keithley strip+status bar) | Keithley (smua+smub, controls) | Аналитика (R_thermal + cooldown predictor) | Теплопроводность (chain R/G + T∞) | Автоизмерение (power sweep) | Алармы | Статус приборов
 
-Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
+Menu: Файл (экспорт CSV/HDF5/Excel) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
 
 ### Module index
 
@@ -100,6 +100,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `src/cryodaq/core/experiment.py` — ExperimentManager: start/stop, config snapshot, SQLite persistence
 - `src/cryodaq/core/zmq_bridge.py` — ZMQPublisher + ZMQSubscriber (msgpack) + ZMQCommandServer (JSON REP)
 - `src/cryodaq/core/channel_manager.py` — ChannelManager: centralized channel names/visibility, YAML persistence
+- `src/cryodaq/core/disk_monitor.py` — DiskMonitor: shutil.disk_usage() every 5min, publishes system/disk_free_gb, alarms at <10GB/<2GB
 
 **Drivers:**
 - `src/cryodaq/drivers/base.py` — Reading (frozen dataclass) + InstrumentDriver ABC
@@ -115,6 +116,7 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `src/cryodaq/storage/hdf5_export.py` — HDF5Exporter: groups per instrument/channel
 - `src/cryodaq/storage/csv_export.py` — CSVExporter: time-range export with filters
 - `src/cryodaq/storage/replay.py` — ReplaySource: historical data → DataBroker with speed control
+- `src/cryodaq/storage/xlsx_export.py` — XLSXExporter: pivoted time×channel Excel via openpyxl, 2 sheets (Данные + Информация)
 
 **Analytics:**
 - `src/cryodaq/analytics/base_plugin.py` — AnalyticsPlugin ABC + DerivedMetric dataclass
@@ -129,10 +131,9 @@ Menu: Файл (экспорт CSV/HDF5) | Эксперимент (начать/
 - `plugins/cooldown_estimator.py` — exponential decay fit → cooldown ETA
 
 **GUI widgets:**
-- `src/cryodaq/gui/main_window.py` — MainWindow: 8 tabs, 3 menus, status bar
-- `src/cryodaq/gui/widgets/temp_panel.py` — TemperaturePanel: 24ch cards + pyqtgraph
+- `src/cryodaq/gui/main_window.py` — MainWindow: 7 tabs, 3 menus (Файл incl. Excel export), status bar
+- `src/cryodaq/gui/widgets/overview_panel.py` — OverviewPanel (home tab "Обзор"): StatusStrip (safety/uptime/alarms/Keithley/cooldown/disk) + CompactTempCard grid (24ch, trend arrows) + temp plot ([1h/6h/24h], log/lin, PNG/CSV export) + PressureStrip (value + mini plot) + KeythleyStrip (conditionally visible)
 - `src/cryodaq/gui/widgets/keithley_panel.py` — KeithleyPanel: smua+smub tabs, controls, ZMQ commands
-- `src/cryodaq/gui/widgets/pressure_panel.py` — PressurePanel: log-scale plot, color-coded value
 - `src/cryodaq/gui/widgets/analytics_panel.py` — AnalyticsPanel: R_thermal + cooldown ETA with ±CI, progress bar, phase, prediction trajectory + CI band on plot
 - `src/cryodaq/gui/widgets/conductivity_panel.py` — ConductivityPanel: chain R/G + T∞ prediction
 - `src/cryodaq/gui/widgets/autosweep_panel.py` — AutoSweepPanel: automated power sweep measurement
