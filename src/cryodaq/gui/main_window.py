@@ -23,40 +23,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.autosweep_panel import AutoSweepPanel
+from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
+from cryodaq.gui.widgets.connection_settings import ConnectionSettingsDialog
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.pressure_panel import PressurePanel
 from cryodaq.gui.widgets.temp_panel import TemperaturePanel
 
 logger = logging.getLogger(__name__)
-
-# Конфигурация каналов для TemperaturePanel (24 канала LakeShore)
-_TEMP_CHANNELS: list[dict] = []
-for _cryostat_idx, _start_ch in enumerate([1, 9, 17], start=1):
-    _labels = {
-        1: [
-            "Т1 Криостат верх", "Т2 Криостат низ", "Т3 Радиатор 1", "Т4 Радиатор 2",
-            "Т5 Экран 77К", "Т6 Экран 4К", "Т7 Детектор", "Т8 Калибровка",
-        ],
-        9: [
-            "Т9 Компрессор вход", "Т10 Компрессор выход",
-            "Т11 Теплообменник 1", "Т12 Теплообменник 2",
-            "Т13 Труба подачи", "Т14 Труба возврата",
-            "Т15 Вакуумный кожух", "Т16 Фланец",
-        ],
-        17: [
-            "Т17 Зеркало 1", "Т18 Зеркало 2", "Т19 Подвес", "Т20 Рама",
-            "Т21 Резерв 1", "Т22 Резерв 2", "Т23 Резерв 3", "Т24 Резерв 4",
-        ],
-    }
-    for _i, _label in enumerate(_labels[_start_ch]):
-        _TEMP_CHANNELS.append({"name": _label, "channel_id": _label})
 
 
 class MainWindow(QMainWindow):
@@ -106,7 +87,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         # Вкладка «Температуры»
-        self._temp_panel = TemperaturePanel(_TEMP_CHANNELS)
+        self._channel_mgr = ChannelManager()
+        self._temp_panel = TemperaturePanel(self._channel_mgr.get_channel_configs())
         self._tabs.addTab(self._temp_panel, "Температуры")
 
         # Вкладка «Keithley»
@@ -170,6 +152,17 @@ class MainWindow(QMainWindow):
         self._stop_action.setEnabled(False)
         self._stop_action.triggered.connect(self._on_stop_experiment)
         exp_menu.addAction(self._stop_action)
+
+        # Настройки
+        settings_menu = menu_bar.addMenu("Настройки")
+
+        channels_action = QAction("Редактор каналов...", self)
+        channels_action.triggered.connect(self._on_channel_editor)
+        settings_menu.addAction(channels_action)
+
+        connection_action = QAction("Подключение приборов...", self)
+        connection_action.triggered.connect(self._on_connection_settings)
+        settings_menu.addAction(connection_action)
 
     def _build_status_bar(self) -> None:
         """Создать статусную строку."""
@@ -284,3 +277,13 @@ class MainWindow(QMainWindow):
         self._start_action.setEnabled(True)
         self._stop_action.setEnabled(False)
         logger.info("Эксперимент: запись остановлена")
+
+    @Slot()
+    def _on_channel_editor(self) -> None:
+        dialog = ChannelEditorDialog(self)
+        dialog.exec()
+
+    @Slot()
+    def _on_connection_settings(self) -> None:
+        dialog = ConnectionSettingsDialog(self)
+        dialog.exec()

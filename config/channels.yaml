@@ -1,0 +1,25 @@
+channels:
+  Т1: {name: "Криостат верх", visible: true, group: "криостат"}
+  Т2: {name: "Криостат низ", visible: true, group: "криостат"}
+  Т3: {name: "Радиатор 1", visible: true, group: "криостат"}
+  Т4: {name: "Радиатор 2", visible: true, group: "криостат"}
+  Т5: {name: "Экран 77К", visible: true, group: "криостат"}
+  Т6: {name: "Экран 4К", visible: true, group: "криостат"}
+  Т7: {name: "Детектор", visible: true, group: "криостат"}
+  Т8: {name: "Калибровка", visible: true, group: "криостат"}
+  Т9: {name: "Компрессор вход", visible: true, group: "компрессор"}
+  Т10: {name: "Компрессор выход", visible: true, group: "компрессор"}
+  Т11: {name: "Теплообменник 1", visible: true, group: "компрессор"}
+  Т12: {name: "Теплообменник 2", visible: true, group: "компрессор"}
+  Т13: {name: "Труба подачи", visible: true, group: "компрессор"}
+  Т14: {name: "Труба возврата", visible: true, group: "компрессор"}
+  Т15: {name: "Вакуумный кожух", visible: true, group: "компрессор"}
+  Т16: {name: "Фланец", visible: true, group: "компрессор"}
+  Т17: {name: "Зеркало 1", visible: true, group: "оптика"}
+  Т18: {name: "Зеркало 2", visible: true, group: "оптика"}
+  Т19: {name: "Подвес", visible: true, group: "оптика"}
+  Т20: {name: "Рама", visible: true, group: "оптика"}
+  Т21: {name: "Резерв 1", visible: false, group: "резерв"}
+  Т22: {name: "Резерв 2", visible: false, group: "резерв"}
+  Т23: {name: "Резерв 3", visible: false, group: "резерв"}
+  Т24: {name: "Резерв 4", visible: false, group: "резерв"}
