@@ -225,14 +225,14 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     safety_manager.load_config(safety_cfg)
 
-    # Планировщик — публикует в ОБА брокера
-    scheduler = Scheduler(broker, safety_broker=safety_broker)
+    # SQLite — persistence-first: writer создаётся ДО scheduler
+    writer = SQLiteWriter(_DATA_DIR)
+    await writer.start_immediate()
+
+    # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации
+    scheduler = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer)
     for cfg in driver_configs:
         scheduler.add(cfg)
-
-    # SQLite
-    sqlite_queue = await broker.subscribe("sqlite_writer", maxsize=50_000)
-    writer = SQLiteWriter(_DATA_DIR)
 
     # ZMQ PUB
     zmq_queue = await broker.subscribe("zmq_publisher")
@@ -339,7 +339,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Запуск всех подсистем ---
     await safety_manager.start()
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
-    await writer.start(sqlite_queue)
+    # writer уже запущен через start_immediate() выше
     await zmq_pub.start(zmq_queue)
     await cmd_server.start()
     await alarm_engine.start()

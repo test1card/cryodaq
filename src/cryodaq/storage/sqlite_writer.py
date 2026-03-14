@@ -173,8 +173,35 @@ class SQLiteWriter:
                 except Exception:
                     logger.exception("Ошибка записи батча (%d записей)", len(batch))
 
+    async def write_immediate(self, readings: list[Reading]) -> None:
+        """Записать пакет синхронно (await до WAL commit).
+
+        Используется Scheduler для гарантии persistence-first:
+        данные попадают в DataBroker ТОЛЬКО после записи на диск.
+        При ошибке — логирует CRITICAL и пробрасывает исключение.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._executor, self._write_batch, readings)
+        except Exception:
+            logger.critical(
+                "CRITICAL: Ошибка write_immediate (%d записей) — данные НЕ персистированы",
+                len(readings),
+            )
+            raise
+
+    async def start_immediate(self) -> None:
+        """Инициализировать writer без очереди (persistence-first режим).
+
+        Создаёт директорию данных и помечает writer как работающий.
+        Запись происходит через write_immediate(), вызываемый из Scheduler.
+        """
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._running = True
+        logger.info("SQLiteWriter запущен (immediate mode)")
+
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
-        """Запустить цикл записи."""
+        """Запустить цикл записи (legacy, обратная совместимость)."""
         self._running = True
         self._task = asyncio.create_task(self._consume_loop(queue), name="sqlite_writer")
         logger.info("SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size)

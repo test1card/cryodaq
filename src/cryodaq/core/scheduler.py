@@ -58,9 +58,10 @@ class Scheduler:
         await scheduler.stop()
     """
 
-    def __init__(self, broker: DataBroker, *, safety_broker: Any | None = None) -> None:
+    def __init__(self, broker: DataBroker, *, safety_broker: Any | None = None, sqlite_writer: Any | None = None) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
+        self._sqlite_writer = sqlite_writer
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
 
@@ -99,8 +100,22 @@ class Scheduler:
                 state.total_reads += 1
                 state.consecutive_errors = 0
                 state.backoff_s = INITIAL_BACKOFF_S
+
+                # Step 1: Persist to disk FIRST (blocking until WAL commit)
+                if self._sqlite_writer is not None:
+                    try:
+                        await self._sqlite_writer.write_immediate(readings)
+                    except Exception:
+                        logger.exception(
+                            "CRITICAL: Ошибка записи '%s' — данные НЕ отправлены подписчикам",
+                            name,
+                        )
+                        state.consecutive_errors += 1
+                        state.total_errors += 1
+                        continue  # Do NOT publish unpersisted data
+
+                # Step 2: ONLY AFTER disk commit, publish to DataBroker and SafetyBroker
                 await self._broker.publish_batch(readings)
-                # Дублировать в SafetyBroker (если подключён)
                 if self._safety_broker is not None:
                     await self._safety_broker.publish_batch(readings)
             except TimeoutError:
