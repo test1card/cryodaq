@@ -6,147 +6,241 @@
 
 ## Архитектура
 
-Двухпроцессная система: **engine** (headless, asyncio) + **GUI** (PySide6).
-Опционально: **web-дашборд** (FastAPI + WebSocket).
-
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         cryodaq-engine                              │
-│                                                                     │
-│  LakeShore 218S ×3 ──┐                                             │
-│  (GPIB, 24 канала)    ├──► Scheduler ──► DataBroker (fan-out)      │
-│  Keithley 2604B ×1 ──┘    (backoff)      │  │  │  │  │            │
-│  (USB-TMC, TSP/Lua)                      │  │  │  │  │            │
-│                                          │  │  │  │  │            │
-│                          SQLiteWriter ◄──┘  │  │  │  │            │
-│                          (WAL, daily)       │  │  │  │            │
-│                          ZMQPublisher ◄─────┘  │  │  │            │
-│                          (PUB :5555)           │  │  │            │
-│                          AlarmEngine ◄─────────┘  │  │            │
-│                          (гистерезис, Telegram)   │  │            │
-│                          InterlockEngine ◄────────┘  │            │
-│                          (emergency_off)             │            │
-│                          PluginPipeline ◄────────────┘            │
-│                          (hot-reload)                              │
-└─────────────────────────────────────────────────────────────────────┘
-          │ ZMQ PUB/SUB (msgpack)
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           cryodaq-engine                                 │
+│                                                                          │
+│  LakeShore 218S ×3 ──┐                                                  │
+│  (GPIB, 24 канала)    │                                                  │
+│  Keithley 2604B ×1 ───┤──► Scheduler ──► DataBroker ──► SQLiteWriter    │
+│  (USB-TMC, smua+smub) │    (backoff)  │               ──► ZMQPublisher  │
+│  Thyracont VSP63D ×1 ─┘              │               ──► AlarmEngine   │
+│  (RS-232, вакуум)                     │               ──► PluginPipeline│
+│                                       │                                  │
+│                                       └──► SafetyBroker ──► SafetyManager│
+│                                            (fail-on-silence)   (SAFE_OFF │
+│                                                                 → READY  │
+│  ZMQCommandServer ◄──── GUI команды ◄──── SafetyManager        → RUNNING│
+│  (REP :5556)           (start/stop)       (единая точка        → FAULT) │
+│                                            управления)                   │
+│  InterlockEngine ──────► SafetyManager (делегирование действий)          │
+└──────────────────────────────────────────────────────────────────────────┘
+          │ ZMQ PUB/SUB (msgpack, :5555)
           ▼
-┌──────────────────────┐  ┌──────────────────────┐
-│    cryodaq-gui       │  │  web-дашборд         │
-│    (PySide6)         │  │  (FastAPI + WS)      │
-│                      │  │                      │
-│  Температуры (24ch)  │  │  GET /status (JSON)  │
-│  Keithley (V/I/R/P)  │  │  WebSocket /ws       │
-│  Алармы (таблица)    │  │  Авто-обновление     │
-│  Статус приборов     │  │                      │
-│  Экспорт CSV/HDF5   │  │                      │
-└──────────────────────┘  └──────────────────────┘
+┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
+│  cryodaq (лаунчер)   │  │  cryodaq-gui         │  │ web-дашборд      │
+│  Engine + GUI + tray  │  │  (PySide6)           │  │ (FastAPI + WS)   │
+│                      │  │                      │  │                  │
+│  8 вкладок:          │  │  Температуры (24ch)  │  │ Chart.js графики │
+│  Температуры         │  │  Keithley (smua/smub)│  │ GET /status      │
+│  Keithley (контроль) │  │  Давление (лог.)     │  │ GET /history     │
+│  Давление            │  │  Аналитика (R, ETA)  │  │ WebSocket /ws    │
+│  Аналитика           │  │  Теплопроводность    │  │ Тёмная тема      │
+│  Теплопроводность    │  │  Автоизмерение       │  │ Алармы, приборы  │
+│  Автоизмерение       │  │  Алармы              │  │                  │
+│  Алармы              │  │  Статус приборов     │  │                  │
+│  Статус приборов     │  │                      │  │                  │
+└──────────────────────┘  └──────────────────────┘  └──────────────────┘
 ```
+
+## Система безопасности
+
+**Безопасное состояние (нагреватель ВЫКЛЮЧЕН) — это DEFAULT.**
+
+SafetyManager — единая точка управления источником тока:
+- `SAFE_OFF` → `READY` → `RUNNING` → `FAULT_LATCHED` → восстановление
+- Нет данных 10 секунд → авария + аварийное отключение (fail-on-silence)
+- Двойная защита: SafetyManager (Python) + TSP watchdog (аппаратный, 30с)
+- Восстановление: подтверждение с причиной + 60с ожидание + проверка предусловий
 
 ## Быстрый старт
 
 ```bash
-# Установка (или просто запустите install.bat на Windows)
+# Установка (или запустите install.bat на Windows)
 git clone https://github.com/test1card/cryodaq.git
 cd cryodaq
 pip install -e ".[dev,web]"
 
-# Запуск для оператора (engine + GUI в одном окне)
+# Запуск для оператора (engine + GUI в одном окне, иконка в трее)
 cryodaq
 
 # Или по отдельности:
-cryodaq-engine --mock            # engine с имитацией приборов
+cryodaq-engine --mock            # engine с имитацией 5 приборов
 cryodaq-gui                      # GUI (в другом терминале)
 uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # web
 
 # Тесты
-pytest tests/ -v
+pytest tests/ -v                 # 151 тест
 ruff check src/ tests/           # линтинг
-ruff format src/ tests/          # форматирование
 ```
+
+## Развёртывание на лабораторном ПК
+
+```bash
+# 1. Клонировать и установить
+git clone https://github.com/test1card/cryodaq.git
+cd cryodaq
+install.bat                      # или: pip install -e ".[dev,web]"
+
+# 2. Настроить приборы (адреса COM/GPIB/USB)
+copy config\instruments.local.yaml.example config\instruments.local.yaml
+# Отредактировать instruments.local.yaml
+
+# 3. Настроить Telegram (опционально)
+copy config\notifications.local.yaml.example config\notifications.local.yaml
+# Указать bot_token и chat_id
+
+# 4. Запустить
+cryodaq                          # или дважды кликнуть по ярлыку CryoDAQ
+```
+
+Подробнее: [docs/deployment.md](docs/deployment.md) | [docs/operator_manual.md](docs/operator_manual.md)
 
 ## Приборы
 
 | Прибор | Интерфейс | Каналы | Описание |
 |--------|-----------|--------|----------|
 | LakeShore 218S ×3 | GPIB | 24 температуры (K) | Кремниевые диоды DT-670B1-CU |
-| Keithley 2604B ×1 | USB-TMC | V, I, R, P (smua) | TSP/Lua, P=const, watchdog 30s |
-| Вакуумметр | TBD | — | Планируется |
+| Keithley 2604B ×1 | USB-TMC | V, I, R, P (smua+smub) | TSP/Lua, P=const, watchdog 30s |
+| Thyracont VSP63D ×1 | RS-232 | давление (мбар) | Протокол MV00, 1e-6…1e3 мбар |
+
+## Функции GUI
+
+| Вкладка | Описание |
+|---------|----------|
+| Температуры | 24 карточки + pyqtgraph, 10-мин скользящее окно |
+| Keithley | smua/smub: 4 графика (V/I/R/P) + управление (P, V, I, старт/стоп/аварийное откл.) |
+| Давление | Логарифмический график, цветовая индикация (<1e-3 зелёный, >1e-1 красный) |
+| Аналитика | R_thermal (К/Вт) + прогноз охлаждения (ETA) |
+| Теплопроводность | Выбор цепочки датчиков → R, G, T∞ прогноз, «Стабильно» индикатор |
+| Автоизмерение | Автоматический развёрт по мощности: P₁→P₂→…→Pₙ, стабилизация, CSV+PNG |
+| Алармы | Таблица тревог по severity, подтверждение оператором |
+| Статус приборов | Карточки: подключён/отключён, счётчик показаний/ошибок |
+
+**Меню:** Файл (экспорт CSV/HDF5) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
+
+## Telegram-бот
+
+| Команда | Описание |
+|---------|----------|
+| /status | Аптайм, приборы, активные тревоги |
+| /temps | Таблица всех температур |
+| /pressure | Уровень вакуума |
+| /keithley | V, I, R, P по каналам |
+| /alarms | Активные тревоги |
+| /help | Список команд |
+
+Периодические отчёты: PNG-график + текстовая сводка каждые 30 мин.
 
 ## Структура проекта
 
 ```
 src/cryodaq/
-├── engine.py                — точка входа engine (headless)
+├── engine.py                    — engine (headless)
+├── launcher.py                  — оператор-лаунчер (engine + GUI + tray)
 ├── core/
-│   ├── broker.py            — DataBroker: fan-out pub/sub
-│   ├── scheduler.py         — планировщик опроса приборов
-│   ├── alarm.py             — AlarmEngine: пороги + гистерезис
-│   ├── interlock.py         — InterlockEngine: аварийная защита
-│   ├── experiment.py        — ExperimentManager: жизненный цикл
-│   └── zmq_bridge.py        — ZMQ PUB/SUB (msgpack)
+│   ├── safety_manager.py        — SafetyManager: 6 состояний, fail-on-silence
+│   ├── safety_broker.py         — SafetyBroker: выделенный канал безопасности
+│   ├── broker.py                — DataBroker: fan-out pub/sub
+│   ├── scheduler.py             — планировщик опроса приборов
+│   ├── alarm.py                 — AlarmEngine: пороги + гистерезис
+│   ├── interlock.py             — InterlockEngine → SafetyManager
+│   ├── experiment.py            — ExperimentManager
+│   ├── zmq_bridge.py            — ZMQ PUB/SUB + CommandServer
+│   └── channel_manager.py       — имена и видимость каналов
 ├── drivers/
-│   ├── base.py              — Reading + InstrumentDriver ABC
+│   ├── base.py                  — Reading + InstrumentDriver ABC
 │   ├── instruments/
-│   │   ├── lakeshore_218s.py — LakeShore 218S (SCPI, KRDG? 0)
-│   │   └── keithley_2604b.py — Keithley 2604B (TSP/Lua)
+│   │   ├── lakeshore_218s.py    — LakeShore 218S (SCPI)
+│   │   ├── keithley_2604b.py    — Keithley 2604B (TSP/Lua)
+│   │   └── thyracont_vsp63d.py  — Thyracont VSP63D (RS-232)
 │   └── transport/
-│       ├── gpib.py          — async pyvisa (GPIB)
-│       └── usbtmc.py        — async pyvisa (USB-TMC)
+│       ├── gpib.py              — async pyvisa (GPIB)
+│       ├── usbtmc.py            — async pyvisa (USB-TMC)
+│       └── serial.py            — async pyserial (RS-232)
 ├── storage/
-│   ├── sqlite_writer.py     — SQLite WAL, daily rotation
-│   ├── hdf5_export.py       — экспорт в HDF5
-│   ├── csv_export.py        — экспорт в CSV
-│   └── replay.py            — воспроизведение данных
+│   ├── sqlite_writer.py         — SQLite WAL, daily rotation
+│   ├── hdf5_export.py           — экспорт в HDF5
+│   ├── csv_export.py            — экспорт в CSV
+│   └── replay.py                — воспроизведение данных
 ├── analytics/
-│   ├── base_plugin.py       — AnalyticsPlugin ABC
-│   ├── plugin_loader.py     — PluginPipeline (hot-reload)
-│   └── calibration.py       — CalibrationStore (заглушка)
+│   ├── base_plugin.py           — AnalyticsPlugin ABC
+│   ├── plugin_loader.py         — PluginPipeline (hot-reload)
+│   ├── steady_state.py          — T∞ прогноз (scipy curve_fit)
+│   └── calibration.py           — CalibrationStore (заглушка)
 ├── gui/
-│   ├── app.py               — точка входа GUI
-│   ├── main_window.py       — MainWindow (вкладки, меню)
+│   ├── app.py                   — standalone GUI
+│   ├── main_window.py           — MainWindow (8 вкладок, 3 меню)
 │   └── widgets/
-│       ├── temp_panel.py    — 24 канала + pyqtgraph
-│       ├── alarm_panel.py   — таблица тревог
-│       └── instrument_status.py — статус приборов
+│       ├── temp_panel.py        — 24 канала + pyqtgraph
+│       ├── keithley_panel.py    — smua+smub + управление
+│       ├── pressure_panel.py    — давление (лог. шкала)
+│       ├── analytics_panel.py   — R_thermal + ETA
+│       ├── conductivity_panel.py — цепочка R/G + T∞
+│       ├── autosweep_panel.py   — автоизмерение по мощности
+│       ├── alarm_panel.py       — таблица тревог
+│       ├── instrument_status.py — статус приборов
+│       ├── channel_editor.py    — редактор каналов
+│       └── connection_settings.py — подключение приборов
 ├── web/
-│   ├── server.py            — FastAPI + WebSocket
-│   └── static/index.html    — SPA-дашборд
+│   ├── server.py                — FastAPI + WebSocket + /history
+│   └── static/index.html        — Chart.js дашборд
 └── notifications/
-    └── telegram.py          — Telegram Bot API
+    ├── telegram.py              — Telegram алармы
+    ├── telegram_commands.py     — Telegram бот-команды
+    └── periodic_report.py       — отчёты с графиками
 
-plugins/
-├── thermal_calculator.py    — R_thermal = ΔT / P
-└── cooldown_estimator.py    — ETA охлаждения (exp fit)
+plugins/                         — hot-reloadable аналитика
+├── thermal_calculator.py        — R_thermal = ΔT / P
+└── cooldown_estimator.py        — ETA охлаждения
 
 config/
-├── instruments.yaml         — конфигурация приборов
-├── interlocks.yaml          — аварийные блокировки
-├── alarms.yaml              — пороги тревог
-└── notifications.yaml       — Telegram бот
+├── instruments.yaml             — приборы (шаблон)
+├── interlocks.yaml              — аварийные блокировки
+├── alarms.yaml                  — пороги тревог
+├── safety.yaml                  — SafetyManager
+├── channels.yaml                — имена и видимость каналов
+├── notifications.yaml           — Telegram (шаблон, без токена!)
+├── *.local.yaml.example         — шаблоны для машино-специфичных настроек
+└── *.local.yaml                 — машино-специфичные (gitignored)
+
+docs/
+├── architecture.md              — архитектура системы
+├── operator_manual.md           — руководство оператора (русский)
+└── deployment.md                — развёртывание на новом ПК
+
+tests/                           — 151 тест (18 файлов)
+├── core/                        — broker, alarm, interlock, safety, scheduler, zmq, experiment
+├── drivers/                     — lakeshore, keithley, thyracont
+├── analytics/                   — thermal, cooldown, plugins
+├── storage/                     — hdf5, csv, replay
+└── notifications/               — telegram
 ```
 
 ## Ключевые правила
 
-- Engine работает неделями без перезапуска. Нет утечек памяти. Нет неограниченных буферов.
+- **SAFE_OFF — это DEFAULT.** Нагреватель включён только при непрерывном подтверждении здоровья.
+- Engine работает неделями. Нет утечек памяти. Нет неограниченных буферов.
 - GUI — отдельный процесс. Можно закрыть/открыть без потери данных.
-- Keithley TSP: обязателен watchdog → source OFF.
-- Никакого блокирующего I/O в engine (pyvisa через run_in_executor).
+- Keithley TSP: watchdog → source OFF. Нет `__del__`.
+- Никакого блокирующего I/O в engine.
 - Интерфейс оператора на русском языке.
-- Каждый драйвер: async, mock-режим, timeout+retry, Reading dataclass.
-- `disconnect()` Keithley **всегда** вызывает `emergency_off()` первым.
+- Telegram токен НИКОГДА не коммитится.
+
+## Статус проекта
+
+| Метрика | Значение |
+|---------|----------|
+| Python-файлов | **81** |
+| Строк Python | **16 600+** |
+| Тестов | **151** (все проходят) |
+| Приборов (mock) | **5** (3× LakeShore + Keithley + Thyracont) |
+| Каналов данных | **29** (24 температуры + 4 Keithley + 1 давление) |
+| GUI вкладок | **8** |
+| Telegram команд | **6** |
+| Коммитов | **28** |
 
 ## Стандарты
 
 - Калибровка по ГОСТ Р 8.879-2014
 - Кремниевые диоды DT-670B1-CU, индивидуальные кривые на каждый датчик
-
-## Статус проекта
-
-- **10 600+** строк Python, **61** файл
-- **118** тестов (pytest, все проходят)
-- Engine работает в mock-режиме (4 прибора, 28 каналов)
-- GUI: температуры, алармы, статус приборов
-- Web-дашборд: реальное время через WebSocket
-- Экспорт: SQLite → CSV, HDF5
-- Уведомления: Telegram Bot API
