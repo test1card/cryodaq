@@ -1,6 +1,7 @@
 """Панель источника-измерителя Keithley 2604B.
 
-Четыре графика (V, I, R, P) + текущие значения крупным шрифтом.
+Два SMU-канала (smua, smub), каждый с четырьмя графиками (V, I, R, P)
+и текущими значениями крупным шрифтом.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -24,47 +26,43 @@ from cryodaq.drivers.base import Reading
 _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
 
-# Каналы Keithley: суффикс → (название, единица, цвет)
-_CHANNELS = {
-    "voltage":    ("Напряжение",    "В",   "#58a6ff"),
-    "current":    ("Ток",           "А",   "#3fb950"),
-    "resistance": ("Сопротивление", "Ом",  "#f0883e"),
-    "power":      ("Мощность",      "Вт",  "#f85149"),
+# Измеряемые величины: суффикс → (название, единица)
+_MEASUREMENTS = {
+    "voltage":    ("Напряжение",    "В"),
+    "current":    ("Ток",           "А"),
+    "resistance": ("Сопротивление", "Ом"),
+    "power":      ("Мощность",      "Вт"),
+}
+
+# Цвета для smua и smub
+_SMU_COLORS = {
+    "smua": {"voltage": "#58a6ff", "current": "#3fb950", "resistance": "#f0883e", "power": "#f85149"},
+    "smub": {"voltage": "#79c0ff", "current": "#56d364", "resistance": "#ffa657", "power": "#ffa198"},
 }
 
 
-class KeithleyPanel(QWidget):
-    """Панель Keithley 2604B с графиками и текущими значениями."""
+class _SmuTab(QWidget):
+    """Вкладка одного SMU-канала с 4 графиками и значениями."""
 
-    _reading_signal = Signal(object)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, smu_name: str, colors: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
+        self._smu = smu_name
 
-        # channel_suffix → deque[(ts, value)]
         self._buffers: dict[str, deque[tuple[float, float]]] = {
-            k: deque(maxlen=_BUFFER_MAXLEN) for k in _CHANNELS
+            k: deque(maxlen=_BUFFER_MAXLEN) for k in _MEASUREMENTS
         }
-        self._current: dict[str, float] = {k: 0.0 for k in _CHANNELS}
         self._value_labels: dict[str, QLabel] = {}
         self._plots: dict[str, pg.PlotDataItem] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
 
-        self._build_ui()
-        self._reading_signal.connect(self._handle_reading)
+        self._build_ui(colors)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(500)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start()
-
-    def _build_ui(self) -> None:
+    def _build_ui(self, colors: dict[str, str]) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # Верх: 4 карточки с текущими значениями
+        # Верх: 4 карточки
         cards_row = QHBoxLayout()
         cards_row.setSpacing(8)
 
@@ -75,7 +73,8 @@ class KeithleyPanel(QWidget):
         label_font = QFont()
         label_font.setPointSize(9)
 
-        for key, (name, unit, color) in _CHANNELS.items():
+        for key, (name, unit) in _MEASUREMENTS.items():
+            color = colors[key]
             card = QWidget()
             card.setStyleSheet(
                 f"background-color: #2A2A2A; border: 1px solid {color}; border-radius: 6px;"
@@ -106,11 +105,12 @@ class KeithleyPanel(QWidget):
 
         root.addLayout(cards_row)
 
-        # Низ: 2×2 сетка графиков
+        # Низ: 2×2 графики
         grid = QGridLayout()
         grid.setSpacing(6)
 
-        for idx, (key, (name, unit, color)) in enumerate(_CHANNELS.items()):
+        for idx, (key, (name, unit)) in enumerate(_MEASUREMENTS.items()):
+            color = colors[key]
             pw = pg.PlotWidget()
             pw.setBackground("#111111")
             pi = pw.getPlotItem()
@@ -132,26 +132,16 @@ class KeithleyPanel(QWidget):
 
         root.addLayout(grid, stretch=1)
 
-    # ------------------------------------------------------------------
+    def handle_reading(self, suffix: str, reading: Reading) -> None:
+        """Обработать показание для этого SMU."""
+        if suffix in self._buffers:
+            self._buffers[suffix].append(
+                (reading.timestamp.timestamp(), reading.value)
+            )
+            self._value_labels[suffix].setText(f"{reading.value:.6g}")
 
-    def on_reading(self, reading: Reading) -> None:
-        self._reading_signal.emit(reading)
-
-    @Slot(object)
-    def _handle_reading(self, reading: Reading) -> None:
-        ch = reading.channel
-        # Формат: "Keithley_1/smua/voltage"
-        for suffix in _CHANNELS:
-            if ch.endswith(f"/{suffix}"):
-                self._buffers[suffix].append(
-                    (reading.timestamp.timestamp(), reading.value)
-                )
-                self._current[suffix] = reading.value
-                self._value_labels[suffix].setText(f"{reading.value:.6g}")
-                break
-
-    @Slot()
-    def _refresh(self) -> None:
+    def refresh(self) -> None:
+        """Обновить графики."""
         now = time.time()
         x_min = now - _WINDOW_S
         for key, item in self._plots.items():
@@ -163,3 +153,60 @@ class KeithleyPanel(QWidget):
             ys = [v for t, v in buf if t >= x_min]
             item.setData(xs, ys)
             self._plot_widgets[key].getPlotItem().setXRange(x_min, now, padding=0)
+
+
+class KeithleyPanel(QWidget):
+    """Панель Keithley 2604B с вкладками smua/smub."""
+
+    _reading_signal = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #1A1A1A;")
+
+        self._smu_tabs: dict[str, _SmuTab] = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setStyleSheet(
+            "QTabWidget::pane { border: none; }"
+            "QTabBar::tab { background: #2A2A2A; color: #CCCCCC; padding: 6px 16px; "
+            "border: 1px solid #444; border-bottom: none; border-radius: 4px 4px 0 0; }"
+            "QTabBar::tab:selected { background: #1A1A1A; color: #FFFFFF; }"
+        )
+
+        for smu_name, colors in _SMU_COLORS.items():
+            tab = _SmuTab(smu_name, colors)
+            self._smu_tabs[smu_name] = tab
+            label = smu_name.upper()
+            self._tab_widget.addTab(tab, label)
+
+        root.addWidget(self._tab_widget)
+
+        self._reading_signal.connect(self._handle_reading)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+
+    def on_reading(self, reading: Reading) -> None:
+        self._reading_signal.emit(reading)
+
+    @Slot(object)
+    def _handle_reading(self, reading: Reading) -> None:
+        ch = reading.channel
+        # Format: "Keithley_1/smua/voltage" or "Keithley_1/smub/current"
+        for smu_name, tab in self._smu_tabs.items():
+            if f"/{smu_name}/" in ch:
+                for suffix in _MEASUREMENTS:
+                    if ch.endswith(f"/{suffix}"):
+                        tab.handle_reading(suffix, reading)
+                        return
+
+    @Slot()
+    def _refresh(self) -> None:
+        for tab in self._smu_tabs.values():
+            tab.refresh()

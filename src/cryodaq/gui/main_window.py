@@ -195,8 +195,8 @@ class MainWindow(QMainWindow):
         if channel.startswith("Т") and reading.unit == "K":
             self._temp_panel.on_reading(reading)
 
-        # Keithley каналы → KeithleyPanel
-        if "/smua/" in channel:
+        # Keithley каналы → KeithleyPanel (smua + smub)
+        if "/smua/" in channel or "/smub/" in channel:
             self._keithley_panel.on_reading(reading)
 
         # Давление → PressurePanel

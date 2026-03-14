@@ -9,19 +9,24 @@ LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
 ## Build & Development Commands
 
 ```bash
-pip install -e ".[dev]"        # Install in editable mode with dev deps
-pip install -e ".[web]"        # Install with web dashboard deps (FastAPI)
-cryodaq-engine                 # Run the engine (headless, real instruments)
-cryodaq-engine --mock          # Run the engine with simulated data
-cryodaq-gui                    # Run the GUI (connects to engine via ZMQ)
+pip install -e ".[dev,web]"    # Install all deps
+cryodaq                        # Operator launcher (auto-starts engine + GUI)
+cryodaq-engine                 # Run engine headless (real instruments)
+cryodaq-engine --mock          # Run engine with simulated data
+cryodaq-gui                    # Run GUI only (connects to engine via ZMQ)
 uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # Web dashboard
+install.bat                    # One-click Windows installer
+python create_shortcut.py      # Create desktop shortcut
 pytest                         # Run all tests
-pytest tests/drivers/          # Run driver tests only
-pytest tests/core/             # Run core tests only
-pytest -k test_lakeshore       # Run a single test by name
 ruff check src/ tests/         # Lint
 ruff format src/ tests/        # Format
 ```
+
+## Deployment
+
+Config override: `config/*.local.yaml` takes priority over `config/*.yaml`.
+Local configs are gitignored — machine-specific (COM ports, GPIB addresses, Telegram tokens).
+See `docs/deployment.md` for step-by-step lab PC setup.
 
 ## Architecture
 
@@ -100,6 +105,8 @@ ZMQSubscriber (SUB, msgpack deserialize)
 
 **Notifications:**
 - `src/cryodaq/notifications/telegram.py` — TelegramNotifier: alarm → Telegram Bot API (aiohttp)
+- `src/cryodaq/notifications/telegram_commands.py` — TelegramCommandBot: /status, /temps, /pressure, /keithley, /alarms
+- `src/cryodaq/launcher.py` — Operator launcher: auto-starts engine, embeds GUI, system tray
 
 **TSP (Keithley instrument scripts):**
 - `tsp/p_const_single.lua` — P=const feedback, watchdog 30s, compliance check

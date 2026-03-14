@@ -8,98 +8,60 @@
 
 from __future__ import annotations
 
-import os
+import subprocess
 import sys
 from pathlib import Path
+
+
+def _get_desktop_path() -> Path:
+    """Получить путь к рабочему столу (корректно для OneDrive, русской локали и т.д.)."""
+    if sys.platform != "win32":
+        return Path.home() / "Desktop"
+
+    # PowerShell возвращает правильный путь во всех случаях
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "[Environment]::GetFolderPath('Desktop')"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip())
+
+    # Fallback
+    return Path.home() / "Desktop"
+
+
+def _get_pythonw() -> Path:
+    """Получить путь к pythonw.exe (или python.exe как fallback)."""
+    pythonw = Path(sys.executable).parent / "pythonw.exe"
+    return pythonw if pythonw.exists() else Path(sys.executable)
 
 
 def create_shortcut() -> None:
     """Создать ярлык на рабочем столе Windows."""
     if sys.platform != "win32":
         print("Этот скрипт предназначен только для Windows.")
-        print("На Linux/macOS используйте: pythonw -m cryodaq.launcher")
+        print("На Linux/macOS используйте: python -m cryodaq.launcher")
         return
 
-    try:
-        import winshell  # type: ignore[import-untyped]
-    except ImportError:
-        # Fallback: использовать COM напрямую
-        _create_shortcut_com()
-        return
-
-    desktop = winshell.desktop()
-    shortcut_path = os.path.join(desktop, "CryoDAQ.lnk")
-
-    pythonw = Path(sys.executable).parent / "pythonw.exe"
-    if not pythonw.exists():
-        pythonw = Path(sys.executable)
-
+    desktop = _get_desktop_path()
+    shortcut_path = desktop / "CryoDAQ.lnk"
+    pythonw = _get_pythonw()
     project_root = Path(__file__).resolve().parent
 
-    winshell.CreateShortcut(
-        Path=shortcut_path,
-        Target=str(pythonw),
-        Arguments="-m cryodaq.launcher",
-        StartIn=str(project_root),
-        Description="CryoDAQ — Система сбора данных криогенной лаборатории",
+    ps_script = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{shortcut_path}'); "
+        f"$s.TargetPath = '{pythonw}'; "
+        "$s.Arguments = '-m cryodaq.launcher'; "
+        f"$s.WorkingDirectory = '{project_root}'; "
+        "$s.Description = 'CryoDAQ'; "
+        "$s.Save()"
     )
-    print(f"Ярлык создан: {shortcut_path}")
 
-
-def _create_shortcut_com() -> None:
-    """Создать ярлык через Windows COM (без winshell)."""
-    try:
-        # pylint: disable=import-error
-        from win32com.client import Dispatch  # type: ignore[import-untyped]
-    except ImportError:
-        # Последний fallback: PowerShell
-        _create_shortcut_powershell()
-        return
-
-    desktop = Path.home() / "Desktop"
-    shortcut_path = str(desktop / "CryoDAQ.lnk")
-
-    pythonw = Path(sys.executable).parent / "pythonw.exe"
-    if not pythonw.exists():
-        pythonw = Path(sys.executable)
-
-    project_root = Path(__file__).resolve().parent
-
-    shell = Dispatch("WScript.Shell")
-    shortcut = shell.CreateShortCut(shortcut_path)
-    shortcut.TargetPath = str(pythonw)
-    shortcut.Arguments = "-m cryodaq.launcher"
-    shortcut.WorkingDirectory = str(project_root)
-    shortcut.Description = "CryoDAQ — Система сбора данных криогенной лаборатории"
-    shortcut.save()
-    print(f"Ярлык создан: {shortcut_path}")
-
-
-def _create_shortcut_powershell() -> None:
-    """Создать ярлык через PowerShell (fallback без COM/winshell)."""
-    import subprocess
-
-    desktop = Path.home() / "Desktop"
-    shortcut_path = str(desktop / "CryoDAQ.lnk")
-
-    pythonw = Path(sys.executable).parent / "pythonw.exe"
-    if not pythonw.exists():
-        pythonw = Path(sys.executable)
-
-    project_root = Path(__file__).resolve().parent
-
-    ps_script = f"""
-$ws = New-Object -ComObject WScript.Shell
-$s = $ws.CreateShortcut('{shortcut_path}')
-$s.TargetPath = '{pythonw}'
-$s.Arguments = '-m cryodaq.launcher'
-$s.WorkingDirectory = '{project_root}'
-$s.Description = 'CryoDAQ'
-$s.Save()
-"""
     result = subprocess.run(
-        ["powershell", "-Command", ps_script],
-        capture_output=True, text=True,
+        ["powershell", "-NoProfile", "-Command", ps_script],
+        capture_output=True, text=True, timeout=10,
     )
     if result.returncode == 0:
         print(f"Ярлык создан: {shortcut_path}")

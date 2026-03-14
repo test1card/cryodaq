@@ -46,23 +46,21 @@
 ## Быстрый старт
 
 ```bash
-# Установка
+# Установка (или просто запустите install.bat на Windows)
 git clone https://github.com/test1card/cryodaq.git
 cd cryodaq
-pip install -e ".[dev]"          # основные + dev зависимости
-pip install -e ".[web]"          # + FastAPI/uvicorn для web-дашборда
+pip install -e ".[dev,web]"
 
-# Запуск engine (имитация приборов)
-cryodaq-engine --mock
+# Запуск для оператора (engine + GUI в одном окне)
+cryodaq
 
-# Запуск GUI (в другом терминале)
-cryodaq-gui
-
-# Запуск web-дашборда (в третьем терминале)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+# Или по отдельности:
+cryodaq-engine --mock            # engine с имитацией приборов
+cryodaq-gui                      # GUI (в другом терминале)
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # web
 
 # Тесты
-pytest tests/ -v                 # 118 тестов
+pytest tests/ -v
 ruff check src/ tests/           # линтинг
 ruff format src/ tests/          # форматирование
 ```

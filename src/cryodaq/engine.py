@@ -35,6 +35,7 @@ from cryodaq.core.zmq_bridge import ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications.periodic_report import PeriodicReporter
+from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
@@ -186,10 +187,15 @@ async def _run_engine(*, mock: bool = False) -> None:
     start_ts = time.monotonic()
     logger.info("═══ CryoDAQ Engine запускается ═══")
 
-    # --- Конфигурация путей ---
-    instruments_cfg = _CONFIG_DIR / "instruments.yaml"
-    alarms_cfg = _CONFIG_DIR / "alarms.yaml"
-    interlocks_cfg = _CONFIG_DIR / "interlocks.yaml"
+    # --- Конфигурация путей (*.local.yaml приоритетнее *.yaml) ---
+    def _cfg(name: str) -> Path:
+        local = _CONFIG_DIR / f"{name}.local.yaml"
+        return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
+
+    instruments_cfg = _cfg("instruments")
+    alarms_cfg = _cfg("alarms")
+    interlocks_cfg = _cfg("interlocks")
+    logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
 
     # --- Создать основные компоненты ---
     broker = DataBroker()
@@ -252,7 +258,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # Periodic Reporter (Telegram-отчёты с графиками)
     periodic_reporter: PeriodicReporter | None = None
-    notifications_cfg = _CONFIG_DIR / "notifications.yaml"
+    notifications_cfg = _cfg("notifications")
     if notifications_cfg.exists():
         try:
             with notifications_cfg.open(encoding="utf-8") as fh:
@@ -289,6 +295,27 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
 
+    # Telegram Command Bot
+    telegram_bot: TelegramCommandBot | None = None
+    if notifications_cfg.exists():
+        try:
+            with notifications_cfg.open(encoding="utf-8") as fh:
+                _nr: dict[str, Any] = yaml.safe_load(fh)
+            cmd_cfg = _nr.get("commands", {})
+            _tg = _nr.get("telegram", {})
+            _token = str(_tg.get("bot_token", ""))
+            if cmd_cfg.get("enabled", False) and _token and _token != "YOUR_BOT_TOKEN_HERE":
+                allowed = _tg.get("allowed_chat_ids") or []
+                telegram_bot = TelegramCommandBot(
+                    broker, alarm_engine,
+                    bot_token=_token,
+                    allowed_chat_ids=[int(x) for x in allowed] if allowed else None,
+                    poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
+                )
+                logger.info("TelegramCommandBot создан")
+        except Exception as exc:
+            logger.error("Ошибка создания TelegramCommandBot: %s", exc)
+
     # --- Запуск всех подсистем ---
     await writer.start(sqlite_queue)
     await zmq_pub.start(zmq_queue)
@@ -297,6 +324,8 @@ async def _run_engine(*, mock: bool = False) -> None:
     await plugin_pipeline.start()
     if periodic_reporter is not None:
         await periodic_reporter.start()
+    if telegram_bot is not None:
+        await telegram_bot.start()
     await scheduler.start()
 
     # Watchdog
@@ -350,6 +379,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     if periodic_reporter is not None:
         await periodic_reporter.stop()
         logger.info("PeriodicReporter остановлен")
+
+    if telegram_bot is not None:
+        await telegram_bot.stop()
+        logger.info("TelegramCommandBot остановлен")
 
     await alarm_engine.stop()
     logger.info("Движок тревог остановлен")

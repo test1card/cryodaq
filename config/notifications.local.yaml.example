@@ -1,0 +1,21 @@
+# Локальная конфигурация уведомлений — СКОПИРУЙТЕ в notifications.local.yaml
+# и укажите ваш Telegram-токен и chat_id.
+#
+# Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
+
+telegram:
+  bot_token: "ВСТАВЬТЕ_ТОКЕН_ОТ_BOTFATHER"     # ← токен от @BotFather
+  chat_id: 0                                     # ← ID чата (число)
+  send_cleared: true
+  timeout_s: 10
+  allowed_chat_ids: []                            # ← [12345, 67890] или пусто = все
+
+periodic_report:
+  enabled: true
+  report_interval_s: 1800                         # 30 минут
+  chart_hours: 2.0
+  include_channels: null
+
+commands:
+  enabled: true
+  poll_interval_s: 2.0
