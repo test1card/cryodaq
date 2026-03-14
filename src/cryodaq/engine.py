@@ -30,6 +30,8 @@ import yaml
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -199,12 +201,29 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # --- Создать основные компоненты ---
     broker = DataBroker()
+    safety_broker = SafetyBroker()
 
     # Драйверы
     driver_configs = _load_drivers(instruments_cfg, mock=mock)
 
-    # Планировщик
-    scheduler = Scheduler(broker)
+    # Keithley driver (нужен для SafetyManager)
+    keithley_driver = None
+    for cfg in driver_configs:
+        if hasattr(cfg.driver, "emergency_off"):
+            keithley_driver = cfg.driver
+            break
+
+    # SafetyManager — создаётся ПЕРВЫМ
+    safety_cfg = _cfg("safety")
+    safety_manager = SafetyManager(
+        safety_broker,
+        keithley_driver=keithley_driver,
+        mock=mock,
+    )
+    safety_manager.load_config(safety_cfg)
+
+    # Планировщик — публикует в ОБА брокера
+    scheduler = Scheduler(broker, safety_broker=safety_broker)
     for cfg in driver_configs:
         scheduler.add(cfg)
 
@@ -227,29 +246,17 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.warning("Файл тревог не найден: %s", alarms_cfg)
 
-    # Interlock Engine — маппинг action-строк к функциям
-    # Ищем Keithley-драйвер для привязки emergency_off / stop_source
-    keithley_driver = None
-    for cfg in driver_configs:
-        if hasattr(cfg.driver, "emergency_off"):
-            keithley_driver = cfg.driver
-            break
+    # Interlock Engine — действия делегируются SafetyManager
+    async def _interlock_emergency_off() -> None:
+        await safety_manager.on_interlock_trip("interlock", "", 0)
 
-    interlock_actions: dict[str, Any] = {}
-    if keithley_driver is not None:
-        interlock_actions["emergency_off"] = keithley_driver.emergency_off
-        interlock_actions["stop_source"] = keithley_driver.stop_source
-    else:
-        # Stub-действия: Keithley не подключён — логируем, но не падаем
-        async def _noop_emergency_off() -> None:
-            logger.warning("INTERLOCK emergency_off: Keithley не подключён, действие пропущено")
+    async def _interlock_stop_source() -> None:
+        await safety_manager.on_interlock_trip("interlock", "", 0)
 
-        async def _noop_stop_source() -> None:
-            logger.warning("INTERLOCK stop_source: Keithley не подключён, действие пропущено")
-
-        interlock_actions["emergency_off"] = _noop_emergency_off
-        interlock_actions["stop_source"] = _noop_stop_source
-        logger.info("Keithley не найден — блокировки используют stub-действия")
+    interlock_actions: dict[str, Any] = {
+        "emergency_off": _interlock_emergency_off,
+        "stop_source": _interlock_stop_source,
+    }
 
     interlock_engine = InterlockEngine(broker, actions=interlock_actions)
     if interlocks_cfg.exists():
@@ -257,22 +264,24 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.warning("Файл блокировок не найден: %s", interlocks_cfg)
 
-    # Обработчик команд от GUI (Keithley start/stop/emergency_off)
+    # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
         try:
-            if action == "keithley_emergency_off" and keithley_driver is not None:
-                await keithley_driver.emergency_off()
-                return {"ok": True, "action": "emergency_off"}
-            if action == "keithley_stop" and keithley_driver is not None:
-                await keithley_driver.stop_source()
-                return {"ok": True, "action": "stop_source"}
-            if action == "keithley_start" and keithley_driver is not None:
+            if action == "keithley_emergency_off":
+                return await safety_manager.emergency_off()
+            if action == "keithley_stop":
+                return await safety_manager.request_stop()
+            if action == "keithley_start":
                 p = float(cmd.get("p_target", 0))
                 v = float(cmd.get("v_comp", 40))
                 i = float(cmd.get("i_comp", 1.0))
-                await keithley_driver.start_source(p, v, i)
-                return {"ok": True, "action": "start_source", "p_target": p}
+                return await safety_manager.request_run(p, v, i)
+            if action == "safety_status":
+                return {"ok": True, **safety_manager.get_status()}
+            if action == "safety_acknowledge":
+                reason = cmd.get("reason", "")
+                return await safety_manager.acknowledge_fault(reason)
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -344,6 +353,8 @@ async def _run_engine(*, mock: bool = False) -> None:
             logger.error("Ошибка создания TelegramCommandBot: %s", exc)
 
     # --- Запуск всех подсистем ---
+    await safety_manager.start()
+    logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
     await writer.start(sqlite_queue)
     await zmq_pub.start(zmq_queue)
     await cmd_server.start()
@@ -417,6 +428,9 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await interlock_engine.stop()
     logger.info("Движок блокировок остановлен")
+
+    await safety_manager.stop()
+    logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))
