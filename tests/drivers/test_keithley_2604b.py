@@ -68,8 +68,8 @@ async def test_mock_channel_naming() -> None:
     readings = await driver.read_channels()
     for r in readings:
         assert r.channel.startswith("K1/smua/")
-        # instrument_id is set by driver (may be driver name or mock ID)
-        assert "instrument_id" in r.metadata
+        # instrument_id is a first-class field on Reading
+        assert r.instrument_id == "K1"
 
     await driver.disconnect()
 

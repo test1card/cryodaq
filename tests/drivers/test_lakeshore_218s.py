@@ -244,3 +244,13 @@ async def test_reconnect_after_disconnect() -> None:
 
     await driver.disconnect()
     assert not driver.connected
+
+
+# ---------------------------------------------------------------------------
+# 11. Reading has instrument_id as first-class field
+# ---------------------------------------------------------------------------
+
+async def test_reading_has_instrument_id_field():
+    from cryodaq.drivers.base import Reading
+    r = Reading.now(channel="CH1", value=4.5, unit="K", instrument_id="LS218_1")
+    assert r.instrument_id == "LS218_1"

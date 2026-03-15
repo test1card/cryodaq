@@ -31,11 +31,11 @@ def _reading(
     timestamp = ts or datetime.now(timezone.utc)
     return Reading(
         timestamp=timestamp,
+        instrument_id=instrument_id,
         channel=channel,
         value=value,
         unit=unit,
         status=status,
-        metadata={"instrument_id": instrument_id},
     )
 
 

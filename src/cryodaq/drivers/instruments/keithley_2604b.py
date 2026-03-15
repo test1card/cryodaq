@@ -182,7 +182,6 @@ class Keithley2604B(InstrumentDriver):
         power = voltage * current
 
         metadata: dict[str, Any] = {
-            "instrument_id": self._instrument_id,
             "resource_str": self._resource_str,
         }
 
@@ -191,6 +190,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/voltage",
                 value=voltage,
                 unit="V",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=voltage,
                 metadata=metadata,
@@ -199,6 +199,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/current",
                 value=current,
                 unit="A",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=current,
                 metadata=metadata,
@@ -207,6 +208,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/resistance",
                 value=resistance,
                 unit="Ohm",
+                instrument_id=self.name,
                 status=ChannelStatus.OK if math.isfinite(resistance) else ChannelStatus.SENSOR_ERROR,
                 raw=resistance if math.isfinite(resistance) else None,
                 metadata=metadata,
@@ -215,6 +217,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/power",
                 value=power,
                 unit="W",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=power,
                 metadata=metadata,
@@ -628,7 +631,6 @@ class Keithley2604B(InstrumentDriver):
         resistance = r
 
         metadata: dict[str, Any] = {
-            "instrument_id": "MOCK_2604B",
             "mock_temp_K": round(self._mock_temp, 3),
             "resource_str": self._resource_str,
         }
@@ -638,6 +640,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/voltage",
                 value=round(voltage, 6),
                 unit="V",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=voltage,
                 metadata=metadata,
@@ -646,6 +649,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/current",
                 value=round(current, 7),
                 unit="A",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=current,
                 metadata=metadata,
@@ -654,6 +658,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/resistance",
                 value=round(resistance, 4),
                 unit="Ohm",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=resistance,
                 metadata=metadata,
@@ -662,6 +667,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=f"{self.name}/smua/power",
                 value=round(power, 7),
                 unit="W",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=power,
                 metadata=metadata,
@@ -691,7 +697,6 @@ class Keithley2604B(InstrumentDriver):
     def _error_readings(self) -> list[Reading]:
         """Сформировать список Reading с состоянием SENSOR_ERROR для всех каналов."""
         metadata: dict[str, Any] = {
-            "instrument_id": self._instrument_id,
             "resource_str": self._resource_str,
         }
         channels = [
@@ -705,6 +710,7 @@ class Keithley2604B(InstrumentDriver):
                 channel=ch,
                 value=float("nan"),
                 unit=unit,
+                instrument_id=self.name,
                 status=ChannelStatus.SENSOR_ERROR,
                 raw=None,
                 metadata=metadata,

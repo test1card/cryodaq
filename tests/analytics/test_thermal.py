@@ -18,11 +18,11 @@ HEATER_CH = "keithley/power"
 
 
 def _make_reading(channel: str, value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(channel=channel, value=value, unit="K", status=status)
+    return Reading.now(channel=channel, value=value, unit="K", instrument_id="test", status=status)
 
 
 def _make_heater_reading(value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(channel=HEATER_CH, value=value, unit="W", status=status)
+    return Reading.now(channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status)
 
 
 def _configured_plugin() -> ThermalCalculator:

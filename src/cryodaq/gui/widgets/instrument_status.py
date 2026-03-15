@@ -228,14 +228,14 @@ class InstrumentStatusPanel(QWidget):
         """Извлечь идентификатор прибора из Reading.
 
         Приоритет:
-        1. metadata["instrument_id"]
+        1. reading.instrument_id (first-class field)
         2. Первая часть channel до «/» (для Keithley: «Keithley_1/smua/...»)
         3. Имя канала, начинающееся с «Т» → определяем по номеру (Т1-8 → LS218_1 и т.д.)
         """
-        # Из metadata
-        inst_id = reading.metadata.get("instrument_id")
+        # Из first-class поля
+        inst_id = reading.instrument_id
         if inst_id:
-            return str(inst_id)
+            return inst_id
 
         channel = reading.channel
 

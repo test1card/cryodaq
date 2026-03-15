@@ -47,7 +47,7 @@ class MockDriver(InstrumentDriver):
         self._connected = False
 
     async def read_channels(self) -> list[Reading]:
-        return [Reading.now("CH1", 4.2, "K", metadata={"instrument_id": "mock"})]
+        return [Reading.now("CH1", 4.2, "K", instrument_id="mock")]
 
 
 def _make_batch(n: int) -> list[Reading]:
@@ -56,11 +56,11 @@ def _make_batch(n: int) -> list[Reading]:
     return [
         Reading(
             timestamp=ts,
+            instrument_id="mock",
             channel=f"CH{i + 1}",
             value=4.0 + i * 0.01,
             unit="K",
             status=ChannelStatus.OK,
-            metadata={"instrument_id": "mock"},
         )
         for i in range(n)
     ]

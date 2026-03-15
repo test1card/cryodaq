@@ -28,6 +28,7 @@ class Reading:
     """
 
     timestamp: datetime
+    instrument_id: str
     channel: str
     value: float
     unit: str
@@ -36,10 +37,11 @@ class Reading:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
-    def now(channel: str, value: float, unit: str, **kwargs: Any) -> Reading:
+    def now(channel: str, value: float, unit: str, *, instrument_id: str = "", **kwargs: Any) -> Reading:
         """Создать Reading с текущим временем UTC."""
         return Reading(
             timestamp=datetime.now(timezone.utc),
+            instrument_id=instrument_id,
             channel=channel,
             value=value,
             unit=unit,

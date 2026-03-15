@@ -113,11 +113,12 @@ class ReplaySource:
 
             reading = Reading(
                 timestamp=datetime.fromtimestamp(ts_posix, tz=timezone.utc),
+                instrument_id=inst_id,
                 channel=channel,
                 value=value,
                 unit=unit,
                 status=status,
-                metadata={"instrument_id": inst_id, "source": "replay"},
+                metadata={"source": "replay"},
             )
 
             await self._broker.publish(reading)

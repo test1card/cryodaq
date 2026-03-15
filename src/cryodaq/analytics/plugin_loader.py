@@ -278,6 +278,7 @@ class PluginPipeline:
                         channel=f"analytics/{plugin_id}/{metric.metric}",
                         value=metric.value,
                         unit=metric.unit,
+                        instrument_id=plugin_id,
                         metadata=metric.metadata | {
                             "source": "analytics",
                             "plugin_id": plugin_id,

@@ -74,7 +74,7 @@ class _ServerState:
         self.last_readings[reading.channel] = data
 
         # Определить прибор
-        inst_id = reading.metadata.get("instrument_id", "")
+        inst_id = reading.instrument_id or ""
         if not inst_id and "/" in reading.channel:
             inst_id = reading.channel.split("/")[0]
         elif not inst_id and reading.channel.startswith("Т"):

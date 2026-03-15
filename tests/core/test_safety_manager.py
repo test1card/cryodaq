@@ -36,7 +36,7 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0):
 
 async def _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K"):
     """Publish a reading to the safety broker."""
-    r = Reading.now(channel=channel, value=value, unit=unit)
+    r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test")
     await broker.publish(r)
     await asyncio.sleep(0.02)  # Let collect loop process
 
@@ -244,7 +244,7 @@ async def test_broker_overflow_triggers_fault():
         # Fill the queue (queue was created with maxsize=2 in start)
         # Overflow callback should trigger fault
         for i in range(5):
-            r = Reading.now(channel=f"CH{i}", value=float(i), unit="K")
+            r = Reading.now(channel=f"CH{i}", value=float(i), unit="K", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
 

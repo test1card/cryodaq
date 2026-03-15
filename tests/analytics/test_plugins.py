@@ -68,7 +68,7 @@ class GoodCompanionPlugin(AnalyticsPlugin):
 
 
 def _make_ok_reading() -> Reading:
-    return Reading.now(channel="test/ch", value=1.0, unit="K")
+    return Reading.now(channel="test/ch", value=1.0, unit="K", instrument_id="test")
 
 
 # ---------------------------------------------------------------------------

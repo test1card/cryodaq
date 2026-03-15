@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # CryoDAQ
 
 LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 24k+ lines, 236 tests.
+Python 3.12+, asyncio, PySide6, 24k+ lines, 237 tests.
 
 ## Build & Development Commands
 
@@ -20,7 +20,7 @@ install.bat                    # One-click Windows installer
 python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
 cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
-pytest                         # Run all 236 tests (~87s)
+pytest                         # Run all 237 tests (~88s)
 pytest tests/core/             # Core subsystem tests only
 pytest -k test_safety          # Run safety manager tests
 pytest -k test_cooldown        # Run cooldown predictor + service tests
@@ -103,7 +103,7 @@ Menu: Файл (экспорт CSV/HDF5/Excel) | Эксперимент (нач�
 - `src/cryodaq/core/disk_monitor.py` — DiskMonitor: shutil.disk_usage() every 5min, publishes system/disk_free_gb, alarms at <10GB/<2GB
 
 **Drivers:**
-- `src/cryodaq/drivers/base.py` — Reading (frozen dataclass) + InstrumentDriver ABC
+- `src/cryodaq/drivers/base.py` — Reading (frozen dataclass: timestamp, instrument_id, channel, value, unit, status, raw, metadata) + InstrumentDriver ABC
 - `src/cryodaq/drivers/transport/gpib.py` — async pyvisa wrapper (GPIB)
 - `src/cryodaq/drivers/transport/usbtmc.py` — async pyvisa wrapper (USB-TMC)
 - `src/cryodaq/drivers/transport/serial.py` — async pyserial wrapper (RS-232)

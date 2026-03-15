@@ -415,6 +415,7 @@ class CooldownService:
             channel=f"analytics/cooldown_predictor/cooldown_eta",
             value=pred.t_remaining_hours,
             unit="h",
+            instrument_id="cooldown_predictor",
             metadata=metadata | {"plugin_id": "cooldown_predictor"},
         )
         await self._broker.publish(reading)

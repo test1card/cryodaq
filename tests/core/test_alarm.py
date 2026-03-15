@@ -65,7 +65,7 @@ async def _publish_and_wait(
     unit: str = "K",
     delay: float = 0.05,
 ) -> None:
-    await broker.publish(Reading.now(channel, value, unit))
+    await broker.publish(Reading.now(channel, value, unit, instrument_id="test"))
     await asyncio.sleep(delay)
 
 
@@ -347,8 +347,8 @@ async def test_event_history_bounded() -> None:
     )
     try:
         for _ in range(600):
-            await broker.publish(Reading.now("sensor/temp", 60.0, "K"))
-            await broker.publish(Reading.now("sensor/temp", 40.0, "K"))
+            await broker.publish(Reading.now("sensor/temp", 60.0, "K", instrument_id="test"))
+            await broker.publish(Reading.now("sensor/temp", 40.0, "K", instrument_id="test"))
 
         # Allow the check loop to drain the queue
         await asyncio.sleep(0.2)
@@ -413,7 +413,7 @@ async def test_rapid_oscillation() -> None:
         # Alternate above/below threshold several times
         transitions = [60.0, 40.0, 60.0, 40.0, 60.0, 40.0]
         for v in transitions:
-            await broker.publish(Reading.now("sensor/temp", v, "K"))
+            await broker.publish(Reading.now("sensor/temp", v, "K", instrument_id="test"))
         await asyncio.sleep(0.1)
 
         # 3 above-threshold values → 3 activations total (each from OK)

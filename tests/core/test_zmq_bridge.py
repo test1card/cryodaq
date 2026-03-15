@@ -30,6 +30,7 @@ def _make_reading(
 ) -> Reading:
     return Reading(
         timestamp=datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc),
+        instrument_id="test",
         channel=channel,
         value=value,
         unit=unit,
@@ -63,12 +64,13 @@ async def test_pack_unpack_roundtrip() -> None:
 async def test_pack_preserves_all_fields() -> None:
     original = Reading(
         timestamp=datetime(2026, 1, 15, 8, 30, 0, tzinfo=timezone.utc),
+        instrument_id="vg1",
         channel="VACUUM",
         value=1.23e-5,
         unit="mbar",
         status=ChannelStatus.OK,
         raw=0.987,
-        metadata={"instrument_id": "vg1", "range": "low"},
+        metadata={"range": "low"},
     )
     result = _unpack_reading(_pack_reading(original))
 
@@ -77,7 +79,8 @@ async def test_pack_preserves_all_fields() -> None:
     assert result.unit == "mbar"
     assert result.raw is not None
     assert abs(result.raw - 0.987) < 1e-9
-    assert result.metadata == {"instrument_id": "vg1", "range": "low"}
+    assert result.instrument_id == "vg1"
+    assert result.metadata == {"range": "low"}
 
 
 # ---------------------------------------------------------------------------

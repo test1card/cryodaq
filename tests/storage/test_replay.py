@@ -28,11 +28,11 @@ def _reading(
 ) -> Reading:
     return Reading(
         timestamp=ts,
+        instrument_id=instrument_id,
         channel=channel,
         value=value,
         unit=unit,
         status=ChannelStatus.OK,
-        metadata={"instrument_id": instrument_id},
     )
 
 

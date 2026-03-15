@@ -37,6 +37,7 @@ def _configured_plugin(
 def _make_reading(channel: str, value: float, timestamp: datetime) -> Reading:
     return Reading(
         timestamp=timestamp,
+        instrument_id="test",
         channel=channel,
         value=value,
         unit="K",

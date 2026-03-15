@@ -67,7 +67,7 @@ async def test_armed_to_tripped() -> None:
     broker, engine, called = await _make_engine()
     engine.add_condition(_make_condition(threshold=300.0, comparison=">"))
 
-    await broker.publish(Reading.now("T1", 350.0, "K"))
+    await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     states = engine.get_state()
@@ -86,7 +86,7 @@ async def test_tripped_to_acknowledged() -> None:
     broker, engine, called = await _make_engine()
     engine.add_condition(_make_condition(threshold=300.0, comparison=">"))
 
-    await broker.publish(Reading.now("T1", 350.0, "K"))
+    await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
@@ -111,7 +111,7 @@ async def test_cooldown_prevents_retrip() -> None:
     )
 
     # First trip
-    await broker.publish(Reading.now("T1", 350.0, "K"))
+    await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
 
@@ -120,7 +120,7 @@ async def test_cooldown_prevents_retrip() -> None:
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
 
     # Publish again — still within cooldown, should NOT trip
-    await broker.publish(Reading.now("T1", 400.0, "K"))
+    await broker.publish(Reading.now("T1", 400.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     # Still ARMED because cooldown is active
@@ -147,7 +147,7 @@ async def test_action_called_async() -> None:
     engine.add_condition(_make_condition(threshold=300.0, comparison=">"))
     await engine.start()
 
-    await broker.publish(Reading.now("T1", 999.0, "K"))
+    await broker.publish(Reading.now("T1", 999.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     assert len(awaited) == 1, "Async action was not awaited"
@@ -167,7 +167,7 @@ async def test_regex_channel_matching() -> None:
         _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
     )
 
-    await broker.publish(Reading.now("T5", 350.0, "K"))
+    await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
@@ -188,7 +188,7 @@ async def test_regex_no_match_ignored() -> None:
     )
 
     # "PRESSURE_1" does not match T[1-8]
-    await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa"))
+    await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
@@ -207,12 +207,12 @@ async def test_greater_than_comparison() -> None:
     engine.add_condition(_make_condition(threshold=100.0, comparison=">"))
 
     # Value exactly at threshold — should NOT trip
-    await broker.publish(Reading.now("T1", 100.0, "K"))
+    await broker.publish(Reading.now("T1", 100.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
 
     # Value above threshold — should trip
-    await broker.publish(Reading.now("T1", 100.001, "K"))
+    await broker.publish(Reading.now("T1", 100.001, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
     assert len(called) == 1
@@ -232,12 +232,12 @@ async def test_less_than_comparison() -> None:
     )
 
     # Value above threshold — should NOT trip
-    await broker.publish(Reading.now("T1", 3.0, "K"))
+    await broker.publish(Reading.now("T1", 3.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
 
     # Value below threshold — should trip
-    await broker.publish(Reading.now("T1", 1.5, "K"))
+    await broker.publish(Reading.now("T1", 1.5, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
     assert len(called) == 1
@@ -254,7 +254,7 @@ async def test_event_history() -> None:
     broker, engine, called = await _make_engine()
     engine.add_condition(_make_condition(threshold=300.0, comparison=">"))
 
-    await broker.publish(Reading.now("T1", 350.0, "K"))
+    await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     events = engine.get_events()
@@ -292,7 +292,7 @@ async def test_event_history_bounded() -> None:
     # Publish 1100 readings that all exceed the threshold.
     # After each trip we acknowledge so the interlock goes back to ARMED.
     for _ in range(1100):
-        await broker.publish(Reading.now("T1", 350.0, "K"))
+        await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
         await asyncio.sleep(0.001)
         engine.acknowledge("high_temp")
 
@@ -429,7 +429,7 @@ async def test_multiple_interlocks() -> None:
     await engine.start()
 
     # Publish a temperature reading that exceeds lock_a threshold
-    await broker.publish(Reading.now("T3", 400.0, "K"))
+    await broker.publish(Reading.now("T3", 400.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
 
     states = engine.get_state()

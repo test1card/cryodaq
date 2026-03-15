@@ -129,7 +129,7 @@ class SQLiteWriter:
         rows = [
             (
                 r.timestamp.timestamp(),
-                r.metadata.get("instrument_id", "unknown"),
+                r.instrument_id or "unknown",
                 r.channel,
                 r.value,
                 r.unit,

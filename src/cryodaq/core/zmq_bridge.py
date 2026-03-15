@@ -30,6 +30,7 @@ def _pack_reading(reading: Reading) -> bytes:
     """Сериализовать Reading в msgpack."""
     data = {
         "ts": reading.timestamp.timestamp(),
+        "iid": reading.instrument_id,
         "ch": reading.channel,
         "v": reading.value,
         "u": reading.unit,
@@ -45,6 +46,7 @@ def _unpack_reading(payload: bytes) -> Reading:
     data = msgpack.unpackb(payload, raw=False)
     return Reading(
         timestamp=datetime.fromtimestamp(data["ts"], tz=timezone.utc),
+        instrument_id=data.get("iid", ""),
         channel=data["ch"],
         value=data["v"],
         unit=data["u"],

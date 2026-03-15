@@ -382,6 +382,7 @@ class SafetyManager:
             channel="analytics/safety_state",
             value=0.0,
             unit="",
+            instrument_id="safety_manager",
             metadata={"state": self._state.value, "reason": reason},
         )
         try:

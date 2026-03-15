@@ -79,6 +79,7 @@ class DiskMonitor:
             channel="system/disk_free_gb",
             value=round(free_gb, 1),
             unit="GB",
+            instrument_id="system",
             metadata={"source": "disk_monitor"},
         )
         await self._broker.publish(reading)

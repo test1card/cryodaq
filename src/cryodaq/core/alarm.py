@@ -476,6 +476,7 @@ class AlarmEngine:
             channel=f"alarm/{event.alarm_name}",
             value=event.value,
             unit="",
+            instrument_id="alarm_engine",
             metadata={
                 "alarm_name": event.alarm_name,
                 "event_type": event.event_type,
@@ -493,6 +494,7 @@ class AlarmEngine:
             channel="analytics/alarm_count",
             value=float(len(unresolved)),
             unit="",
+            instrument_id="alarm_engine",
             metadata={"active_names": unresolved},
         )
         await self._broker.publish(reading)

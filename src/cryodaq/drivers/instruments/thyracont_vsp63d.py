@@ -166,9 +166,10 @@ class ThyracontVSP63D(InstrumentDriver):
                 channel=channel,
                 value=float("nan"),
                 unit="mbar",
+                instrument_id=self.name,
                 status=ChannelStatus.SENSOR_ERROR,
                 raw=None,
-                metadata={"instrument_id": self.name, "raw_response": response_stripped},
+                metadata={"raw_response": response_stripped},
             )
 
         ch_status = _STATUS_MAP.get(status_code, ChannelStatus.SENSOR_ERROR)
@@ -186,9 +187,10 @@ class ThyracontVSP63D(InstrumentDriver):
             channel=channel,
             value=value,
             unit="mbar",
+            instrument_id=self.name,
             status=ch_status,
             raw=value,
-            metadata={"instrument_id": self.name, "status_code": status_code},
+            metadata={"status_code": status_code},
         )
 
     # ------------------------------------------------------------------
@@ -206,8 +208,8 @@ class ThyracontVSP63D(InstrumentDriver):
                 channel=f"{self.name}/pressure",
                 value=value,
                 unit="mbar",
+                instrument_id=self.name,
                 status=ChannelStatus.OK,
                 raw=value,
-                metadata={"instrument_id": self.name},
             )
         ]

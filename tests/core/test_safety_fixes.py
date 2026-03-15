@@ -55,7 +55,7 @@ async def _feed(
     unit="K",
     status=ChannelStatus.OK,
 ):
-    r = Reading.now(channel=channel, value=value, unit=unit, status=status)
+    r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test", status=status)
     await broker.publish(r)
     await asyncio.sleep(0.02)
 
@@ -257,7 +257,7 @@ async def test_rate_limit_ignores_non_temperature():
         # Publish 20 voltage readings with a massive step change
         for i in range(20):
             v = 0.0 if i < 10 else 1000.0  # huge jump in Volts
-            r = Reading.now(channel="Keithley/voltage", value=v, unit="V")
+            r = Reading.now(channel="Keithley/voltage", value=v, unit="V", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
 
@@ -282,7 +282,7 @@ async def test_rate_limit_catches_temperature():
         for i in range(15):
             # 15 samples rising at ~60 K/min (well above 5 K/min threshold)
             temp = 4.0 + i * 1.0  # +1 K per 10 ms → ~6000 K/min
-            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K")
+            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
 
@@ -299,7 +299,7 @@ async def test_rate_limit_catches_temperature():
         # Feed more rapidly rising samples to keep triggering rate check
         for i in range(15):
             temp = 20.0 + i * 1.0
-            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K")
+            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
 

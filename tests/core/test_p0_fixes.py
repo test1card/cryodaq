@@ -48,7 +48,7 @@ async def _make_safety(*, mock=True, keithley=None, data_broker=None):
 
 
 async def _feed_safety(broker: SafetyBroker, channel: str = "Т1 Криостат верх", value: float = 4.5):
-    r = Reading.now(channel=channel, value=value, unit="K")
+    r = Reading.now(channel=channel, value=value, unit="K", instrument_id="test")
     await broker.publish(r)
     await asyncio.sleep(0.02)
 
@@ -111,7 +111,7 @@ async def test_alarm_publishes_reading_on_activate() -> None:
     await engine.start()
     try:
         # Trigger alarm: value=150 > threshold=100
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(test_q, timeout=0.2)
@@ -146,11 +146,11 @@ async def test_alarm_publishes_reading_on_clear() -> None:
     await engine.start()
     try:
         # Activate
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         # Clear: value=80 < threshold - hysteresis_k = 90
-        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(test_q, timeout=0.2)
@@ -176,7 +176,7 @@ async def test_alarm_publishes_alarm_count_on_activate() -> None:
     await engine.start()
     try:
         # Trigger alarm
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(count_q, timeout=0.2)
@@ -206,7 +206,7 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
     await engine.start()
     try:
         # Activate
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         # Acknowledge
@@ -214,7 +214,7 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
         await asyncio.sleep(0.02)
 
         # Clear: value=80 < 90
-        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K"))
+        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test"))
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(count_q, timeout=0.2)
@@ -255,6 +255,7 @@ async def test_alarm_no_feedback_loop() -> None:
             channel="alarm/alarm_feedback",
             value=1.0,
             unit="",
+            instrument_id="test",
             metadata={"event_type": "activated", "severity": "warning"},
         )
         await broker.publish(alarm_reading)

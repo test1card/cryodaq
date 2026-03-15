@@ -127,7 +127,6 @@ class LakeShore218S(InstrumentDriver):
             channel_num = i + 1
             channel_name = self._channel_labels.get(channel_num, f"CH{channel_num}")
             metadata: dict[str, Any] = {
-                "instrument_id": self.name,
                 "raw_channel": channel_num,
             }
 
@@ -138,6 +137,7 @@ class LakeShore218S(InstrumentDriver):
                         channel=channel_name,
                         value=float("inf"),
                         unit="K",
+                        instrument_id=self.name,
                         status=ChannelStatus.OVERRANGE,
                         raw=None,
                         metadata=metadata,
@@ -164,6 +164,7 @@ class LakeShore218S(InstrumentDriver):
                         channel=channel_name,
                         value=float("nan"),
                         unit="K",
+                        instrument_id=self.name,
                         status=ChannelStatus.SENSOR_ERROR,
                         raw=None,
                         metadata=metadata,
@@ -176,6 +177,7 @@ class LakeShore218S(InstrumentDriver):
                     channel=channel_name,
                     value=value,
                     unit="K",
+                    instrument_id=self.name,
                     status=ChannelStatus.OK,
                     raw=value,
                     metadata=metadata,
@@ -202,10 +204,10 @@ class LakeShore218S(InstrumentDriver):
                     channel=channel_name,
                     value=value,
                     unit="K",
+                    instrument_id=self.name,
                     status=ChannelStatus.OK,
                     raw=value,
                     metadata={
-                        "instrument_id": self.name,
                         "raw_channel": channel_num,
                     },
                 )

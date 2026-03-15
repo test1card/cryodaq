@@ -59,6 +59,7 @@ def _reading(channel: str, value: float, ts: datetime | None = None) -> Reading:
     """Create a Reading with a specific timestamp (or now)."""
     return Reading(
         timestamp=ts or datetime.now(timezone.utc),
+        instrument_id="test",
         channel=channel,
         value=value,
         unit="K",

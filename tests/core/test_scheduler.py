@@ -34,7 +34,7 @@ class MockDriver(InstrumentDriver):
 
     async def read_channels(self) -> list[Reading]:
         self.read_calls += 1
-        return [Reading.now("CH1", 4.2, "K")]
+        return [Reading.now("CH1", 4.2, "K", instrument_id="test")]
 
 
 # ---------------------------------------------------------------------------

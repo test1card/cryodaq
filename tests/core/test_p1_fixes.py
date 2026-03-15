@@ -61,7 +61,7 @@ async def _feed(
     status: ChannelStatus = ChannelStatus.OK,
 ) -> None:
     """Publish one Reading to the broker and yield to the collect loop."""
-    r = Reading.now(channel=channel, value=value, unit=unit, status=status)
+    r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test", status=status)
     await broker.publish(r)
     await asyncio.sleep(0.02)
 
@@ -89,11 +89,11 @@ def _reading(
     timestamp = ts or datetime.now(timezone.utc)
     return Reading(
         timestamp=timestamp,
+        instrument_id=instrument_id,
         channel=channel,
         value=value,
         unit=unit,
         status=status,
-        metadata={"instrument_id": instrument_id},
     )
 
 

@@ -188,7 +188,7 @@ class TelegramCommandBot:
 
         instruments: dict[str, int] = {}
         for ch, r in self._latest.items():
-            inst = r.metadata.get("instrument_id", "")
+            inst = r.instrument_id or ""
             if inst:
                 instruments[inst] = instruments.get(inst, 0) + 1
 

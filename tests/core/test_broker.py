@@ -16,7 +16,7 @@ from cryodaq.drivers.base import Reading
 
 
 def _reading(channel: str = "CH1", value: float = 4.5, unit: str = "K") -> Reading:
-    return Reading.now(channel, value, unit)
+    return Reading.now(channel, value, unit, instrument_id="test")
 
 
 # ---------------------------------------------------------------------------
