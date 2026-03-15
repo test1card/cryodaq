@@ -21,6 +21,8 @@ from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import aiohttp
+
 if TYPE_CHECKING:
     from cryodaq.core.alarm import AlarmEngine
     from cryodaq.core.broker import DataBroker
@@ -88,6 +90,7 @@ class PeriodicReporter:
         self._queue: asyncio.Queue | None = None
         self._collect_task: asyncio.Task | None = None
         self._report_task: asyncio.Task | None = None
+        self._session: aiohttp.ClientSession | None = None
 
     # ------------------------------------------------------------------
     # Жизненный цикл
@@ -112,6 +115,13 @@ class PeriodicReporter:
             self._buffer_maxlen,
         )
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self._timeout_s)
+            )
+        return self._session
+
     async def stop(self) -> None:
         """Остановить задачи и отписаться от DataBroker."""
         for task in (self._collect_task, self._report_task):
@@ -124,6 +134,10 @@ class PeriodicReporter:
 
         self._collect_task = None
         self._report_task = None
+
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
         await self._broker.unsubscribe(_SUBSCRIPTION_NAME)
         self._queue = None
@@ -443,42 +457,32 @@ class PeriodicReporter:
         Использует aiohttp multipart FormData.
         """
         try:
-            import aiohttp
-        except ImportError:
-            logger.error(
-                "Библиотека aiohttp не установлена — "
-                "Telegram-отчёты недоступны. Установите: pip install aiohttp"
+            session = await self._get_session()
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(self._chat_id))
+            form.add_field(
+                "photo",
+                png_data,
+                filename="report.png",
+                content_type="image/png",
             )
-            return
+            form.add_field("caption", caption[:1024])  # Telegram лимит 1024 символа
+            form.add_field("parse_mode", "HTML")
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=self._timeout_s)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                form = aiohttp.FormData()
-                form.add_field("chat_id", str(self._chat_id))
-                form.add_field(
-                    "photo",
-                    png_data,
-                    filename="report.png",
-                    content_type="image/png",
-                )
-                form.add_field("caption", caption[:1024])  # Telegram лимит 1024 символа
-                form.add_field("parse_mode", "HTML")
-
-                async with session.post(self._api_url, data=form) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error(
-                            "Telegram API вернул %d при отправке фото: %s",
-                            resp.status,
-                            body[:300],
-                        )
-                    else:
-                        logger.info(
-                            "Периодический отчёт отправлен в Telegram "
-                            "(каналов: %d, PNG: %d байт)",
-                            len(self._buffers),
-                            len(png_data),
-                        )
+            async with session.post(self._api_url, data=form) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        "Telegram API вернул %d при отправке фото: %s",
+                        resp.status,
+                        body[:300],
+                    )
+                else:
+                    logger.info(
+                        "Периодический отчёт отправлен в Telegram "
+                        "(каналов: %d, PNG: %d байт)",
+                        len(self._buffers),
+                        len(png_data),
+                    )
         except Exception as exc:
             logger.error("Ошибка отправки периодического отчёта в Telegram: %s", exc)

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def _pressure_color(value: float) -> str:
 def _disk_free_gb() -> float:
     """Свободное место на диске data/ (или C:) в ГБ."""
     try:
-        usage = shutil.disk_usage(Path("data") if Path("data").exists() else Path("."))
+        usage = shutil.disk_usage(get_data_dir())
         return usage.free / (1024 ** 3)
     except Exception:
         return -1.0

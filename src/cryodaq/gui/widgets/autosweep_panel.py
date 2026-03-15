@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
-from cryodaq.gui.widgets.keithley_panel import _send_command
+from cryodaq.gui.zmq_client import send_command
+from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,20 @@ class AutoSweepPanel(QWidget):
         self._max_wait.setRange(1, 180)
         self._max_wait.setValue(30)
         pl.addWidget(self._max_wait, 5, 1)
+
+        pl.addWidget(QLabel("V пред. (В):"), 6, 0)
+        self._v_comp_spin = QDoubleSpinBox()
+        self._v_comp_spin.setRange(0.1, 40.0)
+        self._v_comp_spin.setValue(10.0)
+        self._v_comp_spin.setDecimals(1)
+        pl.addWidget(self._v_comp_spin, 6, 1)
+
+        pl.addWidget(QLabel("I пред. (А):"), 7, 0)
+        self._i_comp_spin = QDoubleSpinBox()
+        self._i_comp_spin.setRange(0.001, 3.0)
+        self._i_comp_spin.setValue(0.1)
+        self._i_comp_spin.setDecimals(3)
+        pl.addWidget(self._i_comp_spin, 7, 1)
 
         left.addWidget(power_box)
 
@@ -363,7 +378,7 @@ class AutoSweepPanel(QWidget):
     def _on_stop(self) -> None:
         self._running = False
         self._paused = False
-        _send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
+        send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
         self._stop_btn.setEnabled(False)
@@ -387,12 +402,12 @@ class AutoSweepPanel(QWidget):
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=5.0)
 
         # Send command
-        reply = _send_command({
+        reply = send_command({
             "cmd": "keithley_start",
             "channel": self._smu_channel,
             "p_target": p,
-            "v_comp": 40.0,
-            "i_comp": 3.0,
+            "v_comp": self._v_comp_spin.value(),
+            "i_comp": self._i_comp_spin.value(),
         })
         logger.info(
             "Автоизмерение: шаг %d/%d, P=%.4f Вт, ответ: %s",
@@ -401,7 +416,7 @@ class AutoSweepPanel(QWidget):
 
     def _finish_sweep(self) -> None:
         self._running = False
-        _send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
+        send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
         self._stop_btn.setEnabled(False)
@@ -550,7 +565,7 @@ class AutoSweepPanel(QWidget):
         date_str = now.strftime("%Y-%m-%d_%H%M")
 
         # Create directory
-        sweep_dir = Path("data") / "sweeps"
+        sweep_dir = get_data_dir() / "sweeps"
         sweep_dir.mkdir(parents=True, exist_ok=True)
 
         base = f"{date_str}_{material}"

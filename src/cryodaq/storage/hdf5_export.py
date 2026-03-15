@@ -29,6 +29,8 @@ from typing import Any
 
 import h5py
 
+from cryodaq.storage.sqlite_writer import _parse_timestamp
+
 logger = logging.getLogger(__name__)
 
 
@@ -125,7 +127,7 @@ class HDF5Exporter:
                 row["timestamp"], row["instrument_id"], row["channel"],
                 row["value"], row["unit"], row["status"],
             )
-            ts = _parse_iso_timestamp(ts_str)
+            ts = _parse_timestamp(ts_str).timestamp()
             data.setdefault(inst_id, {}).setdefault(
                 channel, _ChannelData(unit=unit)
             ).append(ts, value)
@@ -162,7 +164,7 @@ class HDF5Exporter:
         powers: list[float] = []
 
         for row in rows:
-            timestamps.append(_parse_iso_timestamp(row["timestamp"]))
+            timestamps.append(_parse_timestamp(row["timestamp"]).timestamp())
             channels.append(row["channel"] or "")
             voltages.append(row["voltage"] if row["voltage"] is not None else float("nan"))
             currents.append(row["current"] if row["current"] is not None else float("nan"))
@@ -226,17 +228,6 @@ class _ChannelData:
     def append(self, ts: float, value: float) -> None:
         self.timestamps.append(ts)
         self.values.append(value)
-
-
-def _parse_iso_timestamp(ts_str: str) -> float:
-    """Разобрать ISO-строку в POSIX timestamp (float)."""
-    try:
-        dt = datetime.fromisoformat(ts_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except (ValueError, TypeError):
-        return 0.0
 
 
 def _sanitize_name(name: str) -> str:

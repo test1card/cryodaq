@@ -9,6 +9,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cryodaq.storage.sqlite_writer import _parse_timestamp
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,13 +117,12 @@ class XLSXExporter:
 
         row_num = 2
         for ts_str in sorted(by_time.keys()):
-            # Разобрать ISO-строку в datetime для Excel
+            # Разобрать REAL или ISO-строку в datetime для Excel
             try:
-                dt = datetime.fromisoformat(ts_str)
-                if dt.tzinfo is not None:
-                    # Excel не понимает offset-aware datetime — приводим к UTC naive
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            except ValueError:
+                dt = _parse_timestamp(ts_str)
+                # Excel не понимает offset-aware datetime — приводим к UTC naive
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            except (ValueError, TypeError, OSError):
                 dt = ts_str  # fallback: оставить как строку
 
             ts_cell = ws_data.cell(row=row_num, column=1, value=dt)
@@ -226,10 +227,10 @@ class XLSXExporter:
 
             if start is not None:
                 conditions.append("timestamp >= ?")
-                params.append(start.isoformat())
+                params.append(start.timestamp())
             if end is not None:
                 conditions.append("timestamp < ?")
-                params.append(end.isoformat())
+                params.append(end.timestamp())
             if channels:
                 placeholders = ",".join("?" * len(channels))
                 conditions.append(f"channel IN ({placeholders})")

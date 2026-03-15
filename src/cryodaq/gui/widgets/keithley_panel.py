@@ -6,13 +6,11 @@ SMU канал smua (smub planned): управление, графики (V, I, 
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections import deque
 
 import pyqtgraph as pg
-import zmq
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -27,8 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.zmq_bridge import DEFAULT_CMD_ADDR
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +46,6 @@ _SMU_COLORS = {
 }
 
 
-def _send_command(cmd: dict) -> dict:
-    """Отправить команду на engine через ZMQ REQ (синхронно, с таймаутом)."""
-    ctx = zmq.Context.instance()
-    sock = ctx.socket(zmq.REQ)
-    sock.setsockopt(zmq.RCVTIMEO, 3000)
-    sock.setsockopt(zmq.SNDTIMEO, 3000)
-    sock.setsockopt(zmq.LINGER, 0)
-    try:
-        sock.connect(DEFAULT_CMD_ADDR)
-        sock.send(json.dumps(cmd).encode())
-        reply = json.loads(sock.recv().decode())
-        return reply
-    except Exception as exc:
-        logger.error("Ошибка отправки команды: %s", exc)
-        return {"ok": False, "error": str(exc)}
-    finally:
-        sock.close()
-
-
 class _SmuTab(QWidget):
     """Вкладка одного SMU-канала: управление + 4 графика + значения."""
 
@@ -80,6 +59,7 @@ class _SmuTab(QWidget):
         self._value_labels: dict[str, QLabel] = {}
         self._plots: dict[str, pg.PlotDataItem] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
+        self._workers: list[ZmqCommandWorker] = []  # prevent GC of active workers
 
         self._build_ui(colors)
 
@@ -171,15 +151,16 @@ class _SmuTab(QWidget):
         stop_btn.clicked.connect(self._on_stop)
         cl.addWidget(stop_btn)
 
-        emg_btn = QPushButton("АВАРИЙНОЕ ОТКЛ.")
-        emg_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        emg_btn.setStyleSheet(
+        self._emg_btn = QPushButton("АВАРИЙНОЕ ОТКЛ.")
+        self._emg_btn.setFont(QFont("", 10, QFont.Weight.Bold))
+        self._emg_btn.setStyleSheet(
             "QPushButton { background: #da3633; color: white; border: 2px solid #f85149; "
             "border-radius: 4px; padding: 8px 18px; }"
             "QPushButton:hover { background: #f85149; }"
+            "QPushButton:disabled { background: #555; border-color: #888; }"
         )
-        emg_btn.clicked.connect(self._on_emergency)
-        cl.addWidget(emg_btn)
+        self._emg_btn.clicked.connect(self._on_emergency)
+        cl.addWidget(self._emg_btn)
 
         root.addWidget(ctrl)
 
@@ -258,7 +239,7 @@ class _SmuTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start(self) -> None:
-        reply = _send_command({
+        reply = send_command({
             "cmd": "keithley_start",
             "channel": self._smu,
             "p_target": self._p_spin.value(),
@@ -269,15 +250,27 @@ class _SmuTab(QWidget):
             logger.warning("Keithley start failed: %s", reply.get("error"))
 
     def _on_stop(self) -> None:
-        reply = _send_command({"cmd": "keithley_stop", "channel": self._smu})
+        reply = send_command({"cmd": "keithley_stop", "channel": self._smu})
         if not reply.get("ok"):
             logger.warning("Keithley stop failed: %s", reply.get("error"))
 
     def _on_emergency(self) -> None:
-        # No confirmation — immediate action
-        reply = _send_command({"cmd": "keithley_emergency_off"})
-        if not reply.get("ok"):
-            logger.error("Emergency off failed: %s", reply.get("error"))
+        # Немедленная визуальная обратная связь — кнопку заблокировать
+        self._emg_btn.setEnabled(False)
+        self._emg_btn.setText("ОТКЛ...")
+        worker = ZmqCommandWorker({"cmd": "keithley_emergency_off"})
+        worker.finished.connect(self._on_emergency_result)
+        self._workers.append(worker)  # prevent GC
+        worker.start()
+
+    def _on_emergency_result(self, result: dict) -> None:
+        # Восстановить кнопку
+        self._emg_btn.setEnabled(True)
+        self._emg_btn.setText("АВАРИЙНОЕ ОТКЛ.")
+        if not result.get("ok"):
+            logger.error("Emergency off failed: %s", result.get("error"))
+        # Удалить завершённый worker из списка
+        self._workers = [w for w in self._workers if w.isRunning()]
 
     # ------------------------------------------------------------------
     # Data

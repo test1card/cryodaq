@@ -33,13 +33,15 @@ from fastapi.staticfiles import StaticFiles
 
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
+from cryodaq.paths import get_data_dir
+from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
 # Директория с файлами данных SQLite (data_YYYY-MM-DD.db)
-_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
+_DATA_DIR = get_data_dir()
 
 # ---------------------------------------------------------------------------
 # Глобальное состояние сервера
@@ -190,7 +192,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
         return {}
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    cutoff_iso = cutoff.isoformat()
+    cutoff_epoch = cutoff.timestamp()
 
     result: dict[str, list[dict[str, Any]]] = {}
     try:
@@ -200,7 +202,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
             rows = conn.execute(
                 "SELECT timestamp, channel, value, unit FROM readings "
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
-                (cutoff_iso,),
+                (cutoff_epoch,),
             ).fetchall()
         finally:
             conn.close()
@@ -212,8 +214,9 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
         ch = row["channel"]
         if ch not in result:
             result[ch] = []
+        ts = _parse_timestamp(row["timestamp"])
         result[ch].append({
-            "t": row["timestamp"],
+            "t": ts.isoformat(),
             "v": row["value"],
             "u": row["unit"],
         })

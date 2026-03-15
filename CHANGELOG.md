@@ -7,6 +7,24 @@
 
 ---
 
+## [0.10.0] — 2026-03-15
+
+### P1 Lab Deployment Fixes (8 defects)
+
+- **P1-01: Async ZMQ** — `zmq_client.py` with persistent socket + `ZmqCommandWorker(QThread)` for non-blocking emergency off; keithley_panel and autosweep share zmq_client
+- **P1-02: AutoSweep compliance** — V_comp (default 10V) and I_comp (default 0.1A) spinboxes added; hardcoded 40V/3A removed
+- **P1-03: Heartbeat regex** — configurable `keithley_channels` patterns from safety.yaml; checks both freshness AND status (SENSOR_ERROR ≠ fresh)
+- **P1-04: Centralized paths** — `paths.py` with `get_data_dir()`; all `Path("data")` replaced (main_window, autosweep, overview, web/server)
+- **P1-05: Experiment menu** — dialog with name/operator/sample/description → ZMQ command → ExperimentManager in engine
+- **P1-06: Persistent aiohttp** — `_get_session()` + `close()` in TelegramNotifier, TelegramCommandBot, PeriodicReporter
+- **P1-07: SQLite REAL timestamp** — new DBs use `REAL` (epoch float); `_parse_timestamp()` handles both REAL and legacy TEXT
+- **P1-08: Composite index** — `idx_channel_ts ON readings (channel, timestamp)`
+
+### Статистика
+- 236 тестов, ~24 000 строк
+
+---
+
 ## [0.9.0] — 2026-03-15
 
 ### P0 Critical Fixes (external audit — 5 defects)

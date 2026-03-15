@@ -36,3 +36,7 @@ source_limits:
   max_power_w: 5.0
   max_voltage_v: 40.0
   max_current_a: 1.0
+
+# Регулярные выражения для определения каналов Keithley (heartbeat check)
+keithley_channels:
+  - ".*/smu.*"

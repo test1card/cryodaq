@@ -240,8 +240,8 @@ class AlarmPanel(QWidget):
 
     def _acknowledge(self, alarm_name: str) -> None:
         """Send acknowledge to engine via ZMQ."""
-        from cryodaq.gui.widgets.keithley_panel import _send_command
-        reply = _send_command({"cmd": "alarm_acknowledge", "alarm_name": alarm_name})
+        from cryodaq.gui.zmq_client import send_command
+        reply = send_command({"cmd": "alarm_acknowledge", "alarm_name": alarm_name})
         if reply.get("ok"):
             logger.info("Тревога '%s' подтверждена через engine", alarm_name)
         else:

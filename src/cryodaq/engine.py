@@ -30,6 +30,7 @@ import yaml
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
+from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
@@ -46,10 +47,12 @@ logger = logging.getLogger("cryodaq.engine")
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(os.environ["CRYODAQ_ROOT"]) if "CRYODAQ_ROOT" in os.environ else Path(__file__).resolve().parent.parent.parent
-_CONFIG_DIR = _PROJECT_ROOT / "config"
+from cryodaq.paths import get_project_root, get_data_dir, get_config_dir
+
+_PROJECT_ROOT = get_project_root()
+_CONFIG_DIR = get_config_dir()
 _PLUGINS_DIR = _PROJECT_ROOT / "plugins"
-_DATA_DIR = _PROJECT_ROOT / "data"
+_DATA_DIR = get_data_dir()
 
 # Интервал самодиагностики (секунды)
 _WATCHDOG_INTERVAL_S = 30.0
@@ -265,6 +268,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.warning("Файл блокировок не найден: %s", interlocks_cfg)
 
+    # ExperimentManager
+    experiment_manager = ExperimentManager(data_dir=_DATA_DIR, instruments_config=instruments_cfg)
+
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
@@ -290,6 +296,23 @@ async def _run_engine(*, mock: bool = False) -> None:
                     await alarm_engine._publish_alarm_count()
                     return {"ok": True, "action": "alarm_acknowledge"}
                 except (KeyError, ValueError) as exc:
+                    return {"ok": False, "error": str(exc)}
+            if action == "experiment_start":
+                try:
+                    exp_id = experiment_manager.start_experiment(
+                        name=cmd.get("name", ""),
+                        operator=cmd.get("operator", ""),
+                        sample=cmd.get("sample", ""),
+                        description=cmd.get("description", ""),
+                    )
+                    return {"ok": True, "experiment_id": exp_id}
+                except RuntimeError as exc:
+                    return {"ok": False, "error": str(exc)}
+            if action == "experiment_stop":
+                try:
+                    experiment_manager.stop_experiment()
+                    return {"ok": True}
+                except RuntimeError as exc:
                     return {"ok": False, "error": str(exc)}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:

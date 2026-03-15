@@ -71,7 +71,7 @@ uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # web
 
 # Тесты
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # модель cooldown
-pytest tests/ -v                 # 217 тестов
+pytest tests/ -v                 # 236 тестов
 ruff check src/ tests/           # линтинг
 ```
 
@@ -239,7 +239,7 @@ tests/                           — 217 тестов (25 файлов)
 |---------|----------|
 | Python-файлов | **96** |
 | Строк Python | **22 700+** |
-| Тестов | **217** (все проходят) |
+| Тестов | **236** (все проходят) |
 | Приборов (mock) | **5** (3× LakeShore + Keithley + Thyracont) |
 | Каналов данных | **29** (24 температуры + 4 Keithley + 1 давление) |
 | GUI вкладок | **7** (была 8 — Температуры+Давление объединены в «Обзор») |

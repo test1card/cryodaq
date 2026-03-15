@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 SCHEMA_READINGS = """
 CREATE TABLE IF NOT EXISTS readings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp   TEXT    NOT NULL,
+    timestamp   REAL    NOT NULL,
     instrument_id TEXT  NOT NULL,
     channel     TEXT    NOT NULL,
     value       REAL    NOT NULL,
@@ -52,6 +52,17 @@ CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (timestamp);
 INDEX_SOURCE_DATA_TS = """
 CREATE INDEX IF NOT EXISTS idx_source_data_ts ON source_data (timestamp);
 """
+
+INDEX_CHANNEL_TS = """
+CREATE INDEX IF NOT EXISTS idx_channel_ts ON readings (channel, timestamp);
+"""
+
+
+def _parse_timestamp(raw) -> datetime:
+    """Parse timestamp from REAL (float) or legacy TEXT (isoformat)."""
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+    return datetime.fromisoformat(str(raw))
 
 
 class SQLiteWriter:
@@ -102,6 +113,7 @@ class SQLiteWriter:
         conn.execute(SCHEMA_SOURCE_DATA)
         conn.execute(INDEX_READINGS_TS)
         conn.execute(INDEX_SOURCE_DATA_TS)
+        conn.execute(INDEX_CHANNEL_TS)
         conn.commit()
         self._conn = conn
         self._current_date = day
@@ -116,7 +128,7 @@ class SQLiteWriter:
         conn = self._ensure_connection(day)
         rows = [
             (
-                r.timestamp.isoformat(),
+                r.timestamp.timestamp(),
                 r.metadata.get("instrument_id", "unknown"),
                 r.channel,
                 r.value,

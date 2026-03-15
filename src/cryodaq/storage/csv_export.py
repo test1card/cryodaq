@@ -12,6 +12,8 @@ import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from cryodaq.storage.sqlite_writer import _parse_timestamp
+
 logger = logging.getLogger(__name__)
 
 
@@ -145,10 +147,10 @@ class CSVExporter:
 
             if start is not None:
                 conditions.append("timestamp >= ?")
-                params.append(start.isoformat())
+                params.append(start.timestamp())
             if end is not None:
                 conditions.append("timestamp < ?")
-                params.append(end.isoformat())
+                params.append(end.timestamp())
             if channels:
                 placeholders = ",".join("?" * len(channels))
                 conditions.append(f"channel IN ({placeholders})")
@@ -165,8 +167,9 @@ class CSVExporter:
             cursor = conn.execute(query, params)
             count = 0
             for row in cursor:
+                ts = _parse_timestamp(row["timestamp"])
                 writer.writerow([
-                    row["timestamp"],
+                    ts.isoformat(),
                     row["instrument_id"],
                     row["channel"],
                     row["value"],

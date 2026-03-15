@@ -99,6 +99,7 @@ class SafetyConfig:
     max_power_w: float = 5.0
     max_voltage_v: float = 40.0
     max_current_a: float = 1.0
+    keithley_channel_patterns: list[str] = field(default_factory=lambda: [".*/smu.*"])
 
 
 class SafetyManager:
@@ -135,6 +136,11 @@ class SafetyManager:
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._collect_task: asyncio.Task[None] | None = None
+
+        # Compiled regex patterns for Keithley channel matching (from config defaults)
+        self._keithley_patterns: list[re.Pattern] = [
+            re.compile(p) for p in self._config.keithley_channel_patterns
+        ]
 
         # Callbacks для уведомлений (GUI, Telegram)
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
@@ -178,6 +184,11 @@ class SafetyManager:
             max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
             max_current_a=float(src_limits.get("max_current_a", 1.0)),
         )
+
+        # Compile Keithley channel patterns for heartbeat check
+        kp = raw.get("keithley_channels", [".*/smu.*"])
+        self._keithley_patterns = [re.compile(p) for p in kp]
+
         logger.info(
             "SafetyManager: конфигурация загружена. Критических каналов: %d, stale=%.0fs",
             len(self._config.critical_channels),
@@ -564,9 +575,9 @@ class SafetyManager:
         # 3. Keithley heartbeat: if source is ON, Keithley must be sending data
         if self._keithley is not None and not self._mock:
             keithley_fresh = False
-            for ch, (ts, _val, _status) in self._latest.items():
-                if "/smu" in ch:  # Keithley channel
-                    if now - ts < self._config.heartbeat_timeout_s:
+            for ch, (ts, _val, status) in self._latest.items():
+                if any(p.match(ch) for p in self._keithley_patterns):
+                    if now - ts < self._config.heartbeat_timeout_s and status == "ok":
                         keithley_fresh = True
                         break
             if not keithley_fresh:

@@ -19,6 +19,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class TelegramNotifier:
         self._send_cleared = send_cleared
         self._timeout_s = timeout_s
         self._api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self._session: aiohttp.ClientSession | None = None
 
     @classmethod
     def from_config(cls, config_path: Path) -> TelegramNotifier:
@@ -169,21 +171,24 @@ class TelegramNotifier:
     # Отправка HTTP-запроса
     # ------------------------------------------------------------------
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self._timeout_s)
+            )
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     async def _send(self, text: str) -> None:
         """Отправить сообщение через Telegram Bot API.
 
         Использует aiohttp для асинхронной отправки.  При недоступности
         библиотеки или ошибке сети — логирует и продолжает работу.
         """
-        try:
-            import aiohttp
-        except ImportError:
-            logger.error(
-                "Библиотека aiohttp не установлена — Telegram-уведомления недоступны. "
-                "Установите: pip install aiohttp"
-            )
-            return
-
         payload = {
             "chat_id": self._chat_id,
             "text": text,
@@ -192,15 +197,14 @@ class TelegramNotifier:
         }
 
         try:
-            timeout = aiohttp.ClientTimeout(total=self._timeout_s)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(self._api_url, json=payload) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error(
-                            "Telegram API ответил %d: %s", resp.status, body[:200],
-                        )
-                    else:
-                        logger.debug("Telegram-уведомление отправлено: %s", text[:80])
+            session = await self._get_session()
+            async with session.post(self._api_url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        "Telegram API ответил %d: %s", resp.status, body[:200],
+                    )
+                else:
+                    logger.debug("Telegram-уведомление отправлено: %s", text[:80])
         except Exception as exc:
             logger.error("Ошибка отправки Telegram-уведомления: %s", exc)

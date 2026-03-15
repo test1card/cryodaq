@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 from PySide6.QtCore import QTimer, Signal, Slot
 from PySide6.QtGui import QAction
@@ -27,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.paths import get_data_dir
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
@@ -268,7 +268,7 @@ class MainWindow(QMainWindow):
             try:
                 from cryodaq.storage.csv_export import CSVExporter
 
-                exporter = CSVExporter(data_dir=Path("data"))
+                exporter = CSVExporter(data_dir=get_data_dir())
                 count = exporter.export(Path(path))
                 QMessageBox.information(
                     self, "Экспорт CSV", f"Экспортировано {count} записей",
@@ -285,7 +285,7 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         from cryodaq.storage.hdf5_export import HDF5Exporter
-        data_dir = Path("data")
+        data_dir = get_data_dir()
         exporter = HDF5Exporter()
         total = 0
         for db_file in sorted(data_dir.glob("data_*.db")):
@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         from cryodaq.storage.xlsx_export import XLSXExporter
-        exporter = XLSXExporter(Path("data"))
+        exporter = XLSXExporter(get_data_dir())
         try:
             count = exporter.export(Path(path))
             QMessageBox.information(self, "Excel", f"Экспортировано: {count} записей")
@@ -308,15 +308,59 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_start_experiment(self) -> None:
-        self._start_action.setEnabled(False)
-        self._stop_action.setEnabled(True)
-        logger.info("Эксперимент: запись начата")
+        from PySide6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QLineEdit,
+            QTextEdit,
+        )
+
+        from cryodaq.gui.zmq_client import send_command
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Начать эксперимент")
+        layout = QFormLayout(dialog)
+
+        name_edit = QLineEdit()
+        operator_edit = QLineEdit()
+        sample_edit = QLineEdit()
+        desc_edit = QTextEdit()
+        desc_edit.setMaximumHeight(80)
+
+        layout.addRow("Название:", name_edit)
+        layout.addRow("Оператор:", operator_edit)
+        layout.addRow("Образец:", sample_edit)
+        layout.addRow("Описание:", desc_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            result = send_command({
+                "cmd": "experiment_start",
+                "name": name_edit.text(),
+                "operator": operator_edit.text(),
+                "sample": sample_edit.text(),
+                "description": desc_edit.toPlainText(),
+            })
+            if result.get("ok"):
+                self._start_action.setEnabled(False)
+                self._stop_action.setEnabled(True)
+            else:
+                QMessageBox.warning(self, "Ошибка", result.get("error", ""))
 
     @Slot()
     def _on_stop_experiment(self) -> None:
+        from cryodaq.gui.zmq_client import send_command
+
+        result = send_command({"cmd": "experiment_stop"})
+        if not result.get("ok"):
+            logger.warning("Experiment stop failed: %s", result.get("error"))
         self._start_action.setEnabled(True)
         self._stop_action.setEnabled(False)
-        logger.info("Эксперимент: запись остановлена")
 
     @Slot()
     def _on_channel_editor(self) -> None:

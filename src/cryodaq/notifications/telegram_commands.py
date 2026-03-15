@@ -13,6 +13,8 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
+
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
@@ -67,12 +69,20 @@ class TelegramCommandBot:
         self._collect_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Reading] | None = None
+        self._session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
         self._queue = await self._broker.subscribe(_SUBSCRIBE_NAME, maxsize=5000)
         self._collect_task = asyncio.create_task(self._collect_loop(), name="tg_cmd_collect")
         self._poll_task = asyncio.create_task(self._poll_loop(), name="tg_cmd_poll")
         logger.info("TelegramCommandBot запущен")
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            )
+        return self._session
 
     async def stop(self) -> None:
         for task in (self._collect_task, self._poll_task):
@@ -84,6 +94,9 @@ class TelegramCommandBot:
                     pass
         self._collect_task = None
         self._poll_task = None
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
         await self._broker.unsubscribe(_SUBSCRIBE_NAME)
         logger.info("TelegramCommandBot остановлен")
 
@@ -106,12 +119,6 @@ class TelegramCommandBot:
 
     async def _poll_loop(self) -> None:
         try:
-            import aiohttp
-        except ImportError:
-            logger.error("aiohttp не установлен — Telegram-бот не работает")
-            return
-
-        try:
             while True:
                 try:
                     await self._fetch_updates()
@@ -122,18 +129,16 @@ class TelegramCommandBot:
             return
 
     async def _fetch_updates(self) -> None:
-        import aiohttp
-
         url = f"{self._api}/getUpdates"
         params: dict[str, Any] = {"timeout": 5}
         if self._last_update_id:
             params["offset"] = self._last_update_id + 1
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return
-                data = await resp.json()
+        session = await self._get_session()
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return
+            data = await resp.json()
 
         if not data.get("ok"):
             return
@@ -280,18 +285,16 @@ class TelegramCommandBot:
 
     async def _send(self, chat_id: int, text: str) -> None:
         try:
-            import aiohttp
-
             payload = {
                 "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             }
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
+            session = await self._get_session()
+            async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)

@@ -16,6 +16,7 @@ from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -180,10 +181,10 @@ class ReplaySource:
 
             if start is not None:
                 conditions.append("timestamp >= ?")
-                params.append(start.isoformat())
+                params.append(start.timestamp())
             if end is not None:
                 conditions.append("timestamp < ?")
-                params.append(end.isoformat())
+                params.append(end.timestamp())
             if channels:
                 placeholders = ",".join("?" * len(channels))
                 conditions.append(f"channel IN ({placeholders})")
@@ -197,13 +198,11 @@ class ReplaySource:
             result: list[tuple[float, str, float, str, str, str]] = []
 
             for row in cursor:
-                ts_str, channel, value, unit, status, inst_id = row
+                ts_raw, channel, value, unit, status, inst_id = row
                 try:
-                    dt = datetime.fromisoformat(ts_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt = _parse_timestamp(ts_raw)
                     ts_posix = dt.timestamp()
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, OSError):
                     continue
                 result.append((ts_posix, channel, value, unit, status, inst_id or "unknown"))
 
