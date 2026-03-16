@@ -233,7 +233,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
-        version="0.1.0",
+        version="0.11.0rc1",
     )
 
     _zmq_task: asyncio.Task[None] | None = None

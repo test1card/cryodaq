@@ -195,7 +195,7 @@
 
 ### Добавлено
 - **Keithley 2604B driver** — USB-TMC, TSP/Lua supervisor, heartbeat, emergency_off
-- **TSP script** `p_const_single.lua` — P=const feedback loop, watchdog 30с, compliance
+- **TSP script** `p_const.lua` — P=const feedback loop for `smua`/`smub`, watchdog 30с, compliance
 - **Вкладка Keithley** — smua/smub: V/I/R/P графики + управление
 - **PluginPipeline** — hot-reload .py из plugins/, watchdog filesystem events, error isolation
 - **ThermalCalculator plugin** — R_thermal = (T_hot - T_cold) / P

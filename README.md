@@ -1,17 +1,17 @@
 # CryoDAQ
 
-CryoDAQ is a Python-based DAQ and control system for the cryogenic laboratory of AKTs FIAN (Millimetron project). The current release candidate already includes runtime control, safety/alarm handling, experiment metadata, operator log, report generation, archive browsing, calibration backend + GUI, housekeeping, and desktop GUI integration with tray status.
+CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Ветка `CRYODAQ-CODEX` отражает текущее release-candidate состояние с уже реализованными experiment/report/archive/operator-log/calibration/housekeeping/tray workflow.
 
-## Current system shape
+## Текущая форма системы
 
-- `cryodaq-engine` is the headless runtime process. It polls instruments, evaluates alarms/interlocks, writes data, and serves GUI commands.
-- `cryodaq-gui` is a separate desktop client. It can be restarted without stopping acquisition.
-- `cryodaq` is the launcher path for operator use on Windows.
-- Optional web access is available through `cryodaq.web.server:app`.
+- `cryodaq-engine` — headless runtime-процесс. Он опрашивает приборы, проверяет safety/alarm/interlock-логику, пишет данные и обслуживает GUI-команды.
+- `cryodaq-gui` — отдельный настольный клиент. Его можно перезапускать без остановки сбора данных.
+- `cryodaq` — операторский launcher для Windows.
+- `cryodaq.web.server:app` — опциональный web-доступ для мониторинга.
 
-### Main GUI tabs
+## GUI
 
-The current `MainWindow` contains 10 operator-facing tabs:
+`MainWindow` сейчас содержит 10 операторских вкладок:
 
 1. `Обзор`
 2. `Keithley 2604B`
@@ -24,49 +24,63 @@ The current `MainWindow` contains 10 operator-facing tabs:
 9. `Калибровка`
 10. `Приборы`
 
-The window also contains:
+Также в окне есть:
 
-- menu `Файл` with CSV / HDF5 / Excel export
-- menu `Эксперимент` with experiment start/finalize actions
-- menu `Настройки` with channel editor and instrument connection settings
-- status bar with connection, uptime, and rate
-- Windows tray integration with conservative `healthy / warning / fault` mapping
+- меню `Файл` с экспортом CSV / HDF5 / Excel
+- меню `Эксперимент` со стартом и завершением эксперимента
+- меню `Настройки` с редактором каналов и настройками подключений приборов
+- строка состояния с соединением, uptime и скоростью потока данных
+- системный tray со статусами `healthy / warning / fault`
 
-## Implemented workflow blocks
+Tray не показывает `healthy`, если у GUI нет достаточной backend-truth информации. `fault` выставляется при unresolved alarms или safety-state `fault` / `fault_latched`.
 
-- Safety and alarm pipeline with acknowledge/clear publish path
-- Backend-truth-driven GUI safety/alarm/status behavior
-- Dual-channel Keithley 2604B runtime for `smua`, `smub`, and `smua + smub`
-- Operator log persisted to SQLite and available in GUI / command path
-- Experiment templates and lifecycle metadata with artifact folders
-- Report generator MVP with template-selected modular sections
-- Archive GUI for browsing stored experiments and report artifacts
-- Housekeeping with conservative adaptive throttle and retention/compression policy
-- Calibration backend:
+## Реализованные workflow-блоки
+
+- safety/alarm pipeline с acknowledge/clear publish path
+- backend-driven GUI для safety/alarm/status
+- dual-channel Keithley 2604B runtime для `smua`, `smub` и `smua + smub`
+- журнал оператора в SQLite с GUI и command access
+- experiment templates, lifecycle metadata и artifact folders
+- шаблонно-управляемая генерация отчётов
+- архив экспериментов с просмотром артефактов и повторной генерацией отчёта
+- housekeeping с conservative adaptive throttle и retention/compression policy
+- calibration backend:
   - LakeShore raw/SRDG acquisition
   - calibration sessions
-  - multi-zone Chebyshev fitting
+  - multi-zone Chebyshev fit
   - JSON/CSV export/import
-- Calibration GUI for session capture, fit, and export
+- calibration GUI для capture / fit / export
 
-## Installation
+## Установка
 
-### Requirements
+### Требования
 
-- Windows 10/11 or Linux
+- Windows 10/11 или Linux
 - Python `>=3.12`
 - Git
-- Instrument drivers / VISA backend as required by the hardware stack
+- VISA backend / драйверы, необходимые для фактического набора приборов
 
-### Python package install
+### Установка Python-пакета
 
 ```bash
 pip install -e ".[dev,web]"
 ```
 
-Supported local development and test flow assumes the package is installed from the repository root into the active environment. Running `pytest` against an arbitrary unpacked source tree without installing CryoDAQ first is not a supported path.
+Минимальная runtime-установка без dev/web extras:
 
-Key declared runtime dependencies include:
+```bash
+pip install -e .
+```
+
+Если нужен только web dashboard, используйте:
+
+```bash
+pip install -e ".[web]"
+```
+
+Поддерживаемый локальный dev/test workflow предполагает установку пакета из корня репозитория в активное окружение. Запуск `pytest` по произвольной распакованной копии исходников без `pip install -e ...` не считается поддерживаемым сценарием.
+
+Ключевые runtime-зависимости из `pyproject.toml`:
 
 - `PySide6`
 - `pyqtgraph`
@@ -78,21 +92,24 @@ Key declared runtime dependencies include:
 - `matplotlib`
 - `openpyxl`
 
-## Launch
+## Запуск
 
-Recommended manual startup order:
+Рекомендуемый ручной порядок запуска:
 
 ```bash
 cryodaq-engine
 cryodaq-gui
 ```
 
-Optional paths:
+Дополнительные пути:
 
 ```bash
-cryodaq                 # operator launcher
+cryodaq
 uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
 ```
+
+Команда `uvicorn cryodaq.web.server:app` относится к optional web-path и требует установленного extra `web`
+(или полного dev/test install path `.[dev,web]`).
 
 Mock mode:
 
@@ -100,9 +117,9 @@ Mock mode:
 cryodaq-engine --mock
 ```
 
-## Configuration
+## Конфигурация
 
-Main configuration files:
+Основные конфигурационные файлы:
 
 - `config/instruments.yaml`
 - `config/instruments.local.yaml`
@@ -112,11 +129,11 @@ Main configuration files:
 - `config/housekeeping.yaml`
 - `config/experiment_templates/*.yaml`
 
-`*.local.yaml` overrides base config and is intended for machine-specific deployment data.
+`*.local.yaml` переопределяют базовые файлы и предназначены для machine-specific настроек.
 
-## Experiment and artifact layout
+## Эксперименты и артефакты
 
-Experiment templates live in:
+В текущем RC доступны шаблоны:
 
 - `config/experiment_templates/thermal_conductivity.yaml`
 - `config/experiment_templates/cooldown_test.yaml`
@@ -124,7 +141,7 @@ Experiment templates live in:
 - `config/experiment_templates/debug_checkout.yaml`
 - `config/experiment_templates/custom.yaml`
 
-Experiment artifacts are stored under:
+Артефакты эксперимента:
 
 ```text
 data/experiments/<experiment_id>/
@@ -135,18 +152,20 @@ data/experiments/<experiment_id>/
     assets/
 ```
 
-Calibration artifacts are stored under:
+Артефакты калибровки:
 
 ```text
 data/calibration/sessions/<session_id>/
 data/calibration/curves/<sensor_id>/<curve_id>/
 ```
 
-## Reporting
+`metadata.json` хранит payload эксперимента, payload шаблона, `data_range` и `artifacts`.
 
-The report generator is modular and template-driven.
+## Отчёты
 
-Implemented section renderers:
+Подсистема отчётов находится в `src/cryodaq/reporting/` и использует template-defined sections.
+
+Реализованные section renderers:
 
 - `title_page`
 - `cooldown_section`
@@ -156,60 +175,57 @@ Implemented section renderers:
 - `alarms_section`
 - `config_section`
 
-Primary guaranteed artifact: `DOCX`.
+Гарантированный артефакт:
 
-PDF conversion is best-effort only and depends on external `soffice` / `libreoffice` availability.
+- `report.docx`
 
-## Project structure
+Опциональный артефакт:
+
+- `report.pdf`
+
+PDF-конвертация остаётся best-effort и зависит от наличия внешнего `soffice` / `LibreOffice`.
+
+## Keithley TSP
+
+Актуальная runtime-опора:
+
+- `tsp/p_const.lua`
+
+В дереве также присутствует:
+
+- `tsp/p_const_single.lua`
+
+`p_const_single.lua` остаётся legacy/fallback-артефактом, но текущая архитектурная опора для runtime — `p_const.lua`.
+
+## Структура проекта
 
 ```text
 src/cryodaq/
   analytics/
-    calibration.py
   core/
-    alarm.py
-    experiment.py
-    housekeeping.py
-    operator_log.py
-    safety_manager.py
-    smu_channel.py
   drivers/
-    instruments/
-      keithley_2604b.py
-      lakeshore_218s.py
   gui/
-    app.py
-    main_window.py
-    tray_status.py
-    widgets/
-      archive_panel.py
-      calibration_panel.py
-      common.py
-      experiment_dialogs.py
-      keithley_panel.py
-      operator_log_panel.py
-      overview_panel.py
   reporting/
-    data.py
-    generator.py
-    sections.py
   storage/
-    sqlite_writer.py
+  web/
 tsp/
-  p_const.lua
-  p_const_single.lua
 tests/
-  analytics/
-  core/
-  drivers/
-  gui/
-  reporting/
-  storage/
+config/
 ```
 
-## Tests
+Ключевые файлы для операторских workflow:
 
-Reference regression commands:
+- `src/cryodaq/gui/main_window.py`
+- `src/cryodaq/gui/tray_status.py`
+- `src/cryodaq/gui/widgets/archive_panel.py`
+- `src/cryodaq/gui/widgets/operator_log_panel.py`
+- `src/cryodaq/gui/widgets/calibration_panel.py`
+- `src/cryodaq/core/experiment.py`
+- `src/cryodaq/reporting/generator.py`
+
+## Тесты
+
+Референсная regression matrix:
 
 ```bash
 python -m pytest tests/core -q
@@ -220,25 +236,14 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Run these commands from the repository root after `pip install -e ".[dev,web]"`. GUI tests assume that the environment includes the declared GUI/runtime dependencies such as `PySide6` and `pyqtgraph`.
+Запускайте эти команды из корня репозитория после `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke set не входит и требует отдельного `.[web]` install path.
 
-Current RC baseline:
+## Известные ограничения
 
-- required regression matrix:
-  - `tests/core`: `169 passed`
-  - `tests/storage`: `20 passed`
-  - `tests/drivers`: `29 passed`
-  - `tests/analytics`: `45 passed`
-  - `tests/gui`: `57 passed`
-  - `tests/reporting`: `6 passed`
-  - total: `326 passed`
+- Применение calibration curve в runtime не реализовано. GUI держит кнопку `Применить в CryoDAQ` disabled.
+- PDF для отчётов не гарантирован. Гарантированный результат — DOCX.
+- На новых версиях Python сохраняются deprecation warnings, связанные с `asyncio.WindowsSelectorEventLoopPolicy`.
 
-## Known limitations
+## Статус
 
-- Calibration apply path into runtime is not implemented. The GUI keeps `Применить в CryoDAQ` disabled.
-- Report PDF generation is best-effort. DOCX is the guaranteed output.
-- `asyncio.WindowsSelectorEventLoopPolicy` still produces deprecation warnings on newer Python versions.
-
-## Status
-
-The current `CRYODAQ-CODEX` branch represents the release-candidate implementation state. Documentation in this file is intentionally limited to implemented behavior and confirmed caveats.
+Этот README намеренно ограничен только подтверждённым текущим поведением и актуальными caveat-ограничениями RC-ветки.

@@ -1,213 +1,179 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 # CryoDAQ
 
-LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 24k+ lines, 326 passing tests in the required regression matrix.
+LabVIEW replacement for a cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
+Python 3.12+, asyncio, PySide6. Current package metadata: `0.11.0rc1`.
 
 ## Build & Development Commands
 
 ```bash
-pip install -e ".[dev,web]"    # Install all deps (incl. scipy, matplotlib, aiohttp)
-cryodaq                        # Operator launcher (auto-starts engine + GUI, tray icon)
+pip install -e ".[dev,web]"    # Install runtime, dev, and optional web dependencies
+cryodaq                        # Operator launcher
 cryodaq-engine                 # Run engine headless (real instruments)
-cryodaq-engine --mock          # Run engine with simulated data (5 instruments)
-cryodaq-gui                    # Run GUI only (connects to running engine via ZMQ)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # Web dashboard
-install.bat                    # One-click Windows installer
-python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
-cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
+cryodaq-engine --mock          # Run engine with simulated data
+cryodaq-gui                    # Run GUI only (connects to engine over ZMQ)
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+install.bat                    # Windows installer helper
+python create_shortcut.py      # Create desktop shortcut
+cryodaq-cooldown build --data cooldown_v5/ --output model/
 cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
-pytest                         # Run all tests / local regression from repo root
-pytest tests/core/             # Core subsystem tests only
-pytest -k test_safety          # Run safety manager tests
-pytest -k test_cooldown        # Run cooldown predictor + service tests
-ruff check src/ tests/         # Lint
-ruff format src/ tests/        # Format
+pytest
+pytest tests/core/
+pytest -k test_safety
+pytest -k test_cooldown
+ruff check src/ tests/
+ruff format src/ tests/
 ```
 
 ## Environment Variables
 
-- `CRYODAQ_ROOT` — override project root directory (default: auto-detected from `engine.py` location)
-- `CRYODAQ_MOCK=1` — start engine in mock mode (same as `--mock` flag)
+- `CRYODAQ_ROOT` — override project root directory
+- `CRYODAQ_MOCK=1` — start engine in mock mode
 
 ## Deployment
 
-Config override: `config/*.local.yaml` takes priority over `config/*.yaml`.
-Local configs are gitignored — machine-specific (COM ports, GPIB addresses, Telegram tokens).
-See `docs/deployment.md` for step-by-step lab PC setup.
+`config/*.local.yaml` overrides `config/*.yaml`.
+Local configs are gitignored and intended for machine-specific deployment data such as COM ports, GPIB addresses, and notification credentials.
+
+See `docs/deployment.md` for operator-PC deployment steps.
 
 ## Architecture
 
-Three-tier system:
-- **cryodaq-engine** (headless, asyncio) — data acquisition, safety, storage
-- **cryodaq-gui** (PySide6) or **cryodaq** (launcher with embedded GUI + engine management)
-- **web dashboard** (FastAPI + WebSocket + Chart.js) — optional remote monitoring
+Three main runtime surfaces:
 
-### Safety architecture (CRITICAL)
+- `cryodaq-engine` — headless asyncio runtime: acquisition, safety, storage, commands
+- `cryodaq-gui` or `cryodaq` — desktop operator client / launcher
+- web dashboard — optional FastAPI monitoring surface
+
+### Safety architecture
 
 SafetyManager is the single authority for source on/off decisions.
-Source OFF is the DEFAULT. Running requires continuous proof of health.
+Source OFF is the default. Running requires continuous proof of health.
 
-```
+```text
 SafetyBroker (dedicated, overflow=FAULT)
-  → SafetyManager (state machine, 1Hz monitoring)
-    States: SAFE_OFF → READY → RUN_PERMITTED → RUNNING → FAULT_LATCHED
-    Fail-on-silence: stale data (10s) → FAULT + emergency_off
-    Rate limit: dT/dt > 5 K/min → FAULT
-    Recovery: two-step (acknowledge with reason + precondition re-check + 60s cooldown)
-    Double protection: SafetyManager (Python) + TSP watchdog (hardware, 30s)
+  -> SafetyManager
+     States: SAFE_OFF -> READY -> RUN_PERMITTED -> RUNNING -> FAULT_LATCHED
+     Fail-on-silence: stale data -> FAULT + emergency_off
+     Rate limit: dT/dt > 5 K/min -> FAULT
+     Recovery: acknowledge + precondition re-check + cooldown
+     Double protection: Python safety path + hardware watchdog
 ```
 
-### Engine data flow (persistence-first ordering)
+### Persistence-first ordering
 
-```
+```text
 InstrumentDriver.read_channels()
-  → Scheduler
-      1. SQLiteWriter.write_immediate() → WAL commit (BLOCKING — data on disk first)
-      2. THEN DataBroker.publish_batch() → ZMQ, Alarms, Plugins, CooldownService
-      3. THEN SafetyBroker.publish_batch() → SafetyManager
-  Invariant: if DataBroker has it, it's already on disk.
-  → InterlockEngine (threshold detection → SafetyManager action delegation)
-  → ZMQCommandServer (REP :5556, GUI commands → SafetyManager)
-  → CooldownService (auto-detects cooldown, predict every 30s, auto-ingest)
+  -> Scheduler
+     1. SQLiteWriter.write_immediate()
+     2. THEN DataBroker.publish_batch()
+     3. THEN SafetyBroker.publish_batch()
 ```
 
-### GUI tabs (10 tabs)
+Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
-Обзор (home: temps+pressure+Keithley strip+status bar) | Keithley (dual-channel smua/smub) | Аналитика (R_thermal + cooldown predictor) | Теплопроводность (chain R/G + T∞) | Автоизмерение (power sweep) | Алармы | Журнал оператора | Архив | Калибровка | Статус приборов
+### GUI tabs
 
-Menu: Файл (экспорт CSV/HDF5/Excel) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
+Current `MainWindow` tabs:
+
+- `Обзор`
+- `Keithley 2604B`
+- `Аналитика`
+- `Теплопроводность`
+- `Автоизмерение`
+- `Алармы`
+- `Журнал оператора`
+- `Архив`
+- `Калибровка`
+- `Приборы`
+
+Menus:
+
+- `Файл` — CSV / HDF5 / Excel export
+- `Эксперимент` — start / finalize experiment
+- `Настройки` — channel editor and connection settings
 
 ### Module index
 
-**Entry points:**
-- `src/cryodaq/engine.py` — headless engine: config loading, subsystem wiring, graceful shutdown, watchdog
-- `src/cryodaq/launcher.py` — operator launcher: auto-starts engine, embeds GUI, system tray, auto-restart
+**Entry points**
+
+- `src/cryodaq/engine.py` — headless engine
+- `src/cryodaq/launcher.py` — operator launcher
 - `src/cryodaq/gui/app.py` — standalone GUI entry point
 
-**Safety (CRITICAL — changes require review):**
-- `src/cryodaq/core/safety_manager.py` — SafetyManager: 6-state machine, fail-on-silence, rate limits, two-step recovery
-- `src/cryodaq/core/safety_broker.py` — SafetyBroker: dedicated safety channel, overflow=FAULT, staleness tracking
+**Core**
 
-**Core:**
-- `src/cryodaq/core/broker.py` — DataBroker: bounded queues, overflow policies, fan-out (tuple snapshot iteration)
-- `src/cryodaq/core/scheduler.py` — per-instrument polling, exponential backoff, dual-broker publish
-- `src/cryodaq/core/alarm.py` — AlarmEngine: OK/ACTIVE/ACKNOWLEDGED, hysteresis, severity, notifiers
-- `src/cryodaq/core/interlock.py` — InterlockEngine: ARMED/TRIPPED/ACKNOWLEDGED, pre-compiled regex, cooldown
-- `src/cryodaq/core/experiment.py` — ExperimentManager: YAML templates, lifecycle metadata, artifact folders, archive listing
-- `src/cryodaq/core/operator_log.py` — operator log persistence + retrieval
-- `src/cryodaq/core/housekeeping.py` — adaptive throttle + retention/compression housekeeping
-- `src/cryodaq/core/zmq_bridge.py` — ZMQPublisher + ZMQSubscriber (msgpack) + ZMQCommandServer (JSON REP)
-- `src/cryodaq/core/channel_manager.py` — ChannelManager: centralized channel names/visibility, YAML persistence
-- `src/cryodaq/core/disk_monitor.py` — DiskMonitor: shutil.disk_usage() every 5min, publishes system/disk_free_gb, alarms at <10GB/<2GB
+- `src/cryodaq/core/alarm.py`
+- `src/cryodaq/core/experiment.py`
+- `src/cryodaq/core/housekeeping.py`
+- `src/cryodaq/core/operator_log.py`
+- `src/cryodaq/core/safety_broker.py`
+- `src/cryodaq/core/safety_manager.py`
+- `src/cryodaq/core/scheduler.py`
+- `src/cryodaq/core/zmq_bridge.py`
 
-**Drivers:**
-- `src/cryodaq/drivers/base.py` — Reading (frozen dataclass: timestamp, instrument_id, channel, value, unit, status, raw, metadata) + InstrumentDriver ABC
-- `src/cryodaq/drivers/transport/gpib.py` — async pyvisa wrapper (GPIB)
-- `src/cryodaq/drivers/transport/usbtmc.py` — async pyvisa wrapper (USB-TMC)
-- `src/cryodaq/drivers/transport/serial.py` — async pyserial wrapper (RS-232)
-- `src/cryodaq/drivers/instruments/lakeshore_218s.py` — LakeShore 218S: KRDG? 0, 8ch SCPI
-- `src/cryodaq/drivers/instruments/keithley_2604b.py` — Keithley 2604B: TSP/Lua, heartbeat, no __del__
-- `src/cryodaq/drivers/instruments/thyracont_vsp63d.py` — Thyracont VSP63D: MV00 protocol, pressure
+**GUI**
 
-**Storage:**
-- `src/cryodaq/storage/sqlite_writer.py` — SQLiteWriter: WAL, daily rotation, dedicated ThreadPoolExecutor
-- `src/cryodaq/storage/hdf5_export.py` — HDF5Exporter: groups per instrument/channel
-- `src/cryodaq/storage/csv_export.py` — CSVExporter: time-range export with filters
-- `src/cryodaq/storage/replay.py` — ReplaySource: historical data → DataBroker with speed control
-- `src/cryodaq/storage/xlsx_export.py` — XLSXExporter: pivoted time×channel Excel via openpyxl, 2 sheets (Данные + Информация)
+- `src/cryodaq/gui/main_window.py`
+- `src/cryodaq/gui/tray_status.py`
+- `src/cryodaq/gui/widgets/archive_panel.py`
+- `src/cryodaq/gui/widgets/calibration_panel.py`
+- `src/cryodaq/gui/widgets/operator_log_panel.py`
+- `src/cryodaq/gui/widgets/overview_panel.py`
+- `src/cryodaq/gui/widgets/keithley_panel.py`
 
-**Analytics:**
-- `src/cryodaq/analytics/base_plugin.py` — AnalyticsPlugin ABC + DerivedMetric dataclass
-- `src/cryodaq/analytics/plugin_loader.py` — PluginPipeline: hot-reload, batch processing, error isolation
-- `src/cryodaq/analytics/steady_state.py` — SteadyStatePredictor: T∞ prediction via scipy curve_fit
-- `src/cryodaq/analytics/cooldown_predictor.py` — dual-channel progress-variable predictor: ensemble model, rate-adaptive weighting, LOO validation, quality-gated ingest (~900 lines library, no CLI)
-- `src/cryodaq/analytics/cooldown_service.py` — CooldownService: auto-detects cooldown (IDLE→COOLING→STABILIZING→COMPLETE), periodic predict via executor, publishes DerivedMetric with trajectory+CI, auto-ingest on completion
-- `src/cryodaq/analytics/calibration.py` — CalibrationSessionStore + CalibrationStore: SRDG capture, multi-zone fits, import/export
+**Reporting**
 
-**Plugins (hot-reloadable):**
-- `plugins/thermal_calculator.py` — R_thermal = (T_hot - T_cold) / P
-- `plugins/cooldown_estimator.py` — exponential decay fit → cooldown ETA
+- `src/cryodaq/reporting/data.py`
+- `src/cryodaq/reporting/generator.py`
+- `src/cryodaq/reporting/sections.py`
 
-**GUI widgets:**
-- `src/cryodaq/gui/main_window.py` — MainWindow: 10 tabs, menu actions, status bar, tray status integration
-- `src/cryodaq/gui/widgets/overview_panel.py` — OverviewPanel (home tab "Обзор"): StatusStrip (safety/uptime/alarms/Keithley/cooldown/disk) + CompactTempCard grid (24ch, trend arrows) + temp plot ([1h/6h/24h], log/lin, PNG/CSV export) + PressureStrip (value + mini plot) + KeithleyStrip (conditionally visible)
-- `src/cryodaq/gui/widgets/keithley_panel.py` — KeithleyPanel: dual-channel smua/smub controls, backend-driven status
-- `src/cryodaq/gui/widgets/analytics_panel.py` — AnalyticsPanel: R_thermal + cooldown ETA with ±CI, progress bar, phase, prediction trajectory + CI band on plot
-- `src/cryodaq/gui/widgets/conductivity_panel.py` — ConductivityPanel: chain R/G + T∞ prediction
-- `src/cryodaq/gui/widgets/autosweep_panel.py` — AutoSweepPanel: automated power sweep measurement
-- `src/cryodaq/gui/widgets/alarm_panel.py` — AlarmPanel: severity table, acknowledge
-- `src/cryodaq/gui/widgets/operator_log_panel.py` — operator log entry + recent log view
-- `src/cryodaq/gui/widgets/archive_panel.py` — archive browser, artifact open, report regenerate
-- `src/cryodaq/gui/widgets/calibration_panel.py` — calibration workflow over backend sessions and curve fits
-- `src/cryodaq/gui/widgets/instrument_status.py` — InstrumentStatusPanel: per-instrument cards
-- `src/cryodaq/gui/widgets/channel_editor.py` — ChannelEditorDialog: edit names/visibility
-- `src/cryodaq/gui/widgets/connection_settings.py` — ConnectionSettingsDialog: instrument addresses
+**Web**
 
-- `src/cryodaq/reporting/generator.py` — template-driven DOCX report generation, optional PDF conversion
-- `src/cryodaq/reporting/sections.py` — modular report sections registry
-- `src/cryodaq/reporting/data.py` — report data extraction from SQLite/artifacts
+- `src/cryodaq/web/server.py`
 
-**Web:**
-- `src/cryodaq/web/server.py` — FastAPI: WebSocket, GET /status, GET /history, static dashboard
-- `src/cryodaq/web/static/index.html` — Chart.js dashboard (temp + pressure + alarms + instruments)
+**Tools**
 
-**Notifications:**
-- `src/cryodaq/notifications/telegram.py` — TelegramNotifier: alarm events → Telegram Bot API
-- `src/cryodaq/notifications/telegram_commands.py` — TelegramCommandBot: /status /temps /pressure /keithley /alarms
-- `src/cryodaq/notifications/periodic_report.py` — PeriodicReporter: matplotlib charts + text summary
+- `src/cryodaq/tools/cooldown_cli.py`
 
-**Tools (CLI):**
-- `src/cryodaq/tools/cooldown_cli.py` — CLI: `cryodaq-cooldown build|predict|validate|demo|update`
+**TSP**
 
-**TSP (Keithley instrument scripts):**
-- `tsp/p_const.lua` — parameterized P=const feedback, watchdog 30s, compliance check for smua/smub
+- `tsp/p_const.lua` — primary runtime script
+- `tsp/p_const_single.lua` — legacy/fallback artifact still present in the tree
 
-### Config files
+## Config files
 
-- `config/instruments.yaml` — instrument definitions (resource strings, channel labels)
-- `config/interlocks.yaml` — safety interlocks (thresholds, actions, cooldowns)
-- `config/alarms.yaml` — alarm thresholds (severity, hysteresis)
-- `config/safety.yaml` — SafetyManager params (critical channels, stale timeout, rate limits, recovery)
-- `config/notifications.yaml` — Telegram config TEMPLATE (real token in *.local.yaml)
-- `config/channels.yaml` — channel display names and visibility
-- `config/cooldown.yaml` — CooldownService: channels, model_dir, detection thresholds, predict interval, auto-ingest
-- `config/experiment_templates/*.yaml` — experiment templates, report sections, custom fields
-- `config/housekeeping.yaml` — adaptive throttle and retention policy
-- `config/*.local.yaml.example` — templates for machine-specific overrides
+- `config/instruments.yaml`
+- `config/interlocks.yaml`
+- `config/alarms.yaml`
+- `config/safety.yaml`
+- `config/notifications.yaml`
+- `config/channels.yaml`
+- `config/cooldown.yaml`
+- `config/experiment_templates/*.yaml`
+- `config/housekeeping.yaml`
+- `config/*.local.yaml.example`
 
 ## Instruments
 
-- 3× LakeShore 218S (GPIB, 24 temperature channels, SCPI: KRDG? 0)
-- 1× Keithley 2604B (USB-TMC, TSP/Lua, P=const feedback, dual-channel smua + smub)
-- 1× Thyracont VSP63D (RS-232, vacuum gauge, MV00 protocol)
+- LakeShore 218S
+- Keithley 2604B
+- Thyracont VSP63D
 
 ## Key Rules
 
-- **SAFE_OFF is the default.** Source ON requires continuous proof of health (SafetyManager).
-- Engine must run weeks without restart. No memory leaks. No unbounded buffers.
-- GUI is a separate process. Can be closed/opened without data loss.
-- Keithley TSP scripts MUST have watchdog timeout → source OFF.
-- No blocking I/O anywhere in engine (pyvisa via run_in_executor).
-- All operator-facing text in Russian.
-- Every driver: async, mock mode, timeout+retry, Reading dataclass output.
-- Keithley disconnect() ALWAYS calls emergency_off() first. No __del__.
-- InterlockEngine detects thresholds; SafetyManager executes actions (single authority).
-- Telegram bot token NEVER committed — use config/*.local.yaml (gitignored).
-- DataBroker.publish() iterates tuple snapshot (concurrent-safe).
-- SQLiteWriter uses dedicated ThreadPoolExecutor (thread-safe day rotation).
-- **Persistence-first**: Scheduler writes to SQLite BEFORE publishing to DataBroker. Invariant: if broker has it, it's on disk.
-
-## Standards
-
-- Calibration per ГОСТ Р 8.879-2014
-- DT-670B1-CU silicon diodes, individual curves per sensor
+- `SAFE_OFF` is the default.
+- GUI is a separate process and must not be the source of truth for runtime state.
+- Keithley disconnect must call emergency off first.
+- No blocking I/O on the engine event loop.
+- Operator-facing GUI text should remain in Russian.
+- Scheduler writes to SQLite before publishing to brokers.
 
 ## Known limitations (RC)
 
-- Calibration apply path into runtime is not implemented yet; GUI correctly keeps this action disabled.
+- Calibration apply path into runtime is not implemented; the GUI keeps this action disabled.
 - Report PDF conversion is best-effort; DOCX is the required artifact.
-- `WindowsSelectorEventLoopPolicy` produces known Python 3.14+ deprecation warnings and should be revisited before Python 3.16.
+- `WindowsSelectorEventLoopPolicy` produces known Python 3.14+ deprecation warnings.

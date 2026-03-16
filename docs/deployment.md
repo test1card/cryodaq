@@ -27,6 +27,18 @@ cd cryodaq
 pip install -e ".[dev,web]"
 ```
 
+Минимальная runtime-установка без dev/web extras:
+
+```powershell
+pip install -e .
+```
+
+Если нужен только web dashboard, используйте:
+
+```powershell
+pip install -e ".[web]"
+```
+
 Эта установка подтягивает и GUI dependencies, включая:
 
 - `PySide6`
@@ -99,6 +111,9 @@ Optional web dashboard:
 uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
 ```
 
+Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
+(или полного dev/test install path `.[dev,web]`).
+
 ## 7. Проверка после запуска
 
 Проверьте минимум следующее:
@@ -170,6 +185,6 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`.
+Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили на RC branch до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
