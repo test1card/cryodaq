@@ -39,7 +39,7 @@ class ReportGenerator:
                 assets_dir=metadata_path.parent / "reports" / "assets",
                 sections=tuple(),
                 skipped=True,
-                reason="report disabled by template",
+                reason="Формирование отчёта отключено шаблоном.",
             )
 
         section_names = self._resolve_sections(dataset.metadata)

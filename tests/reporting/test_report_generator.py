@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from docx import Document
 
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -144,6 +145,19 @@ async def test_template_driven_section_selection_for_thermal(manager: Experiment
     assert (result.assets_dir / "thermal_power.png").exists()
     assert (result.assets_dir / "pressure.png").exists()
 
+    document = Document(result.docx_path)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+    assert "Идентификатор эксперимента:" in text
+    assert "Шаблон: Thermal Conductivity" in text
+    assert "Оператор: Ivanov" in text
+    assert "Образец:" in text
+    assert "Статус: Завершён" in text
+    assert "Секция теплового режима" in text
+    assert "Секция давления" in text
+    assert "Журнал оператора" in text
+    assert "Снимок конфигурации" in text
+    assert "Report marker" in text
+
 
 async def test_report_generation_for_cooldown_template(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
@@ -163,6 +177,12 @@ async def test_report_generation_for_cooldown_template(manager: ExperimentManage
     assert (result.assets_dir / "cooldown_temperature.png").exists()
     assert result.docx_path.name == "report.docx"
 
+    document = Document(result.docx_path)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+    assert "Секция охлаждения" in text
+    assert "Алармы" in text
+    assert "Снимок конфигурации" in text
+
 
 async def test_report_disabled_template_is_respected(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
@@ -177,7 +197,7 @@ async def test_report_disabled_template_is_respected(manager: ExperimentManager,
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.skipped is True
-    assert result.reason == "report disabled by template"
+    assert result.reason == "Формирование отчёта отключено шаблоном."
     assert result.docx_path.exists() is False
 
 
@@ -220,3 +240,17 @@ async def test_report_generation_graceful_without_pdf_tooling(
 
     assert result.docx_path.exists()
     assert result.pdf_path is None
+
+
+def test_operator_log_empty_state_is_russian(tmp_path: Path) -> None:
+    from cryodaq.reporting.data import ReportDataset
+    from cryodaq.reporting.sections import render_operator_log_section
+
+    document = Document()
+    dataset = ReportDataset(metadata={"experiment": {}, "template": {}}, operator_log=[])
+
+    render_operator_log_section(document, dataset, tmp_path)
+
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+    assert "Журнал оператора" in text
+    assert "Для этого эксперимента нет записей в журнале оператора." in text
