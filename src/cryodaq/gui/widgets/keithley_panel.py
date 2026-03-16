@@ -25,6 +25,7 @@ from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
     apply_button_style,
+    apply_panel_frame_style,
     apply_status_label_style,
     build_action_row,
     create_panel_root,
@@ -66,10 +67,20 @@ class _SmuPanel(QFrame):
         self._channel_label = f"канал {self._smu[-1].upper()}"
         self._build_ui(colors)
 
+    def _show_info(self, text: str, *, emit: bool = True) -> None:
+        if emit:
+            self._status_banner.show_info(text)
+
+    def _show_warning(self, text: str, *, emit: bool = True) -> None:
+        if emit:
+            self._status_banner.show_warning(text)
+
+    def _show_error(self, text: str, *, emit: bool = True) -> None:
+        if emit:
+            self._status_banner.show_error(text)
+
     def _build_ui(self, colors: dict[str, str]) -> None:
-        self.setStyleSheet(
-            "QFrame { background-color: #141821; border: 1px solid #30363d; border-radius: 6px; }"
-        )
+        apply_panel_frame_style(self, background="#141821", border="#30363d", radius=6)
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
@@ -88,7 +99,7 @@ class _SmuPanel(QFrame):
         root.addLayout(header)
 
         controls = QWidget()
-        controls.setStyleSheet("background-color: #1e2430; border: 1px solid #30363d; border-radius: 6px;")
+        apply_panel_frame_style(controls, background="#1e2430", border="#30363d", radius=6)
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(10, 8, 10, 8)
         controls_layout.setSpacing(10)
@@ -101,10 +112,10 @@ class _SmuPanel(QFrame):
         controls_layout.addWidget(self._caption("P цель (Вт):", label_font))
         self._p_spin = self._spinbox(0.0, 10.0, 0.5, 0.1, 3, spin_font)
         controls_layout.addWidget(self._p_spin)
-        controls_layout.addWidget(self._caption("V пред. (В):", label_font))
+        controls_layout.addWidget(self._caption("V предел (В):", label_font))
         self._v_spin = self._spinbox(0.0, 200.0, 40.0, 1.0, 2, spin_font)
         controls_layout.addWidget(self._v_spin)
-        controls_layout.addWidget(self._caption("I пред. (А):", label_font))
+        controls_layout.addWidget(self._caption("I предел (А):", label_font))
         self._i_spin = self._spinbox(0.0, 3.0, 1.0, 0.1, 3, spin_font)
         controls_layout.addWidget(self._i_spin)
         controls_layout.addStretch()
@@ -116,6 +127,7 @@ class _SmuPanel(QFrame):
         controls_layout.addWidget(self._stop_btn)
         controls_layout.addWidget(self._emg_btn)
         root.addWidget(controls)
+
         self._status_banner = StatusBanner()
         self._status_banner.clear_message()
         root.addWidget(self._status_banner)
@@ -139,7 +151,7 @@ class _SmuPanel(QFrame):
             title_label.setAlignment(Qt.AlignCenter)
             card_layout.addWidget(title_label)
 
-            value_label = QLabel("—")
+            value_label = QLabel("--")
             value_label.setFont(big_font)
             value_label.setStyleSheet("color: #ffffff; border: none;")
             value_label.setAlignment(Qt.AlignCenter)
@@ -228,7 +240,42 @@ class _SmuPanel(QFrame):
             self._state_label.setText("ВЫКЛ")
             apply_status_label_style(self._state_label, "muted", bold=True)
 
-    def _on_start(self) -> None:
+    def _validate_start_request(self, *, emit_feedback: bool = True) -> bool:
+        if self._channel_state == "on":
+            self._show_info(
+                f"{self._channel_label.capitalize()} уже включен по подтвержденному состоянию backend. Повторная команда запуска не отправлена.",
+                emit=emit_feedback,
+            )
+            return False
+        if self._channel_state == "fault":
+            self._show_warning(
+                f"Для {self._channel_label} backend сообщает аварийное состояние. Команда запуска не отправлена.",
+                emit=emit_feedback,
+            )
+            return False
+        if self._p_spin.value() <= 0:
+            self._show_warning(
+                f"Для {self._channel_label} целевая мощность должна быть больше нуля.",
+                emit=emit_feedback,
+            )
+            return False
+        if self._v_spin.value() <= 0:
+            self._show_warning(
+                f"Для {self._channel_label} предел напряжения должен быть больше нуля.",
+                emit=emit_feedback,
+            )
+            return False
+        if self._i_spin.value() <= 0:
+            self._show_warning(
+                f"Для {self._channel_label} предел тока должен быть больше нуля.",
+                emit=emit_feedback,
+            )
+            return False
+        return True
+
+    def _on_start(self, *, emit_success_feedback: bool = True) -> bool:
+        if not self._validate_start_request(emit_feedback=True):
+            return False
         reply = send_command(
             {
                 "cmd": "keithley_start",
@@ -239,43 +286,59 @@ class _SmuPanel(QFrame):
             }
         )
         if not reply.get("ok"):
-            self._status_banner.show_error(
+            self._show_error(
                 str(reply.get("error", f"Не удалось запустить {self._channel_label}."))
             )
             logger.warning("Keithley start failed on %s: %s", self._smu, reply.get("error"))
-            return
-        self._status_banner.show_info(
-            f"Команда запуска для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+            return False
+        self._show_info(
+            f"Команда запуска для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
+            emit=emit_success_feedback,
         )
+        return True
 
-    def _on_stop(self) -> None:
+    def _on_stop(self, *, emit_success_feedback: bool = True) -> bool:
+        if self._channel_state == "off":
+            self._show_info(
+                f"{self._channel_label.capitalize()} уже выключен по подтвержденному состоянию backend. Повторная команда остановки не отправлена."
+            )
+            return False
         reply = send_command({"cmd": "keithley_stop", "channel": self._smu})
         if not reply.get("ok"):
-            self._status_banner.show_error(
+            self._show_error(
                 str(reply.get("error", f"Не удалось остановить {self._channel_label}."))
             )
             logger.warning("Keithley stop failed on %s: %s", self._smu, reply.get("error"))
-            return
-        self._status_banner.show_info(
-            f"Команда остановки для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+            return False
+        self._show_info(
+            f"Команда остановки для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
+            emit=emit_success_feedback,
         )
+        return True
 
-    def _on_emergency(self) -> None:
+    def _on_emergency(self, *, emit_progress_feedback: bool = True) -> bool:
+        if any(worker.isRunning() for worker in self._workers):
+            self._show_warning(
+                f"Аварийное отключение для {self._channel_label} уже выполняется. Дождитесь результата."
+            )
+            return False
         self._emg_btn.setEnabled(False)
         self._emg_btn.setText("ОТКЛ...")
-        self._status_banner.show_warning(
-            f"Команда аварийного отключения для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+        self._show_warning(
+            f"Аварийное отключение для {self._channel_label} отправлено. Дождитесь подтверждения состояния.",
+            emit=emit_progress_feedback,
         )
         worker = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": self._smu})
         worker.finished.connect(self._on_emergency_result)
         self._workers.append(worker)
         worker.start()
+        return True
 
     def _on_emergency_result(self, result: dict) -> None:
         self._emg_btn.setEnabled(True)
         self._emg_btn.setText("АВАР. ОТКЛ.")
         if not result.get("ok"):
-            self._status_banner.show_error(
+            self._show_error(
                 str(result.get("error", f"Не удалось аварийно отключить {self._channel_label}."))
             )
             logger.error("Emergency off failed on %s: %s", self._smu, result.get("error"))
@@ -325,7 +388,7 @@ class KeithleyPanel(QWidget):
         emergency_both.clicked.connect(self._on_emergency_both)
         header = PanelHeader(
             "Keithley 2604B",
-            "Независимое управление каналами A / B и совместный режим A+B",
+            "Независимое управление каналами A / B и общий аварийный режим A+B",
         )
         header.layout().addLayout(build_action_row(start_both, stop_both, emergency_both, add_stretch=True))
         root.addWidget(header)
@@ -352,21 +415,35 @@ class KeithleyPanel(QWidget):
         self._reading_signal.emit(reading)
 
     def _on_start_both(self) -> None:
-        self._status_banner.show_info("Команды запуска для каналов A+B отправлены. Ожидание подтверждения состояния.")
-        for panel in self._smu_panels.values():
-            panel._on_start()
+        dispatched = sum(1 for panel in self._smu_panels.values() if panel._on_start(emit_success_feedback=False))
+        if dispatched:
+            self._status_banner.show_info(
+                "Команда запуска для каналов A+B отправлена. Дождитесь подтверждения состояния."
+            )
+            return
+        self._status_banner.show_warning("Команда запуска A+B не отправлена. Проверьте сообщения по каналам.")
 
     def _on_stop_both(self) -> None:
-        self._status_banner.show_info("Команды остановки для каналов A+B отправлены. Ожидание подтверждения состояния.")
-        for panel in self._smu_panels.values():
-            panel._on_stop()
+        dispatched = sum(1 for panel in self._smu_panels.values() if panel._on_stop(emit_success_feedback=False))
+        if dispatched:
+            self._status_banner.show_info(
+                "Команда остановки для каналов A+B отправлена. Дождитесь подтверждения состояния."
+            )
+            return
+        self._status_banner.show_warning("Команда остановки A+B не отправлена. Проверьте сообщения по каналам.")
 
     def _on_emergency_both(self) -> None:
-        self._status_banner.show_warning(
-            "Команды аварийного отключения для каналов A+B отправлены. Ожидание подтверждения состояния."
+        dispatched = sum(
+            1 for panel in self._smu_panels.values() if panel._on_emergency(emit_progress_feedback=False)
         )
-        for panel in self._smu_panels.values():
-            panel._on_emergency()
+        if dispatched:
+            self._status_banner.show_warning(
+                "Команда аварийного отключения для каналов A+B отправлена. Дождитесь подтверждения состояния."
+            )
+            return
+        self._status_banner.show_warning(
+            "Команда аварийного отключения A+B не отправлена. Проверьте сообщения по каналам."
+        )
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:

@@ -122,6 +122,65 @@ def test_command_success_shows_pending_status_without_forcing_state(monkeypatch)
     assert panel._smu_panels["smua"]._channel_state == "off"
 
 
+def test_start_validation_blocks_zero_target_without_backend_call(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    called = False
+
+    def _send_command(_payload):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    panel._smu_panels["smua"]._p_spin.setValue(0.0)
+
+    panel._smu_panels["smua"]._on_start()
+
+    assert called is False
+    assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
+    assert panel._smu_panels["smua"]._channel_state == "off"
+
+
+def test_start_when_backend_already_on_skips_command(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    called = False
+
+    def _send_command(_payload):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    panel.on_reading(_channel_state_reading("smua", "on"))
+
+    panel._smu_panels["smua"]._on_start()
+
+    assert called is False
+    assert "уже включен" in panel._smu_panels["smua"]._status_banner.text()
+    assert panel._smu_panels["smua"]._channel_state == "on"
+
+
+def test_stop_when_backend_already_off_skips_command(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    called = False
+
+    def _send_command(_payload):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+
+    panel._smu_panels["smua"]._on_stop()
+
+    assert called is False
+    assert "уже выключен" in panel._smu_panels["smua"]._status_banner.text()
+    assert panel._smu_panels["smua"]._channel_state == "off"
+
+
 def test_emergency_failure_shows_inline_error() -> None:
     _app()
     panel = KeithleyPanel()
@@ -139,5 +198,29 @@ def test_group_actions_show_panel_level_feedback(monkeypatch) -> None:
     panel._on_start_both()
 
     assert "A+B" in panel._status_banner.text()
+    assert panel._smu_panels["smua"]._status_banner.text().strip() == ""
+    assert panel._smu_panels["smub"]._status_banner.text().strip() == ""
     assert panel._smu_panels["smua"]._channel_state == "off"
     assert panel._smu_panels["smub"]._channel_state == "off"
+
+
+def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    called = False
+
+    def _send_command(_payload):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    panel._smu_panels["smua"]._p_spin.setValue(0.0)
+    panel._smu_panels["smub"]._p_spin.setValue(0.0)
+
+    panel._on_start_both()
+
+    assert called is False
+    assert "не отправлена" in panel._status_banner.text()
+    assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
+    assert "больше нуля" in panel._smu_panels["smub"]._status_banner.text()

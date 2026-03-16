@@ -111,6 +111,18 @@ def apply_group_box_style(box: QGroupBox, accent: str = "#58a6ff") -> None:
     )
 
 
+def apply_panel_frame_style(
+    frame: QFrame,
+    *,
+    background: str = "#1E1E1E",
+    border: str = "#333",
+    radius: int = 4,
+) -> None:
+    frame.setStyleSheet(
+        f"{frame.__class__.__name__} {{ background-color: {background}; border: 1px solid {border}; border-radius: {radius}px; }}"
+    )
+
+
 def create_panel_root(widget: QWidget) -> QVBoxLayout:
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(8, 8, 8, 8)

@@ -37,7 +37,12 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.gui.widgets.common import apply_button_style, apply_status_label_style
+from cryodaq.gui.widgets.common import (
+    apply_button_style,
+    apply_panel_frame_style,
+    apply_status_label_style,
+    create_panel_root,
+)
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -91,9 +96,7 @@ class StatusStrip(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(40)
-        self.setStyleSheet(
-            "StatusStrip { background-color: #1E1E1E; border: 1px solid #333; border-radius: 4px; }"
-        )
+        apply_panel_frame_style(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)
@@ -126,7 +129,7 @@ class StatusStrip(QFrame):
 
         # Cooldown ETA
         self._cooldown_label = QLabel("")
-        self._cooldown_label.setStyleSheet("color: #00CED1; border: none;")
+        apply_status_label_style(self._cooldown_label, "accent")
         self._cooldown_label.setVisible(False)
         layout.addWidget(self._cooldown_label)
         layout.addWidget(self._separator())
@@ -423,9 +426,7 @@ class PressureStrip(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(80)
-        self.setStyleSheet(
-            "PressureStrip { background-color: #1E1E1E; border: 1px solid #333; border-radius: 4px; }"
-        )
+        apply_panel_frame_style(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 4, 4)
@@ -518,9 +519,7 @@ class KeithleyStrip(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(50)
-        self.setStyleSheet(
-            "KeithleyStrip { background-color: #1E1E1E; border: 1px solid #333; border-radius: 4px; }"
-        )
+        apply_panel_frame_style(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)
@@ -678,8 +677,7 @@ class OverviewPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        root = create_panel_root(self)
         root.setSpacing(6)
 
         # 1. StatusStrip
@@ -692,9 +690,7 @@ class OverviewPanel(QWidget):
 
         # 3. График с кнопками
         plot_frame = QFrame()
-        plot_frame.setStyleSheet(
-            "QFrame { background-color: #111111; border: 1px solid #333; border-radius: 4px; }"
-        )
+        apply_panel_frame_style(plot_frame, background="#111111", border="#333", radius=4)
         plot_root = QVBoxLayout(plot_frame)
         plot_root.setContentsMargins(4, 4, 4, 4)
         plot_root.setSpacing(4)
