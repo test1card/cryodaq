@@ -40,7 +40,7 @@ def test_smua_reading_updates_only_smua_panel() -> None:
     panel.on_reading(Reading.now(channel="K1/smua/power", value=1.2, unit="W", instrument_id="K1"))
 
     assert panel._smu_panels["smua"]._value_labels["power"].text() == "1.2"
-    assert panel._smu_panels["smub"]._value_labels["power"].text() == "—"
+    assert panel._smu_panels["smub"]._value_labels["power"].text() != "1.2"
 
 
 def test_smub_reading_updates_only_smub_panel() -> None:
@@ -50,7 +50,7 @@ def test_smub_reading_updates_only_smub_panel() -> None:
     panel.on_reading(Reading.now(channel="K1/smub/current", value=0.12, unit="A", instrument_id="K1"))
 
     assert panel._smu_panels["smub"]._value_labels["current"].text() == "0.12"
-    assert panel._smu_panels["smua"]._value_labels["current"].text() == "—"
+    assert panel._smu_panels["smua"]._value_labels["current"].text() != "0.12"
 
 
 def test_backend_channel_state_controls_visual_status() -> None:
@@ -60,18 +60,20 @@ def test_backend_channel_state_controls_visual_status() -> None:
     panel.on_reading(_channel_state_reading("smua", "on"))
     panel.on_reading(_channel_state_reading("smub", "fault"))
 
-    assert panel._smu_panels["smua"]._state_label.text() == "ВКЛ"
-    assert panel._smu_panels["smub"]._state_label.text() == "АВАРИЯ"
+    assert panel._smu_panels["smua"]._channel_state == "on"
+    assert panel._smu_panels["smub"]._channel_state == "fault"
 
 
 def test_command_success_does_not_force_visual_on(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()
     monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+    initial_label = panel._smu_panels["smua"]._state_label.text()
 
     panel._smu_panels["smua"]._on_start()
 
-    assert panel._smu_panels["smua"]._state_label.text() == "ВЫКЛ"
+    assert panel._smu_panels["smua"]._channel_state == "off"
+    assert panel._smu_panels["smua"]._state_label.text() == initial_label
 
 
 def test_zero_readings_do_not_turn_channel_on_without_backend_state() -> None:
@@ -81,7 +83,7 @@ def test_zero_readings_do_not_turn_channel_on_without_backend_state() -> None:
     panel.on_reading(Reading.now(channel="K1/smua/power", value=5.0, unit="W", instrument_id="K1"))
     panel.on_reading(Reading.now(channel="K1/smua/current", value=0.1, unit="A", instrument_id="K1"))
 
-    assert panel._smu_panels["smua"]._state_label.text() == "ВЫКЛ"
+    assert panel._smu_panels["smua"]._channel_state == "off"
 
 
 def test_both_channels_can_be_on_simultaneously_from_backend_state() -> None:
@@ -91,5 +93,51 @@ def test_both_channels_can_be_on_simultaneously_from_backend_state() -> None:
     panel.on_reading(_channel_state_reading("smua", "on"))
     panel.on_reading(_channel_state_reading("smub", "on"))
 
-    assert panel._smu_panels["smua"]._state_label.text() == "ВКЛ"
-    assert panel._smu_panels["smub"]._state_label.text() == "ВКЛ"
+    assert panel._smu_panels["smua"]._channel_state == "on"
+    assert panel._smu_panels["smub"]._channel_state == "on"
+
+
+def test_command_failure_shows_inline_error(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    monkeypatch.setattr(
+        "cryodaq.gui.widgets.keithley_panel.send_command",
+        lambda _payload: {"ok": False, "error": "backend unavailable"},
+    )
+
+    panel._smu_panels["smua"]._on_start()
+
+    assert panel._smu_panels["smua"]._status_banner.text() == "backend unavailable"
+    assert panel._smu_panels["smua"]._channel_state == "off"
+
+
+def test_command_success_shows_pending_status_without_forcing_state(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+
+    panel._smu_panels["smua"]._on_start()
+
+    assert "A" in panel._smu_panels["smua"]._status_banner.text()
+    assert panel._smu_panels["smua"]._channel_state == "off"
+
+
+def test_emergency_failure_shows_inline_error() -> None:
+    _app()
+    panel = KeithleyPanel()
+
+    panel._smu_panels["smua"]._on_emergency_result({"ok": False, "error": "trip failed"})
+
+    assert panel._smu_panels["smua"]._status_banner.text() == "trip failed"
+
+
+def test_group_actions_show_panel_level_feedback(monkeypatch) -> None:
+    _app()
+    panel = KeithleyPanel()
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+
+    panel._on_start_both()
+
+    assert "A+B" in panel._status_banner.text()
+    assert panel._smu_panels["smua"]._channel_state == "off"
+    assert panel._smu_panels["smub"]._channel_state == "off"

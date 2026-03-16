@@ -44,6 +44,7 @@ from cryodaq.gui.widgets.experiment_dialogs import (
 )
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
+from cryodaq.gui.widgets.common import apply_status_label_style
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
 from cryodaq.gui.tray_status import TrayController, resolve_tray_status
@@ -196,7 +197,7 @@ class MainWindow(QMainWindow):
         status_bar: QStatusBar = self.statusBar()
 
         self._conn_label = QLabel("⬤ Отключено")
-        self._conn_label.setStyleSheet("color: #FF4136; font-weight: bold;")
+        apply_status_label_style(self._conn_label, "error", bold=True)
         status_bar.addWidget(self._conn_label)
 
         self._uptime_label = QLabel("Аптайм: 00:00:00")
@@ -279,14 +280,14 @@ class MainWindow(QMainWindow):
             self._last_rate_time = time.monotonic()
 
             self._conn_label.setText("⬤ Подключено")
-            self._conn_label.setStyleSheet("color: #2ECC40; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "success", bold=True)
             self._rate_label.setText(f"{rate:.0f} изм/с")
         elif self._reading_count > 0:
             self._conn_label.setText("⬤ Нет данных")
-            self._conn_label.setStyleSheet("color: #FFDC00; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "warning", bold=True)
         else:
             self._conn_label.setText("⬤ Отключено")
-            self._conn_label.setStyleSheet("color: #FF4136; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "error", bold=True)
 
         # Uptime
         uptime_s = int(time.monotonic() - self._start_time)

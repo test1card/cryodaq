@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui.widgets.common import apply_button_style, apply_status_label_style
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -101,25 +102,25 @@ class StatusStrip(QFrame):
         # SafetyManager state
         self._safety_label = QLabel("SAFE_OFF")
         self._safety_label.setFont(self._bold_font(14))
-        self._safety_label.setStyleSheet("color: #2ECC40; border: none;")
+        apply_status_label_style(self._safety_label, "success")
         layout.addWidget(self._safety_label)
         layout.addWidget(self._separator())
 
         # Engine uptime
         self._uptime_label = QLabel("Аптайм: 00:00:00")
-        self._uptime_label.setStyleSheet("color: #888888; border: none;")
+        apply_status_label_style(self._uptime_label, "muted")
         layout.addWidget(self._uptime_label)
         layout.addWidget(self._separator())
 
         # Active alarms
         self._alarm_label = QLabel("0 алармов")
-        self._alarm_label.setStyleSheet("color: #888888; border: none;")
+        apply_status_label_style(self._alarm_label, "muted")
         layout.addWidget(self._alarm_label)
         layout.addWidget(self._separator())
 
         # Keithley status
         self._keithley_label = QLabel("ВЫКЛ")
-        self._keithley_label.setStyleSheet("color: #888888; border: none;")
+        apply_status_label_style(self._keithley_label, "muted")
         layout.addWidget(self._keithley_label)
         layout.addWidget(self._separator())
 
@@ -132,7 +133,7 @@ class StatusStrip(QFrame):
 
         # Disk free
         self._disk_label = QLabel("")
-        self._disk_label.setStyleSheet("color: #888888; border: none;")
+        apply_status_label_style(self._disk_label, "muted")
         layout.addWidget(self._disk_label)
 
         layout.addStretch()
@@ -151,23 +152,21 @@ class StatusStrip(QFrame):
 
     def set_safety_state(self, state: str) -> None:
         state = state.upper()
-        colors = {
-            "SAFE_OFF": "#2ECC40",
-            "READY": "#FFDC00",
-            "RUN_PERMITTED": "#FFDC00",
-            "RUNNING": "#3498DB",
-            "FAULT_LATCHED": "#FF4136",
-            "FAULT": "#FF4136",
-        }
-        color = colors.get(state, "#888888")
         self._safety_label.setText(state)
-        self._safety_label.setStyleSheet(f"color: {color}; border: none;")
+        if state in {"FAULT_LATCHED", "FAULT"}:
+            apply_status_label_style(self._safety_label, "error", bold=True)
+        elif state == "RUNNING":
+            apply_status_label_style(self._safety_label, "info", bold=True)
+        elif state in {"READY", "RUN_PERMITTED"}:
+            apply_status_label_style(self._safety_label, "warning", bold=True)
+        else:
+            apply_status_label_style(self._safety_label, "success", bold=True)
 
     def set_alarm_count(self, count: int) -> None:
         self._alarm_count = count
         if count == 0:
             self._alarm_label.setText("0 алармов")
-            self._alarm_label.setStyleSheet("color: #888888; border: none;")
+            apply_status_label_style(self._alarm_label, "muted")
         else:
             # Правильное склонение
             if count == 1:
@@ -177,15 +176,15 @@ class StatusStrip(QFrame):
             else:
                 word = "алармов"
             self._alarm_label.setText(f"{count} {word}!")
-            self._alarm_label.setStyleSheet("color: #FF4136; font-weight: bold; border: none;")
+            apply_status_label_style(self._alarm_label, "error", bold=True)
 
     def set_keithley_status(self, text: str, is_on: bool) -> None:
         if is_on:
             self._keithley_label.setText(text)
-            self._keithley_label.setStyleSheet("color: #2ECC40; border: none;")
+            apply_status_label_style(self._keithley_label, "success")
         else:
             self._keithley_label.setText("ВЫКЛ")
-            self._keithley_label.setStyleSheet("color: #888888; border: none;")
+            apply_status_label_style(self._keithley_label, "muted")
 
     def set_cooldown_eta(self, eta_text: str | None) -> None:
         if eta_text:
@@ -206,16 +205,16 @@ class StatusStrip(QFrame):
         free = _disk_free_gb()
         if free < 0:
             self._disk_label.setText("Диск: ?")
-            self._disk_label.setStyleSheet("color: #888888; border: none;")
+            apply_status_label_style(self._disk_label, "muted")
         elif free < 2:
             self._disk_label.setText(f"Диск: {free:.1f} ГБ")
-            self._disk_label.setStyleSheet("color: #FF4136; font-weight: bold; border: none;")
+            apply_status_label_style(self._disk_label, "error", bold=True)
         elif free < 10:
             self._disk_label.setText(f"Диск: {free:.1f} ГБ")
-            self._disk_label.setStyleSheet("color: #FFDC00; border: none;")
+            apply_status_label_style(self._disk_label, "warning")
         else:
             self._disk_label.setText(f"Диск: {free:.0f} ГБ")
-            self._disk_label.setStyleSheet("color: #888888; border: none;")
+            apply_status_label_style(self._disk_label, "muted")
 
     @staticmethod
     def _bold_font(pt: int) -> QFont:
@@ -532,17 +531,17 @@ class KeithleyStrip(QFrame):
 
         title = QLabel("Keithley")
         title.setFont(self._bold_font(10))
-        title.setStyleSheet("color: #AAAAAA; border: none;")
+        apply_status_label_style(title, "muted", bold=True)
         layout.addWidget(title)
 
         self._smua_label = QLabel("smua: ВЫКЛ")
         self._smua_label.setFont(lbl_font)
-        self._smua_label.setStyleSheet("color: #8b949e; border: none;")
+        apply_status_label_style(self._smua_label, "muted")
         layout.addWidget(self._smua_label)
 
         self._smub_label = QLabel("smub: ВЫКЛ")
         self._smub_label.setFont(lbl_font)
-        self._smub_label.setStyleSheet("color: #8b949e; border: none;")
+        apply_status_label_style(self._smub_label, "muted")
         layout.addWidget(self._smub_label)
 
         layout.addStretch()
@@ -606,15 +605,15 @@ class KeithleyStrip(QFrame):
     ) -> None:
         if state == "fault":
             label.setText(f"{name}: АВАРИЯ")
-            label.setStyleSheet("color: #FF4136; border: none;")
+            apply_status_label_style(label, "error", bold=True)
             return
         if state == "on" and not data:
             label.setText(f"{name}: ВКЛ")
-            label.setStyleSheet("color: #2ECC40; border: none;")
+            apply_status_label_style(label, "success", bold=True)
             return
         if not data:
             label.setText(f"{name}: ВЫКЛ")
-            label.setStyleSheet("color: #8b949e; border: none;")
+            apply_status_label_style(label, "muted")
             return
         v = data.get("voltage", 0.0)
         i = data.get("current", 0.0)
@@ -625,9 +624,11 @@ class KeithleyStrip(QFrame):
             "fault": "АВАРИЯ",
             "off": "ВЫКЛ",
         }.get(state, state.upper())
-        color = "#2ECC40" if state == "on" else "#8b949e"
         label.setText(f"{name}: {state_text}  V={v:.3f} I={i:.4f} R={r:.1f} P={p:.2f}")
-        label.setStyleSheet(f"color: {color}; border: none;")
+        if state == "on":
+            apply_status_label_style(label, "success", bold=True)
+        else:
+            apply_status_label_style(label, "muted")
 
     @staticmethod
     def _bold_font(pt: int) -> QFont:
@@ -652,7 +653,6 @@ class OverviewPanel(QWidget):
     def __init__(self, channel_manager: ChannelManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._channel_mgr = channel_manager
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         # Буферы данных: channel_id -> deque[(ts, value)]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
@@ -707,10 +707,7 @@ class OverviewPanel(QWidget):
         for label, seconds in [("1\u0447", 3600), ("6\u0447", 21600), ("24\u0447", 86400)]:
             btn = QPushButton(label)
             btn.setFixedSize(QSize(50, 24))
-            btn.setStyleSheet(
-                "QPushButton { background: #333; color: #CCC; border: 1px solid #555; "
-                "border-radius: 3px; } QPushButton:hover { background: #444; }"
-            )
+            apply_button_style(btn, "neutral", compact=True)
             btn.clicked.connect(lambda checked, s=seconds: self._set_window(s))
             btn_bar.addWidget(btn)
 
@@ -719,10 +716,7 @@ class OverviewPanel(QWidget):
         # Log/Lin toggle
         self._log_btn = QPushButton("Lin Y")
         self._log_btn.setFixedSize(QSize(60, 24))
-        self._log_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #CCC; border: 1px solid #555; "
-            "border-radius: 3px; } QPushButton:hover { background: #444; }"
-        )
+        apply_button_style(self._log_btn, "neutral", compact=True)
         self._log_btn.clicked.connect(self._toggle_log)
         self._is_log_y = False
         btn_bar.addWidget(self._log_btn)
@@ -730,20 +724,14 @@ class OverviewPanel(QWidget):
         # Export PNG
         png_btn = QPushButton("PNG")
         png_btn.setFixedSize(QSize(60, 24))
-        png_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #CCC; border: 1px solid #555; "
-            "border-radius: 3px; } QPushButton:hover { background: #444; }"
-        )
+        apply_button_style(png_btn, "neutral", compact=True)
         png_btn.clicked.connect(self._on_export_png)
         btn_bar.addWidget(png_btn)
 
         # Export CSV
         csv_btn = QPushButton("CSV")
         csv_btn.setFixedSize(QSize(60, 24))
-        csv_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #CCC; border: 1px solid #555; "
-            "border-radius: 3px; } QPushButton:hover { background: #444; }"
-        )
+        apply_button_style(csv_btn, "neutral", compact=True)
         csv_btn.clicked.connect(self._on_export_csv)
         btn_bar.addWidget(csv_btn)
 

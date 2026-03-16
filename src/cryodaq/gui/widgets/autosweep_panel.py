@@ -42,7 +42,13 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
-from cryodaq.gui.widgets.common import PanelHeader, create_panel_root
+from cryodaq.gui.widgets.common import (
+    PanelHeader,
+    apply_button_style,
+    apply_group_box_style,
+    apply_status_label_style,
+    create_panel_root,
+)
 from cryodaq.gui.zmq_client import send_command
 from cryodaq.paths import get_data_dir
 
@@ -75,7 +81,6 @@ class AutoSweepPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         # State
         self._running = False
@@ -128,8 +133,7 @@ class AutoSweepPanel(QWidget):
 
         # Метаданные
         meta_box = QGroupBox("Метаданные")
-        meta_box.setStyleSheet("QGroupBox { color: #58a6ff; border: 1px solid #30363d; "
-                               "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(meta_box, "#58a6ff")
         ml = QGridLayout(meta_box)
 
         ml.addWidget(QLabel("Образец:"), 0, 0)
@@ -150,8 +154,7 @@ class AutoSweepPanel(QWidget):
 
         # Настройка мощности
         power_box = QGroupBox("Мощность")
-        power_box.setStyleSheet("QGroupBox { color: #f0883e; border: 1px solid #30363d; "
-                                "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(power_box, "#f0883e")
         pl = QGridLayout(power_box)
 
         pl.addWidget(QLabel("Начало (Вт):"), 0, 0)
@@ -213,8 +216,7 @@ class AutoSweepPanel(QWidget):
 
         # Датчики
         sensor_box = QGroupBox("Датчики")
-        sensor_box.setStyleSheet("QGroupBox { color: #3fb950; border: 1px solid #30363d; "
-                                 "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(sensor_box, "#3fb950")
         sl = QVBoxLayout(sensor_box)
         sensor_scroll = QScrollArea()
         sensor_scroll.setWidgetResizable(True)
@@ -225,7 +227,6 @@ class AutoSweepPanel(QWidget):
         scl.setSpacing(1)
         for ch in _ALL_CHANNELS:
             cb = QCheckBox(ch)
-            cb.setStyleSheet("color: #c9d1d9;")
             self._checkboxes[ch] = cb
             scl.addWidget(cb)
         sensor_scroll.setWidget(sc)
@@ -237,30 +238,20 @@ class AutoSweepPanel(QWidget):
 
         self._start_btn = QPushButton("СТАРТ")
         self._start_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._start_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-            "QPushButton:hover { background: #2ea043; }"
-        )
+        apply_button_style(self._start_btn, "primary")
         self._start_btn.clicked.connect(self._on_start)
         btn_layout.addWidget(self._start_btn)
 
         self._pause_btn = QPushButton("ПАУЗА")
         self._pause_btn.setEnabled(False)
-        self._pause_btn.setStyleSheet(
-            "QPushButton { background: #9e6a03; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-        )
+        apply_button_style(self._pause_btn, "warning")
         self._pause_btn.clicked.connect(self._on_pause)
         btn_layout.addWidget(self._pause_btn)
 
         self._stop_btn = QPushButton("СТОП")
         self._stop_btn.setEnabled(False)
         self._stop_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._stop_btn.setStyleSheet(
-            "QPushButton { background: #da3633; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-        )
+        apply_button_style(self._stop_btn, "danger")
         self._stop_btn.clicked.connect(self._on_stop)
         btn_layout.addWidget(self._stop_btn)
 
@@ -279,7 +270,7 @@ class AutoSweepPanel(QWidget):
         # Прогресс
         self._progress_label = QLabel("Ожидание старта...")
         self._progress_label.setFont(title_font)
-        self._progress_label.setStyleSheet("color: #c9d1d9;")
+        apply_status_label_style(self._progress_label, "info")
         right.addWidget(self._progress_label)
 
         self._progress_bar = QProgressBar()

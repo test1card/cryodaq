@@ -26,7 +26,7 @@
 
 ### Verification
 
-- Full suite: **328 collected / 327 passed / 1 skipped**
+- Required regression matrix: **326 passed**
 
 ---
 

@@ -21,6 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.common import (
+    PanelHeader,
+    StatusBanner,
+    apply_button_style,
+    apply_status_label_style,
+    build_action_row,
+    create_panel_root,
+)
 from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
 
 logger = logging.getLogger(__name__)
@@ -55,6 +63,7 @@ class _SmuPanel(QFrame):
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
         self._workers: list[ZmqCommandWorker] = []
         self._channel_state = "off"
+        self._channel_label = f"канал {self._smu[-1].upper()}"
         self._build_ui(colors)
 
     def _build_ui(self, colors: dict[str, str]) -> None:
@@ -74,7 +83,7 @@ class _SmuPanel(QFrame):
 
         self._state_label = QLabel("ВЫКЛ")
         self._state_label.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._state_label.setStyleSheet("color: #8b949e; border: none;")
+        apply_status_label_style(self._state_label, "muted", bold=True)
         header.addWidget(self._state_label)
         root.addLayout(header)
 
@@ -107,6 +116,9 @@ class _SmuPanel(QFrame):
         controls_layout.addWidget(self._stop_btn)
         controls_layout.addWidget(self._emg_btn)
         root.addWidget(controls)
+        self._status_banner = StatusBanner()
+        self._status_banner.clear_message()
+        root.addWidget(self._status_banner)
 
         cards = QHBoxLayout()
         cards.setSpacing(8)
@@ -193,18 +205,14 @@ class _SmuPanel(QFrame):
 
     @staticmethod
     def _button(label: str, bg: str, hover: str, handler: Slot, *, bold: bool = False) -> QPushButton:
+        del bg, hover
         button = QPushButton(label)
         font = QFont()
         font.setPointSize(9 if not bold else 10)
         font.setBold(True)
         button.setFont(font)
-        button.setStyleSheet(
-            "QPushButton { "
-            f"background: {bg}; color: white; border: none; border-radius: 4px; padding: 6px 14px; "
-            "}"
-            f"QPushButton:hover {{ background: {hover}; }}"
-            "QPushButton:disabled { background: #555; }"
-        )
+        variant = "danger" if "АВАР" in label else ("warning" if label == "Стоп" else "primary")
+        apply_button_style(button, variant)
         button.clicked.connect(handler)
         return button
 
@@ -212,13 +220,13 @@ class _SmuPanel(QFrame):
         self._channel_state = state.lower()
         if self._channel_state == "on":
             self._state_label.setText("ВКЛ")
-            self._state_label.setStyleSheet("color: #3fb950; border: none;")
+            apply_status_label_style(self._state_label, "success", bold=True)
         elif self._channel_state == "fault":
             self._state_label.setText("АВАРИЯ")
-            self._state_label.setStyleSheet("color: #ff7b72; border: none;")
+            apply_status_label_style(self._state_label, "error", bold=True)
         else:
             self._state_label.setText("ВЫКЛ")
-            self._state_label.setStyleSheet("color: #8b949e; border: none;")
+            apply_status_label_style(self._state_label, "muted", bold=True)
 
     def _on_start(self) -> None:
         reply = send_command(
@@ -231,16 +239,33 @@ class _SmuPanel(QFrame):
             }
         )
         if not reply.get("ok"):
+            self._status_banner.show_error(
+                str(reply.get("error", f"Не удалось запустить {self._channel_label}."))
+            )
             logger.warning("Keithley start failed on %s: %s", self._smu, reply.get("error"))
+            return
+        self._status_banner.show_info(
+            f"Команда запуска для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+        )
 
     def _on_stop(self) -> None:
         reply = send_command({"cmd": "keithley_stop", "channel": self._smu})
         if not reply.get("ok"):
+            self._status_banner.show_error(
+                str(reply.get("error", f"Не удалось остановить {self._channel_label}."))
+            )
             logger.warning("Keithley stop failed on %s: %s", self._smu, reply.get("error"))
+            return
+        self._status_banner.show_info(
+            f"Команда остановки для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+        )
 
     def _on_emergency(self) -> None:
         self._emg_btn.setEnabled(False)
         self._emg_btn.setText("ОТКЛ...")
+        self._status_banner.show_warning(
+            f"Команда аварийного отключения для {self._channel_label} отправлена. Ожидание подтверждения состояния."
+        )
         worker = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": self._smu})
         worker.finished.connect(self._on_emergency_result)
         self._workers.append(worker)
@@ -250,6 +275,9 @@ class _SmuPanel(QFrame):
         self._emg_btn.setEnabled(True)
         self._emg_btn.setText("АВАР. ОТКЛ.")
         if not result.get("ok"):
+            self._status_banner.show_error(
+                str(result.get("error", f"Не удалось аварийно отключить {self._channel_label}."))
+            )
             logger.error("Emergency off failed on %s: %s", self._smu, result.get("error"))
         self._workers = [worker for worker in self._workers if worker.isRunning()]
 
@@ -280,43 +308,30 @@ class KeithleyPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
         self._smu_panels: dict[str, _SmuPanel] = {}
-        self._workers: list[ZmqCommandWorker] = []
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
-
-        header = QFrame()
-        header.setStyleSheet("QFrame { background-color: #11151d; border: 1px solid #30363d; border-radius: 6px; }")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
-        header_layout.setSpacing(8)
-
-        title = QLabel("Keithley 2604B")
-        title.setFont(QFont("", 12, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f0f6fc; border: none;")
-        header_layout.addWidget(title)
-
-        subtitle = QLabel("Независимое управление каналами A / B и совместный режим A+B")
-        subtitle.setStyleSheet("color: #8b949e; border: none;")
-        header_layout.addWidget(subtitle)
-        header_layout.addStretch()
+        root = create_panel_root(self)
 
         start_both = QPushButton("Старт A+B")
+        apply_button_style(start_both, "primary")
         start_both.clicked.connect(self._on_start_both)
-        header_layout.addWidget(start_both)
 
         stop_both = QPushButton("Стоп A+B")
+        apply_button_style(stop_both, "warning")
         stop_both.clicked.connect(self._on_stop_both)
-        header_layout.addWidget(stop_both)
 
         emergency_both = QPushButton("АВАР. ОТКЛ. A+B")
+        apply_button_style(emergency_both, "danger")
         emergency_both.clicked.connect(self._on_emergency_both)
-        header_layout.addWidget(emergency_both)
-
+        header = PanelHeader(
+            "Keithley 2604B",
+            "Независимое управление каналами A / B и совместный режим A+B",
+        )
+        header.layout().addLayout(build_action_row(start_both, stop_both, emergency_both, add_stretch=True))
         root.addWidget(header)
+        self._status_banner = StatusBanner()
+        self._status_banner.clear_message()
+        root.addWidget(self._status_banner)
 
         panels = QHBoxLayout()
         panels.setSpacing(10)
@@ -336,26 +351,22 @@ class KeithleyPanel(QWidget):
     def on_reading(self, reading: Reading) -> None:
         self._reading_signal.emit(reading)
 
-    def _run_async_command(self, command: dict[str, str]) -> None:
-        worker = ZmqCommandWorker(command)
-        worker.finished.connect(lambda _result: self._cleanup_workers())
-        self._workers.append(worker)
-        worker.start()
-
-    def _cleanup_workers(self) -> None:
-        self._workers = [worker for worker in self._workers if worker.isRunning()]
-
     def _on_start_both(self) -> None:
+        self._status_banner.show_info("Команды запуска для каналов A+B отправлены. Ожидание подтверждения состояния.")
         for panel in self._smu_panels.values():
             panel._on_start()
 
     def _on_stop_both(self) -> None:
+        self._status_banner.show_info("Команды остановки для каналов A+B отправлены. Ожидание подтверждения состояния.")
         for panel in self._smu_panels.values():
             panel._on_stop()
 
     def _on_emergency_both(self) -> None:
-        for smu_name in self._smu_panels:
-            self._run_async_command({"cmd": "keithley_emergency_off", "channel": smu_name})
+        self._status_banner.show_warning(
+            "Команды аварийного отключения для каналов A+B отправлены. Ожидание подтверждения состояния."
+        )
+        for panel in self._smu_panels.values():
+            panel._on_emergency()
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:

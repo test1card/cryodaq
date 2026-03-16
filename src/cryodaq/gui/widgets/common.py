@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from PySide6.QtWidgets import (
     QFrame,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -68,6 +69,46 @@ class StatusBanner(QLabel):
     def _apply(self, level: str, text: str) -> None:
         self.setText(text)
         self.setStyleSheet(self._STYLES[level])
+
+
+def apply_status_label_style(label: QLabel, level: str, *, bold: bool = False) -> None:
+    base = {
+        "muted": "#888888",
+        "info": "#888888",
+        "success": "#2ECC40",
+        "warning": "#FFDC00",
+        "error": "#FF4136",
+        "accent": "#58a6ff",
+    }.get(level, "#888888")
+    weight = "font-weight: bold;" if bold else ""
+    label.setStyleSheet(f"color: {base}; {weight}".strip())
+
+
+def apply_button_style(button: QPushButton, variant: str = "neutral", *, compact: bool = False) -> None:
+    variants = {
+        "neutral": ("#21262d", "#30363d", "#c9d1d9"),
+        "primary": ("#238636", "#2ea043", "#ffffff"),
+        "warning": ("#9e6a03", "#d29922", "#ffffff"),
+        "danger": ("#da3633", "#f85149", "#ffffff"),
+    }
+    bg, hover, fg = variants.get(variant, variants["neutral"])
+    padding = "4px 8px" if compact else "6px 14px"
+    radius = "3px" if compact else "4px"
+    button.setStyleSheet(
+        "QPushButton { "
+        f"background: {bg}; color: {fg}; border: 1px solid #30363d; border-radius: {radius}; padding: {padding}; "
+        "}"
+        f"QPushButton:hover {{ background: {hover}; }}"
+        "QPushButton:disabled { background: #555555; color: #c9d1d9; }"
+    )
+
+
+def apply_group_box_style(box: QGroupBox, accent: str = "#58a6ff") -> None:
+    box.setStyleSheet(
+        "QGroupBox { "
+        f"color: {accent}; border: 1px solid #30363d; border-radius: 4px; padding-top: 12px; "
+        "}"
+    )
 
 
 def create_panel_root(widget: QWidget) -> QVBoxLayout:

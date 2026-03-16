@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # CryoDAQ
 
 LabVIEW replacement for cryogenic lab (АКЦ ФИАН, Millimetron).
-Python 3.12+, asyncio, PySide6, 24k+ lines, 328 collected tests.
+Python 3.12+, asyncio, PySide6, 24k+ lines, 326 passing tests in the required regression matrix.
 
 ## Build & Development Commands
 
@@ -20,7 +20,7 @@ install.bat                    # One-click Windows installer
 python create_shortcut.py      # Create desktop shortcut (CryoDAQ.lnk)
 cryodaq-cooldown build --data cooldown_v5/ --output model/  # Build cooldown model
 cryodaq-cooldown predict --model model/ --T_cold 50 --T_warm 120 --t_elapsed 8
-pytest                         # Run all tests (328 collected, ~100s)
+pytest                         # Run all tests / local regression from repo root
 pytest tests/core/             # Core subsystem tests only
 pytest -k test_safety          # Run safety manager tests
 pytest -k test_cooldown        # Run cooldown predictor + service tests
@@ -134,7 +134,7 @@ Menu: Файл (экспорт CSV/HDF5/Excel) | Эксперимент (нач�
 
 **GUI widgets:**
 - `src/cryodaq/gui/main_window.py` — MainWindow: 10 tabs, menu actions, status bar, tray status integration
-- `src/cryodaq/gui/widgets/overview_panel.py` — OverviewPanel (home tab "Обзор"): StatusStrip (safety/uptime/alarms/Keithley/cooldown/disk) + CompactTempCard grid (24ch, trend arrows) + temp plot ([1h/6h/24h], log/lin, PNG/CSV export) + PressureStrip (value + mini plot) + KeythleyStrip (conditionally visible)
+- `src/cryodaq/gui/widgets/overview_panel.py` — OverviewPanel (home tab "Обзор"): StatusStrip (safety/uptime/alarms/Keithley/cooldown/disk) + CompactTempCard grid (24ch, trend arrows) + temp plot ([1h/6h/24h], log/lin, PNG/CSV export) + PressureStrip (value + mini plot) + KeithleyStrip (conditionally visible)
 - `src/cryodaq/gui/widgets/keithley_panel.py` — KeithleyPanel: dual-channel smua/smub controls, backend-driven status
 - `src/cryodaq/gui/widgets/analytics_panel.py` — AnalyticsPanel: R_thermal + cooldown ETA with ±CI, progress bar, phase, prediction trajectory + CI band on plot
 - `src/cryodaq/gui/widgets/conductivity_panel.py` — ConductivityPanel: chain R/G + T∞ prediction
