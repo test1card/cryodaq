@@ -1,0 +1,19 @@
+id: cooldown_test
+name: Cooldown Test
+sections:
+  - setup
+  - cooldown_path
+  - operator_log
+report_enabled: true
+report_sections:
+  - title_page
+  - cooldown_section
+  - pressure_section
+  - operator_log_section
+  - alarms_section
+  - config_section
+custom_fields:
+  - id: cryostat_mode
+    label: Cryostat Mode
+  - id: target_temperature
+    label: Target Temperature

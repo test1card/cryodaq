@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 import signal
@@ -27,11 +28,20 @@ from typing import Any
 
 import yaml
 
+from cryodaq.analytics.calibration import CalibrationSessionStore, CalibrationStore
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
-from cryodaq.core.experiment import ExperimentManager
+from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
+from cryodaq.core.housekeeping import (
+    AdaptiveThrottle,
+    HousekeepingService,
+    load_housekeeping_config,
+    load_protected_channel_patterns,
+)
 from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
@@ -39,6 +49,7 @@ from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications.periodic_report import PeriodicReporter
+from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -56,6 +67,393 @@ _DATA_DIR = get_data_dir()
 
 # Интервал самодиагностики (секунды)
 _WATCHDOG_INTERVAL_S = 30.0
+
+
+async def _run_keithley_command(
+    action: str,
+    cmd: dict[str, Any],
+    safety_manager: SafetyManager,
+) -> dict[str, Any]:
+    """Dispatch channel-scoped Keithley commands to SafetyManager."""
+    channel = cmd.get("channel")
+
+    if action == "keithley_start":
+        smu_channel = normalize_smu_channel(channel)
+        p = float(cmd.get("p_target", 0))
+        v = float(cmd.get("v_comp", 40))
+        i = float(cmd.get("i_comp", 1.0))
+        return await safety_manager.request_run(p, v, i, channel=smu_channel)
+
+    if action == "keithley_stop":
+        smu_channel = normalize_smu_channel(channel)
+        return await safety_manager.request_stop(channel=smu_channel)
+
+    if action == "keithley_emergency_off":
+        smu_channel = normalize_smu_channel(channel)
+        return await safety_manager.emergency_off(channel=smu_channel)
+
+    raise ValueError(f"Unsupported Keithley command: {action}")
+
+
+def _parse_log_time(raw: Any) -> datetime | None:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return None
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    raise ValueError("Invalid log time filter.")
+
+
+def _parse_experiment_time(raw: Any) -> datetime | None:
+    return _parse_log_time(raw)
+
+
+async def _publish_operator_log_entry(
+    broker: DataBroker | None,
+    entry: OperatorLogEntry,
+) -> None:
+    if broker is None:
+        return
+    await broker.publish(
+        Reading(
+            timestamp=entry.timestamp,
+            instrument_id="operator_log",
+            channel="analytics/operator_log_entry",
+            value=float(entry.id),
+            unit="",
+            metadata=entry.to_payload(),
+        )
+    )
+
+
+async def _run_operator_log_command(
+    action: str,
+    cmd: dict[str, Any],
+    writer: SQLiteWriter,
+    experiment_manager: ExperimentManager,
+    broker: DataBroker | None = None,
+) -> dict[str, Any]:
+    if action == "log_entry":
+        message = str(cmd.get("message", "")).strip()
+        if not message:
+            raise ValueError("Operator log message must not be empty.")
+
+        experiment_id = cmd.get("experiment_id")
+        if experiment_id is None and cmd.get("current_experiment", True):
+            experiment_id = experiment_manager.active_experiment_id
+
+        entry = await writer.append_operator_log(
+            message=message,
+            author=str(cmd.get("author", "")).strip(),
+            source=str(cmd.get("source", "")).strip() or "command",
+            experiment_id=str(experiment_id) if experiment_id is not None else None,
+            tags=cmd.get("tags"),
+            timestamp=_parse_log_time(cmd.get("timestamp")),
+        )
+        await _publish_operator_log_entry(broker, entry)
+        return {"ok": True, "entry": entry.to_payload()}
+
+    if action == "log_get":
+        experiment_id = cmd.get("experiment_id")
+        if experiment_id is None and cmd.get("current_experiment", False):
+            experiment_id = experiment_manager.active_experiment_id
+            if experiment_id is None:
+                return {"ok": True, "entries": []}
+
+        entries = await writer.get_operator_log(
+            experiment_id=str(experiment_id) if experiment_id is not None else None,
+            start_time=_parse_log_time(cmd.get("start_time", cmd.get("start_ts"))),
+            end_time=_parse_log_time(cmd.get("end_time", cmd.get("end_ts"))),
+            limit=int(cmd.get("limit", 100)),
+        )
+        return {"ok": True, "entries": [entry.to_payload() for entry in entries]}
+
+    raise ValueError(f"Unsupported operator log command: {action}")
+
+
+async def _run_calibration_command(
+    action: str,
+    cmd: dict[str, Any],
+    *,
+    calibration_sessions: CalibrationSessionStore,
+    calibration_store: CalibrationStore,
+    experiment_manager: ExperimentManager,
+    drivers_by_name: dict[str, Any],
+) -> dict[str, Any]:
+    if action == "calibration_session_start":
+        experiment_id = cmd.get("experiment_id")
+        if experiment_id is None and cmd.get("current_experiment", True):
+            experiment_id = experiment_manager.active_experiment_id
+        session = calibration_sessions.start_session(
+            sensor_id=str(cmd.get("sensor_id", "")).strip(),
+            reference_channel=str(cmd.get("reference_channel", "")).strip(),
+            sensor_channel=str(cmd.get("sensor_channel", "")).strip(),
+            raw_unit=str(cmd.get("raw_unit", "sensor_unit")).strip() or "sensor_unit",
+            reference_instrument_id=str(cmd.get("reference_instrument_id", "")).strip(),
+            sensor_instrument_id=str(
+                cmd.get("sensor_instrument_id", cmd.get("reference_instrument_id", ""))
+            ).strip(),
+            experiment_id=str(experiment_id) if experiment_id is not None else None,
+            notes=str(cmd.get("notes", "")),
+            metadata=_normalize_dict_payload(cmd.get("metadata")),
+            session_id=str(cmd.get("session_id", "")).strip() or None,
+            started_at=_parse_log_time(cmd.get("started_at")),
+        )
+        return {"ok": True, "session": session.to_payload()}
+
+    if action == "calibration_session_get":
+        session_id = str(cmd.get("session_id", "")).strip()
+        if not session_id:
+            raise ValueError("session_id is required.")
+        session = calibration_sessions.get_session(session_id)
+        return {"ok": True, "session": session.to_payload()}
+
+    if action == "calibration_session_finalize":
+        session_id = str(cmd.get("session_id", "")).strip()
+        if not session_id:
+            raise ValueError("session_id is required.")
+        session = calibration_sessions.finalize_session(
+            session_id,
+            finished_at=_parse_log_time(cmd.get("finished_at")),
+            notes=str(cmd.get("notes", "")) if "notes" in cmd else None,
+        )
+        return {"ok": True, "session": session.to_payload()}
+
+    if action == "calibration_session_capture":
+        session_id = str(cmd.get("session_id", "")).strip()
+        if not session_id:
+            raise ValueError("session_id is required.")
+        session = calibration_sessions.get_session(session_id)
+
+        reference_temperature = cmd.get("reference_temperature")
+        sensor_raw_value = cmd.get("sensor_raw_value")
+        metadata = _normalize_dict_payload(cmd.get("metadata"))
+        if reference_temperature is None or sensor_raw_value is None:
+            instrument_name = session.reference_instrument_id or session.sensor_instrument_id
+            if not instrument_name:
+                raise ValueError("Calibration session capture requires instrument_id or manual values.")
+            driver = drivers_by_name.get(instrument_name)
+            if driver is None:
+                raise KeyError(f"Calibration instrument '{instrument_name}' not found.")
+            if not hasattr(driver, "read_calibration_pair"):
+                raise ValueError(f"Driver '{instrument_name}' does not support calibration capture.")
+            captured = await driver.read_calibration_pair(
+                reference_channel=session.reference_channel,
+                sensor_channel=session.sensor_channel,
+            )
+            reference_reading = captured["reference"]
+            sensor_reading = captured["sensor"]
+            reference_temperature = reference_reading.value
+            sensor_raw_value = sensor_reading.value
+            metadata = {
+                **metadata,
+                "captured_reference_channel": reference_reading.channel,
+                "captured_sensor_channel": sensor_reading.channel,
+                "reference_status": reference_reading.status.value,
+                "sensor_status": sensor_reading.status.value,
+            }
+
+        updated = calibration_sessions.append_sample(
+            session_id,
+            reference_temperature=float(reference_temperature),
+            sensor_raw_value=float(sensor_raw_value),
+            timestamp=_parse_log_time(cmd.get("timestamp")),
+            experiment_id=session.experiment_id,
+            metadata=metadata,
+        )
+        return {"ok": True, "session": updated.to_payload(), "sample": updated.samples[-1].to_payload()}
+
+    if action == "calibration_curve_fit":
+        session_id = str(cmd.get("session_id", "")).strip()
+        if not session_id:
+            raise ValueError("session_id is required.")
+        session = calibration_sessions.get_session(session_id)
+        curve = calibration_store.fit_curve(
+            session.sensor_id,
+            list(session.samples),
+            raw_unit=session.raw_unit,
+            sensor_kind=str(cmd.get("sensor_kind", "generic")).strip() or "generic",
+            source_session_ids=[session.session_id],
+            max_zones=int(cmd.get("max_zones", 3)),
+            min_points_per_zone=int(cmd.get("min_points_per_zone", 6)),
+            max_order=int(cmd.get("max_order", 8)),
+            target_rmse_k=float(cmd.get("target_rmse_k", 0.05)),
+            metadata={
+                "reference_channel": session.reference_channel,
+                "sensor_channel": session.sensor_channel,
+                **_normalize_dict_payload(cmd.get("metadata")),
+            },
+        )
+        curve_path = calibration_store.save_curve(curve)
+        table_path = calibration_store.export_curve_table(curve.sensor_id)
+        return {
+            "ok": True,
+            "curve": curve.to_payload(),
+            "curve_path": str(curve_path),
+            "table_path": str(table_path),
+        }
+
+    if action == "calibration_curve_evaluate":
+        sensor_id = str(cmd.get("sensor_id", "")).strip()
+        if not sensor_id:
+            raise ValueError("sensor_id is required.")
+        temperature = calibration_store.evaluate(sensor_id, float(cmd.get("raw_value")))
+        return {"ok": True, "temperature_k": temperature}
+
+    if action == "calibration_curve_export":
+        sensor_id = str(cmd.get("sensor_id", "")).strip()
+        if not sensor_id:
+            raise ValueError("sensor_id is required.")
+        json_path = calibration_store.export_curve_json(
+            sensor_id,
+            Path(str(cmd.get("json_path")).strip()) if str(cmd.get("json_path", "")).strip() else None,
+        )
+        table_path = calibration_store.export_curve_table(
+            sensor_id,
+            path=Path(str(cmd.get("table_path")).strip()) if str(cmd.get("table_path", "")).strip() else None,
+            points=int(cmd.get("points", 200)),
+        )
+        return {"ok": True, "json_path": str(json_path), "table_path": str(table_path)}
+
+    if action == "calibration_curve_import":
+        raw_path = str(cmd.get("path", "")).strip()
+        if not raw_path:
+            raise ValueError("path is required.")
+        curve = calibration_store.import_curve_json(Path(raw_path))
+        return {"ok": True, "curve": curve.to_payload()}
+
+    raise ValueError(f"Unsupported calibration command: {action}")
+
+
+def _normalize_custom_fields_payload(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    raise ValueError("custom_fields must be a dictionary.")
+
+
+def _normalize_dict_payload(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    raise ValueError("Expected dictionary payload.")
+
+
+async def _run_experiment_command(
+    action: str,
+    cmd: dict[str, Any],
+    experiment_manager: ExperimentManager,
+) -> dict[str, Any]:
+    if action == "experiment_templates":
+        return {
+            "ok": True,
+            "templates": [template.to_payload() for template in experiment_manager.get_templates()],
+        }
+
+    if action == "experiment_status":
+        return experiment_manager.get_status_payload()
+
+    if action == "experiment_archive_list":
+        report_present_raw = cmd.get("report_present")
+        if report_present_raw in (None, ""):
+            report_present = None
+        elif isinstance(report_present_raw, str):
+            report_present = report_present_raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            report_present = bool(report_present_raw)
+        entries = experiment_manager.list_archive_entries(
+            template_id=str(cmd.get("template_id", "")).strip() or None,
+            operator=str(cmd.get("operator", "")).strip() or None,
+            sample=str(cmd.get("sample", "")).strip() or None,
+            start_date=_parse_experiment_time(cmd.get("start_date")),
+            end_date=_parse_experiment_time(cmd.get("end_date")),
+            report_present=report_present,
+            sort_by=str(cmd.get("sort_by", "start_time")),
+            descending=bool(cmd.get("descending", True)),
+        )
+        return {"ok": True, "entries": [entry.to_payload() for entry in entries]}
+
+    if action == "experiment_start":
+        exp_id = experiment_manager.start_experiment(
+            name=str(cmd.get("name", "")).strip() or str(cmd.get("title", "")).strip(),
+            operator=str(cmd.get("operator", "")).strip(),
+            template_id=str(cmd.get("template_id", "custom")).strip() or "custom",
+            title=str(cmd.get("title", "")).strip() or None,
+            sample=str(cmd.get("sample", "")).strip(),
+            cryostat=str(cmd.get("cryostat", "")).strip(),
+            description=str(cmd.get("description", "")).strip(),
+            notes=str(cmd.get("notes", "")).strip(),
+            custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
+            start_time=_parse_experiment_time(cmd.get("start_time")),
+        )
+        return {
+            "ok": True,
+            "experiment_id": exp_id,
+            "active_experiment": experiment_manager.active_experiment.to_payload()
+            if experiment_manager.active_experiment
+            else None,
+        }
+
+    if action in {"experiment_finalize", "experiment_stop"}:
+        status_name = str(cmd.get("status", ExperimentStatus.COMPLETED.value)).upper()
+        status = ExperimentStatus(status_name)
+        info = experiment_manager.finalize_experiment(
+            experiment_id=str(cmd.get("experiment_id", "")).strip() or None,
+            status=status,
+            title=str(cmd.get("title", "")).strip() or None,
+            sample=str(cmd.get("sample", "")).strip() or None,
+            notes=str(cmd.get("notes", "")).strip() or None,
+            description=str(cmd.get("description", "")).strip() or None,
+            custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
+            end_time=_parse_experiment_time(cmd.get("end_time")),
+        )
+        return {"ok": True, "experiment": info.to_payload()}
+
+    if action == "experiment_create_retroactive":
+        info = experiment_manager.create_retroactive_experiment(
+            template_id=str(cmd.get("template_id", "custom")).strip() or "custom",
+            title=str(cmd.get("title", "")).strip(),
+            operator=str(cmd.get("operator", "")).strip(),
+            start_time=_parse_experiment_time(cmd.get("start_time")),
+            end_time=_parse_experiment_time(cmd.get("end_time")),
+            sample=str(cmd.get("sample", "")).strip(),
+            cryostat=str(cmd.get("cryostat", "")).strip(),
+            description=str(cmd.get("description", "")).strip(),
+            notes=str(cmd.get("notes", "")).strip(),
+            custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
+        )
+        return {"ok": True, "experiment": info.to_payload()}
+
+    if action == "experiment_generate_report":
+        experiment_id = str(cmd.get("experiment_id", "")).strip()
+        if not experiment_id:
+            raise ValueError("experiment_id is required for report generation.")
+        generator = ReportGenerator(experiment_manager.data_dir)
+        result = generator.generate(experiment_id)
+        return {
+            "ok": True,
+            "report": {
+                "docx_path": str(result.docx_path),
+                "pdf_path": str(result.pdf_path) if result.pdf_path else None,
+                "assets_dir": str(result.assets_dir),
+                "sections": list(result.sections),
+                "skipped": result.skipped,
+                "reason": result.reason,
+            },
+        }
+
+    raise ValueError(f"Unsupported experiment command: {action}")
 
 
 def _get_memory_mb() -> float:
@@ -204,6 +602,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     instruments_cfg = _cfg("instruments")
     alarms_cfg = _cfg("alarms")
     interlocks_cfg = _cfg("interlocks")
+    housekeeping_cfg = _cfg("housekeeping")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
 
     # --- Создать основные компоненты ---
@@ -212,6 +611,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # Драйверы
     driver_configs = _load_drivers(instruments_cfg, mock=mock)
+    drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
 
     # Keithley driver (нужен для SafetyManager)
     keithley_driver = None
@@ -230,12 +630,23 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     safety_manager.load_config(safety_cfg)
 
+    housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
+    adaptive_throttle = AdaptiveThrottle(
+        housekeeping_raw.get("adaptive_throttle", {}),
+        protected_patterns=load_protected_channel_patterns(alarms_cfg, interlocks_cfg),
+    )
+
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR)
     await writer.start_immediate()
 
     # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации
-    scheduler = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer)
+    scheduler = Scheduler(
+        broker,
+        safety_broker=safety_broker,
+        sqlite_writer=writer,
+        adaptive_throttle=adaptive_throttle,
+    )
     for cfg in driver_configs:
         scheduler.add(cfg)
 
@@ -269,21 +680,37 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.warning("Файл блокировок не найден: %s", interlocks_cfg)
 
     # ExperimentManager
-    experiment_manager = ExperimentManager(data_dir=_DATA_DIR, instruments_config=instruments_cfg)
+    experiment_manager = ExperimentManager(
+        data_dir=_DATA_DIR,
+        instruments_config=instruments_cfg,
+        templates_dir=_CONFIG_DIR / "experiment_templates",
+    )
+    calibration_dir = _DATA_DIR / "calibration"
+    calibration_sessions = CalibrationSessionStore(calibration_dir)
+    calibration_store = CalibrationStore(calibration_dir)
+    curves_dir = calibration_dir / "curves"
+    if curves_dir.exists():
+        calibration_store.load_curves(curves_dir)
+    housekeeping_service = HousekeepingService(
+        _DATA_DIR,
+        experiment_manager.data_dir / "experiments",
+        config=housekeeping_raw.get("retention", {}),
+    )
+
+    async def _track_runtime_signals() -> None:
+        queue = await broker.subscribe("adaptive_throttle_runtime", maxsize=2000)
+        try:
+            while True:
+                adaptive_throttle.observe_runtime_signal(await queue.get())
+        except asyncio.CancelledError:
+            return
 
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
         try:
-            if action == "keithley_emergency_off":
-                return await safety_manager.emergency_off()
-            if action == "keithley_stop":
-                return await safety_manager.request_stop()
-            if action == "keithley_start":
-                p = float(cmd.get("p_target", 0))
-                v = float(cmd.get("v_comp", 40))
-                i = float(cmd.get("i_comp", 1.0))
-                return await safety_manager.request_run(p, v, i)
+            if action in {"keithley_emergency_off", "keithley_stop", "keithley_start"}:
+                return await _run_keithley_command(action, cmd, safety_manager)
             if action == "safety_status":
                 return {"ok": True, **safety_manager.get_status()}
             if action == "safety_acknowledge":
@@ -292,28 +719,47 @@ async def _run_engine(*, mock: bool = False) -> None:
             if action == "alarm_acknowledge":
                 name = cmd.get("alarm_name", "")
                 try:
-                    alarm_engine.acknowledge(name)
-                    await alarm_engine._publish_alarm_count()
+                    await alarm_engine.acknowledge(name)
                     return {"ok": True, "action": "alarm_acknowledge"}
                 except (KeyError, ValueError) as exc:
                     return {"ok": False, "error": str(exc)}
-            if action == "experiment_start":
-                try:
-                    exp_id = experiment_manager.start_experiment(
-                        name=cmd.get("name", ""),
-                        operator=cmd.get("operator", ""),
-                        sample=cmd.get("sample", ""),
-                        description=cmd.get("description", ""),
-                    )
-                    return {"ok": True, "experiment_id": exp_id}
-                except RuntimeError as exc:
-                    return {"ok": False, "error": str(exc)}
-            if action == "experiment_stop":
-                try:
-                    experiment_manager.stop_experiment()
-                    return {"ok": True}
-                except RuntimeError as exc:
-                    return {"ok": False, "error": str(exc)}
+            if action in {
+                "experiment_templates",
+                "experiment_status",
+                "experiment_archive_list",
+                "experiment_start",
+                "experiment_finalize",
+                "experiment_stop",
+                "experiment_create_retroactive",
+                "experiment_generate_report",
+            }:
+                return await _run_experiment_command(action, cmd, experiment_manager)
+            if action in {"log_entry", "log_get"}:
+                return await _run_operator_log_command(
+                    action,
+                    cmd,
+                    writer,
+                    experiment_manager,
+                    broker,
+                )
+            if action in {
+                "calibration_session_start",
+                "calibration_session_get",
+                "calibration_session_capture",
+                "calibration_session_finalize",
+                "calibration_curve_fit",
+                "calibration_curve_evaluate",
+                "calibration_curve_export",
+                "calibration_curve_import",
+            }:
+                return await _run_calibration_command(
+                    action,
+                    cmd,
+                    calibration_sessions=calibration_sessions,
+                    calibration_store=calibration_store,
+                    experiment_manager=experiment_manager,
+                    drivers_by_name=drivers_by_name,
+                )
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -404,6 +850,8 @@ async def _run_engine(*, mock: bool = False) -> None:
     if telegram_bot is not None:
         await telegram_bot.start()
     await scheduler.start()
+    throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
+    await housekeeping_service.start()
 
     # Watchdog
     watchdog_task = asyncio.create_task(
@@ -450,6 +898,12 @@ async def _run_engine(*, mock: bool = False) -> None:
     except asyncio.CancelledError:
         pass
 
+    throttle_task.cancel()
+    try:
+        await throttle_task
+    except asyncio.CancelledError:
+        pass
+
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
     await scheduler.stop()
     logger.info("Планировщик остановлен")
@@ -480,6 +934,9 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await disk_monitor.stop()
     logger.info("DiskMonitor остановлен")
+
+    await housekeeping_service.stop()
+    logger.info("HousekeepingService остановлен")
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))

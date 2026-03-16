@@ -161,6 +161,34 @@ async def test_alarm_publishes_reading_on_clear() -> None:
         await engine.stop()
 
 
+async def test_alarm_publishes_reading_on_acknowledge() -> None:
+    """AlarmEngine publishes a Reading with event_type='acknowledged' on acknowledge."""
+    broker = DataBroker()
+    test_q = await broker.subscribe(
+        "test_alarm_acknowledge",
+        maxsize=100,
+        filter_fn=lambda r: r.channel.startswith("alarm/"),
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await asyncio.sleep(0.05)
+
+        await engine.acknowledge("high_temp")
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(test_q, timeout=0.2)
+        acknowledged = [r for r in readings if r.metadata.get("event_type") == "acknowledged"]
+        assert acknowledged, "Expected a Reading with event_type='acknowledged'"
+        assert acknowledged[0].channel == "alarm/high_temp"
+    finally:
+        await engine.stop()
+
+
 async def test_alarm_publishes_alarm_count_on_activate() -> None:
     """AlarmEngine publishes analytics/alarm_count with value=1.0 when alarm activates."""
     broker = DataBroker()
@@ -210,7 +238,7 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
         await asyncio.sleep(0.05)
 
         # Acknowledge
-        engine.acknowledge("high_temp")
+        await engine.acknowledge("high_temp")
         await asyncio.sleep(0.02)
 
         # Clear: value=80 < 90
@@ -222,6 +250,35 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
         count_values = [r.value for r in readings]
         assert 0.0 in count_values, (
             f"Expected analytics/alarm_count=0.0 after clear, got history: {count_values}"
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_count_remains_unresolved_after_acknowledge() -> None:
+    """alarm_count counts ACTIVE + ACKNOWLEDGED alarms until clear."""
+    broker = DataBroker()
+    count_q = await broker.subscribe(
+        "test_count_acknowledge",
+        maxsize=100,
+        filter_fn=lambda r: r.channel == "analytics/alarm_count",
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await asyncio.sleep(0.05)
+
+        await engine.acknowledge("high_temp")
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(count_q, timeout=0.2)
+        count_values = [r.value for r in readings]
+        assert count_values[-1] == pytest.approx(1.0), (
+            f"Expected unresolved alarm_count to remain 1.0 after acknowledge, got: {count_values}"
         )
     finally:
         await engine.stop()

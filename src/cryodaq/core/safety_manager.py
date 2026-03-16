@@ -1,40 +1,4 @@
-"""SafetyManager — центральный менеджер безопасности CryoDAQ.
-
-АРХИТЕКТУРА БЕЗОПАСНОСТИ:
-- Безопасное состояние (source OFF) — DEFAULT. Работа нагревателя
-  требует непрерывного подтверждения, что всё исправно.
-- Отсутствие данных = ОПАСНО (fail-on-silence).
-- Единственная точка принятия решений о включении/отключении источника.
-- Двухшаговое восстановление после аварии.
-
-ДИАГРАММА СОСТОЯНИЙ:
-
-    SAFE_OFF ──(все предусловия ОК)──► READY
-                                         │
-                         (оператор запросил + проверка) │
-                                         ▼
-                                    RUN_PERMITTED
-                                         │
-                            (источник подтверждён ON) │
-                                         ▼
-                                      RUNNING
-                                     │       │
-                    (оператор стоп)  │       │ (нарушение)
-                         ▼           │       ▼
-                     SAFE_OFF       │    FAULT_LATCHED
-                                    │       │
-                                    │  (оператор + причина)
-                                    │       ▼
-                                    │   MANUAL_RECOVERY
-                                    │       │
-                                    │  (предусловия ОК)
-                                    │       ▼
-                                    └──► READY
-
-    Из ЛЮБОГО состояния:
-        → FAULT_LATCHED (критическое нарушение)
-        → SAFE_OFF (аварийное отключение)
-"""
+"""SafetyManager for CryoDAQ."""
 
 from __future__ import annotations
 
@@ -53,6 +17,7 @@ from typing import Any, Callable
 import yaml
 
 from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.smu_channel import SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
@@ -62,20 +27,16 @@ _CHECK_INTERVAL_S = 1.0
 
 
 class SafetyState(Enum):
-    """Состояние системы безопасности."""
-
-    SAFE_OFF = "safe_off"                 # Источник ВЫКЛЮЧЕН. Стандартное состояние.
-    READY = "ready"                       # Все предусловия ОК, оператор может запустить.
-    RUN_PERMITTED = "run_permitted"       # Запрос на запуск одобрен, ожидание подтверждения.
-    RUNNING = "running"                   # Источник ВКЛЮЧЁН, непрерывный мониторинг.
-    FAULT_LATCHED = "fault_latched"       # Авария. Источник ВЫКЛЮЧЕН. Требуется вмешательство.
-    MANUAL_RECOVERY = "manual_recovery"   # Оператор подтвердил, система проверяет предусловия.
+    SAFE_OFF = "safe_off"
+    READY = "ready"
+    RUN_PERMITTED = "run_permitted"
+    RUNNING = "running"
+    FAULT_LATCHED = "fault_latched"
+    MANUAL_RECOVERY = "manual_recovery"
 
 
 @dataclass(frozen=True, slots=True)
 class SafetyEvent:
-    """Запись о событии безопасности."""
-
     timestamp: datetime
     from_state: SafetyState
     to_state: SafetyState
@@ -86,8 +47,6 @@ class SafetyEvent:
 
 @dataclass
 class SafetyConfig:
-    """Конфигурация безопасности."""
-
     critical_channels: list[re.Pattern[str]] = field(default_factory=list)
     stale_timeout_s: float = 10.0
     heartbeat_timeout_s: float = 15.0
@@ -103,11 +62,7 @@ class SafetyConfig:
 
 
 class SafetyManager:
-    """Центральный менеджер безопасности.
-
-    Единственная точка принятия решений о включении/отключении источника тока.
-    Все команды keithley_start/stop проходят через SafetyManager.
-    """
+    """Single safety state machine with channel-aware Keithley control."""
 
     def __init__(
         self,
@@ -124,51 +79,38 @@ class SafetyManager:
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
-        self._fault_reason: str = ""
-        self._fault_time: float = 0.0
-        self._recovery_reason: str = ""
+        self._fault_reason = ""
+        self._fault_time = 0.0
+        self._recovery_reason = ""
+        self._active_sources: set[SmuChannel] = set()
 
-        # Текущие значения каналов: channel → (monotonic_time, value, status)
         self._latest: dict[str, tuple[float, float, str]] = {}
-        # Скорости изменения: channel → deque[(monotonic, value)]
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
 
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._collect_task: asyncio.Task[None] | None = None
 
-        # Compiled regex patterns for Keithley channel matching (from config defaults)
-        self._keithley_patterns: list[re.Pattern] = [
-            re.compile(p) for p in self._config.keithley_channel_patterns
-        ]
-
-        # Callbacks для уведомлений (GUI, Telegram)
+        self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
-
-        # Установить overflow callback на SafetyBroker
         self._broker.set_overflow_callback(
-            lambda: self._fault("SafetyBroker переполнен — данные потеряны")
+            lambda: self._fault("SafetyBroker overflow - data lost")
         )
 
-    # ------------------------------------------------------------------
-    # Конфигурация
-    # ------------------------------------------------------------------
-
     def load_config(self, path: Path) -> None:
-        """Загрузить config/safety.yaml."""
         if not path.exists():
-            logger.warning("Файл safety.yaml не найден: %s — используются значения по умолчанию", path)
+            logger.warning("safety.yaml not found: %s", path)
             return
 
         with path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
 
-        patterns = []
-        for p in raw.get("critical_channels", []):
+        patterns: list[re.Pattern[str]] = []
+        for pattern in raw.get("critical_channels", []):
             try:
-                patterns.append(re.compile(p))
+                patterns.append(re.compile(pattern))
             except re.error as exc:
-                logger.error("Некорректный regex в critical_channels: '%s': %s", p, exc)
+                logger.error("Invalid critical_channels regex %r: %s", pattern, exc)
 
         src_limits = raw.get("source_limits", {})
         self._config = SafetyConfig(
@@ -184,40 +126,21 @@ class SafetyManager:
             max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
             max_current_a=float(src_limits.get("max_current_a", 1.0)),
         )
-
-        # Compile Keithley channel patterns for heartbeat check
-        kp = raw.get("keithley_channels", [".*/smu.*"])
-        self._keithley_patterns = [re.compile(p) for p in kp]
-
-        logger.info(
-            "SafetyManager: конфигурация загружена. Критических каналов: %d, stale=%.0fs",
-            len(self._config.critical_channels),
-            self._config.stale_timeout_s,
-        )
-
-    # ------------------------------------------------------------------
-    # Жизненный цикл
-    # ------------------------------------------------------------------
+        self._keithley_patterns = [
+            re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])
+        ]
 
     async def start(self) -> None:
-        """Запустить SafetyManager."""
         self._queue = self._broker.subscribe("safety_manager", maxsize=self._config.max_safety_backlog)
         self._broker.freeze()
-
         self._collect_task = asyncio.create_task(self._collect_loop(), name="safety_collect")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="safety_monitor")
-
-        logger.info(
-            "SafetyManager запущен. Состояние: %s. Mock: %s.",
-            self._state.value, self._mock,
-        )
         await self._publish_state("initial")
+        await self._publish_keithley_channel_states("initial")
 
     async def stop(self) -> None:
-        """Остановить SafetyManager. Гарантировать источник OFF."""
-        # Сначала убедимся, что источник выключен
-        if self._state == SafetyState.RUNNING:
-            await self._safe_off("Остановка системы")
+        if self._active_sources:
+            await self._safe_off("system stop", channels=set(self._active_sources))
 
         for task in (self._collect_task, self._monitor_task):
             if task and not task.done():
@@ -228,11 +151,6 @@ class SafetyManager:
                     pass
         self._collect_task = None
         self._monitor_task = None
-        logger.info("SafetyManager остановлен. Финальное состояние: %s.", self._state.value)
-
-    # ------------------------------------------------------------------
-    # Публичный API (вызывается из GUI через ZMQ command handler)
-    # ------------------------------------------------------------------
 
     @property
     def state(self) -> SafetyState:
@@ -243,142 +161,153 @@ class SafetyManager:
         return self._fault_reason
 
     async def request_run(
-        self, p_target: float, v_comp: float, i_comp: float,
+        self,
+        p_target: float,
+        v_comp: float,
+        i_comp: float,
+        *,
+        channel: str | None = None,
     ) -> dict[str, Any]:
-        """Оператор запрашивает включение источника.
+        smu_channel = normalize_smu_channel(channel)
 
-        Возвращает {"ok": True/False, "state": ..., "error": ...}.
-        """
         if self._state == SafetyState.FAULT_LATCHED:
-            return {"ok": False, "state": self._state.value,
-                    "error": f"FAULT: {self._fault_reason}"}
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"FAULT: {self._fault_reason}"}
 
-        if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY):
-            return {"ok": False, "state": self._state.value,
-                    "error": f"Запуск невозможен из состояния {self._state.value}"}
+        if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Start not allowed from {self._state.value}"}
 
-        # Проверить предусловия
+        if smu_channel in self._active_sources:
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Channel {smu_channel} already active"}
+
         ok, reason = self._check_preconditions()
         if not ok:
-            return {"ok": False, "state": self._state.value, "error": reason}
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": reason}
 
-        # Проверить лимиты источника
         if p_target > self._config.max_power_w:
-            return {"ok": False, "state": self._state.value,
-                    "error": f"P={p_target}W превышает лимит {self._config.max_power_w}W"}
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
         if v_comp > self._config.max_voltage_v:
-            return {"ok": False, "state": self._state.value,
-                    "error": f"V={v_comp}V превышает лимит {self._config.max_voltage_v}V"}
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
         if i_comp > self._config.max_current_a:
-            return {"ok": False, "state": self._state.value,
-                    "error": f"I={i_comp}A превышает лимит {self._config.max_current_a}A"}
+            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
 
-        # Перейти в RUN_PERMITTED
-        self._transition(SafetyState.RUN_PERMITTED, f"Запуск запрошен: P={p_target}W")
+        if self._state != SafetyState.RUNNING:
+            self._transition(
+                SafetyState.RUN_PERMITTED,
+                f"Start requested for {smu_channel}: P={p_target}W",
+                channel=smu_channel,
+                value=p_target,
+            )
 
-        # Попытка запустить источник
         if self._keithley is None:
             if self._config.require_keithley_for_run and not self._mock:
-                self._transition(SafetyState.SAFE_OFF, "Keithley не подключён")
-                return {"ok": False, "state": self._state.value,
-                        "error": "Keithley не подключён"}
-            # Mock mode — имитируем успех
-            self._transition(SafetyState.RUNNING, f"Mock RUN: P={p_target}W")
-            return {"ok": True, "state": self._state.value}
-
-        try:
-            await self._keithley.start_source(p_target, v_comp, i_comp)
-            self._transition(SafetyState.RUNNING, f"Источник включён: P={p_target}W")
-            return {"ok": True, "state": self._state.value}
-        except Exception as exc:
-            await self._fault(f"Ошибка запуска источника: {exc}")
-            return {"ok": False, "state": self._state.value, "error": str(exc)}
-
-    async def _ensure_output_off(self) -> None:
-        """Turn off hardware output WITHOUT changing safety state."""
-        if self._keithley is not None:
-            try:
-                await self._keithley.emergency_off()
-            except Exception as exc:
-                logger.critical("_ensure_output_off FAILED: %s", exc)
-
-    async def request_stop(self) -> dict[str, Any]:
-        """Оператор запрашивает штатную остановку."""
-        if self._state == SafetyState.FAULT_LATCHED:
-            await self._ensure_output_off()
-            return {"ok": False, "state": self._state.value,
-                    "error": "Система в аварии — сброс через acknowledge_fault"}
-        await self._safe_off("Штатная остановка оператором")
-        return {"ok": True, "state": self._state.value}
-
-    async def emergency_off(self) -> dict[str, Any]:
-        """Аварийное отключение. Bypasses state machine — прямое отключение."""
-        logger.critical("АВАРИЙНОЕ ОТКЛЮЧЕНИЕ — прямая команда")
-        await self._ensure_output_off()
-        if self._state != SafetyState.FAULT_LATCHED:
-            self._transition(SafetyState.SAFE_OFF, "Аварийное отключение оператором")
-            return {"ok": True, "state": self._state.value}
+                self._transition(SafetyState.SAFE_OFF, "Keithley not connected")
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": "Keithley not connected"}
         else:
-            logger.warning("emergency_off: FAULT_LATCHED сохранён, выход выключен")
+            try:
+                await self._keithley.start_source(smu_channel, p_target, v_comp, i_comp)
+            except Exception as exc:
+                await self._fault(f"Source start failed on {smu_channel}: {exc}", channel=smu_channel)
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": str(exc)}
+
+        self._active_sources.add(smu_channel)
+        if self._state != SafetyState.RUNNING:
+            self._transition(
+                SafetyState.RUNNING,
+                f"Source {smu_channel} enabled: P={p_target}W",
+                channel=smu_channel,
+                value=p_target,
+            )
+        await self._publish_keithley_channel_states(f"run:{smu_channel}")
+        return {
+            "ok": True,
+            "state": self._state.value,
+            "channel": smu_channel,
+            "active_channels": sorted(self._active_sources),
+        }
+
+    async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
+        channels = self._resolve_channels(channel)
+        if self._state == SafetyState.FAULT_LATCHED:
+            await self._ensure_output_off(channel)
+            return {
+                "ok": False,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "error": "System is fault-latched - acknowledge_fault required",
+            }
+
+        await self._safe_off("Operator stop", channels=channels)
+        await self._publish_keithley_channel_states("stop")
+        return {
+            "ok": True,
+            "state": self._state.value,
+            "channels": sorted(channels),
+            "active_channels": sorted(self._active_sources),
+        }
+
+    async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
+        channels = self._resolve_channels(channel)
+        await self._ensure_output_off(channel)
+        self._active_sources.difference_update(channels)
+        await self._publish_keithley_channel_states("emergency_off")
+
+        if self._state == SafetyState.FAULT_LATCHED:
             return {
                 "ok": True,
                 "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
                 "latched": True,
-                "warning": "Выход отключён, но авария не снята — используйте acknowledge_fault",
+                "warning": "Outputs disabled but fault remains latched",
             }
 
+        if not self._active_sources:
+            self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
+
+        return {
+            "ok": True,
+            "state": self._state.value,
+            "channels": sorted(channels),
+            "active_channels": sorted(self._active_sources),
+        }
+
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
-        """Оператор подтверждает аварию и указывает причину.
-
-        Step 1 восстановления: FAULT_LATCHED → MANUAL_RECOVERY.
-        """
         if self._state != SafetyState.FAULT_LATCHED:
-            return {"ok": False, "state": self._state.value,
-                    "error": "Нет активной аварии для подтверждения"}
-
+            return {"ok": False, "state": self._state.value, "error": "Нет активной аварии для подтверждения"}
         if self._config.require_reason and not reason.strip():
-            return {"ok": False, "state": self._state.value,
-                    "error": "Укажите причину аварии"}
+            return {"ok": False, "state": self._state.value, "error": "Укажите причину аварии"}
 
-        # Cooldown check
         elapsed = time.monotonic() - self._fault_time
         if elapsed < self._config.cooldown_before_rearm_s:
             remaining = self._config.cooldown_before_rearm_s - elapsed
-            return {"ok": False, "state": self._state.value,
-                    "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
+            return {"ok": False, "state": self._state.value, "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
 
         self._recovery_reason = reason.strip()
-        self._transition(
-            SafetyState.MANUAL_RECOVERY,
-            f"Оператор подтвердил аварию: {reason}",
-        )
+        self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
+        await self._publish_keithley_channel_states("fault_acknowledged")
         return {"ok": True, "state": self._state.value}
 
     def get_status(self) -> dict[str, Any]:
-        """Полный статус для GUI / Telegram."""
         return {
             "state": self._state.value,
             "fault_reason": self._fault_reason,
             "recovery_reason": self._recovery_reason,
             "channels_tracked": len(self._latest),
-            "keithley_connected": self._keithley is not None and (
-                self._keithley.connected if hasattr(self._keithley, "connected") else False
-            ),
+            "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
+            "active_channels": sorted(self._active_sources),
             "mock": self._mock,
         }
 
     def get_events(self) -> list[SafetyEvent]:
         return list(self._events)
 
-    def on_state_change(self, callback: Callable) -> None:
-        """Зарегистрировать callback(from_state, to_state, reason)."""
+    def on_state_change(self, callback: Callable[[SafetyState, SafetyState, str], Any]) -> None:
         self._on_state_change.append(callback)
 
     async def _publish_state(self, reason: str = "") -> None:
-        """Опубликовать текущее состояние безопасности в DataBroker."""
         if self._data_broker is None:
             return
-        r = Reading.now(
+        reading = Reading.now(
             channel="analytics/safety_state",
             value=0.0,
             unit="",
@@ -386,142 +315,175 @@ class SafetyManager:
             metadata={"state": self._state.value, "reason": reason},
         )
         try:
-            await self._data_broker.publish(r)
+            await self._data_broker.publish(reading)
         except Exception as exc:
-            logger.warning("Не удалось опубликовать safety state: %s", exc)
+            logger.warning("Failed to publish safety state: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Внутренние переходы
-    # ------------------------------------------------------------------
+    async def _publish_keithley_channel_states(
+        self,
+        reason: str = "",
+        *,
+        fault_channel: str | None = None,
+    ) -> None:
+        if self._data_broker is None:
+            return
 
-    def _transition(self, new_state: SafetyState, reason: str, *, channel: str = "", value: float = 0.0) -> None:
-        """Выполнить переход состояния с логированием и уведомлением."""
-        old = self._state
+        for smu_channel in ("smua", "smub"):
+            if fault_channel == smu_channel:
+                state = "fault"
+                value = -1.0
+            elif smu_channel in self._active_sources:
+                state = "on"
+                value = 1.0
+            else:
+                state = "off"
+                value = 0.0
+
+            reading = Reading.now(
+                channel=f"analytics/keithley_channel_state/{smu_channel}",
+                value=value,
+                unit="",
+                instrument_id="safety_manager",
+                metadata={"state": state, "channel": smu_channel, "reason": reason},
+            )
+            try:
+                await self._data_broker.publish(reading)
+            except Exception as exc:
+                logger.warning("Failed to publish Keithley channel state for %s: %s", smu_channel, exc)
+
+    def _transition(
+        self,
+        new_state: SafetyState,
+        reason: str,
+        *,
+        channel: str = "",
+        value: float = 0.0,
+    ) -> None:
+        old_state = self._state
         self._state = new_state
-
-        event = SafetyEvent(
-            timestamp=datetime.now(timezone.utc),
-            from_state=old,
-            to_state=new_state,
-            reason=reason,
-            channel=channel,
-            value=value,
+        self._events.append(
+            SafetyEvent(
+                timestamp=datetime.now(timezone.utc),
+                from_state=old_state,
+                to_state=new_state,
+                reason=reason,
+                channel=channel,
+                value=value,
+            )
         )
-        self._events.append(event)
 
         level = logging.CRITICAL if new_state == SafetyState.FAULT_LATCHED else logging.INFO
-        logger.log(
-            level,
-            "SAFETY: %s → %s | %s",
-            old.value, new_state.value, reason,
-        )
+        logger.log(level, "SAFETY: %s -> %s | %s", old_state.value, new_state.value, reason)
 
-        for cb in self._on_state_change:
+        for callback in self._on_state_change:
             try:
-                cb(old, new_state, reason)
+                callback(old_state, new_state, reason)
             except Exception:
-                logger.exception("Ошибка в safety state_change callback")
+                logger.exception("State change callback failed")
 
-        # Опубликовать изменение состояния в DataBroker (async из sync контекста)
         try:
             asyncio.get_running_loop().create_task(self._publish_state(reason))
         except RuntimeError:
-            pass  # Нет event loop (например, в тестах)
+            pass
 
     async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:
-        """Перевести в FAULT_LATCHED + emergency_off."""
         self._fault_reason = reason
         self._fault_time = time.monotonic()
+        self._active_sources.clear()
 
-        # Немедленное отключение источника
         if self._keithley is not None:
             try:
                 await self._keithley.emergency_off()
             except Exception as exc:
-                logger.critical("FAULT: emergency_off FAILED: %s", exc)
+                logger.critical("FAULT: emergency_off failed: %s", exc)
 
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
+        fault_channel = channel if channel in {"smua", "smub"} else None
+        await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
 
-    async def _safe_off(self, reason: str) -> None:
-        """Штатный переход в SAFE_OFF + остановка источника."""
+    async def _ensure_output_off(self, channel: str | None = None) -> None:
+        if self._keithley is None:
+            return
+        try:
+            await self._keithley.emergency_off(channel)
+        except TypeError:
+            if channel is None:
+                await self._keithley.emergency_off()
+            else:
+                raise
+        except Exception as exc:
+            logger.critical("_ensure_output_off failed: %s", exc)
+
+    async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
         if self._state == SafetyState.FAULT_LATCHED:
             await self._ensure_output_off()
-            logger.warning("_safe_off: FAULT_LATCHED сохранён, переход в SAFE_OFF отклонён")
+            logger.warning("_safe_off rejected while fault latched")
             return
 
-        if self._keithley is not None and self._state == SafetyState.RUNNING:
-            try:
-                await self._keithley.stop_source()
-            except Exception as exc:
-                logger.error("Ошибка stop_source: %s", exc)
+        if self._keithley is not None:
+            for smu_channel in sorted(channels):
+                try:
+                    await self._keithley.stop_source(smu_channel)
+                except Exception as exc:
+                    logger.error("stop_source(%s) failed: %s", smu_channel, exc)
+
+        self._active_sources.difference_update(channels)
+        if self._active_sources:
+            self._state = SafetyState.RUNNING
+            return
 
         self._transition(SafetyState.SAFE_OFF, reason)
 
-    # ------------------------------------------------------------------
-    # Предусловия
-    # ------------------------------------------------------------------
+    def _resolve_channels(self, channel: str | None) -> set[SmuChannel]:
+        if channel is not None:
+            return {normalize_smu_channel(channel)}
+        if self._active_sources:
+            return set(self._active_sources)
+        return {normalize_smu_channel(None)}
 
     def _check_preconditions(self) -> tuple[bool, str]:
-        """Проверить все предусловия для перехода в READY/RUN.
-
-        Возвращает (ok, reason).
-        """
         now = time.monotonic()
 
-        # 1. Критические каналы — свежие данные, статус, валидность
         for pattern in self._config.critical_channels:
             matched = False
-            for ch, (ts, val, status) in self._latest.items():
-                if pattern.match(ch):
-                    matched = True
-                    age = now - ts
-                    if age > self._config.stale_timeout_s:
-                        return False, f"Устаревшие данные: {ch} ({age:.1f}s > {self._config.stale_timeout_s}s)"
-                    if status != "ok":
-                        return False, f"Канал {ch} в ошибке: status={status}"
-                    if math.isnan(val) or math.isinf(val):
-                        return False, f"Канал {ch}: невалидное значение ({val})"
+            for ch, (ts, value, status) in self._latest.items():
+                if not pattern.match(ch):
+                    continue
+                matched = True
+                age = now - ts
+                if age > self._config.stale_timeout_s:
+                    return False, f"Stale data: {ch} ({age:.1f}s)"
+                if status != "ok":
+                    return False, f"Channel {ch} status={status}"
+                if math.isnan(value) or math.isinf(value):
+                    return False, f"Channel {ch} invalid value {value}"
             if not matched and not self._mock:
-                return False, f"Нет данных для критического канала: {pattern.pattern}"
+                return False, f"No data for critical channel: {pattern.pattern}"
 
-        # 2. Keithley подключён (если требуется)
         if self._config.require_keithley_for_run and not self._mock:
             if self._keithley is None:
-                return False, "Keithley не подключён"
-            if hasattr(self._keithley, "connected") and not self._keithley.connected:
-                return False, "Keithley не подключён (connected=False)"
+                return False, "Keithley not connected"
+            if not getattr(self._keithley, "connected", False):
+                return False, "Keithley connected=False"
 
-        # 3. Нет активного FAULT
         if self._state == SafetyState.FAULT_LATCHED:
-            return False, f"Активная авария: {self._fault_reason}"
+            return False, f"Active fault: {self._fault_reason}"
 
         return True, ""
 
-    # ------------------------------------------------------------------
-    # Фоновые задачи
-    # ------------------------------------------------------------------
-
     async def _collect_loop(self) -> None:
-        """Собирать данные из SafetyBroker."""
         assert self._queue is not None
         try:
             while True:
                 reading = await self._queue.get()
                 now = time.monotonic()
                 self._latest[reading.channel] = (now, reading.value, reading.status.value)
-                if reading.status.value != "ok":
-                    logger.warning("SafetyManager: канал %s status=%s", reading.channel, reading.status.value)
-
-                # Буфер скоростей для rate limit check — только температурные каналы
                 if reading.unit == "K":
-                    if reading.channel not in self._rate_buffers:
-                        self._rate_buffers[reading.channel] = deque(maxlen=120)
-                    self._rate_buffers[reading.channel].append((now, reading.value))
+                    self._rate_buffers.setdefault(reading.channel, deque(maxlen=120)).append((now, reading.value))
         except asyncio.CancelledError:
             return
 
     async def _monitor_loop(self) -> None:
-        """Непрерывный мониторинг (1 Гц)."""
         try:
             while True:
                 await asyncio.sleep(_CHECK_INTERVAL_S)
@@ -530,90 +492,78 @@ class SafetyManager:
             return
 
     async def _run_checks(self) -> None:
-        """Выполнить все проверки безопасности."""
         now = time.monotonic()
 
-        # В состоянии MANUAL_RECOVERY — проверяем предусловия для READY
         if self._state == SafetyState.MANUAL_RECOVERY:
-            ok, reason = self._check_preconditions()
+            ok, _ = self._check_preconditions()
             if ok:
-                self._transition(SafetyState.READY, "Предусловия восстановлены после аварии")
+                self._transition(SafetyState.READY, "Recovery preconditions restored")
             return
 
-        # Переход SAFE_OFF → READY если все предусловия ОК
         if self._state == SafetyState.SAFE_OFF:
             ok, _ = self._check_preconditions()
-            if ok and self._latest:  # Хотя бы один канал получен
-                self._transition(SafetyState.READY, "Все предусловия выполнены")
+            if ok and self._latest:
+                self._transition(SafetyState.READY, "All preconditions satisfied")
             return
 
-        # В RUNNING — непрерывный мониторинг
         if self._state != SafetyState.RUNNING:
             return
 
-        # 1. Staleness check
         for pattern in self._config.critical_channels:
-            for ch, (ts, _val, _status) in self._latest.items():
-                if pattern.match(ch):
-                    age = now - ts
-                    if age > self._config.stale_timeout_s:
-                        await self._fault(
-                            f"Устаревшие данные канала {ch}: {age:.1f}s без обновления",
-                            channel=ch,
-                        )
-                        return
+            for ch, (ts, _value, _status) in self._latest.items():
+                if pattern.match(ch) and now - ts > self._config.stale_timeout_s:
+                    await self._fault(f"Устаревшие данные канала {ch}", channel=ch)
+                    return
 
-        # 2. Status and NaN/Inf check on critical channels
-        for ch, (ts, val, status) in self._latest.items():
-            if any(p.match(ch) for p in self._config.critical_channels):
+        for ch, (_ts, value, status) in self._latest.items():
+            if any(pattern.match(ch) for pattern in self._config.critical_channels):
                 if status != "ok":
-                    await self._fault(f"Канал {ch} status={status}", channel=ch, value=val)
+                    await self._fault(f"Channel {ch} status={status}", channel=ch, value=value)
                     return
-                if math.isnan(val) or math.isinf(val):
-                    await self._fault(f"Канал {ch}: NaN/Inf", channel=ch, value=val)
+                if math.isnan(value) or math.isinf(value):
+                    await self._fault(f"Channel {ch}: NaN/Inf", channel=ch, value=value)
                     return
 
-        # 3. Keithley heartbeat: if source is ON, Keithley must be sending data
-        if self._keithley is not None and not self._mock:
-            keithley_fresh = False
-            for ch, (ts, _val, status) in self._latest.items():
-                if any(p.match(ch) for p in self._keithley_patterns):
-                    if now - ts < self._config.heartbeat_timeout_s and status == "ok":
-                        keithley_fresh = True
-                        break
-            if not keithley_fresh:
-                await self._fault(
-                    f"Keithley heartbeat timeout: нет данных {self._config.heartbeat_timeout_s}s",
-                )
-                return
+        if self._keithley is not None and not self._mock and self._active_sources:
+            for smu_channel in sorted(self._active_sources):
+                if not self._has_fresh_keithley_data(now, smu_channel):
+                    await self._fault(
+                        f"Keithley heartbeat timeout {smu_channel}: no data {self._config.heartbeat_timeout_s}s",
+                        channel=smu_channel,
+                    )
+                    return
 
-        # 4. Rate-of-change check
         for ch, buf in self._rate_buffers.items():
             if len(buf) < 10:
                 continue
             t0, v0 = buf[0]
             t1, v1 = buf[-1]
             dt_s = t1 - t0
-            if dt_s > 0:
-                rate_k_min = abs(v1 - v0) / (dt_s / 60.0)
-                if rate_k_min > self._config.max_dT_dt_K_per_min:
-                    await self._fault(
-                        f"Скорость изменения {ch}: {rate_k_min:.2f} К/мин > "
-                        f"{self._config.max_dT_dt_K_per_min} К/мин",
-                        channel=ch, value=rate_k_min,
-                    )
-                    return
+            if dt_s <= 0:
+                continue
+            rate_k_min = abs(v1 - v0) / (dt_s / 60.0)
+            if rate_k_min > self._config.max_dT_dt_K_per_min:
+                await self._fault(
+                    f"Rate limit exceeded {ch}: {rate_k_min:.2f} K/min > {self._config.max_dT_dt_K_per_min}",
+                    channel=ch,
+                    value=rate_k_min,
+                )
+                return
 
-    # ------------------------------------------------------------------
-    # Для InterlockEngine
-    # ------------------------------------------------------------------
+    def _has_fresh_keithley_data(self, now: float, smu_channel: SmuChannel) -> bool:
+        aliases = {smu_channel, smu_channel.replace("smu", "smu_")}
+        for channel, (ts, _value, status) in self._latest.items():
+            if status != "ok":
+                continue
+            if not any(pattern.match(channel) for pattern in self._keithley_patterns):
+                continue
+            if any(f"/{alias}/" in channel for alias in aliases) and now - ts < self._config.heartbeat_timeout_s:
+                return True
+        return False
 
     async def on_interlock_trip(self, interlock_name: str, channel: str, value: float) -> None:
-        """Вызывается InterlockEngine при срабатывании блокировки.
-
-        SafetyManager берёт на себя выполнение действия (emergency_off).
-        """
         await self._fault(
-            f"Блокировка '{interlock_name}' сработала: канал={channel}, значение={value:.4g}",
-            channel=channel, value=value,
+            f"Interlock '{interlock_name}' tripped: channel={channel}, value={value:.4g}",
+            channel=channel,
+            value=value,
         )

@@ -362,7 +362,7 @@ class AlarmEngine:
     # Управление состоянием
     # ------------------------------------------------------------------
 
-    def acknowledge(self, alarm_name: str) -> None:
+    async def acknowledge(self, alarm_name: str) -> None:
         """Подтвердить активную тревогу (ACTIVE → ACKNOWLEDGED).
 
         Оператор принимает к сведению нарушение; тревога остаётся в поле
@@ -414,6 +414,8 @@ class AlarmEngine:
             alarm_name,
             record.condition.description,
         )
+        await self._publish_alarm_reading(event)
+        await self._publish_alarm_count()
 
     def get_state(self) -> dict[str, AlarmState]:
         """Вернуть текущее состояние всех зарегистрированных тревог.

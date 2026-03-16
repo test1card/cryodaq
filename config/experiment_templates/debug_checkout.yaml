@@ -1,0 +1,17 @@
+id: debug_checkout
+name: Debug Checkout
+sections:
+  - setup
+  - checks
+  - operator_log
+report_enabled: false
+report_sections:
+  - title_page
+  - operator_log_section
+  - alarms_section
+  - config_section
+custom_fields:
+  - id: issue_ticket
+    label: Issue Ticket
+  - id: checkout_scope
+    label: Checkout Scope

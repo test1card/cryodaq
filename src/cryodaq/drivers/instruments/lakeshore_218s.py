@@ -14,6 +14,11 @@ log = logging.getLogger(__name__)
 _MOCK_BASE_TEMPS: tuple[float, ...] = (4.2, 4.8, 77.0, 77.5, 4.5, 4.1, 3.9, 300.0)
 
 
+def _mock_sensor_unit(temp_k: float) -> float:
+    # Monotonic synthetic sensor-units curve for calibration workflows in mock mode.
+    return round((1600.0 / (temp_k + 15.0)) + 0.08, 6)
+
+
 class LakeShore218S(InstrumentDriver):
     """Драйвер LakeShore Model 218S — восьмиканального измерителя температуры.
 
@@ -104,13 +109,40 @@ class LakeShore218S(InstrumentDriver):
 
         raw_response = await self._transport.query("KRDG? 0")
         log.debug("%s: KRDG? 0 → %s", self.name, raw_response)
-        return self._parse_response(raw_response)
+        return self._parse_response(raw_response, unit="K", reading_kind="temperature")
+
+    async def read_srdg_channels(self) -> list[Reading]:
+        """Read all 8 channels in sensor units via ``SRDG? 0``."""
+        if not self._connected:
+            raise RuntimeError(f"{self.name}: прибор не подключён")
+
+        if self.mock:
+            return self._mock_sensor_readings()
+
+        raw_response = await self._transport.query("SRDG? 0")
+        log.debug("%s: SRDG? 0 → %s", self.name, raw_response)
+        return self._parse_response(raw_response, unit="sensor_unit", reading_kind="raw_sensor")
+
+    async def read_calibration_pair(
+        self,
+        *,
+        reference_channel: int | str,
+        sensor_channel: int | str,
+    ) -> dict[str, Any]:
+        temperatures = await self.read_channels()
+        raw_readings = await self.read_srdg_channels()
+        reference_reading = self._resolve_channel_reading(temperatures, reference_channel)
+        sensor_reading = self._resolve_channel_reading(raw_readings, sensor_channel)
+        return {
+            "reference": reference_reading,
+            "sensor": sensor_reading,
+        }
 
     # ------------------------------------------------------------------
     # Разбор ответа прибора
     # ------------------------------------------------------------------
 
-    def _parse_response(self, response: str) -> list[Reading]:
+    def _parse_response(self, response: str, *, unit: str, reading_kind: str) -> list[Reading]:
         """Разобрать строку ответа ``KRDG? 0`` в список Reading.
 
         Формат ответа: восемь значений через запятую, например::
@@ -128,6 +160,7 @@ class LakeShore218S(InstrumentDriver):
             channel_name = self._channel_labels.get(channel_num, f"CH{channel_num}")
             metadata: dict[str, Any] = {
                 "raw_channel": channel_num,
+                "reading_kind": reading_kind,
             }
 
             token_upper = token.upper().lstrip("+")
@@ -136,7 +169,7 @@ class LakeShore218S(InstrumentDriver):
                     Reading.now(
                         channel=channel_name,
                         value=float("inf"),
-                        unit="K",
+                        unit=unit,
                         instrument_id=self.name,
                         status=ChannelStatus.OVERRANGE,
                         raw=None,
@@ -163,7 +196,7 @@ class LakeShore218S(InstrumentDriver):
                     Reading.now(
                         channel=channel_name,
                         value=float("nan"),
-                        unit="K",
+                        unit=unit,
                         instrument_id=self.name,
                         status=ChannelStatus.SENSOR_ERROR,
                         raw=None,
@@ -173,13 +206,13 @@ class LakeShore218S(InstrumentDriver):
                 continue
 
             readings.append(
-                Reading.now(
-                    channel=channel_name,
-                    value=value,
-                    unit="K",
-                    instrument_id=self.name,
-                    status=ChannelStatus.OK,
-                    raw=value,
+                    Reading.now(
+                        channel=channel_name,
+                        value=value,
+                        unit=unit,
+                        instrument_id=self.name,
+                        status=ChannelStatus.OK,
+                        raw=value,
                     metadata=metadata,
                 )
             )
@@ -201,15 +234,69 @@ class LakeShore218S(InstrumentDriver):
             value = round(base_temp + noise, 4)
             readings.append(
                 Reading.now(
+                        channel=channel_name,
+                        value=value,
+                        unit="K",
+                    instrument_id=self.name,
+                    status=ChannelStatus.OK,
+                    raw=value,
+                        metadata={
+                            "raw_channel": channel_num,
+                            "reading_kind": "temperature",
+                        },
+                    )
+            )
+        return readings
+
+    def _mock_sensor_readings(self) -> list[Reading]:
+        readings: list[Reading] = []
+        for i, base_temp in enumerate(_MOCK_BASE_TEMPS):
+            channel_num = i + 1
+            channel_name = self._channel_labels.get(channel_num, f"CH{channel_num}")
+            raw_base = _mock_sensor_unit(base_temp)
+            noise = raw_base * random.uniform(-0.002, 0.002)
+            value = round(raw_base + noise, 6)
+            readings.append(
+                Reading.now(
                     channel=channel_name,
                     value=value,
-                    unit="K",
+                    unit="sensor_unit",
                     instrument_id=self.name,
                     status=ChannelStatus.OK,
                     raw=value,
                     metadata={
                         "raw_channel": channel_num,
+                        "reading_kind": "raw_sensor",
                     },
                 )
             )
         return readings
+
+    def _resolve_channel_reading(
+        self,
+        readings: list[Reading],
+        channel_spec: int | str,
+    ) -> Reading:
+        if isinstance(channel_spec, int):
+            channel_num = channel_spec
+            channel_name = self._channel_labels.get(channel_num, f"CH{channel_num}")
+            for reading in readings:
+                if reading.metadata.get("raw_channel") == channel_num:
+                    return reading
+            raise KeyError(f"LakeShore channel {channel_num} not found.")
+
+        channel_name = str(channel_spec).strip()
+        if not channel_name:
+            raise ValueError("LakeShore channel must not be empty.")
+
+        if channel_name.upper().startswith("CH") and channel_name[2:].isdigit():
+            channel_num = int(channel_name[2:])
+            for reading in readings:
+                if reading.metadata.get("raw_channel") == channel_num:
+                    return reading
+
+        for reading in readings:
+            if reading.channel == channel_name:
+                return reading
+
+        raise KeyError(f"LakeShore channel '{channel_name}' not found.")

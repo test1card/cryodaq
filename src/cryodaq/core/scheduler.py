@@ -58,10 +58,18 @@ class Scheduler:
         await scheduler.stop()
     """
 
-    def __init__(self, broker: DataBroker, *, safety_broker: Any | None = None, sqlite_writer: Any | None = None) -> None:
+    def __init__(
+        self,
+        broker: DataBroker,
+        *,
+        safety_broker: Any | None = None,
+        sqlite_writer: Any | None = None,
+        adaptive_throttle: Any | None = None,
+    ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
         self._sqlite_writer = sqlite_writer
+        self._adaptive_throttle = adaptive_throttle
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
 
@@ -99,14 +107,17 @@ class Scheduler:
                 readings = await asyncio.wait_for(
                     driver.safe_read(), timeout=cfg.read_timeout_s
                 )
+                persisted_readings = list(readings)
+                if self._adaptive_throttle is not None:
+                    persisted_readings = self._adaptive_throttle.filter_for_archive(readings)
                 state.total_reads += 1
                 state.consecutive_errors = 0
                 state.backoff_s = INITIAL_BACKOFF_S
 
                 # Step 1: Persist to disk FIRST (blocking until WAL commit)
-                if self._sqlite_writer is not None:
+                if self._sqlite_writer is not None and persisted_readings:
                     try:
-                        await self._sqlite_writer.write_immediate(readings)
+                        await self._sqlite_writer.write_immediate(persisted_readings)
                     except Exception:
                         logger.exception(
                             "CRITICAL: Ошибка записи '%s' — данные НЕ отправлены подписчикам",
@@ -117,7 +128,8 @@ class Scheduler:
                         continue  # Do NOT publish unpersisted data
 
                 # Step 2: ONLY AFTER disk commit, publish to DataBroker and SafetyBroker
-                await self._broker.publish_batch(readings)
+                if persisted_readings:
+                    await self._broker.publish_batch(persisted_readings)
                 if self._safety_broker is not None:
                     await self._safety_broker.publish_batch(readings)
             except TimeoutError:

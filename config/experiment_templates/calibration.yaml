@@ -1,0 +1,16 @@
+id: calibration
+name: Calibration
+sections:
+  - setup
+  - reference
+  - operator_log
+report_enabled: false
+report_sections:
+  - title_page
+  - operator_log_section
+  - config_section
+custom_fields:
+  - id: reference_standard
+    label: Reference Standard
+  - id: calibration_batch
+    label: Calibration Batch

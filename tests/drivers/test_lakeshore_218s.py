@@ -25,6 +25,11 @@ EXPECTED_NORMAL_VALUES = [
     4.235, 4.891, 4.100, 3.998, 4.567, 4.123, 3.876, 4.321,
 ]
 
+RAW_RESPONSE = (
+    "+8.298000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
+    "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+)
+
 
 def _make_mock_transport(response: str) -> MagicMock:
     """Return a GPIBTransport mock whose query() returns *response*."""
@@ -71,6 +76,22 @@ async def test_mock_returns_8_channels() -> None:
         assert r.status == ChannelStatus.OK
         # Mock base temps range from 3.9 to 300 K, with ±0.5% noise
         assert 3.5 <= r.value <= 302.0, f"Temperature {r.value} K out of expected range"
+
+    await driver.disconnect()
+
+
+async def test_mock_returns_raw_sensor_channels() -> None:
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
+    await driver.connect()
+
+    readings = await driver.read_srdg_channels()
+
+    assert len(readings) == 8
+    for reading in readings:
+        assert reading.unit == "sensor_unit"
+        assert reading.status == ChannelStatus.OK
+        assert reading.metadata["reading_kind"] == "raw_sensor"
+        assert reading.value > 0
 
     await driver.disconnect()
 
@@ -156,6 +177,48 @@ async def test_parse_overrange() -> None:
     for idx in (1, 3, 4, 5, 6, 7):
         assert readings[idx].status == ChannelStatus.OK
         assert math.isfinite(readings[idx].value)
+
+
+async def test_parse_srdg_response() -> None:
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=["LSCI,MODEL218S,MOCK001,010101", RAW_RESPONSE])
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
+    driver._transport = transport
+
+    await driver.connect()
+    readings = await driver.read_srdg_channels()
+
+    assert len(readings) == 8
+    assert readings[0].unit == "sensor_unit"
+    assert readings[0].metadata["reading_kind"] == "raw_sensor"
+    assert readings[0].value == pytest.approx(82.98)
+
+
+async def test_read_calibration_pair_resolves_channels() -> None:
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(
+        side_effect=["LSCI,MODEL218S,MOCK001,010101", NORMAL_RESPONSE, RAW_RESPONSE]
+    )
+    driver = LakeShore218S(
+        "ls218s",
+        "GPIB0::12::INSTR",
+        channel_labels={1: "REF", 2: "SENSOR"},
+        mock=False,
+    )
+    driver._transport = transport
+
+    await driver.connect()
+    pair = await driver.read_calibration_pair(reference_channel="REF", sensor_channel="SENSOR")
+
+    assert pair["reference"].unit == "K"
+    assert pair["reference"].channel == "REF"
+    assert pair["sensor"].unit == "sensor_unit"
+    assert pair["sensor"].channel == "SENSOR"
 
 
 # ---------------------------------------------------------------------------
