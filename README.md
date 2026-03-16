@@ -1,5 +1,13 @@
 # CryoDAQ
 
+## Reconciliation Snapshot (2026-03-16)
+
+- Product source of truth: one experiment equals one experiment card with exactly one open card during an active experiment.
+- Main operator flow must distinguish `Эксперимент` and `Отладка`; debug runs must not create archival experiment records or automatic experiment reports.
+- External report target is `report_raw.pdf` plus `report_editable.docx`.
+- Dual-channel Keithley support (`smua`, `smub`, `smua + smub`) remains current. Any old `smub` disable/hide/remove expectations are obsolete.
+- Calibration RC contour includes `.330` / `.340`, task-level multi-zone Chebyshev FIT, and runtime apply with global/per-channel policy; remaining gaps are limited to deeper live-operator rollout and follow-on polish.
+
 CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Ветка `CRYODAQ-CODEX` отражает текущее release-candidate состояние с уже реализованными experiment/report/archive/operator-log/calibration/housekeeping/tray workflow.
 
 ## Текущая форма системы
@@ -147,8 +155,9 @@ cryodaq-engine --mock
 data/experiments/<experiment_id>/
   metadata.json
   reports/
-    report.docx
-    report.pdf          # optional, best effort
+    report_editable.docx
+    report_raw.pdf      # optional, best effort if soffice/libreoffice is available
+    report_raw.docx
     assets/
 ```
 
@@ -177,11 +186,11 @@ data/calibration/curves/<sensor_id>/<curve_id>/
 
 Гарантированный артефакт:
 
-- `report.docx`
+- `report_editable.docx`
 
 Опциональный артефакт:
 
-- `report.pdf`
+- `report_raw.pdf`
 
 PDF-конвертация остаётся best-effort и зависит от наличия внешнего `soffice` / `LibreOffice`.
 
@@ -240,7 +249,7 @@ python -m pytest tests/reporting -q
 
 ## Известные ограничения
 
-- Применение calibration curve в runtime не реализовано. GUI держит кнопку `Применить в CryoDAQ` disabled.
+- Runtime calibration policy реализована: глобальный режим `on/off` и per-channel policy переключают `KRDG` / `SRDG + curve`. При отсутствии curve, assignment, `SRDG` или ошибке вычисления backend консервативно возвращается к `KRDG`; поведение на живом LakeShore требует отдельной lab verification.
 - PDF для отчётов не гарантирован. Гарантированный результат — DOCX.
 - На новых версиях Python сохраняются deprecation warnings, связанные с `asyncio.WindowsSelectorEventLoopPolicy`.
 

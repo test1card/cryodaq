@@ -15,6 +15,14 @@ CryoDAQ управляет сбором данных и операторским
 - хранит операторские записи и метаданные экспериментов
 - формирует отчёты и ведёт архив экспериментов
 
+Актуальная продуктовая модель:
+
+- один эксперимент = одна experiment card
+- во время активного эксперимента есть ровно одна открытая карточка
+- по завершении карточка закрывается и становится архивной записью
+- следующий эксперимент создаёт новую карточку
+- операторский журнал является частью карточки эксперимента, а не её заменой
+
 Важно: `engine` и GUI разделены. Закрытие GUI не останавливает сбор данных.
 
 ## 2. Порядок запуска
@@ -75,6 +83,8 @@ CryoDAQ управляет сбором данных и операторским
 Используйте её как первую точку проверки после запуска.
 
 ### 4.2. Keithley 2604B
+
+Старые ожидания про disable / hide / remove `smub` считать устаревшими.
 
 Вкладка Keithley показывает оба канала:
 
@@ -148,7 +158,7 @@ CryoDAQ управляет сбором данных и операторским
 - построить кривую
 - экспортировать JSON/CSV артефакты
 
-Текущее ограничение: путь `Применить в CryoDAQ` в runtime не реализован. Кнопка остаётся disabled.
+Runtime calibration поддерживает глобальный режим `on/off` и per-channel policy. При отсутствии curve, assignment, `SRDG` или ошибке вычисления backend консервативно возвращается к `KRDG` и логирует причину. Поведение на живом LakeShore требует отдельной lab verification.
 
 ### 4.7. Приборы
 
@@ -157,6 +167,13 @@ CryoDAQ управляет сбором данных и операторским
 Если конкретный прибор теряет связь, это должно отражаться здесь независимо от состояния остальных приборов.
 
 ## 5. Эксперименты
+
+Главная operator workflow должна различать режимы `Эксперимент` и `Отладка`.
+
+В режиме `Отладка` не должны:
+
+- создаваться архивные карточки экспериментов
+- запускаться автоматические внешние отчёты по эксперименту
 
 Меню `Эксперимент` содержит действия:
 
@@ -173,17 +190,22 @@ CryoDAQ управляет сбором данных и операторским
 
 ## 6. Отчёты
 
-Отчёт формируется из данных эксперимента и его шаблона.
+Целевой внешний отчётный контракт:
 
-Гарантированный артефакт:
+- `report_raw.pdf` — автоматически сгенерированный сырой файл
+- `report_editable.docx` — редактируемая версия для оператора
 
-- `report.docx`
+Report generation uses the archived experiment card and its artifacts as the source of truth.
 
-Дополнительно может быть создан:
+Guaranteed artifact:
 
-- `report.pdf`
+- `report_editable.docx`
 
-PDF conversion best-effort и зависит от внешнего `LibreOffice` / `soffice`.
+Optional artifact:
+
+- `report_raw.pdf`
+
+PDF conversion remains best-effort and depends on external `LibreOffice` / `soffice`.
 
 ## 7. Типовой рабочий сценарий
 
@@ -216,20 +238,21 @@ PDF conversion best-effort и зависит от внешнего `LibreOffice`
 
 - GUI закрыт, а engine продолжает писать данные
 - в архиве нет PDF, но есть DOCX
-- калибровочная кнопка `Применить в CryoDAQ` disabled
-- tray показывает warning, если у GUI нет полного runtime truth
+- GUI may be closed while `engine` keeps collecting data
+- Archive may contain DOCX without PDF
+- Runtime calibration may conservatively fall back to `KRDG` when curve, assignment, or SRDG input is unavailable
+- Tray may show warning when GUI does not have enough runtime truth
 
-Ненормально:
+Abnormal:
 
-- GUI показывает healthy / ON без backend status
-- архив говорит, что отчёт есть, но файла нет
-- экспорт запускает backend действие после отмены выбора файла
-- calibration panel делает вид, что кривая применена в runtime
+- GUI shows healthy / ON without backend status
+- Archive claims a report exists when the file is missing
+- Export triggers backend work after the file dialog was canceled
+- Calibration panel hides runtime fallback or refusal and presents an optimistic applied state
 
-## 9. Известные ограничения RC
+## 9. Known RC limitations
 
-- Применение calibration curve в runtime не реализовано.
-- PDF для отчётов не гарантирован.
-- На новых версиях Python возможны deprecation warnings, связанные с `WindowsSelectorEventLoopPolicy`.
+- PDF conversion remains best-effort and depends on external `LibreOffice` / `soffice`.
+- Newer Python versions may emit deprecation warnings related to `WindowsSelectorEventLoopPolicy`.
 
-Этот документ описывает именно текущее реализованное состояние, без обещаний будущих функций.
+This document describes the currently implemented RC state and does not promise future features.

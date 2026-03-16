@@ -7,6 +7,24 @@
 
 ---
 
+## [Unreleased] — 2026-03-16
+
+### Docs / Spec Reconciliation
+
+- Root task/spec/docs reconciled against the current codebase and current product decisions.
+- Obsolete expectations about disabling, hiding, or removing `smub` were explicitly retired; dual-channel Keithley remains the active model.
+- Experiment workflow documentation was rewritten around experiment-card lifecycle: one active card, close-on-finish, archive-on-close, next experiment creates a new card.
+- Main-page product spec now explicitly requires `Эксперимент / Отладка`; debug mode must not create archive records or automatic experiment reports.
+- External reporting contract and implementation are aligned on `report_raw.pdf` and `report_editable.docx`, with `report_raw.docx` kept as the machine-generated intermediate source for PDF conversion.
+- Calibration docs now reflect the implemented RC contour: `.330` / `.340`, task-level Chebyshev FIT, runtime apply, and per-channel policy are present; remaining work is follow-on rollout/polish rather than missing core backend scope.
+
+### Known gaps after reconciliation
+
+- Best-effort PDF conversion still depends on external `soffice` / `LibreOffice`.
+- `WindowsSelectorEventLoopPolicy` deprecation warnings remain on newer Python versions.
+
+---
+
 ## [0.11.0-rc1] — 2026-03-16
 
 ### RC Stabilization
@@ -20,8 +38,9 @@
 
 ### Known limitations
 
-- Calibration apply path into runtime is not implemented yet; GUI keeps it disabled.
+- Runtime calibration uses global on/off plus per-channel policy with conservative fallback to `KRDG`.
 - Report PDF conversion remains best-effort and depends on external tooling; DOCX is the guaranteed artifact.
+
 - Python 3.14+ currently emits `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ### Verification

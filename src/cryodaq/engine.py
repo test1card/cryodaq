@@ -208,6 +208,27 @@ async def _run_calibration_command(
             session_id=str(cmd.get("session_id", "")).strip() or None,
             started_at=_parse_log_time(cmd.get("started_at")),
         )
+        artifacts = calibration_sessions.get_session_artifacts(session.session_id)
+        experiment_manager.attach_run_record(
+            experiment_id=session.experiment_id,
+            source_tab="calibration",
+            source_module="calibration_session",
+            run_type="calibration_session",
+            status="RUNNING",
+            started_at=session.started_at,
+            finished_at=session.finished_at,
+            source_run_id=session.session_id,
+            parameters={
+                "sensor_id": session.sensor_id,
+                "reference_channel": session.reference_channel,
+                "sensor_channel": session.sensor_channel,
+                "raw_unit": session.raw_unit,
+                "reference_instrument_id": session.reference_instrument_id,
+                "sensor_instrument_id": session.sensor_instrument_id,
+            },
+            result_summary={"sample_count": len(session.samples)},
+            artifact_paths=[artifacts["session_path"], artifacts["samples_csv_path"]],
+        )
         return {"ok": True, "session": session.to_payload()}
 
     if action == "calibration_session_get":
@@ -225,6 +246,30 @@ async def _run_calibration_command(
             session_id,
             finished_at=_parse_log_time(cmd.get("finished_at")),
             notes=str(cmd.get("notes", "")) if "notes" in cmd else None,
+        )
+        artifacts = calibration_sessions.get_session_artifacts(session.session_id)
+        experiment_manager.attach_run_record(
+            experiment_id=session.experiment_id,
+            source_tab="calibration",
+            source_module="calibration_session",
+            run_type="calibration_session",
+            status="COMPLETED",
+            started_at=session.started_at,
+            finished_at=session.finished_at,
+            source_run_id=session.session_id,
+            parameters={
+                "sensor_id": session.sensor_id,
+                "reference_channel": session.reference_channel,
+                "sensor_channel": session.sensor_channel,
+                "raw_unit": session.raw_unit,
+                "reference_instrument_id": session.reference_instrument_id,
+                "sensor_instrument_id": session.sensor_instrument_id,
+            },
+            result_summary={
+                "sample_count": len(session.samples),
+                "notes": session.notes,
+            },
+            artifact_paths=[artifacts["session_path"], artifacts["samples_csv_path"]],
         )
         return {"ok": True, "session": session.to_payload()}
 
@@ -295,6 +340,28 @@ async def _run_calibration_command(
         )
         curve_path = calibration_store.save_curve(curve)
         table_path = calibration_store.export_curve_table(curve.sensor_id)
+        experiment_manager.attach_run_record(
+            experiment_id=session.experiment_id,
+            source_tab="calibration",
+            source_module="calibration_curve_fit",
+            run_type="calibration_curve_fit",
+            status="COMPLETED",
+            started_at=curve.fit_timestamp,
+            finished_at=curve.fit_timestamp,
+            source_run_id=curve.curve_id,
+            parameters={
+                "sensor_id": curve.sensor_id,
+                "source_session_ids": list(curve.source_session_ids),
+                "raw_unit": curve.raw_unit,
+                "sensor_kind": curve.sensor_kind,
+                "max_zones": int(cmd.get("max_zones", 3)),
+                "min_points_per_zone": int(cmd.get("min_points_per_zone", 6)),
+                "max_order": int(cmd.get("max_order", 8)),
+                "target_rmse_k": float(cmd.get("target_rmse_k", 0.05)),
+            },
+            result_summary=dict(curve.metrics),
+            artifact_paths=[str(curve_path), str(table_path)],
+        )
         return {
             "ok": True,
             "curve": curve.to_payload(),
@@ -309,6 +376,65 @@ async def _run_calibration_command(
         temperature = calibration_store.evaluate(sensor_id, float(cmd.get("raw_value")))
         return {"ok": True, "temperature_k": temperature}
 
+    if action == "calibration_curve_list":
+        return {
+            "ok": True,
+            "curves": calibration_store.list_curves(sensor_id=str(cmd.get("sensor_id", "")).strip() or None),
+            "assignments": calibration_store.list_assignments(),
+        }
+
+    if action == "calibration_curve_get":
+        sensor_id = str(cmd.get("sensor_id", "")).strip() or None
+        curve_id = str(cmd.get("curve_id", "")).strip() or None
+        curve = calibration_store.get_curve_info(sensor_id=sensor_id, curve_id=curve_id)
+        return {"ok": True, "curve": curve}
+
+    if action == "calibration_curve_lookup":
+        sensor_id = str(cmd.get("sensor_id", "")).strip() or None
+        channel_key = str(cmd.get("channel_key", "")).strip() or None
+        lookup = calibration_store.lookup_curve(sensor_id=sensor_id, channel_key=channel_key)
+        return {"ok": True, **lookup}
+
+    if action == "calibration_curve_assign":
+        sensor_id = str(cmd.get("sensor_id", "")).strip()
+        if not sensor_id:
+            raise ValueError("sensor_id is required.")
+        assignment = calibration_store.assign_curve(
+            sensor_id=sensor_id,
+            curve_id=str(cmd.get("curve_id", "")).strip() or None,
+            channel_key=str(cmd.get("channel_key", "")).strip() or None,
+            runtime_apply_ready=bool(cmd.get("runtime_apply_ready", False)),
+            reading_mode_policy=str(cmd.get("reading_mode_policy", "inherit")).strip() or "inherit",
+        )
+        return {"ok": True, "assignment": assignment}
+
+    if action == "calibration_runtime_status":
+        return {
+            "ok": True,
+            "runtime": calibration_store.get_runtime_settings(),
+        }
+
+    if action == "calibration_runtime_set_global":
+        mode = calibration_store.set_runtime_global_mode(str(cmd.get("global_mode", "")).strip())
+        return {
+            "ok": True,
+            "runtime": mode,
+        }
+
+    if action == "calibration_runtime_set_channel_policy":
+        result = calibration_store.set_runtime_channel_policy(
+            channel_key=str(cmd.get("channel_key", "")).strip(),
+            policy=str(cmd.get("policy", "")).strip(),
+            sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
+            curve_id=str(cmd.get("curve_id", "")).strip() or None,
+            runtime_apply_ready=(
+                bool(cmd.get("runtime_apply_ready"))
+                if "runtime_apply_ready" in cmd
+                else None
+            ),
+        )
+        return {"ok": True, **result}
+
     if action == "calibration_curve_export":
         sensor_id = str(cmd.get("sensor_id", "")).strip()
         if not sensor_id:
@@ -322,14 +448,41 @@ async def _run_calibration_command(
             path=Path(str(cmd.get("table_path")).strip()) if str(cmd.get("table_path", "")).strip() else None,
             points=int(cmd.get("points", 200)),
         )
-        return {"ok": True, "json_path": str(json_path), "table_path": str(table_path)}
+        curve_330_path = calibration_store.export_curve_330(
+            sensor_id,
+            path=Path(str(cmd.get("curve_330_path")).strip()) if str(cmd.get("curve_330_path", "")).strip() else None,
+            points=int(cmd.get("points", 200)),
+        )
+        curve_340_path = calibration_store.export_curve_340(
+            sensor_id,
+            path=Path(str(cmd.get("curve_340_path")).strip()) if str(cmd.get("curve_340_path", "")).strip() else None,
+            points=int(cmd.get("points", 200)),
+        )
+        return {
+            "ok": True,
+            "json_path": str(json_path),
+            "table_path": str(table_path),
+            "curve_330_path": str(curve_330_path),
+            "curve_340_path": str(curve_340_path),
+        }
 
     if action == "calibration_curve_import":
         raw_path = str(cmd.get("path", "")).strip()
         if not raw_path:
             raise ValueError("path is required.")
-        curve = calibration_store.import_curve_json(Path(raw_path))
-        return {"ok": True, "curve": curve.to_payload()}
+        curve = calibration_store.import_curve_file(
+            Path(raw_path),
+            sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
+            channel_key=str(cmd.get("channel_key", "")).strip() or None,
+            raw_unit=str(cmd.get("raw_unit", "sensor_unit")).strip() or "sensor_unit",
+            sensor_kind=str(cmd.get("sensor_kind", "generic")).strip() or "generic",
+        )
+        return {
+            "ok": True,
+            "curve": curve.to_payload(),
+            "artifacts": calibration_store.get_curve_artifacts(curve.sensor_id),
+            "assignment": calibration_store.lookup_curve(sensor_id=curve.sensor_id)["assignment"],
+        }
 
     raise ValueError(f"Unsupported calibration command: {action}")
 
@@ -355,6 +508,19 @@ async def _run_experiment_command(
     cmd: dict[str, Any],
     experiment_manager: ExperimentManager,
 ) -> dict[str, Any]:
+    if action == "get_app_mode":
+        return {"ok": True, "app_mode": experiment_manager.get_app_mode().value}
+
+    if action == "set_app_mode":
+        app_mode = experiment_manager.set_app_mode(str(cmd.get("app_mode", "")).strip())
+        return {
+            "ok": True,
+            "app_mode": app_mode.value,
+            "active_experiment": experiment_manager.active_experiment.to_payload()
+            if experiment_manager.active_experiment
+            else None,
+        }
+
     if action == "experiment_templates":
         return {
             "ok": True,
@@ -364,7 +530,7 @@ async def _run_experiment_command(
     if action == "experiment_status":
         return experiment_manager.get_status_payload()
 
-    if action == "experiment_archive_list":
+    if action in {"experiment_archive_list", "experiment_list_archive"}:
         report_present_raw = cmd.get("report_present")
         if report_present_raw in (None, ""):
             report_present = None
@@ -384,8 +550,17 @@ async def _run_experiment_command(
         )
         return {"ok": True, "entries": [entry.to_payload() for entry in entries]}
 
-    if action == "experiment_start":
-        exp_id = experiment_manager.start_experiment(
+    if action == "experiment_get_active":
+        return {
+            "ok": True,
+            "app_mode": experiment_manager.get_app_mode().value,
+            "active_experiment": experiment_manager.active_experiment.to_payload()
+            if experiment_manager.active_experiment
+            else None,
+        }
+
+    if action in {"experiment_start", "experiment_create"}:
+        info = experiment_manager.create_experiment(
             name=str(cmd.get("name", "")).strip() or str(cmd.get("title", "")).strip(),
             operator=str(cmd.get("operator", "")).strip(),
             template_id=str(cmd.get("template_id", "custom")).strip() or "custom",
@@ -399,11 +574,24 @@ async def _run_experiment_command(
         )
         return {
             "ok": True,
-            "experiment_id": exp_id,
-            "active_experiment": experiment_manager.active_experiment.to_payload()
-            if experiment_manager.active_experiment
-            else None,
+            "experiment_id": info.experiment_id,
+            "experiment": info.to_payload(),
+            "active_experiment": info.to_payload(),
+            "app_mode": experiment_manager.get_app_mode().value,
         }
+
+    if action == "experiment_update":
+        info = experiment_manager.update_experiment(
+            experiment_id=str(cmd.get("experiment_id", "")).strip() or None,
+            title=str(cmd.get("title", "")).strip() if "title" in cmd else None,
+            sample=str(cmd.get("sample", "")).strip() if "sample" in cmd else None,
+            notes=str(cmd.get("notes", "")).strip() if "notes" in cmd else None,
+            description=str(cmd.get("description", "")).strip() if "description" in cmd else None,
+            custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields"))
+            if "custom_fields" in cmd
+            else None,
+        )
+        return {"ok": True, "experiment": info.to_payload(), "active_experiment": info.to_payload()}
 
     if action in {"experiment_finalize", "experiment_stop"}:
         status_name = str(cmd.get("status", ExperimentStatus.COMPLETED.value)).upper()
@@ -419,6 +607,45 @@ async def _run_experiment_command(
             end_time=_parse_experiment_time(cmd.get("end_time")),
         )
         return {"ok": True, "experiment": info.to_payload()}
+
+    if action == "experiment_abort":
+        info = experiment_manager.abort_experiment(
+            experiment_id=str(cmd.get("experiment_id", "")).strip() or None,
+            title=str(cmd.get("title", "")).strip() or None,
+            sample=str(cmd.get("sample", "")).strip() or None,
+            notes=str(cmd.get("notes", "")).strip() or None,
+            description=str(cmd.get("description", "")).strip() or None,
+            custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
+            end_time=_parse_experiment_time(cmd.get("end_time")),
+        )
+        return {"ok": True, "experiment": info.to_payload()}
+
+    if action == "experiment_get_archive_item":
+        experiment_id = str(cmd.get("experiment_id", "")).strip()
+        if not experiment_id:
+            raise ValueError("experiment_id is required.")
+        entry = experiment_manager.get_archive_item(experiment_id)
+        return {"ok": True, "entry": entry.to_payload() if entry else None}
+
+    if action == "experiment_attach_run_record":
+        record = experiment_manager.attach_run_record(
+            experiment_id=str(cmd.get("experiment_id", "")).strip() or None,
+            source_tab=str(cmd.get("source_tab", "")).strip(),
+            source_module=str(cmd.get("source_module", "")).strip(),
+            run_type=str(cmd.get("run_type", "")).strip(),
+            status=str(cmd.get("status", "")).strip(),
+            started_at=_parse_experiment_time(cmd.get("started_at")),
+            finished_at=_parse_experiment_time(cmd.get("finished_at")),
+            source_run_id=str(cmd.get("source_run_id", "")).strip() or None,
+            parameters=_normalize_dict_payload(cmd.get("parameters")),
+            result_summary=_normalize_dict_payload(cmd.get("result_summary")),
+            artifact_paths=[
+                str(item).strip()
+                for item in list(cmd.get("artifact_paths") or [])
+                if str(item).strip()
+            ],
+        )
+        return {"ok": True, "attached": record is not None, "run_record": record.to_payload() if record else None}
 
     if action == "experiment_create_retroactive":
         info = experiment_manager.create_retroactive_experiment(
@@ -497,7 +724,12 @@ def _get_memory_mb() -> float:
 # Загрузка конфигурации приборов
 # ---------------------------------------------------------------------------
 
-def _load_drivers(config_path: Path, *, mock: bool) -> list[InstrumentConfig]:
+def _load_drivers(
+    config_path: Path,
+    *,
+    mock: bool,
+    calibration_store: CalibrationStore | None = None,
+) -> list[InstrumentConfig]:
     """Загрузить драйверы из config/instruments.yaml.
 
     Возвращает список InstrumentConfig, готовых к регистрации в Scheduler.
@@ -519,7 +751,11 @@ def _load_drivers(config_path: Path, *, mock: bool) -> list[InstrumentConfig]:
 
             channel_labels = {int(k): v for k, v in channels.items()}
             driver = LakeShore218S(
-                name, resource, channel_labels=channel_labels, mock=mock,
+                name,
+                resource,
+                channel_labels=channel_labels,
+                mock=mock,
+                calibration_store=calibration_store,
             )
         elif itype == "keithley_2604b":
             from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -608,9 +844,14 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Создать основные компоненты ---
     broker = DataBroker()
     safety_broker = SafetyBroker()
+    calibration_dir = _DATA_DIR / "calibration"
+    calibration_store = CalibrationStore(calibration_dir)
+    curves_dir = calibration_dir / "curves"
+    if curves_dir.exists():
+        calibration_store.load_curves(curves_dir)
 
     # Драйверы
-    driver_configs = _load_drivers(instruments_cfg, mock=mock)
+    driver_configs = _load_drivers(instruments_cfg, mock=mock, calibration_store=calibration_store)
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
 
     # Keithley driver (нужен для SafetyManager)
@@ -685,12 +926,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
-    calibration_dir = _DATA_DIR / "calibration"
     calibration_sessions = CalibrationSessionStore(calibration_dir)
-    calibration_store = CalibrationStore(calibration_dir)
-    curves_dir = calibration_dir / "curves"
-    if curves_dir.exists():
-        calibration_store.load_curves(curves_dir)
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -724,12 +960,21 @@ async def _run_engine(*, mock: bool = False) -> None:
                 except (KeyError, ValueError) as exc:
                     return {"ok": False, "error": str(exc)}
             if action in {
+                "get_app_mode",
+                "set_app_mode",
                 "experiment_templates",
                 "experiment_status",
                 "experiment_archive_list",
+                "experiment_list_archive",
                 "experiment_start",
+                "experiment_create",
+                "experiment_get_active",
+                "experiment_update",
                 "experiment_finalize",
                 "experiment_stop",
+                "experiment_abort",
+                "experiment_get_archive_item",
+                "experiment_attach_run_record",
                 "experiment_create_retroactive",
                 "experiment_generate_report",
             }:
@@ -749,6 +994,13 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "calibration_session_finalize",
                 "calibration_curve_fit",
                 "calibration_curve_evaluate",
+                "calibration_curve_list",
+                "calibration_curve_get",
+                "calibration_curve_lookup",
+                "calibration_curve_assign",
+                "calibration_runtime_status",
+                "calibration_runtime_set_global",
+                "calibration_runtime_set_channel_policy",
                 "calibration_curve_export",
                 "calibration_curve_import",
             }:

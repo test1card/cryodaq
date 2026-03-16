@@ -63,11 +63,15 @@ class CalibrationPanel(QWidget):
         self._curves_by_sensor: dict[str, dict[str, Any]] = {}
         self._curve_artifacts: dict[str, dict[str, str]] = {}
         self._latest_temperatures: dict[str, float] = {}
+        self._runtime_state: dict[str, Any] = {"global_mode": "off", "assignments": []}
+        self._runtime_updating_ui = False
 
         self._build_ui()
         self._populate_reference_channels()
         self._populate_target_rows()
+        self._refresh_runtime_status()
         self._update_selection_dependent_widgets()
+        self._update_runtime_widgets()
         self._update_availability_state()
         if self._channel_options:
             self._set_status_message("Нет активного сеанса калибровки")
@@ -165,6 +169,28 @@ class CalibrationPanel(QWidget):
         )
         right_layout.addWidget(summary_box)
 
+        runtime_box = QGroupBox("Runtime calibration")
+        runtime_form = QFormLayout(runtime_box)
+        self._runtime_global_checkbox = QCheckBox("SRDG + calibration curves")
+        self._runtime_global_checkbox.toggled.connect(self._on_runtime_global_toggled)
+        self._runtime_policy_combo = QComboBox()
+        self._runtime_policy_combo.addItem("По умолчанию (inherit)", "inherit")
+        self._runtime_policy_combo.addItem("Выключено (KRDG)", "off")
+        self._runtime_policy_combo.addItem("Включено (curve)", "on")
+        self._runtime_effective_label = QLabel("—")
+        self._runtime_curve_label = QLabel("—")
+        self._runtime_curve_label.setWordWrap(True)
+        add_form_rows(
+            runtime_form,
+            [
+                ("Глобально:", self._runtime_global_checkbox),
+                ("Политика канала:", self._runtime_policy_combo),
+                ("Эффективно:", self._runtime_effective_label),
+                ("Кривая:", self._runtime_curve_label),
+            ],
+        )
+        right_layout.addWidget(runtime_box)
+
         self._plot = pg.PlotWidget()
         self._plot.setBackground("#111111")
         plot_item = self._plot.getPlotItem()
@@ -186,8 +212,10 @@ class CalibrationPanel(QWidget):
         self._export_button = QPushButton("Экспорт JSON/CSV")
         self._export_button.clicked.connect(self._on_export_curve)
         self._apply_button = QPushButton("Применить в CryoDAQ")
-        self._apply_button.setEnabled(False)
-        self._apply_button.setToolTip("Путь применения в backend пока не реализован.")
+        self._apply_button.clicked.connect(self._on_apply_runtime)
+        self._apply_button.setToolTip(
+            "Сохраняет runtime policy для выбранного канала. При недоступной curve, assignment или SRDG backend консервативно вернётся к KRDG."
+        )
         export_row = build_action_row(self._export_button, self._apply_button, add_stretch=True)
         right_layout.addLayout(export_row)
 
@@ -312,7 +340,9 @@ class CalibrationPanel(QWidget):
         self._stop_button.setEnabled(has_sessions)
         self._fit_button.setEnabled(has_channels and (has_sessions or self._selected_row() >= 0))
         self._export_button.setEnabled(has_curve)
-        self._apply_button.setEnabled(False)
+        self._runtime_global_checkbox.setEnabled(has_channels)
+        self._runtime_policy_combo.setEnabled(has_channels and self._selected_sensor_id() is not None)
+        self._apply_button.setEnabled(has_curve and self._selected_sensor_id() is not None)
         if not has_channels:
             self._set_status_message("Каналы LakeShore недоступны. Проверьте instruments.yaml.")
 
@@ -362,6 +392,51 @@ class CalibrationPanel(QWidget):
         if sensor_id is None:
             return {}
         return self._curve_artifacts.get(sensor_id, {})
+
+    def _runtime_assignment_for_selected(self) -> dict[str, Any]:
+        sensor_id = self._selected_sensor_id()
+        if sensor_id is None:
+            return {}
+        assignments = self._runtime_state.get("assignments", [])
+        if not isinstance(assignments, list):
+            return {}
+        for item in assignments:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("sensor_id", "")).strip() == sensor_id:
+                return dict(item)
+            if str(item.get("channel_key", "")).strip() == sensor_id:
+                return dict(item)
+        return {}
+
+    def _refresh_runtime_status(self) -> None:
+        try:
+            result = send_command({"cmd": "calibration_runtime_status"})
+        except Exception:
+            self._runtime_state = {"global_mode": "off", "assignments": []}
+            return
+        runtime = result.get("runtime", {})
+        if not result.get("ok") or not isinstance(runtime, dict):
+            self._runtime_state = {"global_mode": "off", "assignments": []}
+            return
+        self._runtime_state = dict(runtime)
+
+    def _update_runtime_widgets(self) -> None:
+        assignment = self._runtime_assignment_for_selected()
+        resolution = assignment.get("resolution", {}) if isinstance(assignment.get("resolution"), dict) else {}
+        self._runtime_updating_ui = True
+        self._runtime_global_checkbox.setChecked(str(self._runtime_state.get("global_mode", "off")) == "on")
+        policy = str(assignment.get("reading_mode_policy", "inherit") or "inherit")
+        index = self._runtime_policy_combo.findData(policy)
+        self._runtime_policy_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._runtime_updating_ui = False
+        effective = str(resolution.get("reading_mode", "krdg"))
+        raw_source = str(resolution.get("raw_source", "KRDG"))
+        reason = str(resolution.get("reason", ""))
+        self._runtime_effective_label.setText(f"{effective} / {raw_source} ({reason})")
+        curve_id = str(assignment.get("curve_id", "")).strip() or "—"
+        sensor_id = str(assignment.get("sensor_id", "")).strip() or "—"
+        self._runtime_curve_label.setText(f"{sensor_id} / {curve_id}")
 
     def _set_status_message(self, text: str) -> None:
         self._capture_status.setText(text)
@@ -597,6 +672,44 @@ class CalibrationPanel(QWidget):
         self._set_status_message("Артефакты калибровки экспортированы.")
         self._update_selection_dependent_widgets()
 
+    @Slot(bool)
+    def _on_runtime_global_toggled(self, checked: bool) -> None:
+        if self._runtime_updating_ui:
+            return
+        result = send_command(
+            {
+                "cmd": "calibration_runtime_set_global",
+                "global_mode": "on" if checked else "off",
+            }
+        )
+        if not result.get("ok"):
+            self._show_error(str(result.get("error", "Не удалось переключить runtime calibration.")))
+        self._refresh_runtime_status()
+        self._update_selection_dependent_widgets()
+
+    @Slot()
+    def _on_apply_runtime(self) -> None:
+        sensor_id = self._selected_sensor_id()
+        curve = self._selected_curve_payload()
+        if sensor_id is None or curve is None:
+            self._show_warning("Сначала выберите канал с построенной калибровочной кривой.")
+            return
+        result = send_command(
+            {
+                "cmd": "calibration_runtime_set_channel_policy",
+                "sensor_id": sensor_id,
+                "channel_key": sensor_id,
+                "policy": self._runtime_policy_combo.currentData(),
+                "runtime_apply_ready": self._runtime_policy_combo.currentData() != "off",
+            }
+        )
+        if not result.get("ok"):
+            self._show_error(str(result.get("error", "Не удалось применить runtime policy.")))
+            return
+        self._refresh_runtime_status()
+        self._set_status_message("Runtime policy сохранена.")
+        self._update_selection_dependent_widgets()
+
     @Slot()
     def _on_target_selection_changed(self) -> None:
         self._update_selection_dependent_widgets()
@@ -650,6 +763,7 @@ class CalibrationPanel(QWidget):
             self._curve_path_label.setText(artifacts.get("curve_path", "—") or "—")
             self._render_curve_plot(session or {}, curve)
 
+        self._update_runtime_widgets()
         self._update_availability_state()
 
     def _update_live_readings(self) -> None:
