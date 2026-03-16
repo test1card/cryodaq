@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.common import PanelHeader, create_panel_root
 from cryodaq.gui.zmq_client import send_command
 from cryodaq.paths import get_data_dir
 
@@ -107,8 +108,14 @@ class AutoSweepPanel(QWidget):
         self._timer.start()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        outer = create_panel_root(self)
+        outer.addWidget(
+            PanelHeader(
+                "Автоизмерение по мощности",
+                "Пошаговая развертка мощности Keithley с ожиданием стабилизации температур.",
+            )
+        )
+        root = QHBoxLayout()
         root.setSpacing(8)
 
         # --- Левая панель: настройки ---
@@ -310,6 +317,7 @@ class AutoSweepPanel(QWidget):
         right.addWidget(self._live_plot, stretch=1)
 
         root.addLayout(right, stretch=1)
+        outer.addLayout(root, 1)
 
     # ------------------------------------------------------------------
     # Controls

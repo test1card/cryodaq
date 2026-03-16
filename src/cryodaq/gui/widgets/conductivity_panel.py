@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.common import PanelHeader, create_panel_root
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,14 @@ class ConductivityPanel(QWidget):
         self._timer.start()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        outer = create_panel_root(self)
+        outer.addWidget(
+            PanelHeader(
+                "Теплопроводность",
+                "Оценка R и G по выбранной цепочке датчиков с прогнозом стационарных значений.",
+            )
+        )
+        root = QHBoxLayout()
         root.setSpacing(8)
 
         # --- Левая панель ---
@@ -238,6 +245,7 @@ class ConductivityPanel(QWidget):
 
         right.addWidget(self._plot, stretch=1)
         root.addLayout(right, stretch=1)
+        outer.addLayout(root, 1)
 
     # ------------------------------------------------------------------
     # Channel selection

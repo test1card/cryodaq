@@ -1,8 +1,4 @@
-"""Панель источника-измерителя Keithley 2604B.
-
-SMU канал smua (smub planned): управление, графики (V, I, R, P)
-и текущие значения крупным шрифтом.
-"""
+"""Keithley 2604B operator panel with backend-driven channel status."""
 
 from __future__ import annotations
 
@@ -15,12 +11,11 @@ from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -34,10 +29,10 @@ _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
 
 _MEASUREMENTS = {
-    "voltage":    ("Напряжение",    "В"),
-    "current":    ("Ток",           "А"),
+    "voltage": ("Напряжение", "В"),
+    "current": ("Ток", "А"),
     "resistance": ("Сопротивление", "Ом"),
-    "power":      ("Мощность",      "Вт"),
+    "power": ("Мощность", "Вт"),
 }
 
 _SMU_COLORS = {
@@ -46,290 +41,290 @@ _SMU_COLORS = {
 }
 
 
-class _SmuTab(QWidget):
-    """Вкладка одного SMU-канала: управление + 4 графика + значения."""
+class _SmuPanel(QFrame):
+    """One channel panel with backend-driven execution state."""
 
     def __init__(self, smu_name: str, colors: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._smu = smu_name
-
         self._buffers: dict[str, deque[tuple[float, float]]] = {
-            k: deque(maxlen=_BUFFER_MAXLEN) for k in _MEASUREMENTS
+            name: deque(maxlen=_BUFFER_MAXLEN) for name in _MEASUREMENTS
         }
         self._value_labels: dict[str, QLabel] = {}
         self._plots: dict[str, pg.PlotDataItem] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
-        self._workers: list[ZmqCommandWorker] = []  # prevent GC of active workers
-
+        self._workers: list[ZmqCommandWorker] = []
+        self._channel_state = "off"
         self._build_ui(colors)
 
     def _build_ui(self, colors: dict[str, str]) -> None:
+        self.setStyleSheet(
+            "QFrame { background-color: #141821; border: 1px solid #30363d; border-radius: 6px; }"
+        )
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        # --- Верх: панель управления ---
-        ctrl = QWidget()
-        ctrl.setStyleSheet(
-            "background-color: #1e2430; border: 1px solid #30363d; border-radius: 6px;"
-        )
-        cl = QHBoxLayout(ctrl)
-        cl.setContentsMargins(12, 8, 12, 8)
-        cl.setSpacing(12)
+        header = QHBoxLayout()
+        title = QLabel(f"Канал {self._smu[-1].upper()} ({self._smu})")
+        title.setFont(QFont("", 11, QFont.Weight.Bold))
+        title.setStyleSheet("color: #f0f6fc; border: none;")
+        header.addWidget(title)
+        header.addStretch()
 
+        self._state_label = QLabel("ВЫКЛ")
+        self._state_label.setFont(QFont("", 10, QFont.Weight.Bold))
+        self._state_label.setStyleSheet("color: #8b949e; border: none;")
+        header.addWidget(self._state_label)
+        root.addLayout(header)
+
+        controls = QWidget()
+        controls.setStyleSheet("background-color: #1e2430; border: 1px solid #30363d; border-radius: 6px;")
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(10, 8, 10, 8)
+        controls_layout.setSpacing(10)
+
+        label_font = QFont()
+        label_font.setPointSize(8)
         spin_font = QFont()
         spin_font.setPointSize(10)
 
-        lbl_font = QFont()
-        lbl_font.setPointSize(8)
+        controls_layout.addWidget(self._caption("P цель (Вт):", label_font))
+        self._p_spin = self._spinbox(0.0, 10.0, 0.5, 0.1, 3, spin_font)
+        controls_layout.addWidget(self._p_spin)
+        controls_layout.addWidget(self._caption("V пред. (В):", label_font))
+        self._v_spin = self._spinbox(0.0, 200.0, 40.0, 1.0, 2, spin_font)
+        controls_layout.addWidget(self._v_spin)
+        controls_layout.addWidget(self._caption("I пред. (А):", label_font))
+        self._i_spin = self._spinbox(0.0, 3.0, 1.0, 0.1, 3, spin_font)
+        controls_layout.addWidget(self._i_spin)
+        controls_layout.addStretch()
 
-        # P_target
-        p_lbl = QLabel("P цель (Вт):")
-        p_lbl.setFont(lbl_font)
-        p_lbl.setStyleSheet("color: #c9d1d9; border: none;")
-        cl.addWidget(p_lbl)
-        self._p_spin = QDoubleSpinBox()
-        self._p_spin.setRange(0.0, 10.0)
-        self._p_spin.setValue(0.5)
-        self._p_spin.setSingleStep(0.1)
-        self._p_spin.setDecimals(3)
-        self._p_spin.setFont(spin_font)
-        self._p_spin.setFixedWidth(100)
-        cl.addWidget(self._p_spin)
+        self._start_btn = self._button("Старт", "#238636", "#2ea043", self._on_start)
+        self._stop_btn = self._button("Стоп", "#9e6a03", "#d29922", self._on_stop)
+        self._emg_btn = self._button("АВАР. ОТКЛ.", "#da3633", "#f85149", self._on_emergency, bold=True)
+        controls_layout.addWidget(self._start_btn)
+        controls_layout.addWidget(self._stop_btn)
+        controls_layout.addWidget(self._emg_btn)
+        root.addWidget(controls)
 
-        # V_compliance
-        v_lbl = QLabel("V пред. (В):")
-        v_lbl.setFont(lbl_font)
-        v_lbl.setStyleSheet("color: #c9d1d9; border: none;")
-        cl.addWidget(v_lbl)
-        self._v_spin = QDoubleSpinBox()
-        self._v_spin.setRange(0.0, 200.0)
-        self._v_spin.setValue(40.0)
-        self._v_spin.setSingleStep(1.0)
-        self._v_spin.setFont(spin_font)
-        self._v_spin.setFixedWidth(100)
-        cl.addWidget(self._v_spin)
-
-        # I_compliance
-        i_lbl = QLabel("I пред. (А):")
-        i_lbl.setFont(lbl_font)
-        i_lbl.setStyleSheet("color: #c9d1d9; border: none;")
-        cl.addWidget(i_lbl)
-        self._i_spin = QDoubleSpinBox()
-        self._i_spin.setRange(0.0, 3.0)
-        self._i_spin.setValue(1.0)
-        self._i_spin.setSingleStep(0.1)
-        self._i_spin.setDecimals(3)
-        self._i_spin.setFont(spin_font)
-        self._i_spin.setFixedWidth(100)
-        cl.addWidget(self._i_spin)
-
-        cl.addStretch()
-
-        # Кнопки
-        btn_font = QFont()
-        btn_font.setPointSize(9)
-        btn_font.setBold(True)
-
-        start_btn = QPushButton("Подать мощность")
-        start_btn.setFont(btn_font)
-        start_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background: #2ea043; }"
-        )
-        start_btn.clicked.connect(self._on_start)
-        cl.addWidget(start_btn)
-
-        stop_btn = QPushButton("Остановить")
-        stop_btn.setFont(btn_font)
-        stop_btn.setStyleSheet(
-            "QPushButton { background: #9e6a03; color: white; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background: #d29922; }"
-        )
-        stop_btn.clicked.connect(self._on_stop)
-        cl.addWidget(stop_btn)
-
-        self._emg_btn = QPushButton("АВАРИЙНОЕ ОТКЛ.")
-        self._emg_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._emg_btn.setStyleSheet(
-            "QPushButton { background: #da3633; color: white; border: 2px solid #f85149; "
-            "border-radius: 4px; padding: 8px 18px; }"
-            "QPushButton:hover { background: #f85149; }"
-            "QPushButton:disabled { background: #555; border-color: #888; }"
-        )
-        self._emg_btn.clicked.connect(self._on_emergency)
-        cl.addWidget(self._emg_btn)
-
-        root.addWidget(ctrl)
-
-        # --- Середина: 4 карточки значений ---
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(8)
-
+        cards = QHBoxLayout()
+        cards.setSpacing(8)
         big_font = QFont()
         big_font.setPointSize(18)
         big_font.setBold(True)
-
-        small_font = QFont()
-        small_font.setPointSize(8)
-
-        for key, (name, unit) in _MEASUREMENTS.items():
-            color = colors[key]
+        for key, (title_text, unit) in _MEASUREMENTS.items():
             card = QWidget()
             card.setStyleSheet(
-                f"background-color: #2A2A2A; border: 1px solid {color}; border-radius: 6px;"
+                f"background-color: #2A2A2A; border: 1px solid {colors[key]}; border-radius: 6px;"
             )
-            vcl = QVBoxLayout(card)
-            vcl.setContentsMargins(10, 6, 10, 6)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 6, 10, 6)
 
-            t = QLabel(name)
-            t.setFont(small_font)
-            t.setStyleSheet(f"color: {color}; border: none;")
-            t.setAlignment(Qt.AlignCenter)
-            vcl.addWidget(t)
+            title_label = QLabel(title_text)
+            title_label.setFont(label_font)
+            title_label.setStyleSheet(f"color: {colors[key]}; border: none;")
+            title_label.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(title_label)
 
-            val = QLabel("—")
-            val.setFont(big_font)
-            val.setStyleSheet("color: #FFFFFF; border: none;")
-            val.setAlignment(Qt.AlignCenter)
-            vcl.addWidget(val)
+            value_label = QLabel("—")
+            value_label.setFont(big_font)
+            value_label.setStyleSheet("color: #ffffff; border: none;")
+            value_label.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(value_label)
 
-            u = QLabel(unit)
-            u.setFont(small_font)
-            u.setStyleSheet("color: #888888; border: none;")
-            u.setAlignment(Qt.AlignCenter)
-            vcl.addWidget(u)
+            unit_label = QLabel(unit)
+            unit_label.setFont(label_font)
+            unit_label.setStyleSheet("color: #8b949e; border: none;")
+            unit_label.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(unit_label)
 
-            self._value_labels[key] = val
-            cards_row.addWidget(card)
+            self._value_labels[key] = value_label
+            cards.addWidget(card)
+        root.addLayout(cards)
 
-        root.addLayout(cards_row)
-
-        # --- Низ: 2×2 графики ---
         grid = QGridLayout()
         grid.setSpacing(6)
-
-        for idx, (key, (name, unit)) in enumerate(_MEASUREMENTS.items()):
-            color = colors[key]
-            pw = pg.PlotWidget()
-            pw.setBackground("#111111")
-            pi = pw.getPlotItem()
-            pi.setLabel("left", name, units=unit, color="#AAAAAA")
-            pi.showGrid(x=True, y=True, alpha=0.2)
-            pi.enableAutoRange(axis="y", enable=True)
-            for ax in ("left", "bottom"):
-                a = pi.getAxis(ax)
-                if a:
-                    a.setPen(pg.mkPen(color="#444444"))
-                    a.setTextPen(pg.mkPen(color="#AAAAAA"))
-
-            item = pw.plot([], [], pen=pg.mkPen(color=color, width=2))
-            self._plots[key] = item
-            self._plot_widgets[key] = pw
-
-            r, c = divmod(idx, 2)
-            grid.addWidget(pw, r, c)
-
+        for idx, (key, (title_text, unit)) in enumerate(_MEASUREMENTS.items()):
+            plot = pg.PlotWidget()
+            plot.setBackground("#111111")
+            item = plot.getPlotItem()
+            item.setLabel("left", title_text, units=unit, color="#AAAAAA")
+            item.showGrid(x=True, y=True, alpha=0.2)
+            item.enableAutoRange(axis="y", enable=True)
+            for axis_name in ("left", "bottom"):
+                axis = item.getAxis(axis_name)
+                if axis:
+                    axis.setPen(pg.mkPen(color="#444444"))
+                    axis.setTextPen(pg.mkPen(color="#AAAAAA"))
+            plot_item = plot.plot([], [], pen=pg.mkPen(color=colors[key], width=2))
+            self._plots[key] = plot_item
+            self._plot_widgets[key] = plot
+            row, col = divmod(idx, 2)
+            grid.addWidget(plot, row, col)
         root.addLayout(grid, stretch=1)
 
-    # ------------------------------------------------------------------
-    # Button handlers
-    # ------------------------------------------------------------------
+        self.apply_channel_state("off")
+
+    @staticmethod
+    def _caption(text: str, font: QFont) -> QLabel:
+        label = QLabel(text)
+        label.setFont(font)
+        label.setStyleSheet("color: #c9d1d9; border: none;")
+        return label
+
+    @staticmethod
+    def _spinbox(
+        minimum: float,
+        maximum: float,
+        value: float,
+        step: float,
+        decimals: int,
+        font: QFont,
+    ) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        spin.setFont(font)
+        spin.setFixedWidth(100)
+        return spin
+
+    @staticmethod
+    def _button(label: str, bg: str, hover: str, handler: Slot, *, bold: bool = False) -> QPushButton:
+        button = QPushButton(label)
+        font = QFont()
+        font.setPointSize(9 if not bold else 10)
+        font.setBold(True)
+        button.setFont(font)
+        button.setStyleSheet(
+            "QPushButton { "
+            f"background: {bg}; color: white; border: none; border-radius: 4px; padding: 6px 14px; "
+            "}"
+            f"QPushButton:hover {{ background: {hover}; }}"
+            "QPushButton:disabled { background: #555; }"
+        )
+        button.clicked.connect(handler)
+        return button
+
+    def apply_channel_state(self, state: str) -> None:
+        self._channel_state = state.lower()
+        if self._channel_state == "on":
+            self._state_label.setText("ВКЛ")
+            self._state_label.setStyleSheet("color: #3fb950; border: none;")
+        elif self._channel_state == "fault":
+            self._state_label.setText("АВАРИЯ")
+            self._state_label.setStyleSheet("color: #ff7b72; border: none;")
+        else:
+            self._state_label.setText("ВЫКЛ")
+            self._state_label.setStyleSheet("color: #8b949e; border: none;")
 
     def _on_start(self) -> None:
-        reply = send_command({
-            "cmd": "keithley_start",
-            "channel": self._smu,
-            "p_target": self._p_spin.value(),
-            "v_comp": self._v_spin.value(),
-            "i_comp": self._i_spin.value(),
-        })
+        reply = send_command(
+            {
+                "cmd": "keithley_start",
+                "channel": self._smu,
+                "p_target": self._p_spin.value(),
+                "v_comp": self._v_spin.value(),
+                "i_comp": self._i_spin.value(),
+            }
+        )
         if not reply.get("ok"):
-            logger.warning("Keithley start failed: %s", reply.get("error"))
+            logger.warning("Keithley start failed on %s: %s", self._smu, reply.get("error"))
 
     def _on_stop(self) -> None:
         reply = send_command({"cmd": "keithley_stop", "channel": self._smu})
         if not reply.get("ok"):
-            logger.warning("Keithley stop failed: %s", reply.get("error"))
+            logger.warning("Keithley stop failed on %s: %s", self._smu, reply.get("error"))
 
     def _on_emergency(self) -> None:
-        # Немедленная визуальная обратная связь — кнопку заблокировать
         self._emg_btn.setEnabled(False)
         self._emg_btn.setText("ОТКЛ...")
-        worker = ZmqCommandWorker({"cmd": "keithley_emergency_off"})
+        worker = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": self._smu})
         worker.finished.connect(self._on_emergency_result)
-        self._workers.append(worker)  # prevent GC
+        self._workers.append(worker)
         worker.start()
 
     def _on_emergency_result(self, result: dict) -> None:
-        # Восстановить кнопку
         self._emg_btn.setEnabled(True)
-        self._emg_btn.setText("АВАРИЙНОЕ ОТКЛ.")
+        self._emg_btn.setText("АВАР. ОТКЛ.")
         if not result.get("ok"):
-            logger.error("Emergency off failed: %s", result.get("error"))
-        # Удалить завершённый worker из списка
-        self._workers = [w for w in self._workers if w.isRunning()]
-
-    # ------------------------------------------------------------------
-    # Data
-    # ------------------------------------------------------------------
+            logger.error("Emergency off failed on %s: %s", self._smu, result.get("error"))
+        self._workers = [worker for worker in self._workers if worker.isRunning()]
 
     def handle_reading(self, suffix: str, reading: Reading) -> None:
-        if suffix in self._buffers:
-            self._buffers[suffix].append(
-                (reading.timestamp.timestamp(), reading.value)
-            )
-            self._value_labels[suffix].setText(f"{reading.value:.6g}")
+        if suffix not in self._buffers:
+            return
+        self._buffers[suffix].append((reading.timestamp.timestamp(), reading.value))
+        self._value_labels[suffix].setText(f"{reading.value:.6g}")
 
     def refresh(self) -> None:
         now = time.time()
         x_min = now - _WINDOW_S
         for key, item in self._plots.items():
-            buf = self._buffers[key]
-            if not buf:
+            buffer = self._buffers[key]
+            if not buffer:
                 item.setData([], [])
                 continue
-            xs = [t for t, _ in buf if t >= x_min]
-            ys = [v for t, v in buf if t >= x_min]
+            xs = [ts for ts, _ in buffer if ts >= x_min]
+            ys = [value for ts, value in buffer if ts >= x_min]
             item.setData(xs, ys)
             self._plot_widgets[key].getPlotItem().setXRange(x_min, now, padding=0)
 
 
 class KeithleyPanel(QWidget):
-    """Панель Keithley 2604B с вкладками smua/smub."""
+    """Single Keithley dashboard with independent A/B controls and backend-owned status."""
 
     _reading_signal = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background-color: #1A1A1A;")
-
-        self._smu_tabs: dict[str, _SmuTab] = {}
+        self._smu_panels: dict[str, _SmuPanel] = {}
+        self._workers: list[ZmqCommandWorker] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setStyleSheet(
-            "QTabWidget::pane { border: none; }"
-            "QTabBar::tab { background: #2A2A2A; color: #CCCCCC; padding: 6px 16px; "
-            "border: 1px solid #444; border-bottom: none; border-radius: 4px 4px 0 0; }"
-            "QTabBar::tab:selected { background: #1A1A1A; color: #FFFFFF; }"
-        )
+        header = QFrame()
+        header.setStyleSheet("QFrame { background-color: #11151d; border: 1px solid #30363d; border-radius: 6px; }")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(8)
 
+        title = QLabel("Keithley 2604B")
+        title.setFont(QFont("", 12, QFont.Weight.Bold))
+        title.setStyleSheet("color: #f0f6fc; border: none;")
+        header_layout.addWidget(title)
+
+        subtitle = QLabel("Независимое управление каналами A / B и совместный режим A+B")
+        subtitle.setStyleSheet("color: #8b949e; border: none;")
+        header_layout.addWidget(subtitle)
+        header_layout.addStretch()
+
+        start_both = QPushButton("Старт A+B")
+        start_both.clicked.connect(self._on_start_both)
+        header_layout.addWidget(start_both)
+
+        stop_both = QPushButton("Стоп A+B")
+        stop_both.clicked.connect(self._on_stop_both)
+        header_layout.addWidget(stop_both)
+
+        emergency_both = QPushButton("АВАР. ОТКЛ. A+B")
+        emergency_both.clicked.connect(self._on_emergency_both)
+        header_layout.addWidget(emergency_both)
+
+        root.addWidget(header)
+
+        panels = QHBoxLayout()
+        panels.setSpacing(10)
         for smu_name, colors in _SMU_COLORS.items():
-            tab = _SmuTab(smu_name, colors)
-            self._smu_tabs[smu_name] = tab
-            label = smu_name.upper()
-            self._tab_widget.addTab(tab, label)
-            if smu_name == "smub":
-                idx = self._tab_widget.count() - 1
-                self._tab_widget.setTabEnabled(idx, False)
-                self._tab_widget.setTabToolTip(idx, "Не реализовано / Planned")
-
-        root.addWidget(self._tab_widget)
+            panel = _SmuPanel(smu_name, colors)
+            self._smu_panels[smu_name] = panel
+            panels.addWidget(panel, stretch=1)
+        root.addLayout(panels, stretch=1)
 
         self._reading_signal.connect(self._handle_reading)
 
@@ -341,17 +336,46 @@ class KeithleyPanel(QWidget):
     def on_reading(self, reading: Reading) -> None:
         self._reading_signal.emit(reading)
 
+    def _run_async_command(self, command: dict[str, str]) -> None:
+        worker = ZmqCommandWorker(command)
+        worker.finished.connect(lambda _result: self._cleanup_workers())
+        self._workers.append(worker)
+        worker.start()
+
+    def _cleanup_workers(self) -> None:
+        self._workers = [worker for worker in self._workers if worker.isRunning()]
+
+    def _on_start_both(self) -> None:
+        for panel in self._smu_panels.values():
+            panel._on_start()
+
+    def _on_stop_both(self) -> None:
+        for panel in self._smu_panels.values():
+            panel._on_stop()
+
+    def _on_emergency_both(self) -> None:
+        for smu_name in self._smu_panels:
+            self._run_async_command({"cmd": "keithley_emergency_off", "channel": smu_name})
+
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
-        ch = reading.channel
-        for smu_name, tab in self._smu_tabs.items():
-            if f"/{smu_name}/" in ch:
-                for suffix in _MEASUREMENTS:
-                    if ch.endswith(f"/{suffix}"):
-                        tab.handle_reading(suffix, reading)
-                        return
+        channel = reading.channel
+        if channel.startswith("analytics/keithley_channel_state/"):
+            smu_name = channel.rsplit("/", 1)[-1]
+            panel = self._smu_panels.get(smu_name)
+            if panel is not None:
+                panel.apply_channel_state(str(reading.metadata.get("state", "off")))
+            return
+
+        for smu_name, panel in self._smu_panels.items():
+            if f"/{smu_name}/" not in channel:
+                continue
+            for suffix in _MEASUREMENTS:
+                if channel.endswith(f"/{suffix}"):
+                    panel.handle_reading(suffix, reading)
+                    return
 
     @Slot()
     def _refresh(self) -> None:
-        for tab in self._smu_tabs.values():
-            tab.refresh()
+        for panel in self._smu_panels.values():
+            panel.refresh()

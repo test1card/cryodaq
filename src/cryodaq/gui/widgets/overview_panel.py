@@ -106,7 +106,7 @@ class StatusStrip(QFrame):
         layout.addWidget(self._separator())
 
         # Engine uptime
-        self._uptime_label = QLabel("Uptime: 00:00:00")
+        self._uptime_label = QLabel("Аптайм: 00:00:00")
         self._uptime_label.setStyleSheet("color: #888888; border: none;")
         layout.addWidget(self._uptime_label)
         layout.addWidget(self._separator())
@@ -118,7 +118,7 @@ class StatusStrip(QFrame):
         layout.addWidget(self._separator())
 
         # Keithley status
-        self._keithley_label = QLabel("OFF")
+        self._keithley_label = QLabel("ВЫКЛ")
         self._keithley_label.setStyleSheet("color: #888888; border: none;")
         layout.addWidget(self._keithley_label)
         layout.addWidget(self._separator())
@@ -150,6 +150,7 @@ class StatusStrip(QFrame):
     # --- Публичные методы обновления ---
 
     def set_safety_state(self, state: str) -> None:
+        state = state.upper()
         colors = {
             "SAFE_OFF": "#2ECC40",
             "READY": "#FFDC00",
@@ -183,7 +184,7 @@ class StatusStrip(QFrame):
             self._keithley_label.setText(text)
             self._keithley_label.setStyleSheet("color: #2ECC40; border: none;")
         else:
-            self._keithley_label.setText("OFF")
+            self._keithley_label.setText("ВЫКЛ")
             self._keithley_label.setStyleSheet("color: #888888; border: none;")
 
     def set_cooldown_eta(self, eta_text: str | None) -> None:
@@ -200,7 +201,7 @@ class StatusStrip(QFrame):
         uptime_s = int(time.monotonic() - self._start_time)
         hours, rem = divmod(uptime_s, 3600)
         mins, secs = divmod(rem, 60)
-        self._uptime_label.setText(f"Uptime: {hours:02d}:{mins:02d}:{secs:02d}")
+        self._uptime_label.setText(f"Аптайм: {hours:02d}:{mins:02d}:{secs:02d}")
 
         free = _disk_free_gb()
         if free < 0:
@@ -513,7 +514,7 @@ class PressureStrip(QFrame):
 # ---------------------------------------------------------------------------
 
 class KeithleyStrip(QFrame):
-    """Полоса Keithley smua/smub (~50px), условно видимая."""
+    """Dual-channel Keithley strip driven by backend truth."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -521,7 +522,6 @@ class KeithleyStrip(QFrame):
         self.setStyleSheet(
             "KeithleyStrip { background-color: #1E1E1E; border: 1px solid #333; border-radius: 4px; }"
         )
-        self.setVisible(False)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)
@@ -535,15 +535,14 @@ class KeithleyStrip(QFrame):
         title.setStyleSheet("color: #AAAAAA; border: none;")
         layout.addWidget(title)
 
-        self._smua_label = QLabel("smua: ---")
+        self._smua_label = QLabel("smua: ВЫКЛ")
         self._smua_label.setFont(lbl_font)
-        self._smua_label.setStyleSheet("color: #FFFFFF; border: none;")
+        self._smua_label.setStyleSheet("color: #8b949e; border: none;")
         layout.addWidget(self._smua_label)
 
-        self._smub_label = QLabel("smub: OFF")
+        self._smub_label = QLabel("smub: ВЫКЛ")
         self._smub_label.setFont(lbl_font)
-        self._smub_label.setStyleSheet("color: #888888; border: none;")
-        self._smub_label.setVisible(False)
+        self._smub_label.setStyleSheet("color: #8b949e; border: none;")
         layout.addWidget(self._smub_label)
 
         layout.addStretch()
@@ -551,36 +550,84 @@ class KeithleyStrip(QFrame):
         # Состояние
         self._smua_data: dict[str, float] = {}
         self._smub_data: dict[str, float] = {}
-        self._is_on = False
+        self._channel_state: dict[str, str] = {"smua": "off", "smub": "off"}
 
     def on_reading(self, reading: Reading) -> None:
-        """Обновить по Keithley показанию."""
+        """Update display values from backend telemetry."""
         ch = reading.channel
         val = reading.value
 
         if "/smua/" in ch:
-            param = ch.split("/")[-1]  # voltage, current, resistance, power
+            param = ch.split("/")[-1]
             self._smua_data[param] = val
-            self._update_smu_label(self._smua_label, "smua", self._smua_data)
-            self._is_on = True
-            self.setVisible(True)
+        elif "/smub/" in ch:
+            param = ch.split("/")[-1]
+            self._smub_data[param] = val
+        self._refresh_labels()
+
+    def set_channel_state(self, channel: str, state: str) -> None:
+        self._channel_state[channel] = state.lower()
+        self._refresh_labels()
 
     def set_safety_state(self, state: str) -> None:
-        """Скрыть при SAFE_OFF."""
-        if state == "SAFE_OFF":
-            self.setVisible(False)
-            self._is_on = False
-        elif self._is_on:
-            self.setVisible(True)
+        """Apply global safety state without overriding channel-owned fault."""
+        if state.upper() == "SAFE_OFF":
+            for channel, channel_state in list(self._channel_state.items()):
+                if channel_state != "fault":
+                    self._channel_state[channel] = "off"
+        self._refresh_labels()
+
+    def _refresh_labels(self) -> None:
+        self._update_smu_label(
+            self._smua_label,
+            "smua",
+            self._smua_data,
+            state=self._channel_state["smua"],
+        )
+        self._update_smu_label(
+            self._smub_label,
+            "smub",
+            self._smub_data,
+            state=self._channel_state["smub"],
+        )
+        self.setVisible(
+            any(state != "off" for state in self._channel_state.values())
+            or bool(self._smua_data)
+            or bool(self._smub_data)
+        )
 
     @staticmethod
-    def _update_smu_label(label: QLabel, name: str, data: dict[str, float]) -> None:
+    def _update_smu_label(
+        label: QLabel,
+        name: str,
+        data: dict[str, float],
+        *,
+        state: str,
+    ) -> None:
+        if state == "fault":
+            label.setText(f"{name}: АВАРИЯ")
+            label.setStyleSheet("color: #FF4136; border: none;")
+            return
+        if state == "on" and not data:
+            label.setText(f"{name}: ВКЛ")
+            label.setStyleSheet("color: #2ECC40; border: none;")
+            return
+        if not data:
+            label.setText(f"{name}: ВЫКЛ")
+            label.setStyleSheet("color: #8b949e; border: none;")
+            return
         v = data.get("voltage", 0.0)
         i = data.get("current", 0.0)
         r = data.get("resistance", 0.0)
         p = data.get("power", 0.0)
-        label.setText(f"{name}: V={v:.3f} I={i:.4f} R={r:.1f} P={p:.2f}")
-        label.setStyleSheet("color: #FFFFFF; border: none;")
+        state_text = {
+            "on": "ВКЛ",
+            "fault": "АВАРИЯ",
+            "off": "ВЫКЛ",
+        }.get(state, state.upper())
+        color = "#2ECC40" if state == "on" else "#8b949e"
+        label.setText(f"{name}: {state_text}  V={v:.3f} I={i:.4f} R={r:.1f} P={p:.2f}")
+        label.setStyleSheet(f"color: {color}; border: none;")
 
     @staticmethod
     def _bold_font(pt: int) -> QFont:
@@ -784,13 +831,35 @@ class OverviewPanel(QWidget):
         # Keithley
         if "/smua/" in channel or "/smub/" in channel:
             self._keithley_strip.on_reading(reading)
-            # Обновить status strip
-            if channel.endswith("/power"):
-                power = reading.value
-                if power > 0:
-                    self._status_strip.set_keithley_status(
-                        f"ON P={power:.1f}W", is_on=True,
-                    )
+            status_bits: list[str] = []
+            if self._keithley_strip._channel_state["smua"] == "on":
+                status_bits.append(
+                    f"A ВКЛ {self._keithley_strip._smua_data.get('power', 0.0):.1f}W"
+                )
+            if self._keithley_strip._channel_state["smub"] == "on":
+                status_bits.append(
+                    f"B ВКЛ {self._keithley_strip._smub_data.get('power', 0.0):.1f}W"
+                )
+            self._status_strip.set_keithley_status(" | ".join(status_bits), is_on=bool(status_bits))
+
+        if channel.startswith("analytics/keithley_channel_state/"):
+            smu_name = channel.rsplit("/", 1)[-1]
+            state_name = str(reading.metadata.get("state", "off"))
+            self._keithley_strip.set_channel_state(smu_name, state_name)
+            status_bits: list[str] = []
+            if self._keithley_strip._channel_state["smua"] == "on":
+                status_bits.append(
+                    f"A ВКЛ {self._keithley_strip._smua_data.get('power', 0.0):.1f}W"
+                )
+            elif self._keithley_strip._channel_state["smua"] == "fault":
+                status_bits.append("A АВАРИЯ")
+            if self._keithley_strip._channel_state["smub"] == "on":
+                status_bits.append(
+                    f"B ВКЛ {self._keithley_strip._smub_data.get('power', 0.0):.1f}W"
+                )
+            elif self._keithley_strip._channel_state["smub"] == "fault":
+                status_bits.append("B АВАРИЯ")
+            self._status_strip.set_keithley_status(" | ".join(status_bits), is_on=bool(status_bits))
 
         # Аналитика — cooldown ETA
         if channel == "analytics/cooldown_eta_hours":
