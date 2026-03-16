@@ -150,13 +150,14 @@ async def test_template_driven_section_selection_for_thermal(manager: Experiment
     assert "Идентификатор эксперимента:" in text
     assert "Шаблон: Thermal Conductivity" in text
     assert "Оператор: Ivanov" in text
-    assert "Образец:" in text
+    assert "Образец: не указано" in text
     assert "Статус: Завершён" in text
-    assert "Секция теплового режима" in text
-    assert "Секция давления" in text
+    assert "Тепловая нагрузка" in text
+    assert "Давление" in text
     assert "Журнал оператора" in text
     assert "Снимок конфигурации" in text
     assert "Report marker" in text
+    assert "Снимок конфигурации для этого эксперимента не сохранён." in text
 
 
 async def test_report_generation_for_cooldown_template(manager: ExperimentManager, tmp_path: Path) -> None:
@@ -179,7 +180,7 @@ async def test_report_generation_for_cooldown_template(manager: ExperimentManage
 
     document = Document(result.docx_path)
     text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
-    assert "Секция охлаждения" in text
+    assert "Охлаждение" in text
     assert "Алармы" in text
     assert "Снимок конфигурации" in text
 
@@ -253,4 +254,4 @@ def test_operator_log_empty_state_is_russian(tmp_path: Path) -> None:
 
     text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
     assert "Журнал оператора" in text
-    assert "Для этого эксперимента нет записей в журнале оператора." in text
+    assert "Записи журнала оператора за интервал эксперимента отсутствуют." in text
