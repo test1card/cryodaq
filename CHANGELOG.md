@@ -7,6 +7,29 @@
 
 ---
 
+## [0.11.0-rc1] — 2026-03-16
+
+### RC Stabilization
+
+- **Operator workflow stack completed** — operator log, experiment templates/metadata, report generator MVP, archive browser, calibration backend + calibration GUI are integrated and covered by tests
+- **Keithley dual-channel model** — backend, driver and GUI now support `smua`, `smub` and simultaneous `smua+smub` operation on one 2604B
+- **GUI contract cleanup** — alarm acknowledge path published end-to-end, lowercase safety-state contract fixed, backend-driven Keithley channel state used as GUI source of truth
+- **Housekeeping** — conservative adaptive throttle for non-safety archival writes and retention/compression for old unlinked daily DBs
+- **GUI shell/UX passes** — shared widgets, tab consistency, tray status, archive/report/log alignment, unified status/error feedback
+- **Calibration** — LakeShore SRDG/raw acquisition, calibration session artifacts, multi-zone Chebyshev fit, JSON/CSV import/export, calibration GUI workflow
+
+### Known limitations
+
+- Calibration apply path into runtime is not implemented yet; GUI keeps it disabled.
+- Report PDF conversion remains best-effort and depends on external tooling; DOCX is the guaranteed artifact.
+- Python 3.14+ currently emits `WindowsSelectorEventLoopPolicy` deprecation warnings.
+
+### Verification
+
+- Full suite: **328 collected / 327 passed / 1 skipped**
+
+---
+
 ## [0.10.0] — 2026-03-15
 
 ### P1 Lab Deployment Fixes (8 defects)
