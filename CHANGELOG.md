@@ -9,39 +9,38 @@
 
 ## [Unreleased] — 2026-03-16
 
-### Docs / Spec Reconciliation
+### Сверка docs / spec
 
-- Root task/spec/docs reconciled against the current codebase and current product decisions.
-- Obsolete expectations about disabling, hiding, or removing `smub` were explicitly retired; dual-channel Keithley remains the active model.
-- Experiment workflow documentation was rewritten around experiment-card lifecycle: one active card, close-on-finish, archive-on-close, next experiment creates a new card.
-- Main-page product spec now explicitly requires `Эксперимент / Отладка`; debug mode must not create archive records or automatic experiment reports.
-- External reporting contract and implementation are aligned on `report_raw.pdf` and `report_editable.docx`, with `report_raw.docx` kept as the machine-generated intermediate source for PDF conversion.
-- Calibration docs now reflect the implemented RC contour: `.330` / `.340`, task-level Chebyshev FIT, runtime apply, and per-channel policy are present; remaining work is follow-on rollout/polish rather than missing core backend scope.
+- Root task/spec/docs сверены с текущим кодом и актуальными продуктовыми решениями.
+- Устаревшие ожидания про отключение, скрытие или удаление `smub` явно выведены из актуального контракта; dual-channel Keithley остаётся рабочей моделью.
+- Документация по экспериментам переписана вокруг experiment-card lifecycle: одна активная карточка, закрытие по завершении, архивирование при закрытии, новый эксперимент создаёт новую карточку.
+- Спецификация главной страницы теперь явно требует режимы `Эксперимент / Отладка`; `Отладка` не должна создавать архивные записи и автоматические отчёты по эксперименту.
+- Контракт и реализация внешних отчётов синхронизированы на `report_raw.pdf` и `report_editable.docx`, при этом `report_raw.docx` остаётся machine-generated intermediate source для PDF-конвертации.
+- Документация по calibration теперь отражает реализованный RC contour: `.330` / `.340`, task-level Chebyshev FIT, runtime apply и per-channel policy присутствуют; оставшаяся работа относится к follow-on rollout/polish, а не к отсутствующему core backend.
 
-### Known gaps after reconciliation
+### Известные caveat'ы после сверки
 
-- Best-effort PDF conversion still depends on external `soffice` / `LibreOffice`.
-- `WindowsSelectorEventLoopPolicy` deprecation warnings remain on newer Python versions.
+- Best-effort PDF-конвертация по-прежнему зависит от внешнего `soffice` / `LibreOffice`.
+- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ---
 
 ## [0.11.0-rc1] — 2026-03-16
 
-### RC Stabilization
+### RC stabilization
 
-- **Operator workflow stack completed** — operator log, experiment templates/metadata, report generator MVP, archive browser, calibration backend + calibration GUI are integrated and covered by tests
-- **Keithley dual-channel model** — backend, driver and GUI now support `smua`, `smub` and simultaneous `smua+smub` operation on one 2604B
-- **GUI contract cleanup** — alarm acknowledge path published end-to-end, lowercase safety-state contract fixed, backend-driven Keithley channel state used as GUI source of truth
-- **Housekeeping** — conservative adaptive throttle for non-safety archival writes and retention/compression for old unlinked daily DBs
-- **GUI shell/UX passes** — shared widgets, tab consistency, tray status, archive/report/log alignment, unified status/error feedback
-- **Calibration** — LakeShore SRDG/raw acquisition, calibration session artifacts, multi-zone Chebyshev fit, JSON/CSV import/export, calibration GUI workflow
+- **Operator workflow stack completed** — operator log, experiment templates/metadata, report generator MVP, archive browser, calibration backend и calibration GUI интегрированы и покрыты тестами
+- **Keithley dual-channel model** — backend, driver и GUI поддерживают `smua`, `smub` и одновременную работу `smua+smub` на одном 2604B
+- **GUI contract cleanup** — путь acknowledge для alarms опубликован end-to-end, lowercase safety-state contract исправлен, backend-driven Keithley channel state используется как источник истины для GUI
+- **Housekeeping** — добавлены conservative adaptive throttle для non-safety archival writes и retention/compression для старых unlinked daily DB
+- **GUI shell/UX passes** — выровнены shared widgets, согласованность вкладок, tray status, archive/report/log и единая обратная связь по статусам и ошибкам
+- **Calibration** — реализованы LakeShore SRDG/raw acquisition, calibration session artifacts, multi-zone Chebyshev fit, `.330` / `.340` / JSON / CSV import/export и calibration GUI workflow
 
-### Known limitations
+### Известные ограничения
 
-- Runtime calibration uses global on/off plus per-channel policy with conservative fallback to `KRDG`.
-- Report PDF conversion remains best-effort and depends on external tooling; DOCX is the guaranteed artifact.
-
-- Python 3.14+ currently emits `WindowsSelectorEventLoopPolicy` deprecation warnings.
+- Runtime calibration использует global on/off и per-channel policy с консервативным fallback к `KRDG`.
+- PDF для отчётов остаётся best-effort и зависит от внешнего инструмента; гарантированным артефактом остаётся DOCX.
+- Python 3.14+ сейчас продолжает выдавать `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ### Verification
 

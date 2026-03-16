@@ -1,13 +1,21 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
+Этот файл задаёт рабочие ориентиры для Claude Code при работе с данным репозиторием.
 
 # CryoDAQ
 
-LabVIEW replacement for a cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
+## Снимок сверки
+
+- Источник истины по продуктовой модели: один эксперимент равен одной experiment card, и во время активного эксперимента открыта ровно одна карточка.
+- Основной операторский workflow различает `Эксперимент` и `Отладка`; `Отладка` не должна создавать архивные записи и автоматические отчёты по эксперименту.
+- Dual-channel Keithley (`smua`, `smub`, `smua + smub`) остаётся актуальной моделью. Старые ожидания про disable/hide/remove `smub` устарели.
+- Контракт внешних отчётов и текущий код используют `report_raw.pdf` и `report_editable.docx`, а `report_raw.docx` остаётся machine-generated intermediate input для best-effort PDF-конвертации.
+- Calibration RC contour включает `.330` / `.340`, task-level Chebyshev FIT и runtime apply с per-channel policy; дальнейшая работа ограничена operator rollout и non-blocking polish.
+
+Замена LabVIEW для cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
 Python 3.12+, asyncio, PySide6. Current package metadata: `0.11.0rc1`.
 
-## Build & Development Commands
+## Команды сборки и разработки
 
 ```bash
 pip install -e ".[dev,web]"    # Install runtime, dev, and optional web dependencies
@@ -28,27 +36,27 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-## Environment Variables
+## Переменные окружения
 
-- `CRYODAQ_ROOT` — override project root directory
-- `CRYODAQ_MOCK=1` — start engine in mock mode
+- `CRYODAQ_ROOT` — переопределяет корневой каталог проекта
+- `CRYODAQ_MOCK=1` — запускает engine в mock mode
 
-## Deployment
+## Развёртывание
 
 `config/*.local.yaml` overrides `config/*.yaml`.
 Local configs are gitignored and intended for machine-specific deployment data such as COM ports, GPIB addresses, and notification credentials.
 
 See `docs/deployment.md` for operator-PC deployment steps.
 
-## Architecture
+## Архитектура
 
-Three main runtime surfaces:
+Три основных runtime-контура:
 
 - `cryodaq-engine` — headless asyncio runtime: acquisition, safety, storage, commands
-- `cryodaq-gui` or `cryodaq` — desktop operator client / launcher
+- `cryodaq-gui` или `cryodaq` — desktop operator client / launcher
 - web dashboard — optional FastAPI monitoring surface
 
-### Safety architecture
+### Архитектура safety
 
 SafetyManager is the single authority for source on/off decisions.
 Source OFF is the default. Running requires continuous proof of health.
@@ -75,9 +83,9 @@ InstrumentDriver.read_channels()
 
 Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
-### GUI tabs
+### Вкладки GUI
 
-Current `MainWindow` tabs:
+Текущие вкладки `MainWindow`:
 
 - `Обзор`
 - `Keithley 2604B`
@@ -85,20 +93,20 @@ Current `MainWindow` tabs:
 - `Теплопроводность`
 - `Автоизмерение`
 - `Алармы`
-- `Журнал оператора`
+- `Служебный лог`
 - `Архив`
 - `Калибровка`
 - `Приборы`
 
-Menus:
+Меню:
 
-- `Файл` — CSV / HDF5 / Excel export
-- `Эксперимент` — start / finalize experiment
-- `Настройки` — channel editor and connection settings
+- `Файл` — экспорт CSV / HDF5 / Excel
+- `Эксперимент` — запуск и завершение эксперимента
+- `Настройки` — редактор каналов и параметры подключений
 
-### Module index
+### Индекс модулей
 
-**Entry points**
+**Точки входа**
 
 - `src/cryodaq/engine.py` — headless engine
 - `src/cryodaq/launcher.py` — operator launcher
@@ -142,9 +150,9 @@ Menus:
 **TSP**
 
 - `tsp/p_const.lua` — primary runtime script
-- `tsp/p_const_single.lua` — legacy/fallback artifact still present in the tree
+- `tsp/p_const_single.lua` — legacy/fallback artifact, который всё ещё присутствует в дереве
 
-## Config files
+## Конфигурационные файлы
 
 - `config/instruments.yaml`
 - `config/interlocks.yaml`
@@ -157,23 +165,22 @@ Menus:
 - `config/housekeeping.yaml`
 - `config/*.local.yaml.example`
 
-## Instruments
+## Приборы
 
 - LakeShore 218S
 - Keithley 2604B
 - Thyracont VSP63D
 
-## Key Rules
+## Ключевые правила
 
-- `SAFE_OFF` is the default.
-- GUI is a separate process and must not be the source of truth for runtime state.
+- `SAFE_OFF` — состояние по умолчанию.
+- GUI — отдельный процесс и не должен быть источником истины для runtime state.
 - Keithley disconnect must call emergency off first.
 - No blocking I/O on the engine event loop.
 - Operator-facing GUI text should remain in Russian.
 - Scheduler writes to SQLite before publishing to brokers.
 
-## Known limitations (RC)
+## Известные ограничения RC
 
-- Calibration apply path into runtime is not implemented; the GUI keeps this action disabled.
-- Report PDF conversion is best-effort; DOCX is the required artifact.
-- `WindowsSelectorEventLoopPolicy` produces known Python 3.14+ deprecation warnings.
+- Best-effort PDF generation по-прежнему зависит от внешнего `soffice` / `LibreOffice`; отсутствие этого инструмента является ограничением окружения, а не code regression.
+- `WindowsSelectorEventLoopPolicy` продолжает давать известные Python 3.14+ deprecation warnings.

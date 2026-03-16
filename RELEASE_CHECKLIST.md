@@ -50,15 +50,15 @@ python -m pytest tests/reporting -q
 - [ ] `Теплопроводность`
 - [ ] `Автоизмерение`
 - [ ] `Алармы`
-- [ ] `Журнал оператора`
+- [ ] `Служебный лог`
 - [ ] `Архив`
 - [ ] `Калибровка`
 - [ ] `Приборы`
 - [ ] `Обзор` показывает summary/status widgets без старого layout drift
 - [ ] `Keithley 2604B` не показывает ложный `ON` без backend truth
-- [ ] `Журнал оператора` позволяет добавить запись и честно показывает empty state
+- [ ] `Служебный лог` позволяет добавить запись и честно показывает empty state
 - [ ] `Архив` не падает на missing report или partial artifacts
-- [ ] `Калибровка` читает LakeShore channels из конфигурации и не делает вид, что calibration уже применена в runtime
+- [ ] `Калибровка` читает LakeShore channels из конфигурации и не показывает ложный applied state без подтверждённого backend runtime status
 
 ## 5. Tray behavior
 
@@ -70,12 +70,18 @@ python -m pytest tests/reporting -q
 
 ## 6. Experiment / report / archive workflow
 
+- [ ] Workflow задокументирован и проверен как experiment-card lifecycle, а не append-only operator log
+- [ ] Во время активного эксперимента открыта ровно одна experiment card
+- [ ] Завершение эксперимента закрывает карточку и переводит её в архивную запись
+- [ ] Режим `Отладка` не создаёт архивные карточки экспериментов
+- [ ] Режим `Отладка` не запускает автоматическую генерацию отчётов по эксперименту
+
 - [ ] Experiment templates грузятся из `config/experiment_templates/*.yaml`
 - [ ] Start/finalize experiment создают ожидаемый artifact layout
 - [ ] Для эксперимента создаётся `data/experiments/<experiment_id>/metadata.json`
 - [ ] Reports сохраняются в `data/experiments/<experiment_id>/reports/`
-- [ ] Guaranteed artifact: `report.docx`
-- [ ] Optional artifact: `report.pdf`
+- [ ] Целевой внешний отчётный артефакт: `report_raw.pdf`
+- [ ] Целевой внешний отчётный артефакт: `report_editable.docx`
 - [ ] Отсутствие PDF само по себе не считается RC-блокером
 - [ ] Archive GUI читает `data/experiments/*/metadata.json`, а не отдельную archive DB
 - [ ] Archive filters/search/details работают на текущем metadata contract
@@ -85,25 +91,28 @@ python -m pytest tests/reporting -q
 
 - [ ] Operator log пишет записи в SQLite
 - [ ] `log_entry` / `log_get` path работает end-to-end
-- [ ] Записи журнала попадают в report generation
+- [ ] Записи журнала прикрепляются к experiment card и участвуют в генерации отчёта как часть этой карточки
 - [ ] Empty state журнала и подписи остаются операторскими и русскоязычными
 
 ## 8. Calibration workflow
 
+- [ ] Поддержка `.330` / `.340` есть и покрыта тестами
+- [ ] Chebyshev FIT следует task-level contour, и его статус явно отражён в docs
+- [ ] Runtime apply и per-channel apply присутствуют, а их operator-facing ограничения описаны явно
+
 - [ ] Calibration session start / capture / finalize path работает
-- [ ] Fit и export JSON/CSV path работает
+- [ ] Fit и export `.330` / `.340` / JSON / CSV path работает
 - [ ] Calibration artifacts пишутся в:
 - [ ] `data/calibration/sessions/<session_id>/`
 - [ ] `data/calibration/curves/<sensor_id>/<curve_id>/`
-- [ ] GUI показывает raw points и fitted curve
-- [ ] Apply path в runtime/instrument не реализован и это явно зафиксировано
-- [ ] Кнопка `Применить в CryoDAQ` остаётся disabled, пока backend path не реализован
+- [ ] Runtime apply path uses global on/off plus per-channel policy with conservative fallback to `KRDG`
+- [ ] GUI не показывает misleading optimistic state, если runtime apply завершился fallback-сценарием
 
-## 9. Report language and wording
+## 9. Язык и wording отчётов
 
 - [ ] Operator-facing report text остаётся русскоязычным
 - [ ] Section titles, field labels и empty states используют согласованный словарь
-- [ ] Термины `эксперимент`, `оператор`, `шаблон`, `журнал оператора`, `алармы`, `снимок конфигурации` используются последовательно
+- [ ] Термины `эксперимент`, `оператор`, `шаблон`, `служебный лог`, `алармы`, `снимок конфигурации` используются последовательно
 - [ ] Technical ids и backend keys не утекли в operator-facing подписи без необходимости
 
 ## 10. Housekeeping and storage
@@ -114,7 +123,12 @@ python -m pytest tests/reporting -q
 - [ ] Housekeeping policy не удаляет experiment artifact folders
 - [ ] Daily SQLite DB layout и artifact layout соответствуют текущим docs
 
-## 11. Documentation sync
+## 11. Синхронизация документации
+
+- [ ] obsolete `smub disable/hide/remove` expectations are explicitly retired
+- [ ] experiment-card lifecycle wording is synchronized
+- [ ] `Эксперимент / Отладка` mode wording is synchronized
+- [ ] target report naming `report_raw.pdf` / `report_editable.docx` is synchronized
 
 Проверить:
 
@@ -135,9 +149,8 @@ python -m pytest tests/reporting -q
 - [ ] TSP script naming: runtime path `tsp/p_const.lua`, `tsp/p_const_single.lua` как legacy/fallback artifact
 - [ ] install/test instructions и packaging assumptions
 
-## 12. Known RC caveats
+## 12. Известные caveat'ы RC
 
-- [ ] Применение calibration curve в runtime не реализовано
-- [ ] PDF-конвертация отчётов остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`
-- [ ] На новых версиях Python остаются deprecation warnings вокруг `asyncio.WindowsSelectorEventLoopPolicy`
-- [ ] Эти caveats явно отражены в docs и не замаскированы под уже закрытые задачи
+- [ ] PDF conversion for reports remains best-effort and depends on external `LibreOffice` / `soffice`
+- [ ] На новых версиях Python сохраняются deprecation warnings вокруг `asyncio.WindowsSelectorEventLoopPolicy`
+- [ ] These caveats are reflected explicitly in docs and are not masked as already closed product gaps

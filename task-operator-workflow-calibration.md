@@ -88,8 +88,8 @@ DOCX через python-docx. PDF через docx2pdf (если Word есть) и
 data/experiments/
 ├── 2026-03/
 │   └── 002_2026-03-15_теплопроводность_Cu-OFHC-14/
-│       ├── report.pdf
-│       ├── report.docx
+│       ├── report_raw.pdf
+│       ├── report_editable.docx
 │       ├── data/ (CSV файлы)
 │       ├── plots/ (PNG графики)
 │       ├── operator_log.txt
@@ -211,3 +211,11 @@ config/calibrations/
 ## TODO (в CLAUDE.md)
 
 - Etalon MultiLine TCP/IP драйвер: нужен протокол (MATLAB исходники или Wireshark capture)
+> Статус (2026-03-16): частично реализовано / в значительной степени superseded.
+>
+> Сверка:
+> - Этот файл смешивает уже доставленный workflow и устаревшие target-assumptions.
+> - Основная операторская модель теперь строится вокруг experiment-card lifecycle, а не append-only operator log.
+> - Целевой внешний отчётный контракт: `report_raw.pdf` + `report_editable.docx`; старые формулировки `report.pdf` / `report.docx` считать legacy.
+> - Calibration RC state уже включает `.330` / `.340`, task-level Chebyshev FIT и runtime apply с per-channel policy.
+> - Оставшаяся работа относится к дальнейшему operator rollout и non-blocking polish, а не к отсутствующему core backend scope.

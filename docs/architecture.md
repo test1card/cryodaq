@@ -4,6 +4,18 @@
 
 Этот документ описывает реализованную систему, а не исторический проектный план.
 
+## 0. Сверка с продуктовым контрактом
+
+- Один эксперимент равен одной experiment card.
+- Во время активного эксперимента открыта ровно одна experiment card.
+- Завершение эксперимента закрывает карточку и переводит её в архивную запись.
+- Следующий эксперимент создаёт новую карточку.
+- Основной workflow различает режимы `Эксперимент` и `Отладка`.
+- Режим `Отладка` не создаёт архивные карточки и автоматические отчёты по эксперименту.
+- Dual-channel `smua` / `smub` остаётся текущей и целевой Keithley-моделью; старые ожидания про disable/hide/remove `smub` устарели.
+- Внешний отчётный контракт: `report_raw.pdf` + `report_editable.docx`.
+- Calibration-контракт текущего RC: `.330` / `.340`, Chebyshev FIT по task, runtime apply и per-channel apply. Оставшиеся пробелы относятся к дальнейшему operator rollout и lab verification, а не к отсутствующему core backend.
+
 ## 1. Общая модель
 
 CryoDAQ состоит из независимых слоёв:
@@ -17,7 +29,7 @@ CryoDAQ состоит из независимых слоёв:
 
 Главный принцип: GUI не должен быть источником истины для runtime state. Источник истины находится в backend readings, analytics channels и command replies.
 
-## 2. Runtime shape
+## 2. Runtime-контур
 
 ### 2.1. Engine
 
@@ -40,7 +52,7 @@ CryoDAQ состоит из независимых слоёв:
 4. `Теплопроводность`
 5. `Автоизмерение`
 6. `Алармы`
-7. `Журнал оператора`
+7. `Служебный лог`
 8. `Архив`
 9. `Калибровка`
 10. `Приборы`
@@ -67,9 +79,9 @@ Windows tray integration реализована в `src/cryodaq/gui/tray_status.
 
 Unknown state deliberately не показывается как healthy.
 
-## 3. Backend contracts
+## 3. Backend-контракты
 
-### 3.1. Alarm contract
+### 3.1. Alarm-контракт
 
 Alarm backend event types:
 
@@ -77,7 +89,7 @@ Alarm backend event types:
 - `acknowledged`
 - `cleared`
 
-GUI row states:
+Состояния строк в GUI:
 
 - `active`
 - `acknowledged`
@@ -149,8 +161,9 @@ Template содержит как минимум:
 data/experiments/<experiment_id>/
   metadata.json
   reports/
-    report.docx
-    report.pdf          # optional
+    report_editable.docx
+    report_raw.pdf      # optional, best effort if soffice/libreoffice is available
+    report_raw.docx
     assets/
 ```
 
@@ -162,6 +175,12 @@ data/experiments/<experiment_id>/
 - `artifacts`
 
 Archive GUI строится поверх этого artifact contract, а не поверх отдельной archive DB.
+
+Target operator-facing report artifacts:
+
+- `report_raw.pdf`
+- `report_editable.docx`
+
 
 ### 5.2. Operator log
 
@@ -178,9 +197,13 @@ Reporting subsystem lives in `src/cryodaq/reporting/`.
 
 Основные части:
 
-- `data.py` — data extraction from metadata + SQLite
-- `sections.py` — modular section registry
-- `generator.py` — DOCX assembly + optional PDF conversion
+- `data.py` — извлечение данных из архивной карточки и её артефактов, с текущим fallback в SQLite для части секций
+- `sections.py` — модульный реестр секций
+- `generator.py` — текущая сборка DOCX / PDF
+
+- `report_editable.docx`
+- `report_raw.pdf`
+- `report_raw.docx` как machine-generated intermediate source для PDF-конвертации
 
 Реализованные sections:
 
@@ -192,13 +215,13 @@ Reporting subsystem lives in `src/cryodaq/reporting/`.
 - `alarms_section`
 - `config_section`
 
-Current guarantee:
+Текущая гарантия:
 
-- DOCX generation works
+- генерация DOCX работает
 
-Current caveat:
+Текущий caveat:
 
-- PDF conversion is best-effort only and depends on external tooling
+- PDF-конвертация остаётся best-effort и зависит от внешнего инструмента
 
 ## 7. Archive
 
@@ -236,7 +259,7 @@ Calibration backend supports:
 - LakeShore raw / SRDG acquisition
 - calibration sessions
 - multi-zone Chebyshev fit
-- JSON/CSV export/import
+- `.330` / `.340` / JSON / CSV import/export
 
 Calibration artifacts:
 
@@ -252,12 +275,16 @@ Calibration GUI supports:
 - start / capture / finalize session
 - fit curve
 - visualization of raw points and fitted curve
-- export JSON/CSV
+- export `.330` / `.340` / JSON / CSV
 
-Important limitation:
+Runtime calibration behavior:
 
-- applying a calibration curve into runtime/instrument is not implemented in the current RC
-- GUI correctly keeps `Применить в CryoDAQ` disabled
+- global `off` uses `KRDG`
+- global `on` uses `SRDG + curve` where assignment and curve are ready
+- per-channel policy may override to `off` / `on` / `inherit`
+- conservative fallback returns `KRDG` and logs the reason when assignment/curve/raw SRDG input is unavailable
+
+`CalibrationStore` поднимается до wiring LakeShore drivers, чтобы runtime policy была доступна уже на startup contour.
 
 ## 10. Dependencies that affect operator workflows
 
@@ -275,11 +302,10 @@ These dependencies are not optional if the corresponding workflows are expected 
 
 ## 11. Known RC limitations
 
-- Calibration apply path is not implemented.
-- Report PDF conversion is best-effort only.
+- Best-effort PDF conversion depends on external `soffice` / `LibreOffice`.
 - `asyncio.WindowsSelectorEventLoopPolicy` still emits deprecation warnings on newer Python versions.
 
-## 12. Source-of-truth note
+## 12. Примечание про источник истины
 
 For current behavior, prefer the code contracts in:
 

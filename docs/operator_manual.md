@@ -48,7 +48,7 @@ CryoDAQ управляет сбором данных и операторским
 4. `Теплопроводность`
 5. `Автоизмерение`
 6. `Алармы`
-7. `Журнал оператора`
+7. `Служебный лог`
 8. `Архив`
 9. `Калибровка`
 10. `Приборы`
@@ -122,9 +122,9 @@ CryoDAQ управляет сбором данных и операторским
 
 Пока тревога не `cleared`, она остаётся unresolved.
 
-### 4.4. Журнал оператора
+### 4.4. Служебный лог
 
-Вкладка `Журнал оператора` позволяет:
+Вкладка `Служебный лог` позволяет:
 
 - ввести произвольную заметку
 - связать её с текущим экспериментом
@@ -195,17 +195,17 @@ Runtime calibration поддерживает глобальный режим `on
 - `report_raw.pdf` — автоматически сгенерированный сырой файл
 - `report_editable.docx` — редактируемая версия для оператора
 
-Report generation uses the archived experiment card and its artifacts as the source of truth.
+Основой генерации отчёта служат архивная карточка эксперимента и её артефакты; для части данных текущая реализация всё ещё может использовать fallback-чтение из SQLite.
 
-Guaranteed artifact:
+Гарантированный артефакт:
 
 - `report_editable.docx`
 
-Optional artifact:
+Опциональный артефакт:
 
 - `report_raw.pdf`
 
-PDF conversion remains best-effort and depends on external `LibreOffice` / `soffice`.
+PDF-конвертация остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
 
 ## 7. Типовой рабочий сценарий
 
@@ -216,7 +216,7 @@ PDF conversion remains best-effort and depends on external `LibreOffice` / `soff
 3. Проверьте `Обзор` и `Алармы`
 4. Убедитесь, что нет необработанных critical conditions
 5. Через меню `Эксперимент` начните запись
-6. При необходимости внесите заметку в `Журнал оператора`
+6. При необходимости внесите заметку в `Служебный лог`
 
 ### Работа с Keithley
 
@@ -238,21 +238,21 @@ PDF conversion remains best-effort and depends on external `LibreOffice` / `soff
 
 - GUI закрыт, а engine продолжает писать данные
 - в архиве нет PDF, но есть DOCX
-- GUI may be closed while `engine` keeps collecting data
-- Archive may contain DOCX without PDF
-- Runtime calibration may conservatively fall back to `KRDG` when curve, assignment, or SRDG input is unavailable
-- Tray may show warning when GUI does not have enough runtime truth
+- GUI может быть закрыт, пока `engine` продолжает собирать данные
+- В архиве может быть DOCX без PDF
+- Runtime calibration может консервативно вернуться к `KRDG`, если недоступны curve, assignment или вход `SRDG`
+- Tray может показывать warning, если у GUI недостаточно backend truth
 
-Abnormal:
+Ненормально:
 
-- GUI shows healthy / ON without backend status
-- Archive claims a report exists when the file is missing
-- Export triggers backend work after the file dialog was canceled
-- Calibration panel hides runtime fallback or refusal and presents an optimistic applied state
+- GUI показывает healthy / ON без backend status
+- Архив утверждает, что отчёт существует, хотя файла нет
+- Export запускает backend-работу после отмены file dialog
+- Calibration panel скрывает runtime fallback или отказ и показывает оптимистичный applied state
 
 ## 9. Known RC limitations
 
-- PDF conversion remains best-effort and depends on external `LibreOffice` / `soffice`.
+- PDF-конвертация остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
 - Newer Python versions may emit deprecation warnings related to `WindowsSelectorEventLoopPolicy`.
 
-This document describes the currently implemented RC state and does not promise future features.
+Документ описывает текущий реализованный RC state и не обещает будущие функции.

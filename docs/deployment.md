@@ -83,6 +83,7 @@ Copy-Item config\notifications.local.yaml.example config\notifications.local.yam
 - calibration GUI читает LakeShore channels из `instruments.yaml` / `instruments.local.yaml`
 - допустимы разные shapes channel config, но конфигурация должна оставаться валидным YAML
 - Keithley runtime использует dual-channel model (`smua`, `smub`)
+- Любые старые инструкции про отключение или скрытие `smub` считать устаревшими
 
 ## 6. Запуск
 
@@ -121,7 +122,7 @@ uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
 - `Обзор` получает свежие данные
 - вкладка `Keithley 2604B` открывается и показывает каналы A/B
 - вкладка `Алармы` не содержит unexpected active alarms
-- вкладка `Журнал оператора` может загрузить записи
+- вкладка `Служебный лог` может загрузить записи
 - вкладка `Архив` открывается без ошибок
 - вкладка `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
 - tray icon, если системный трей доступен, не показывает healthy без backend truth
@@ -134,14 +135,20 @@ uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
 - `Теплопроводность`
 - `Автоизмерение`
 - `Алармы`
-- `Журнал оператора`
+- `Служебный лог`
 - `Архив`
 - `Калибровка`
 - `Приборы`
 
 ## 8. Данные и артефакты
 
-Основные runtime files:
+Операторская интерпретация `data/experiments/<experiment_id>/`:
+
+- один каталог соответствует одной experiment card
+- в каждый момент времени должна быть открыта только одна активная experiment card
+- workflow `Отладка` не должен создавать архивные карточки эксперимента
+
+Основные runtime-файлы:
 
 - daily SQLite databases: `data/data_YYYY-MM-DD.db`
 - experiment artifacts: `data/experiments/<experiment_id>/`
@@ -156,23 +163,30 @@ Housekeeping:
 
 ## 9. Отчёты и архив
 
-Report generation uses experiment metadata and template-defined sections.
+Целевой внешний отчётный контракт:
 
-Guaranteed artifact:
+- `report_raw.pdf`
+- `report_editable.docx`
 
-- `report.docx`
 
-Optional artifact:
+Генерация отчёта опирается на архивную карточку эксперимента, её артефакты и template-defined sections; для части данных текущий contour всё ещё может использовать fallback-чтение из SQLite.
 
-- `report.pdf`
+Гарантированный артефакт:
+
+- `report_editable.docx`
+
+Опциональный артефакт:
+
+- `report_raw.pdf`
 
 PDF generation must not be treated as guaranteed deployment criterion.
 
-## 10. Known RC caveats
+## 10. Известные caveat'ы RC
 
-- Calibration apply path into runtime is not implemented.
-- PDF report conversion is best-effort.
-- Newer Python versions still emit `WindowsSelectorEventLoopPolicy` deprecation warnings.
+- Runtime apply калибровки доступен через global on/off и per-channel policy; отсутствие curve, assignment или сбой вычисления нужно трактовать как консервативный fallback к `KRDG` с явным логированием.
+- Поведение на живом LakeShore требует отдельной lab verification и не считается автоматически подтверждённым одним только unit/mock coverage.
+- PDF-артефакт остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
+- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ## 11. Smoke-test commands
 
