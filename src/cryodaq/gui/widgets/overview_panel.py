@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -45,7 +46,6 @@ from cryodaq.gui.widgets.common import (
     apply_status_label_style,
     create_panel_root,
 )
-from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
 from cryodaq.gui.widgets.shift_handover import ShiftBar
 from cryodaq.paths import get_data_dir
 
@@ -912,40 +912,33 @@ class OverviewPanel(QWidget):
 
     def _build_ui(self) -> None:
         root = create_panel_root(self)
-        root.setSpacing(6)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(0)
 
-        # 1. StatusStrip
-        self._status_strip = StatusStrip()
-        root.addWidget(self._status_strip)
+        # Two-column splitter: left = charts, right = sidebar
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background-color: #333333; }"
+        )
+        root.addWidget(splitter)
 
-        # 1a. Experiment status
-        self._experiment_status = ExperimentStatusWidget()
-        root.addWidget(self._experiment_status)
+        # ============ LEFT COLUMN: charts ============
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 4, 0)
+        left_layout.setSpacing(4)
 
-        # 1b. Shift handover bar
-        self._shift_bar = ShiftBar()
-        root.addWidget(self._shift_bar)
-
-        # 2. Operator workspace
-        self._experiment_workspace = ExperimentWorkspace()
-        root.addWidget(self._experiment_workspace)
-
-        # 3. TempCardGrid
-        self._card_grid = TempCardGrid(self._channel_mgr)
-        root.addWidget(self._card_grid)
-
-        # 4. График с кнопками
+        # Plot toolbar
         plot_frame = QFrame()
         apply_panel_frame_style(plot_frame, background="#111111", border="#333", radius=4)
         plot_root = QVBoxLayout(plot_frame)
         plot_root.setContentsMargins(4, 4, 4, 4)
         plot_root.setSpacing(4)
 
-        # Кнопки над графиком
         btn_bar = QHBoxLayout()
         btn_bar.setSpacing(6)
 
-        # Временные кнопки
         for label, seconds in [("1\u0447", 3600), ("6\u0447", 21600), ("24\u0447", 86400)]:
             btn = QPushButton(label)
             btn.setFixedSize(QSize(50, 24))
@@ -961,7 +954,6 @@ class OverviewPanel(QWidget):
 
         btn_bar.addStretch()
 
-        # Log/Lin toggle
         self._log_btn = QPushButton("Lin Y")
         self._log_btn.setFixedSize(QSize(60, 24))
         apply_button_style(self._log_btn, "neutral", compact=True)
@@ -969,14 +961,12 @@ class OverviewPanel(QWidget):
         self._is_log_y = False
         btn_bar.addWidget(self._log_btn)
 
-        # Export PNG
         png_btn = QPushButton("PNG")
         png_btn.setFixedSize(QSize(60, 24))
         apply_button_style(png_btn, "neutral", compact=True)
         png_btn.clicked.connect(self._on_export_png)
         btn_bar.addWidget(png_btn)
 
-        # Export CSV
         csv_btn = QPushButton("CSV")
         csv_btn.setFixedSize(QSize(60, 24))
         apply_button_style(csv_btn, "neutral", compact=True)
@@ -985,23 +975,51 @@ class OverviewPanel(QWidget):
 
         plot_root.addLayout(btn_bar)
 
-        # PlotWidget
+        # Main temperature plot
         self._plot = pg.PlotWidget()
         plot_root.addWidget(self._plot)
 
-        root.addWidget(plot_frame, stretch=1)
+        left_layout.addWidget(plot_frame, stretch=1)
 
-        # 5. PressureStrip
+        # PressureStrip below plot
         self._pressure_strip = PressureStrip()
-        root.addWidget(self._pressure_strip)
+        left_layout.addWidget(self._pressure_strip)
 
-        # 6. KeithleyStrip
+        splitter.addWidget(left_widget)
+
+        # ============ RIGHT COLUMN: sidebar ============
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(4, 0, 0, 0)
+        right_layout.setSpacing(4)
+
+        # Compact status bars
+        self._status_strip = StatusStrip()
+        right_layout.addWidget(self._status_strip)
+
+        self._experiment_status = ExperimentStatusWidget()
+        right_layout.addWidget(self._experiment_status)
+
+        self._shift_bar = ShiftBar()
+        right_layout.addWidget(self._shift_bar)
+
+        # Temperature card grid (scrollable, takes available space)
+        self._card_grid = TempCardGrid(self._channel_mgr)
+        right_layout.addWidget(self._card_grid, stretch=1)
+
+        # Keithley strip with quick-actions
         self._keithley_strip = KeithleyStrip()
-        root.addWidget(self._keithley_strip)
+        right_layout.addWidget(self._keithley_strip)
 
-        # 7. QuickLogWidget
+        # Quick log
         self._quick_log = QuickLogWidget()
-        root.addWidget(self._quick_log)
+        right_layout.addWidget(self._quick_log)
+
+        splitter.addWidget(right_widget)
+
+        # Splitter proportions: 65% charts, 35% sidebar
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика."""
@@ -1039,15 +1057,6 @@ class OverviewPanel(QWidget):
         """Принять показание (потокобезопасно через Signal)."""
         self._reading_received.emit(reading)
 
-    def refresh_experiment_workspace(self) -> bool:
-        return self._experiment_workspace.refresh_state()
-
-    def focus_experiment_workspace(self) -> None:
-        self._experiment_workspace.focus_create_form()
-
-    def focus_experiment_finalize(self) -> None:
-        self._experiment_workspace.focus_finalize_action()
-
     # ------------------------------------------------------------------
     # Внутренние слоты
     # ------------------------------------------------------------------
@@ -1056,7 +1065,6 @@ class OverviewPanel(QWidget):
     def _handle_reading(self, reading: Reading) -> None:
         """Обработать показание в GUI-потоке. Маршрутизация к суб-виджетам."""
         channel = reading.channel
-        self._experiment_workspace.on_reading(reading)
 
         # Температуры → карточки + буфер графика
         if channel.startswith("\u0422") and reading.unit == "K":

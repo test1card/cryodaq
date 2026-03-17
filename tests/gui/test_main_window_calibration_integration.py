@@ -89,6 +89,7 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
     labels = [window._tabs.tabText(index) for index in range(window._tabs.count())]
     assert labels == [
         "Обзор",
+        "Эксперимент",
         "Keithley 2604B",
         "Аналитика",
         "Теплопроводность",

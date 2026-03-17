@@ -87,7 +87,8 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 Текущие вкладки `MainWindow`:
 
-- `Обзор`
+- `Обзор` — двухколоночный layout (графики слева, sidebar справа)
+- `Эксперимент` — ExperimentWorkspace (создание, управление, финализация)
 - `Keithley 2604B`
 - `Аналитика`
 - `Теплопроводность`

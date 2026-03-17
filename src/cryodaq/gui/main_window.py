@@ -1,8 +1,8 @@
 """Главное окно CryoDAQ GUI.
 
 QMainWindow с операторскими вкладками:
-Обзор, Keithley, Аналитика, Теплопроводность, Автоизмерение, Алармы,
-Служебный лог, Архив, Калибровка, Статус приборов.
+Обзор, Эксперимент, Keithley, Аналитика, Теплопроводность, Автоизмерение,
+Алармы, Служебный лог, Архив, Калибровка, Статус приборов.
 Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп), Настройки.
 Статусная строка: подключение, uptime, скорость данных.
 """
@@ -42,6 +42,7 @@ from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.common import apply_status_label_style
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
+from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
 from cryodaq.gui.tray_status import TrayController, resolve_tray_status
 
@@ -80,12 +81,12 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._tray_controller = TrayController(self)
         self._refresh_tray_status()
-        self._overview_panel._experiment_workspace.set_post_action_callback(
+        self._experiment_workspace.set_post_action_callback(
             self._refresh_experiment_dependent_views
         )
-        self._overview_panel._experiment_workspace.set_shell_message_callback(self._show_shell_message)
-        self._overview_panel._experiment_workspace.set_finalize_guard(self._check_finalize_guard)
-        self._overview_panel.refresh_experiment_workspace()
+        self._experiment_workspace.set_shell_message_callback(self._show_shell_message)
+        self._experiment_workspace.set_finalize_guard(self._check_finalize_guard)
+        self._experiment_workspace.refresh_state()
         self._sync_experiment_actions()
 
         # ZMQ callback → сигнал → слот (потокобезопасно)
@@ -115,6 +116,10 @@ class MainWindow(QMainWindow):
         # Вкладка «Обзор» — главная домашняя вкладка
         self._overview_panel = OverviewPanel(self._channel_mgr)
         self._tabs.addTab(self._overview_panel, "Обзор")
+
+        # Вкладка «Эксперимент» — управление экспериментами
+        self._experiment_workspace = ExperimentWorkspace()
+        self._tabs.addTab(self._experiment_workspace, "Эксперимент")
 
         # Вкладка «Keithley»
         self._keithley_panel = KeithleyPanel()
@@ -231,6 +236,9 @@ class MainWindow(QMainWindow):
 
         # Все показания → OverviewPanel (маршрутизирует внутри себя)
         self._overview_panel.on_reading(reading)
+
+        # Все показания → ExperimentWorkspace (timeline, live data)
+        self._experiment_workspace.on_reading(reading)
 
         # Температурные каналы → ConductivityPanel + AutoSweep
         if channel.startswith("Т") and reading.unit == "K":
@@ -360,26 +368,26 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_start_experiment(self) -> None:
-        self._tabs.setCurrentWidget(self._overview_panel)
-        if not self._overview_panel.refresh_experiment_workspace():
+        self._tabs.setCurrentWidget(self._experiment_workspace)
+        if not self._experiment_workspace.refresh_state():
             return
-        workspace = self._overview_panel._experiment_workspace
+        workspace = self._experiment_workspace
         if workspace.app_mode != "experiment":
             self._show_shell_message("Создание эксперимента доступно только в режиме «Эксперимент».")
             return
         if workspace.active_experiment is not None:
             self._show_shell_message("Нельзя открыть новый эксперимент поверх активной карточки.")
-            self._overview_panel.focus_experiment_finalize()
+            self._experiment_workspace.focus_finalize_action()
             return
-        self._overview_panel.focus_experiment_workspace()
-        self._show_shell_message("Заполните карточку нового эксперимента на главной странице.")
+        self._experiment_workspace.focus_create_form()
+        self._show_shell_message("Заполните карточку нового эксперимента.")
 
     @Slot()
     def _on_finalize_experiment(self) -> None:
-        self._tabs.setCurrentWidget(self._overview_panel)
-        if not self._overview_panel.refresh_experiment_workspace():
+        self._tabs.setCurrentWidget(self._experiment_workspace)
+        if not self._experiment_workspace.refresh_state():
             return
-        workspace = self._overview_panel._experiment_workspace
+        workspace = self._experiment_workspace
         if workspace.active_experiment is None:
             self._show_shell_message("Нет активного эксперимента.")
             self._sync_experiment_actions()
@@ -388,17 +396,17 @@ class MainWindow(QMainWindow):
         if not allowed:
             self._show_shell_message(message)
             return
-        self._overview_panel.focus_experiment_finalize()
-        self._show_shell_message("Завершите карточку эксперимента на главной странице.")
+        self._experiment_workspace.focus_finalize_action()
+        self._show_shell_message("Завершите карточку эксперимента на вкладке «Эксперимент».")
 
     def _refresh_experiment_dependent_views(self) -> None:
         self._operator_log_panel.refresh_entries()
         self._archive_panel.refresh_archive()
-        self._overview_panel.refresh_experiment_workspace()
+        self._experiment_workspace.refresh_state()
         self._sync_experiment_actions()
 
     def _sync_experiment_actions(self) -> None:
-        workspace = self._overview_panel._experiment_workspace
+        workspace = self._experiment_workspace
         is_experiment_mode = workspace.app_mode == "experiment"
         has_active = workspace.active_experiment is not None
         self._start_action.setEnabled(is_experiment_mode and not has_active)
