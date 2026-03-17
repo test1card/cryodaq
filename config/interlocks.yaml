@@ -33,19 +33,16 @@ interlocks:
     cooldown_s: 10.0
 
   # ─── Защита детектора ────────────────────────────────────────────────────────
+  # Примечание: фазовое условие (только в фазе measurement при активном источнике)
+  # обеспечивается Alarm Engine v2 (detector_warmup_interlock в alarms_v3.yaml).
+  # Данный интерлок — аппаратная страховка для любой фазы при T12 > 10 K.
   - name: "detector_warmup"
-    description: "Нагрев детектора выше рабочей температуры — остановка источника"
-    channel_pattern: "Т7 Детектор"
+    description: "Нагрев детектора (T12) выше рабочей температуры — остановка источника"
+    channel_pattern: "T12"
     threshold: 10.0
     comparison: ">"
     action: "stop_source"
     cooldown_s: 5.0
 
-  # ─── Защита экрана 77К ──────────────────────────────────────────────────────
-  - name: "undercool_shield"
-    description: "Экран 77К ниже допустимой температуры"
-    channel_pattern: "Т5 Экран 77К"
-    threshold: 50.0
-    comparison: "<"
-    action: "emergency_off"
-    cooldown_s: 30.0
+  # undercool_shield (T5 < 50 K) — УДАЛЁН: ложное срабатывание при штатном cooldown.
+  # Физическое обоснование: см. alarm_tz_physics_v3.md §4.2 "Undercool false alarm".
