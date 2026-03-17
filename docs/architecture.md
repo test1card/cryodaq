@@ -84,7 +84,7 @@ Unknown state deliberately не показывается как healthy.
 
 ### 3.1. Alarm-контракт
 
-Alarm backend event types:
+Alarm backend event types (v1):
 
 - `activated`
 - `acknowledged`
@@ -97,6 +97,33 @@ Alarm backend event types:
 - `cleared`
 
 `alarm_count` = unresolved alarms, то есть `active + acknowledged` до момента `cleared`.
+
+### 3.2. Alarm Engine v2
+
+Alarm Engine v2 работает параллельно с v1. Реализует физически обоснованные алармы:
+
+**Компоненты:**
+
+- `RateEstimator` — OLS dX/dt оценка; числовая стабильность через нормализацию времени
+- `ChannelStateTracker` — актуальное состояние каналов + stale detection + fault history
+- `AlarmEvaluator` — четыре типа: `threshold`, `composite` (AND/OR), `rate`, `stale`
+  - Threshold checks: `above`, `below`, `outside_range`, `deviation_from_setpoint`, `fault_count_in_window`
+  - Composite sub-conditions: `any_below`, `any_above`, `above`, `below`, `rate_above`, `rate_below`, `rate_near_zero`, `phase_elapsed_s`
+  - Rate checks: `rate_above`, `rate_below`, `rate_near_zero`, `relative_rate_near_zero`
+- `AlarmStateManager` — dedup, sustained_s (задержка активации), acknowledge, history
+- `ExperimentPhaseProvider` — читает фазу из ExperimentManager
+- `ExperimentSetpointProvider` — читает setpoints из experiment custom_fields
+
+**Конфигурация:** `config/alarms_v3.yaml`
+
+- `engine` — rate_window_s, rate_min_points, setpoints
+- `channel_groups` — именованные группы каналов (раскрываются в channels[] при загрузке)
+- `global_alarms` — алармы без фазового фильтра
+- `phase_alarms` — алармы с фильтром по фазе эксперимента
+
+**Интеграция в engine:** DataBroker subscriber кормит `ChannelStateTracker` + `RateEstimator`; периодический `_alarm_v2_tick()` (каждые 0.5 с) вычисляет алармы и диспетчеризирует в Telegram.
+
+**GUI-команды:** `alarm_v2_status`, `alarm_v2_ack`
 
 ### 3.2. Safety state contract
 

@@ -11,12 +11,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -88,23 +89,38 @@ class AlarmPanel(QWidget):
 
     Показывает таблицу с текущими и историческими тревогами.
     Тревоги с severity CRITICAL отображаются вверху.
+
+    Поддерживает два источника:
+    - v1: AlarmEngine readings через on_reading()
+    - v2: AlarmEngine v2 polling через alarm_v2_status command (каждые 3 с)
     """
 
     # Внутренний сигнал для потокобезопасного обновления
     _reading_signal = Signal(object)
+    # Сигнал для обновления счётчика v2 алармов в overview
+    v2_alarm_count_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         self._alarms: dict[str, _AlarmRow] = {}
+        # v2: alarm_id → {level, message, triggered_at, channels}
+        self._v2_alarms: dict[str, dict] = {}
 
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
+
+        # Polling timer for alarm_v2_status
+        self._v2_poll_timer = QTimer(self)
+        self._v2_poll_timer.setInterval(3000)  # 3 seconds
+        self._v2_poll_timer.timeout.connect(self._poll_v2_status)
+        self._v2_poll_timer.start()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
+        # --- v1 alarm table ---
         # Таблица тревог
         self._table = QTableWidget(0, len(_COLUMNS))
         self._table.setHorizontalHeaderLabels(_COLUMNS)
@@ -120,6 +136,27 @@ class AlarmPanel(QWidget):
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
 
         layout.addWidget(self._table)
+
+        # --- v2 alarm section ---
+        v2_label = QLabel("Алармы v2 (физические)")
+        v2_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout.addWidget(v2_label)
+
+        _V2_COLUMNS = ["Уровень", "Alarm ID", "Сообщение", "Каналы", "Время", "Действие"]
+        self._v2_table = QTableWidget(0, len(_V2_COLUMNS))
+        self._v2_table.setHorizontalHeaderLabels(_V2_COLUMNS)
+        self._v2_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._v2_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._v2_table.setAlternatingRowColors(True)
+        self._v2_table.verticalHeader().setVisible(False)
+        self._v2_table.setMaximumHeight(200)
+
+        v2_header = self._v2_table.horizontalHeader()
+        v2_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        v2_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        v2_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+
+        layout.addWidget(self._v2_table)
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -246,3 +283,82 @@ class AlarmPanel(QWidget):
             logger.info("Тревога '%s' подтверждена через engine", alarm_name)
         else:
             logger.warning("Ошибка подтверждения тревоги '%s': %s", alarm_name, reply.get("error"))
+
+    # ------------------------------------------------------------------
+    # Alarm Engine v2 polling
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _poll_v2_status(self) -> None:
+        """Poll alarm_v2_status from engine and refresh v2 table."""
+        try:
+            from cryodaq.gui.zmq_client import send_command
+            reply = send_command({"cmd": "alarm_v2_status"})
+            if reply.get("ok"):
+                self.update_v2_status(reply)
+        except Exception as exc:
+            logger.debug("alarm_v2_status poll error: %s", exc)
+
+    def update_v2_status(self, payload: dict) -> None:
+        """Update v2 alarm table from alarm_v2_status response payload."""
+        active: dict = payload.get("active", {})
+        self._v2_alarms = dict(active)
+        self._refresh_v2_table()
+        self.v2_alarm_count_changed.emit(len(self._v2_alarms))
+
+    def _refresh_v2_table(self) -> None:
+        """Rebuild v2 alarm table, sorted by severity."""
+        _sev_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+        sorted_items = sorted(
+            self._v2_alarms.items(),
+            key=lambda kv: (_sev_order.get(kv[1].get("level", "INFO"), 99), kv[0]),
+        )
+        self._v2_table.setRowCount(len(sorted_items))
+        for row_idx, (alarm_id, info) in enumerate(sorted_items):
+            level = info.get("level", "INFO")
+            message = info.get("message", "")
+            channels = ", ".join(info.get("channels", []))
+            triggered_at = info.get("triggered_at", 0.0)
+            if triggered_at:
+                elapsed = time.time() - triggered_at
+                if elapsed < 60:
+                    time_text = f"{elapsed:.0f} с"
+                elif elapsed < 3600:
+                    time_text = f"{elapsed / 60:.0f} мин"
+                else:
+                    time_text = f"{elapsed / 3600:.1f} ч"
+            else:
+                time_text = "—"
+
+            color = QColor(_SEVERITY_COLORS.get(level, "#AAAAAA"))
+            icon = _SEVERITY_ICONS.get(level, "")
+
+            level_item = QTableWidgetItem(f"{icon} {level}")
+            level_item.setForeground(color)
+            level_item.setFont(QFont("", -1, QFont.Weight.Bold))
+            self._v2_table.setItem(row_idx, 0, level_item)
+            self._v2_table.setItem(row_idx, 1, QTableWidgetItem(alarm_id))
+            self._v2_table.setItem(row_idx, 2, QTableWidgetItem(message[:80]))
+            self._v2_table.setItem(row_idx, 3, QTableWidgetItem(channels))
+            self._v2_table.setItem(row_idx, 4, QTableWidgetItem(time_text))
+
+            # ACK button
+            btn = QPushButton("ACK")
+            btn.setStyleSheet(
+                f"background-color: {_SEVERITY_COLORS.get(level, '#666')}; "
+                "color: white; border: none; padding: 2px 6px; border-radius: 3px;"
+            )
+            btn.clicked.connect(lambda checked=False, aid=alarm_id: self._acknowledge_v2(aid))
+            self._v2_table.setCellWidget(row_idx, 5, btn)
+
+    def _acknowledge_v2(self, alarm_id: str) -> None:
+        """Send alarm_v2_ack to engine."""
+        try:
+            from cryodaq.gui.zmq_client import send_command
+            reply = send_command({"cmd": "alarm_v2_ack", "alarm_name": alarm_id})
+            if reply.get("ok"):
+                logger.info("Alarm v2 '%s' подтверждён", alarm_id)
+            else:
+                logger.warning("Ошибка ack alarm v2 '%s': %s", alarm_id, reply.get("error"))
+        except Exception as exc:
+            logger.warning("alarm_v2_ack error: %s", exc)

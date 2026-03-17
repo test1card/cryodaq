@@ -154,6 +154,9 @@ class MainWindow(QMainWindow):
 
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
+        self._alarm_panel.v2_alarm_count_changed.connect(
+            self._overview_panel._status_strip.set_alarm_count
+        )
         self._tabs.addTab(self._alarm_panel, "Алармы")
         self._operator_log_panel = OperatorLogPanel()
         self._tabs.addTab(self._operator_log_panel, "Служебный лог")

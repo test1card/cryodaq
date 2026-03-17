@@ -7,6 +7,30 @@
 
 ---
 
+## [Unreleased] — 2026-03-18
+
+### Alarm Engine v2
+
+- **RateEstimator** — OLS-based dX/dt оценка скорости изменения (K/мин) с подавлением шума; скользящее окно, get_rate_custom_window
+- **ChannelStateTracker** — отслеживание актуального состояния каналов, stale detection, fault history (deque)
+- **AlarmEvaluator** — composite (AND/OR), threshold, rate, stale alarm types; deviation_from_setpoint, outside_range, fault_count_in_window checks
+- **AlarmStateManager** — dedup, sustained_s, гистерезис, история переходов, acknowledge
+- **PhaseProvider / SetpointProvider** — конкретные реализации через ExperimentManager; setpoints из experiment_metadata custom_fields
+- **alarm_config.py** — парсинг alarms_v3.yaml; раскрытие channel_group, phase_filter, EngineConfig
+- **config/alarms_v3.yaml** — полная конфигурация физических алармов Миллиметрон: vacuum_loss, excessive_cooling, detector_drift, stale, sensor_fault, phase-dependent alarms
+- **engine.py** — интеграция v2: DataBroker subscriber для обновления state/rate, периодический alarm_tick с фазовым фильтром, команды alarm_v2_status / alarm_v2_ack
+- **GUI alarm panel** — секция "Алармы v2" с цветовыми уровнями, ACK, поллинг каждые 3 с; сигнал v2_alarm_count_changed → overview dashboard indicator
+- **config/interlocks.yaml** — удалён undercool_shield (ложное срабатывание при cooldown), detector_warmup переведён на T12
+
+### T1 Features (Web / Telegram / Pre-flight / Auto-fill)
+
+- **Web Dashboard** — FastAPI + self-contained HTML, auto-refresh 5 с, `/api/status`, `/api/log`, `/ws`
+- **Telegram Bot v2** — `/log <text>`, `/phase <phase>`, `/temps`; EscalationService (delayed multi-level chain)
+- **Pre-Flight Checklist** — диалог перед созданием эксперимента: engine, safety, инструменты, алармы, давление, диск
+- **Experiment auto-fill** — UserPreferences, QCompleter на operator/sample/cryostat, автоимя с инкрементом
+
+---
+
 ## [0.12.0] — 2026-03-17
 
 Первый полнофункциональный релиз. Calibration v2, фазы экспериментов, смены операторов, автоматическое логирование, автоотчёты, переработанный dashboard.
