@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -255,19 +256,19 @@ class CompactTempCard(QFrame):
         self._has_alarm = False
         self._has_error = False
 
-        self.setMinimumSize(100, 60)
-        self.setMaximumHeight(70)
+        self.setMinimumSize(80, 54)
+        self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._apply_bg("#2A2A2A")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(2, 1, 2, 1)
         layout.setSpacing(0)
 
         # Строка 1: имя канала
         self._name_label = QLabel(display_name)
         name_font = QFont()
-        name_font.setPointSize(9)
+        name_font.setPointSize(8)
         self._name_label.setFont(name_font)
         self._name_label.setStyleSheet("color: #BBBBBB; border: none;")
         self._name_label.setAlignment(Qt.AlignCenter)
@@ -276,7 +277,7 @@ class CompactTempCard(QFrame):
         # Строка 2: значение
         self._value_label = QLabel("---- K")
         val_font = QFont()
-        val_font.setPointSize(14)
+        val_font.setPointSize(12)
         val_font.setBold(True)
         self._value_label.setFont(val_font)
         self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
@@ -365,9 +366,9 @@ class CompactTempCard(QFrame):
 # ---------------------------------------------------------------------------
 
 class TempCardGrid(QWidget):
-    """Адаптивная сетка CompactTempCard."""
+    """Fixed 8-per-row temperature card grid (one row per instrument)."""
 
-    _MIN_CARD_WIDTH = 110
+    _COLS = 8
 
     def __init__(self, channel_manager: ChannelManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -375,49 +376,23 @@ class TempCardGrid(QWidget):
         self._cards: dict[str, CompactTempCard] = {}
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(4)
-        self._cols = 4
+        self._grid.setSpacing(2)
 
         self._build_cards()
 
     def _build_cards(self) -> None:
         """Создать карточки для видимых каналов."""
         visible_ids = self._channel_mgr.get_all_visible()
-        # Фильтруем только температурные каналы
         temp_ids = [ch for ch in visible_ids if ch.startswith("\u0422")]  # Т
-        for ch_id in temp_ids:
+        for idx, ch_id in enumerate(temp_ids):
             display = self._channel_mgr.get_display_name(ch_id)
             card = CompactTempCard(ch_id, display)
             self._cards[ch_id] = card
-
-        self._relayout()
+            row, col = divmod(idx, self._COLS)
+            self._grid.addWidget(card, row, col)
 
     def get_cards(self) -> dict[str, CompactTempCard]:
         return self._cards
-
-    def resizeEvent(self, event: object) -> None:  # noqa: ANN001
-        super().resizeEvent(event)
-        self._relayout()
-
-    def _relayout(self) -> None:
-        """Перестроить сетку по текущей ширине."""
-        width = self.width() if self.width() > 0 else 800
-        new_cols = max(1, width // self._MIN_CARD_WIDTH)
-        if new_cols == self._cols and self._grid.count() > 0:
-            return
-        self._cols = new_cols
-
-        # Убрать все из layout (без удаления виджетов)
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            if item and item.widget():
-                item.widget().setParent(None)
-
-        # Разместить заново
-        for idx, card in enumerate(self._cards.values()):
-            row, col = divmod(idx, self._cols)
-            self._grid.addWidget(card, row, col)
-            card.setParent(self)
 
 
 # ---------------------------------------------------------------------------
@@ -425,11 +400,11 @@ class TempCardGrid(QWidget):
 # ---------------------------------------------------------------------------
 
 class PressureStrip(QFrame):
-    """Полоса давления (~80px): слева — значение, справа — мини-график."""
+    """Полоса давления (~100px): слева — значение, справа — мини-график."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(80)
+        self.setFixedHeight(100)
         apply_panel_frame_style(self)
 
         layout = QHBoxLayout(self)
@@ -975,8 +950,9 @@ class OverviewPanel(QWidget):
 
         plot_root.addLayout(btn_bar)
 
-        # Main temperature plot
-        self._plot = pg.PlotWidget()
+        # Main temperature plot with human-readable time axis
+        time_axis = pg.DateAxisItem(orientation="bottom")
+        self._plot = pg.PlotWidget(axisItems={"bottom": time_axis})
         plot_root.addWidget(self._plot)
 
         left_layout.addWidget(plot_frame, stretch=1)
@@ -987,9 +963,9 @@ class OverviewPanel(QWidget):
 
         splitter.addWidget(left_widget)
 
-        # ============ RIGHT COLUMN: sidebar ============
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
+        # ============ RIGHT COLUMN: sidebar (scrollable) ============
+        right_inner = QWidget()
+        right_layout = QVBoxLayout(right_inner)
         right_layout.setContentsMargins(4, 0, 0, 0)
         right_layout.setSpacing(4)
 
@@ -1003,7 +979,7 @@ class OverviewPanel(QWidget):
         self._shift_bar = ShiftBar()
         right_layout.addWidget(self._shift_bar)
 
-        # Temperature card grid (scrollable, takes available space)
+        # Temperature card grid (takes available space)
         self._card_grid = TempCardGrid(self._channel_mgr)
         right_layout.addWidget(self._card_grid, stretch=1)
 
@@ -1015,7 +991,14 @@ class OverviewPanel(QWidget):
         self._quick_log = QuickLogWidget()
         right_layout.addWidget(self._quick_log)
 
-        splitter.addWidget(right_widget)
+        # Wrap in scroll area for small screens
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setWidget(right_inner)
+
+        splitter.addWidget(right_scroll)
 
         # Splitter proportions: 65% charts, 35% sidebar
         splitter.setStretchFactor(0, 7)
