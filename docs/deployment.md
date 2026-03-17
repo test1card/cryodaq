@@ -202,4 +202,4 @@ python -m pytest tests/reporting -q
 
 Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
 
-Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили на RC branch до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
+Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.

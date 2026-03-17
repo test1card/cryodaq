@@ -13,7 +13,7 @@
 - Calibration v2: continuous SRDG acquisition during calibration experiments (CalibrationAcquisitionService), post-run pipeline (CalibrationFitter: extract → downsample → breakpoints → Chebyshev fit), three-mode GUI (Setup → Acquisition → Results), `.330` / `.340` / JSON export, runtime apply с per-channel policy.
 
 Замена LabVIEW для cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
-Python 3.12+, asyncio, PySide6. Current package metadata: `0.11.0rc1`.
+Python 3.12+, asyncio, PySide6. Current package metadata: `0.12.0`.
 
 ## Команды сборки и разработки
 
@@ -190,7 +190,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - Operator-facing GUI text should remain in Russian.
 - Scheduler writes to SQLite before publishing to brokers.
 
-## Известные ограничения RC
+## Известные ограничения
 
 - Best-effort PDF generation по-прежнему зависит от внешнего `soffice` / `LibreOffice`; отсутствие этого инструмента является ограничением окружения, а не code regression.
 - `WindowsSelectorEventLoopPolicy` продолжает давать известные Python 3.14+ deprecation warnings.

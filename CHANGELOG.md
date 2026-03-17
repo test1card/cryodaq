@@ -7,7 +7,9 @@
 
 ---
 
-## [Unreleased] — 2026-03-17
+## [0.12.0] — 2026-03-17
+
+Первый полнофункциональный релиз. Calibration v2, фазы экспериментов, смены операторов, автоматическое логирование, автоотчёты, переработанный dashboard.
 
 ### Калибровка v2
 
@@ -76,7 +78,7 @@
 - Документация по экспериментам переписана вокруг experiment-card lifecycle: одна активная карточка, закрытие по завершении, архивирование при закрытии, новый эксперимент создаёт новую карточку.
 - Спецификация главной страницы теперь явно требует режимы `Эксперимент / Отладка`; `Отладка` не должна создавать архивные записи и автоматические отчёты по эксперименту.
 - Контракт и реализация внешних отчётов синхронизированы на `report_raw.pdf` и `report_editable.docx`, при этом `report_raw.docx` остаётся machine-generated intermediate source для PDF-конвертации.
-- Документация по calibration теперь отражает реализованный RC contour: `.330` / `.340`, task-level Chebyshev FIT, runtime apply и per-channel policy присутствуют; оставшаяся работа относится к follow-on rollout/polish, а не к отсутствующему core backend.
+- Документация по calibration теперь отражает реализованный контур: `.330` / `.340`, task-level Chebyshev FIT, runtime apply и per-channel policy присутствуют; оставшаяся работа относится к follow-on rollout/polish, а не к отсутствующему core backend.
 
 ### Известные caveat'ы после сверки
 
@@ -87,7 +89,7 @@
 
 ## [0.11.0-rc1] — 2026-03-16
 
-### RC stabilization
+### Стабилизация
 
 - **Operator workflow stack completed** — operator log, experiment templates/metadata, report generator MVP, archive browser, calibration backend и calibration GUI интегрированы и покрыты тестами
 - **Keithley dual-channel model** — backend, driver и GUI поддерживают `smua`, `smub` и одновременную работу `smua+smub` на одном 2604B

@@ -1,14 +1,14 @@
 # CryoDAQ
 
-## Снимок сверки RC (2026-03-16)
+## Текущее состояние (v0.12.0)
 
 - Источник истины по продуктовой модели: один эксперимент равен одной experiment card, и во время активного эксперимента открыта ровно одна карточка.
 - Основной операторский workflow различает режимы `Эксперимент` и `Отладка`; в `Отладке` не должны появляться архивные карточки и автоматические отчёты по эксперименту.
 - Целевой внешний отчётный контракт в текущем коде: `report_raw.pdf` и `report_editable.docx`.
 - Dual-channel Keithley (`smua`, `smub`, `smua + smub`) остаётся актуальной моделью. Старые ожидания про disable/hide/remove `smub` устарели.
-- Calibration RC contour уже включает `.330` / `.340`, task-level multi-zone Chebyshev FIT и runtime apply с global/per-channel policy; оставшиеся пробелы относятся к lab verification и последующему operator polish.
+- Calibration v2: непрерывный сбор SRDG при калибровочных экспериментах, post-run pipeline (extract → downsample → Chebyshev fit), `.330` / `.340` export, runtime apply с global/per-channel policy.
 
-CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Ветка `CRYODAQ-CODEX` отражает текущее release-candidate состояние с уже реализованными experiment/report/archive/operator-log/calibration/housekeeping/tray workflow.
+CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Полнофункциональная система с experiment/report/archive/operator-log/calibration/housekeeping/shift-handover workflow.
 
 ## Текущая форма системы
 
@@ -142,7 +142,7 @@ cryodaq-engine --mock
 
 ## Эксперименты и артефакты
 
-В текущем RC доступны шаблоны:
+Доступные шаблоны:
 
 - `config/experiment_templates/thermal_conductivity.yaml`
 - `config/experiment_templates/cooldown_test.yaml`
