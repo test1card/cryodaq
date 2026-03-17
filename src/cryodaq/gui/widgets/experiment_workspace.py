@@ -126,6 +126,13 @@ class ExperimentWorkspace(QWidget):
             self._workspace_status.show_warning("Укажите оператора эксперимента.")
             return
 
+        # Pre-flight checklist (только в режиме эксперимента)
+        from cryodaq.gui.widgets.preflight_dialog import PreFlightDialog
+        from PySide6.QtWidgets import QDialog
+        preflight = PreFlightDialog(self)
+        if preflight.exec() != QDialog.DialogCode.Accepted:
+            return
+
         payload = {
             "cmd": "experiment_create",
             "template_id": str(template.get("id", "custom")),
