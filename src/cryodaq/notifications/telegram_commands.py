@@ -37,6 +37,10 @@ _HELP_TEXT = (
 _VALID_PHASES = ["preparation", "cooling", "measurement", "warming", "teardown"]
 
 
+class _TelegramAuthError(Exception):
+    """Raised when Telegram API returns 401 or 404 (bad token)."""
+
+
 class TelegramCommandBot:
     """Бот для обработки Telegram-команд.
 
@@ -81,12 +85,17 @@ class TelegramCommandBot:
         self._queue = await self._broker.subscribe(_SUBSCRIBE_NAME, maxsize=5000)
         self._collect_task = asyncio.create_task(self._collect_loop(), name="tg_cmd_collect")
         self._poll_task = asyncio.create_task(self._poll_loop(), name="tg_cmd_poll")
-        logger.info("TelegramCommandBot запущен")
+        logger.info(
+            "TelegramCommandBot запущен | collect_task=%s poll_task=%s",
+            self._collect_task.get_name(),
+            self._poll_task.get_name(),
+        )
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            # total=None чтобы long-poll (timeout=5 в params) не упирался в общий таймаут
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
             )
         return self._session
 
@@ -124,14 +133,32 @@ class TelegramCommandBot:
     # ------------------------------------------------------------------
 
     async def _poll_loop(self) -> None:
+        logger.info("Telegram polling task started (interval=%.1fs)", self._poll_interval_s)
+        iteration = 0
+        backoff_s = self._poll_interval_s
         try:
             while True:
+                iteration += 1
+                logger.info(
+                    "Telegram polling #%d, offset=%s", iteration, self._last_update_id
+                )
                 try:
                     await self._fetch_updates()
+                    backoff_s = self._poll_interval_s  # сброс бэкоффа при успехе
+                except _TelegramAuthError as exc:
+                    # 401/404 — токен невалидный, не спамим
+                    backoff_s = min(backoff_s * 2, 300)
+                    logger.error(
+                        "Telegram token error (#%d), backoff=%.0fs: %s",
+                        iteration, backoff_s, exc,
+                    )
                 except Exception as exc:
-                    logger.error("Ошибка опроса Telegram: %s", exc)
-                await asyncio.sleep(self._poll_interval_s)
+                    logger.error(
+                        "Telegram polling error (#%d): %s", iteration, exc, exc_info=True
+                    )
+                await asyncio.sleep(backoff_s)
         except asyncio.CancelledError:
+            logger.info("Telegram polling task cancelled after %d iterations", iteration)
             return
 
     async def _fetch_updates(self) -> None:
@@ -143,13 +170,23 @@ class TelegramCommandBot:
         session = await self._get_session()
         async with session.get(url, params=params) as resp:
             if resp.status != 200:
+                body = await resp.text()
+                logger.error(
+                    "Telegram getUpdates HTTP %d: %s", resp.status, body[:300]
+                )
+                if resp.status in (401, 404):
+                    raise _TelegramAuthError(f"HTTP {resp.status}: {body[:100]}")
                 return
             data = await resp.json()
 
         if not data.get("ok"):
+            logger.error("Telegram getUpdates not ok: %s", data)
             return
 
-        for update in data.get("result", []):
+        updates = data.get("result", [])
+        logger.info("Telegram: получено %d обновлений", len(updates))
+
+        for update in updates:
             self._last_update_id = max(self._last_update_id, update["update_id"])
             msg = update.get("message", {})
             text = msg.get("text", "")
