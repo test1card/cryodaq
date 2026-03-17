@@ -30,6 +30,19 @@ class _TrayStub:
         self.statuses.append(status)
 
 
+def _fake_workspace_send(payload: dict) -> dict:
+    if payload["cmd"] == "experiment_status":
+        return {
+            "ok": True,
+            "app_mode": "experiment",
+            "active_experiment": None,
+            "templates": [{"id": "custom", "name": "Custom", "custom_fields": []}],
+        }
+    if payload["cmd"] == "log_get":
+        return {"ok": True, "entries": []}
+    return {"ok": True}
+
+
 def test_main_window_instantiates_with_calibration_tab(monkeypatch) -> None:
     _app()
 
@@ -43,6 +56,7 @@ def test_main_window_instantiates_with_calibration_tab(monkeypatch) -> None:
 
     monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
     monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
     window = MainWindow(_SubscriberStub())
@@ -67,6 +81,7 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
 
     monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
     monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
     window = MainWindow(_SubscriberStub())
@@ -79,7 +94,7 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
         "Теплопроводность",
         "Автоизмерение",
         "Алармы",
-        "Журнал оператора",
+        "Служебный лог",
         "Архив",
         "Калибровка",
         "Приборы",
@@ -104,6 +119,7 @@ def test_main_window_routes_nonlocalized_temperature_readings_to_calibration(mon
 
     monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
     monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
     window = MainWindow(_SubscriberStub())
@@ -132,6 +148,7 @@ def test_main_window_updates_tray_from_backend_truth(monkeypatch) -> None:
 
     monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
     monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
     window = MainWindow(_SubscriberStub())
@@ -176,10 +193,10 @@ def test_main_window_experiment_failures_use_status_bar(monkeypatch) -> None:
     monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
     monkeypatch.setattr(
-        "cryodaq.gui.zmq_client.send_command",
+        "cryodaq.gui.widgets.experiment_workspace.send_command",
         lambda payload: {"ok": False, "error": "experiment backend offline"}
-        if payload["cmd"] in {"experiment_templates", "experiment_status"}
-        else {"ok": True},
+        if payload["cmd"] == "experiment_status"
+        else {"ok": True, "entries": []},
     )
 
     window = MainWindow(_SubscriberStub())

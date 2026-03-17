@@ -43,6 +43,7 @@ from cryodaq.gui.widgets.common import (
     apply_status_label_style,
     create_panel_root,
 )
+from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -684,11 +685,15 @@ class OverviewPanel(QWidget):
         self._status_strip = StatusStrip()
         root.addWidget(self._status_strip)
 
-        # 2. TempCardGrid
+        # 2. Operator workspace
+        self._experiment_workspace = ExperimentWorkspace()
+        root.addWidget(self._experiment_workspace)
+
+        # 3. TempCardGrid
         self._card_grid = TempCardGrid(self._channel_mgr)
         root.addWidget(self._card_grid)
 
-        # 3. График с кнопками
+        # 4. График с кнопками
         plot_frame = QFrame()
         apply_panel_frame_style(plot_frame, background="#111111", border="#333", radius=4)
         plot_root = QVBoxLayout(plot_frame)
@@ -739,11 +744,11 @@ class OverviewPanel(QWidget):
 
         root.addWidget(plot_frame, stretch=1)
 
-        # 4. PressureStrip
+        # 5. PressureStrip
         self._pressure_strip = PressureStrip()
         root.addWidget(self._pressure_strip)
 
-        # 5. KeithleyStrip
+        # 6. KeithleyStrip
         self._keithley_strip = KeithleyStrip()
         root.addWidget(self._keithley_strip)
 
@@ -783,6 +788,15 @@ class OverviewPanel(QWidget):
         """Принять показание (потокобезопасно через Signal)."""
         self._reading_received.emit(reading)
 
+    def refresh_experiment_workspace(self) -> bool:
+        return self._experiment_workspace.refresh_state()
+
+    def focus_experiment_workspace(self) -> None:
+        self._experiment_workspace.focus_create_form()
+
+    def focus_experiment_finalize(self) -> None:
+        self._experiment_workspace.focus_finalize_action()
+
     # ------------------------------------------------------------------
     # Внутренние слоты
     # ------------------------------------------------------------------
@@ -791,6 +805,7 @@ class OverviewPanel(QWidget):
     def _handle_reading(self, reading: Reading) -> None:
         """Обработать показание в GUI-потоке. Маршрутизация к суб-виджетам."""
         channel = reading.channel
+        self._experiment_workspace.on_reading(reading)
 
         # Температуры → карточки + буфер графика
         if channel.startswith("\u0422") and reading.unit == "K":

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from cryodaq.analytics.calibration import CalibrationSample, CalibrationStore
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
@@ -317,3 +319,94 @@ async def test_reading_has_instrument_id_field():
     from cryodaq.drivers.base import Reading
     r = Reading.now(channel="CH1", value=4.5, unit="K", instrument_id="LS218_1")
     assert r.instrument_id == "LS218_1"
+
+
+def _calibration_samples(sensor_channel: str) -> list[CalibrationSample]:
+    values = [82.98, 80.17, 60.0, 45.0, 30.0, 18.0, 10.0]
+    return [
+        CalibrationSample(
+            timestamp=datetime(2026, 3, 16, 12, index, tzinfo=timezone.utc),
+            reference_channel="CH1",
+            reference_temperature=1500.0 / (raw_value + 18.0),
+            sensor_channel=sensor_channel,
+            sensor_raw_value=raw_value,
+        )
+        for index, raw_value in enumerate(values)
+    ]
+
+
+async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    store.save_curve(curve)
+    store.assign_curve(sensor_id="ls218s:CH1", channel_key="ls218s:CH1", runtime_apply_ready=True)
+    store.set_runtime_global_mode("off")
+
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=["LSCI,MODEL218S,MOCK001,010101", NORMAL_RESPONSE])
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
+    driver._transport = transport
+    await driver.connect()
+    readings = await driver.read_channels()
+
+    assert readings[0].value == pytest.approx(4.235)
+    assert readings[0].metadata["reading_mode"] == "krdg"
+    assert readings[0].metadata["raw_source"] == "KRDG"
+
+
+async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(tmp_path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    store.save_curve(curve)
+    store.assign_curve(
+        sensor_id="ls218s:CH1",
+        channel_key="ls218s:CH1",
+        runtime_apply_ready=True,
+        reading_mode_policy="on",
+    )
+    store.set_runtime_global_mode("on")
+
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=["LSCI,MODEL218S,MOCK001,010101", NORMAL_RESPONSE, RAW_RESPONSE])
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
+    driver._transport = transport
+    await driver.connect()
+    readings = await driver.read_channels()
+
+    assert readings[0].metadata["reading_mode"] == "curve"
+    assert readings[0].metadata["raw_source"] == "SRDG"
+    assert readings[0].metadata["curve_id"] == curve.curve_id
+    assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
+    assert readings[0].unit == "K"
+    assert readings[0].raw == pytest.approx(82.98)
+
+
+async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(tmp_path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve_ch1 = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    curve_ch2 = store.fit_curve("ls218s:CH2", _calibration_samples("CH2"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    store.save_curve(curve_ch1)
+    store.save_curve(curve_ch2)
+    store.assign_curve(sensor_id="ls218s:CH1", channel_key="ls218s:CH1", runtime_apply_ready=True, reading_mode_policy="on")
+    store.assign_curve(sensor_id="ls218s:CH2", channel_key="ls218s:CH2", runtime_apply_ready=True, reading_mode_policy="off")
+    store.set_runtime_global_mode("on")
+
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=["LSCI,MODEL218S,MOCK001,010101", NORMAL_RESPONSE, RAW_RESPONSE])
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
+    driver._transport = transport
+    await driver.connect()
+    readings = await driver.read_channels()
+
+    assert readings[0].metadata["reading_mode"] == "curve"
+    assert readings[1].metadata["reading_mode"] == "krdg"
+    assert readings[1].metadata["raw_source"] == "KRDG"

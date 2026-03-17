@@ -336,3 +336,72 @@ def test_calibration_panel_export_cancel_does_not_call_backend(monkeypatch, tmp_
     panel._on_export_curve()
 
     assert calls == []
+
+
+def test_calibration_panel_runtime_controls_roundtrip_through_backend(monkeypatch, tmp_path: Path) -> None:
+    _app()
+    sensor_key = "LS218_1:Т2 Криостат низ"
+    runtime_state = {
+        "global_mode": "off",
+        "assignments": [
+            {
+                "sensor_id": sensor_key,
+                "curve_id": "curve-001",
+                "channel_key": sensor_key,
+                "runtime_apply_ready": False,
+                "reading_mode_policy": "inherit",
+                "resolution": {
+                    "reading_mode": "krdg",
+                    "raw_source": "KRDG",
+                    "reason": "global_off",
+                },
+            }
+        ],
+    }
+    calls: list[dict] = []
+
+    def _fake_send(payload: dict) -> dict:
+        calls.append(dict(payload))
+        if payload["cmd"] == "calibration_runtime_status":
+            return {"ok": True, "runtime": runtime_state}
+        if payload["cmd"] == "calibration_runtime_set_global":
+            runtime_state["global_mode"] = payload["global_mode"]
+            runtime_state["assignments"][0]["resolution"] = {
+                "reading_mode": "curve" if payload["global_mode"] == "on" else "krdg",
+                "raw_source": "SRDG" if payload["global_mode"] == "on" else "KRDG",
+                "reason": "curve_applied" if payload["global_mode"] == "on" else "global_off",
+            }
+            return {"ok": True, "runtime": runtime_state}
+        if payload["cmd"] == "calibration_runtime_set_channel_policy":
+            runtime_state["assignments"][0]["reading_mode_policy"] = payload["policy"]
+            runtime_state["assignments"][0]["runtime_apply_ready"] = payload["runtime_apply_ready"]
+            runtime_state["assignments"][0]["resolution"] = {
+                "reading_mode": "curve",
+                "raw_source": "SRDG",
+                "reason": "curve_applied",
+            }
+            return {
+                "ok": True,
+                "assignment": runtime_state["assignments"][0],
+                "resolution": runtime_state["assignments"][0]["resolution"],
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.calibration_panel.send_command", _fake_send)
+
+    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
+    panel._targets_table.selectRow(1)
+    sensor_id = panel._selected_sensor_id()
+    assert sensor_id is not None
+    runtime_state["assignments"][0]["sensor_id"] = sensor_id
+    runtime_state["assignments"][0]["channel_key"] = sensor_id
+    panel._curves_by_sensor[sensor_id] = {"curve_id": "curve-001", "zones": [], "metrics": {}}
+    panel._update_selection_dependent_widgets()
+
+    panel._runtime_global_checkbox.setChecked(True)
+    panel._runtime_policy_combo.setCurrentIndex(panel._runtime_policy_combo.findData("on"))
+    panel._on_apply_runtime()
+
+    assert any(call["cmd"] == "calibration_runtime_set_global" for call in calls)
+    assert any(call["cmd"] == "calibration_runtime_set_channel_policy" for call in calls)
+    assert panel._runtime_effective_label.text().startswith("curve / SRDG")

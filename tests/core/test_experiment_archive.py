@@ -82,6 +82,21 @@ async def test_archive_discovers_experiments(manager: ExperimentManager, tmp_pat
     assert entries[0].start_time >= entries[-1].start_time
 
 
+async def test_archive_excludes_active_experiment_card(manager: ExperimentManager) -> None:
+    exp_id = manager.start_experiment(
+        name="Run Active",
+        title="Run Active",
+        operator="Ivanov",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T10:00:00+00:00",
+    )
+
+    entries = manager.list_archive_entries()
+
+    assert [entry.experiment_id for entry in entries] == []
+    assert manager.get_archive_item(exp_id) is None
+
+
 async def test_archive_filters_and_sorts(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_a = manager.start_experiment(
         name="Thermal",
@@ -102,7 +117,7 @@ async def test_archive_filters_and_sorts(manager: ExperimentManager, tmp_path: P
     )
     report_path = tmp_path / "experiments" / exp_b.experiment_id / "reports"
     report_path.mkdir(parents=True, exist_ok=True)
-    (report_path / "report.docx").write_text("dummy", encoding="utf-8")
+    (report_path / "report_editable.docx").write_text("dummy", encoding="utf-8")
 
     entries = manager.list_archive_entries(template_id="cooldown_test", report_present=True)
 
@@ -113,7 +128,7 @@ async def test_archive_filters_and_sorts(manager: ExperimentManager, tmp_path: P
     assert [entry.operator for entry in operator_sorted] == ["Ivanov", "Petrov"]
 
 
-async def test_archive_missing_report_does_not_crash(manager: ExperimentManager) -> None:
+async def test_archive_finalize_generates_editable_report_entry(manager: ExperimentManager) -> None:
     exp_id = manager.start_experiment(
         name="No Report",
         title="No Report",
@@ -124,8 +139,9 @@ async def test_archive_missing_report_does_not_crash(manager: ExperimentManager)
     manager.finalize_experiment(exp_id, end_time="2026-03-16T11:00:00+00:00")
 
     entry = manager.list_archive_entries()[0]
-    assert entry.report_present is False
-    assert entry.docx_path is None
+    assert entry.report_present is True
+    assert entry.docx_path is not None
+    assert entry.docx_path.name == "report_editable.docx"
     assert entry.pdf_path is None
 
 

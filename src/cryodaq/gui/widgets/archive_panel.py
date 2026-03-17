@@ -48,7 +48,7 @@ class ArchivePanel(QWidget):
         layout.addWidget(
             PanelHeader(
                 "Архив экспериментов",
-                "Поиск, проверка артефактов и открытие сохранённых отчётов.",
+                "Поиск, проверка артефактов и открытие сырых PDF и редактируемых DOCX.",
             )
         )
 
@@ -117,25 +117,60 @@ class ArchivePanel(QWidget):
                 ("Образец:", self._sample_label),
                 ("Диапазон:", self._date_label),
                 ("Папка артефактов:", self._artifact_label),
-                ("Файл отчёта:", self._report_label),
+                ("Файлы отчёта:", self._report_label),
             ],
         )
         details_layout.addLayout(meta_form)
 
         self._notes_view = QTextEdit()
         self._notes_view.setReadOnly(True)
-        self._notes_view.setMaximumHeight(140)
+        self._notes_view.setMaximumHeight(120)
         self._notes_view.setPlaceholderText("Заметки по эксперименту отсутствуют.")
         details_layout.addWidget(self._notes_view)
 
+        self._archive_stats_label = QLabel("Состав архивной записи: —")
+        self._archive_stats_label.setWordWrap(True)
+        details_layout.addWidget(self._archive_stats_label)
+
+        self._runs_view = QTextEdit()
+        self._runs_view.setReadOnly(True)
+        self._runs_view.setMaximumHeight(110)
+        runs_box = QGroupBox("Runs")
+        runs_layout = QVBoxLayout(runs_box)
+        runs_layout.addWidget(self._runs_view)
+        details_layout.addWidget(runs_box)
+
+        self._artifacts_view = QTextEdit()
+        self._artifacts_view.setReadOnly(True)
+        self._artifacts_view.setMaximumHeight(130)
+        artifacts_box = QGroupBox("Artifacts")
+        artifacts_layout = QVBoxLayout(artifacts_box)
+        artifacts_layout.addWidget(self._artifacts_view)
+        details_layout.addWidget(artifacts_box)
+
+        self._results_view = QTextEdit()
+        self._results_view.setReadOnly(True)
+        self._results_view.setMaximumHeight(110)
+        results_box = QGroupBox("Results")
+        results_layout = QVBoxLayout(results_box)
+        results_layout.addWidget(self._results_view)
+        details_layout.addWidget(results_box)
+
         self._open_folder_button = QPushButton("Открыть папку")
-        self._open_report_button = QPushButton("Открыть отчёт")
-        self._regenerate_button = QPushButton("Сформировать отчёт")
+        self._open_pdf_button = QPushButton("Открыть PDF")
+        self._open_docx_button = QPushButton("Открыть DOCX")
+        self._regenerate_button = QPushButton("Перегенерировать отчёты")
         self._open_folder_button.clicked.connect(self._open_selected_folder)
-        self._open_report_button.clicked.connect(self._open_selected_report)
+        self._open_pdf_button.clicked.connect(self._open_selected_pdf)
+        self._open_docx_button.clicked.connect(self._open_selected_docx)
         self._regenerate_button.clicked.connect(self._regenerate_selected_report)
         details_layout.addLayout(
-            build_action_row(self._open_folder_button, self._open_report_button, self._regenerate_button)
+            build_action_row(
+                self._open_folder_button,
+                self._open_pdf_button,
+                self._open_docx_button,
+                self._regenerate_button,
+            )
         )
 
         self._status_label = StatusBanner()
@@ -183,10 +218,9 @@ class ArchivePanel(QWidget):
 
     def _reload_template_choices(self) -> None:
         current_value = self._template_filter.currentData()
-        labels = [self._template_filter.itemData(i) for i in range(self._template_filter.count())]
-        seen = {value for value in labels if value}
+        seen = {self._template_filter.itemData(i) for i in range(self._template_filter.count())}
         for entry in self._entries:
-            template_id = str(entry.get("template_id", ""))
+            template_id = str(entry.get("template_id", "")).strip()
             template_name = str(entry.get("template_name", template_id))
             if template_id and template_id not in seen:
                 self._template_filter.addItem(template_name, template_id)
@@ -219,9 +253,7 @@ class ArchivePanel(QWidget):
         if row < 0:
             return None
         item = self._table.item(row, 0)
-        if item is None:
-            return None
-        return item.data(Qt.ItemDataRole.UserRole)
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
 
     @Slot()
     def _update_details(self) -> None:
@@ -231,8 +263,10 @@ class ArchivePanel(QWidget):
             return
 
         report_enabled = bool(entry.get("report_enabled", True))
-        report_path = self.resolve_report_path(entry)
+        pdf_path = self.resolve_pdf_path(entry)
+        docx_path = self.resolve_docx_path(entry)
         folder_path = self.resolve_folder_path(entry)
+
         self._summary_label.setText(
             f"{entry.get('title', '')}\n"
             f"Идентификатор: {entry.get('experiment_id', '')}\n"
@@ -245,19 +279,31 @@ class ArchivePanel(QWidget):
             f"{self._format_datetime(entry.get('start_time'))} → {self._format_datetime(entry.get('end_time'))}"
         )
         self._artifact_label.setText(str(folder_path) if folder_path else "Папка артефактов не найдена")
-        if report_path is not None:
-            self._report_label.setText(str(report_path))
+        if pdf_path or docx_path:
+            self._report_label.setText(
+                f"PDF: {pdf_path or 'нет'}\nDOCX: {docx_path or 'нет'}"
+            )
         elif report_enabled:
-            self._report_label.setText("Файл отчёта отсутствует")
+            self._report_label.setText("Файлы отчёта отсутствуют")
         else:
             self._report_label.setText("Отчёт не предусмотрен шаблоном")
+
         raw_notes = entry.get("notes")
         notes = "" if raw_notes is None else str(raw_notes).strip()
         self._notes_view.setPlainText(notes or "Заметки отсутствуют.")
+        self._archive_stats_label.setText(
+            "Состав архивной записи: "
+            f"runs={int(entry.get('run_record_count', 0) or 0)}, "
+            f"artifacts={int(entry.get('artifact_count', 0) or 0)}, "
+            f"results={int(entry.get('result_table_count', 0) or 0)}"
+        )
+        self._runs_view.setPlainText(self._format_run_records(entry))
+        self._artifacts_view.setPlainText(self._format_artifacts(entry))
+        self._results_view.setPlainText(self._format_results(entry))
         self._open_folder_button.setEnabled(folder_path is not None)
-        self._open_report_button.setEnabled(report_path is not None)
+        self._open_pdf_button.setEnabled(pdf_path is not None)
+        self._open_docx_button.setEnabled(docx_path is not None)
         self._regenerate_button.setEnabled(report_enabled)
-        self._regenerate_button.setText("Пересобрать отчёт" if report_path is not None else "Сформировать отчёт")
 
     def _clear_details(self, summary: str = "Эксперимент не выбран.") -> None:
         self._summary_label.setText(summary)
@@ -268,21 +314,81 @@ class ArchivePanel(QWidget):
         self._artifact_label.setText("—")
         self._report_label.setText("—")
         self._notes_view.setPlainText("Выберите эксперимент, чтобы увидеть сведения и артефакты.")
+        self._archive_stats_label.setText("Состав архивной записи: —")
+        self._runs_view.setPlainText("Run records ещё нет.")
+        self._artifacts_view.setPlainText("Артефактов ещё нет.")
+        self._results_view.setPlainText("Result tables ещё нет.")
         self._open_folder_button.setEnabled(False)
-        self._open_report_button.setEnabled(False)
+        self._open_pdf_button.setEnabled(False)
+        self._open_docx_button.setEnabled(False)
         self._regenerate_button.setEnabled(False)
-        self._regenerate_button.setText("Сформировать отчёт")
 
     @staticmethod
-    def resolve_report_path(entry: dict[str, Any]) -> Path | None:
-        pdf_path = str(entry.get("pdf_path", "")).strip()
-        if pdf_path:
-            path = Path(pdf_path)
+    def _format_run_records(entry: dict[str, Any]) -> str:
+        records = [item for item in entry.get("run_records", []) if isinstance(item, dict)]
+        if not records:
+            return "Run records отсутствуют."
+        return "\n".join(
+            (
+                f"{str(item.get('run_type', '')).strip() or 'run'} | "
+                f"{str(item.get('source_tab', '')).strip() or 'unknown'} | "
+                f"{str(item.get('status', '')).strip() or 'UNKNOWN'} | "
+                f"start={str(item.get('started_at', '')).strip() or '—'} | "
+                f"finish={str(item.get('finished_at', '')).strip() or '—'} | "
+                f"artifacts={len([path for path in item.get('artifact_paths', []) if str(path).strip()])}"
+            )
+            for item in records
+        )
+
+    @staticmethod
+    def _format_artifacts(entry: dict[str, Any]) -> str:
+        artifacts = [item for item in entry.get("artifact_index", []) if isinstance(item, dict)]
+        if not artifacts:
+            return "Артефакты отсутствуют."
+        return "\n".join(
+            f"{str(item.get('category', '')).strip() or 'artifact'} | "
+            f"{str(item.get('role', '')).strip() or 'unknown'} | "
+            f"{str(item.get('path', '')).strip() or '—'}"
+            for item in artifacts
+        )
+
+    @staticmethod
+    def _format_results(entry: dict[str, Any]) -> str:
+        results = [item for item in entry.get("result_tables", []) if isinstance(item, dict)]
+        summary = dict(entry.get("summary_metadata") or {})
+        if not results and not summary:
+            return "Result tables отсутствуют."
+        lines = [
+            f"{str(item.get('table_id', '')).strip() or 'table'} | rows={item.get('row_count', 0)} | {str(item.get('path', '')).strip() or '—'}"
+            for item in results
+        ]
+        if summary:
+            lines.append("summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items())))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _report_candidate_paths(entry: dict[str, Any], key: str, *fallbacks: str) -> list[Path]:
+        paths: list[Path] = []
+        primary = str(entry.get(key, "")).strip()
+        if primary:
+            paths.append(Path(primary))
+        artifact_dir = str(entry.get("artifact_dir", "")).strip()
+        if artifact_dir:
+            root = Path(artifact_dir) / "reports"
+            for name in fallbacks:
+                paths.append(root / name)
+        return paths
+
+    @classmethod
+    def resolve_pdf_path(cls, entry: dict[str, Any]) -> Path | None:
+        for path in cls._report_candidate_paths(entry, "pdf_path", "report_raw.pdf", "report.pdf"):
             if path.exists():
                 return path
-        docx_path = str(entry.get("docx_path", "")).strip()
-        if docx_path:
-            path = Path(docx_path)
+        return None
+
+    @classmethod
+    def resolve_docx_path(cls, entry: dict[str, Any]) -> Path | None:
+        for path in cls._report_candidate_paths(entry, "docx_path", "report_editable.docx", "report.docx"):
             if path.exists():
                 return path
         return None
@@ -306,24 +412,25 @@ class ArchivePanel(QWidget):
             return
         folder = self.resolve_folder_path(entry)
         if folder is None or not self._open_path(folder):
-            QMessageBox.warning(
-                self,
-                "Архив экспериментов",
-                "Папка артефактов отсутствует или не открывается. Проверьте запись архива.",
-            )
+            QMessageBox.warning(self, "Архив экспериментов", "Папка артефактов отсутствует или не открывается.")
 
     @Slot()
-    def _open_selected_report(self) -> None:
+    def _open_selected_pdf(self) -> None:
         entry = self._selected_entry()
         if not entry:
             return
-        report = self.resolve_report_path(entry)
-        if report is None or not self._open_path(report):
-            QMessageBox.warning(
-                self,
-                "Архив экспериментов",
-                "Файл отчёта отсутствует или не открывается. Сначала сформируйте отчёт или откройте папку артефактов.",
-            )
+        path = self.resolve_pdf_path(entry)
+        if path is None or not self._open_path(path):
+            QMessageBox.warning(self, "Архив экспериментов", "Сырой PDF отсутствует или не открывается.")
+
+    @Slot()
+    def _open_selected_docx(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        path = self.resolve_docx_path(entry)
+        if path is None or not self._open_path(path):
+            QMessageBox.warning(self, "Архив экспериментов", "Редактируемый DOCX отсутствует или не открывается.")
 
     @Slot()
     def _regenerate_selected_report(self) -> None:
@@ -333,19 +440,19 @@ class ArchivePanel(QWidget):
         if not bool(entry.get("report_enabled", True)):
             self._status_label.show_warning("Для этого шаблона формирование отчёта отключено.")
             return
-        result = send_command(
-            {"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")}
-        )
+        result = send_command({"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")})
         if not result.get("ok"):
-            error_text = str(result.get("error", "Не удалось сформировать отчёт."))
-            self._status_label.show_error(error_text)
+            self._status_label.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
             return
         report = result.get("report", {})
         if report.get("skipped"):
-            self._status_label.show_warning(str(report.get("reason", "Формирование отчёта пропущено.")))
+            message = str(report.get("reason", "Формирование отчёта пропущено."))
+            self.refresh_archive()
+            self._status_label.show_warning(message)
         else:
-            self._status_label.show_success(f"Отчёт обновлён: {report.get('docx_path', '')}")
-        self.refresh_archive()
+            message = f"Отчёты обновлены: PDF={report.get('pdf_path') or 'нет'}, DOCX={report.get('docx_path') or 'нет'}"
+            self.refresh_archive()
+            self._status_label.show_success(message)
 
     @staticmethod
     def _format_datetime(raw: Any) -> str:

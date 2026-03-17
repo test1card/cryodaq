@@ -90,6 +90,8 @@ class AutoSweepPanel(QWidget):
         self._step_start_time = 0.0
         self._selected_channels: list[str] = []
         self._smu_channel = "smua"
+        self._run_started_at: datetime | None = None
+        self._run_finished_at: datetime | None = None
 
         # Data
         self._temps: dict[str, float] = {}
@@ -341,6 +343,8 @@ class AutoSweepPanel(QWidget):
         self._results = []
         self._running = True
         self._paused = False
+        self._run_started_at = datetime.now(timezone.utc)
+        self._run_finished_at = None
 
         # Reset predictor
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=5.0)
@@ -377,6 +381,7 @@ class AutoSweepPanel(QWidget):
     def _on_stop(self) -> None:
         self._running = False
         self._paused = False
+        self._run_finished_at = datetime.now(timezone.utc)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
@@ -415,6 +420,7 @@ class AutoSweepPanel(QWidget):
 
     def _finish_sweep(self) -> None:
         self._running = False
+        self._run_finished_at = datetime.now(timezone.utc)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
@@ -620,3 +626,47 @@ class AutoSweepPanel(QWidget):
             logger.info("График сохранён: %s", png_path)
         except Exception as exc:
             logger.error("Ошибка сохранения графика: %s", exc)
+            png_path = None
+
+        attach_result = send_command(
+            {
+                "cmd": "experiment_attach_run_record",
+                "source_tab": "autosweep",
+                "source_module": "autosweep_panel",
+                "run_type": "autosweep",
+                "status": "COMPLETED" if self._running is False else "RUNNING",
+                "source_run_id": base,
+                "started_at": self._run_started_at.isoformat() if self._run_started_at else now.isoformat(),
+                "finished_at": self._run_finished_at.isoformat() if self._run_finished_at else now.isoformat(),
+                "parameters": {
+                    "sample": sample,
+                    "material": material,
+                    "operator": operator,
+                    "power_start_w": self._p_start.value(),
+                    "power_end_w": self._p_end.value(),
+                    "power_step_w": self._p_step.value(),
+                    "smu_channel": self._smu_channel,
+                    "selected_channels": list(self._selected_channels),
+                    "target_percent": int(self._target_pct.value()),
+                    "max_wait_min": int(self._max_wait.value()),
+                    "v_comp_v": self._v_comp_spin.value(),
+                    "i_comp_a": self._i_comp_spin.value(),
+                },
+                "result_summary": {
+                    "point_count": len(self._results),
+                    "avg_temperature_k": (
+                        sum(float(item["T_avg"]) for item in self._results) / len(self._results)
+                        if self._results
+                        else 0.0
+                    ),
+                    "max_resistance_kw": max((float(item["R"]) for item in self._results), default=0.0),
+                    "max_conductance_wk": max((float(item["G"]) for item in self._results), default=0.0),
+                },
+                "artifact_paths": [
+                    str(csv_path),
+                    str(png_path) if png_path is not None else "",
+                ],
+            }
+        )
+        if attach_result.get("attached"):
+            logger.info("Автоизмерение прикреплено к активной карточке эксперимента.")

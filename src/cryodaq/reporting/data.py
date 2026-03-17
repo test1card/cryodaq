@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import sqlite3
@@ -39,6 +40,10 @@ class ReportDataset:
     readings: list[HistoricalReading] = field(default_factory=list)
     operator_log: list[OperatorLogRecord] = field(default_factory=list)
     alarm_readings: list[HistoricalReading] = field(default_factory=list)
+    run_records: list[dict[str, Any]] = field(default_factory=list)
+    artifact_index: list[dict[str, Any]] = field(default_factory=list)
+    result_tables: list[dict[str, Any]] = field(default_factory=list)
+    summary_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ReportDataExtractor:
@@ -55,7 +60,9 @@ class ReportDataExtractor:
         end_time = self._parse_time(experiment.get("end_time")) or datetime.now(timezone.utc)
         experiment_id = experiment.get("experiment_id")
 
-        readings = self._load_readings(start_time, end_time)
+        readings = self._load_archived_readings(metadata)
+        if not readings:
+            readings = self._load_readings(start_time, end_time)
         alarm_readings = [item for item in readings if item.channel.startswith("alarm/")]
         operator_log = self._load_operator_log(start_time, end_time, experiment_id)
         return ReportDataset(
@@ -63,7 +70,48 @@ class ReportDataExtractor:
             readings=readings,
             operator_log=operator_log,
             alarm_readings=alarm_readings,
+            run_records=[dict(item) for item in metadata.get("run_records", []) if isinstance(item, dict)],
+            artifact_index=[dict(item) for item in metadata.get("artifact_index", []) if isinstance(item, dict)],
+            result_tables=[dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)],
+            summary_metadata=dict(metadata.get("summary_metadata") or {}),
         )
+
+    def _load_archived_readings(self, metadata: dict[str, Any]) -> list[HistoricalReading]:
+        table_path = self._resolve_archived_table(metadata, table_id="measured_values")
+        if table_path is None or not table_path.exists():
+            return []
+        rows: list[HistoricalReading] = []
+        try:
+            with table_path.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    rows.append(
+                        HistoricalReading(
+                            timestamp=self._parse_time(row.get("timestamp")),
+                            instrument_id=str(row.get("instrument_id") or ""),
+                            channel=str(row.get("channel") or ""),
+                            value=float(row.get("value") or 0.0),
+                            unit=str(row.get("unit") or ""),
+                            status=str(row.get("status") or ""),
+                        )
+                    )
+        except Exception as exc:
+            logger.warning("Failed to load archived measured values from %s: %s", table_path, exc)
+            return []
+        return rows
+
+    def _resolve_archived_table(self, metadata: dict[str, Any], *, table_id: str) -> Path | None:
+        for item in metadata.get("result_tables", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("table_id", "")).strip() != table_id:
+                continue
+            path = Path(str(item.get("path", "")).strip())
+            if path.exists():
+                return path
+        artifact_root = Path(str(metadata.get("artifacts", {}).get("root_dir", "")).strip())
+        fallback = artifact_root / "archive" / "tables" / f"{table_id}.csv"
+        return fallback if fallback.exists() else None
 
     def _db_paths(self, start_time: datetime, end_time: datetime) -> list[Path]:
         paths: list[Path] = []

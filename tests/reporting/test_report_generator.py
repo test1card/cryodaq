@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,10 +35,8 @@ def templates_dir(tmp_path: Path) -> Path:
                 "sections": ["setup", "sample"],
                 "report_enabled": True,
                 "report_sections": [
-                    "title_page",
                     "thermal_section",
                     "pressure_section",
-                    "operator_log_section",
                     "config_section",
                 ],
             }
@@ -55,12 +51,9 @@ def templates_dir(tmp_path: Path) -> Path:
                 "sections": ["setup", "cooldown_path"],
                 "report_enabled": True,
                 "report_sections": [
-                    "title_page",
                     "cooldown_section",
                     "pressure_section",
-                    "operator_log_section",
                     "alarms_section",
-                    "config_section",
                 ],
             }
         ),
@@ -73,7 +66,7 @@ def templates_dir(tmp_path: Path) -> Path:
                 "name": "Debug Checkout",
                 "sections": ["setup", "checks"],
                 "report_enabled": False,
-                "report_sections": ["title_page", "config_section"],
+                "report_sections": ["config_section"],
             }
         ),
         encoding="utf-8",
@@ -119,48 +112,67 @@ async def _seed_experiment_data(tmp_path: Path, experiment_id: str) -> None:
     await writer.stop()
 
 
-async def test_template_driven_section_selection_for_thermal(manager: ExperimentManager, tmp_path: Path) -> None:
+def _doc_text(path: Path) -> str:
+    document = Document(path)
+    return "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+
+
+async def test_report_generation_uses_new_output_names_and_sections(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Lambda",
         title="Lambda",
         operator="Ivanov",
         template_id="thermal_conductivity",
+        sample="Cu sample",
+        notes="Card note",
         start_time="2026-03-16T12:00:00+00:00",
     )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
     await _seed_experiment_data(tmp_path, exp_id)
+    manager.attach_run_record(
+        experiment_id=exp_id,
+        source_tab="autosweep",
+        source_module="autosweep_panel",
+        run_type="autosweep",
+        status="COMPLETED",
+        started_at="2026-03-16T12:01:00+00:00",
+        finished_at="2026-03-16T12:02:00+00:00",
+        source_run_id="autosweep-1",
+        parameters={"power_start_w": 0.1},
+        result_summary={"point_count": 3},
+        artifact_paths=[],
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.skipped is False
-    assert result.docx_path.exists()
-    assert result.pdf_path is None
-    assert result.sections == (
-        "title_page",
-        "thermal_section",
-        "pressure_section",
-        "operator_log_section",
-        "config_section",
-    )
-    assert (result.assets_dir / "thermal_power.png").exists()
-    assert (result.assets_dir / "pressure.png").exists()
+    assert result.docx_path.name == "report_editable.docx"
+    assert (tmp_path / "experiments" / exp_id / "reports" / "report_raw.docx").exists()
+    assert "run_timeline_section" in result.sections
+    assert "run_parameters_section" in result.sections
+    assert "result_tables_section" in result.sections
+    assert "conductivity_section" in result.sections
+    assert "artifact_manifest_section" in result.sections
+    assert "operator_comments_section" in result.sections
+    assert "operator_interpretation_section" in result.sections
+    assert "operator_photos_section" in result.sections
 
-    document = Document(result.docx_path)
-    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+    text = _doc_text(result.docx_path)
     assert "Идентификатор эксперимента:" in text
     assert "Шаблон: Thermal Conductivity" in text
     assert "Оператор: Ivanov" in text
-    assert "Образец: не указано" in text
-    assert "Статус: Завершён" in text
-    assert "Тепловая нагрузка" in text
-    assert "Давление" in text
-    assert "Журнал оператора" in text
-    assert "Снимок конфигурации" in text
-    assert "Report marker" in text
-    assert "Снимок конфигурации для этого эксперимента не сохранён." in text
+    assert "Образец: Cu sample" in text
+    assert "Заметки карточки: Card note" in text
+    assert "Таймлайн прогонов" in text
+    assert "Параметры запусков" in text
+    assert "Итоговые результаты и таблицы" in text
+    assert "Ключевые артефакты" in text
+    assert "Комментарии оператора" in text
+    assert "Интерпретация результатов" in text
+    assert "Фотографии и внешние изображения" in text
 
 
-async def test_report_generation_for_cooldown_template(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_generation_for_cooldown_template_uses_archive_tables(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -168,21 +180,18 @@ async def test_report_generation_for_cooldown_template(manager: ExperimentManage
         template_id="cooldown_test",
         start_time="2026-03-16T12:00:00+00:00",
     )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
     await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     result = ReportGenerator(tmp_path).generate(exp_id)
 
-    assert "cooldown_section" in result.sections
-    assert "alarms_section" in result.sections
+    assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
     assert (result.assets_dir / "cooldown_temperature.png").exists()
-    assert result.docx_path.name == "report.docx"
-
-    document = Document(result.docx_path)
-    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+    assert (result.assets_dir / "pressure.png").exists()
+    text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
     assert "Алармы" in text
-    assert "Снимок конфигурации" in text
+    assert "Таблица измеренных величин:" in text
 
 
 async def test_report_disabled_template_is_respected(manager: ExperimentManager, tmp_path: Path) -> None:
@@ -202,7 +211,7 @@ async def test_report_disabled_template_is_respected(manager: ExperimentManager,
     assert result.docx_path.exists() is False
 
 
-async def test_report_artifact_folder_contains_docx_and_assets(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_artifact_folder_contains_named_outputs(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Artifact Check",
         title="Artifact Check",
@@ -210,15 +219,16 @@ async def test_report_artifact_folder_contains_docx_and_assets(manager: Experime
         template_id="cooldown_test",
         start_time="2026-03-16T12:00:00+00:00",
     )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
     await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     result = ReportGenerator(tmp_path).generate(exp_id)
     report_dir = tmp_path / "experiments" / exp_id / "reports"
 
     assert report_dir.exists()
-    assert result.docx_path.parent == report_dir
+    assert result.docx_path == report_dir / "report_editable.docx"
     assert result.assets_dir.exists()
+    assert (report_dir / "report_raw.docx").exists()
 
 
 async def test_report_generation_graceful_without_pdf_tooling(
@@ -233,17 +243,55 @@ async def test_report_generation_graceful_without_pdf_tooling(
         template_id="cooldown_test",
         start_time="2026-03-16T12:00:00+00:00",
     )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
     await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     monkeypatch.setattr("cryodaq.reporting.generator.shutil.which", lambda _name: None)
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
+    assert result.docx_path.name == "report_editable.docx"
     assert result.pdf_path is None
 
 
-def test_operator_log_empty_state_is_russian(tmp_path: Path) -> None:
+async def test_report_generation_can_use_archived_measured_values_without_live_db(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Archive source",
+        title="Archive source",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    writer = SQLiteWriter(tmp_path)
+    ts = datetime(2026, 3, 16, 12, 1, tzinfo=timezone.utc)
+    writer._write_batch(
+        [
+            _reading("K1/smua/power", 1.2, "W", ts),
+            _reading("P_MAIN/pressure", 2.1e-4, "mbar", ts),
+            _reading("T_STAGE", 4.3, "K", ts),
+        ]
+    )
+    if writer._conn is not None:
+        writer._conn.close()
+        writer._conn = None
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    db_path = tmp_path / "data_2026-03-16.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    result = ReportGenerator(tmp_path).generate(exp_id)
+
+    assert result.docx_path.exists()
+    assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
+    assert (result.assets_dir / "cooldown_temperature.png").exists()
+    assert (result.assets_dir / "pressure.png").exists()
+
+
+def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:
     from cryodaq.reporting.data import ReportDataset
     from cryodaq.reporting.sections import render_operator_log_section
 
@@ -253,5 +301,5 @@ def test_operator_log_empty_state_is_russian(tmp_path: Path) -> None:
     render_operator_log_section(document, dataset, tmp_path)
 
     text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
-    assert "Журнал оператора" in text
-    assert "Записи журнала оператора за интервал эксперимента отсутствуют." in text
+    assert "Служебный лог" in text
+    assert "Записи служебного лога за интервал эксперимента отсутствуют." in text

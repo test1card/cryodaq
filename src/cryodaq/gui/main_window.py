@@ -2,7 +2,7 @@
 
 QMainWindow с операторскими вкладками:
 Обзор, Keithley, Аналитика, Теплопроводность, Автоизмерение, Алармы,
-Журнал оператора, Архив, Калибровка, Статус приборов.
+Служебный лог, Архив, Калибровка, Статус приборов.
 Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп), Настройки.
 Статусная строка: подключение, uptime, скорость данных.
 """
@@ -38,10 +38,6 @@ from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.connection_settings import ConnectionSettingsDialog
-from cryodaq.gui.widgets.experiment_dialogs import (
-    ExperimentFinalizeDialog,
-    ExperimentStartDialog,
-)
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.common import apply_status_label_style
@@ -84,6 +80,13 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._tray_controller = TrayController(self)
         self._refresh_tray_status()
+        self._overview_panel._experiment_workspace.set_post_action_callback(
+            self._refresh_experiment_dependent_views
+        )
+        self._overview_panel._experiment_workspace.set_shell_message_callback(self._show_shell_message)
+        self._overview_panel._experiment_workspace.set_finalize_guard(self._check_finalize_guard)
+        self._overview_panel.refresh_experiment_workspace()
+        self._sync_experiment_actions()
 
         # ZMQ callback → сигнал → слот (потокобезопасно)
         self._subscriber._callback = self._on_zmq_reading
@@ -133,7 +136,7 @@ class MainWindow(QMainWindow):
         self._alarm_panel = AlarmPanel()
         self._tabs.addTab(self._alarm_panel, "Алармы")
         self._operator_log_panel = OperatorLogPanel()
-        self._tabs.addTab(self._operator_log_panel, "Журнал оператора")
+        self._tabs.addTab(self._operator_log_panel, "Служебный лог")
         self._archive_panel = ArchivePanel()
         self._tabs.addTab(self._archive_panel, "Архив")
         self._calibration_panel = CalibrationPanel()
@@ -357,56 +360,54 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_start_experiment(self) -> None:
-        from cryodaq.gui.zmq_client import send_command
-
-        templates_reply = send_command({"cmd": "experiment_templates"})
-        if not templates_reply.get("ok"):
-            self._show_shell_message(str(templates_reply.get("error", "Не удалось загрузить шаблоны эксперимента.")))
+        self._tabs.setCurrentWidget(self._overview_panel)
+        if not self._overview_panel.refresh_experiment_workspace():
             return
-
-        dialog = ExperimentStartDialog(list(templates_reply.get("templates", [])), self)
-        if dialog.exec() == dialog.Accepted:
-            result = send_command(dialog.payload())
-            if result.get("ok"):
-                self._start_action.setEnabled(False)
-                self._stop_action.setEnabled(True)
-                self._operator_log_panel.refresh_entries()
-                self._archive_panel.refresh_archive()
-                self._show_shell_message("Эксперимент запущен.")
-            else:
-                self._show_shell_message(str(result.get("error", "Не удалось запустить эксперимент.")))
+        workspace = self._overview_panel._experiment_workspace
+        if workspace.app_mode != "experiment":
+            self._show_shell_message("Создание эксперимента доступно только в режиме «Эксперимент».")
+            return
+        if workspace.active_experiment is not None:
+            self._show_shell_message("Нельзя открыть новый эксперимент поверх активной карточки.")
+            self._overview_panel.focus_experiment_finalize()
+            return
+        self._overview_panel.focus_experiment_workspace()
+        self._show_shell_message("Заполните карточку нового эксперимента на главной странице.")
 
     @Slot()
     def _on_finalize_experiment(self) -> None:
-        from cryodaq.gui.zmq_client import send_command
-
-        status_reply = send_command({"cmd": "experiment_status"})
-        if not status_reply.get("ok"):
-            self._show_shell_message(str(status_reply.get("error", "Не удалось получить статус эксперимента.")))
+        self._tabs.setCurrentWidget(self._overview_panel)
+        if not self._overview_panel.refresh_experiment_workspace():
             return
-
-        active_experiment = status_reply.get("active_experiment")
-        if not active_experiment:
+        workspace = self._overview_panel._experiment_workspace
+        if workspace.active_experiment is None:
             self._show_shell_message("Нет активного эксперимента.")
-            self._start_action.setEnabled(True)
-            self._stop_action.setEnabled(False)
+            self._sync_experiment_actions()
             return
-
-        dialog = ExperimentFinalizeDialog(dict(active_experiment), self)
-        if dialog.exec() != dialog.Accepted:
+        allowed, message = self._check_finalize_guard()
+        if not allowed:
+            self._show_shell_message(message)
             return
+        self._overview_panel.focus_experiment_finalize()
+        self._show_shell_message("Завершите карточку эксперимента на главной странице.")
 
-        result = send_command(dialog.payload())
-        if not result.get("ok"):
-            logger.warning("Experiment finalize failed: %s", result.get("error"))
-            self._show_shell_message(str(result.get("error", "Не удалось завершить эксперимент.")))
-            return
-
-        self._start_action.setEnabled(True)
-        self._stop_action.setEnabled(False)
+    def _refresh_experiment_dependent_views(self) -> None:
         self._operator_log_panel.refresh_entries()
         self._archive_panel.refresh_archive()
-        self._show_shell_message("Эксперимент завершён.")
+        self._overview_panel.refresh_experiment_workspace()
+        self._sync_experiment_actions()
+
+    def _sync_experiment_actions(self) -> None:
+        workspace = self._overview_panel._experiment_workspace
+        is_experiment_mode = workspace.app_mode == "experiment"
+        has_active = workspace.active_experiment is not None
+        self._start_action.setEnabled(is_experiment_mode and not has_active)
+        self._stop_action.setEnabled(is_experiment_mode and has_active)
+
+    def _check_finalize_guard(self) -> tuple[bool, str]:
+        if getattr(self._autosweep_panel, "_running", False):
+            return False, "Нельзя завершить эксперимент, пока активно автоизмерение."
+        return True, ""
 
     @Slot()
     def _on_channel_editor(self) -> None:

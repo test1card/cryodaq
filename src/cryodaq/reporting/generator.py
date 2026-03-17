@@ -22,6 +22,21 @@ class ReportGenerationResult:
 
 
 class ReportGenerator:
+    _BASE_RAW_SECTIONS = (
+        "title_page",
+        "experiment_metadata_section",
+        "run_timeline_section",
+        "run_parameters_section",
+        "result_tables_section",
+        "conductivity_section",
+        "artifact_manifest_section",
+    )
+    _EDITABLE_ONLY_SECTIONS = (
+        "operator_comments_section",
+        "operator_interpretation_section",
+        "operator_photos_section",
+    )
+
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
         self._experiments_dir = data_dir / "experiments"
@@ -32,55 +47,77 @@ class ReportGenerator:
         dataset = self._extractor.load_dataset(metadata_path)
         experiment = dataset.metadata["experiment"]
         template = dataset.metadata["template"]
+        reports_dir = metadata_path.parent / "reports"
+        assets_dir = reports_dir / "assets"
+        editable_docx_path = reports_dir / "report_editable.docx"
+        raw_source_docx_path = reports_dir / "report_raw.docx"
+        raw_pdf_path = reports_dir / "report_raw.pdf"
+
         if not bool(experiment.get("report_enabled", template.get("report_enabled", True))):
             return ReportGenerationResult(
-                docx_path=metadata_path.parent / "reports" / "report.docx",
+                docx_path=editable_docx_path,
                 pdf_path=None,
-                assets_dir=metadata_path.parent / "reports" / "assets",
+                assets_dir=assets_dir,
                 sections=tuple(),
                 skipped=True,
                 reason="Формирование отчёта отключено шаблоном.",
             )
 
-        section_names = self._resolve_sections(dataset.metadata)
-        reports_dir = metadata_path.parent / "reports"
-        assets_dir = reports_dir / "assets"
         reports_dir.mkdir(parents=True, exist_ok=True)
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-        document = Document()
-        for index, section_name in enumerate(section_names):
-            renderer = SECTION_REGISTRY[section_name]
-            renderer(document, dataset, assets_dir)
-            if index < len(section_names) - 1:
-                document.add_page_break()
+        raw_sections = self._resolve_raw_sections(dataset.metadata)
+        editable_sections = tuple(list(raw_sections) + list(self._EDITABLE_ONLY_SECTIONS))
 
-        docx_path = reports_dir / "report.docx"
-        document.save(str(docx_path))
-        pdf_path = self._try_convert_pdf(docx_path)
+        raw_document = self._build_document(dataset, assets_dir, raw_sections)
+        raw_document.save(str(raw_source_docx_path))
+        pdf_path = self._try_convert_pdf(raw_source_docx_path, raw_pdf_path)
+
+        editable_document = self._build_document(dataset, assets_dir, editable_sections)
+        editable_document.save(str(editable_docx_path))
+
         return ReportGenerationResult(
-            docx_path=docx_path,
+            docx_path=editable_docx_path,
             pdf_path=pdf_path,
             assets_dir=assets_dir,
-            sections=tuple(section_names),
+            sections=editable_sections,
         )
 
-    def _resolve_sections(self, metadata: dict) -> list[str]:
-        template = metadata.get("template", {})
-        section_names = list(template.get("report_sections") or [])
-        if not section_names:
-            section_names = ["title_page", "operator_log_section", "config_section"]
-        return [name for name in section_names if name in SECTION_REGISTRY]
+    def _build_document(self, dataset, assets_dir: Path, sections: tuple[str, ...]) -> Document:
+        document = Document()
+        for index, section_name in enumerate(sections):
+            renderer = SECTION_REGISTRY[section_name]
+            renderer(document, dataset, assets_dir)
+            if index < len(sections) - 1:
+                document.add_page_break()
+        return document
 
-    def _try_convert_pdf(self, docx_path: Path) -> Path | None:
+    def _resolve_raw_sections(self, metadata: dict) -> tuple[str, ...]:
+        template = metadata.get("template", {})
+        configured = [name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY]
+        ordered: list[str] = []
+        for name in self._BASE_RAW_SECTIONS + tuple(configured):
+            if name not in ordered:
+                ordered.append(name)
+        if "config_section" not in ordered and "config_section" in SECTION_REGISTRY:
+            ordered.append("config_section")
+        return tuple(ordered)
+
+    def _try_convert_pdf(self, source_docx_path: Path, target_pdf_path: Path) -> Path | None:
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         if not soffice:
             return None
-        output_dir = docx_path.parent
+        output_dir = source_docx_path.parent
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", str(docx_path), "--outdir", str(output_dir)],
+            [soffice, "--headless", "--convert-to", "pdf", str(source_docx_path), "--outdir", str(output_dir)],
             check=False,
             capture_output=True,
         )
-        pdf_path = output_dir / f"{docx_path.stem}.pdf"
-        return pdf_path if pdf_path.exists() else None
+        produced = output_dir / f"{source_docx_path.stem}.pdf"
+        if not produced.exists():
+            return None
+        if produced != target_pdf_path:
+            if target_pdf_path.exists():
+                target_pdf_path.unlink()
+            produced.replace(target_pdf_path)
+        return target_pdf_path if target_pdf_path.exists() else None
