@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from cryodaq.analytics.calibration import CalibrationSessionStore, CalibrationStore
+from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
@@ -503,6 +504,38 @@ def _normalize_dict_payload(raw: Any) -> dict[str, Any]:
     raise ValueError("Expected dictionary payload.")
 
 
+def _try_activate_calibration_acquisition(
+    service: CalibrationAcquisitionService,
+    experiment_manager: ExperimentManager,
+    cmd: dict[str, Any],
+) -> None:
+    """Activate SRDG acquisition if the experiment template requests it."""
+    try:
+        template_id = str(cmd.get("template_id", "custom")).strip() or "custom"
+        template = experiment_manager.get_template(template_id)
+        # Check raw YAML for calibration_acquisition flag
+        raw_path = experiment_manager._templates_dir / f"{template_id}.yaml"
+        if not raw_path.exists():
+            return
+        with raw_path.open(encoding="utf-8") as fh:
+            import yaml as _yaml
+            raw = _yaml.safe_load(fh) or {}
+        if not raw.get("calibration_acquisition"):
+            return
+        custom_fields = _normalize_custom_fields_payload(cmd.get("custom_fields"))
+        reference = str(custom_fields.get("reference_channel", "")).strip()
+        targets_raw = str(custom_fields.get("target_channels", "")).strip()
+        targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
+        if reference and targets:
+            service.activate(reference, targets)
+        else:
+            logger.warning(
+                "Calibration experiment missing reference_channel/target_channels in custom_fields"
+            )
+    except Exception:
+        logger.warning("Failed to activate calibration acquisition", exc_info=True)
+
+
 async def _run_experiment_command(
     action: str,
     cmd: dict[str, Any],
@@ -881,12 +914,16 @@ async def _run_engine(*, mock: bool = False) -> None:
     writer = SQLiteWriter(_DATA_DIR)
     await writer.start_immediate()
 
+    # Calibration acquisition — continuous SRDG during calibration experiments
+    calibration_acquisition = CalibrationAcquisitionService(writer)
+
     # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации
     scheduler = Scheduler(
         broker,
         safety_broker=safety_broker,
         sqlite_writer=writer,
         adaptive_throttle=adaptive_throttle,
+        calibration_acquisition=calibration_acquisition,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
@@ -978,7 +1015,19 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "experiment_create_retroactive",
                 "experiment_generate_report",
             }:
-                return await _run_experiment_command(action, cmd, experiment_manager)
+                result = await _run_experiment_command(action, cmd, experiment_manager)
+                # Hook calibration acquisition on experiment lifecycle
+                if result.get("ok") and action in {"experiment_start", "experiment_create"}:
+                    _try_activate_calibration_acquisition(
+                        calibration_acquisition, experiment_manager, cmd,
+                    )
+                elif result.get("ok") and action in {
+                    "experiment_finalize", "experiment_stop", "experiment_abort",
+                }:
+                    calibration_acquisition.deactivate()
+                return result
+            if action == "calibration_acquisition_status":
+                return {"ok": True, **calibration_acquisition.stats}
             if action in {"log_entry", "log_get"}:
                 return await _run_operator_log_command(
                     action,

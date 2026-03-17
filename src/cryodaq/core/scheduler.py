@@ -65,11 +65,13 @@ class Scheduler:
         safety_broker: Any | None = None,
         sqlite_writer: Any | None = None,
         adaptive_throttle: Any | None = None,
+        calibration_acquisition: Any | None = None,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
         self._sqlite_writer = sqlite_writer
         self._adaptive_throttle = adaptive_throttle
+        self._calibration_acquisition = calibration_acquisition
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
 
@@ -126,6 +128,24 @@ class Scheduler:
                         state.consecutive_errors += 1
                         state.total_errors += 1
                         continue  # Do NOT publish unpersisted data
+
+                # Step 1b: If calibration acquisition active, read SRDG
+                if (
+                    self._calibration_acquisition is not None
+                    and self._calibration_acquisition.is_active
+                    and hasattr(driver, "read_srdg_channels")
+                ):
+                    try:
+                        srdg = await driver.read_srdg_channels()
+                        await self._calibration_acquisition.on_readings(
+                            readings, srdg,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to read SRDG for calibration on '%s'",
+                            name,
+                            exc_info=True,
+                        )
 
                 # Step 2: ONLY AFTER disk commit, publish to DataBroker and SafetyBroker
                 if persisted_readings:

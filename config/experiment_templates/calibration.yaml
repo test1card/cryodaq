@@ -1,5 +1,6 @@
 id: calibration
-name: Calibration
+name: Калибровка датчиков
+calibration_acquisition: true
 sections:
   - setup
   - reference
@@ -10,7 +11,11 @@ report_sections:
   - operator_log_section
   - config_section
 custom_fields:
+  - id: reference_channel
+    label: Опорный канал
+  - id: target_channels
+    label: Целевые каналы (через запятую)
   - id: reference_standard
-    label: Reference Standard
+    label: Эталон
   - id: calibration_batch
-    label: Calibration Batch
+    label: Партия калибровки
