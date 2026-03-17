@@ -253,7 +253,7 @@ class LauncherWindow(QMainWindow):
         root.addWidget(top_bar)
 
         # --- Встроенное главное окно ---
-        self._main_window = MainWindow(subscriber=self._subscriber)
+        self._main_window = MainWindow(subscriber=self._subscriber, embedded=True)
         # Скрываем statusBar MainWindow — используем launcher statusBar
         self._main_window.statusBar().setVisible(False)
         # Переносим меню MainWindow (Файл, Эксперимент, Настройки) в launcher menuBar

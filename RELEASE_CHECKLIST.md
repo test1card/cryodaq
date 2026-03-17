@@ -43,8 +43,9 @@ python -m pytest tests/reporting -q
 ## 4. GUI smoke checks
 
 - [ ] `MainWindow` поднимается без расхождения с текущей документацией
-- [ ] GUI содержит ровно 10 вкладок:
+- [ ] GUI содержит ровно 11 вкладок:
 - [ ] `Обзор`
+- [ ] `Эксперимент`
 - [ ] `Keithley 2604B`
 - [ ] `Аналитика`
 - [ ] `Теплопроводность`
@@ -141,7 +142,7 @@ python -m pytest tests/reporting -q
 
 Сверить:
 
-- [ ] состав и названия 10 вкладок
+- [ ] состав и названия 11 вкладок
 - [ ] tray behavior и caveats
 - [ ] experiment/report/archive paths
 - [ ] calibration limitation wording

@@ -61,9 +61,16 @@ class MainWindow(QMainWindow):
     # Внутренний сигнал для потокобезопасной передачи Reading из ZMQ callback
     _reading_received = Signal(object)
 
-    def __init__(self, subscriber: ZMQSubscriber, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        subscriber: ZMQSubscriber,
+        parent: QWidget | None = None,
+        *,
+        embedded: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._subscriber = subscriber
+        self._embedded = embedded
         self._start_time = time.monotonic()
         self._reading_count: int = 0
         self._rate_count: int = 0
@@ -79,7 +86,14 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_status_bar()
-        self._tray_controller = TrayController(self)
+        # Skip tray when embedded in LauncherWindow (launcher has its own tray)
+        if not embedded:
+            self._tray_controller = TrayController(self)
+        else:
+            self._tray_controller = TrayController.__new__(TrayController)
+            self._tray_controller._tray = None
+            self._tray_controller._window = self
+            self._tray_controller._show_action = None
         self._refresh_tray_status()
         self._experiment_workspace.set_post_action_callback(
             self._refresh_experiment_dependent_views
