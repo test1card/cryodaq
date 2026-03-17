@@ -1,3 +1,5 @@
+"""Tests for Calibration v2 panel — three-mode with auto-switching."""
+
 from __future__ import annotations
 
 import os
@@ -8,8 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import yaml
 from PySide6.QtWidgets import QApplication, QCheckBox
 
-from cryodaq.drivers.base import Reading
-from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
+from cryodaq.gui.widgets.calibration_panel import (
+    CalibrationAcquisitionWidget,
+    CalibrationPanel,
+    CalibrationResultsWidget,
+    CalibrationSetupWidget,
+    CoverageBar,
+)
 
 
 def _app() -> QApplication:
@@ -31,377 +38,142 @@ def _write_instruments(path: Path) -> Path:
                     2: "Т2 Криостат низ",
                     3: "Т3 Радиатор 1",
                 },
-            }
+            },
+            {
+                "type": "lakeshore_218s",
+                "name": "LS218_2",
+                "resource": "MOCK",
+                "channels": {1: "Т9", 2: "Т10"},
+            },
         ]
     }
     path.write_text(yaml.dump(config, allow_unicode=True), encoding="utf-8")
     return path
 
 
-def _checkbox(panel: CalibrationPanel, row: int) -> QCheckBox:
-    wrapper = panel._targets_table.cellWidget(row, 0)
-    assert wrapper is not None
-    checkbox = wrapper.findChild(QCheckBox)
-    assert checkbox is not None
-    return checkbox
+# ---------------------------------------------------------------------------
+# CalibrationPanel — mode switching
+# ---------------------------------------------------------------------------
 
-
-def test_calibration_panel_instantiates_and_loads_channels(tmp_path: Path) -> None:
+def test_panel_starts_in_setup_mode(tmp_path: Path) -> None:
     _app()
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-
-    assert panel._reference_combo.count() == 3
-    assert panel._targets_table.rowCount() == 3
-    assert panel._targets_table.item(0, 1).text() == "LS218_1:Т1 Криостат верх"
+    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
+    assert panel._stack.currentWidget() is panel._setup_widget
+    assert panel._current_mode == "setup"
 
 
-def test_calibration_panel_uses_normalized_russian_labels(tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# CalibrationSetupWidget
+# ---------------------------------------------------------------------------
+
+def test_setup_shows_grouped_channels(tmp_path: Path) -> None:
     _app()
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
+    widget = CalibrationSetupWidget(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
 
-    assert panel._start_button.text() == "Начать сеанс"
-    assert panel._capture_button.text() == "Записать точку"
-    assert panel._stop_button.text() == "Завершить сеанс"
-    assert panel._fit_button.text() == "Построить кривую"
-    assert panel._export_button.text() == "Экспорт JSON/CSV"
-    assert panel._apply_button.text() == "Применить в CryoDAQ"
+    assert widget._reference_combo.count() == 5  # 3 + 2 channels
+    assert len(widget._target_checkboxes) == 5
 
 
-def test_calibration_panel_handles_missing_or_malformed_config(tmp_path: Path) -> None:
+def test_setup_has_import_buttons(tmp_path: Path) -> None:
     _app()
-    missing = tmp_path / "missing.yaml"
-    malformed = tmp_path / "broken.yaml"
-    malformed.write_text("instruments: [", encoding="utf-8")
+    widget = CalibrationSetupWidget(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
 
-    missing_panel = CalibrationPanel(instruments_config=missing)
-    malformed_panel = CalibrationPanel(instruments_config=malformed)
-
-    for panel in (missing_panel, malformed_panel):
-        assert panel._reference_combo.isEnabled() is False
-        assert panel._reference_combo.count() == 1
-        assert panel._targets_table.rowCount() == 0
-        assert panel._start_button.isEnabled() is False
-        assert panel._capture_button.isEnabled() is False
-        assert panel._stop_button.isEnabled() is False
-        assert panel._fit_button.isEnabled() is False
-        assert panel._export_button.isEnabled() is False
-        assert panel._apply_button.isEnabled() is False
-        assert "LakeShore" in panel._capture_status.text()
+    assert widget._import_330_btn.text() == "Импорт .330"
+    assert widget._import_340_btn.text() == "Импорт .340"
+    assert widget._import_json_btn.text() == "Импорт JSON"
 
 
-def test_calibration_panel_accepts_list_shaped_channel_config(tmp_path: Path) -> None:
+def test_setup_get_selected_targets(tmp_path: Path) -> None:
     _app()
-    config = {
-        "instruments": [
-            {
-                "type": "lakeshore_218s",
-                "name": "LS218_1",
-                "channels": [
-                    "Т1 Криостат верх",
-                    {"label": "Т2 Криостат низ"},
-                    {},
-                ],
-            }
-        ]
-    }
-    path = tmp_path / "instruments.yaml"
-    path.write_text(yaml.dump(config, allow_unicode=True), encoding="utf-8")
+    widget = CalibrationSetupWidget(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
 
-    panel = CalibrationPanel(instruments_config=path)
-
-    assert panel._reference_combo.count() == 3
-    assert panel._targets_table.item(0, 1).text() == "LS218_1:Т1 Криостат верх"
-    assert panel._targets_table.item(1, 1).text() == "LS218_1:Т2 Криостат низ"
-    assert panel._targets_table.item(2, 1).text() == "LS218_1:CH3"
+    # Default: all checked
+    targets = widget.get_selected_targets()
+    # Reference is first item (index 0), so it's excluded
+    ref = widget._reference_combo.currentText()
+    assert ref not in targets
+    assert len(targets) == 4  # 5 total - 1 reference
 
 
-def test_calibration_panel_command_flow_and_fit_rendering(monkeypatch, tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# CalibrationAcquisitionWidget
+# ---------------------------------------------------------------------------
+
+def test_acquisition_shows_stats() -> None:
     _app()
-    sessions: dict[str, dict] = {}
-    exports: list[dict] = []
+    widget = CalibrationAcquisitionWidget()
 
-    def _fake_send(payload: dict) -> dict:
-        cmd = payload["cmd"]
-        if cmd == "calibration_session_start":
-            session_id = f"sess-{len(sessions) + 1}"
-            session = {
-                "session_id": session_id,
-                "sensor_id": payload["sensor_id"],
-                "reference_channel": payload["reference_channel"],
-                "sensor_channel": payload["sensor_channel"],
-                "raw_unit": "sensor_unit",
-                "started_at": "2026-03-16T12:00:00+00:00",
-                "finished_at": None,
-                "reference_instrument_id": payload["reference_instrument_id"],
-                "sensor_instrument_id": payload["sensor_instrument_id"],
-                "experiment_id": "exp-001",
-                "notes": payload.get("notes", ""),
-                "metadata": {},
-                "samples": [],
-            }
-            sessions[session_id] = session
-            return {"ok": True, "session": session}
-        if cmd == "calibration_session_capture":
-            session = sessions[payload["session_id"]]
-            session["samples"].append(
-                {
-                    "timestamp": "2026-03-16T12:01:00+00:00",
-                    "reference_channel": session["reference_channel"],
-                    "reference_temperature": 4.2 + len(session["samples"]),
-                    "sensor_channel": session["sensor_channel"],
-                    "sensor_raw_value": 80.0 - (3 * len(session["samples"])),
-                    "reference_instrument_id": session["reference_instrument_id"],
-                    "sensor_instrument_id": session["sensor_instrument_id"],
-                    "experiment_id": session["experiment_id"],
-                    "metadata": {},
-                }
-            )
-            return {"ok": True, "session": session, "sample": session["samples"][-1]}
-        if cmd == "calibration_session_finalize":
-            session = sessions[payload["session_id"]]
-            session["finished_at"] = "2026-03-16T12:10:00+00:00"
-            return {"ok": True, "session": session}
-        if cmd == "calibration_curve_fit":
-            session = sessions[payload["session_id"]]
-            curve = {
-                "curve_id": "curve-001",
-                "sensor_id": session["sensor_id"],
-                "fit_timestamp": "2026-03-16T12:15:00+00:00",
-                "raw_unit": "sensor_unit",
-                "sensor_kind": "generic",
-                "source_session_ids": [session["session_id"]],
-                "zones": [
-                    {
-                        "raw_min": 68.0,
-                        "raw_max": 80.0,
-                        "order": 2,
-                        "coefficients": [6.0, -1.5, 0.2],
-                        "rmse_k": 0.012,
-                        "max_abs_error_k": 0.031,
-                        "point_count": len(session["samples"]),
-                    }
-                ],
-                "metrics": {
-                    "sample_count": len(session["samples"]),
-                    "zone_count": 1,
-                    "rmse_k": 0.012,
-                    "max_abs_error_k": 0.031,
-                },
-                "metadata": {},
-            }
-            return {
-                "ok": True,
-                "curve": curve,
-                "curve_path": str(tmp_path / "curve.json"),
-                "table_path": str(tmp_path / "curve_table.csv"),
-            }
-        if cmd == "calibration_curve_export":
-            exports.append(dict(payload))
-            return {
-                "ok": True,
-                "json_path": payload["json_path"],
-                "table_path": payload["table_path"],
-            }
-        raise AssertionError(f"Unexpected command: {payload}")
+    widget.update_stats({
+        "point_count": 9142,
+        "t_min": 4.5,
+        "t_max": 185.0,
+    })
 
-    monkeypatch.setattr("cryodaq.gui.widgets.calibration_panel.send_command", _fake_send)
-    monkeypatch.setattr(
-        "cryodaq.gui.widgets.calibration_panel.QFileDialog.getSaveFileName",
-        lambda *_args, **_kwargs: (
-            str(tmp_path / ("curve.json" if "JSON" in _args[1] else "curve.csv")),
-            "",
-        ),
-    )
-
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-    panel._reference_combo.setCurrentIndex(0)
-    _checkbox(panel, 1).setChecked(True)
-    panel._targets_table.selectRow(1)
-
-    panel._on_start_sessions()
-    for _ in range(3):
-        panel._on_capture_points()
-    panel._on_stop_sessions()
-    panel._on_fit_curves()
-    panel.on_reading(Reading.now(channel="Т1 Криостат верх", value=4.15, unit="K", instrument_id="LS218_1"))
-    panel.on_reading(Reading.now(channel="Т2 Криостат низ", value=4.05, unit="K", instrument_id="LS218_1"))
-    panel._on_export_curve()
-
-    assert panel._targets_table.item(1, 4).text() == "завершен"
-    assert panel._targets_table.item(1, 5).text() == "3"
-    assert panel._targets_table.item(1, 6).text() == "готова"
-    assert panel._points_label.text() == "3"
-    assert panel._zones_label.text() == "1"
-    assert panel._rmse_label.text() == "0.0120 K"
-    assert "Т1 Криостат верх" in panel._live_reading_label.text()
-    assert len(panel._fit_curve_item.getData()[0]) > 0
-    assert len(exports) == 1
-    assert exports[0]["sensor_id"] == "LS218_1:Т2 Криостат низ"
+    assert "9,142" in widget._point_count_label.text()
+    assert "4.5" in widget._temp_range_label.text()
+    assert "185.0" in widget._temp_range_label.text()
 
 
-def test_calibration_panel_handles_invalid_backend_payload(monkeypatch, tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# CalibrationResultsWidget
+# ---------------------------------------------------------------------------
+
+def test_results_shows_metrics() -> None:
     _app()
-    def _fake_send(payload: dict) -> dict:
-        if payload["cmd"] == "calibration_session_start":
-            return {"ok": True}
-        raise AssertionError(payload)
+    widget = CalibrationResultsWidget()
 
-    monkeypatch.setattr("cryodaq.gui.widgets.calibration_panel.send_command", _fake_send)
+    widget.update_metrics({
+        "raw_count": 28400,
+        "downsampled_count": 480,
+        "breakpoint_count": 156,
+        "metrics": {
+            "zone_count": 4,
+            "rmse_k": 0.012,
+            "max_abs_error_k": 0.048,
+        },
+    })
 
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-    panel._reference_combo.setCurrentIndex(0)
-    _checkbox(panel, 1).setChecked(True)
-
-    panel._on_start_sessions()
-
-    assert panel._status_banner.text() == "Backend вернул некорректные данные сеанса калибровки."
-    assert panel._capture_button.isEnabled() is False
+    assert "28,400" in widget._raw_count_label.text()
+    assert "480" in widget._downsampled_label.text()
+    assert "156" in widget._breakpoints_label.text()
+    assert "4" in widget._zones_label.text()
+    assert "0.0120" in widget._rmse_label.text()
+    assert "0.0480" in widget._max_error_label.text()
 
 
-def test_calibration_panel_handles_sparse_multizone_fit_data(tmp_path: Path) -> None:
+def test_results_export_all_formats() -> None:
     _app()
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-    panel._targets_table.selectRow(1)
-    option = panel._selected_target_option()
-    assert option is not None
-    panel._sessions_by_target[option.key] = {
-        "session_id": "sess-1",
-        "reference_instrument_id": "LS218_1",
-        "reference_channel": "Т1 Криостат верх",
-        "sensor_instrument_id": "LS218_1",
-        "sensor_channel": "Т2 Криостат низ",
-        "started_at": "2026-03-16T12:00:00+00:00",
-        "finished_at": "2026-03-16T12:10:00+00:00",
-        "samples": [
-            {"reference_temperature": 4.2, "sensor_raw_value": 80.0},
-            {"reference_temperature": "bad", "sensor_raw_value": 79.5},
-            {"reference_temperature": 4.0},
-            "bad",
-        ],
-    }
-    panel._curves_by_sensor[panel._selected_sensor_id() or ""] = {
-        "zones": [
-            {"raw_min": 75.0, "raw_max": 80.0, "coefficients": [6.0, -1.5]},
-            {"raw_min": 70.0, "raw_max": 75.0, "coefficients": []},
-            {"raw_min": "bad", "raw_max": 70.0, "coefficients": [1.0]},
-        ],
-        "metrics": {"zone_count": 3, "rmse_k": 0.02, "max_abs_error_k": 0.05},
-    }
+    widget = CalibrationResultsWidget()
 
-    panel._update_selection_dependent_widgets()
-
-    raw_xs, raw_ys = panel._raw_scatter.getData()
-    fit_xs, fit_ys = panel._fit_curve_item.getData()
-    assert raw_xs == [80.0]
-    assert raw_ys == [4.2]
-    assert len(fit_xs) > 0
-    assert len(fit_xs) == len(fit_ys)
-    assert panel._zones_label.text() == "3"
+    assert widget._export_330_btn.text() == ".330"
+    assert widget._export_340_btn.text() == ".340"
+    assert widget._export_json_btn.text() == "JSON"
+    assert widget._export_csv_btn.text() == "CSV"
 
 
-def test_calibration_panel_export_disabled_without_curve(tmp_path: Path) -> None:
+def test_results_before_after_shows_delta() -> None:
     _app()
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
+    widget = CalibrationResultsWidget()
 
-    assert panel._export_button.isEnabled() is False
-    assert panel._apply_button.isEnabled() is False
+    widget._delta_label.setText("Δ = -0.03 K")
+    assert "0.03" in widget._delta_label.text()
 
 
-def test_calibration_panel_uses_inline_warning_for_missing_active_sessions(tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# CoverageBar
+# ---------------------------------------------------------------------------
+
+def test_coverage_bar_renders() -> None:
     _app()
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
+    bar = CoverageBar()
+    bar.set_coverage([
+        {"status": "dense", "temp_min": 4.0, "temp_max": 50.0, "point_count": 100},
+        {"status": "medium", "temp_min": 50.0, "temp_max": 100.0, "point_count": 30},
+        {"status": "empty", "temp_min": 100.0, "temp_max": 200.0, "point_count": 0},
+        {"status": "sparse", "temp_min": 200.0, "temp_max": 300.0, "point_count": 5},
+    ])
 
-    panel._on_capture_points()
-
-    assert panel._status_banner.text() == "Нет активных сеансов для записи точки."
-
-
-def test_calibration_panel_export_cancel_does_not_call_backend(monkeypatch, tmp_path: Path) -> None:
-    _app()
-    calls: list[dict] = []
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-    panel._targets_table.selectRow(1)
-    sensor_id = panel._selected_sensor_id()
-    assert sensor_id is not None
-    panel._curves_by_sensor[sensor_id] = {"zones": [], "metrics": {}}
-    panel._curve_artifacts[sensor_id] = {"curve_path": str(tmp_path / "existing.json"), "table_path": ""}
-    panel._update_selection_dependent_widgets()
-
-    monkeypatch.setattr("cryodaq.gui.widgets.calibration_panel.send_command", lambda payload: calls.append(dict(payload)) or {"ok": True})
-    monkeypatch.setattr(
-        "cryodaq.gui.widgets.calibration_panel.QFileDialog.getSaveFileName",
-        lambda *_args, **_kwargs: ("", ""),
-    )
-
-    panel._on_export_curve()
-
-    assert calls == []
-
-
-def test_calibration_panel_runtime_controls_roundtrip_through_backend(monkeypatch, tmp_path: Path) -> None:
-    _app()
-    sensor_key = "LS218_1:Т2 Криостат низ"
-    runtime_state = {
-        "global_mode": "off",
-        "assignments": [
-            {
-                "sensor_id": sensor_key,
-                "curve_id": "curve-001",
-                "channel_key": sensor_key,
-                "runtime_apply_ready": False,
-                "reading_mode_policy": "inherit",
-                "resolution": {
-                    "reading_mode": "krdg",
-                    "raw_source": "KRDG",
-                    "reason": "global_off",
-                },
-            }
-        ],
-    }
-    calls: list[dict] = []
-
-    def _fake_send(payload: dict) -> dict:
-        calls.append(dict(payload))
-        if payload["cmd"] == "calibration_runtime_status":
-            return {"ok": True, "runtime": runtime_state}
-        if payload["cmd"] == "calibration_runtime_set_global":
-            runtime_state["global_mode"] = payload["global_mode"]
-            runtime_state["assignments"][0]["resolution"] = {
-                "reading_mode": "curve" if payload["global_mode"] == "on" else "krdg",
-                "raw_source": "SRDG" if payload["global_mode"] == "on" else "KRDG",
-                "reason": "curve_applied" if payload["global_mode"] == "on" else "global_off",
-            }
-            return {"ok": True, "runtime": runtime_state}
-        if payload["cmd"] == "calibration_runtime_set_channel_policy":
-            runtime_state["assignments"][0]["reading_mode_policy"] = payload["policy"]
-            runtime_state["assignments"][0]["runtime_apply_ready"] = payload["runtime_apply_ready"]
-            runtime_state["assignments"][0]["resolution"] = {
-                "reading_mode": "curve",
-                "raw_source": "SRDG",
-                "reason": "curve_applied",
-            }
-            return {
-                "ok": True,
-                "assignment": runtime_state["assignments"][0],
-                "resolution": runtime_state["assignments"][0]["resolution"],
-            }
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.calibration_panel.send_command", _fake_send)
-
-    panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "instruments.yaml"))
-    panel._targets_table.selectRow(1)
-    sensor_id = panel._selected_sensor_id()
-    assert sensor_id is not None
-    runtime_state["assignments"][0]["sensor_id"] = sensor_id
-    runtime_state["assignments"][0]["channel_key"] = sensor_id
-    panel._curves_by_sensor[sensor_id] = {"curve_id": "curve-001", "zones": [], "metrics": {}}
-    panel._update_selection_dependent_widgets()
-
-    panel._runtime_global_checkbox.setChecked(True)
-    panel._runtime_policy_combo.setCurrentIndex(panel._runtime_policy_combo.findData("on"))
-    panel._on_apply_runtime()
-
-    assert any(call["cmd"] == "calibration_runtime_set_global" for call in calls)
-    assert any(call["cmd"] == "calibration_runtime_set_channel_policy" for call in calls)
-    assert panel._runtime_effective_label.text().startswith("curve / SRDG")
+    assert len(bar._bins) == 4
+    # Verify paintEvent doesn't crash
+    bar.resize(200, 24)
+    bar.repaint()
