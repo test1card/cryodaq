@@ -461,6 +461,7 @@ class ShiftBar(QFrame):
         self._missed_timer.timeout.connect(self._on_periodic_missed)
 
         self._prompt_pending = False
+        self._workers: list[object] = []
 
     # --- Public API ---
 
@@ -564,9 +565,9 @@ class ShiftBar(QFrame):
         self._missed_count += 1
         logger.warning("Shift periodic check missed for %s", self._shift_id)
 
-        from cryodaq.gui.zmq_client import send_command
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        send_command({
+        worker = ZmqCommandWorker({
             "cmd": "log_entry",
             "message": f"Пропущена периодическая проверка (оператор: {self._operator})",
             "author": self._operator,
@@ -577,3 +578,6 @@ class ShiftBar(QFrame):
                 "missed_count": self._missed_count,
             }),
         })
+        worker.finished.connect(lambda r: None)
+        self._workers.append(worker)
+        worker.start()

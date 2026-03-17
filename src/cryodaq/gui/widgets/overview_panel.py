@@ -702,18 +702,26 @@ class ExperimentStatusWidget(QFrame):
         self._elapsed_label.setStyleSheet("color: #58a6ff; border: none;")
         layout.addWidget(self._elapsed_label)
 
-        # Refresh timer
+        self._worker = None
+
+        # Refresh timer (first refresh deferred to avoid blocking construction)
         self._timer = QTimer(self)
         self._timer.setInterval(5000)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
-        self._refresh()
 
     @Slot()
     def _refresh(self) -> None:
-        from cryodaq.gui.zmq_client import send_command
+        if self._worker is not None and not self._worker.isFinished():
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        result = send_command({"cmd": "experiment_status"})
+        self._worker = ZmqCommandWorker({"cmd": "experiment_status"})
+        self._worker.finished.connect(self._on_refresh_result)
+        self._worker.start()
+
+    @Slot(dict)
+    def _on_refresh_result(self, result: dict) -> None:
         if not result.get("ok") or not result.get("active"):
             self._status_label.setText("Нет активного эксперимента")
             self._status_label.setStyleSheet("color: #888888; border: none;")
@@ -792,11 +800,12 @@ class QuickLogWidget(QFrame):
         self._recent_label.setWordWrap(True)
         layout.addWidget(self._recent_label, stretch=1)
 
+        self._refresh_worker = None
+
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(10000)
         self._refresh_timer.timeout.connect(self._refresh_recent)
         self._refresh_timer.start()
-        self._refresh_recent()
 
     @Slot()
     def _on_submit(self) -> None:
@@ -824,9 +833,16 @@ class QuickLogWidget(QFrame):
 
     @Slot()
     def _refresh_recent(self) -> None:
-        from cryodaq.gui.zmq_client import send_command
+        if self._refresh_worker is not None and not self._refresh_worker.isFinished():
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        result = send_command({"cmd": "log_get", "limit": 5, "current_experiment": True})
+        self._refresh_worker = ZmqCommandWorker({"cmd": "log_get", "limit": 5, "current_experiment": True})
+        self._refresh_worker.finished.connect(self._on_refresh_result)
+        self._refresh_worker.start()
+
+    @Slot(dict)
+    def _on_refresh_result(self, result: dict) -> None:
         if not result.get("ok"):
             return
         entries = result.get("entries", [])
