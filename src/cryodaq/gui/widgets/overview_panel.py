@@ -254,11 +254,14 @@ class CompactTempCard(QFrame):
         self._dt_dt: float = 0.0  # K/h
         self._has_alarm = False
         self._has_error = False
+        self._last_status: ChannelStatus = ChannelStatus.OK
+        self._last_ui_update: float = 0.0
+        self._current_bg: str = ""
 
         self.setMinimumSize(80, 54)
         self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._apply_bg("#2A2A2A")
+        self._set_bg("#2A2A2A")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 1, 2, 1)
@@ -297,63 +300,86 @@ class CompactTempCard(QFrame):
         return self._channel_id
 
     def update_reading(self, reading: Reading) -> None:
-        """Обновить карточку по новому показанию."""
+        """Обновить карточку по новому показанию.
+
+        Stores data immediately but throttles UI updates to max 1 Hz.
+        """
         ts = reading.timestamp.timestamp()
         value = reading.value
         status = reading.status
 
-        # Ошибка сенсора
-        if status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
-            self._has_error = True
-            self._value_label.setText("ОТКЛ")
-            self._value_label.setStyleSheet("color: #888888; border: none;")
-            self._trend_label.setText("")
-            self._apply_bg("#3A3A3A")
-            return
+        # Compute dT/dt and store state (cheap, no UI)
+        if status not in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
+            if self._last_ts is not None and ts > self._last_ts:
+                dt_s = ts - self._last_ts
+                if dt_s > 0.5:
+                    dv = value - (self._last_value or 0.0)
+                    self._dt_dt = (dv / dt_s) * 3600.0
+            self._prev_value = self._last_value
+            self._prev_ts = self._last_ts
 
-        self._has_error = False
-        self._value_label.setText(f"{value:.2f} K")
-        self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
-
-        # Вычислить dT/dt
-        if self._last_ts is not None and ts > self._last_ts:
-            dt_s = ts - self._last_ts
-            if dt_s > 0.5:  # минимум 0.5с
-                dv = value - (self._last_value or 0.0)
-                self._dt_dt = (dv / dt_s) * 3600.0  # K/h
-
-        self._prev_value = self._last_value
-        self._prev_ts = self._last_ts
         self._last_value = value
         self._last_ts = ts
+        self._last_status = status
+
+        # Throttle UI updates to max 1 Hz
+        if ts - self._last_ui_update < 1.0:
+            return
+        self._last_ui_update = ts
+        self._flush_ui()
+
+    def _flush_ui(self) -> None:
+        """Apply buffered state to UI labels (called at most 1 Hz)."""
+        status = self._last_status
+        value = self._last_value
+
+        if status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
+            if not self._has_error:
+                self._has_error = True
+                self._value_label.setText("ОТКЛ")
+                self._value_label.setStyleSheet("color: #888888; border: none;")
+                self._trend_label.setText("")
+                self._set_bg("#3A3A3A")
+            return
+
+        if self._has_error:
+            self._has_error = False
+            self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        if value is not None:
+            self._value_label.setText(f"{value:.2f} K")
 
         # Тренд
         abs_rate = abs(self._dt_dt)
         if abs_rate < 0.1:
             arrow = "="
         elif self._dt_dt > 0:
-            arrow = "\u25b2"  # ▲
+            arrow = "\u25b2"
         else:
-            arrow = "\u25bc"  # ▼
+            arrow = "\u25bc"
         self._trend_label.setText(f"{arrow} {self._dt_dt:+.1f} K/ч")
 
-        # Фон
+        # Фон — only update if changed
         if self._has_alarm:
-            self._apply_bg("#4A2020")  # красный оттенок
+            self._set_bg("#4A2020")
         elif abs_rate > 10:
-            self._apply_bg("#1E2A3A")  # синий оттенок
+            self._set_bg("#1E2A3A")
         else:
-            self._apply_bg("#2A2A2A")
+            self._set_bg("#2A2A2A")
 
     def set_alarm(self, active: bool) -> None:
         self._has_alarm = active
         if active and not self._has_error:
-            self._apply_bg("#4A2020")
+            self._set_bg("#4A2020")
         elif not self._has_error:
             abs_rate = abs(self._dt_dt)
-            self._apply_bg("#1E2A3A" if abs_rate > 10 else "#2A2A2A")
+            self._set_bg("#1E2A3A" if abs_rate > 10 else "#2A2A2A")
 
-    def _apply_bg(self, color: str) -> None:
+    def _set_bg(self, color: str) -> None:
+        """Set background only if color actually changed."""
+        if color == self._current_bg:
+            return
+        self._current_bg = color
         self.setStyleSheet(
             f"CompactTempCard {{ background-color: {color}; "
             f"border: 1px solid #444; border-radius: 4px; }}"
@@ -452,6 +478,7 @@ class PressureStrip(QFrame):
 
         self._buffer: deque[tuple[float, float]] = deque(maxlen=_BUFFER_MAXLEN)
         self._plot_item: pg.PlotDataItem | None = None
+        self._current_color: str = ""
 
     def on_reading(self, reading: Reading) -> None:
         """Обновить давление."""
@@ -468,7 +495,9 @@ class PressureStrip(QFrame):
             self._value_label.setText(f"{value:.2e}")
 
         color = _pressure_color(value)
-        self._value_label.setStyleSheet(f"color: {color}; border: none;")
+        if color != self._current_color:
+            self._current_color = color
+            self._value_label.setStyleSheet(f"color: {color}; border: none;")
 
     def refresh_plot(self) -> None:
         """Обновить мини-график (вызывается по таймеру)."""
@@ -890,9 +919,9 @@ class OverviewPanel(QWidget):
         # Signal/Slot для потокобезопасности
         self._reading_received.connect(self._handle_reading)
 
-        # Таймер обновления графика — 2 Гц
+        # Таймер обновления графика — 1 Гц
         self._plot_timer = QTimer(self)
-        self._plot_timer.setInterval(500)
+        self._plot_timer.setInterval(1000)
         self._plot_timer.timeout.connect(self._refresh_plot)
         self._plot_timer.start()
 
@@ -1028,6 +1057,8 @@ class OverviewPanel(QWidget):
             color = _LINE_PALETTE[idx % len(_LINE_PALETTE)]
             pen = pg.mkPen(color=color, width=1.5)
             item = pw.plot([], [], pen=pen, name=display)
+            item.setDownsampling(auto=True, method="peak")
+            item.setClipToView(True)
             self._plot_items[ch_id] = item
             self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
 
