@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -888,29 +887,32 @@ class OverviewPanel(QWidget):
     def _build_ui(self) -> None:
         root = create_panel_root(self)
         root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(0)
+        root.setSpacing(4)
 
-        # Two-column splitter: left = charts, right = sidebar
+        # ============ TOP: compact status bars (full width) ============
+        self._status_strip = StatusStrip()
+        root.addWidget(self._status_strip)
+
+        self._experiment_status = ExperimentStatusWidget()
+        root.addWidget(self._experiment_status)
+
+        self._shift_bar = ShiftBar()
+        root.addWidget(self._shift_bar)
+
+        # ============ MIDDLE: splitter (graph left, info right) ============
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(4)
         splitter.setStyleSheet(
             "QSplitter::handle { background-color: #333333; }"
         )
-        root.addWidget(splitter)
 
-        # ============ LEFT COLUMN: charts ============
+        # --- Left: plot toolbar + temperature chart ---
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 4, 0)
-        left_layout.setSpacing(4)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(2)
 
-        # Plot toolbar
-        plot_frame = QFrame()
-        apply_panel_frame_style(plot_frame, background="#111111", border="#333", radius=4)
-        plot_root = QVBoxLayout(plot_frame)
-        plot_root.setContentsMargins(4, 4, 4, 4)
-        plot_root.setSpacing(4)
-
+        # Button bar
         btn_bar = QHBoxLayout()
         btn_bar.setSpacing(6)
 
@@ -948,61 +950,42 @@ class OverviewPanel(QWidget):
         csv_btn.clicked.connect(self._on_export_csv)
         btn_bar.addWidget(csv_btn)
 
-        plot_root.addLayout(btn_bar)
+        left_layout.addLayout(btn_bar)
 
         # Main temperature plot with human-readable time axis
         time_axis = pg.DateAxisItem(orientation="bottom")
         self._plot = pg.PlotWidget(axisItems={"bottom": time_axis})
-        plot_root.addWidget(self._plot)
-
-        left_layout.addWidget(plot_frame, stretch=1)
-
-        # PressureStrip below plot
-        self._pressure_strip = PressureStrip()
-        left_layout.addWidget(self._pressure_strip)
+        left_layout.addWidget(self._plot, stretch=1)
 
         splitter.addWidget(left_widget)
 
-        # ============ RIGHT COLUMN: sidebar (scrollable) ============
-        right_inner = QWidget()
-        right_layout = QVBoxLayout(right_inner)
-        right_layout.setContentsMargins(4, 0, 0, 0)
+        # --- Right: pressure, keithley, quick log ---
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(4)
 
-        # Compact status bars
-        self._status_strip = StatusStrip()
-        right_layout.addWidget(self._status_strip)
+        self._pressure_strip = PressureStrip()
+        right_layout.addWidget(self._pressure_strip)
 
-        self._experiment_status = ExperimentStatusWidget()
-        right_layout.addWidget(self._experiment_status)
-
-        self._shift_bar = ShiftBar()
-        right_layout.addWidget(self._shift_bar)
-
-        # Temperature card grid (takes available space)
-        self._card_grid = TempCardGrid(self._channel_mgr)
-        right_layout.addWidget(self._card_grid, stretch=1)
-
-        # Keithley strip with quick-actions
         self._keithley_strip = KeithleyStrip()
         right_layout.addWidget(self._keithley_strip)
 
-        # Quick log
         self._quick_log = QuickLogWidget()
         right_layout.addWidget(self._quick_log)
 
-        # Wrap in scroll area for small screens
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        right_scroll.setWidget(right_inner)
+        right_layout.addStretch()
 
-        splitter.addWidget(right_scroll)
+        splitter.addWidget(right_widget)
 
-        # Splitter proportions: 65% charts, 35% sidebar
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
+
+        root.addWidget(splitter, stretch=1)
+
+        # ============ BOTTOM: temperature cards (full width) ============
+        self._card_grid = TempCardGrid(self._channel_mgr)
+        root.addWidget(self._card_grid)
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика."""
