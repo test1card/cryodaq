@@ -30,6 +30,7 @@ import yaml
 
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
+from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
@@ -458,7 +459,17 @@ async def _run_experiment_command(
             custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
             end_time=_parse_experiment_time(cmd.get("end_time")),
         )
-        return {"ok": True, "experiment": info.to_payload()}
+        # Auto-generate report if template enables it
+        report_generated = False
+        try:
+            template = experiment_manager.get_template(info.template_id)
+            if template.report_enabled:
+                generator = ReportGenerator(experiment_manager.data_dir)
+                generator.generate(info.experiment_id)
+                report_generated = True
+        except Exception as exc:
+            logger.warning("Auto-report generation failed: %s", exc)
+        return {"ok": True, "experiment": info.to_payload(), "report_generated": report_generated}
 
     if action == "experiment_abort":
         info = experiment_manager.abort_experiment(
@@ -806,6 +817,8 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
+    event_logger = EventLogger(writer, experiment_manager)
+
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -825,7 +838,16 @@ async def _run_engine(*, mock: bool = False) -> None:
         action = cmd.get("cmd", "")
         try:
             if action in {"keithley_emergency_off", "keithley_stop", "keithley_start"}:
-                return await _run_keithley_command(action, cmd, safety_manager)
+                result = await _run_keithley_command(action, cmd, safety_manager)
+                if result.get("ok"):
+                    ch = cmd.get("channel", "?")
+                    if action == "keithley_start":
+                        await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
+                    elif action == "keithley_stop":
+                        await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
+                    elif action == "keithley_emergency_off":
+                        await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
+                return result
             if action == "safety_status":
                 return {"ok": True, **safety_manager.get_status()}
             if action == "safety_acknowledge":
@@ -865,10 +887,19 @@ async def _run_engine(*, mock: bool = False) -> None:
                     _try_activate_calibration_acquisition(
                         calibration_acquisition, experiment_manager, cmd,
                     )
+                    name = cmd.get("name") or cmd.get("title") or "?"
+                    await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
                 elif result.get("ok") and action in {
                     "experiment_finalize", "experiment_stop", "experiment_abort",
                 }:
                     calibration_acquisition.deactivate()
+                    if action == "experiment_abort":
+                        await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
+                    else:
+                        await event_logger.log_event("experiment", "Эксперимент завершён")
+                elif result.get("ok") and action == "experiment_advance_phase":
+                    phase = cmd.get("phase", "?")
+                    await event_logger.log_event("phase", f"Фаза: → {phase}")
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}

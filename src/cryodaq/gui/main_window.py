@@ -13,7 +13,7 @@ import logging
 import time
 
 from PySide6.QtCore import QTimer, Signal, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self._build_shortcuts()
         self._build_status_bar()
         # Skip tray when embedded in LauncherWindow (launcher has its own tray)
         if not embedded:
@@ -213,6 +214,55 @@ class MainWindow(QMainWindow):
         connection_action = QAction("Подключение приборов...", self)
         connection_action.triggered.connect(self._on_connection_settings)
         settings_menu.addAction(connection_action)
+
+    def _build_shortcuts(self) -> None:
+        """Register keyboard shortcuts."""
+        # Ctrl+L → focus quick log on Overview
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._focus_quick_log)
+        # Ctrl+E → Experiment tab
+        QShortcut(QKeySequence("Ctrl+E"), self).activated.connect(
+            lambda: self._tabs.setCurrentIndex(1)
+        )
+        # Ctrl+1..9 → tab 1..9, Ctrl+0 → tab 10
+        for i in range(1, 10):
+            QShortcut(QKeySequence(f"Ctrl+{i}"), self).activated.connect(
+                lambda checked=False, idx=i - 1: self._tabs.setCurrentIndex(idx)
+            )
+        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(
+            lambda: self._tabs.setCurrentIndex(9)
+        )
+        # F5 → refresh current view (no-op placeholder)
+        QShortcut(QKeySequence("F5"), self).activated.connect(self._refresh_current)
+        # Ctrl+Shift+X → emergency off
+        QShortcut(QKeySequence("Ctrl+Shift+X"), self).activated.connect(
+            self._emergency_off_shortcut
+        )
+
+    def _focus_quick_log(self) -> None:
+        self._tabs.setCurrentIndex(0)
+        if hasattr(self._overview_panel, "_quick_log"):
+            self._overview_panel._quick_log._input.setFocus()
+
+    def _refresh_current(self) -> None:
+        pass  # placeholder for future per-tab refresh
+
+    def _emergency_off_shortcut(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "Emergency Off",
+            "Аварийное отключение Keithley (оба канала)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+            for ch in ("smua", "smub"):
+                w = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": ch})
+                w.finished.connect(lambda r: None)
+                w.start()
 
     def _build_status_bar(self) -> None:
         """Создать статусную строку."""
