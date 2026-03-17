@@ -183,6 +183,7 @@ class InstrumentStatusPanel(QWidget):
         self._container = QWidget()
         self._grid = QGridLayout(self._container)
         self._grid.setSpacing(8)
+        self._grid.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll.setWidget(self._container)
         outer.addWidget(scroll)

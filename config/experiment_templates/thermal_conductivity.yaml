@@ -1,5 +1,5 @@
 id: thermal_conductivity
-name: Thermal Conductivity
+name: Теплопроводность
 sections:
   - setup
   - sample
@@ -15,6 +15,6 @@ report_sections:
   - config_section
 custom_fields:
   - id: sample_id
-    label: Sample ID
+    label: Идентификатор образца
   - id: heater_geometry
-    label: Heater Geometry
+    label: Геометрия нагревателя

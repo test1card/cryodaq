@@ -1,5 +1,5 @@
 id: debug_checkout
-name: Debug Checkout
+name: Отладочная проверка
 sections:
   - setup
   - checks
@@ -12,6 +12,6 @@ report_sections:
   - config_section
 custom_fields:
   - id: issue_ticket
-    label: Issue Ticket
+    label: Номер заявки
   - id: checkout_scope
-    label: Checkout Scope
+    label: Область проверки

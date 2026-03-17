@@ -127,9 +127,9 @@ def test_archive_panel_empty_state(monkeypatch) -> None:
     assert panel._table.rowCount() == 0
     assert panel._summary_label.text() == "Эксперименты по текущему фильтру не найдены."
     assert panel._notes_view.toPlainText() == "Выберите эксперимент, чтобы увидеть сведения и артефакты."
-    assert panel._runs_view.toPlainText() == "Run records ещё нет."
+    assert panel._runs_view.toPlainText() == "Записей прогонов нет."
     assert panel._artifacts_view.toPlainText() == "Артефактов ещё нет."
-    assert panel._results_view.toPlainText() == "Result tables ещё нет."
+    assert panel._results_view.toPlainText() == "Таблиц результатов нет."
     assert panel._open_folder_button.isEnabled() is False
     assert panel._open_pdf_button.isEnabled() is False
     assert panel._open_docx_button.isEnabled() is False

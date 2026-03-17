@@ -135,7 +135,7 @@ class ArchivePanel(QWidget):
         self._runs_view = QTextEdit()
         self._runs_view.setReadOnly(True)
         self._runs_view.setMaximumHeight(110)
-        runs_box = QGroupBox("Runs")
+        runs_box = QGroupBox("Прогоны")
         runs_layout = QVBoxLayout(runs_box)
         runs_layout.addWidget(self._runs_view)
         details_layout.addWidget(runs_box)
@@ -143,7 +143,7 @@ class ArchivePanel(QWidget):
         self._artifacts_view = QTextEdit()
         self._artifacts_view.setReadOnly(True)
         self._artifacts_view.setMaximumHeight(130)
-        artifacts_box = QGroupBox("Artifacts")
+        artifacts_box = QGroupBox("Артефакты")
         artifacts_layout = QVBoxLayout(artifacts_box)
         artifacts_layout.addWidget(self._artifacts_view)
         details_layout.addWidget(artifacts_box)
@@ -151,7 +151,7 @@ class ArchivePanel(QWidget):
         self._results_view = QTextEdit()
         self._results_view.setReadOnly(True)
         self._results_view.setMaximumHeight(110)
-        results_box = QGroupBox("Results")
+        results_box = QGroupBox("Результаты")
         results_layout = QVBoxLayout(results_box)
         results_layout.addWidget(self._results_view)
         details_layout.addWidget(results_box)
@@ -315,9 +315,9 @@ class ArchivePanel(QWidget):
         self._report_label.setText("—")
         self._notes_view.setPlainText("Выберите эксперимент, чтобы увидеть сведения и артефакты.")
         self._archive_stats_label.setText("Состав архивной записи: —")
-        self._runs_view.setPlainText("Run records ещё нет.")
+        self._runs_view.setPlainText("Записей прогонов нет.")
         self._artifacts_view.setPlainText("Артефактов ещё нет.")
-        self._results_view.setPlainText("Result tables ещё нет.")
+        self._results_view.setPlainText("Таблиц результатов нет.")
         self._open_folder_button.setEnabled(False)
         self._open_pdf_button.setEnabled(False)
         self._open_docx_button.setEnabled(False)
@@ -327,7 +327,7 @@ class ArchivePanel(QWidget):
     def _format_run_records(entry: dict[str, Any]) -> str:
         records = [item for item in entry.get("run_records", []) if isinstance(item, dict)]
         if not records:
-            return "Run records отсутствуют."
+            return "Записей прогонов нет."
         return "\n".join(
             (
                 f"{str(item.get('run_type', '')).strip() or 'run'} | "
@@ -357,7 +357,7 @@ class ArchivePanel(QWidget):
         results = [item for item in entry.get("result_tables", []) if isinstance(item, dict)]
         summary = dict(entry.get("summary_metadata") or {})
         if not results and not summary:
-            return "Result tables отсутствуют."
+            return "Таблиц результатов нет."
         lines = [
             f"{str(item.get('table_id', '')).strip() or 'table'} | rows={item.get('row_count', 0)} | {str(item.get('path', '')).strip() or '—'}"
             for item in results

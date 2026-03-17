@@ -170,7 +170,8 @@ class _SmuPanel(QFrame):
         grid = QGridLayout()
         grid.setSpacing(6)
         for idx, (key, (title_text, unit)) in enumerate(_MEASUREMENTS.items()):
-            plot = pg.PlotWidget()
+            time_axis = pg.DateAxisItem(orientation="bottom")
+            plot = pg.PlotWidget(axisItems={"bottom": time_axis})
             plot.setBackground("#111111")
             item = plot.getPlotItem()
             item.setLabel("left", title_text, units=unit, color="#AAAAAA")

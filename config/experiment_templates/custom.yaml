@@ -1,5 +1,5 @@
 id: custom
-name: Custom
+name: Пользовательский
 sections:
   - setup
   - notes
@@ -11,4 +11,4 @@ report_sections:
   - config_section
 custom_fields:
   - id: objective
-    label: Objective
+    label: Цель эксперимента
