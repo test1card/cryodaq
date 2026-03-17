@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cryodaq.analytics.calibration import CalibrationSample, CalibrationSessionStore, CalibrationStore
+from cryodaq.analytics.calibration import CalibrationSample, CalibrationStore
 
 
 def _sample_series() -> list[CalibrationSample]:
@@ -81,35 +81,6 @@ def _data_lines(path: Path) -> list[str]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-
-
-def test_calibration_session_store_persists_samples(tmp_path: Path) -> None:
-    sessions = CalibrationSessionStore(tmp_path)
-    session = sessions.start_session(
-        sensor_id="sensor-001",
-        reference_channel="CH1",
-        sensor_channel="CH2",
-        reference_instrument_id="ls218s",
-        sensor_instrument_id="ls218s",
-        experiment_id="exp-123",
-    )
-    updated = sessions.append_sample(
-        session.session_id,
-        reference_temperature=4.2,
-        sensor_raw_value=81.7,
-        timestamp=datetime(2026, 3, 16, 12, 30, tzinfo=timezone.utc),
-    )
-    finalized = sessions.finalize_session(session.session_id, notes="done")
-
-    metadata_path = tmp_path / "sessions" / session.session_id / "session.json"
-    csv_path = tmp_path / "sessions" / session.session_id / "samples.csv"
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-
-    assert updated.samples[-1].sensor_raw_value == pytest.approx(81.7)
-    assert finalized.notes == "done"
-    assert payload["sensor_id"] == "sensor-001"
-    assert payload["samples"][0]["reference_temperature"] == pytest.approx(4.2)
-    assert csv_path.exists()
 
 
 def test_calibration_store_fit_roundtrip_and_persistence(tmp_path: Path) -> None:

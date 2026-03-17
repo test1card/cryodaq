@@ -10,7 +10,7 @@
 - Основной операторский workflow различает `Эксперимент` и `Отладка`; `Отладка` не должна создавать архивные записи и автоматические отчёты по эксперименту.
 - Dual-channel Keithley (`smua`, `smub`, `smua + smub`) остаётся актуальной моделью. Старые ожидания про disable/hide/remove `smub` устарели.
 - Контракт внешних отчётов и текущий код используют `report_raw.pdf` и `report_editable.docx`, а `report_raw.docx` остаётся machine-generated intermediate input для best-effort PDF-конвертации.
-- Calibration RC contour включает `.330` / `.340`, task-level Chebyshev FIT и runtime apply с per-channel policy; дальнейшая работа ограничена operator rollout и non-blocking polish.
+- Calibration v2: continuous SRDG acquisition during calibration experiments (CalibrationAcquisitionService), post-run pipeline (CalibrationFitter: extract → downsample → breakpoints → Chebyshev fit), three-mode GUI (Setup → Acquisition → Results), `.330` / `.340` / JSON export, runtime apply с per-channel policy.
 
 Замена LabVIEW для cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
 Python 3.12+, asyncio, PySide6. Current package metadata: `0.11.0rc1`.

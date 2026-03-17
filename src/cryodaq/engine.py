@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from cryodaq.analytics.calibration import CalibrationSessionStore, CalibrationStore
+from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
@@ -185,191 +185,10 @@ async def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
     *,
-    calibration_sessions: CalibrationSessionStore,
     calibration_store: CalibrationStore,
     experiment_manager: ExperimentManager,
     drivers_by_name: dict[str, Any],
 ) -> dict[str, Any]:
-    if action == "calibration_session_start":
-        experiment_id = cmd.get("experiment_id")
-        if experiment_id is None and cmd.get("current_experiment", True):
-            experiment_id = experiment_manager.active_experiment_id
-        session = calibration_sessions.start_session(
-            sensor_id=str(cmd.get("sensor_id", "")).strip(),
-            reference_channel=str(cmd.get("reference_channel", "")).strip(),
-            sensor_channel=str(cmd.get("sensor_channel", "")).strip(),
-            raw_unit=str(cmd.get("raw_unit", "sensor_unit")).strip() or "sensor_unit",
-            reference_instrument_id=str(cmd.get("reference_instrument_id", "")).strip(),
-            sensor_instrument_id=str(
-                cmd.get("sensor_instrument_id", cmd.get("reference_instrument_id", ""))
-            ).strip(),
-            experiment_id=str(experiment_id) if experiment_id is not None else None,
-            notes=str(cmd.get("notes", "")),
-            metadata=_normalize_dict_payload(cmd.get("metadata")),
-            session_id=str(cmd.get("session_id", "")).strip() or None,
-            started_at=_parse_log_time(cmd.get("started_at")),
-        )
-        artifacts = calibration_sessions.get_session_artifacts(session.session_id)
-        experiment_manager.attach_run_record(
-            experiment_id=session.experiment_id,
-            source_tab="calibration",
-            source_module="calibration_session",
-            run_type="calibration_session",
-            status="RUNNING",
-            started_at=session.started_at,
-            finished_at=session.finished_at,
-            source_run_id=session.session_id,
-            parameters={
-                "sensor_id": session.sensor_id,
-                "reference_channel": session.reference_channel,
-                "sensor_channel": session.sensor_channel,
-                "raw_unit": session.raw_unit,
-                "reference_instrument_id": session.reference_instrument_id,
-                "sensor_instrument_id": session.sensor_instrument_id,
-            },
-            result_summary={"sample_count": len(session.samples)},
-            artifact_paths=[artifacts["session_path"], artifacts["samples_csv_path"]],
-        )
-        return {"ok": True, "session": session.to_payload()}
-
-    if action == "calibration_session_get":
-        session_id = str(cmd.get("session_id", "")).strip()
-        if not session_id:
-            raise ValueError("session_id is required.")
-        session = calibration_sessions.get_session(session_id)
-        return {"ok": True, "session": session.to_payload()}
-
-    if action == "calibration_session_finalize":
-        session_id = str(cmd.get("session_id", "")).strip()
-        if not session_id:
-            raise ValueError("session_id is required.")
-        session = calibration_sessions.finalize_session(
-            session_id,
-            finished_at=_parse_log_time(cmd.get("finished_at")),
-            notes=str(cmd.get("notes", "")) if "notes" in cmd else None,
-        )
-        artifacts = calibration_sessions.get_session_artifacts(session.session_id)
-        experiment_manager.attach_run_record(
-            experiment_id=session.experiment_id,
-            source_tab="calibration",
-            source_module="calibration_session",
-            run_type="calibration_session",
-            status="COMPLETED",
-            started_at=session.started_at,
-            finished_at=session.finished_at,
-            source_run_id=session.session_id,
-            parameters={
-                "sensor_id": session.sensor_id,
-                "reference_channel": session.reference_channel,
-                "sensor_channel": session.sensor_channel,
-                "raw_unit": session.raw_unit,
-                "reference_instrument_id": session.reference_instrument_id,
-                "sensor_instrument_id": session.sensor_instrument_id,
-            },
-            result_summary={
-                "sample_count": len(session.samples),
-                "notes": session.notes,
-            },
-            artifact_paths=[artifacts["session_path"], artifacts["samples_csv_path"]],
-        )
-        return {"ok": True, "session": session.to_payload()}
-
-    if action == "calibration_session_capture":
-        session_id = str(cmd.get("session_id", "")).strip()
-        if not session_id:
-            raise ValueError("session_id is required.")
-        session = calibration_sessions.get_session(session_id)
-
-        reference_temperature = cmd.get("reference_temperature")
-        sensor_raw_value = cmd.get("sensor_raw_value")
-        metadata = _normalize_dict_payload(cmd.get("metadata"))
-        if reference_temperature is None or sensor_raw_value is None:
-            instrument_name = session.reference_instrument_id or session.sensor_instrument_id
-            if not instrument_name:
-                raise ValueError("Calibration session capture requires instrument_id or manual values.")
-            driver = drivers_by_name.get(instrument_name)
-            if driver is None:
-                raise KeyError(f"Calibration instrument '{instrument_name}' not found.")
-            if not hasattr(driver, "read_calibration_pair"):
-                raise ValueError(f"Driver '{instrument_name}' does not support calibration capture.")
-            captured = await driver.read_calibration_pair(
-                reference_channel=session.reference_channel,
-                sensor_channel=session.sensor_channel,
-            )
-            reference_reading = captured["reference"]
-            sensor_reading = captured["sensor"]
-            reference_temperature = reference_reading.value
-            sensor_raw_value = sensor_reading.value
-            metadata = {
-                **metadata,
-                "captured_reference_channel": reference_reading.channel,
-                "captured_sensor_channel": sensor_reading.channel,
-                "reference_status": reference_reading.status.value,
-                "sensor_status": sensor_reading.status.value,
-            }
-
-        updated = calibration_sessions.append_sample(
-            session_id,
-            reference_temperature=float(reference_temperature),
-            sensor_raw_value=float(sensor_raw_value),
-            timestamp=_parse_log_time(cmd.get("timestamp")),
-            experiment_id=session.experiment_id,
-            metadata=metadata,
-        )
-        return {"ok": True, "session": updated.to_payload(), "sample": updated.samples[-1].to_payload()}
-
-    if action == "calibration_curve_fit":
-        session_id = str(cmd.get("session_id", "")).strip()
-        if not session_id:
-            raise ValueError("session_id is required.")
-        session = calibration_sessions.get_session(session_id)
-        curve = calibration_store.fit_curve(
-            session.sensor_id,
-            list(session.samples),
-            raw_unit=session.raw_unit,
-            sensor_kind=str(cmd.get("sensor_kind", "generic")).strip() or "generic",
-            source_session_ids=[session.session_id],
-            max_zones=int(cmd.get("max_zones", 3)),
-            min_points_per_zone=int(cmd.get("min_points_per_zone", 6)),
-            max_order=int(cmd.get("max_order", 8)),
-            target_rmse_k=float(cmd.get("target_rmse_k", 0.05)),
-            metadata={
-                "reference_channel": session.reference_channel,
-                "sensor_channel": session.sensor_channel,
-                **_normalize_dict_payload(cmd.get("metadata")),
-            },
-        )
-        curve_path = calibration_store.save_curve(curve)
-        table_path = calibration_store.export_curve_table(curve.sensor_id)
-        experiment_manager.attach_run_record(
-            experiment_id=session.experiment_id,
-            source_tab="calibration",
-            source_module="calibration_curve_fit",
-            run_type="calibration_curve_fit",
-            status="COMPLETED",
-            started_at=curve.fit_timestamp,
-            finished_at=curve.fit_timestamp,
-            source_run_id=curve.curve_id,
-            parameters={
-                "sensor_id": curve.sensor_id,
-                "source_session_ids": list(curve.source_session_ids),
-                "raw_unit": curve.raw_unit,
-                "sensor_kind": curve.sensor_kind,
-                "max_zones": int(cmd.get("max_zones", 3)),
-                "min_points_per_zone": int(cmd.get("min_points_per_zone", 6)),
-                "max_order": int(cmd.get("max_order", 8)),
-                "target_rmse_k": float(cmd.get("target_rmse_k", 0.05)),
-            },
-            result_summary=dict(curve.metrics),
-            artifact_paths=[str(curve_path), str(table_path)],
-        )
-        return {
-            "ok": True,
-            "curve": curve.to_payload(),
-            "curve_path": str(curve_path),
-            "table_path": str(table_path),
-        }
-
     if action == "calibration_curve_evaluate":
         sensor_id = str(cmd.get("sensor_id", "")).strip()
         if not sensor_id:
@@ -963,7 +782,6 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
-    calibration_sessions = CalibrationSessionStore(calibration_dir)
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -1082,11 +900,6 @@ async def _run_engine(*, mock: bool = False) -> None:
                     broker,
                 )
             if action in {
-                "calibration_session_start",
-                "calibration_session_get",
-                "calibration_session_capture",
-                "calibration_session_finalize",
-                "calibration_curve_fit",
                 "calibration_curve_evaluate",
                 "calibration_curve_list",
                 "calibration_curve_get",
@@ -1101,7 +914,6 @@ async def _run_engine(*, mock: bool = False) -> None:
                 return await _run_calibration_command(
                     action,
                     cmd,
-                    calibration_sessions=calibration_sessions,
                     calibration_store=calibration_store,
                     experiment_manager=experiment_manager,
                     drivers_by_name=drivers_by_name,
