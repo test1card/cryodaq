@@ -7,6 +7,7 @@ from typing import Any
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -22,7 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.user_preferences import UserPreferences, suggest_experiment_name
 from cryodaq.drivers.base import Reading
+from cryodaq.paths import get_data_dir
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -47,7 +50,9 @@ class ExperimentWorkspace(QWidget):
         self._post_action: Callable[[], None] | None = None
         self._shell_message: Callable[[str, int], None] | None = None
         self._finalize_guard: Callable[[], tuple[bool, str]] | None = None
+        self._preferences = UserPreferences(get_data_dir() / "user_preferences.json")
         self._build_ui()
+        self._apply_preferences()
 
     @property
     def app_mode(self) -> str:
@@ -156,6 +161,16 @@ class ExperimentWorkspace(QWidget):
             )
             self._show_shell_message(self._workspace_status.text())
             return
+
+        # Сохранить данные формы в историю
+        self._preferences.save_last_experiment(
+            template_id=str(payload.get("template_id", "")),
+            operator=operator,
+            sample=self._create_sample_edit.text().strip(),
+            cryostat=self._create_cryostat_edit.text().strip(),
+            description=self._create_description_edit.toPlainText().strip(),
+            custom_fields=payload.get("custom_fields", {}),
+        )
 
         if self.refresh_state():
             self._workspace_status.show_success("Эксперимент создан, карточка открыта.")
@@ -484,6 +499,50 @@ class ExperimentWorkspace(QWidget):
 
         # Push all content to top — empty space goes to bottom
         root.addStretch()
+
+    def _apply_preferences(self) -> None:
+        """Подставить последние значения из истории и настроить autocomplete."""
+        last = self._preferences.get_last_experiment()
+
+        # Pre-fill fields (только если поле пустое)
+        if last.get("operator") and not self._create_operator_edit.text():
+            self._create_operator_edit.setText(last["operator"])
+        if last.get("sample") and not self._create_sample_edit.text():
+            self._create_sample_edit.setText(last["sample"])
+        if last.get("cryostat") and not self._create_cryostat_edit.text():
+            self._create_cryostat_edit.setText(last["cryostat"])
+
+        # QCompleter для текстовых полей
+        def _make_completer(items: list[str]) -> QCompleter:
+            c = QCompleter(items, self)
+            c.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            return c
+
+        self._create_operator_edit.setCompleter(
+            _make_completer(self._preferences.get_history("operator"))
+        )
+        self._create_sample_edit.setCompleter(
+            _make_completer(self._preferences.get_history("sample"))
+        )
+        self._create_cryostat_edit.setCompleter(
+            _make_completer(self._preferences.get_history("cryostat"))
+        )
+
+        # Подключить suggest name при смене шаблона
+        self._create_template_combo.currentIndexChanged.connect(self._suggest_name)
+
+    def _suggest_name(self) -> None:
+        """Предложить имя эксперимента с авто-инкрементом при смене шаблона."""
+        if self._create_title_edit.text().strip():
+            return  # Не перезаписывать если уже введено
+        template = self._create_template_combo.currentData() or {}
+        template_id = str(template.get("id", ""))
+        template_name = str(template.get("name", template_id))
+        if not template_name:
+            return
+        name_map = {template_id: template_name} if template_id else {}
+        suggested = suggest_experiment_name(template_id, [], name_map)
+        self._create_title_edit.setText(suggested)
 
     def _switch_mode(self, mode: str) -> None:
         if mode == self._app_mode:
