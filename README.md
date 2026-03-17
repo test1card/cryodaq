@@ -1,252 +1,259 @@
 # CryoDAQ
 
-Система сбора данных для криогенной лаборатории АКЦ ФИАН (проект «Миллиметрон»).
+## Снимок сверки RC (2026-03-16)
 
-Замена LabVIEW: полностью на Python 3.12+, asyncio, PySide6.
+- Источник истины по продуктовой модели: один эксперимент равен одной experiment card, и во время активного эксперимента открыта ровно одна карточка.
+- Основной операторский workflow различает режимы `Эксперимент` и `Отладка`; в `Отладке` не должны появляться архивные карточки и автоматические отчёты по эксперименту.
+- Целевой внешний отчётный контракт в текущем коде: `report_raw.pdf` и `report_editable.docx`.
+- Dual-channel Keithley (`smua`, `smub`, `smua + smub`) остаётся актуальной моделью. Старые ожидания про disable/hide/remove `smub` устарели.
+- Calibration RC contour уже включает `.330` / `.340`, task-level multi-zone Chebyshev FIT и runtime apply с global/per-channel policy; оставшиеся пробелы относятся к lab verification и последующему operator polish.
 
-## Архитектура
+CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Ветка `CRYODAQ-CODEX` отражает текущее release-candidate состояние с уже реализованными experiment/report/archive/operator-log/calibration/housekeeping/tray workflow.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                           cryodaq-engine                                 │
-│                                                                          │
-│  LakeShore 218S ×3 ──┐                                                  │
-│  (GPIB, 24 канала)    │                                                  │
-│  Keithley 2604B ×1 ───┤──► Scheduler ──► DataBroker ──► SQLiteWriter    │
-│  (USB-TMC, smua (smub planned)) │    (backoff)  │               ──► ZMQPublisher  │
-│  Thyracont VSP63D ×1 ─┘              │               ──► AlarmEngine   │
-│  (RS-232, вакуум)                     │               ──► PluginPipeline│
-│                                       │                                  │
-│                                       └──► SafetyBroker ──► SafetyManager│
-│                                            (fail-on-silence)   (SAFE_OFF │
-│                                                                 → READY  │
-│  ZMQCommandServer ◄──── GUI команды ◄──── SafetyManager        → RUNNING│
-│  (REP :5556)           (start/stop)       (единая точка        → FAULT) │
-│                                            управления)                   │
-│  InterlockEngine ──────► SafetyManager (делегирование действий)          │
-└──────────────────────────────────────────────────────────────────────────┘
-          │ ZMQ PUB/SUB (msgpack, :5555)
-          ▼
-┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
-│  cryodaq (лаунчер)   │  │  cryodaq-gui         │  │ web-дашборд      │
-│  Engine + GUI + tray  │  │  (PySide6)           │  │ (FastAPI + WS)   │
-│                      │  │                      │  │                  │
-│  8 вкладок:          │  │  Температуры (24ch)  │  │ Chart.js графики │
-│  Температуры         │  │  Keithley (smua/smub)│  │ GET /status      │
-│  Keithley (контроль) │  │  Давление (лог.)     │  │ GET /history     │
-│  Давление            │  │  Аналитика (R, ETA)  │  │ WebSocket /ws    │
-│  Аналитика           │  │  Теплопроводность    │  │ Тёмная тема      │
-│  Теплопроводность    │  │  Автоизмерение       │  │ Алармы, приборы  │
-│  Автоизмерение       │  │  Алармы              │  │                  │
-│  Алармы              │  │  Статус приборов     │  │                  │
-│  Статус приборов     │  │                      │  │                  │
-└──────────────────────┘  └──────────────────────┘  └──────────────────┘
-```
+## Текущая форма системы
 
-## Система безопасности
+- `cryodaq-engine` — headless runtime-процесс. Он опрашивает приборы, проверяет safety/alarm/interlock-логику, пишет данные и обслуживает GUI-команды.
+- `cryodaq-gui` — отдельный настольный клиент. Его можно перезапускать без остановки сбора данных.
+- `cryodaq` — операторский launcher для Windows.
+- `cryodaq.web.server:app` — опциональный web-доступ для мониторинга.
 
-**Безопасное состояние (нагреватель ВЫКЛЮЧЕН) — это DEFAULT.**
+## GUI
 
-SafetyManager — единая точка управления источником тока:
-- `SAFE_OFF` → `READY` → `RUNNING` → `FAULT_LATCHED` → восстановление
-- Нет данных 10 секунд → авария + аварийное отключение (fail-on-silence)
-- Двойная защита: SafetyManager (Python) + TSP watchdog (аппаратный, 30с)
-- Восстановление: подтверждение с причиной + 60с ожидание + проверка предусловий
+`MainWindow` сейчас содержит 10 операторских вкладок:
 
-## Быстрый старт
+1. `Обзор`
+2. `Keithley 2604B`
+3. `Аналитика`
+4. `Теплопроводность`
+5. `Автоизмерение`
+6. `Алармы`
+7. `Служебный лог`
+8. `Архив`
+9. `Калибровка`
+10. `Приборы`
+
+Также в окне есть:
+
+- меню `Файл` с экспортом CSV / HDF5 / Excel
+- меню `Эксперимент` со стартом и завершением эксперимента
+- меню `Настройки` с редактором каналов и настройками подключений приборов
+- строка состояния с соединением, uptime и скоростью потока данных
+- системный tray со статусами `healthy / warning / fault`
+
+Tray не показывает `healthy`, если у GUI нет достаточной backend-truth информации. `fault` выставляется при unresolved alarms или safety-state `fault` / `fault_latched`.
+
+## Реализованные workflow-блоки
+
+- safety/alarm pipeline с acknowledge/clear publish path
+- backend-driven GUI для safety/alarm/status
+- dual-channel Keithley 2604B runtime для `smua`, `smub` и `smua + smub`
+- журнал оператора в SQLite с GUI и command access
+- experiment templates, lifecycle metadata и artifact folders
+- шаблонно-управляемая генерация отчётов
+- архив экспериментов с просмотром артефактов и повторной генерацией отчёта
+- housekeeping с conservative adaptive throttle и retention/compression policy
+- calibration backend:
+  - LakeShore raw/SRDG acquisition
+  - calibration sessions
+  - multi-zone Chebyshev fit
+  - `.330` / `.340` / JSON / CSV import/export
+- calibration GUI для capture / fit / export
+
+## Установка
+
+### Требования
+
+- Windows 10/11 или Linux
+- Python `>=3.12`
+- Git
+- VISA backend / драйверы, необходимые для фактического набора приборов
+
+### Установка Python-пакета
 
 ```bash
-# Установка (или запустите install.bat на Windows)
-git clone https://github.com/test1card/cryodaq.git
-cd cryodaq
 pip install -e ".[dev,web]"
-
-# Запуск для оператора (engine + GUI в одном окне, иконка в трее)
-cryodaq
-
-# Или по отдельности:
-cryodaq-engine --mock            # engine с имитацией 5 приборов
-cryodaq-gui                      # GUI (в другом терминале)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # web
-
-# Тесты
-cryodaq-cooldown build --data cooldown_v5/ --output model/  # модель cooldown
-pytest tests/ -v                 # 236 тестов
-ruff check src/ tests/           # линтинг
 ```
 
-## Развёртывание на лабораторном ПК
+Минимальная runtime-установка без dev/web extras:
 
 ```bash
-# 1. Клонировать и установить
-git clone https://github.com/test1card/cryodaq.git
-cd cryodaq
-install.bat                      # или: pip install -e ".[dev,web]"
-
-# 2. Настроить приборы (адреса COM/GPIB/USB)
-copy config\instruments.local.yaml.example config\instruments.local.yaml
-# Отредактировать instruments.local.yaml
-
-# 3. Настроить Telegram (опционально)
-copy config\notifications.local.yaml.example config\notifications.local.yaml
-# Указать bot_token и chat_id
-
-# 4. Запустить
-cryodaq                          # или дважды кликнуть по ярлыку CryoDAQ
+pip install -e .
 ```
 
-Подробнее: [docs/deployment.md](docs/deployment.md) | [docs/operator_manual.md](docs/operator_manual.md)
+Если нужен только web dashboard, используйте:
 
-## Приборы
+```bash
+pip install -e ".[web]"
+```
 
-| Прибор | Интерфейс | Каналы | Описание |
-|--------|-----------|--------|----------|
-| LakeShore 218S ×3 | GPIB | 24 температуры (K) | Кремниевые диоды DT-670B1-CU |
-| Keithley 2604B ×1 | USB-TMC | V, I, R, P (smua (smub planned)) | TSP/Lua, P=const, watchdog 30s |
-| Thyracont VSP63D ×1 | RS-232 | давление (мбар) | Протокол MV00, 1e-6…1e3 мбар |
+Поддерживаемый локальный dev/test workflow предполагает установку пакета из корня репозитория в активное окружение. Запуск `pytest` по произвольной распакованной копии исходников без `pip install -e ...` не считается поддерживаемым сценарием.
 
-## Функции GUI (7 вкладок)
+Ключевые runtime-зависимости из `pyproject.toml`:
 
-| Вкладка | Описание |
-|---------|----------|
-| **Обзор** | Домашняя: строка состояния (safety/аптайм/алармы/Keithley/cooldown/диск), 24 карточки температур с трендами (▲▼=), график ([1ч/6ч/24ч], лог/лин, 📷PNG/📊CSV), полоса давления, полоса Keithley (скрыта при SAFE_OFF) |
-| Keithley | smua/smub: 4 графика (V/I/R/P) + управление (P, V, I, старт/стоп/аварийное откл.) |
-| Аналитика | R_thermal (К/Вт) + прогноз охлаждения: ETA ±CI, progress bar, фаза, пунктир траектории с CI-band, автодетекция cooldown |
-| Теплопроводность | Выбор цепочки датчиков → R, G, T∞ прогноз, «Стабильно» индикатор |
-| Автоизмерение | Автоматический развёрт по мощности: P₁→P₂→…→Pₙ, стабилизация, CSV+PNG |
-| Алармы | Таблица тревог по severity, подтверждение оператором |
-| Статус приборов | Карточки: подключён/отключён, счётчик показаний/ошибок |
+- `PySide6`
+- `pyqtgraph`
+- `pyvisa`
+- `pyserial-asyncio`
+- `pyzmq`
+- `python-docx`
+- `scipy`
+- `matplotlib`
+- `openpyxl`
 
-**Меню:** Файл (экспорт CSV / HDF5 / Excel) | Эксперимент (начать/остановить) | Настройки (редактор каналов, подключение приборов)
+## Запуск
 
-## Telegram-бот
+Рекомендуемый ручной порядок запуска:
 
-| Команда | Описание |
-|---------|----------|
-| /status | Аптайм, приборы, активные тревоги |
-| /temps | Таблица всех температур |
-| /pressure | Уровень вакуума |
-| /keithley | V, I, R, P по каналам |
-| /alarms | Активные тревоги |
-| /help | Список команд |
+```bash
+cryodaq-engine
+cryodaq-gui
+```
 
-Периодические отчёты: PNG-график + текстовая сводка каждые 30 мин.
+Дополнительные пути:
+
+```bash
+cryodaq
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+```
+
+Команда `uvicorn cryodaq.web.server:app` относится к optional web-path и требует установленного extra `web`
+(или полного dev/test install path `.[dev,web]`).
+
+Mock mode:
+
+```bash
+cryodaq-engine --mock
+```
+
+## Конфигурация
+
+Основные конфигурационные файлы:
+
+- `config/instruments.yaml`
+- `config/instruments.local.yaml`
+- `config/alarms.yaml`
+- `config/interlocks.yaml`
+- `config/notifications.yaml`
+- `config/housekeeping.yaml`
+- `config/experiment_templates/*.yaml`
+
+`*.local.yaml` переопределяют базовые файлы и предназначены для machine-specific настроек.
+
+## Эксперименты и артефакты
+
+В текущем RC доступны шаблоны:
+
+- `config/experiment_templates/thermal_conductivity.yaml`
+- `config/experiment_templates/cooldown_test.yaml`
+- `config/experiment_templates/calibration.yaml`
+- `config/experiment_templates/debug_checkout.yaml`
+- `config/experiment_templates/custom.yaml`
+
+Артефакты эксперимента:
+
+```text
+data/experiments/<experiment_id>/
+  metadata.json
+  reports/
+    report_editable.docx
+    report_raw.pdf      # optional, best effort if soffice/libreoffice is available
+    report_raw.docx
+    assets/
+```
+
+Артефакты калибровки:
+
+```text
+data/calibration/sessions/<session_id>/
+data/calibration/curves/<sensor_id>/<curve_id>/
+```
+
+`metadata.json` хранит payload эксперимента, payload шаблона, `data_range` и `artifacts`.
+
+## Отчёты
+
+Подсистема отчётов находится в `src/cryodaq/reporting/` и использует template-defined sections.
+Основой для генерации отчёта служат архивная карточка эксперимента и её артефакты; для части данных текущий contour всё ещё может использовать fallback-чтение из SQLite.
+
+Реализованные section renderers:
+
+- `title_page`
+- `cooldown_section`
+- `thermal_section`
+- `pressure_section`
+- `operator_log_section`
+- `alarms_section`
+- `config_section`
+
+Гарантированный артефакт:
+
+- `report_editable.docx`
+
+Опциональный артефакт:
+
+- `report_raw.pdf`
+
+PDF-конвертация остаётся best-effort и зависит от наличия внешнего `soffice` / `LibreOffice`.
+
+## Keithley TSP
+
+Актуальная runtime-опора:
+
+- `tsp/p_const.lua`
+
+В дереве также присутствует:
+
+- `tsp/p_const_single.lua`
+
+`p_const_single.lua` остаётся legacy/fallback-артефактом, но текущая архитектурная опора для runtime — `p_const.lua`.
 
 ## Структура проекта
 
-```
+```text
 src/cryodaq/
-├── engine.py                    — engine (headless)
-├── launcher.py                  — оператор-лаунчер (engine + GUI + tray)
-├── core/
-│   ├── safety_manager.py        — SafetyManager: 6 состояний, fail-on-silence
-│   ├── safety_broker.py         — SafetyBroker: выделенный канал безопасности
-│   ├── broker.py                — DataBroker: fan-out pub/sub
-│   ├── scheduler.py             — планировщик опроса приборов
-│   ├── alarm.py                 — AlarmEngine: пороги + гистерезис
-│   ├── interlock.py             — InterlockEngine → SafetyManager
-│   ├── experiment.py            — ExperimentManager
-│   ├── zmq_bridge.py            — ZMQ PUB/SUB + CommandServer
-│   ├── channel_manager.py       — имена и видимость каналов
-│   └── disk_monitor.py          — мониторинг диска (shutil.disk_usage)
-├── drivers/
-│   ├── base.py                  — Reading + InstrumentDriver ABC
-│   ├── instruments/
-│   │   ├── lakeshore_218s.py    — LakeShore 218S (SCPI)
-│   │   ├── keithley_2604b.py    — Keithley 2604B (TSP/Lua)
-│   │   └── thyracont_vsp63d.py  — Thyracont VSP63D (RS-232)
-│   └── transport/
-│       ├── gpib.py              — async pyvisa (GPIB)
-│       ├── usbtmc.py            — async pyvisa (USB-TMC)
-│       └── serial.py            — async pyserial (RS-232)
-├── storage/
-│   ├── sqlite_writer.py         — SQLite WAL, daily rotation
-│   ├── hdf5_export.py           — экспорт в HDF5
-│   ├── csv_export.py            — экспорт в CSV
-│   ├── xlsx_export.py           — экспорт в Excel (openpyxl)
-│   └── replay.py                — воспроизведение данных
-├── analytics/
-│   ├── base_plugin.py           — AnalyticsPlugin ABC
-│   ├── plugin_loader.py         — PluginPipeline (hot-reload)
-│   ├── steady_state.py          — T∞ прогноз (scipy curve_fit)
-│   ├── cooldown_predictor.py    — ensemble predictor (dual-channel, ~900 строк)
-│   ├── cooldown_service.py      — CooldownService (автодетекция, predict, auto-ingest)
-│   └── calibration.py           — CalibrationStore (заглушка)
-├── gui/
-│   ├── app.py                   — standalone GUI
-│   ├── main_window.py           — MainWindow (7 вкладок, 3 меню)
-│   └── widgets/
-│       ├── overview_panel.py    — домашняя вкладка «Обзор» (объединение T + P + статус)
-│       ├── keithley_panel.py    — smua (smub planned) + управление
-│       ├── analytics_panel.py   — R_thermal + ETA + cooldown predictor
-│       ├── conductivity_panel.py — цепочка R/G + T∞
-│       ├── autosweep_panel.py   — автоизмерение по мощности
-│       ├── alarm_panel.py       — таблица тревог
-│       ├── instrument_status.py — статус приборов
-│       ├── channel_editor.py    — редактор каналов
-│       └── connection_settings.py — подключение приборов
-├── web/
-│   ├── server.py                — FastAPI + WebSocket + /history
-│   └── static/index.html        — Chart.js дашборд
-├── notifications/
-│   ├── telegram.py              — Telegram алармы
-│   ├── telegram_commands.py     — Telegram бот-команды
-│   └── periodic_report.py       — отчёты с графиками
-└── tools/
-    └── cooldown_cli.py          — CLI: cryodaq-cooldown build/predict/validate
-
-plugins/                         — hot-reloadable аналитика
-├── thermal_calculator.py        — R_thermal = ΔT / P
-└── cooldown_estimator.py        — ETA охлаждения
-
+  analytics/
+  core/
+  drivers/
+  gui/
+  reporting/
+  storage/
+  web/
+tsp/
+tests/
 config/
-├── instruments.yaml             — приборы (шаблон)
-├── interlocks.yaml              — аварийные блокировки
-├── alarms.yaml                  — пороги тревог
-├── safety.yaml                  — SafetyManager
-├── channels.yaml                — имена и видимость каналов
-├── notifications.yaml           — Telegram (шаблон, без токена!)
-├── cooldown.yaml                — CooldownService (каналы, детекция, auto-ingest)
-├── *.local.yaml.example         — шаблоны для машино-специфичных настроек
-└── *.local.yaml                 — машино-специфичные (gitignored)
-
-docs/
-├── architecture.md              — архитектура системы
-├── operator_manual.md           — руководство оператора (русский)
-└── deployment.md                — развёртывание на новом ПК
-
-tests/                           — 217 тестов (25 файлов)
-├── core/                        — broker, alarm, interlock, safety, scheduler, zmq, experiment, persistence, disk_monitor
-├── drivers/                     — lakeshore, keithley, thyracont
-├── analytics/                   — thermal, cooldown_estimator, cooldown_predictor, cooldown_service, plugins
-├── storage/                     — hdf5, csv, xlsx, replay
-└── notifications/               — telegram
 ```
 
-## Ключевые правила
+Ключевые файлы для операторских workflow:
 
-- **SAFE_OFF — это DEFAULT.** Нагреватель включён только при непрерывном подтверждении здоровья.
-- Engine работает неделями. Нет утечек памяти. Нет неограниченных буферов.
-- GUI — отдельный процесс. Можно закрыть/открыть без потери данных.
-- Keithley TSP: watchdog → source OFF. Нет `__del__`.
-- Никакого блокирующего I/O в engine.
-- Интерфейс оператора на русском языке.
-- Telegram токен НИКОГДА не коммитится.
+- `src/cryodaq/gui/main_window.py`
+- `src/cryodaq/gui/tray_status.py`
+- `src/cryodaq/gui/widgets/archive_panel.py`
+- `src/cryodaq/gui/widgets/operator_log_panel.py`
+- `src/cryodaq/gui/widgets/calibration_panel.py`
+- `src/cryodaq/core/experiment.py`
+- `src/cryodaq/reporting/generator.py`
 
-## Статус проекта
+## Тесты
 
-| Метрика | Значение |
-|---------|----------|
-| Python-файлов | **96** |
-| Строк Python | **22 700+** |
-| Тестов | **236** (все проходят) |
-| Приборов (mock) | **5** (3× LakeShore + Keithley + Thyracont) |
-| Каналов данных | **29** (24 температуры + 4 Keithley + 1 давление) |
-| GUI вкладок | **7** (была 8 — Температуры+Давление объединены в «Обзор») |
-| Telegram команд | **6** |
-| Коммитов | **42** |
+Референсная regression matrix:
 
-## Стандарты
+```bash
+python -m pytest tests/core -q
+python -m pytest tests/storage -q
+python -m pytest tests/drivers -q
+python -m pytest tests/analytics -q
+python -m pytest tests/gui -q
+python -m pytest tests/reporting -q
+```
 
-- Калибровка по ГОСТ Р 8.879-2014
-- Кремниевые диоды DT-670B1-CU, индивидуальные кривые на каждый датчик
+Запускайте эти команды из корня репозитория после `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke set не входит и требует отдельного `.[web]` install path.
+
+## Известные ограничения
+
+- Runtime calibration policy реализована: глобальный режим `on/off` и per-channel policy переключают `KRDG` / `SRDG + curve`. При отсутствии curve, assignment, `SRDG` или ошибке вычисления backend консервативно возвращается к `KRDG`; поведение на живом LakeShore требует отдельной lab verification.
+- PDF для отчётов не гарантирован. Гарантированный результат — DOCX.
+- На новых версиях Python сохраняются deprecation warnings, связанные с `asyncio.WindowsSelectorEventLoopPolicy`.
+
+## Статус
+
+Этот README намеренно ограничен только подтверждённым текущим поведением и актуальными caveat-ограничениями RC-ветки.

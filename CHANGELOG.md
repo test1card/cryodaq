@@ -7,6 +7,47 @@
 
 ---
 
+## [Unreleased] — 2026-03-16
+
+### Сверка docs / spec
+
+- Root task/spec/docs сверены с текущим кодом и актуальными продуктовыми решениями.
+- Устаревшие ожидания про отключение, скрытие или удаление `smub` явно выведены из актуального контракта; dual-channel Keithley остаётся рабочей моделью.
+- Документация по экспериментам переписана вокруг experiment-card lifecycle: одна активная карточка, закрытие по завершении, архивирование при закрытии, новый эксперимент создаёт новую карточку.
+- Спецификация главной страницы теперь явно требует режимы `Эксперимент / Отладка`; `Отладка` не должна создавать архивные записи и автоматические отчёты по эксперименту.
+- Контракт и реализация внешних отчётов синхронизированы на `report_raw.pdf` и `report_editable.docx`, при этом `report_raw.docx` остаётся machine-generated intermediate source для PDF-конвертации.
+- Документация по calibration теперь отражает реализованный RC contour: `.330` / `.340`, task-level Chebyshev FIT, runtime apply и per-channel policy присутствуют; оставшаяся работа относится к follow-on rollout/polish, а не к отсутствующему core backend.
+
+### Известные caveat'ы после сверки
+
+- Best-effort PDF-конвертация по-прежнему зависит от внешнего `soffice` / `LibreOffice`.
+- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
+
+---
+
+## [0.11.0-rc1] — 2026-03-16
+
+### RC stabilization
+
+- **Operator workflow stack completed** — operator log, experiment templates/metadata, report generator MVP, archive browser, calibration backend и calibration GUI интегрированы и покрыты тестами
+- **Keithley dual-channel model** — backend, driver и GUI поддерживают `smua`, `smub` и одновременную работу `smua+smub` на одном 2604B
+- **GUI contract cleanup** — путь acknowledge для alarms опубликован end-to-end, lowercase safety-state contract исправлен, backend-driven Keithley channel state используется как источник истины для GUI
+- **Housekeeping** — добавлены conservative adaptive throttle для non-safety archival writes и retention/compression для старых unlinked daily DB
+- **GUI shell/UX passes** — выровнены shared widgets, согласованность вкладок, tray status, archive/report/log и единая обратная связь по статусам и ошибкам
+- **Calibration** — реализованы LakeShore SRDG/raw acquisition, calibration session artifacts, multi-zone Chebyshev fit, `.330` / `.340` / JSON / CSV import/export и calibration GUI workflow
+
+### Известные ограничения
+
+- Runtime calibration использует global on/off и per-channel policy с консервативным fallback к `KRDG`.
+- PDF для отчётов остаётся best-effort и зависит от внешнего инструмента; гарантированным артефактом остаётся DOCX.
+- Python 3.14+ сейчас продолжает выдавать `WindowsSelectorEventLoopPolicy` deprecation warnings.
+
+### Verification
+
+- Required regression matrix: **326 passed**
+
+---
+
 ## [0.10.0] — 2026-03-15
 
 ### P1 Lab Deployment Fixes (8 defects)
@@ -172,7 +213,7 @@
 
 ### Добавлено
 - **Keithley 2604B driver** — USB-TMC, TSP/Lua supervisor, heartbeat, emergency_off
-- **TSP script** `p_const_single.lua` — P=const feedback loop, watchdog 30с, compliance
+- **TSP script** `p_const.lua` — P=const feedback loop for `smua`/`smub`, watchdog 30с, compliance
 - **Вкладка Keithley** — smua/smub: V/I/R/P графики + управление
 - **PluginPipeline** — hot-reload .py из plugins/, watchdog filesystem events, error isolation
 - **ThermalCalculator plugin** — R_thermal = (T_hot - T_cold) / P

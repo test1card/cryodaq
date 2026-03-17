@@ -1,8 +1,9 @@
 """Главное окно CryoDAQ GUI.
 
-QMainWindow с вкладками: Обзор, Keithley, Аналитика, Теплопроводность,
-Автоизмерение, Алармы, Статус приборов.
-Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп).
+QMainWindow с операторскими вкладками:
+Обзор, Keithley, Аналитика, Теплопроводность, Автоизмерение, Алармы,
+Служебный лог, Архив, Калибровка, Статус приборов.
+Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп), Настройки.
 Статусная строка: подключение, uptime, скорость данных.
 """
 
@@ -31,13 +32,18 @@ from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
+from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.autosweep_panel import AutoSweepPanel
+from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.connection_settings import ConnectionSettingsDialog
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
+from cryodaq.gui.widgets.common import apply_status_label_style
+from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
+from cryodaq.gui.tray_status import TrayController, resolve_tray_status
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,9 @@ class MainWindow(QMainWindow):
         self._rate_count: int = 0
         self._last_rate_time: float = time.monotonic()
         self._last_reading_time: float = 0.0
+        self._last_safety_state: str | None = None
+        self._alarm_count: int = 0
+        self._connected = False
 
         self.setWindowTitle("CryoDAQ — Система сбора данных")
         self.setMinimumSize(1280, 800)
@@ -69,6 +78,15 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_status_bar()
+        self._tray_controller = TrayController(self)
+        self._refresh_tray_status()
+        self._overview_panel._experiment_workspace.set_post_action_callback(
+            self._refresh_experiment_dependent_views
+        )
+        self._overview_panel._experiment_workspace.set_shell_message_callback(self._show_shell_message)
+        self._overview_panel._experiment_workspace.set_finalize_guard(self._check_finalize_guard)
+        self._overview_panel.refresh_experiment_workspace()
+        self._sync_experiment_actions()
 
         # ZMQ callback → сигнал → слот (потокобезопасно)
         self._subscriber._callback = self._on_zmq_reading
@@ -87,6 +105,9 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         """Создать вкладки и виджеты."""
         self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.setUsesScrollButtons(True)
+        self._tabs.setMovable(False)
         self.setCentralWidget(self._tabs)
 
         self._channel_mgr = get_channel_manager()
@@ -97,7 +118,7 @@ class MainWindow(QMainWindow):
 
         # Вкладка «Keithley»
         self._keithley_panel = KeithleyPanel()
-        self._tabs.addTab(self._keithley_panel, "Keithley")
+        self._tabs.addTab(self._keithley_panel, "Keithley 2604B")
 
         # Вкладка «Аналитика»
         self._analytics_panel = AnalyticsPanel()
@@ -114,10 +135,16 @@ class MainWindow(QMainWindow):
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
         self._tabs.addTab(self._alarm_panel, "Алармы")
+        self._operator_log_panel = OperatorLogPanel()
+        self._tabs.addTab(self._operator_log_panel, "Служебный лог")
+        self._archive_panel = ArchivePanel()
+        self._tabs.addTab(self._archive_panel, "Архив")
+        self._calibration_panel = CalibrationPanel()
+        self._tabs.addTab(self._calibration_panel, "Калибровка")
 
         # Вкладка «Статус приборов»
         self._instrument_panel = InstrumentStatusPanel()
-        self._tabs.addTab(self._instrument_panel, "Статус приборов")
+        self._tabs.addTab(self._instrument_panel, "Приборы")
 
     def _build_menu(self) -> None:
         """Создать меню приложения."""
@@ -154,7 +181,7 @@ class MainWindow(QMainWindow):
 
         self._stop_action = QAction("Остановить запись", self)
         self._stop_action.setEnabled(False)
-        self._stop_action.triggered.connect(self._on_stop_experiment)
+        self._stop_action.triggered.connect(self._on_finalize_experiment)
         exp_menu.addAction(self._stop_action)
 
         # Настройки
@@ -173,14 +200,17 @@ class MainWindow(QMainWindow):
         status_bar: QStatusBar = self.statusBar()
 
         self._conn_label = QLabel("⬤ Отключено")
-        self._conn_label.setStyleSheet("color: #FF4136; font-weight: bold;")
+        apply_status_label_style(self._conn_label, "error", bold=True)
         status_bar.addWidget(self._conn_label)
 
-        self._uptime_label = QLabel("Uptime: 00:00:00")
+        self._uptime_label = QLabel("Аптайм: 00:00:00")
         status_bar.addPermanentWidget(self._uptime_label)
 
         self._rate_label = QLabel("0 изм/с")
         status_bar.addPermanentWidget(self._rate_label)
+
+    def _show_shell_message(self, text: str, timeout_ms: int = 5000) -> None:
+        self.statusBar().showMessage(text, timeout_ms)
 
     # ------------------------------------------------------------------
     # ZMQ → Qt маршрутизация данных
@@ -207,6 +237,10 @@ class MainWindow(QMainWindow):
             self._conductivity_panel.on_reading(reading)
             self._autosweep_panel.on_reading(reading)
 
+        # Calibration live context must not depend on localized channel prefixes.
+        if reading.unit == "K":
+            self._calibration_panel.on_reading(reading)
+
         # Keithley каналы → KeithleyPanel + ConductivityPanel + AutoSweep (power)
         if "/smua/" in channel or "/smub/" in channel:
             self._keithley_panel.on_reading(reading)
@@ -217,6 +251,14 @@ class MainWindow(QMainWindow):
         # Аналитика → AnalyticsPanel
         if channel.startswith("analytics/"):
             self._analytics_panel.on_reading(reading)
+            self._operator_log_panel.on_reading(reading)
+            if channel == "analytics/safety_state":
+                state_name = reading.metadata.get("state")
+                self._last_safety_state = str(state_name) if state_name is not None else None
+                self._refresh_tray_status()
+            elif channel == "analytics/alarm_count":
+                self._alarm_count = max(0, int(reading.value))
+                self._refresh_tray_status()
 
         # Алармы (все каналы — AlarmPanel оценивает сам)
         self._alarm_panel.on_reading(reading)
@@ -233,6 +275,7 @@ class MainWindow(QMainWindow):
         """Обновить метки подключения, uptime и скорости."""
         # Подключение
         connected = (time.monotonic() - self._last_reading_time) < 3.0
+        self._connected = connected
         if connected:
             elapsed = time.monotonic() - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
@@ -240,20 +283,29 @@ class MainWindow(QMainWindow):
             self._last_rate_time = time.monotonic()
 
             self._conn_label.setText("⬤ Подключено")
-            self._conn_label.setStyleSheet("color: #2ECC40; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "success", bold=True)
             self._rate_label.setText(f"{rate:.0f} изм/с")
         elif self._reading_count > 0:
             self._conn_label.setText("⬤ Нет данных")
-            self._conn_label.setStyleSheet("color: #FFDC00; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "warning", bold=True)
         else:
             self._conn_label.setText("⬤ Отключено")
-            self._conn_label.setStyleSheet("color: #FF4136; font-weight: bold;")
+            apply_status_label_style(self._conn_label, "error", bold=True)
 
         # Uptime
         uptime_s = int(time.monotonic() - self._start_time)
         hours, rem = divmod(uptime_s, 3600)
         mins, secs = divmod(rem, 60)
-        self._uptime_label.setText(f"Uptime: {hours:02d}:{mins:02d}:{secs:02d}")
+        self._uptime_label.setText(f"Аптайм: {hours:02d}:{mins:02d}:{secs:02d}")
+        self._refresh_tray_status()
+
+    def _refresh_tray_status(self) -> None:
+        status = resolve_tray_status(
+            connected=self._connected,
+            safety_state=self._last_safety_state,
+            alarm_count=self._alarm_count,
+        )
+        self._tray_controller.update(status)
 
     # ------------------------------------------------------------------
     # Обработчики меню
@@ -308,59 +360,54 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_start_experiment(self) -> None:
-        from PySide6.QtWidgets import (
-            QDialog,
-            QDialogButtonBox,
-            QFormLayout,
-            QLineEdit,
-            QTextEdit,
-        )
-
-        from cryodaq.gui.zmq_client import send_command
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Начать эксперимент")
-        layout = QFormLayout(dialog)
-
-        name_edit = QLineEdit()
-        operator_edit = QLineEdit()
-        sample_edit = QLineEdit()
-        desc_edit = QTextEdit()
-        desc_edit.setMaximumHeight(80)
-
-        layout.addRow("Название:", name_edit)
-        layout.addRow("Оператор:", operator_edit)
-        layout.addRow("Образец:", sample_edit)
-        layout.addRow("Описание:", desc_edit)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-
-        if dialog.exec() == QDialog.Accepted:
-            result = send_command({
-                "cmd": "experiment_start",
-                "name": name_edit.text(),
-                "operator": operator_edit.text(),
-                "sample": sample_edit.text(),
-                "description": desc_edit.toPlainText(),
-            })
-            if result.get("ok"):
-                self._start_action.setEnabled(False)
-                self._stop_action.setEnabled(True)
-            else:
-                QMessageBox.warning(self, "Ошибка", result.get("error", ""))
+        self._tabs.setCurrentWidget(self._overview_panel)
+        if not self._overview_panel.refresh_experiment_workspace():
+            return
+        workspace = self._overview_panel._experiment_workspace
+        if workspace.app_mode != "experiment":
+            self._show_shell_message("Создание эксперимента доступно только в режиме «Эксперимент».")
+            return
+        if workspace.active_experiment is not None:
+            self._show_shell_message("Нельзя открыть новый эксперимент поверх активной карточки.")
+            self._overview_panel.focus_experiment_finalize()
+            return
+        self._overview_panel.focus_experiment_workspace()
+        self._show_shell_message("Заполните карточку нового эксперимента на главной странице.")
 
     @Slot()
-    def _on_stop_experiment(self) -> None:
-        from cryodaq.gui.zmq_client import send_command
+    def _on_finalize_experiment(self) -> None:
+        self._tabs.setCurrentWidget(self._overview_panel)
+        if not self._overview_panel.refresh_experiment_workspace():
+            return
+        workspace = self._overview_panel._experiment_workspace
+        if workspace.active_experiment is None:
+            self._show_shell_message("Нет активного эксперимента.")
+            self._sync_experiment_actions()
+            return
+        allowed, message = self._check_finalize_guard()
+        if not allowed:
+            self._show_shell_message(message)
+            return
+        self._overview_panel.focus_experiment_finalize()
+        self._show_shell_message("Завершите карточку эксперимента на главной странице.")
 
-        result = send_command({"cmd": "experiment_stop"})
-        if not result.get("ok"):
-            logger.warning("Experiment stop failed: %s", result.get("error"))
-        self._start_action.setEnabled(True)
-        self._stop_action.setEnabled(False)
+    def _refresh_experiment_dependent_views(self) -> None:
+        self._operator_log_panel.refresh_entries()
+        self._archive_panel.refresh_archive()
+        self._overview_panel.refresh_experiment_workspace()
+        self._sync_experiment_actions()
+
+    def _sync_experiment_actions(self) -> None:
+        workspace = self._overview_panel._experiment_workspace
+        is_experiment_mode = workspace.app_mode == "experiment"
+        has_active = workspace.active_experiment is not None
+        self._start_action.setEnabled(is_experiment_mode and not has_active)
+        self._stop_action.setEnabled(is_experiment_mode and has_active)
+
+    def _check_finalize_guard(self) -> tuple[bool, str]:
+        if getattr(self._autosweep_panel, "_running", False):
+            return False, "Нельзя завершить эксперимент, пока активно автоизмерение."
+        return True, ""
 
     @Slot()
     def _on_channel_editor(self) -> None:

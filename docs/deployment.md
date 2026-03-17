@@ -1,155 +1,204 @@
-# Развёртывание CryoDAQ на новом ПК
+# Развёртывание CryoDAQ
 
-Пошаговая инструкция для установки системы на лабораторном компьютере.
+Практическая инструкция для установки CryoDAQ на операторский ПК.
 
 ## 1. Требования
 
-- Windows 10/11 (64-bit)
-- Python 3.12 или новее
-- Git (для клонирования репозитория)
-- Доступ в интернет (для установки зависимостей)
+- Windows 10/11 или Linux
+- Python `>=3.12`
+- Git
+- доступ к интернету для установки Python dependencies
+- установленный VISA backend / драйверы приборов по фактическому стеку
 
-## 2. Установка Python
+Дополнительно, если нужен best-effort PDF export для отчётов:
 
-1. Скачайте Python с https://python.org/downloads/
-2. Запустите установщик
-3. **Обязательно** отметьте галочку **"Add Python to PATH"**
-4. Нажмите **"Install Now"**
-5. Проверьте: откройте командную строку и выполните `python --version`
+- `LibreOffice` / `soffice`
 
-## 3. Установка Git
+## 2. Получение кода
 
-1. Скачайте Git с https://git-scm.com/download/win
-2. Установите с настройками по умолчанию
-
-## 4. Клонирование репозитория
-
-Откройте командную строку и выполните:
-
-```
-cd C:\
+```powershell
 git clone https://github.com/test1card/cryodaq.git
 cd cryodaq
 ```
 
-## 5. Автоматическая установка
+## 3. Установка пакета
 
-Запустите:
-
-```
-install.bat
-```
-
-Скрипт:
-- Проверит версию Python
-- Установит все зависимости
-- Создаст ярлык CryoDAQ на рабочем столе
-
-## 6. Настройка приборов
-
-Скопируйте файл-шаблон:
-
-```
-copy config\instruments.local.yaml.example config\instruments.local.yaml
-```
-
-Откройте `config\instruments.local.yaml` в текстовом редакторе и укажите
-реальные адреса ваших приборов:
-
-- **LakeShore 218S**: GPIB-адрес (например, `GPIB0::12::INSTR`)
-- **Keithley 2604B**: USB-TMC адрес с серийным номером
-- **Thyracont VSP63D**: COM-порт (например, `COM3`)
-
-Как узнать адреса:
-- GPIB: запустите NI MAX (Measurement & Automation Explorer)
-- USB-TMC: посмотрите в Диспетчере устройств → USB Test and Measurement
-- COM-порт: Диспетчер устройств → Порты (COM и LPT)
-
-## 7. Настройка Telegram (опционально)
-
-Если хотите получать уведомления в Telegram:
-
-```
-copy config\notifications.local.yaml.example config\notifications.local.yaml
-```
-
-Отредактируйте `config\notifications.local.yaml`:
-
-1. Создайте бота: напишите @BotFather в Telegram, отправьте `/newbot`
-2. Скопируйте полученный токен в поле `bot_token`
-3. Добавьте бота в нужный чат
-4. Узнайте chat_id: отправьте боту сообщение, откройте
-   `https://api.telegram.org/botВАШ_ТОКЕН/getUpdates` — найдите `chat.id`
-5. Укажите `chat_id` в конфигурации
-
-## 8. Первый запуск
-
-### Вариант А: ярлык на рабочем столе
-
-Дважды кликните по ярлыку **CryoDAQ** на рабочем столе.
-
-Система автоматически:
-1. Запустит engine
-2. Подключится к приборам
-3. Покажет GUI с данными
-
-### Вариант Б: из командной строки
-
-```
-cd C:\cryodaq
-cryodaq-engine         # запуск engine с приборами
-cryodaq-engine --mock  # тестовый запуск без приборов
-```
-
-## 9. Проверка
-
-После запуска убедитесь:
-
-- [ ] В верхней панели — зелёный индикатор «Engine: работает»
-- [ ] Вкладка «Статус приборов» — все кружки зелёные
-- [ ] Вкладка «Температуры» — значения обновляются
-- [ ] Вкладка «Давление» — значение отображается
-- [ ] Нет красных тревог на вкладке «Алармы»
-
-## 10. Обновление
-
-При выходе новой версии:
-
-```
-cd C:\cryodaq
-git pull
+```powershell
 pip install -e ".[dev,web]"
 ```
 
-Локальные файлы конфигурации (`*.local.yaml`) **не затрагиваются** при обновлении.
+Минимальная runtime-установка без dev/web extras:
 
-## Структура конфигурации
-
-```
-config/
-├── instruments.yaml              ← шаблон (не редактировать)
-├── instruments.local.yaml        ← ваши адреса (не в git)
-├── instruments.local.yaml.example ← пример для копирования
-├── alarms.yaml                   ← пороги тревог
-├── interlocks.yaml               ← аварийные блокировки
-├── notifications.yaml            ← шаблон уведомлений
-├── notifications.local.yaml      ← ваш Telegram-токен (не в git)
-└── notifications.local.yaml.example
+```powershell
+pip install -e .
 ```
 
-Правило: `*.local.yaml` имеет приоритет над `*.yaml`.
-Файлы `*.local.yaml` не коммитятся в git — они специфичны для каждого ПК.
+Если нужен только web dashboard, используйте:
 
-## Устранение неполадок
+```powershell
+pip install -e ".[web]"
+```
 
-**Python не найден:**
-Убедитесь, что при установке Python была отмечена галочка "Add to PATH".
-Или добавьте вручную: Параметры → Система → Переменные среды → Path.
+Эта установка подтягивает и GUI dependencies, включая:
 
-**Прибор не подключается:**
-Проверьте адрес в `instruments.local.yaml`. Проверьте кабель.
-Попробуйте NI MAX или Диспетчер устройств.
+- `PySide6`
+- `pyqtgraph`
+- `python-docx`
+- `openpyxl`
+- `scipy`
 
-**Ярлык не работает:**
-Запустите из командной строки: `python -m cryodaq.launcher` —
-увидите сообщение об ошибке.
+Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
+
+## 4. Локальная конфигурация
+
+Создайте machine-specific overrides:
+
+```powershell
+Copy-Item config\instruments.local.yaml.example config\instruments.local.yaml
+Copy-Item config\notifications.local.yaml.example config\notifications.local.yaml
+```
+
+Проверьте и заполните:
+
+- `config/instruments.local.yaml`
+- `config/notifications.local.yaml`
+
+Также в репозитории уже используются:
+
+- `config/alarms.yaml`
+- `config/interlocks.yaml`
+- `config/housekeeping.yaml`
+- `config/experiment_templates/*.yaml`
+
+## 5. Что настроить в instruments.local.yaml
+
+Актуальный стек первой RC-версии:
+
+- три `LakeShore 218S`
+- `Keithley 2604B`
+- опционально вакуумметр
+
+Обратите внимание:
+
+- calibration GUI читает LakeShore channels из `instruments.yaml` / `instruments.local.yaml`
+- допустимы разные shapes channel config, но конфигурация должна оставаться валидным YAML
+- Keithley runtime использует dual-channel model (`smua`, `smub`)
+- Любые старые инструкции про отключение или скрытие `smub` считать устаревшими
+
+## 6. Запуск
+
+Рекомендуемый ручной порядок:
+
+```powershell
+cryodaq-engine
+cryodaq-gui
+```
+
+Для оператора также доступен launcher:
+
+```powershell
+cryodaq
+```
+
+Mock mode:
+
+```powershell
+cryodaq-engine --mock
+```
+
+Optional web dashboard:
+
+```powershell
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+```
+
+Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
+(или полного dev/test install path `.[dev,web]`).
+
+## 7. Проверка после запуска
+
+Проверьте минимум следующее:
+
+- `Обзор` получает свежие данные
+- вкладка `Keithley 2604B` открывается и показывает каналы A/B
+- вкладка `Алармы` не содержит unexpected active alarms
+- вкладка `Служебный лог` может загрузить записи
+- вкладка `Архив` открывается без ошибок
+- вкладка `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
+- tray icon, если системный трей доступен, не показывает healthy без backend truth
+
+Текущая GUI-компоновка содержит 10 вкладок:
+
+- `Обзор`
+- `Keithley 2604B`
+- `Аналитика`
+- `Теплопроводность`
+- `Автоизмерение`
+- `Алармы`
+- `Служебный лог`
+- `Архив`
+- `Калибровка`
+- `Приборы`
+
+## 8. Данные и артефакты
+
+Операторская интерпретация `data/experiments/<experiment_id>/`:
+
+- один каталог соответствует одной experiment card
+- в каждый момент времени должна быть открыта только одна активная experiment card
+- workflow `Отладка` не должен создавать архивные карточки эксперимента
+
+Основные runtime-файлы:
+
+- daily SQLite databases: `data/data_YYYY-MM-DD.db`
+- experiment artifacts: `data/experiments/<experiment_id>/`
+- calibration sessions: `data/calibration/sessions/<session_id>/`
+- calibration curves: `data/calibration/curves/<sensor_id>/<curve_id>/`
+
+Housekeeping:
+
+- compresses only unlinked old daily DBs
+- does not delete experiment-linked DBs
+- does not delete experiment artifact folders
+
+## 9. Отчёты и архив
+
+Целевой внешний отчётный контракт:
+
+- `report_raw.pdf`
+- `report_editable.docx`
+
+
+Генерация отчёта опирается на архивную карточку эксперимента, её артефакты и template-defined sections; для части данных текущий contour всё ещё может использовать fallback-чтение из SQLite.
+
+Гарантированный артефакт:
+
+- `report_editable.docx`
+
+Опциональный артефакт:
+
+- `report_raw.pdf`
+
+PDF generation must not be treated as guaranteed deployment criterion.
+
+## 10. Известные caveat'ы RC
+
+- Runtime apply калибровки доступен через global on/off и per-channel policy; отсутствие curve, assignment или сбой вычисления нужно трактовать как консервативный fallback к `KRDG` с явным логированием.
+- Поведение на живом LakeShore требует отдельной lab verification и не считается автоматически подтверждённым одним только unit/mock coverage.
+- PDF-артефакт остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
+- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
+
+## 11. Smoke-test commands
+
+```powershell
+python -m pytest tests/core -q
+python -m pytest tests/storage -q
+python -m pytest tests/drivers -q
+python -m pytest tests/analytics -q
+python -m pytest tests/gui -q
+python -m pytest tests/reporting -q
+```
+
+Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
+
+Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили на RC branch до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.

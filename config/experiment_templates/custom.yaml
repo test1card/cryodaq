@@ -1,0 +1,14 @@
+id: custom
+name: Custom
+sections:
+  - setup
+  - notes
+  - operator_log
+report_enabled: true
+report_sections:
+  - title_page
+  - operator_log_section
+  - config_section
+custom_fields:
+  - id: objective
+    label: Objective

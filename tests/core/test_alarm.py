@@ -93,7 +93,7 @@ async def test_active_to_acknowledged() -> None:
         await _publish_and_wait(broker, "sensor/temp", 110.0)
         assert engine.get_state()["test_alarm"] == AlarmState.ACTIVE
 
-        engine.acknowledge("test_alarm")
+        await engine.acknowledge("test_alarm")
         assert engine.get_state()["test_alarm"] == AlarmState.ACKNOWLEDGED
     finally:
         await engine.stop()
@@ -133,7 +133,7 @@ async def test_acknowledged_cleared() -> None:
     )
     try:
         await _publish_and_wait(broker, "sensor/temp", 110.0)
-        engine.acknowledge("test_alarm")
+        await engine.acknowledge("test_alarm")
         assert engine.get_state()["test_alarm"] == AlarmState.ACKNOWLEDGED
 
         # Value fully below hysteresis band → transition to OK
@@ -484,16 +484,16 @@ async def test_acknowledge_wrong_state() -> None:
     engine, broker = await _make_engine(_condition(threshold=50.0, comparison=">"))
     try:
         # Alarm is OK — acknowledging is a no-op, no exception raised
-        engine.acknowledge("test_alarm")
+        await engine.acknowledge("test_alarm")
         assert engine.get_state()["test_alarm"] == AlarmState.OK
 
         # Activate, then acknowledge properly
         await _publish_and_wait(broker, "sensor/temp", 60.0)
-        engine.acknowledge("test_alarm")
+        await engine.acknowledge("test_alarm")
         assert engine.get_state()["test_alarm"] == AlarmState.ACKNOWLEDGED
 
         # Acknowledging an already-ACKNOWLEDGED alarm is also a no-op
-        engine.acknowledge("test_alarm")
+        await engine.acknowledge("test_alarm")
         assert engine.get_state()["test_alarm"] == AlarmState.ACKNOWLEDGED
     finally:
         await engine.stop()

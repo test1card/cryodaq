@@ -1,0 +1,20 @@
+id: thermal_conductivity
+name: Thermal Conductivity
+sections:
+  - setup
+  - sample
+  - conditions
+  - operator_log
+report_enabled: true
+report_sections:
+  - title_page
+  - thermal_section
+  - pressure_section
+  - operator_log_section
+  - alarms_section
+  - config_section
+custom_fields:
+  - id: sample_id
+    label: Sample ID
+  - id: heater_geometry
+    label: Heater Geometry

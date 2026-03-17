@@ -34,6 +34,14 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.common import (
+    PanelHeader,
+    StatusBanner,
+    apply_button_style,
+    apply_status_label_style,
+    build_action_row,
+    create_panel_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +86,6 @@ class ConductivityPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         self._temps: dict[str, float] = {}
         self._power: float = 0.0
@@ -102,8 +109,14 @@ class ConductivityPanel(QWidget):
         self._timer.start()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        outer = create_panel_root(self)
+        outer.addWidget(
+            PanelHeader(
+                "Теплопроводность",
+                "Оценка R и G по выбранной цепочке датчиков с прогнозом стационарных значений.",
+            )
+        )
+        root = QHBoxLayout()
         root.setSpacing(8)
 
         # --- Левая панель ---
@@ -116,7 +129,7 @@ class ConductivityPanel(QWidget):
 
         t = QLabel("Выбор датчиков")
         t.setFont(title_font)
-        t.setStyleSheet("color: #58a6ff;")
+        apply_status_label_style(t, "accent", bold=True)
         left.addWidget(t)
 
         scroll = QScrollArea()
@@ -133,7 +146,6 @@ class ConductivityPanel(QWidget):
 
         for ch_name in _ALL_CHANNELS:
             cb = QCheckBox(ch_name)
-            cb.setStyleSheet("color: #c9d1d9;")
             cb.stateChanged.connect(lambda state, n=ch_name: self._on_check(n, state))
             self._checkboxes[ch_name] = cb
             ch_layout.addWidget(cb)
@@ -143,7 +155,7 @@ class ConductivityPanel(QWidget):
         left.addWidget(scroll, stretch=1)
 
         src_lbl = QLabel("Источник P:")
-        src_lbl.setStyleSheet("color: #c9d1d9;")
+        apply_status_label_style(src_lbl, "info")
         left.addWidget(src_lbl)
 
         self._power_combo = QComboBox()
@@ -154,30 +166,17 @@ class ConductivityPanel(QWidget):
         self._power_channel = self._power_combo.currentText()
         left.addWidget(self._power_combo)
 
-        btn_layout = QHBoxLayout()
         up_btn = QPushButton("Вверх")
-        up_btn.setStyleSheet(
-            "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; "
-            "padding: 4px 8px; border-radius: 3px; }"
-        )
+        apply_button_style(up_btn, "neutral", compact=True)
         up_btn.clicked.connect(self._on_move_up)
-        btn_layout.addWidget(up_btn)
 
         down_btn = QPushButton("Вниз")
-        down_btn.setStyleSheet(
-            "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; "
-            "padding: 4px 8px; border-radius: 3px; }"
-        )
+        apply_button_style(down_btn, "neutral", compact=True)
         down_btn.clicked.connect(self._on_move_down)
-        btn_layout.addWidget(down_btn)
-        left.addLayout(btn_layout)
+        left.addLayout(build_action_row(up_btn, down_btn))
 
         export_btn = QPushButton("Экспорт CSV")
-        export_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "padding: 6px; border-radius: 4px; }"
-            "QPushButton:hover { background: #2ea043; }"
-        )
+        apply_button_style(export_btn, "primary")
         export_btn.clicked.connect(self._on_export)
         left.addWidget(export_btn)
 
@@ -188,25 +187,22 @@ class ConductivityPanel(QWidget):
         right.setSpacing(8)
 
         # Баннер стационара
-        self._banner = QLabel("")
+        self._banner = StatusBanner()
         self._banner.setFont(QFont("", 11, QFont.Weight.Bold))
         self._banner.setAlignment(Qt.AlignCenter)
-        self._banner.setStyleSheet(
-            "background: #1e2430; color: #888; border: 1px solid #30363d; "
-            "border-radius: 6px; padding: 8px;"
-        )
+        self._banner.show_info(" ")
         right.addWidget(self._banner)
 
         # Индикаторы
         stab_row = QHBoxLayout()
         self._stability_label = QLabel("Стабильность: —")
         self._stability_label.setFont(title_font)
-        self._stability_label.setStyleSheet("color: #888888;")
+        apply_status_label_style(self._stability_label, "muted")
         stab_row.addWidget(self._stability_label)
 
         self._power_label = QLabel("P = — Вт")
         self._power_label.setFont(title_font)
-        self._power_label.setStyleSheet("color: #f0883e;")
+        apply_status_label_style(self._power_label, "warning", bold=True)
         stab_row.addWidget(self._power_label)
         stab_row.addStretch()
         right.addLayout(stab_row)
@@ -238,6 +234,7 @@ class ConductivityPanel(QWidget):
 
         right.addWidget(self._plot, stretch=1)
         root.addLayout(right, stretch=1)
+        outer.addLayout(root, 1)
 
     # ------------------------------------------------------------------
     # Channel selection
@@ -411,43 +408,28 @@ class ConductivityPanel(QWidget):
     def _update_banner(self, preds: dict) -> None:
         if len(self._chain) < 2:
             self._banner.setText("")
-            self._banner.setStyleSheet(
-                "background: #1e2430; color: #888; border: 1px solid #30363d; "
-                "border-radius: 6px; padding: 8px;"
-            )
+            self._banner.clear_message()
             return
 
         valid_preds = [preds.get(ch) for ch in self._chain if preds.get(ch) and preds[ch].valid]
         if not valid_preds:
-            self._banner.setText("Прогноз: сбор данных...")
+            self._banner.show_info("Прогноз: сбор данных...")
             return
 
         min_pct = min(p.percent_settled for p in valid_preds)
         max_tau = max(p.tau_s for p in valid_preds) if valid_preds else 0
 
         if min_pct >= 99.0:
-            self._banner.setText("ГОТОВО — стационар достигнут")
-            self._banner.setStyleSheet(
-                "background: #0f2d1a; color: #2ECC40; border: 2px solid #2ECC40; "
-                "border-radius: 6px; padding: 8px; font-weight: bold;"
-            )
+            self._banner.show_success("ГОТОВО — стационар достигнут")
         elif min_pct >= 95.0:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
-            self._banner.setText(
+            self._banner.show_warning(
                 f"Стабилизация {min_pct:.0f}% — ещё ~{remaining:.0f} мин"
-            )
-            self._banner.setStyleSheet(
-                "background: #2d2508; color: #FFDC00; border: 1px solid #9e6a03; "
-                "border-radius: 6px; padding: 8px;"
             )
         else:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
-            self._banner.setText(
+            self._banner.show_info(
                 f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин"
-            )
-            self._banner.setStyleSheet(
-                "background: #1e2430; color: #c9d1d9; border: 1px solid #30363d; "
-                "border-radius: 6px; padding: 8px;"
             )
 
     def _update_pred_lines(self, preds: dict) -> None:
@@ -475,7 +457,7 @@ class ConductivityPanel(QWidget):
     def _update_stability(self) -> None:
         if not self._chain:
             self._stability_label.setText("Стабильность: —")
-            self._stability_label.setStyleSheet("color: #888888;")
+            apply_status_label_style(self._stability_label, "muted")
             return
 
         stable = True
@@ -485,7 +467,7 @@ class ConductivityPanel(QWidget):
             buf = self._rate_buffers.get(ch)
             if not buf or len(buf) < 10:
                 self._stability_label.setText("Стабильность: сбор данных...")
-                self._stability_label.setStyleSheet("color: #888888;")
+                apply_status_label_style(self._stability_label, "muted")
                 return
 
             t0, v0 = buf[0]
@@ -499,10 +481,10 @@ class ConductivityPanel(QWidget):
 
         if stable:
             self._stability_label.setText(f"Стабильно (dT/dt = {max_rate:.4f} К/мин)")
-            self._stability_label.setStyleSheet("color: #2ECC40; font-weight: bold;")
+            apply_status_label_style(self._stability_label, "success", bold=True)
         else:
             self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
-            self._stability_label.setStyleSheet("color: #FFDC00; font-weight: bold;")
+            apply_status_label_style(self._stability_label, "warning", bold=True)
 
     def _update_plot(self) -> None:
         now = time.time()

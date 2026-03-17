@@ -1,0 +1,24 @@
+adaptive_throttle:
+  enabled: true
+  include_patterns:
+    - "^T(?![1-8] ).*"
+    - "pressure"
+  exclude_patterns:
+    - "^analytics/"
+    - "^alarm/"
+    - "^system/"
+  stable_duration_s: 120.0
+  max_interval_s: 30.0
+  absolute_delta:
+    default: 0.05
+    K: 0.02
+    mbar: 1.0e-5
+    Pa: 1.0
+  transition_holdoff_s: 30.0
+
+retention:
+  enabled: true
+  interval_s: 3600.0
+  compress_after_days: 14
+  delete_compressed_after_days: 90
+  dry_run: false

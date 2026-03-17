@@ -42,6 +42,13 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.common import (
+    PanelHeader,
+    apply_button_style,
+    apply_group_box_style,
+    apply_status_label_style,
+    create_panel_root,
+)
 from cryodaq.gui.zmq_client import send_command
 from cryodaq.paths import get_data_dir
 
@@ -74,7 +81,6 @@ class AutoSweepPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         # State
         self._running = False
@@ -84,6 +90,8 @@ class AutoSweepPanel(QWidget):
         self._step_start_time = 0.0
         self._selected_channels: list[str] = []
         self._smu_channel = "smua"
+        self._run_started_at: datetime | None = None
+        self._run_finished_at: datetime | None = None
 
         # Data
         self._temps: dict[str, float] = {}
@@ -107,8 +115,14 @@ class AutoSweepPanel(QWidget):
         self._timer.start()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        outer = create_panel_root(self)
+        outer.addWidget(
+            PanelHeader(
+                "Автоизмерение по мощности",
+                "Пошаговая развертка мощности Keithley с ожиданием стабилизации температур.",
+            )
+        )
+        root = QHBoxLayout()
         root.setSpacing(8)
 
         # --- Левая панель: настройки ---
@@ -121,8 +135,7 @@ class AutoSweepPanel(QWidget):
 
         # Метаданные
         meta_box = QGroupBox("Метаданные")
-        meta_box.setStyleSheet("QGroupBox { color: #58a6ff; border: 1px solid #30363d; "
-                               "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(meta_box, "#58a6ff")
         ml = QGridLayout(meta_box)
 
         ml.addWidget(QLabel("Образец:"), 0, 0)
@@ -143,8 +156,7 @@ class AutoSweepPanel(QWidget):
 
         # Настройка мощности
         power_box = QGroupBox("Мощность")
-        power_box.setStyleSheet("QGroupBox { color: #f0883e; border: 1px solid #30363d; "
-                                "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(power_box, "#f0883e")
         pl = QGridLayout(power_box)
 
         pl.addWidget(QLabel("Начало (Вт):"), 0, 0)
@@ -206,8 +218,7 @@ class AutoSweepPanel(QWidget):
 
         # Датчики
         sensor_box = QGroupBox("Датчики")
-        sensor_box.setStyleSheet("QGroupBox { color: #3fb950; border: 1px solid #30363d; "
-                                 "border-radius: 4px; padding-top: 12px; }")
+        apply_group_box_style(sensor_box, "#3fb950")
         sl = QVBoxLayout(sensor_box)
         sensor_scroll = QScrollArea()
         sensor_scroll.setWidgetResizable(True)
@@ -218,7 +229,6 @@ class AutoSweepPanel(QWidget):
         scl.setSpacing(1)
         for ch in _ALL_CHANNELS:
             cb = QCheckBox(ch)
-            cb.setStyleSheet("color: #c9d1d9;")
             self._checkboxes[ch] = cb
             scl.addWidget(cb)
         sensor_scroll.setWidget(sc)
@@ -230,30 +240,20 @@ class AutoSweepPanel(QWidget):
 
         self._start_btn = QPushButton("СТАРТ")
         self._start_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._start_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-            "QPushButton:hover { background: #2ea043; }"
-        )
+        apply_button_style(self._start_btn, "primary")
         self._start_btn.clicked.connect(self._on_start)
         btn_layout.addWidget(self._start_btn)
 
         self._pause_btn = QPushButton("ПАУЗА")
         self._pause_btn.setEnabled(False)
-        self._pause_btn.setStyleSheet(
-            "QPushButton { background: #9e6a03; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-        )
+        apply_button_style(self._pause_btn, "warning")
         self._pause_btn.clicked.connect(self._on_pause)
         btn_layout.addWidget(self._pause_btn)
 
         self._stop_btn = QPushButton("СТОП")
         self._stop_btn.setEnabled(False)
         self._stop_btn.setFont(QFont("", 10, QFont.Weight.Bold))
-        self._stop_btn.setStyleSheet(
-            "QPushButton { background: #da3633; color: white; border: none; "
-            "padding: 8px 16px; border-radius: 4px; }"
-        )
+        apply_button_style(self._stop_btn, "danger")
         self._stop_btn.clicked.connect(self._on_stop)
         btn_layout.addWidget(self._stop_btn)
 
@@ -272,7 +272,7 @@ class AutoSweepPanel(QWidget):
         # Прогресс
         self._progress_label = QLabel("Ожидание старта...")
         self._progress_label.setFont(title_font)
-        self._progress_label.setStyleSheet("color: #c9d1d9;")
+        apply_status_label_style(self._progress_label, "info")
         right.addWidget(self._progress_label)
 
         self._progress_bar = QProgressBar()
@@ -310,6 +310,7 @@ class AutoSweepPanel(QWidget):
         right.addWidget(self._live_plot, stretch=1)
 
         root.addLayout(right, stretch=1)
+        outer.addLayout(root, 1)
 
     # ------------------------------------------------------------------
     # Controls
@@ -342,6 +343,8 @@ class AutoSweepPanel(QWidget):
         self._results = []
         self._running = True
         self._paused = False
+        self._run_started_at = datetime.now(timezone.utc)
+        self._run_finished_at = None
 
         # Reset predictor
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=5.0)
@@ -378,6 +381,7 @@ class AutoSweepPanel(QWidget):
     def _on_stop(self) -> None:
         self._running = False
         self._paused = False
+        self._run_finished_at = datetime.now(timezone.utc)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
@@ -416,6 +420,7 @@ class AutoSweepPanel(QWidget):
 
     def _finish_sweep(self) -> None:
         self._running = False
+        self._run_finished_at = datetime.now(timezone.utc)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
@@ -621,3 +626,47 @@ class AutoSweepPanel(QWidget):
             logger.info("График сохранён: %s", png_path)
         except Exception as exc:
             logger.error("Ошибка сохранения графика: %s", exc)
+            png_path = None
+
+        attach_result = send_command(
+            {
+                "cmd": "experiment_attach_run_record",
+                "source_tab": "autosweep",
+                "source_module": "autosweep_panel",
+                "run_type": "autosweep",
+                "status": "COMPLETED" if self._running is False else "RUNNING",
+                "source_run_id": base,
+                "started_at": self._run_started_at.isoformat() if self._run_started_at else now.isoformat(),
+                "finished_at": self._run_finished_at.isoformat() if self._run_finished_at else now.isoformat(),
+                "parameters": {
+                    "sample": sample,
+                    "material": material,
+                    "operator": operator,
+                    "power_start_w": self._p_start.value(),
+                    "power_end_w": self._p_end.value(),
+                    "power_step_w": self._p_step.value(),
+                    "smu_channel": self._smu_channel,
+                    "selected_channels": list(self._selected_channels),
+                    "target_percent": int(self._target_pct.value()),
+                    "max_wait_min": int(self._max_wait.value()),
+                    "v_comp_v": self._v_comp_spin.value(),
+                    "i_comp_a": self._i_comp_spin.value(),
+                },
+                "result_summary": {
+                    "point_count": len(self._results),
+                    "avg_temperature_k": (
+                        sum(float(item["T_avg"]) for item in self._results) / len(self._results)
+                        if self._results
+                        else 0.0
+                    ),
+                    "max_resistance_kw": max((float(item["R"]) for item in self._results), default=0.0),
+                    "max_conductance_wk": max((float(item["G"]) for item in self._results), default=0.0),
+                },
+                "artifact_paths": [
+                    str(csv_path),
+                    str(png_path) if png_path is not None else "",
+                ],
+            }
+        )
+        if attach_result.get("attached"):
+            logger.info("Автоизмерение прикреплено к активной карточке эксперимента.")
