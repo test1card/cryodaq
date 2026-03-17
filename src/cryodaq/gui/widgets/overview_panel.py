@@ -5,9 +5,10 @@
 Классы:
     StatusStrip — горизонтальная полоса статуса (~40px)
     CompactTempCard — мини-карточка температурного канала (~100x60)
-    TempCardGrid — адаптивная сетка CompactTempCard
-    PressureStrip — полоса давления с мини-графиком (~80px)
+    TempCardGrid — фиксированная сетка CompactTempCard (8 в строке)
     KeithleyStrip — полоса Keithley smua/smub (~50px)
+    ExperimentStatusWidget — компактная полоса статуса эксперимента
+    QuickLogWidget — ввод записи в журнал
     OverviewPanel — главный виджет вкладки «Обзор»
 """
 
@@ -18,7 +19,6 @@ import math
 import shutil
 import time
 from collections import deque
-from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
@@ -65,21 +65,6 @@ _LINE_PALETTE: list[str] = [
     "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
     "#393B79", "#637939", "#8C6D31", "#843C39",
 ]
-
-# Цвета давления
-_PRESSURE_GOOD = "#2ECC40"
-_PRESSURE_WARN = "#FFDC00"
-_PRESSURE_BAD = "#FF4136"
-
-
-def _pressure_color(value: float) -> str:
-    if value <= 0 or not math.isfinite(value):
-        return _PRESSURE_WARN
-    if value < 1e-3:
-        return _PRESSURE_GOOD
-    if value < 1e-1:
-        return _PRESSURE_WARN
-    return _PRESSURE_BAD
 
 
 def _disk_free_gb() -> float:
@@ -432,102 +417,6 @@ class TempCardGrid(QWidget):
 
     def get_cards(self) -> dict[str, CompactTempCard]:
         return self._cards
-
-
-# ---------------------------------------------------------------------------
-# PressureStrip
-# ---------------------------------------------------------------------------
-
-class PressureStrip(QFrame):
-    """Полоса давления (~100px): слева — значение, справа — мини-график."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedHeight(100)
-        apply_panel_frame_style(self)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 4, 4, 4)
-        layout.setSpacing(8)
-
-        # Левая часть: значение
-        val_frame = QFrame()
-        val_frame.setStyleSheet("border: none;")
-        val_layout = QVBoxLayout(val_frame)
-        val_layout.setContentsMargins(0, 0, 0, 0)
-        val_layout.setSpacing(0)
-
-        title = QLabel("Давление")
-        title.setStyleSheet("color: #888888; border: none;")
-        title_font = QFont()
-        title_font.setPointSize(9)
-        title.setFont(title_font)
-        title.setAlignment(Qt.AlignCenter)
-        val_layout.addWidget(title)
-
-        self._value_label = QLabel("---")
-        big_font = QFont()
-        big_font.setPointSize(20)
-        big_font.setBold(True)
-        self._value_label.setFont(big_font)
-        self._value_label.setStyleSheet(f"color: {_PRESSURE_GOOD}; border: none;")
-        self._value_label.setAlignment(Qt.AlignCenter)
-        val_layout.addWidget(self._value_label)
-
-        val_frame.setFixedWidth(160)
-        layout.addWidget(val_frame)
-
-        # Правая часть: мини-график
-        self._plot = pg.PlotWidget()
-        self._plot.setBackground("#111111")
-        pi = self._plot.getPlotItem()
-        pi.setLogMode(x=False, y=True)
-        pi.hideAxis("bottom")
-        pi.hideAxis("left")
-        pi.showGrid(x=False, y=True, alpha=0.2)
-        pi.setMouseEnabled(x=False, y=False)
-        pi.hideButtons()
-        self._plot.setStyleSheet("border: none;")
-        layout.addWidget(self._plot, stretch=1)
-
-        self._buffer: deque[tuple[float, float]] = deque(maxlen=_BUFFER_MAXLEN)
-        self._plot_item: pg.PlotDataItem | None = None
-        self._current_color: str = ""
-
-    def on_reading(self, reading: Reading) -> None:
-        """Обновить давление."""
-        value = reading.value
-        ts = reading.timestamp.timestamp()
-        self._buffer.append((ts, value))
-
-        # Обновить значение
-        if value > 0 and math.isfinite(value):
-            exp = math.floor(math.log10(value))
-            mantissa = value / (10 ** exp)
-            self._value_label.setText(f"{mantissa:.2f}e{exp}")
-        else:
-            self._value_label.setText(f"{value:.2e}")
-
-        color = _pressure_color(value)
-        if color != self._current_color:
-            self._current_color = color
-            self._value_label.setStyleSheet(f"color: {color}; border: none;")
-
-    def refresh_plot(self) -> None:
-        """Обновить мини-график (вызывается по таймеру)."""
-        if not self._buffer:
-            return
-        if self._plot_item is None:
-            pen = pg.mkPen(color="#17BECF", width=1.5)
-            self._plot_item = self._plot.plot([], [], pen=pen)
-
-        now = time.time()
-        x_min = now - 600.0  # 10 минут
-        xs = [t for t, _ in self._buffer if t >= x_min]
-        ys = [v for t, v in self._buffer if t >= x_min]
-        self._plot_item.setData(xs, ys)
-        if xs:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +800,7 @@ class QuickLogWidget(QFrame):
 class OverviewPanel(QWidget):
     """Главный виджет вкладки «Обзор».
 
-    Объединяет StatusStrip, TempCardGrid, график, PressureStrip, KeithleyStrip.
+    Объединяет StatusStrip, TempCardGrid, графики температуры и давления, KeithleyStrip.
     """
 
     _reading_received = Signal(object)
