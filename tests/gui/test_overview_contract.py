@@ -90,3 +90,42 @@ def test_backend_state_off_controls_visual_off_even_with_nonzero_telemetry() -> 
     widget.set_channel_state("smua", "off")
 
     assert "smua: ВЫКЛ" in widget._smua_label.text()
+
+
+# ---------------------------------------------------------------------------
+# KeithleyStrip quick-action buttons
+# ---------------------------------------------------------------------------
+
+def test_keithley_strip_has_quick_action_methods() -> None:
+    _app()
+    widget = KeithleyStrip()
+    assert hasattr(widget, "_on_quick_start")
+    assert hasattr(widget, "_on_quick_stop")
+    assert hasattr(widget, "_on_emergency_off")
+    assert isinstance(widget._workers, list)
+
+
+# ---------------------------------------------------------------------------
+# ExperimentStatusWidget
+# ---------------------------------------------------------------------------
+
+def test_experiment_status_widget_initializes() -> None:
+    _app()
+    from cryodaq.gui.widgets.overview_panel import ExperimentStatusWidget
+
+    widget = ExperimentStatusWidget()
+    assert "Нет активного эксперимента" in widget._status_label.text()
+    assert widget._elapsed_label.text() == ""
+
+
+# ---------------------------------------------------------------------------
+# QuickLogWidget
+# ---------------------------------------------------------------------------
+
+def test_quick_log_widget_initializes() -> None:
+    _app()
+    from cryodaq.gui.widgets.overview_panel import QuickLogWidget
+
+    widget = QuickLogWidget()
+    assert widget._input.text() == ""
+    assert widget._input.placeholderText() == "Заметка оператора..."

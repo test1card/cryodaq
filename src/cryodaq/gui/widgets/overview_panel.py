@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -544,12 +546,35 @@ class KeithleyStrip(QFrame):
         apply_status_label_style(self._smub_label, "muted")
         layout.addWidget(self._smub_label)
 
+        layout.addSpacing(12)
+
+        # Quick-action buttons
+        for smu in ("smua", "smub"):
+            start_btn = QPushButton(f"\u25b6 {smu}")
+            start_btn.setFixedSize(QSize(70, 28))
+            apply_button_style(start_btn, "primary", compact=True)
+            start_btn.clicked.connect(lambda _, ch=smu: self._on_quick_start(ch))
+            layout.addWidget(start_btn)
+
+            stop_btn = QPushButton(f"\u25a0 {smu}")
+            stop_btn.setFixedSize(QSize(70, 28))
+            apply_button_style(stop_btn, "neutral", compact=True)
+            stop_btn.clicked.connect(lambda _, ch=smu: self._on_quick_stop(ch))
+            layout.addWidget(stop_btn)
+
+        eoff_btn = QPushButton("\u26a1 E-Off")
+        eoff_btn.setFixedSize(QSize(70, 28))
+        apply_button_style(eoff_btn, "danger", compact=True)
+        eoff_btn.clicked.connect(self._on_emergency_off)
+        layout.addWidget(eoff_btn)
+
         layout.addStretch()
 
         # Состояние
         self._smua_data: dict[str, float] = {}
         self._smub_data: dict[str, float] = {}
         self._channel_state: dict[str, str] = {"smua": "off", "smub": "off"}
+        self._workers: list[object] = []
 
     def on_reading(self, reading: Reading) -> None:
         """Update display values from backend telemetry."""
@@ -595,6 +620,40 @@ class KeithleyStrip(QFrame):
             or bool(self._smub_data)
         )
 
+    def _on_quick_start(self, channel: str) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker({"cmd": "keithley_start", "channel": channel})
+        worker.finished.connect(lambda r: None)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_quick_stop(self, channel: str) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker({"cmd": "keithley_stop", "channel": channel})
+        worker.finished.connect(lambda r: None)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_emergency_off(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Emergency Off",
+            "Аварийное отключение Keithley?\n\nИсточник будет немедленно отключён.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        for ch in ("smua", "smub"):
+            worker = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": ch})
+            worker.finished.connect(lambda r: None)
+            self._workers.append(worker)
+            worker.start()
+
     @staticmethod
     def _update_smu_label(
         label: QLabel,
@@ -636,6 +695,179 @@ class KeithleyStrip(QFrame):
         f.setPointSize(pt)
         f.setBold(True)
         return f
+
+
+# ---------------------------------------------------------------------------
+# ExperimentStatusWidget
+# ---------------------------------------------------------------------------
+
+class ExperimentStatusWidget(QFrame):
+    """Compact experiment status bar for Overview: name, template, elapsed time."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(32)
+        apply_panel_frame_style(self, background="#1A2332", border="#2A4060")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 2, 12, 2)
+        layout.setSpacing(8)
+
+        self._status_label = QLabel("Нет активного эксперимента")
+        lbl_font = QFont()
+        lbl_font.setPointSize(10)
+        self._status_label.setFont(lbl_font)
+        self._status_label.setStyleSheet("color: #888888; border: none;")
+        layout.addWidget(self._status_label)
+
+        layout.addStretch()
+
+        self._elapsed_label = QLabel("")
+        self._elapsed_label.setFont(lbl_font)
+        self._elapsed_label.setStyleSheet("color: #58a6ff; border: none;")
+        layout.addWidget(self._elapsed_label)
+
+        # Refresh timer
+        self._timer = QTimer(self)
+        self._timer.setInterval(5000)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+        self._refresh()
+
+    @Slot()
+    def _refresh(self) -> None:
+        from cryodaq.gui.zmq_client import send_command
+
+        result = send_command({"cmd": "experiment_status"})
+        if not result.get("ok") or not result.get("active"):
+            self._status_label.setText("Нет активного эксперимента")
+            self._status_label.setStyleSheet("color: #888888; border: none;")
+            self._elapsed_label.setText("")
+            return
+
+        name = result.get("name", "")
+        template = result.get("template", "")
+        parts = [f"\u25cf {name}"]
+        if template:
+            parts.append(f"[{template}]")
+        self._status_label.setText(" ".join(parts))
+        self._status_label.setStyleSheet("color: #2ECC40; border: none;")
+
+        started = result.get("started_at", "")
+        if started:
+            try:
+                from datetime import datetime, timezone
+
+                start_dt = datetime.fromisoformat(str(started))
+                elapsed = datetime.now(timezone.utc) - start_dt.astimezone(timezone.utc)
+                total_s = int(elapsed.total_seconds())
+                h, rem = divmod(max(0, total_s), 3600)
+                m, s = divmod(rem, 60)
+                self._elapsed_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+            except Exception:
+                self._elapsed_label.setText("")
+        else:
+            self._elapsed_label.setText("")
+
+
+# ---------------------------------------------------------------------------
+# QuickLogWidget
+# ---------------------------------------------------------------------------
+
+class QuickLogWidget(QFrame):
+    """Inline quick-log entry for Overview: single-line input + recent entries."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(90)
+        apply_panel_frame_style(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setSpacing(4)
+
+        # Input row
+        input_row = QHBoxLayout()
+        input_row.setSpacing(6)
+
+        input_label = QLabel("Журнал:")
+        input_label.setStyleSheet("color: #888888; border: none;")
+        input_row.addWidget(input_label)
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Заметка оператора...")
+        self._input.setStyleSheet(
+            "QLineEdit { background: #21262d; color: #c9d1d9; "
+            "border: 1px solid #30363d; border-radius: 3px; padding: 2px 6px; }"
+        )
+        self._input.returnPressed.connect(self._on_submit)
+        input_row.addWidget(self._input, stretch=1)
+
+        submit_btn = QPushButton("Записать")
+        submit_btn.setFixedSize(QSize(80, 24))
+        apply_button_style(submit_btn, "primary", compact=True)
+        submit_btn.clicked.connect(self._on_submit)
+        input_row.addWidget(submit_btn)
+
+        layout.addLayout(input_row)
+
+        # Recent entries
+        self._recent_label = QLabel("")
+        self._recent_label.setStyleSheet("color: #666666; border: none; font-size: 9pt;")
+        self._recent_label.setWordWrap(True)
+        layout.addWidget(self._recent_label, stretch=1)
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(10000)
+        self._refresh_timer.timeout.connect(self._refresh_recent)
+        self._refresh_timer.start()
+        self._refresh_recent()
+
+    @Slot()
+    def _on_submit(self) -> None:
+        text = self._input.text().strip()
+        if not text:
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker({
+            "cmd": "log_entry",
+            "message": text,
+            "source": "overview",
+            "current_experiment": True,
+        })
+        worker.finished.connect(self._on_submit_done)
+        self._workers: list[object] = getattr(self, "_workers", [])
+        self._workers.append(worker)
+        worker.start()
+        self._input.clear()
+
+    @Slot(dict)
+    def _on_submit_done(self, result: dict) -> None:
+        if result.get("ok"):
+            self._refresh_recent()
+
+    @Slot()
+    def _refresh_recent(self) -> None:
+        from cryodaq.gui.zmq_client import send_command
+
+        result = send_command({"cmd": "log_get", "limit": 5, "current_experiment": True})
+        if not result.get("ok"):
+            return
+        entries = result.get("entries", [])
+        if not entries:
+            self._recent_label.setText("Нет записей")
+            return
+        lines: list[str] = []
+        for entry in entries[:5]:
+            ts = str(entry.get("timestamp", ""))
+            if "T" in ts:
+                ts = ts.split("T")[1][:8]
+            msg = str(entry.get("message", ""))
+            if len(msg) > 80:
+                msg = msg[:77] + "..."
+            lines.append(f"{ts} — {msg}")
+        self._recent_label.setText("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +917,10 @@ class OverviewPanel(QWidget):
         self._status_strip = StatusStrip()
         root.addWidget(self._status_strip)
 
+        # 1a. Experiment status
+        self._experiment_status = ExperimentStatusWidget()
+        root.addWidget(self._experiment_status)
+
         # 2. Operator workspace
         self._experiment_workspace = ExperimentWorkspace()
         root.addWidget(self._experiment_workspace)
@@ -711,6 +947,12 @@ class OverviewPanel(QWidget):
             apply_button_style(btn, "neutral", compact=True)
             btn.clicked.connect(lambda checked, s=seconds: self._set_window(s))
             btn_bar.addWidget(btn)
+
+        all_btn = QPushButton("Всё")
+        all_btn.setFixedSize(QSize(50, 24))
+        apply_button_style(all_btn, "neutral", compact=True)
+        all_btn.clicked.connect(self._set_window_all)
+        btn_bar.addWidget(all_btn)
 
         btn_bar.addStretch()
 
@@ -751,6 +993,10 @@ class OverviewPanel(QWidget):
         # 6. KeithleyStrip
         self._keithley_strip = KeithleyStrip()
         root.addWidget(self._keithley_strip)
+
+        # 7. QuickLogWidget
+        self._quick_log = QuickLogWidget()
+        root.addWidget(self._quick_log)
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика."""
@@ -912,6 +1158,20 @@ class OverviewPanel(QWidget):
 
     def _set_window(self, seconds: int) -> None:
         self._window_s = float(seconds)
+
+    @Slot()
+    def _set_window_all(self) -> None:
+        """Show full buffer range — all available data."""
+        if not self._buffers:
+            return
+        earliest = float("inf")
+        for buf in self._buffers.values():
+            if buf:
+                earliest = min(earliest, buf[0][0])
+        if earliest == float("inf"):
+            return
+        span = time.time() - earliest
+        self._window_s = max(span + 60.0, 300.0)  # at least 5 min
 
     @Slot()
     def _toggle_log(self) -> None:
