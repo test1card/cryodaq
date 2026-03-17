@@ -53,6 +53,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
+from cryodaq.notifications.escalation import EscalationService
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
@@ -847,6 +848,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                         await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
                     elif action == "keithley_emergency_off":
                         await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
+                        if escalation_service is not None:
+                            await escalation_service.escalate(
+                                "emergency",
+                                f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
+                            )
                 return result
             if action == "safety_status":
                 return {"ok": True, **safety_manager.get_status()}
@@ -1007,6 +1013,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Уведомления (один раз разбираем YAML) ---
     periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
+    escalation_service: EscalationService | None = None
     notifications_cfg = _cfg("notifications")
     if notifications_cfg.exists():
         try:
@@ -1039,8 +1046,19 @@ async def _run_engine(*, mock: bool = False) -> None:
                     bot_token=bot_token,
                     allowed_chat_ids=[int(x) for x in allowed] if allowed else None,
                     poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
+                    command_handler=_handle_gui_command,
                 )
                 logger.info("TelegramCommandBot создан")
+
+            # EscalationService
+            if token_valid and notif_raw.get("escalation"):
+                from cryodaq.notifications.telegram import TelegramNotifier
+                _esc_notifier = TelegramNotifier(
+                    bot_token=bot_token,
+                    chat_id=tg_cfg.get("chat_id", 0),
+                )
+                escalation_service = EscalationService(_esc_notifier, notif_raw)
+                logger.info("EscalationService создан (%d уровней)", len(notif_raw["escalation"]))
 
             if not token_valid:
                 logger.info("Telegram-уведомления отключены (bot_token не настроен)")

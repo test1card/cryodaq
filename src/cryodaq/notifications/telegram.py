@@ -183,6 +183,23 @@ class TelegramNotifier:
             await self._session.close()
             self._session = None
 
+    async def send_message(self, chat_id: int | str, text: str) -> None:
+        """Отправить произвольное сообщение в указанный chat_id."""
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(self._api_url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
+        except Exception as exc:
+            logger.error("Ошибка отправки Telegram-уведомления: %s", exc)
+
     async def _send(self, text: str) -> None:
         """Отправить сообщение через Telegram Bot API.
 

@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import aiohttp
 
@@ -24,13 +24,17 @@ logger = logging.getLogger(__name__)
 _SUBSCRIBE_NAME = "telegram_commands"
 _HELP_TEXT = (
     "<b>CryoDAQ — команды бота</b>\n\n"
-    "/status — состояние системы (приборы, аптайм, алармы)\n"
+    "/status — состояние системы\n"
     "/temps — таблица температур\n"
+    "/log &lt;текст&gt; — записать в операторский журнал\n"
+    "/phase &lt;фаза&gt; — перевести эксперимент в фазу\n"
     "/pressure — уровень вакуума\n"
     "/keithley — показания Keithley (V, I, R, P)\n"
     "/alarms — активные тревоги\n"
     "/help — список команд"
 )
+
+_VALID_PHASES = ["preparation", "cooling", "measurement", "warming", "teardown"]
 
 
 class TelegramCommandBot:
@@ -53,12 +57,14 @@ class TelegramCommandBot:
         bot_token: str,
         allowed_chat_ids: list[int] | None = None,
         poll_interval_s: float = 2.0,
+        command_handler: Callable[[dict], Awaitable[dict]] | None = None,
     ) -> None:
         self._broker = broker
         self._alarm_engine = alarm_engine
         self._bot_token = bot_token
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
         self._poll_interval_s = poll_interval_s
+        self._command_handler = command_handler
         self._api = f"https://api.telegram.org/bot{bot_token}"
 
         # Текущие значения каналов
@@ -157,23 +163,35 @@ class TelegramCommandBot:
                 logger.warning("Отклонён запрос от chat_id=%s", chat_id)
                 continue
 
-            command = text.split()[0].split("@")[0].lower()
-            await self._handle_command(command, chat_id)
+            await self._handle_message(msg)
 
-    async def _handle_command(self, command: str, chat_id: int) -> None:
-        handlers = {
-            "/status": self._cmd_status,
-            "/temps": self._cmd_temps,
-            "/pressure": self._cmd_pressure,
-            "/keithley": self._cmd_keithley,
-            "/alarms": self._cmd_alarms,
-            "/help": self._cmd_help,
-            "/start": self._cmd_help,
-        }
-        handler = handlers.get(command)
-        if handler:
-            text = handler()
-            await self._send(chat_id, text)
+    async def _handle_message(self, msg: dict) -> None:
+        """Обработать входящее сообщение с полным контекстом (текст + from + chat)."""
+        text = msg.get("text", "").strip()
+        chat_id = msg.get("chat", {}).get("id")
+        if not chat_id or not text.startswith("/"):
+            return
+
+        command = text.split()[0].split("@")[0].lower()
+
+        if command == "/status":
+            await self._send(chat_id, self._cmd_status())
+        elif command == "/temps":
+            await self._send(chat_id, self._cmd_temps())
+        elif command == "/pressure":
+            await self._send(chat_id, self._cmd_pressure())
+        elif command == "/keithley":
+            await self._send(chat_id, self._cmd_keithley())
+        elif command == "/alarms":
+            await self._send(chat_id, self._cmd_alarms())
+        elif command in ("/help", "/start"):
+            await self._send(chat_id, _HELP_TEXT)
+        elif command == "/log":
+            log_text = text[len("/log"):].strip()
+            await self._cmd_log(chat_id, log_text, msg)
+        elif command == "/phase":
+            phase_arg = text[len("/phase"):].strip()
+            await self._cmd_phase(chat_id, phase_arg, msg)
         else:
             await self._send(chat_id, f"Неизвестная команда: {command}\n\n{_HELP_TEXT}")
 
@@ -278,6 +296,46 @@ class TelegramCommandBot:
 
     def _cmd_help(self) -> str:
         return _HELP_TEXT
+
+    async def _cmd_log(self, chat_id: int, text: str, msg: dict) -> None:
+        if not text:
+            await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
+            return
+        if self._command_handler is None:
+            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            return
+        from_info = msg.get("from", {})
+        username = from_info.get("username") or from_info.get("first_name", "telegram")
+        result = await self._command_handler({
+            "cmd": "log_entry",
+            "message": text,
+            "author": username,
+            "source": "telegram",
+        })
+        if result.get("ok"):
+            await self._send(chat_id, "✅ Записано в журнал")
+        else:
+            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
+
+    async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
+        if phase not in _VALID_PHASES:
+            phases_str = ", ".join(_VALID_PHASES)
+            await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_str}")
+            return
+        if self._command_handler is None:
+            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            return
+        from_info = msg.get("from", {})
+        username = from_info.get("username") or from_info.get("first_name", "telegram")
+        result = await self._command_handler({
+            "cmd": "experiment_advance_phase",
+            "phase": phase,
+            "operator": username,
+        })
+        if result.get("ok"):
+            await self._send(chat_id, f"✅ Фаза: → {phase}")
+        else:
+            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
 
     # ------------------------------------------------------------------
     # Send

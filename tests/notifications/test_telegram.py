@@ -1,7 +1,8 @@
-"""Tests for TelegramNotifier — alarm event formatting and callback behaviour."""
+"""Tests for TelegramNotifier, TelegramCommandBot, EscalationService."""
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,3 +195,128 @@ def test_format_message_time_format() -> None:
     # Time is formatted as HH:MM:SS DD.MM.YYYY
     assert "09:05:03" in msg, f"Expected time '09:05:03' in message: {msg!r}"
     assert "14.03.2026" in msg, f"Expected date '14.03.2026' in message: {msg!r}"
+
+
+# ===========================================================================
+# TelegramCommandBot v2 tests
+# ===========================================================================
+
+def _make_bot(**kwargs):
+    """Создать TelegramCommandBot с заглушками."""
+    from unittest.mock import MagicMock
+    from cryodaq.notifications.telegram_commands import TelegramCommandBot
+
+    broker = MagicMock()
+    broker.subscribe = AsyncMock(return_value=asyncio.Queue())
+    alarm_engine = MagicMock()
+    alarm_engine.get_active_alarms.return_value = {}
+    alarm_engine.get_state.return_value = {}
+    alarm_engine.get_events.return_value = []
+    bot = TelegramCommandBot(
+        broker, alarm_engine,
+        bot_token="fake:TOKEN",
+        **kwargs,
+    )
+    bot._send = AsyncMock()
+    return bot
+
+
+def _tg_msg(text: str, chat_id: int = 1234, username: str = "testuser") -> dict:
+    return {
+        "text": text,
+        "chat": {"id": chat_id},
+        "from": {"id": 9, "username": username, "first_name": "Test"},
+    }
+
+
+async def test_cmd_status_formats_message() -> None:
+    bot = _make_bot()
+    await bot._handle_message(_tg_msg("/status"))
+    bot._send.assert_called_once()
+    text: str = bot._send.call_args[0][1]
+    assert "CryoDAQ" in text or "Статус" in text or "Аптайм" in text
+
+
+async def test_cmd_log_writes_entry() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/log Всё штатно"))
+    handler.assert_called_once()
+    cmd = handler.call_args[0][0]
+    assert cmd["cmd"] == "log_entry"
+    assert "Всё штатно" in cmd["message"]
+    assert cmd["author"] == "testuser"
+    bot._send.assert_called_once()
+    assert "✅" in bot._send.call_args[0][1]
+
+
+async def test_cmd_log_empty_text_returns_error() -> None:
+    bot = _make_bot()
+    await bot._handle_message(_tg_msg("/log"))
+    bot._send.assert_called_once()
+    assert "❌" in bot._send.call_args[0][1]
+
+
+async def test_cmd_phase_advances() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/phase cooling"))
+    handler.assert_called_once()
+    cmd = handler.call_args[0][0]
+    assert cmd["cmd"] == "experiment_advance_phase"
+    assert cmd["phase"] == "cooling"
+    assert "✅" in bot._send.call_args[0][1]
+
+
+async def test_cmd_phase_invalid_returns_error() -> None:
+    bot = _make_bot()
+    await bot._handle_message(_tg_msg("/phase nonexistent_phase"))
+    bot._send.assert_called_once()
+    assert "❌" in bot._send.call_args[0][1]
+
+
+# ===========================================================================
+# EscalationService tests
+# ===========================================================================
+
+async def test_escalation_chain_sends() -> None:
+    from cryodaq.notifications.escalation import EscalationService
+
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock()
+
+    config = {
+        "escalation": [
+            {"chat_id": 111, "delay_minutes": 0},
+            {"chat_id": 222, "delay_minutes": 0},
+        ]
+    }
+    svc = EscalationService(notifier, config)
+    await svc.escalate("test_event", "Тест эскалации")
+
+    # Ждём завершения задач
+    await asyncio.sleep(0.05)
+
+    assert notifier.send_message.call_count == 2
+    called_ids = {call.args[0] for call in notifier.send_message.call_args_list}
+    assert called_ids == {111, 222}
+
+
+async def test_escalation_cancel_stops() -> None:
+    from cryodaq.notifications.escalation import EscalationService
+
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock()
+
+    config = {
+        "escalation": [
+            {"chat_id": 111, "delay_minutes": 60},  # большая задержка — не успеет
+        ]
+    }
+    svc = EscalationService(notifier, config)
+    await svc.escalate("shift_missed", "Оператор не ответил")
+    await svc.cancel("shift_missed")
+
+    await asyncio.sleep(0.05)
+
+    notifier.send_message.assert_not_called()

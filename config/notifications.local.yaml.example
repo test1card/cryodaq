@@ -19,3 +19,13 @@ periodic_report:
 commands:
   enabled: true
   poll_interval_s: 2.0
+
+# Цепочка эскалации при критических событиях (missed shift, emergency off)
+# Каждый уровень — отдельный chat_id с задержкой.
+escalation:
+  - chat_id: 0                 # ← ночной оператор (немедленно)
+    delay_minutes: 0
+  - chat_id: 0                 # ← старший инженер (через 15 мин)
+    delay_minutes: 15
+  - chat_id: 0                 # ← руководитель (через 30 мин)
+    delay_minutes: 30
