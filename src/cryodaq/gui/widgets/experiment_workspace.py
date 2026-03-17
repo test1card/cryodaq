@@ -438,6 +438,9 @@ class ExperimentWorkspace(QWidget):
         active_layout.addLayout(details_layout)
         root.addWidget(self._active_box)
 
+        # Push all content to top — empty space goes to bottom
+        root.addStretch()
+
     def _switch_mode(self, mode: str) -> None:
         if mode == self._app_mode:
             return

@@ -957,11 +957,14 @@ class OverviewPanel(QWidget):
         self._status_strip = StatusStrip()
         root.addWidget(self._status_strip)
 
+        # Experiment status + Shift bar in one row
+        exp_shift_row = QHBoxLayout()
+        exp_shift_row.setSpacing(4)
         self._experiment_status = ExperimentStatusWidget()
-        root.addWidget(self._experiment_status)
-
+        exp_shift_row.addWidget(self._experiment_status, stretch=1)
         self._shift_bar = ShiftBar()
-        root.addWidget(self._shift_bar)
+        exp_shift_row.addWidget(self._shift_bar, stretch=1)
+        root.addLayout(exp_shift_row)
 
         # ============ 2. TEMPERATURE CARDS (full width, 3×8 grid) ============
         self._card_grid = TempCardGrid(self._channel_mgr)
