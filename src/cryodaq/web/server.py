@@ -233,7 +233,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
-        version="0.11.0rc1",
+        version="0.12.0",
     )
 
     _zmq_task: asyncio.Task[None] | None = None
@@ -260,16 +260,39 @@ def create_app() -> FastAPI:
 
     @application.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        """Главная страница — HTML-дашборд."""
-        index_path = _STATIC_DIR / "index.html"
-        if index_path.exists():
-            return HTMLResponse(content=index_path.read_text(encoding="utf-8"))
-        return HTMLResponse(content="<h1>CryoDAQ</h1><p>index.html не найден</p>")
+        """Главная страница — self-contained HTML dashboard."""
+        return HTMLResponse(content=_DASHBOARD_HTML)
 
     @application.get("/status")
     async def status() -> dict[str, Any]:
         """JSON-статус системы."""
         return _state.status_json()
+
+    @application.get("/api/status")
+    async def api_status() -> dict[str, Any]:
+        """Полный JSON-статус: readings + experiment + shift."""
+        base = _state.status_json()
+        base["readings"] = _state.last_readings
+        # Experiment/shift data via ZMQ command (sync, ok for web server)
+        try:
+            from cryodaq.gui.zmq_client import send_command
+            exp = send_command({"cmd": "experiment_status"})
+            base["experiment"] = exp if exp.get("ok") else None
+        except Exception:
+            base["experiment"] = None
+        return base
+
+    @application.get("/api/log")
+    async def api_log(limit: int = 10) -> dict[str, Any]:
+        """Последние записи журнала."""
+        try:
+            from cryodaq.gui.zmq_client import send_command
+            result = send_command({"cmd": "log_get", "limit": limit})
+            if result.get("ok"):
+                return {"ok": True, "entries": result.get("entries", [])}
+        except Exception:
+            pass
+        return {"ok": False, "entries": []}
 
     @application.get("/history")
     async def history(minutes: int = 60) -> dict[str, Any]:
@@ -306,6 +329,95 @@ def create_app() -> FastAPI:
 
     return application
 
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CryoDAQ Monitor</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:system-ui,-apple-system,sans-serif;padding:8px}
+.header{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px}
+.header h1{font-size:16px;color:#f0f6fc}
+.header .ver{color:#8b949e;font-size:12px}
+.status-bar{display:flex;gap:16px;padding:8px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px;flex-wrap:wrap}
+.status-bar .item{font-size:13px}
+.section{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin-bottom:8px}
+.section-title{font-size:12px;color:#8b949e;margin-bottom:6px;text-transform:uppercase}
+.temps{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}
+@media(max-width:600px){.temps{grid-template-columns:repeat(4,1fr)}}
+.temp-card{background:#21262d;border-radius:4px;padding:4px 6px;text-align:center}
+.temp-card .name{font-size:10px;color:#8b949e}
+.temp-card .val{font-size:16px;font-weight:bold}
+.cold{color:#58a6ff} .mid{color:#c9d1d9} .warm{color:#f0883e} .hot{color:#f85149}
+.log-entry{font-size:12px;color:#8b949e;padding:2px 0;border-bottom:1px solid #21262d}
+.log-entry .ts{color:#58a6ff}
+#updated{font-size:11px;color:#484f58;text-align:right;padding:4px}
+</style>
+</head>
+<body>
+<div class="header"><h1>CryoDAQ Monitor</h1><span class="ver">v0.12.0</span></div>
+<div class="status-bar">
+ <span class="item" id="safety">SAFE_OFF</span>
+ <span class="item" id="uptime">Аптайм: --:--:--</span>
+ <span class="item" id="alarms">0 алармов</span>
+ <span class="item" id="channels">0 каналов</span>
+</div>
+<div class="section"><div class="section-title">Эксперимент</div><div id="experiment">—</div></div>
+<div class="section"><div class="section-title">Температуры</div><div class="temps" id="temps"></div></div>
+<div class="section"><div class="section-title">Давление</div><div id="pressure">—</div></div>
+<div class="section"><div class="section-title">Keithley</div><div id="keithley">—</div></div>
+<div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
+<div id="updated"></div>
+<script>
+function tempColor(v){if(v<10)return'cold';if(v<100)return'mid';if(v<250)return'warm';return'hot'}
+async function refresh(){
+ try{
+  const r=await fetch('/api/status');const d=await r.json();
+  document.getElementById('uptime').textContent='Аптайм: '+(d.uptime||'--');
+  document.getElementById('channels').textContent=(d.channels||0)+' каналов';
+  // Readings
+  const readings=d.readings||{};
+  let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
+  const sorted=Object.entries(readings).sort((a,b)=>a[0].localeCompare(b[0]));
+  for(const[ch,r]of sorted){
+   if(r.unit==='K'&&ch.match(/^\\u0422|^T/)){
+    const c=tempColor(r.value);
+    temps+=`<div class="temp-card"><div class="name">${ch.split(' ')[0]}</div><div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
+   }
+   if(r.unit==='mbar')pressure=r.value.toExponential(2)+' mbar';
+   if(ch.includes('/smua/'))kA=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kA;
+   if(ch.includes('/smub/'))kB=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kB;
+  }
+  document.getElementById('temps').innerHTML=temps||'Нет данных';
+  document.getElementById('pressure').textContent=pressure;
+  document.getElementById('keithley').textContent='A: '+kA+' │ B: '+kB;
+  // Experiment
+  const exp=d.experiment;
+  if(exp&&exp.active_experiment){
+   const e=exp.active_experiment;
+   const phase=exp.current_phase?' ['+exp.current_phase+']':'';
+   document.getElementById('experiment').textContent=(e.name||'—')+phase;
+  }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
+ }catch(e){document.getElementById('updated').textContent='Ошибка: '+e.message}
+ // Log
+ try{
+  const lr=await fetch('/api/log?limit=5');const ld=await lr.json();
+  let html='';
+  for(const e of(ld.entries||[])){
+   const ts=(e.timestamp||'').split('T')[1]||'';
+   html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> [${e.author||e.source||'?'}] ${e.message||''}</div>`;
+  }
+  document.getElementById('log').innerHTML=html||'Нет записей';
+ }catch(e){}
+ document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
+}
+refresh();setInterval(refresh,5000);
+</script>
+</body>
+</html>"""
 
 # Инстанс для uvicorn: `uvicorn cryodaq.web.server:app`
 app = create_app()
