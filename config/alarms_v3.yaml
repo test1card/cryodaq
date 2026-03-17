@@ -1,0 +1,313 @@
+# ============================================================================
+# CryoDAQ Alarm Configuration v3
+# ============================================================================
+#
+# Криовакуумный стенд, проект Миллиметрон, АКЦ ФИАН
+#
+# Калиброванные датчики:  T11 (Азотная плита, 1-я ступень)
+#                         T12 (2-я ступень, холодная точка)
+# Остальные:              только fault-детекция (0 K / 350+ K)
+#
+# Физическое обоснование: alarm_tz_physics_v3.md
+#
+# ============================================================================
+
+engine:
+  poll_interval_s: 0.5
+  rate_window_s: 120          # 240 точек при 2 Hz
+  rate_min_points: 60         # минимум 30с данных
+  rate_method: linear_fit
+
+  setpoints:
+    T12_setpoint:
+      source: experiment_metadata   # SQLite → experiments.custom_fields → "T12_setpoint"
+      default: 4.2                  # K
+      unit: K
+
+# --------------------------------------------------------------------------
+# Группы каналов
+# --------------------------------------------------------------------------
+channel_groups:
+  calibrated:    [T11, T12]
+  uncalibrated:  [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10,
+                  T13, T14, T15, T16, T17, T18, T19, T20]
+  all_temp:      [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10,
+                  T11, T12, T13, T14, T15, T16, T17, T18, T19, T20]
+
+# ============================================================================
+# ГЛОБАЛЬНЫЕ АЛАРМЫ (работают при ЛЮБОЙ фазе)
+# ============================================================================
+global_alarms:
+
+  # --- ГЛАВНЫЙ: потеря вакуума при холодном криостате ---
+  vacuum_loss_cold:
+    alarm_type: composite
+    operator: AND
+    conditions:
+      - channels: [T11, T12]
+        check: any_below
+        threshold: 200           # K
+      - channel: P1
+        check: above
+        threshold: 1.0e-3        # mbar — граница молекулярного режима
+    level: CRITICAL
+    hysteresis:
+      pressure: 5.0e-4
+    message: >
+      ПОТЕРЯ ВАКУУМА ПРИ ХОЛОДНОМ КРИОСТАТЕ.
+      Давление вышло из молекулярного режима (P > 1e-3 mbar) при T < 200K.
+      ДЕЙСТВИЕ: проверить вакуумную систему, подготовить аварийный напуск N₂.
+    notify: [gui, telegram, sound]
+
+  # --- Ранний предвестник ---
+  vacuum_loss_cold_early:
+    alarm_type: composite
+    operator: AND
+    conditions:
+      - channels: [T11, T12]
+        check: any_below
+        threshold: 200
+      - channel: P1
+        check: above
+        threshold: 1.0e-4        # mbar — ещё безопасно, но аномально
+      - channel: P1
+        check: rate_above
+        threshold: 0             # dP/dt > 0
+        rate_window_s: 60
+    level: WARNING
+    message: >
+      Давление растёт при холодном криостате (P > 1e-4 mbar).
+      Возможна течь. ДЕЙСТВИЕ: проверить уплотнения, фланцы.
+    notify: [gui, telegram]
+
+  # --- Fault на некалиброванных датчиках ---
+  sensor_fault:
+    alarm_type: threshold
+    channel_group: uncalibrated
+    check: outside_range
+    range: [0.0, 350.0]         # K — hardcoded, ниже 0 или выше 350 = неисправность
+    level: WARNING
+    message: >
+      Датчик {channel}: {value} K — вне диапазона 0–350 K.
+      Обрыв / КЗ / плохой контакт в месте пайки.
+    notify: [gui]
+    gui_action: highlight_red    # подсветить окно датчика красным на обзорном dashboard
+    side_effect: exclude_channel
+
+  # --- Fault: кратковременные скачки (intermittent) ---
+  sensor_fault_intermittent:
+    alarm_type: threshold
+    channel_group: uncalibrated
+    check: fault_count_in_window
+    range: [0.0, 350.0]
+    window_s: 300                # последние 5 мин
+    min_fault_count: 1           # хотя бы один скачок за окно
+    level: WARNING
+    message: >
+      Датчик {channel}: обнаружены скачки за 0/350 K в последние 5 мин.
+      Нестабильный контакт / деградация пайки.
+    notify: [gui]
+    gui_action: highlight_red
+
+  # --- Fault на калиброванных (те же границы, но отдельно для ясности) ---
+  calibrated_sensor_fault:
+    alarm_type: threshold
+    channels: [T11, T12]
+    check: outside_range
+    range: [1.0, 350.0]         # K — нижняя граница 1K (ниже калибровки DT-670)
+    level: CRITICAL              # CRITICAL — потеря калиброванного датчика опасна
+    message: >
+      КАЛИБРОВАННЫЙ датчик {channel}: {value} K — fault.
+      Количественный контроль ПОТЕРЯН.
+      ДЕЙСТВИЕ: немедленная проверка.
+    notify: [gui, telegram, sound]
+    side_effect: exclude_channel
+
+  # --- Потеря данных ---
+  data_stale_temperature:
+    alarm_type: stale
+    channel_group: all_temp
+    timeout_s: 30
+    level: WARNING
+    message: "Нет данных от {instrument} > 30с."
+    notify: [gui]
+
+  data_loss_temperature:
+    alarm_type: stale
+    channel_group: all_temp
+    timeout_s: 120
+    level: CRITICAL
+    message: "ПОЛНАЯ ПОТЕРЯ ДАННЫХ > 2 мин. Безопасность не гарантирована."
+    notify: [gui, telegram, sound]
+
+  data_loss_pressure:
+    alarm_type: stale
+    channel: P1
+    timeout_s: 60
+    level: CRITICAL
+    message: "Нет данных давления > 60с. Вакуумный контроль потерян."
+    notify: [gui, telegram, sound]
+
+  # --- Keithley ---
+  keithley_overpower:
+    alarm_type: threshold
+    channels: [smua_power, smub_power]
+    check: above
+    threshold: 4.0               # W (лимит 5W, запас 20%)
+    hysteresis: 0.5
+    level: CRITICAL
+    interlock: stop_source
+    message: "Мощность {channel} > 4W."
+    notify: [gui, telegram, sound]
+
+  # --- Диск ---
+  disk_space_warning:
+    alarm_type: threshold
+    channel: system_disk_gb
+    check: below
+    threshold: 10
+    level: WARNING
+    message: "Диск < 10 GB."
+    notify: [gui]
+
+  disk_space_critical:
+    alarm_type: threshold
+    channel: system_disk_gb
+    check: below
+    threshold: 2
+    level: CRITICAL
+    message: "Диск < 2 GB. Запись может прерваться."
+    notify: [gui, telegram]
+
+# ============================================================================
+# ФАЗОЗАВИСИМЫЕ АЛАРМЫ
+# ============================================================================
+phase_alarms:
+
+  vacuum:
+    vacuum_insufficient:
+      alarm_type: composite
+      operator: AND
+      conditions:
+        - channel: P1
+          check: above
+          threshold: 1.0e-4
+        - channel: phase_elapsed_s
+          check: above
+          threshold: 3600        # 60 мин
+      level: WARNING
+      message: "Не достигнут вакуум 1e-4 mbar за 60 мин."
+      notify: [gui]
+
+    vacuum_stall:
+      alarm_type: rate
+      channel: P1
+      check: relative_rate_near_zero
+      rate_threshold: 0.01       # |dP/P| < 1% за окно
+      additional_condition:
+        channel: P1
+        check: above
+        threshold: 1.0e-5
+      level: INFO
+      message: "Давление перестало падать при P > 1e-5."
+      notify: [gui]
+
+  cooldown:
+    excessive_cooling_rate:
+      alarm_type: rate
+      channels: [T11, T12]
+      check: rate_below
+      threshold: -5.0            # K/мин (отрицательный = охлаждение)
+      rate_window_s: 120
+      level: WARNING
+      message: "Скорость охлаждения {channel} > 5 K/мин ({value} K/мин)."
+      notify: [gui, telegram]
+
+    cooldown_stall:
+      alarm_type: composite
+      operator: AND
+      conditions:
+        - channel: T12
+          check: rate_near_zero
+          rate_threshold: 0.1    # K/мин
+          rate_window_s: 900     # 15 мин
+        - channel: T12
+          check: above
+          threshold_expr: "T12_setpoint + 50"
+      level: WARNING
+      message: "Охлаждение остановилось, T12 далеко от setpoint."
+      notify: [gui, telegram]
+
+  measurement:
+    detector_drift:
+      alarm_type: threshold
+      channel: T12
+      check: deviation_from_setpoint
+      setpoint_source: T12_setpoint
+      threshold: 0.5             # K
+      sustained_s: 60
+      level: WARNING
+      message: "T12 отклонился от setpoint на > 0.5 K > 60с."
+      notify: [gui]
+
+    detector_unstable:
+      alarm_type: threshold
+      channel: T12
+      check: deviation_from_setpoint
+      setpoint_source: T12_setpoint
+      threshold: 2.0
+      sustained_s: 10
+      level: CRITICAL
+      message: "T12 ушёл от setpoint на > 2 K. Измерения невалидны."
+      notify: [gui, telegram, sound]
+
+    shield_warming:
+      alarm_type: rate
+      channel: T11               # азотная плита — индикатор 1-й ступени
+      check: rate_above
+      threshold: 0.5             # K/мин
+      rate_window_s: 300
+      level: WARNING
+      message: "Азотная плита (T11) нагревается при measurement."
+      notify: [gui, telegram]
+
+  warmup:
+    excessive_warmup_rate:
+      alarm_type: rate
+      channels: [T11, T12]
+      check: rate_above
+      threshold: 5.0
+      rate_window_s: 120
+      level: WARNING
+      message: "Скорость нагрева {channel} > 5 K/мин."
+      notify: [gui, telegram]
+
+# ============================================================================
+# ИНТЕРЛОКИ
+# ============================================================================
+interlocks:
+
+  overheat_cryostat:
+    channel_group: all_temp
+    check: any_above
+    threshold: 350
+    action: emergency_off
+    message: "АВАРИЙНЫЙ ПЕРЕГРЕВ > 350K"
+
+  keithley_overpower_interlock:
+    channels: [smua_power, smub_power]
+    check: any_above
+    threshold: 4.5               # W — жёстче аларма (4.0), мягче лимита (5.0)
+    action: stop_source
+
+  detector_warmup_interlock:
+    channel: T12
+    check: above
+    threshold: 10
+    conditions:                  # фазозависимый!
+      - phase: measurement
+      - keithley_source: on
+    action: stop_source
+    message: "T12 > 10K при активном нагревателе — source OFF"
+
+  # УДАЛЁН: undercool_shield (T5 < 50K) — ложное срабатывание при штатном cooldown
