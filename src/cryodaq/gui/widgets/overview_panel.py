@@ -46,6 +46,7 @@ from cryodaq.gui.widgets.common import (
     create_panel_root,
 )
 from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
+from cryodaq.gui.widgets.shift_handover import ShiftBar
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -920,6 +921,10 @@ class OverviewPanel(QWidget):
         # 1a. Experiment status
         self._experiment_status = ExperimentStatusWidget()
         root.addWidget(self._experiment_status)
+
+        # 1b. Shift handover bar
+        self._shift_bar = ShiftBar()
+        root.addWidget(self._shift_bar)
 
         # 2. Operator workspace
         self._experiment_workspace = ExperimentWorkspace()
