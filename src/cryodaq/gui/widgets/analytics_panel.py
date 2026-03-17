@@ -230,8 +230,15 @@ class AnalyticsPanel(QWidget):
 
     def _build_plot(self) -> pg.PlotWidget:
         """Построить PlotWidget с поддержкой режимов R_thermal и cooldown."""
-        self._plot = pg.PlotWidget()
+        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot.setBackground("#111111")
+
+        # Empty state overlay
+        from PySide6.QtWidgets import QLabel as _Label
+        self._empty_overlay = _Label("Нет данных для аналитики.\nНачните эксперимент.", self._plot)
+        self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_overlay.setStyleSheet("color: #666666; font-size: 14pt; background: transparent;")
+        self._empty_overlay.setGeometry(0, 0, 400, 100)
 
         pi = self._plot.getPlotItem()
         pi.showGrid(x=True, y=True, alpha=0.3)

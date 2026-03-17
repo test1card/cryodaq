@@ -219,8 +219,16 @@ class ConductivityPanel(QWidget):
         right.addWidget(self._table)
 
         # График
-        self._plot = pg.PlotWidget()
+        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot.setBackground("#111111")
+
+        # Empty state overlay
+        from PySide6.QtWidgets import QLabel as _Label
+        self._empty_overlay = _Label("Нет данных для теплопроводности.\nНачните эксперимент.", self._plot)
+        self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_overlay.setStyleSheet("color: #666666; font-size: 14pt; background: transparent;")
+        self._empty_overlay.setGeometry(0, 0, 400, 100)
+
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
         pi.setLabel("bottom", "Время", color="#AAAAAA")

@@ -256,7 +256,7 @@ class TemperaturePanel(QWidget):
         title_label.setStyleSheet("color: #AAAAAA; background: transparent; border: none;")
         plot_layout.addWidget(title_label)
 
-        self._plot_widget = pg.PlotWidget()
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         plot_layout.addWidget(self._plot_widget)
 
         root_layout.addWidget(plot_frame, stretch=1)

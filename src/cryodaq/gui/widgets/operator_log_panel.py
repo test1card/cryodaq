@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import Slot
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QLabel,
@@ -92,7 +93,10 @@ class OperatorLogPanel(QWidget):
             return
 
         for entry in self._entries:
-            self._entries_list.addItem(QListWidgetItem(self._format_entry(entry)))
+            item = QListWidgetItem(self._format_entry(entry))
+            if str(entry.get("author", "")).strip() == "system":
+                item.setForeground(QColor("#666666"))
+            self._entries_list.addItem(item)
         self._status_label.show_info(f"Показано записей: {len(self._entries)}")
 
     @Slot()

@@ -229,7 +229,12 @@ class ExperimentWorkspace(QWidget):
             )
             self._show_shell_message(self._save_status.text())
             return
-        action_text = "Карточка эксперимента закрыта." if command == "experiment_finalize" else "Эксперимент прерван."
+        if command == "experiment_finalize" and result.get("report_generated"):
+            action_text = "Эксперимент завершён. Отчёт сформирован."
+        elif command == "experiment_finalize":
+            action_text = "Эксперимент завершён."
+        else:
+            action_text = "Эксперимент прерван."
         if self.refresh_state():
             self._workspace_status.show_success(action_text)
         else:
@@ -284,6 +289,38 @@ class ExperimentWorkspace(QWidget):
         self._workspace_status = StatusBanner()
         self._workspace_status.clear_message()
         root.addWidget(self._workspace_status)
+
+        # Phase progress bar (visible only when experiment is active)
+        self._phase_frame = QFrame()
+        apply_panel_frame_style(self._phase_frame, background="#11151d", border="#30363d", radius=6)
+        phase_layout = QHBoxLayout(self._phase_frame)
+        phase_layout.setContentsMargins(12, 6, 12, 6)
+        phase_layout.setSpacing(4)
+        self._phase_labels: dict[str, QLabel] = {}
+        _phase_names = [
+            ("preparation", "Подготовка"),
+            ("vacuum", "Откачка"),
+            ("cooldown", "Захолаживание"),
+            ("measurement", "Измерение"),
+            ("warmup", "Растепление"),
+            ("teardown", "Разборка"),
+        ]
+        for i, (key, label) in enumerate(_phase_names):
+            if i > 0:
+                arrow = QLabel("→")
+                arrow.setStyleSheet("color: #555555; border: none;")
+                phase_layout.addWidget(arrow)
+            lbl = QLabel(f"○ {label}")
+            lbl.setStyleSheet("color: #555555; border: none;")
+            phase_layout.addWidget(lbl)
+            self._phase_labels[key] = lbl
+        phase_layout.addStretch()
+        self._advance_phase_btn = QPushButton("Следующая фаза →")
+        apply_button_style(self._advance_phase_btn, "neutral")
+        self._advance_phase_btn.clicked.connect(self._on_advance_phase)
+        phase_layout.addWidget(self._advance_phase_btn)
+        self._phase_frame.setVisible(False)
+        root.addWidget(self._phase_frame)
 
         self._debug_panel = QFrame()
         apply_panel_frame_style(self._debug_panel, background="#1e2430", border="#9e6a03", radius=6)
@@ -485,11 +522,14 @@ class ExperimentWorkspace(QWidget):
         self._mode_debug_button.setEnabled(self._app_mode != "debug")
 
         debug_mode = self._app_mode == "debug"
+        has_active = self._active_experiment is not None
         self._debug_panel.setVisible(debug_mode)
-        self._create_box.setVisible(self._app_mode == "experiment" and self._active_experiment is None)
-        self._active_box.setVisible(self._app_mode == "experiment" and self._active_experiment is not None)
-        if self._active_experiment is not None:
+        self._create_box.setVisible(self._app_mode == "experiment" and not has_active)
+        self._active_box.setVisible(self._app_mode == "experiment" and has_active)
+        self._phase_frame.setVisible(self._app_mode == "experiment" and has_active)
+        if has_active:
             self._populate_active_card(self._active_experiment)
+            self._update_phase_display()
         else:
             self._clear_active_card()
 
@@ -625,6 +665,47 @@ class ExperimentWorkspace(QWidget):
         return (
             "Карточка активна. Автоматический отчёт станет доступен после завершения и архивирования эксперимента."
         )
+
+    def _update_phase_display(self) -> None:
+        """Update phase labels from current experiment status."""
+        try:
+            result = send_command({"cmd": "experiment_phase_status"})
+        except BaseException:
+            return
+        if not isinstance(result, dict) or not result.get("ok"):
+            return
+        current = result.get("current_phase")
+        completed = set()
+        for p in result.get("phases", []):
+            if p.get("ended_at") is not None:
+                completed.add(p.get("phase"))
+        for key, lbl in self._phase_labels.items():
+            if key == current:
+                lbl.setText(f"● {lbl.text().split(' ', 1)[-1]}")
+                lbl.setStyleSheet("color: #2ECC40; font-weight: bold; border: none;")
+            elif key in completed:
+                lbl.setText(f"✓ {lbl.text().split(' ', 1)[-1]}")
+                lbl.setStyleSheet("color: #58a6ff; border: none;")
+            else:
+                name = lbl.text().split(" ", 1)[-1]
+                lbl.setText(f"○ {name}")
+                lbl.setStyleSheet("color: #555555; border: none;")
+
+    @Slot()
+    def _on_advance_phase(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        phases = ["preparation", "vacuum", "cooldown", "measurement", "warmup", "teardown"]
+        labels = ["Подготовка", "Откачка", "Захолаживание", "Измерение", "Растепление", "Разборка"]
+        item, ok = QInputDialog.getItem(self, "Следующая фаза", "Выберите фазу:", labels, 0, False)
+        if not ok:
+            return
+        idx = labels.index(item)
+        result = send_command({"cmd": "experiment_advance_phase", "phase": phases[idx]})
+        if result.get("ok"):
+            self._update_phase_display()
+            self._workspace_status.show_success(f"Фаза: {item}")
+        else:
+            self._workspace_status.show_error(str(result.get("error", "Ошибка смены фазы")))
 
     @staticmethod
     def _clear_form_layout(layout: QFormLayout) -> None:

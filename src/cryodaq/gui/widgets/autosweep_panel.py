@@ -296,7 +296,7 @@ class AutoSweepPanel(QWidget):
         right.addWidget(self._results_table)
 
         # График температур (live)
-        self._live_plot = pg.PlotWidget()
+        self._live_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._live_plot.setBackground("#111111")
         pi = self._live_plot.getPlotItem()
         pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
