@@ -393,3 +393,11 @@ class TelegramCommandBot:
                     logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)
+
+    async def _send_to_all(self, text: str) -> None:
+        """Отправить текст всем разрешённым chat_id (или только первому если список пуст)."""
+        if self._allowed_ids:
+            for chat_id in self._allowed_ids:
+                await self._send(chat_id, text)
+        else:
+            logger.debug("_send_to_all: нет allowed_chat_ids, сообщение не отправлено")

@@ -32,6 +32,11 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
 from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.alarm import AlarmEngine
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_config import load_alarm_config
+from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
+from cryodaq.core.channel_state import ChannelStateTracker
+from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
@@ -820,6 +825,30 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     event_logger = EventLogger(writer, experiment_manager)
 
+    # --- Alarm Engine v2 ---
+    _alarms_v3_cfg = _CONFIG_DIR / "alarms_v3.yaml"
+    _alarm_v2_engine_cfg, _alarm_v2_configs = load_alarm_config(_alarms_v3_cfg)
+    _alarm_v2_state_tracker = ChannelStateTracker(
+        stale_timeout_s=30.0,
+        fault_window_s=300.0,
+    )
+    _alarm_v2_rate = RateEstimator(
+        window_s=_alarm_v2_engine_cfg.rate_window_s,
+        min_points=_alarm_v2_engine_cfg.rate_min_points,
+    )
+    _alarm_v2_phase = ExperimentPhaseProvider(experiment_manager)
+    _alarm_v2_setpoint = ExperimentSetpointProvider(
+        experiment_manager, _alarm_v2_engine_cfg.setpoints
+    )
+    alarm_v2_evaluator = AlarmEvaluator(
+        _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
+    )
+    alarm_v2_state_mgr = AlarmStateManager()
+    if _alarm_v2_configs:
+        logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
+    else:
+        logger.info("Alarm Engine v2: config/alarms_v3.yaml не найден, v2 отключён")
+
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -833,6 +862,50 @@ async def _run_engine(*, mock: bool = False) -> None:
                 adaptive_throttle.observe_runtime_signal(await queue.get())
         except asyncio.CancelledError:
             return
+
+    async def _alarm_v2_feed_readings() -> None:
+        """Подписаться на DataBroker и кормить v2 channel_state + rate_estimator."""
+        queue = await broker.subscribe("alarm_v2_state_feed", maxsize=2000)
+        try:
+            while True:
+                reading: Reading = await queue.get()
+                _alarm_v2_state_tracker.update(reading)
+                _alarm_v2_rate.push(
+                    reading.channel,
+                    reading.timestamp.timestamp(),
+                    reading.value,
+                )
+        except asyncio.CancelledError:
+            return
+
+    async def _alarm_v2_tick() -> None:
+        """Периодически вычислять алармы v2 и диспетчеризировать события."""
+        poll_s = _alarm_v2_engine_cfg.poll_interval_s
+        while True:
+            await asyncio.sleep(poll_s)
+            if not _alarm_v2_configs:
+                continue
+            current_phase = _alarm_v2_phase.get_current_phase()
+            for alarm_cfg in _alarm_v2_configs:
+                # Проверка фазового фильтра
+                if alarm_cfg.phase_filter is not None:
+                    if current_phase not in alarm_cfg.phase_filter:
+                        # Вне фазы — явно очистить если был активен
+                        alarm_v2_state_mgr.process(alarm_cfg.alarm_id, None, alarm_cfg.config)
+                        continue
+                try:
+                    event = alarm_v2_evaluator.evaluate(alarm_cfg.alarm_id, alarm_cfg.config)
+                    transition = alarm_v2_state_mgr.process(alarm_cfg.alarm_id, event, alarm_cfg.config)
+                    if transition == "TRIGGERED" and event is not None:
+                        # GUI polls via alarm_v2_status command; optionally notify via Telegram
+                        if "telegram" in alarm_cfg.notify and telegram_bot is not None:
+                            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                            asyncio.create_task(
+                                telegram_bot._send_to_all(msg),
+                                name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
+                            )
+                except Exception as exc:
+                    logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
 
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -866,6 +939,24 @@ async def _run_engine(*, mock: bool = False) -> None:
                     return {"ok": True, "action": "alarm_acknowledge"}
                 except (KeyError, ValueError) as exc:
                     return {"ok": False, "error": str(exc)}
+            if action == "alarm_v2_status":
+                active = alarm_v2_state_mgr.get_active()
+                return {
+                    "ok": True,
+                    "active": {
+                        k: {
+                            "level": v.level,
+                            "message": v.message,
+                            "triggered_at": v.triggered_at,
+                            "channels": v.channels,
+                        }
+                        for k, v in active.items()
+                    },
+                    "history": alarm_v2_state_mgr.get_history(limit=20),
+                }
+            if action == "alarm_v2_ack":
+                name = cmd.get("alarm_name", "")
+                return {"ok": alarm_v2_state_mgr.acknowledge(name), "alarm_name": name}
             if action in {
                 "get_app_mode",
                 "set_app_mode",
@@ -1084,6 +1175,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         await telegram_bot.start()
     await scheduler.start()
     throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
+    alarm_v2_feed_task = asyncio.create_task(_alarm_v2_feed_readings(), name="alarm_v2_feed")
+    alarm_v2_tick_task: asyncio.Task | None = None
+    if _alarm_v2_configs:
+        alarm_v2_tick_task = asyncio.create_task(_alarm_v2_tick(), name="alarm_v2_tick")
     await housekeeping_service.start()
 
     # Watchdog
@@ -1136,6 +1231,18 @@ async def _run_engine(*, mock: bool = False) -> None:
         await throttle_task
     except asyncio.CancelledError:
         pass
+
+    alarm_v2_feed_task.cancel()
+    try:
+        await alarm_v2_feed_task
+    except asyncio.CancelledError:
+        pass
+    if alarm_v2_tick_task is not None:
+        alarm_v2_tick_task.cancel()
+        try:
+            await alarm_v2_tick_task
+        except asyncio.CancelledError:
+            pass
 
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
     await scheduler.stop()
