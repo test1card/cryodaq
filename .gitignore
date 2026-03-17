@@ -32,8 +32,8 @@ export/
 # Local config overrides (machine-specific, not committed)
 config/*.local.yaml
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code
+.claude/
 
 # OS
 .DS_Store
