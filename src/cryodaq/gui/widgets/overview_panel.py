@@ -26,6 +26,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -242,7 +243,9 @@ class StatusStrip(QFrame):
 # ---------------------------------------------------------------------------
 
 class CompactTempCard(QFrame):
-    """Мини-карточка температурного канала (~100x60px)."""
+    """Мини-карточка температурного канала (~100x60px). Clickable to toggle plot visibility."""
+
+    toggled = Signal(str)  # emits channel_id on click
 
     def __init__(self, channel_id: str, display_name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -257,6 +260,8 @@ class CompactTempCard(QFrame):
         self._last_status: ChannelStatus = ChannelStatus.OK
         self._last_ui_update: float = 0.0
         self._current_bg: str = ""
+        self._active: bool = True
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.setMinimumSize(80, 54)
         self.setMaximumHeight(60)
@@ -384,6 +389,15 @@ class CompactTempCard(QFrame):
             f"CompactTempCard {{ background-color: {color}; "
             f"border: 1px solid #444; border-radius: 4px; }}"
         )
+
+    def mousePressEvent(self, event: object) -> None:  # noqa: ANN001
+        self.toggled.emit(self._channel_id)
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(1.0 if active else 0.3)
+        self.setGraphicsEffect(effect)
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +924,11 @@ class OverviewPanel(QWidget):
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
         # plot items: channel_id -> PlotDataItem
         self._plot_items: dict[str, pg.PlotDataItem] = {}
+        # Channel visibility for click-toggle
+        self._channel_visible: dict[str, bool] = {}
+        # Pressure buffer
+        self._pressure_buffer: deque[tuple[float, float]] = deque(maxlen=_BUFFER_MAXLEN)
+        self._pressure_plot_item: pg.PlotDataItem | None = None
         # Текущее окно времени (секунды)
         self._window_s = _DEFAULT_WINDOW_S
 
@@ -931,10 +950,10 @@ class OverviewPanel(QWidget):
 
     def _build_ui(self) -> None:
         root = create_panel_root(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(4)
+        root.setContentsMargins(4, 2, 4, 2)
+        root.setSpacing(2)
 
-        # ============ TOP: compact status bars (full width) ============
+        # ============ 1. STATUS BARS (full width, compact) ============
         self._status_strip = StatusStrip()
         root.addWidget(self._status_strip)
 
@@ -944,20 +963,15 @@ class OverviewPanel(QWidget):
         self._shift_bar = ShiftBar()
         root.addWidget(self._shift_bar)
 
-        # ============ MIDDLE: splitter (graph left, info right) ============
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(4)
-        splitter.setStyleSheet(
-            "QSplitter::handle { background-color: #333333; }"
-        )
+        # ============ 2. TEMPERATURE CARDS (full width, 3×8 grid) ============
+        self._card_grid = TempCardGrid(self._channel_mgr)
+        root.addWidget(self._card_grid)
 
-        # --- Left: plot toolbar + temperature chart ---
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(2)
+        # Wire card toggle signals
+        for card in self._card_grid.get_cards().values():
+            card.toggled.connect(self._on_card_toggled)
 
-        # Button bar
+        # ============ 3. BUTTON BAR (full width) ============
         btn_bar = QHBoxLayout()
         btn_bar.setSpacing(6)
 
@@ -995,45 +1009,45 @@ class OverviewPanel(QWidget):
         csv_btn.clicked.connect(self._on_export_csv)
         btn_bar.addWidget(csv_btn)
 
-        left_layout.addLayout(btn_bar)
+        root.addLayout(btn_bar)
 
-        # Main temperature plot with human-readable time axis
-        time_axis = pg.DateAxisItem(orientation="bottom")
-        self._plot = pg.PlotWidget(axisItems={"bottom": time_axis})
-        left_layout.addWidget(self._plot, stretch=1)
+        # ============ 4. GRAPHS — vertical splitter (temp ~70%, pressure ~30%) ============
+        graph_splitter = QSplitter(Qt.Orientation.Vertical)
+        graph_splitter.setHandleWidth(3)
+        graph_splitter.setStyleSheet("QSplitter::handle { background-color: #333333; }")
 
-        splitter.addWidget(left_widget)
+        # Temperature plot
+        temp_axis = pg.DateAxisItem(orientation="bottom")
+        self._plot = pg.PlotWidget(axisItems={"bottom": temp_axis})
+        graph_splitter.addWidget(self._plot)
 
-        # --- Right: pressure, keithley, quick log ---
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(4)
+        # Pressure plot (linked X axis)
+        pressure_axis = pg.DateAxisItem(orientation="bottom")
+        self._pressure_plot = pg.PlotWidget(axisItems={"bottom": pressure_axis})
+        self._pressure_plot.setXLink(self._plot)
+        graph_splitter.addWidget(self._pressure_plot)
 
-        self._pressure_strip = PressureStrip()
-        right_layout.addWidget(self._pressure_strip)
+        graph_splitter.setStretchFactor(0, 7)
+        graph_splitter.setStretchFactor(1, 3)
+
+        root.addWidget(graph_splitter, stretch=1)
+
+        # ============ 5. BOTTOM BAR: Keithley left, QuickLog right ============
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(4)
 
         self._keithley_strip = KeithleyStrip()
-        right_layout.addWidget(self._keithley_strip)
+        bottom_bar.addWidget(self._keithley_strip, stretch=55)
 
         self._quick_log = QuickLogWidget()
-        right_layout.addWidget(self._quick_log)
+        self._quick_log.setFixedHeight(40)
+        bottom_bar.addWidget(self._quick_log, stretch=45)
 
-        right_layout.addStretch()
-
-        splitter.addWidget(right_widget)
-
-        splitter.setStretchFactor(0, 7)
-        splitter.setStretchFactor(1, 3)
-
-        root.addWidget(splitter, stretch=1)
-
-        # ============ BOTTOM: temperature cards (full width) ============
-        self._card_grid = TempCardGrid(self._channel_mgr)
-        root.addWidget(self._card_grid)
+        root.addLayout(bottom_bar)
 
     def _init_plot(self) -> None:
-        """Настроить внешний вид основного графика."""
+        """Настроить внешний вид основного графика и графика давления."""
+        # --- Temperature plot ---
         pw = self._plot
         pw.setBackground("#111111")
 
@@ -1049,7 +1063,6 @@ class OverviewPanel(QWidget):
                 axis.setPen(pg.mkPen(color="#444444"))
                 axis.setTextPen(pg.mkPen(color="#AAAAAA"))
 
-        # Создать линии для всех видимых каналов
         visible_ids = self._channel_mgr.get_all_visible()
         temp_ids = [ch for ch in visible_ids if ch.startswith("\u0422")]
         for idx, ch_id in enumerate(temp_ids):
@@ -1061,6 +1074,29 @@ class OverviewPanel(QWidget):
             item.setClipToView(True)
             self._plot_items[ch_id] = item
             self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
+            self._channel_visible[ch_id] = True
+
+        # --- Pressure plot ---
+        pp = self._pressure_plot
+        pp.setBackground("#111111")
+
+        ppi = pp.getPlotItem()
+        ppi.setLabel("left", "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435", units="mbar", color="#AAAAAA")
+        ppi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
+        ppi.setLogMode(x=False, y=True)
+        ppi.showGrid(x=True, y=True, alpha=0.3)
+        ppi.enableAutoRange(axis="y", enable=True)
+
+        for axis_name in ("left", "bottom", "top", "right"):
+            axis = ppi.getAxis(axis_name)
+            if axis is not None:
+                axis.setPen(pg.mkPen(color="#444444"))
+                axis.setTextPen(pg.mkPen(color="#AAAAAA"))
+
+        pen = pg.mkPen(color="#17BECF", width=1.5)
+        self._pressure_plot_item = pp.plot([], [], pen=pen)
+        self._pressure_plot_item.setDownsampling(auto=True, method="peak")
+        self._pressure_plot_item.setClipToView(True)
 
     # ------------------------------------------------------------------
     # Публичный интерфейс
@@ -1069,6 +1105,21 @@ class OverviewPanel(QWidget):
     def on_reading(self, reading: Reading) -> None:
         """Принять показание (потокобезопасно через Signal)."""
         self._reading_received.emit(reading)
+
+    # ------------------------------------------------------------------
+    # Card toggle
+    # ------------------------------------------------------------------
+
+    @Slot(str)
+    def _on_card_toggled(self, channel_id: str) -> None:
+        visible = not self._channel_visible.get(channel_id, True)
+        self._channel_visible[channel_id] = visible
+        item = self._plot_items.get(channel_id)
+        if item is not None:
+            item.setVisible(visible)
+        card = self._card_grid.get_cards().get(channel_id)
+        if card is not None:
+            card.set_active(visible)
 
     # ------------------------------------------------------------------
     # Внутренние слоты
@@ -1095,9 +1146,11 @@ class OverviewPanel(QWidget):
                     (reading.timestamp.timestamp(), reading.value)
                 )
 
-        # Давление
+        # Давление → буфер графика
         if reading.unit == "mbar":
-            self._pressure_strip.on_reading(reading)
+            self._pressure_buffer.append(
+                (reading.timestamp.timestamp(), reading.value)
+            )
 
         # Keithley
         if "/smua/" in channel or "/smub/" in channel:
@@ -1155,10 +1208,11 @@ class OverviewPanel(QWidget):
 
     @Slot()
     def _refresh_plot(self) -> None:
-        """Обновить все линии на графике (2 Гц)."""
+        """Обновить все линии на графиках (1 Гц)."""
         now = time.time()
         x_min = now - self._window_s
 
+        # Temperature lines
         for ch_id, item in self._plot_items.items():
             buf = self._buffers.get(ch_id)
             if not buf:
@@ -1175,8 +1229,12 @@ class OverviewPanel(QWidget):
         if self._plot_items:
             self._plot.getPlotItem().setXRange(x_min, now, padding=0)
 
-        # Обновить мини-график давления
-        self._pressure_strip.refresh_plot()
+        # Pressure line (X range synced via setXLink)
+        if self._pressure_buffer:
+            xs = [t for t, _ in self._pressure_buffer if t >= x_min]
+            ys = [v for t, v in self._pressure_buffer if t >= x_min]
+            if self._pressure_plot_item is not None:
+                self._pressure_plot_item.setData(xs, ys)
 
     # ------------------------------------------------------------------
     # Кнопки управления

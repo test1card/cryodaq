@@ -129,3 +129,38 @@ def test_quick_log_widget_initializes() -> None:
     widget = QuickLogWidget()
     assert widget._input.text() == ""
     assert widget._input.placeholderText() == "Заметка оператора..."
+
+
+# ---------------------------------------------------------------------------
+# CompactTempCard click-toggle
+# ---------------------------------------------------------------------------
+
+def test_compact_temp_card_emits_toggled_signal() -> None:
+    _app()
+    from cryodaq.gui.widgets.overview_panel import CompactTempCard
+
+    card = CompactTempCard("Т1", "Stage A")
+    received = []
+    card.toggled.connect(lambda ch: received.append(ch))
+
+    card.mousePressEvent(None)
+
+    assert received == ["Т1"]
+
+
+def test_compact_temp_card_set_active_changes_opacity() -> None:
+    _app()
+    from cryodaq.gui.widgets.overview_panel import CompactTempCard
+
+    card = CompactTempCard("Т1", "Stage A")
+    assert card._active is True
+
+    card.set_active(False)
+    assert card._active is False
+    effect = card.graphicsEffect()
+    assert effect is not None
+    assert effect.opacity() < 0.5
+
+    card.set_active(True)
+    effect = card.graphicsEffect()
+    assert effect.opacity() > 0.9
