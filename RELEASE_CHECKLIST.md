@@ -126,10 +126,10 @@ python -m pytest tests/reporting -q
 
 ## 11. Синхронизация документации
 
-- [ ] obsolete `smub disable/hide/remove` expectations are explicitly retired
-- [ ] experiment-card lifecycle wording is synchronized
-- [ ] `Эксперимент / Отладка` mode wording is synchronized
-- [ ] target report naming `report_raw.pdf` / `report_editable.docx` is synchronized
+- [ ] Устаревшие ожидания про `smub disable/hide/remove` явно выведены из контракта
+- [ ] Терминология жизненного цикла карточки эксперимента синхронизирована
+- [ ] Терминология режимов `Эксперимент / Отладка` синхронизирована
+- [ ] Целевые названия отчётов `report_raw.pdf` / `report_editable.docx` синхронизированы
 
 Проверить:
 
@@ -143,15 +143,15 @@ python -m pytest tests/reporting -q
 Сверить:
 
 - [ ] состав и названия 11 вкладок
-- [ ] tray behavior и caveats
-- [ ] experiment/report/archive paths
-- [ ] calibration limitation wording
-- [ ] PDF best-effort wording
-- [ ] TSP script naming: runtime path `tsp/p_const.lua`, `tsp/p_const_single.lua` как legacy/fallback artifact
-- [ ] install/test instructions и packaging assumptions
+- [ ] поведение tray icon и ограничения
+- [ ] пути experiment/report/archive
+- [ ] формулировки ограничений калибровки
+- [ ] формулировка PDF best-effort
+- [ ] TSP скрипты: `tsp/p_const.lua` (runtime), `tsp/p_const_single.lua` (legacy/fallback)
+- [ ] инструкции установки/тестирования и packaging
 
 ## 12. Известные caveat'ы RC
 
-- [ ] PDF conversion for reports remains best-effort and depends on external `LibreOffice` / `soffice`
+- [ ] PDF-конвертация остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`
 - [ ] На новых версиях Python сохраняются deprecation warnings вокруг `asyncio.WindowsSelectorEventLoopPolicy`
-- [ ] These caveats are reflected explicitly in docs and are not masked as already closed product gaps
+- [ ] Эти ограничения явно отражены в документации и не скрыты как закрытые пробелы продукта

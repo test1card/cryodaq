@@ -180,7 +180,7 @@ Housekeeping:
 
 - `report_raw.pdf`
 
-PDF generation must not be treated as guaranteed deployment criterion.
+Генерация PDF не является обязательным критерием развёртывания.
 
 ## 10. Известные caveat'ы RC
 

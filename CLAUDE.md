@@ -116,7 +116,9 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 **Core**
 
 - `src/cryodaq/core/alarm.py`
-- `src/cryodaq/core/experiment.py`
+- `src/cryodaq/core/calibration_acquisition.py` — непрерывный сбор SRDG при калибровке
+- `src/cryodaq/core/event_logger.py` — автоматическое логирование системных событий
+- `src/cryodaq/core/experiment.py` — управление экспериментами, фазы (ExperimentPhase)
 - `src/cryodaq/core/housekeeping.py`
 - `src/cryodaq/core/operator_log.py`
 - `src/cryodaq/core/safety_broker.py`
@@ -124,15 +126,22 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/scheduler.py`
 - `src/cryodaq/core/zmq_bridge.py`
 
+**Аналитика**
+
+- `src/cryodaq/analytics/calibration.py` — CalibrationStore, Chebyshev fit, runtime policy
+- `src/cryodaq/analytics/calibration_fitter.py` — post-run pipeline (extract, downsample, breakpoints, fit)
+
 **GUI**
 
-- `src/cryodaq/gui/main_window.py`
+- `src/cryodaq/gui/main_window.py` — горячие клавиши (Ctrl+L/E/1-9, F5, Ctrl+Shift+X)
 - `src/cryodaq/gui/tray_status.py`
 - `src/cryodaq/gui/widgets/archive_panel.py`
-- `src/cryodaq/gui/widgets/calibration_panel.py`
+- `src/cryodaq/gui/widgets/calibration_panel.py` — три режима (Setup/Acquisition/Results)
+- `src/cryodaq/gui/widgets/experiment_workspace.py` — фазы, карточка эксперимента
 - `src/cryodaq/gui/widgets/operator_log_panel.py`
-- `src/cryodaq/gui/widgets/overview_panel.py`
+- `src/cryodaq/gui/widgets/overview_panel.py` — двухколоночный: графики + карточки
 - `src/cryodaq/gui/widgets/keithley_panel.py`
+- `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
 
 **Reporting**
 

@@ -301,22 +301,23 @@ Key runtime / GUI dependencies from `pyproject.toml`:
 
 These dependencies are not optional if the corresponding workflows are expected to work.
 
-## 11. Known RC limitations
+## 11. Известные ограничения
 
-- Best-effort PDF conversion depends on external `soffice` / `LibreOffice`.
-- `asyncio.WindowsSelectorEventLoopPolicy` still emits deprecation warnings on newer Python versions.
+- PDF-конвертация остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
+- На новых версиях Python возможны deprecation warnings вокруг `WindowsSelectorEventLoopPolicy`.
 
 ## 12. Примечание про источник истины
 
-For current behavior, prefer the code contracts in:
+Для текущего поведения ориентируйтесь на контракты кода в:
 
 - `src/cryodaq/engine.py`
 - `src/cryodaq/core/experiment.py`
+- `src/cryodaq/core/calibration_acquisition.py`
+- `src/cryodaq/analytics/calibration_fitter.py`
 - `src/cryodaq/reporting/`
 - `src/cryodaq/gui/main_window.py`
-- `src/cryodaq/gui/tray_status.py`
-- `src/cryodaq/gui/widgets/archive_panel.py`
-- `src/cryodaq/gui/widgets/operator_log_panel.py`
 - `src/cryodaq/gui/widgets/calibration_panel.py`
+- `src/cryodaq/gui/widgets/experiment_workspace.py`
+- `src/cryodaq/gui/widgets/shift_handover.py`
 
-This document is intentionally scoped to the implemented RC branch state and should be updated if those contracts change.
+Этот документ описывает текущее реализованное состояние и должен обновляться при изменении контрактов.

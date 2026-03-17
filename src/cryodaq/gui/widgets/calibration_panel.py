@@ -174,14 +174,21 @@ class CalibrationSetupWidget(QWidget):
                 box_layout.addWidget(cb)
             root.addWidget(box)
 
-        # Instructions
-        note = QLabel(
-            "Опорный канал автоматически исключается из целевых.\n"
-            "Для начала сбора создайте эксперимент с шаблоном «Калибровка» на вкладке Эксперимент."
-        )
-        note.setWordWrap(True)
+        # Note + start button
+        note = QLabel("Опорный канал автоматически исключается из целевых.")
         note.setStyleSheet("color: #888888;")
         root.addWidget(note)
+
+        self._start_btn = QPushButton("Начать калибровочный прогон")
+        apply_button_style(self._start_btn, "primary")
+        self._start_btn.clicked.connect(self._on_start_calibration)
+        if not self._all_channels:
+            self._start_btn.setEnabled(False)
+        root.addWidget(self._start_btn)
+
+        self._status = StatusBanner()
+        self._status.clear_message()
+        root.addWidget(self._status)
 
         # Import
         import_box = QGroupBox("Импорт внешней кривой")
@@ -205,6 +212,45 @@ class CalibrationSetupWidget(QWidget):
         root.addWidget(curves_box)
 
         root.addStretch()
+
+    @Slot()
+    def _on_start_calibration(self) -> None:
+        ref = self._reference_combo.currentText()
+        if not ref or ref == "Нет LakeShore каналов":
+            self._status.show_warning("Выберите опорный канал.")
+            return
+        targets = self.get_selected_targets()
+        if not targets:
+            self._status.show_warning("Выберите хотя бы один целевой канал.")
+            return
+
+        from datetime import datetime
+
+        name = f"Calibration-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._start_worker = ZmqCommandWorker({
+            "cmd": "experiment_start",
+            "template_id": "calibration",
+            "name": name,
+            "title": name,
+            "operator": "",
+            "custom_fields": {
+                "reference_channel": ref,
+                "target_channels": ", ".join(targets),
+            },
+        })
+        self._start_worker.finished.connect(self._on_start_result)
+        self._start_btn.setEnabled(False)
+        self._start_worker.start()
+
+    @Slot(dict)
+    def _on_start_result(self, result: dict) -> None:
+        self._start_btn.setEnabled(True)
+        if result.get("ok"):
+            self._status.show_success("Калибровочный прогон начат. Переключение на режим сбора...")
+        else:
+            self._status.show_error(str(result.get("error", "Не удалось начать прогон.")))
 
     def get_selected_targets(self) -> list[str]:
         ref = self._reference_combo.currentText()

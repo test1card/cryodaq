@@ -95,6 +95,23 @@ def test_setup_get_selected_targets(tmp_path: Path) -> None:
     assert len(targets) == 4  # 5 total - 1 reference
 
 
+def test_setup_has_start_button(tmp_path: Path) -> None:
+    _app()
+    widget = CalibrationSetupWidget(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
+    assert widget._start_btn.text() == "Начать калибровочный прогон"
+    assert widget._start_btn.isEnabled()
+
+
+def test_setup_start_validates_targets(tmp_path: Path) -> None:
+    _app()
+    widget = CalibrationSetupWidget(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
+    # Uncheck all targets
+    for cb in widget._target_checkboxes.values():
+        cb.setChecked(False)
+    widget._on_start_calibration()
+    assert "целевой" in widget._status.text().lower()
+
+
 # ---------------------------------------------------------------------------
 # CalibrationAcquisitionWidget
 # ---------------------------------------------------------------------------
