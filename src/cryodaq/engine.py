@@ -1028,6 +1028,51 @@ async def _run_engine(*, mock: bool = False) -> None:
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}
+            if action in {
+                "calibration_v2_extract",
+                "calibration_v2_fit",
+                "calibration_v2_coverage",
+            }:
+                from cryodaq.analytics.calibration_fitter import CalibrationFitter
+
+                fitter = CalibrationFitter()
+                if action == "calibration_v2_extract":
+                    pairs = fitter.extract_pairs(
+                        _DATA_DIR,
+                        float(cmd.get("start_ts", 0)),
+                        float(cmd.get("end_ts", 0)),
+                        str(cmd["reference_channel"]),
+                        str(cmd["target_channel"]),
+                    )
+                    return {"ok": True, "pair_count": len(pairs), "pairs_sample": pairs[:20]}
+                if action == "calibration_v2_coverage":
+                    pairs = fitter.extract_pairs(
+                        _DATA_DIR,
+                        float(cmd.get("start_ts", 0)),
+                        float(cmd.get("end_ts", 0)),
+                        str(cmd["reference_channel"]),
+                        str(cmd["target_channel"]),
+                    )
+                    coverage = fitter.compute_coverage(pairs)
+                    return {"ok": True, "coverage": coverage, "total_points": len(pairs)}
+                if action == "calibration_v2_fit":
+                    result = fitter.fit(
+                        _DATA_DIR,
+                        float(cmd.get("start_ts", 0)),
+                        float(cmd.get("end_ts", 0)),
+                        str(cmd["reference_channel"]),
+                        str(cmd["target_channel"]),
+                        calibration_store,
+                    )
+                    return {
+                        "ok": True,
+                        "sensor_id": result.sensor_id,
+                        "curve_id": result.curve.curve_id,
+                        "metrics": result.metrics,
+                        "raw_count": result.raw_pairs_count,
+                        "downsampled_count": result.downsampled_count,
+                        "breakpoint_count": result.breakpoint_count,
+                    }
             if action in {"log_entry", "log_get"}:
                 return await _run_operator_log_command(
                     action,
