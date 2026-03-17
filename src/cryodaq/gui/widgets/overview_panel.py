@@ -665,6 +665,14 @@ class ExperimentStatusWidget(QFrame):
         parts = [f"\u25cf {name}"]
         if template:
             parts.append(f"[{template}]")
+        phase = result.get("current_phase")
+        if phase:
+            _phase_labels = {
+                "preparation": "Подготовка", "vacuum": "Откачка",
+                "cooldown": "Захолаживание", "measurement": "Измерение",
+                "warmup": "Растепление", "teardown": "Разборка",
+            }
+            parts.append(_phase_labels.get(phase, phase))
         self._status_label.setText(" ".join(parts))
         self._status_label.setStyleSheet("color: #2ECC40; border: none;")
 

@@ -532,6 +532,30 @@ async def _run_experiment_command(
             },
         }
 
+    if action == "experiment_advance_phase":
+        phase = str(cmd.get("phase", "")).strip()
+        operator = str(cmd.get("operator", "")).strip()
+        entry = experiment_manager.advance_phase(phase, operator)
+        return {"ok": True, "phase": entry}
+
+    if action == "experiment_phase_status":
+        current = experiment_manager.get_current_phase()
+        history = experiment_manager.get_phase_history()
+        elapsed = 0.0
+        if history and history[-1].get("ended_at") is None:
+            from datetime import datetime as _dt
+            try:
+                started = _dt.fromisoformat(history[-1]["started_at"])
+                elapsed = (_dt.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+            except Exception:
+                pass
+        return {
+            "ok": True,
+            "current_phase": current,
+            "phases": history,
+            "elapsed_in_phase_s": elapsed,
+        }
+
     raise ValueError(f"Unsupported experiment command: {action}")
 
 
@@ -832,6 +856,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "experiment_attach_run_record",
                 "experiment_create_retroactive",
                 "experiment_generate_report",
+                "experiment_advance_phase",
+                "experiment_phase_status",
             }:
                 result = await _run_experiment_command(action, cmd, experiment_manager)
                 # Hook calibration acquisition on experiment lifecycle

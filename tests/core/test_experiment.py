@@ -378,3 +378,58 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
     stored_record = metadata["run_records"][0]
     assert stored_record["experiment_context"]["sample"] == "Cu-archive"
     assert all(path.startswith(str(archive_root)) for path in stored_record["artifact_paths"])
+
+
+# ---------------------------------------------------------------------------
+# Phase tracking
+# ---------------------------------------------------------------------------
+
+async def test_advance_phase_creates_entry(manager: ExperimentManager) -> None:
+    manager.start_experiment("PhaseTest", "Op1", template_id="custom")
+    entry = manager.advance_phase("cooldown", "Op1")
+    assert entry["phase"] == "cooldown"
+    assert entry["operator"] == "Op1"
+    assert entry["ended_at"] is None
+
+
+async def test_advance_phase_closes_previous(manager: ExperimentManager) -> None:
+    manager.start_experiment("PhaseTest2", "Op1", template_id="custom")
+    manager.advance_phase("preparation", "Op1")
+    manager.advance_phase("cooldown", "Op1")
+
+    history = manager.get_phase_history()
+    assert len(history) == 2
+    assert history[0]["phase"] == "preparation"
+    assert history[0]["ended_at"] is not None  # closed
+    assert history[1]["phase"] == "cooldown"
+    assert history[1]["ended_at"] is None  # still open
+
+
+async def test_get_current_phase(manager: ExperimentManager) -> None:
+    assert manager.get_current_phase() is None  # no experiment
+    manager.start_experiment("PhaseTest3", "Op1", template_id="custom")
+    assert manager.get_current_phase() is None  # no phase yet
+    manager.advance_phase("vacuum")
+    assert manager.get_current_phase() == "vacuum"
+
+
+async def test_phase_persisted_in_metadata(manager: ExperimentManager, tmp_path: Path) -> None:
+    import json as _json
+    manager.start_experiment("PhaseTest4", "Op1", template_id="custom")
+    manager.advance_phase("measurement", "Op1")
+
+    exp_id = manager.active_experiment_id
+    metadata_path = tmp_path / "experiments" / exp_id / "metadata.json"
+    payload = _json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert payload["current_phase"] == "measurement"
+    assert len(payload["phases"]) == 1
+    assert payload["phases"][0]["phase"] == "measurement"
+
+
+async def test_no_phases_backward_compat(manager: ExperimentManager) -> None:
+    manager.start_experiment("NoPhasesTest", "Op1", template_id="custom")
+    # Should work fine without any phase calls
+    assert manager.get_current_phase() is None
+    assert manager.get_phase_history() == []
+    manager.finalize_experiment()  # should not crash

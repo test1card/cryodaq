@@ -50,6 +50,15 @@ class ExperimentStatus(Enum):
     ABORTED = "ABORTED"
 
 
+class ExperimentPhase(str, Enum):
+    PREPARATION = "preparation"
+    VACUUM = "vacuum"
+    COOLDOWN = "cooldown"
+    MEASUREMENT = "measurement"
+    WARMUP = "warmup"
+    TEARDOWN = "teardown"
+
+
 class AppMode(Enum):
     DEBUG = "debug"
     EXPERIMENT = "experiment"
@@ -327,6 +336,7 @@ class ExperimentManager:
             "ok": True,
             "app_mode": self.app_mode.value,
             "active_experiment": self._active.to_payload() if self._active else None,
+            "current_phase": self.get_current_phase(),
             "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
@@ -1094,6 +1104,54 @@ class ExperimentManager:
             ),
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Phase tracking
+    # ------------------------------------------------------------------
+
+    def advance_phase(self, phase: str, operator: str = "") -> dict[str, Any]:
+        """Transition to a new experiment phase. Closes the current phase."""
+        if self._active is None:
+            raise RuntimeError("No active experiment.")
+        # Validate phase name
+        try:
+            ExperimentPhase(phase)
+        except ValueError:
+            valid = [p.value for p in ExperimentPhase]
+            raise ValueError(f"Unknown phase '{phase}'. Valid: {valid}")
+
+        now = datetime.now(timezone.utc).isoformat()
+        payload = self._read_metadata_payload(self._active.experiment_id)
+        phases = payload.get("phases", [])
+
+        # Close current phase
+        if phases and phases[-1].get("ended_at") is None:
+            phases[-1]["ended_at"] = now
+
+        # Open new phase
+        entry = {"phase": phase, "started_at": now, "ended_at": None, "operator": operator}
+        phases.append(entry)
+
+        payload["phases"] = phases
+        payload["current_phase"] = phase
+        metadata_path = self._metadata_path(self._active.experiment_id)
+        metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return entry
+
+    def get_current_phase(self) -> str | None:
+        """Current phase of the active experiment, or None."""
+        if self._active is None:
+            return None
+        payload = self._read_metadata_payload(self._active.experiment_id)
+        return payload.get("current_phase")
+
+    def get_phase_history(self) -> list[dict[str, Any]]:
+        """Phase history of the active experiment."""
+        if self._active is None:
+            return []
+        payload = self._read_metadata_payload(self._active.experiment_id)
+        return payload.get("phases", [])
 
     def _read_metadata_payload(self, experiment_id: str) -> dict[str, Any]:
         metadata_path = self._metadata_path(experiment_id)
