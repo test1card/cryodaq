@@ -80,9 +80,10 @@ class LauncherWindow(QMainWindow):
 
     _reading_received = Signal(object)
 
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication, *, mock: bool = False) -> None:
         super().__init__()
         self._app = app
+        self._mock = mock
         self._engine_proc: subprocess.Popen | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
         self._reading_count = 0
@@ -148,11 +149,17 @@ class LauncherWindow(QMainWindow):
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        if self._mock:
+            env["CRYODAQ_MOCK"] = "1"
 
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+        cmd = [python, "-m", "cryodaq.engine"]
+        if self._mock:
+            cmd.append("--mock")
+
         self._engine_proc = subprocess.Popen(
-            [python, "-m", "cryodaq.engine"],
+            cmd,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -247,9 +254,10 @@ class LauncherWindow(QMainWindow):
 
         # --- Встроенное главное окно ---
         self._main_window = MainWindow(subscriber=self._subscriber)
-        # Убираем его собственный menuBar и statusBar — используем наши
-        self._main_window.menuBar().setVisible(False)
+        # Скрываем statusBar MainWindow — используем launcher statusBar
         self._main_window.statusBar().setVisible(False)
+        # Переносим меню MainWindow (Файл, Эксперимент, Настройки) в launcher menuBar
+        self._merge_main_window_menus()
         root.addWidget(self._main_window, stretch=1)
 
         # --- Статусная строка ---
@@ -287,6 +295,14 @@ class LauncherWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _merge_main_window_menus(self) -> None:
+        """Перенести меню MainWindow в menuBar лаунчера."""
+        source_bar = self._main_window.menuBar()
+        dest_bar = self.menuBar()
+        for action in source_bar.actions():
+            dest_bar.addAction(action)
+        source_bar.setVisible(False)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -439,18 +455,26 @@ async def _tick_coro() -> None:
 
 def main() -> None:
     """Точка входа cryodaq (лаунчер)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="CryoDAQ Launcher")
+    parser.add_argument("--mock", action="store_true", help="Запустить engine в mock-режиме")
+    args, remaining = parser.parse_known_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    app = QApplication(sys.argv)
+    mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
+
+    app = QApplication(remaining)
     app.setApplicationName("CryoDAQ")
     app.setOrganizationName("АКЦ ФИАН")
     app.setQuitOnLastWindowClosed(False)  # Не выходить при закрытии окна (трей)
 
-    window = LauncherWindow(app)
+    window = LauncherWindow(app, mock=mock)
     window.show()
 
     sys.exit(app.exec())
