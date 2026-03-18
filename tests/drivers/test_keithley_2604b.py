@@ -89,3 +89,20 @@ async def test_start_same_channel_twice_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="already active"):
         await driver.start_source("smua", 0.5, 40.0, 1.0)
     await driver.disconnect()
+
+
+async def test_keithley_read_source_off() -> None:
+    """When source output is OFF, read_channels returns zeros without error."""
+    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
+    await driver.connect()
+
+    # Neither channel is active (source OFF) → should return zero V/I/P
+    readings = await driver.read_channels()
+    assert len(readings) == 8  # 4 per channel × 2 channels
+
+    for reading in readings:
+        assert reading.status == ChannelStatus.OK
+        if "resistance" not in reading.channel:
+            assert reading.value == 0.0, f"{reading.channel} should be 0 when OFF"
+
+    await driver.disconnect()

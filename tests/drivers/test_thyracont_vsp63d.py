@@ -135,3 +135,46 @@ async def test_reconnect_after_disconnect() -> None:
     assert len(readings) == 1
 
     await driver.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# 9. Parse Protocol V1 response "001M100023D"
+# ---------------------------------------------------------------------------
+
+async def test_parse_v1_response_1mbar() -> None:
+    """Protocol V1: '001M100023D' → mantissa=1000, exp=2 → 1000 * 10^(2-5) = 1.0 mbar."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
+
+    reading = driver._parse_v1_response("001M100023D\r")
+
+    assert reading.status == ChannelStatus.OK
+    assert math.isclose(reading.value, 1.0, rel_tol=1e-4)
+    assert reading.unit == "mbar"
+
+
+# ---------------------------------------------------------------------------
+# 10. Parse Protocol V1 — low pressure
+# ---------------------------------------------------------------------------
+
+async def test_parse_v1_response_low_pressure() -> None:
+    """Protocol V1: '001M01500XX' → mantissa=0150, exp=0 → 150 * 10^(0-5) = 1.5e-3 mbar."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+
+    reading = driver._parse_v1_response("001M01500XX\r")
+
+    assert reading.status == ChannelStatus.OK
+    assert math.isclose(reading.value, 1.5e-3, rel_tol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 11. Parse Protocol V1 — invalid response
+# ---------------------------------------------------------------------------
+
+async def test_parse_v1_response_invalid() -> None:
+    """Protocol V1: garbage response → SENSOR_ERROR + NaN."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+
+    reading = driver._parse_v1_response("GARBAGE\r")
+
+    assert reading.status == ChannelStatus.SENSOR_ERROR
+    assert math.isnan(reading.value)

@@ -20,6 +20,7 @@ alarms:
     comparison: ">"
     severity: "WARNING"
     hysteresis_k: 5.0
+    enabled: false  # Ложное срабатывание при комнатной температуре; используйте alarms_v3.yaml
 
   - name: "cryogenics_loss"
     description: "Потеря криогеники — критический нагрев криостата"
@@ -28,6 +29,7 @@ alarms:
     comparison: ">"
     severity: "CRITICAL"
     hysteresis_k: 2.0
+    enabled: false  # Ложное срабатывание при комнатной температуре; используйте alarms_v3.yaml
 
   # ─── Защита источника тока Keithley ──────────────────────────────────────────
   - name: "keithley_overpower"

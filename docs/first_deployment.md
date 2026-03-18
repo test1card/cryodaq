@@ -98,6 +98,86 @@ python create_shortcut.py
 | Ctrl+Shift+X | Аварийное отключение Keithley |
 | F5 | Обновление |
 
+## Настройка instruments.local.yaml
+
+### Обнаружение VISA-ресурсов
+
+```
+python -c "import pyvisa; rm = pyvisa.ResourceManager(); print(rm.list_resources())"
+```
+
+Типичный вывод:
+```
+('GPIB0::11::INSTR', 'GPIB0::12::INSTR', 'GPIB0::13::INSTR', 'USB0::0x05E6::0x2604::04052028::INSTR', 'ASRL3::INSTR')
+```
+
+### Проверка каждого прибора
+
+**LakeShore 218S:**
+```python
+import pyvisa
+rm = pyvisa.ResourceManager()
+ls = rm.open_resource("GPIB0::12::INSTR")
+print(ls.query("*IDN?"))  # Ожидается: LSCI,MODEL218S,...
+print(ls.query("KRDG? 0"))  # Все 8 каналов температуры
+ls.close()
+```
+
+**Keithley 2604B:**
+```python
+k = rm.open_resource("USB0::0x05E6::0x2604::04052028::INSTR")
+print(k.query("*IDN?"))  # Ожидается: Keithley Instruments Inc., Model 2604B,...
+k.close()
+```
+
+**Thyracont VSM77DL (Protocol V1, 115200 бод):**
+```python
+import serial
+s = serial.Serial("COM3", 115200, timeout=2)
+s.write(b"001M^\r")
+print(s.readline())  # Ожидается: b'001M100023D\r' (или аналогичное)
+s.close()
+```
+
+### Пример instruments.local.yaml для АКЦ ФИАН
+
+```yaml
+instruments:
+  - type: lakeshore_218s
+    name: "LS218_1"
+    resource: "GPIB0::12::INSTR"
+    poll_interval_s: 0.5
+
+  - type: lakeshore_218s
+    name: "LS218_2"
+    resource: "GPIB0::11::INSTR"
+    poll_interval_s: 0.5
+
+  - type: lakeshore_218s
+    name: "LS218_3"
+    resource: "GPIB0::13::INSTR"
+    poll_interval_s: 0.5
+
+  - type: keithley_2604b
+    name: "Keithley_1"
+    resource: "USB0::0x05E6::0x2604::04052028::INSTR"
+    poll_interval_s: 1.0
+
+  - type: thyracont_vsp63d
+    name: "VSP63D_1"
+    resource: "COM3"
+    baudrate: 115200
+    address: "001"
+    poll_interval_s: 2.0
+```
+
+### Типичные проблемы настройки приборов
+
+- **GPIB bus contention:** Три LakeShore на одной шине GPIB0 — CryoDAQ сериализует доступ через bus lock, но убедитесь что GPIB адреса не конфликтуют.
+- **COM port baudrate:** Thyracont VSP63D использует 9600 бод, VSM77DL — 115200 бод. Неверный baudrate → таймаут или мусор.
+- **NI-VISA не установлен:** `pyvisa.ResourceManager()` выбросит ошибку. Установите NI-VISA с ni.com или используйте `pyvisa-py` backend: `pip install pyvisa-py`.
+- **USB VISA resource string:** Keithley resource string зависит от серийного номера. Используйте `list_resources()` для получения точной строки.
+
 ## Типичные проблемы
 
 ### «Engine уже запущен» при повторном запуске

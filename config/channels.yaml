@@ -1,4 +1,15 @@
+# Карта каналов CryoDAQ — лаборатория АКЦ ФИАН
+#
+# Реальное подключение (первый деплой, март 2026):
+#   LS218_1 (GPIB0::12): каналы 1-7 подключены, канал 8 — нет датчика
+#   LS218_2 (GPIB0::11): каналы 1-7 подключены, канал 8 — нет датчика
+#   LS218_3 (GPIB0::13): не используется (нет датчиков)
+#   Keithley 2604B (USB):  smua + smub
+#   Thyracont VSM77DL (COM3, 115200): давление в криостате
+
 channels:
+
+  # --- LS218_1 (GPIB0::12) — каналы 1-7 подключены ---
   Т1:
     name: Криостат верх
     visible: true
@@ -29,8 +40,10 @@ channels:
     group: криостат
   Т8:
     name: Калибровка
-    visible: true
+    visible: false    # LS218_1 канал 8 — нет датчика
     group: криостат
+
+  # --- LS218_2 (GPIB0::11) — каналы 1-7 подключены ---
   Т9:
     name: Компрессор вход
     visible: true
@@ -61,37 +74,39 @@ channels:
     group: компрессор
   Т16:
     name: Фланец
-    visible: true
+    visible: false    # LS218_2 канал 8 — нет датчика
     group: компрессор
+
+  # --- LS218_3 (GPIB0::13) — не используется (нет датчиков) ---
   Т17:
     name: Зеркало 1
-    visible: true
+    visible: false    # LS218_3 — нет датчиков
     group: оптика
   Т18:
     name: Зеркало 2
-    visible: true
+    visible: false    # LS218_3 — нет датчиков
     group: оптика
   Т19:
     name: Подвес
-    visible: true
+    visible: false    # LS218_3 — нет датчиков
     group: оптика
   Т20:
     name: Рама
-    visible: true
+    visible: false    # LS218_3 — нет датчиков
     group: оптика
   Т21:
     name: Резерв 1
-    visible: false
+    visible: false    # LS218_3 — нет датчиков
     group: резерв
   Т22:
     name: Резерв 2
-    visible: false
+    visible: false    # LS218_3 — нет датчиков
     group: резерв
   Т23:
     name: Резерв 3
-    visible: false
+    visible: false    # LS218_3 — нет датчиков
     group: резерв
   Т24:
     name: Резерв 4
-    visible: false
+    visible: false    # LS218_3 — нет датчиков
     group: резерв

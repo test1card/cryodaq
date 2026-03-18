@@ -93,6 +93,18 @@ class Keithley2604B(InstrumentDriver):
         readings: list[Reading] = []
         for smu_channel in SMU_CHANNELS:
             try:
+                # Check output state first — measure.iv() returns TSP error -285
+                # ("not permitted when output is off") when source is OFF.
+                output_raw = await self._transport.query(
+                    f"print({smu_channel}.source.output)", timeout_ms=3000
+                )
+                output_on = output_raw.strip() == "1"
+
+                if not output_on:
+                    # Source OFF is a normal operating state — return zeros
+                    readings.extend(self._build_channel_readings(smu_channel, 0.0, 0.0))
+                    continue
+
                 raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
                 current, voltage = self._parse_iv_response(raw, smu_channel)
                 readings.extend(self._build_channel_readings(smu_channel, voltage, current))

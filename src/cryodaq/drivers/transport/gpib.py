@@ -14,6 +14,11 @@ class GPIBTransport:
     Все блокирующие вызовы pyvisa выполняются в пуле потоков через
     ``run_in_executor``, чтобы не блокировать event loop.
 
+    GPIB — half-duplex шина: одновременный доступ нескольких приборов на
+    одном контроллере вызывает VI_ERROR_TMO / VI_ERROR_INV_OBJECT.
+    Поэтому все операции на одной шине (например ``GPIB0``) сериализуются
+    через общий ``asyncio.Lock``.
+
     Parameters
     ----------
     mock:
@@ -21,11 +26,16 @@ class GPIBTransport:
         возвращает предопределённые ответы.
     """
 
+    # Общие блокировки шин: ключ = prefix ("GPIB0"), значение = asyncio.Lock.
+    # Все экземпляры GPIBTransport на одном контроллере разделяют один Lock.
+    _bus_locks: dict[str, asyncio.Lock] = {}
+
     def __init__(self, *, mock: bool = False) -> None:
         self.mock = mock
         self._resource: Any = None
         self._rm: Any = None
         self._resource_str: str = ""
+        self._bus_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -40,6 +50,12 @@ class GPIBTransport:
             VISA-строка ресурса, например ``"GPIB0::12::INSTR"``.
         """
         self._resource_str = resource_str
+
+        # Извлечь prefix шины и получить/создать общий Lock
+        bus_prefix = resource_str.split("::")[0]  # "GPIB0"
+        if bus_prefix not in GPIBTransport._bus_locks:
+            GPIBTransport._bus_locks[bus_prefix] = asyncio.Lock()
+        self._bus_lock = GPIBTransport._bus_locks[bus_prefix]
 
         if self.mock:
             log.info("GPIB [mock]: имитация открытия ресурса %s", resource_str)
@@ -84,12 +100,14 @@ class GPIBTransport:
             return
 
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._resource.write, cmd)
-            log.debug("GPIB write → %s: %s", self._resource_str, cmd)
-        except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
-            log.error("GPIB: ошибка записи команды '%s' в %s — %s", cmd, self._resource_str, exc)
-            raise
+        assert self._bus_lock is not None
+        async with self._bus_lock:
+            try:
+                await loop.run_in_executor(None, self._resource.write, cmd)
+                log.debug("GPIB write → %s: %s", self._resource_str, cmd)
+            except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
+                log.error("GPIB: ошибка записи команды '%s' в %s — %s", cmd, self._resource_str, exc)
+                raise
 
     async def query(self, cmd: str, timeout_ms: int = 5000) -> str:
         """Отправить запрос и вернуть ответ прибора.
@@ -112,17 +130,19 @@ class GPIBTransport:
             return response
 
         loop = asyncio.get_running_loop()
-        try:
-            response: str = await loop.run_in_executor(
-                None, self._blocking_query, cmd, timeout_ms
-            )
-            log.debug("GPIB query '%s' → '%s'", cmd, response)
-            return response
-        except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
-            log.error(
-                "GPIB: ошибка запроса '%s' к %s — %s", cmd, self._resource_str, exc
-            )
-            raise
+        assert self._bus_lock is not None
+        async with self._bus_lock:
+            try:
+                response: str = await loop.run_in_executor(
+                    None, self._blocking_query, cmd, timeout_ms
+                )
+                log.debug("GPIB query '%s' → '%s'", cmd, response)
+                return response
+            except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
+                log.error(
+                    "GPIB: ошибка запроса '%s' к %s — %s", cmd, self._resource_str, exc
+                )
+                raise
 
     # ------------------------------------------------------------------
     # Блокирующие вспомогательные методы (выполняются в executor)

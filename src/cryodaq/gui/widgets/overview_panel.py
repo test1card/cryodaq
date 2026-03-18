@@ -420,6 +420,92 @@ class TempCardGrid(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# PressureCard
+# ---------------------------------------------------------------------------
+
+class PressureCard(QFrame):
+    """Карточка текущего давления с цветовой индикацией вакуума."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(60)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._current_bg = ""
+        self._set_bg("#2A2A2A")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(0)
+
+        # Title
+        self._title = QLabel("Давление")
+        title_font = QFont()
+        title_font.setPointSize(8)
+        self._title.setFont(title_font)
+        self._title.setStyleSheet("color: #BBBBBB; border: none;")
+        self._title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._title)
+
+        # Value
+        self._value_label = QLabel("---- mbar")
+        val_font = QFont()
+        val_font.setPointSize(14)
+        val_font.setBold(True)
+        self._value_label.setFont(val_font)
+        self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        self._value_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._value_label)
+
+        self._last_value: float | None = None
+
+    def update_pressure(self, reading: Reading) -> None:
+        """Обновить карточку давления."""
+        value = reading.value
+
+        if reading.status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
+            self._value_label.setText("ОТКЛ")
+            self._value_label.setStyleSheet("color: #888888; border: none;")
+            self._set_bg("#3A3A3A")
+            return
+
+        self._last_value = value
+
+        # Format: scientific for < 0.01, normal otherwise
+        if value < 0.01:
+            text = f"{value:.2e} mbar"
+        else:
+            text = f"{value:.2f} mbar"
+        self._value_label.setText(text)
+
+        # Color by vacuum quality
+        if value > 1.0:
+            # Atmosphere
+            self._value_label.setStyleSheet("color: #FF4444; border: none;")
+            self._set_bg("#4A2020")
+        elif value > 1e-2:
+            # Bad vacuum
+            self._value_label.setStyleSheet("color: #FF8C00; border: none;")
+            self._set_bg("#3A2A1A")
+        elif value > 1e-4:
+            # Transitional
+            self._value_label.setStyleSheet("color: #FFD700; border: none;")
+            self._set_bg("#2A2A1A")
+        else:
+            # Good vacuum
+            self._value_label.setStyleSheet("color: #2ECC40; border: none;")
+            self._set_bg("#1A2A1A")
+
+    def _set_bg(self, color: str) -> None:
+        if color == self._current_bg:
+            return
+        self._current_bg = color
+        self.setStyleSheet(
+            f"PressureCard {{ background-color: {color}; "
+            f"border: 1px solid #444; border-radius: 4px; }}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # KeithleyStrip
 # ---------------------------------------------------------------------------
 
@@ -871,9 +957,18 @@ class OverviewPanel(QWidget):
         exp_shift_row.addWidget(self._shift_bar, stretch=1)
         root.addLayout(exp_shift_row)
 
-        # ============ 2. TEMPERATURE CARDS (full width, 3×8 grid) ============
+        # ============ 2. TEMPERATURE CARDS + PRESSURE CARD ============
         self._card_grid = TempCardGrid(self._channel_mgr)
-        root.addWidget(self._card_grid)
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(4)
+        cards_row.addWidget(self._card_grid, stretch=1)
+
+        self._pressure_card = PressureCard()
+        self._pressure_card.setFixedWidth(140)
+        cards_row.addWidget(self._pressure_card)
+
+        root.addLayout(cards_row)
 
         # Wire card toggle signals
         for card in self._card_grid.get_cards().values():
@@ -1054,8 +1149,9 @@ class OverviewPanel(QWidget):
                     (reading.timestamp.timestamp(), reading.value)
                 )
 
-        # Давление → буфер графика
+        # Давление → карточка + буфер графика
         if reading.unit == "mbar":
+            self._pressure_card.update_pressure(reading)
             self._pressure_buffer.append(
                 (reading.timestamp.timestamp(), reading.value)
             )
