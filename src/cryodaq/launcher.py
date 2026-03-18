@@ -80,10 +80,17 @@ class LauncherWindow(QMainWindow):
 
     _reading_received = Signal(object)
 
-    def __init__(self, app: QApplication, *, mock: bool = False) -> None:
+    def __init__(
+        self,
+        app: QApplication,
+        *,
+        mock: bool = False,
+        tray_only: bool = False,
+    ) -> None:
         super().__init__()
         self._app = app
         self._mock = mock
+        self._tray_only = tray_only
         self._engine_proc: subprocess.Popen | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
         self._reading_count = 0
@@ -110,12 +117,17 @@ class LauncherWindow(QMainWindow):
         # --- Engine ---
         self._start_engine()
 
-        # --- GUI ---
-        self._build_ui()
-        self._build_tray()
-
-        # --- Подключение ZMQ ---
-        self._loop.run_until_complete(self._subscriber.start())
+        if tray_only:
+            # Tray-only mode: minimal UI, только иконка в трее + health check.
+            # Для оператора: `cryodaq --tray` в автозагрузке Windows.
+            self._main_window = None
+            self._build_tray()
+            self._loop.run_until_complete(self._subscriber.start())
+        else:
+            # --- GUI ---
+            self._build_ui()
+            self._build_tray()
+            self._loop.run_until_complete(self._subscriber.start())
 
         # --- Таймеры ---
         self._health_timer = QTimer(self)
@@ -123,10 +135,11 @@ class LauncherWindow(QMainWindow):
         self._health_timer.timeout.connect(self._check_engine_health)
         self._health_timer.start()
 
-        self._status_timer = QTimer(self)
-        self._status_timer.setInterval(1000)
-        self._status_timer.timeout.connect(self._update_status)
-        self._status_timer.start()
+        if not tray_only:
+            self._status_timer = QTimer(self)
+            self._status_timer.setInterval(1000)
+            self._status_timer.timeout.connect(self._update_status)
+            self._status_timer.start()
 
     # ------------------------------------------------------------------
     # Engine management
@@ -278,13 +291,20 @@ class LauncherWindow(QMainWindow):
         self._tray_icon_yellow = _make_icon("#FFDC00")
         self._tray_icon_red = _make_icon("#FF4136")
 
-        self._tray = QSystemTrayIcon(self._tray_icon_red, self)
+        # Начальная иконка: если engine уже работает — жёлтый (ожидание данных),
+        # иначе красный (engine не запущен).
+        initial_icon = self._tray_icon_yellow if self._engine_external else self._tray_icon_red
+        self._tray = QSystemTrayIcon(initial_icon, self)
 
         menu = QMenu()
-        open_action = menu.addAction("Открыть")
-        open_action.triggered.connect(self._tray_open)
-        minimize_action = menu.addAction("Свернуть")
-        minimize_action.triggered.connect(self._tray_minimize)
+        if self._tray_only:
+            open_gui_action = menu.addAction("Открыть GUI")
+            open_gui_action.triggered.connect(self._on_open_full_gui)
+        else:
+            open_action = menu.addAction("Открыть")
+            open_action.triggered.connect(self._tray_open)
+            minimize_action = menu.addAction("Свернуть")
+            minimize_action.triggered.connect(self._tray_minimize)
         menu.addSeparator()
         restart_action = menu.addAction("Перезапустить Engine")
         restart_action.triggered.connect(self._on_restart_engine)
@@ -294,6 +314,7 @@ class LauncherWindow(QMainWindow):
 
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
+        self._tray.setToolTip("CryoDAQ — запуск...")
         self._tray.show()
 
     def _merge_main_window_menus(self) -> None:
@@ -315,8 +336,9 @@ class LauncherWindow(QMainWindow):
     def _on_reading_qt(self, reading: Reading) -> None:
         self._reading_count += 1
         self._last_reading_time = time.monotonic()
-        # Route to embedded MainWindow
-        self._main_window._dispatch_reading(reading)
+        # Route to embedded MainWindow (if not tray-only)
+        if self._main_window is not None:
+            self._main_window._dispatch_reading(reading)
 
     @Slot()
     def _on_open_web(self) -> None:
@@ -334,7 +356,8 @@ class LauncherWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._engine_label.setText("Engine: перезапуск...")
+            if not self._tray_only:
+                self._engine_label.setText("Engine: перезапуск...")
             self._restart_engine()
 
     @Slot()
@@ -350,10 +373,23 @@ class LauncherWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self._do_shutdown()
 
+    def _on_open_full_gui(self) -> None:
+        """Tray-only → launch full GUI in a separate process."""
+        python = sys.executable
+        env = os.environ.copy()
+        if self._mock:
+            env["CRYODAQ_MOCK"] = "1"
+        creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        cmd = [python, "-m", "cryodaq.launcher"]
+        if self._mock:
+            cmd.append("--mock")
+        subprocess.Popen(cmd, env=env, creationflags=creationflags)
+
     def _do_shutdown(self) -> None:
         """Корректное завершение."""
         self._health_timer.stop()
-        self._status_timer.stop()
+        if hasattr(self, "_status_timer"):
+            self._status_timer.stop()
         self._async_timer.stop()
         self._tray.hide()
         self._loop.run_until_complete(self._subscriber.stop())
@@ -370,7 +406,10 @@ class LauncherWindow(QMainWindow):
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._tray_open()
+            if self._tray_only:
+                self._on_open_full_gui()
+            else:
+                self._tray_open()
 
     # ------------------------------------------------------------------
     # Периодические проверки
@@ -382,15 +421,18 @@ class LauncherWindow(QMainWindow):
         alive = self._is_engine_alive()
 
         if alive:
-            self._engine_indicator.setStyleSheet("color: #2ECC40;")
-            self._engine_label.setText("Engine: работает")
+            if not self._tray_only:
+                self._engine_indicator.setStyleSheet("color: #2ECC40;")
+                self._engine_label.setText("Engine: работает")
         else:
-            self._engine_indicator.setStyleSheet("color: #FF4136;")
-            self._engine_label.setText("Engine: остановлен")
+            if not self._tray_only:
+                self._engine_indicator.setStyleSheet("color: #FF4136;")
+                self._engine_label.setText("Engine: остановлен")
 
             if not self._engine_external:
                 logger.warning("Engine упал, автоматический перезапуск...")
-                self._engine_label.setText("Engine: перезапуск...")
+                if not self._tray_only:
+                    self._engine_label.setText("Engine: перезапуск...")
                 self._start_engine()
                 if self._tray.isVisible():
                     self._tray.showMessage(
@@ -400,14 +442,17 @@ class LauncherWindow(QMainWindow):
                         3000,
                     )
 
-        # Tray icon color
+        # Tray icon color + tooltip
         data_flowing = (time.monotonic() - self._last_reading_time) < 5.0
         if not alive:
             self._tray.setIcon(self._tray_icon_red)
+            self._tray.setToolTip("CryoDAQ — engine остановлен")
         elif not data_flowing:
             self._tray.setIcon(self._tray_icon_yellow)
+            self._tray.setToolTip("CryoDAQ — ожидание данных")
         else:
             self._tray.setIcon(self._tray_icon_green)
+            self._tray.setToolTip("CryoDAQ — работает")
 
     @Slot()
     def _update_status(self) -> None:
@@ -454,11 +499,22 @@ async def _tick_coro() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Точка входа cryodaq (лаунчер)."""
+    """Точка входа cryodaq (лаунчер).
+
+    Флаги:
+        --mock   Запустить engine в mock-режиме
+        --tray   Только иконка в трее (без полного GUI). Полезно для автозагрузки
+                 Windows, чтобы оператор видел статус engine без открытия GUI.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="CryoDAQ Launcher")
     parser.add_argument("--mock", action="store_true", help="Запустить engine в mock-режиме")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="Только иконка в трее — без полного GUI (для автозагрузки)",
+    )
     args, remaining = parser.parse_known_args()
 
     logging.basicConfig(
@@ -474,8 +530,9 @@ def main() -> None:
     app.setOrganizationName("АКЦ ФИАН")
     app.setQuitOnLastWindowClosed(False)  # Не выходить при закрытии окна (трей)
 
-    window = LauncherWindow(app, mock=mock)
-    window.show()
+    window = LauncherWindow(app, mock=mock, tray_only=args.tray)
+    if not args.tray:
+        window.show()
 
     sys.exit(app.exec())
 
