@@ -577,11 +577,15 @@ async def _run_experiment_command(
 
 
 def _get_memory_mb() -> float:
-    """Получить потребление памяти в MB (кроссплатформенно)."""
+    """Получить RSS-память в MB (кроссплатформенно).
+
+    Порядок попыток: psutil (наиболее точный RSS) → ctypes/Windows → resource/Unix.
+    """
     try:
-        import resource as _resource  # Unix only
-        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
-    except ImportError:
+        import os
+        import psutil  # type: ignore[import]
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:
         pass
     try:
         import ctypes
@@ -609,6 +613,11 @@ def _get_memory_mb() -> float:
             counters.cb,
         )
         return counters.WorkingSetSize / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        import resource as _resource  # Unix only
+        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return 0.0
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -408,7 +409,8 @@ class AlarmStateManager:
     def __init__(self) -> None:
         self._active: dict[str, AlarmEvent] = {}
         self._sustained_since: dict[str, float] = {}
-        self._history: list[dict] = []
+        # Ограниченный deque предотвращает утечку памяти при длительной работе.
+        self._history: deque[dict] = deque(maxlen=1000)
 
     def process(
         self,
@@ -499,7 +501,8 @@ class AlarmStateManager:
 
     def get_history(self, limit: int = 50) -> list[dict]:
         """История переходов (последние limit)."""
-        return self._history[-limit:]
+        items = list(self._history)
+        return items[-limit:]
 
     def acknowledge(self, alarm_id: str) -> bool:
         """Подтвердить аларм (снять GUI-оповещение, оставить в логе)."""

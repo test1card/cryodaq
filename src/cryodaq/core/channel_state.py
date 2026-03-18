@@ -100,7 +100,9 @@ class ChannelStateTracker:
 
     def record_fault(self, channel: str, timestamp: float) -> None:
         """Записать fault reading для intermittent fault detection."""
-        hist = self._fault_history.setdefault(channel, deque())
+        # maxlen safety cap: fault_window_s at 10 Hz × 2 + margin
+        maxlen = max(200, int(self._fault_window * 20) + 100)
+        hist = self._fault_history.setdefault(channel, deque(maxlen=maxlen))
         hist.append(timestamp)
         # Удалить устаревшие записи
         cutoff = timestamp - self._fault_window

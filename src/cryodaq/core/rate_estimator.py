@@ -29,12 +29,15 @@ class RateEstimator:
     def __init__(self, window_s: float = 120.0, min_points: int = 60) -> None:
         self._window_s = window_s
         self._min_points = min_points
+        # Safety cap: 2× window at 10 Hz + 100 margin.
+        # Prevents unbounded growth if trim lags; actual usage is window_s × sample_rate.
+        self._maxlen: int = max(500, int(window_s * 20) + 100)
         # channel → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
 
     def push(self, channel: str, timestamp: float, value: float) -> None:
         """Добавить точку. Автоматически удаляет точки старше окна."""
-        buf = self._buffers.setdefault(channel, deque(maxlen=5000))
+        buf = self._buffers.setdefault(channel, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:

@@ -59,6 +59,9 @@ class _ServerState:
         self.clients: set[WebSocket] = set()
         self.subscriber: ZMQSubscriber | None = None
         self._lock = asyncio.Lock()
+        # Bounded broadcast queue — prevents task explosion under load.
+        # Initialised in startup (requires running event loop).
+        self.broadcast_q: asyncio.Queue[dict[str, Any]] | None = None
 
     def on_reading(self, reading: Reading) -> None:
         """Обработать входящее показание (вызывается из ZMQ callback)."""
@@ -136,6 +139,21 @@ async def _broadcast(data: dict[str, Any]) -> None:
         _state.clients.discard(ws)
 
 
+async def _broadcast_pump() -> None:
+    """Одна фоновая задача вместо N fire-and-forget tasks.
+
+    Читает из ограниченной очереди _state.broadcast_q и рассылает
+    по WebSocket. Если нет клиентов — сообщение просто отбрасывается.
+    Это предотвращает накопление тысяч Task-объектов в event loop.
+    """
+    q = _state.broadcast_q
+    assert q is not None
+    while True:
+        data = await q.get()
+        if _state.clients:
+            await _broadcast(data)
+
+
 async def _zmq_to_ws_bridge() -> None:
     """Фоновая задача: получает Reading от ZMQ, рассылает по WebSocket."""
     sub = ZMQSubscriber(callback=_on_reading_callback)
@@ -154,6 +172,13 @@ def _on_reading_callback(reading: Reading) -> None:
     """Sync callback от ZMQSubscriber — обновляет состояние и ставит broadcast."""
     _state.on_reading(reading)
 
+    if not _state.clients:
+        return  # Нет клиентов — не создавать очередные задачи
+
+    q = _state.broadcast_q
+    if q is None:
+        return
+
     data = {
         "type": "reading",
         "timestamp": reading.timestamp.isoformat(),
@@ -162,12 +187,10 @@ def _on_reading_callback(reading: Reading) -> None:
         "unit": reading.unit,
         "status": reading.status.value,
     }
-    # Планируем broadcast в event loop
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_broadcast(data))
-    except RuntimeError:
-        pass
+        q.put_nowait(data)
+    except asyncio.QueueFull:
+        pass  # Отбрасываем показание, очередь переполнена
 
 
 # ---------------------------------------------------------------------------
@@ -237,21 +260,26 @@ def create_app() -> FastAPI:
     )
 
     _zmq_task: asyncio.Task[None] | None = None
+    _pump_task: asyncio.Task[None] | None = None
 
     @application.on_event("startup")
     async def _startup() -> None:
-        nonlocal _zmq_task
+        nonlocal _zmq_task, _pump_task
+        # Инициализируем очередь в контексте event loop
+        _state.broadcast_q = asyncio.Queue(maxsize=200)
+        _pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
         _zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
         logger.info("Веб-сервер CryoDAQ запущен")
 
     @application.on_event("shutdown")
     async def _shutdown() -> None:
-        if _zmq_task and not _zmq_task.done():
-            _zmq_task.cancel()
-            try:
-                await _zmq_task
-            except asyncio.CancelledError:
-                pass
+        for task in (_zmq_task, _pump_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info("Веб-сервер CryoDAQ остановлен")
 
     # Статические файлы
