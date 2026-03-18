@@ -218,3 +218,29 @@ async def test_empty_batch_noop(tmp_path: Path) -> None:
     assert len(db_files) == 0, (
         f"Empty batch should not create DB files, found: {db_files}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. _write_batch skips readings with NaN value (sqlite3 maps NaN to NULL)
+# ---------------------------------------------------------------------------
+
+async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    ts = datetime.now(timezone.utc)
+
+    batch = [
+        _reading(channel="CH1", value=4.5, ts=ts),
+        _reading(channel="CH2", value=float("nan"), ts=ts),  # NaN → should be skipped
+        _reading(channel="CH3", value=3.2, ts=ts),
+    ]
+
+    # Must not raise IntegrityError
+    writer._write_batch(batch)
+
+    db_path = tmp_path / f"data_{ts.date().isoformat()}.db"
+    rows = _read_db(db_path)
+
+    # Only 2 rows written (NaN skipped)
+    assert len(rows) == 2
+    channels = {r["channel"] for r in rows}
+    assert channels == {"CH1", "CH3"}

@@ -92,17 +92,30 @@ async def test_start_same_channel_twice_is_rejected() -> None:
 
 
 async def test_keithley_read_source_off() -> None:
-    """When source output is OFF, read_channels returns zeros without error."""
+    """When source output is OFF, read_channels returns zeros without error.
+
+    In mock mode the mock path returns computed values (not zero) — that's fine.
+    This test verifies that no reading has NaN value, which sqlite3 maps to
+    NULL and crashes on the NOT NULL constraint.
+    """
+    import math
+
     driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
     await driver.connect()
 
-    # Neither channel is active (source OFF) → should return zero V/I/P
+    # Neither channel is active (source OFF)
     readings = await driver.read_channels()
     assert len(readings) == 8  # 4 per channel × 2 channels
 
     for reading in readings:
         assert reading.status == ChannelStatus.OK
-        if "resistance" not in reading.channel:
-            assert reading.value == 0.0, f"{reading.channel} should be 0 when OFF"
+        # NaN must never appear — sqlite3 maps NaN to NULL → IntegrityError
+        assert reading.value is not None, f"{reading.channel} value is None"
+        assert not math.isnan(reading.value), f"{reading.channel} value is NaN"
+
+    # V/I/P should be 0 when source is not active (mock returns 0 for inactive channels)
+    for reading in readings:
+        if reading.channel.endswith(("/voltage", "/current", "/power")):
+            assert reading.value == 0.0, f"{reading.channel} should be 0.0 when OFF"
 
     await driver.disconnect()

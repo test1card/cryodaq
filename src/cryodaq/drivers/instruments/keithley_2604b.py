@@ -101,8 +101,12 @@ class Keithley2604B(InstrumentDriver):
                 output_on = output_raw.strip() == "1"
 
                 if not output_on:
-                    # Source OFF is a normal operating state — return zeros
-                    readings.extend(self._build_channel_readings(smu_channel, 0.0, 0.0))
+                    # Source OFF is a normal operating state — return zeros.
+                    # Explicit resistance_override=0.0 to avoid 0/0 → NaN
+                    # (NaN maps to NULL in sqlite3, violating NOT NULL constraint).
+                    readings.extend(
+                        self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0)
+                    )
                     continue
 
                 raw = await self._transport.query(f"print({smu_channel}.measure.iv())")

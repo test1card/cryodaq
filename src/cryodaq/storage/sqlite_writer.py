@@ -147,22 +147,37 @@ class SQLiteWriter:
         return conn
 
     def _write_batch(self, batch: list[Reading]) -> None:
-        """Вставить пакет в таблицу readings (вызывается в потоке)."""
+        """Вставить пакет в таблицу readings (вызывается в потоке).
+
+        Readings с value=None или value=NaN пропускаются (sqlite3 maps NaN
+        to NULL, which violates the NOT NULL constraint on readings.value).
+        """
         if not batch:
             return
         day = batch[0].timestamp.date()
         conn = self._ensure_connection(day)
-        rows = [
-            (
-                r.timestamp.timestamp(),
-                r.instrument_id or "unknown",
-                r.channel,
-                r.value,
-                r.unit,
-                r.status.value,
+        rows = []
+        skipped = 0
+        for r in batch:
+            if r.value is None or (isinstance(r.value, float) and r.value != r.value):
+                skipped += 1
+                continue
+            rows.append(
+                (
+                    r.timestamp.timestamp(),
+                    r.instrument_id or "unknown",
+                    r.channel,
+                    r.value,
+                    r.unit,
+                    r.status.value,
+                )
             )
-            for r in batch
-        ]
+        if skipped:
+            logger.warning(
+                "Пропущено %d readings с value=None/NaN (из батча %d)", skipped, len(batch),
+            )
+        if not rows:
+            return
         conn.executemany(
             "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
             "VALUES (?, ?, ?, ?, ?, ?);",
