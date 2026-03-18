@@ -1054,6 +1054,23 @@ async def _run_engine(*, mock: bool = False) -> None:
                         "downsampled_count": result.downsampled_count,
                         "breakpoint_count": result.breakpoint_count,
                     }
+            if action == "readings_history":
+                channels_raw = cmd.get("channels")
+                channels = list(channels_raw) if channels_raw else None
+                from_ts = cmd.get("from_ts")
+                to_ts = cmd.get("to_ts")
+                limit = int(cmd.get("limit_per_channel", 3600))
+                data = await writer.read_readings_history(
+                    channels=channels,
+                    from_ts=float(from_ts) if from_ts is not None else None,
+                    to_ts=float(to_ts) if to_ts is not None else None,
+                    limit_per_channel=limit,
+                )
+                # Serialize: {channel: [[ts, value], ...]}
+                return {
+                    "ok": True,
+                    "data": {ch: pts for ch, pts in data.items()},
+                }
             if action in {"log_entry", "log_get"}:
                 return await _run_operator_log_command(
                     action,

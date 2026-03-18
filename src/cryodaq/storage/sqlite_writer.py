@@ -423,6 +423,104 @@ class SQLiteWriter:
         self._executor.shutdown(wait=False)
         logger.info("SQLiteWriter остановлен (записано: %d)", self._total_written)
 
+    # ------------------------------------------------------------------
+    # Readings history query (for GUI reconnect / full-range view)
+    # ------------------------------------------------------------------
+
+    def _read_readings_history(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> dict[str, list[tuple[float, float]]]:
+        """Read historical readings from SQLite.
+
+        Returns {channel: [(unix_ts, value), ...]} sorted by time ASC.
+        Scans all daily DB files that overlap [from_ts, to_ts].
+        """
+        result: dict[str, list[tuple[float, float]]] = {}
+        db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
+        if not db_files:
+            return result
+
+        # Filter DB files by date range if possible
+        if from_ts is not None:
+            from_day = datetime.fromtimestamp(from_ts, tz=timezone.utc).date()
+        else:
+            from_day = None
+        if to_ts is not None:
+            to_day = datetime.fromtimestamp(to_ts, tz=timezone.utc).date()
+        else:
+            to_day = None
+
+        selected_dbs: list[Path] = []
+        for db_path in db_files:
+            try:
+                day = date.fromisoformat(db_path.stem.removeprefix("data_"))
+            except ValueError:
+                continue
+            if from_day is not None and day < from_day:
+                continue
+            if to_day is not None and day > to_day:
+                continue
+            selected_dbs.append(db_path)
+
+        for db_path in selected_dbs:
+            try:
+                conn = sqlite3.connect(str(db_path), timeout=5)
+                conn.row_factory = sqlite3.Row
+                try:
+                    query = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
+                    params: list[Any] = []
+                    if from_ts is not None:
+                        query += " AND timestamp >= ?"
+                        params.append(from_ts)
+                    if to_ts is not None:
+                        query += " AND timestamp <= ?"
+                        params.append(to_ts)
+                    if channels:
+                        placeholders = ",".join("?" for _ in channels)
+                        query += f" AND channel IN ({placeholders})"
+                        params.extend(channels)
+                    query += " ORDER BY timestamp ASC"
+                    for row in conn.execute(query, params).fetchall():
+                        ch = row["channel"]
+                        if ch not in result:
+                            result[ch] = []
+                        result[ch].append((float(row["timestamp"]), float(row["value"])))
+                finally:
+                    conn.close()
+            except Exception:
+                logger.warning("Ошибка чтения истории из %s", db_path)
+
+        # Truncate to limit_per_channel (keep latest)
+        for ch in result:
+            if len(result[ch]) > limit_per_channel:
+                result[ch] = result[ch][-limit_per_channel:]
+
+        return result
+
+    async def read_readings_history(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> dict[str, list[tuple[float, float]]]:
+        """Async wrapper for _read_readings_history."""
+        loop = asyncio.get_running_loop()
+        task = partial(
+            self._read_readings_history,
+            channels=channels,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit_per_channel=limit_per_channel,
+        )
+        return await loop.run_in_executor(self._executor, task)
+
     @property
     def stats(self) -> dict[str, Any]:
         return {

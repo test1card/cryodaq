@@ -636,11 +636,14 @@ class ExperimentStatusWidget(QFrame):
 
         self._worker = None
 
-        # Refresh timer (first refresh deferred to avoid blocking construction)
+        # Refresh timer
         self._timer = QTimer(self)
         self._timer.setInterval(5000)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
+
+        # Immediate first poll (deferred 200ms to let ZMQ connect)
+        QTimer.singleShot(200, self._refresh)
 
     @Slot()
     def _refresh(self) -> None:
@@ -654,14 +657,15 @@ class ExperimentStatusWidget(QFrame):
 
     @Slot(dict)
     def _on_refresh_result(self, result: dict) -> None:
-        if not result.get("ok") or not result.get("active"):
+        exp = result.get("active_experiment")
+        if not result.get("ok") or not exp:
             self._status_label.setText("Нет активного эксперимента")
             self._status_label.setStyleSheet("color: #888888; border: none;")
             self._elapsed_label.setText("")
             return
 
-        name = result.get("name", "")
-        template = result.get("template", "")
+        name = exp.get("name", "")
+        template = exp.get("template_id", "")
         parts = [f"\u25cf {name}"]
         if template:
             parts.append(f"[{template}]")
@@ -676,7 +680,7 @@ class ExperimentStatusWidget(QFrame):
         self._status_label.setText(" ".join(parts))
         self._status_label.setStyleSheet("color: #2ECC40; border: none;")
 
-        started = result.get("started_at", "")
+        started = exp.get("start_time", "")
         if started:
             try:
                 from datetime import datetime, timezone
@@ -840,6 +844,10 @@ class OverviewPanel(QWidget):
         self._plot_timer.setInterval(1000)
         self._plot_timer.timeout.connect(self._refresh_plot)
         self._plot_timer.start()
+
+        # Load 1 hour of history from SQLite on startup (deferred to avoid blocking constructor)
+        self._history_worker = None
+        QTimer.singleShot(500, self._load_initial_history)
 
     # ------------------------------------------------------------------
     # Построение UI
@@ -1145,17 +1153,83 @@ class OverviewPanel(QWidget):
 
     @Slot()
     def _set_window_all(self) -> None:
-        """Show full buffer range — all available data."""
-        if not self._buffers:
+        """Show full buffer range — load full history from SQLite then expand window."""
+        self._load_history(hours=24)
+
+    def _load_initial_history(self) -> None:
+        """Load 1 hour of history from SQLite on startup."""
+        self._load_history(hours=1)
+
+    def _load_history(self, hours: int = 1) -> None:
+        """Query readings_history from engine and populate plot buffers."""
+        if self._history_worker is not None and not self._history_worker.isFinished():
             return
-        earliest = float("inf")
-        for buf in self._buffers.values():
-            if buf:
-                earliest = min(earliest, buf[0][0])
-        if earliest == float("inf"):
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        now = time.time()
+        channels = list(self._buffers.keys())
+        # Also include pressure channels — unit-based match, use broad query
+        cmd = {
+            "cmd": "readings_history",
+            "from_ts": now - hours * 3600,
+            "to_ts": now,
+            "limit_per_channel": _BUFFER_MAXLEN,
+        }
+        self._history_worker = ZmqCommandWorker(cmd)
+        self._history_hours = hours
+        self._history_worker.finished.connect(self._on_history_loaded)
+        self._history_worker.start()
+
+    @Slot(dict)
+    def _on_history_loaded(self, result: dict) -> None:
+        """Populate buffers with historical data from SQLite."""
+        if not result.get("ok"):
+            logger.debug("readings_history failed: %s", result.get("error"))
             return
-        span = time.time() - earliest
-        self._window_s = max(span + 60.0, 300.0)  # at least 5 min
+        data: dict[str, list] = result.get("data", {})
+        loaded = 0
+        for channel, points in data.items():
+            if not points:
+                continue
+            # Temperature channels — match by short_id (Т1, Т2, ...)
+            short_id = channel.split(" ")[0] if " " in channel else channel
+            if short_id in self._buffers:
+                buf = self._buffers[short_id]
+                # Only prepend points older than existing data
+                existing_min_ts = buf[0][0] if buf else float("inf")
+                new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
+                if new_points:
+                    # Prepend: create merged deque (historical + existing)
+                    existing = list(buf)
+                    merged = new_points + existing
+                    buf.clear()
+                    buf.extend(merged[-_BUFFER_MAXLEN:])
+                    loaded += len(new_points)
+            # Pressure channel
+            if any(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in points[:1]):
+                # Check if this is a pressure channel (unit=mbar) by channel name patterns
+                if "mbar" in channel.lower() or "pressure" in channel.lower() or channel.startswith("P"):
+                    existing_min_ts = self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
+                    new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
+                    if new_points:
+                        existing = list(self._pressure_buffer)
+                        merged = new_points + existing
+                        self._pressure_buffer.clear()
+                        self._pressure_buffer.extend(merged[-_BUFFER_MAXLEN:])
+                        loaded += len(new_points)
+
+        if loaded > 0:
+            logger.info("Загружено %d исторических точек из SQLite", loaded)
+            # Expand window to show all loaded data
+            earliest = float("inf")
+            for buf in self._buffers.values():
+                if buf:
+                    earliest = min(earliest, buf[0][0])
+            if self._pressure_buffer:
+                earliest = min(earliest, self._pressure_buffer[0][0])
+            if earliest < float("inf"):
+                span = time.time() - earliest
+                self._window_s = max(span + 60.0, 300.0)
 
     @Slot()
     def _toggle_log(self) -> None:
