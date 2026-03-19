@@ -40,8 +40,9 @@ class ThyracontVSP63D(InstrumentDriver):
 
     **Thyracont Protocol V1 (VSM77DL и аналоги):**
       RS-232/USB-Serial, 115200 бод.
-      Команда: ``"<addr>M^\\r"`` → ответ: ``"<addr>M<5digits><checksum>\\r"``
-      Кодировка значения: ``pressure = 10^((value - 80000) / 4000)`` mbar.
+      Команда: ``"<addr>M^\\r"`` → ответ: ``"<addr>M<6digits><checksum>\\r"``
+      Кодировка 6-значного значения (ABCDEF): ABCD = мантисса, EF = экспонента.
+      ``pressure = (ABCD / 1000) * 10^(EF - 20)`` mbar.
 
     Протокол определяется автоматически по формату ответа, а также может
     быть форсирован через параметр ``protocol``.
@@ -238,13 +239,17 @@ class ThyracontVSP63D(InstrumentDriver):
     def _parse_v1_response(self, response: str) -> Reading:
         """Разобрать ответ Thyracont Protocol V1.
 
-        Формат: ``"<addr>M<5digits><checksum>\\r"``, например ``"001M100023D\\r"``.
+        Формат: ``"<addr>M<6digits><checksum>\\r"``, например ``"001M260017N\\r"``.
 
-        Кодировка 5-значного значения::
+        Кодировка 6-значного значения ABCDEF::
 
-            pressure_mbar = 10 ^ ((value - 80000) / 4000)
+            ABCD = мантисса (4 цифры)
+            EF   = экспонента (2 цифры)
+            pressure_mbar = (ABCD / 1000) × 10^(EF − 20)
 
-        Пример: ``92002`` → 10^((92002 − 80000) / 4000) = 10^3.0005 ≈ 1001 mbar
+        Примеры:
+        - ``260017`` → (2600/1000) × 10^(17−20) = 2.6e-3 mbar
+        - ``100023`` → (1000/1000) × 10^(23−20) = 1000 mbar
 
         Parameters
         ----------
@@ -260,21 +265,22 @@ class ThyracontVSP63D(InstrumentDriver):
         response_stripped = response.strip()
 
         try:
-            # Ожидаемый формат: <addr><cmd><5digits><checksum>
-            # Например: "001M100023D" → addr="001", cmd="M", value="10002", checksum="3D"
+            # Ожидаемый формат: <addr><cmd><6digits><checksum>
+            # Например: "001M260017N" → addr="001", cmd="M", value="260017", checksum="N"
             if not response_stripped.startswith(self._address):
                 raise ValueError(f"Неверный адрес в ответе: '{response_stripped}'")
 
             # Пропустить адрес (3 символа) + команду (1 символ)
             payload = response_stripped[len(self._address) + 1:]
 
-            if len(payload) < 5:
+            if len(payload) < 6:
                 raise ValueError(f"Слишком короткий payload: '{payload}'")
 
-            # Первые 5 символов = кодированное значение давления
-            value_str = payload[:5]
-            value_int = int(value_str)
-            pressure_mbar = 10.0 ** ((value_int - 80000) / 4000.0)
+            # Первые 6 символов: 4 мантисса + 2 экспонента
+            value_str = payload[:6]
+            mantissa = int(value_str[:4])
+            exponent = int(value_str[4:6])
+            pressure_mbar = (mantissa / 1000.0) * (10.0 ** (exponent - 20))
 
         except (ValueError, IndexError) as exc:
             log.error(
