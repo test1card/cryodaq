@@ -1,12 +1,14 @@
-"""Keithley 2604B driver with dual-channel runtime support."""
+"""Keithley 2604B driver with dual-channel runtime support.
+
+P=const control loop runs host-side in read_channels() — no TSP scripts
+are uploaded to the instrument, so the VISA bus stays free for queries.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
@@ -15,8 +17,8 @@ from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_TSP_DIR = Path(__file__).parents[4] / "tsp"
-_HEARTBEAT_INTERVAL_S = 10.0
+# Minimum measurable current for resistance calculation (avoid division by noise)
+_I_MIN_A = 1e-9
 
 _MOCK_R0 = 100.0
 _MOCK_T0 = 300.0
@@ -39,8 +41,6 @@ class ChannelRuntime:
     v_comp: float = 40.0
     i_comp: float = 1.0
     active: bool = False
-    script_running: bool = False
-    heartbeat_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
 class Keithley2604B(InstrumentDriver):
@@ -49,12 +49,10 @@ class Keithley2604B(InstrumentDriver):
         name: str,
         resource_str: str,
         *,
-        tsp_dir: Path | None = None,
         mock: bool = False,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
-        self._tsp_dir = tsp_dir or _DEFAULT_TSP_DIR
         self._transport = USBTMCTransport(mock=mock)
         self._instrument_id = ""
         self._channels: dict[SmuChannel, ChannelRuntime] = {
@@ -94,42 +92,47 @@ class Keithley2604B(InstrumentDriver):
 
         readings: list[Reading] = []
         for smu_channel in SMU_CHANNELS:
+            runtime = self._channels[smu_channel]
             try:
-                # Check output state first — measure.iv() returns TSP error -285
-                # ("not permitted when output is off") when source is OFF.
-                output_raw = await self._transport.query(
-                    f"print({smu_channel}.source.output)", timeout_ms=3000
-                )
-                try:
-                    output_on = float(output_raw.strip()) > 0.5
-                except ValueError:
-                    output_on = False
-
-                if not output_on:
-                    # Source OFF is a normal operating state — return zeros.
-                    # Explicit resistance_override=0.0 to avoid 0/0 → NaN
-                    # (NaN maps to NULL in sqlite3, violating NOT NULL constraint).
-                    readings.extend(
-                        self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0)
+                if not runtime.active:
+                    # Check output state — source may be OFF or left ON from
+                    # a previous session.  measure.iv() errors when output is OFF.
+                    output_raw = await self._transport.query(
+                        f"print({smu_channel}.source.output)", timeout_ms=3000
                     )
+                    try:
+                        output_on = float(output_raw.strip()) > 0.5
+                    except ValueError:
+                        output_on = False
+
+                    if not output_on:
+                        readings.extend(
+                            self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0)
+                        )
+                        continue
+
+                    # Output is ON but not managed by us — read for monitoring.
+                    raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
+                    current, voltage = self._parse_iv_response(raw, smu_channel)
+                    readings.extend(self._build_channel_readings(smu_channel, voltage, current))
                     continue
 
+                # --- Active P=const channel: measure + regulate ---
                 raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
                 current, voltage = self._parse_iv_response(raw, smu_channel)
+
+                if abs(current) > _I_MIN_A:
+                    resistance = voltage / current
+                    if resistance > 0:
+                        target_v = math.sqrt(runtime.p_target * resistance)
+                        target_v = max(0.0, min(target_v, runtime.v_comp))
+                        await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
+
                 readings.extend(self._build_channel_readings(smu_channel, voltage, current))
             except Exception as exc:
                 log.error("%s: read failure on %s: %s", self.name, smu_channel, exc)
                 readings.extend(self._error_readings_for_channel(smu_channel))
         return readings
-
-    async def load_tsp(self, script_path: Path) -> None:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
-        if not script_path.exists():
-            raise FileNotFoundError(f"{self.name}: missing TSP script {script_path}")
-
-        payload = f"loadandrunscript\n{script_path.read_text(encoding='utf-8')}\nendscript\n"
-        await self._transport.write_raw(payload.encode("utf-8"))
 
     async def start_source(
         self,
@@ -154,26 +157,25 @@ class Keithley2604B(InstrumentDriver):
 
         if self.mock:
             runtime.active = True
-            runtime.script_running = True
-            self._start_heartbeat(smu_channel)
             return
 
-        await self._transport.write(f"{smu_channel}_P_target = {p_target}")
-        await self._transport.write(f"{smu_channel}_V_compliance = {v_compliance}")
-        await self._transport.write(f"{smu_channel}_I_compliance = {i_compliance}")
-        await self._transport.write_raw(self._load_tsp_template(smu_channel).encode("utf-8"))
+        # Configure source directly via VISA — no TSP script.
+        await self._transport.write(f"{smu_channel}.reset()")
+        await self._transport.write(f"{smu_channel}.source.func = {smu_channel}.OUTPUT_DCVOLTS")
+        await self._transport.write(f"{smu_channel}.source.autorangev = {smu_channel}.AUTORANGE_ON")
+        await self._transport.write(f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON")
+        await self._transport.write(f"{smu_channel}.source.limitv = {v_compliance}")
+        await self._transport.write(f"{smu_channel}.source.limiti = {i_compliance}")
+        await self._transport.write(f"{smu_channel}.source.levelv = 0")
+        await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON")
         runtime.active = True
-        runtime.script_running = True
-        self._start_heartbeat(smu_channel)
 
     async def stop_source(self, channel: str) -> None:
         smu_channel = normalize_smu_channel(channel)
         runtime = self._channels[smu_channel]
-        self._cancel_heartbeat(smu_channel)
 
         if self.mock:
             runtime.active = False
-            runtime.script_running = False
             runtime.p_target = 0.0
             return
 
@@ -184,20 +186,7 @@ class Keithley2604B(InstrumentDriver):
         await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
         await self._verify_output_off(smu_channel)
         runtime.active = False
-        runtime.script_running = False
         runtime.p_target = 0.0
-
-    async def heartbeat(self, channel: str | None = None) -> None:
-        if not self._connected:
-            return
-
-        if channel is None:
-            for smu_channel in self.active_channels:
-                await self._transport.write(f"if {smu_channel}_heartbeat then {smu_channel}_heartbeat() end")
-            return
-
-        smu_channel = normalize_smu_channel(channel)
-        await self._transport.write(f"if {smu_channel}_heartbeat then {smu_channel}_heartbeat() end")
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
         if not self._connected:
@@ -215,10 +204,8 @@ class Keithley2604B(InstrumentDriver):
     async def emergency_off(self, channel: str | None = None) -> None:
         channels = [normalize_smu_channel(channel)] if channel is not None else list(SMU_CHANNELS)
         for smu_channel in channels:
-            self._cancel_heartbeat(smu_channel)
             runtime = self._channels[smu_channel]
             runtime.active = False
-            runtime.script_running = False
             runtime.p_target = 0.0
 
         if self.mock or not self._connected:
@@ -247,33 +234,6 @@ class Keithley2604B(InstrumentDriver):
     def active_channels(self) -> list[str]:
         return [channel for channel, runtime in self._channels.items() if runtime.active]
 
-    def _start_heartbeat(self, channel: SmuChannel) -> None:
-        self._cancel_heartbeat(channel)
-        self._channels[channel].heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(channel),
-            name=f"heartbeat:{self.name}:{channel}",
-        )
-
-    def _cancel_heartbeat(self, channel: SmuChannel) -> None:
-        task = self._channels[channel].heartbeat_task
-        if task is not None and not task.done():
-            task.cancel()
-        self._channels[channel].heartbeat_task = None
-
-    async def _heartbeat_loop(self, channel: SmuChannel) -> None:
-        try:
-            while self._channels[channel].active:
-                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
-                await self.heartbeat(channel)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.critical("%s: heartbeat failure on %s: %s", self.name, channel, exc)
-            try:
-                await self.stop_source(channel)
-            except Exception:
-                log.exception("%s: stop_source failed after heartbeat failure on %s", self.name, channel)
-
     async def _verify_output_off(self, channel: str) -> None:
         if self.mock or not self._connected:
             return
@@ -284,13 +244,6 @@ class Keithley2604B(InstrumentDriver):
                 log.critical("%s: %s still reports output=%s", self.name, smu_channel, response.strip())
         except ValueError:
             log.critical("%s: %s unexpected output response: %r", self.name, smu_channel, response.strip())
-
-    def _load_tsp_template(self, channel: SmuChannel) -> str:
-        template_path = self._tsp_dir / "p_const.lua"
-        if not template_path.exists():
-            template_path = self._tsp_dir / "p_const_single.lua"
-        template = template_path.read_text(encoding="utf-8")
-        return template.replace("{SMU}", channel).replace("{SMU_VAR}", channel)
 
     def _parse_iv_response(self, raw: str, channel: SmuChannel) -> tuple[float, float]:
         parts = raw.strip().split("\t")
