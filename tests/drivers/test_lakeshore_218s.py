@@ -39,13 +39,12 @@ _MOCK_IDN = "LSCI,MODEL218S,MOCK001,010101"
 def _make_mock_transport(response: str) -> MagicMock:
     """Return a GPIBTransport mock whose query() returns *response*.
 
-    ``open()`` returns the IDN string (used by ``connect()`` via
-    ``verify_query="*IDN?"``).
+    First query() call returns IDN (for connect), subsequent calls return *response*.
     """
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(return_value=response)
+    transport.query = AsyncMock(side_effect=[_MOCK_IDN, response])
     return transport
 
 
@@ -190,9 +189,9 @@ async def test_parse_overrange() -> None:
 
 async def test_parse_srdg_response() -> None:
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[_MOCK_IDN, RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._transport = transport
@@ -208,10 +207,10 @@ async def test_parse_srdg_response() -> None:
 
 async def test_read_calibration_pair_resolves_channels() -> None:
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
     transport.query = AsyncMock(
-        side_effect=[NORMAL_RESPONSE, RAW_RESPONSE]
+        side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE]
     )
     driver = LakeShore218S(
         "ls218s",
@@ -266,11 +265,11 @@ async def test_parse_garbled_response() -> None:
 
 async def test_timeout_handling() -> None:
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    # read_channels query times out (connect uses open(verify_query=) instead)
+    # First call (IDN during connect) succeeds; read_channels query times out
     transport.query = AsyncMock(
-        side_effect=[asyncio.TimeoutError],
+        side_effect=[_MOCK_IDN, asyncio.TimeoutError],
     )
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
@@ -350,9 +349,9 @@ async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
     store.set_runtime_global_mode("off")
 
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE])
+    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport
@@ -377,9 +376,9 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     store.set_runtime_global_mode("on")
 
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE, RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport
@@ -405,9 +404,9 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     store.set_runtime_global_mode("on")
 
     transport = MagicMock()
-    transport.open = AsyncMock(return_value=_MOCK_IDN)
+    transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE, RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport

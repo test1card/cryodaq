@@ -1,4 +1,9 @@
-"""Асинхронная обёртка над pyvisa для GPIB-коммуникации."""
+"""Асинхронная обёртка над pyvisa для GPIB-коммуникации.
+
+Open-per-query: VISA resource открывается и закрывается на каждую операцию.
+NI GPIB-USB-HS зависает навсегда после VI_ERROR_TMO если ресурс остаётся
+открытым. IFC (Interface Clear) сбрасывает шину после таймаута.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -7,35 +12,37 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_TIMEOUT_MS = 10_000
+
 
 class GPIBTransport:
-    """Асинхронный транспорт GPIB на основе pyvisa.
+    """Асинхронный GPIB транспорт: open-per-query + IFC bus reset.
 
-    Все блокирующие вызовы pyvisa выполняются в пуле потоков через
-    ``run_in_executor``, чтобы не блокировать event loop.
+    Каждая операция (query / write) атомарно открывает VISA resource,
+    выполняет команду и закрывает resource. Это предотвращает зависание
+    NI GPIB-USB-HS после VI_ERROR_TMO.
 
-    GPIB — half-duplex шина: одновременный доступ нескольких приборов на
-    одном контроллере вызывает VI_ERROR_TMO / VI_ERROR_INV_OBJECT.
-    Поэтому все операции на одной шине (например ``GPIB0``) сериализуются
-    через общий ``asyncio.Lock``.
+    GPIB — half-duplex шина: все операции на одном контроллере (``GPIB0``)
+    сериализуются через общий ``asyncio.Lock``.
+
+    При таймауте автоматически отправляется IFC (Interface Clear) для
+    сброса шины без power cycle.
 
     Parameters
     ----------
     mock:
-        Если ``True`` — работает без реального VISA-бэкенда,
-        возвращает предопределённые ответы.
+        Если ``True`` — работает без реального VISA-бэкенда.
     """
 
-    # Общие блокировки шин: ключ = prefix ("GPIB0"), значение = asyncio.Lock.
-    # Все экземпляры GPIBTransport на одном контроллере разделяют один Lock.
     _bus_locks: dict[str, asyncio.Lock] = {}
+    _resource_managers: dict[str, Any] = {}
 
     def __init__(self, *, mock: bool = False) -> None:
         self.mock = mock
-        self._resource: Any = None
-        self._rm: Any = None
         self._resource_str: str = ""
+        self._bus_prefix: str = ""
         self._bus_lock: asyncio.Lock | None = None
+        self._timeout_ms: int = _DEFAULT_TIMEOUT_MS
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -43,107 +50,50 @@ class GPIBTransport:
 
     @classmethod
     def get_bus_lock(cls, resource_str: str) -> asyncio.Lock:
-        """Get or create the shared bus lock for a GPIB controller prefix.
-
-        Parameters
-        ----------
-        resource_str:
-            VISA resource string, e.g. ``"GPIB0::12::INSTR"``.
-            The prefix before the first ``"::"`` identifies the bus.
-
-        Returns
-        -------
-        asyncio.Lock
-            Shared lock for all instruments on the same GPIB bus.
-        """
+        """Get or create the shared bus lock for a GPIB controller prefix."""
         bus_prefix = resource_str.split("::")[0]
         if bus_prefix not in cls._bus_locks:
             cls._bus_locks[bus_prefix] = asyncio.Lock()
         return cls._bus_locks[bus_prefix]
 
-    async def open(self, resource_str: str, *, verify_query: str | None = None) -> str | None:
-        """Открыть соединение с GPIB-ресурсом.
+    @classmethod
+    def _get_rm(cls, bus_prefix: str) -> Any:
+        """Get or create a shared ResourceManager for a bus prefix."""
+        if bus_prefix not in cls._resource_managers:
+            import pyvisa
+            cls._resource_managers[bus_prefix] = pyvisa.ResourceManager()
+        return cls._resource_managers[bus_prefix]
+
+    async def open(self, resource_str: str, *, timeout_ms: int = _DEFAULT_TIMEOUT_MS) -> None:
+        """Сохранить параметры подключения. Не открывает VISA resource.
 
         Parameters
         ----------
         resource_str:
             VISA-строка ресурса, например ``"GPIB0::12::INSTR"``.
-        verify_query:
-            Необязательный SCPI-запрос (например ``"*IDN?"``) для верификации
-            связи сразу после open_resource(). Выполняется под тем же bus lock,
-            что и open_resource(), гарантируя атомарность на GPIB-шине.
-
-        Returns
-        -------
-        str | None
-            Ответ на verify_query, если он задан. Иначе None.
+        timeout_ms:
+            Таймаут по умолчанию для query/write операций.
         """
         self._resource_str = resource_str
+        self._bus_prefix = resource_str.split("::")[0]
         self._bus_lock = self.get_bus_lock(resource_str)
+        self._timeout_ms = timeout_ms
 
         if self.mock:
             log.info("GPIB [mock]: имитация открытия ресурса %s", resource_str)
-            if verify_query is not None:
-                return self._mock_response(verify_query)
-            return None
+            return
 
-        loop = asyncio.get_running_loop()
-        async with self._bus_lock:
-            try:
-                await loop.run_in_executor(None, self._blocking_open, resource_str)
-                log.info("GPIB: ресурс %s успешно открыт", resource_str)
-            except Exception as exc:
-                log.error("GPIB: ошибка открытия ресурса %s — %s", resource_str, exc)
-                raise
-
-            if verify_query is not None:
-                try:
-                    response: str = await loop.run_in_executor(
-                        None, self._blocking_query, verify_query, 5000
-                    )
-                    log.debug("GPIB verify '%s' → '%s'", verify_query, response)
-                    return response
-                except Exception as exc:
-                    log.error("GPIB: verify query '%s' failed on %s — %s", verify_query, resource_str, exc)
-                    # Close on failed verify so the resource is not left dangling
-                    try:
-                        await loop.run_in_executor(None, self._blocking_close)
-                    except Exception:
-                        pass
-                    self._resource = None
-                    raise
-
-        return None
+        log.info("GPIB: ресурс %s зарегистрирован (open-per-query)", resource_str)
 
     async def close(self) -> None:
-        """Закрыть соединение с ресурсом (идемпотентно)."""
+        """No-op: ресурсы закрываются после каждой операции."""
         if self.mock:
             log.info("GPIB [mock]: имитация закрытия ресурса %s", self._resource_str)
             return
-
-        if self._resource is None:
-            return
-
-        loop = asyncio.get_running_loop()
-        if self._bus_lock is not None:
-            async with self._bus_lock:
-                try:
-                    await loop.run_in_executor(None, self._blocking_close)
-                    log.info("GPIB: ресурс %s закрыт", self._resource_str)
-                except Exception as exc:
-                    log.warning("GPIB: ошибка при закрытии ресурса %s — %s", self._resource_str, exc)
-                finally:
-                    self._resource = None
-        else:
-            try:
-                await loop.run_in_executor(None, self._blocking_close)
-            except Exception as exc:
-                log.warning("GPIB: ошибка при закрытии ресурса %s — %s", self._resource_str, exc)
-            finally:
-                self._resource = None
+        log.info("GPIB: ресурс %s отключён", self._resource_str)
 
     async def write(self, cmd: str) -> None:
-        """Отправить команду прибору без ожидания ответа.
+        """Отправить команду прибору (open → write → close).
 
         Parameters
         ----------
@@ -158,69 +108,106 @@ class GPIBTransport:
         assert self._bus_lock is not None
         async with self._bus_lock:
             try:
-                await loop.run_in_executor(None, self._resource.write, cmd)
+                await loop.run_in_executor(
+                    None, self._blocking_write, cmd, self._timeout_ms
+                )
                 log.debug("GPIB write → %s: %s", self._resource_str, cmd)
-            except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
-                log.error("GPIB: ошибка записи команды '%s' в %s — %s", cmd, self._resource_str, exc)
+            except Exception as exc:
+                log.error("GPIB: ошибка записи '%s' в %s — %s", cmd, self._resource_str, exc)
+                await self._try_ifc(loop)
                 raise
 
-    async def query(self, cmd: str, timeout_ms: int = 5000) -> str:
-        """Отправить запрос и вернуть ответ прибора.
+    async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
+        """Отправить запрос и вернуть ответ (open → query → close).
 
         Parameters
         ----------
         cmd:
             SCPI-запрос, например ``"*IDN?"``.
         timeout_ms:
-            Таймаут ожидания ответа в миллисекундах (по умолчанию 5000).
+            Таймаут в миллисекундах. По умолчанию значение из open().
 
         Returns
         -------
         str
-            Ответ прибора без завершающих пробелов и символов новой строки.
+            Ответ прибора.
         """
         if self.mock:
             response = self._mock_response(cmd)
             log.debug("GPIB [mock] query '%s' → '%s'", cmd, response)
             return response
 
+        effective_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
         loop = asyncio.get_running_loop()
         assert self._bus_lock is not None
         async with self._bus_lock:
             try:
                 response: str = await loop.run_in_executor(
-                    None, self._blocking_query, cmd, timeout_ms
+                    None, self._blocking_query, cmd, effective_timeout
                 )
                 log.debug("GPIB query '%s' → '%s'", cmd, response)
                 return response
-            except Exception as exc:  # pyvisa.errors.VisaIOError и прочие
-                log.error(
-                    "GPIB: ошибка запроса '%s' к %s — %s", cmd, self._resource_str, exc
-                )
+            except Exception as exc:
+                log.error("GPIB: ошибка запроса '%s' к %s — %s", cmd, self._resource_str, exc)
+                await self._try_ifc(loop)
                 raise
 
+    async def flush_input(self) -> None:
+        """No-op: open-per-query не имеет буфера для очистки."""
+
     # ------------------------------------------------------------------
-    # Блокирующие вспомогательные методы (выполняются в executor)
+    # IFC bus reset
     # ------------------------------------------------------------------
 
-    def _blocking_open(self, resource_str: str) -> None:
-        """Синхронное открытие VISA-ресурса (вызывается в executor)."""
-        import pyvisa  # импорт здесь, чтобы не падать при отсутствии библиотеки в mock-режиме
+    async def _try_ifc(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Попытка IFC (Interface Clear) для сброса GPIB шины после ошибки."""
+        try:
+            await loop.run_in_executor(None, self._blocking_ifc)
+            log.warning("GPIB: IFC sent on %s — bus reset", self._bus_prefix)
+        except Exception as ifc_exc:
+            log.error("GPIB: IFC failed on %s — %s", self._bus_prefix, ifc_exc)
 
-        self._rm = pyvisa.ResourceManager()
-        self._resource = self._rm.open_resource(resource_str)
-
-    def _blocking_close(self) -> None:
-        """Синхронное закрытие VISA-ресурса (вызывается в executor)."""
-        self._resource.close()
-        if self._rm is not None:
-            self._rm.close()
-            self._rm = None
+    # ------------------------------------------------------------------
+    # Блокирующие методы (выполняются в executor)
+    # ------------------------------------------------------------------
 
     def _blocking_query(self, cmd: str, timeout_ms: int) -> str:
-        """Синхронный query с установкой таймаута (вызывается в executor)."""
-        self._resource.timeout = timeout_ms
-        return self._resource.query(cmd).strip()
+        """Open → query → close. Атомарная операция в одном потоке."""
+        rm = self._get_rm(self._bus_prefix)
+        resource = rm.open_resource(self._resource_str)
+        try:
+            resource.timeout = timeout_ms
+            return resource.query(cmd).strip()
+        finally:
+            try:
+                resource.close()
+            except Exception:
+                pass
+
+    def _blocking_write(self, cmd: str, timeout_ms: int) -> None:
+        """Open → write → close. Атомарная операция в одном потоке."""
+        rm = self._get_rm(self._bus_prefix)
+        resource = rm.open_resource(self._resource_str)
+        try:
+            resource.timeout = timeout_ms
+            resource.write(cmd)
+        finally:
+            try:
+                resource.close()
+            except Exception:
+                pass
+
+    def _blocking_ifc(self) -> None:
+        """Послать IFC (Interface Clear) через GPIB controller interface."""
+        rm = self._get_rm(self._bus_prefix)
+        intf = rm.open_resource(f"{self._bus_prefix}::INTFC")
+        try:
+            intf.send_ifc()
+        finally:
+            try:
+                intf.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Mock-утилиты
@@ -233,7 +220,6 @@ class GPIBTransport:
         if cmd_upper == "*IDN?":
             return "LSCI,MODEL218S,MOCK001,010101"
         if cmd_upper.startswith("KRDG?"):
-            # Восемь реалистичных криогенных температур (Кельвин)
             return (
                 "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
                 "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
