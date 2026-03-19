@@ -419,26 +419,32 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
 
 
 # ---------------------------------------------------------------------------
-# Per-channel fallback when KRDG? 0 returns < 8 values
+# Per-channel fallback when KRDG? returns < 8 values
 # ---------------------------------------------------------------------------
 
 async def test_krdg_fallback_to_per_channel() -> None:
-    """If KRDG? 0 returns < 8 values (SDC mux reset), fall back to KRDG? 1..8."""
-    driver = LakeShore218S("ls218s", "GPIB0::11::INSTR", mock=True)
-    await driver.connect()
+    """If KRDG? returns < 8 values, fall back to KRDG? 1..8."""
+    all_values = ["+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
+                  "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"]
 
-    # Patch mock transport to return only 1 value for KRDG? 0, then per-channel
-    original_query = driver._transport.query
-    call_count = 0
-
-    async def _patched_query(cmd, timeout_ms=None):
-        nonlocal call_count
-        call_count += 1
-        if cmd == "KRDG? 0" and call_count == 1:
+    async def _query_handler(cmd, timeout_ms=None):
+        if cmd == "*IDN?":
+            return _MOCK_IDN
+        if cmd == "KRDG?":
             return "+004.235E+0"  # Only 1 value — triggers fallback
-        return await original_query(cmd, timeout_ms=timeout_ms)
+        if cmd.startswith("KRDG? "):
+            ch = int(cmd.split()[-1]) - 1
+            return all_values[ch]
+        return ""
 
-    driver._transport.query = _patched_query
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=_query_handler)
+
+    driver = LakeShore218S("ls218s", "GPIB0::11::INSTR", mock=False)
+    driver._transport = transport
+    await driver.connect()
 
     readings = await driver._read_krdg_channels()
 
@@ -447,4 +453,65 @@ async def test_krdg_fallback_to_per_channel() -> None:
         assert r.unit == "K"
         assert r.status == ChannelStatus.OK
 
-    await driver.disconnect()
+
+async def test_krdg_sticky_fallback() -> None:
+    """After 3 short responses, driver switches to per-channel mode permanently."""
+    transport = _make_mock_transport(NORMAL_RESPONSE)
+    driver = LakeShore218S("ls218s", "GPIB0::11::INSTR", mock=False)
+    driver._transport = transport
+    await driver.connect()
+
+    bulk_call_count = 0
+    original_side_effect = transport.query.side_effect
+
+    async def _patched_query(cmd, timeout_ms=None):
+        nonlocal bulk_call_count
+        if cmd == "KRDG?":
+            bulk_call_count += 1
+            return "+004.235E+0"  # Always short → triggers fallback
+        if cmd.startswith("KRDG? "):
+            ch = int(cmd.split()[-1]) - 1
+            return ["+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
+                    "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"][ch]
+        return _MOCK_IDN
+
+    transport.query = AsyncMock(side_effect=_patched_query)
+
+    # 3 calls to trigger sticky mode
+    for _ in range(3):
+        readings = await driver._read_krdg_channels()
+        assert len(readings) == 8
+
+    assert driver._use_per_channel_krdg is True
+    assert bulk_call_count == 3  # KRDG? tried 3 times
+
+    # 4th call should skip KRDG? entirely
+    bulk_call_count = 0
+    readings = await driver._read_krdg_channels()
+    assert len(readings) == 8
+    assert bulk_call_count == 0  # KRDG? NOT called — went straight to per-channel
+
+
+async def test_krdg_no_argument_in_query() -> None:
+    """Verify the driver sends KRDG? (no argument), not KRDG? 0."""
+    queries_sent: list[str] = []
+
+    async def _tracking_query(cmd, timeout_ms=None):
+        queries_sent.append(cmd)
+        if cmd == "*IDN?":
+            return _MOCK_IDN
+        return NORMAL_RESPONSE
+
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=_tracking_query)
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
+    driver._transport = transport
+    await driver.connect()
+
+    await driver._read_krdg_channels()
+
+    assert "KRDG?" in queries_sent
+    assert "KRDG? 0" not in queries_sent

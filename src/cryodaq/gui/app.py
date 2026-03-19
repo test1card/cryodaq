@@ -68,6 +68,9 @@ def main() -> None:
     timer.stop()
     loop.run_until_complete(subscriber.stop())
     loop.close()
+
+    from cryodaq.gui.zmq_client import shutdown as shutdown_zmq
+    shutdown_zmq()
     logger.info("GUI завершён")
 
     sys.exit(exit_code)

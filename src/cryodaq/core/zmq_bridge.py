@@ -173,6 +173,10 @@ class ZMQSubscriber:
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.setsockopt(zmq.RECONNECT_IVL, 500)
+        self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)
+        self._socket.setsockopt(zmq.RCVTIMEO, 3000)
         self._socket.connect(self._address)
         self._socket.subscribe(self._topic)
         self._running = True

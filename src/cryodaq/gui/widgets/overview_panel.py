@@ -389,8 +389,27 @@ class CompactTempCard(QFrame):
 # TempCardGrid
 # ---------------------------------------------------------------------------
 
+class _PlaceholderCard(QFrame):
+    """Greyed-out placeholder for empty grid cells."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(80, 54)
+        self.setMaximumHeight(60)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setStyleSheet(
+            "background-color: #1A1A1A; border: 1px solid #333; border-radius: 4px;"
+        )
+
+
 class TempCardGrid(QWidget):
-    """Fixed 8-per-row temperature card grid (one row per instrument)."""
+    """Fixed 8-column temperature card grid, one row per instrument group.
+
+    Row layout from channels.yaml groups:
+    - Row 0: криостат (Т1..Т8, with disabled channels as placeholders)
+    - Row 1: компрессор (Т9..Т16, with disabled channels as placeholders)
+    - Row 2+: other groups
+    """
 
     _COLS = 8
 
@@ -405,15 +424,31 @@ class TempCardGrid(QWidget):
         self._build_cards()
 
     def _build_cards(self) -> None:
-        """Создать карточки для видимых каналов."""
-        visible_ids = self._channel_mgr.get_all_visible()
-        temp_ids = [ch for ch in visible_ids if ch.startswith("\u0422")]  # Т
-        for idx, ch_id in enumerate(temp_ids):
-            display = self._channel_mgr.get_display_name(ch_id)
-            card = CompactTempCard(ch_id, display)
-            self._cards[ch_id] = card
-            row, col = divmod(idx, self._COLS)
-            self._grid.addWidget(card, row, col)
+        """Создать карточки, сгруппированные по group из channels.yaml."""
+        all_channels = self._channel_mgr.get_all()
+        groups_map = self._channel_mgr.get_channels_by_group()
+
+        # Filter to temperature channels only (Т prefix)
+        temp_groups: list[tuple[str, list[str]]] = []
+        for group_name, ch_ids in groups_map.items():
+            temp_ids = [ch for ch in ch_ids if ch.startswith("\u0422")]  # Т
+            if temp_ids:
+                temp_groups.append((group_name, temp_ids))
+
+        for row, (group_name, ch_ids) in enumerate(temp_groups):
+            for col, ch_id in enumerate(ch_ids[:self._COLS]):
+                info = all_channels.get(ch_id, {})
+                visible = info.get("visible", True)
+                if visible:
+                    display = self._channel_mgr.get_display_name(ch_id)
+                    card = CompactTempCard(ch_id, display)
+                    self._cards[ch_id] = card
+                    self._grid.addWidget(card, row, col)
+                else:
+                    self._grid.addWidget(_PlaceholderCard(), row, col)
+            # Fill remaining columns with placeholders
+            for col in range(len(ch_ids), self._COLS):
+                self._grid.addWidget(_PlaceholderCard(), row, col)
 
     def get_cards(self) -> dict[str, CompactTempCard]:
         return self._cards
@@ -470,9 +505,9 @@ class PressureCard(QFrame):
 
         self._last_value = value
 
-        # Format: scientific for < 0.01, normal otherwise
+        # Format: compact scientific for small values
         if value < 0.01:
-            text = f"{value:.2e}".replace("e-0", "e-").replace("e+0", "e+") + " mbar"
+            text = f"{value:.1e} mbar"
         else:
             text = f"{value:.2f} mbar"
         self._value_label.setText(text)
@@ -965,7 +1000,7 @@ class OverviewPanel(QWidget):
         cards_row.addWidget(self._card_grid, stretch=1)
 
         self._pressure_card = PressureCard()
-        self._pressure_card.setFixedWidth(140)
+        self._pressure_card.setFixedWidth(160)
         cards_row.addWidget(self._pressure_card)
 
         root.addLayout(cards_row)

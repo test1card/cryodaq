@@ -28,8 +28,21 @@ def _get_socket(addr: str = DEFAULT_CMD_ADDR) -> zmq.Socket:
         _socket.setsockopt(zmq.RCVTIMEO, _TIMEOUT_MS)
         _socket.setsockopt(zmq.SNDTIMEO, _TIMEOUT_MS)
         _socket.setsockopt(zmq.LINGER, 0)
+        _socket.setsockopt(zmq.REQ_RELAXED, 1)
+        _socket.setsockopt(zmq.REQ_CORRELATE, 1)
         _socket.connect(addr)
     return _socket
+
+
+def shutdown() -> None:
+    """Корректно закрыть ZMQ сокет и контекст. Вызывать при завершении GUI."""
+    global _ctx, _socket
+    if _socket is not None and not _socket.closed:
+        _socket.close(linger=0)
+        _socket = None
+    if _ctx is not None:
+        _ctx.term()
+        _ctx = None
 
 
 def send_command(cmd: dict) -> dict:

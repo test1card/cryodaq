@@ -149,6 +149,26 @@ class ChannelManager:
             if info.get("visible", True)
         ]
 
+    def get_group(self, channel_id: str) -> str:
+        """Получить группу канала (из channels.yaml)."""
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        return self._channels.get(short_id, {}).get("group", "")
+
+    def get_channels_by_group(self) -> dict[str, list[str]]:
+        """Получить каналы, сгруппированные по полю 'group'.
+
+        Returns dict: group_name → [channel_id, ...] в порядке из YAML.
+        Каналы без группы попадают в '' (пустая строка).
+        """
+        from collections import OrderedDict
+        groups: dict[str, list[str]] = OrderedDict()
+        for ch_id, info in self._channels.items():
+            group = info.get("group", "")
+            if group not in groups:
+                groups[group] = []
+            groups[group].append(ch_id)
+        return dict(groups)
+
     def get_channel_configs(self) -> list[dict]:
         """Получить конфигурации для TemperaturePanel (совместимость)."""
         result = []

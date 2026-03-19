@@ -348,21 +348,29 @@ class MainWindow(QMainWindow):
     @Slot()
     def _update_status_bar(self) -> None:
         """Обновить метки подключения, uptime и скорости."""
-        # Подключение
-        connected = (time.monotonic() - self._last_reading_time) < 3.0
+        now = time.monotonic()
+        silence_s = now - self._last_reading_time if self._last_reading_time > 0 else 0.0
+        connected = silence_s < 3.0
         self._connected = connected
+
         if connected:
-            elapsed = time.monotonic() - self._last_rate_time
+            elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
             self._rate_count = 0
-            self._last_rate_time = time.monotonic()
+            self._last_rate_time = now
 
             self._conn_label.setText("⬤ Подключено")
             apply_status_label_style(self._conn_label, "success", bold=True)
             self._rate_label.setText(f"{rate:.0f} изм/с")
-        elif self._reading_count > 0:
+        elif self._reading_count > 0 and silence_s < 90:
             self._conn_label.setText("⬤ Нет данных")
             apply_status_label_style(self._conn_label, "warning", bold=True)
+        elif self._reading_count > 0 and silence_s < 180:
+            self._conn_label.setText("⬤ Engine не отвечает")
+            apply_status_label_style(self._conn_label, "error", bold=True)
+        elif self._reading_count > 0:
+            self._conn_label.setText("⬤ Engine потерян (>3 мин)")
+            apply_status_label_style(self._conn_label, "error", bold=True)
         else:
             self._conn_label.setText("⬤ Отключено")
             apply_status_label_style(self._conn_label, "error", bold=True)

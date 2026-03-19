@@ -36,6 +36,10 @@ class LakeShore218S(InstrumentDriver):
         self._instrument_id: str = ""
         self._calibration_store = calibration_store
         self._runtime_warning_cache: set[tuple[str, str]] = set()
+        self._use_per_channel_krdg: bool = False
+        self._use_per_channel_srdg: bool = False
+        self._krdg0_fail_count: int = 0
+        self._srdg0_fail_count: int = 0
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
@@ -46,6 +50,10 @@ class LakeShore218S(InstrumentDriver):
             await self._transport.close()
             raise
         self._connected = True
+        self._use_per_channel_krdg = False
+        self._use_per_channel_srdg = False
+        self._krdg0_fail_count = 0
+        self._srdg0_fail_count = 0
 
     async def disconnect(self) -> None:
         if not self._connected:
@@ -69,15 +77,27 @@ class LakeShore218S(InstrumentDriver):
     async def _read_krdg_channels(self) -> list[Reading]:
         if self.mock:
             return self._mock_readings()
-        raw_response = await self._transport.query("KRDG? 0")
-        log.debug("%s: KRDG? 0 -> %s", self.name, raw_response)
+
+        if self._use_per_channel_krdg:
+            return await self._read_krdg_per_channel()
+
+        raw_response = await self._transport.query("KRDG?")
+        log.debug("%s: KRDG? -> %s", self.name, raw_response)
         readings = self._parse_response(raw_response, unit="K", reading_kind="temperature")
         if len(readings) < 8:
+            self._krdg0_fail_count += 1
             log.warning(
-                "%s: KRDG? 0 returned %d values (expected 8), falling back to per-channel queries",
-                self.name, len(readings),
+                "%s: KRDG? returned %d values (expected 8), fallback #%d",
+                self.name, len(readings), self._krdg0_fail_count,
             )
-            readings = await self._read_krdg_per_channel()
+            if self._krdg0_fail_count >= 3:
+                self._use_per_channel_krdg = True
+                log.warning(
+                    "%s: KRDG? failed %d times, switching to per-channel mode permanently",
+                    self.name, self._krdg0_fail_count,
+                )
+            return await self._read_krdg_per_channel()
+        self._krdg0_fail_count = 0
         return readings
 
     async def _read_krdg_per_channel(self) -> list[Reading]:
@@ -123,15 +143,27 @@ class LakeShore218S(InstrumentDriver):
             raise RuntimeError(f"{self.name}: instrument is not connected")
         if self.mock:
             return self._mock_sensor_readings()
-        raw_response = await self._transport.query("SRDG? 0")
-        log.debug("%s: SRDG? 0 -> %s", self.name, raw_response)
+
+        if self._use_per_channel_srdg:
+            return await self._read_srdg_per_channel()
+
+        raw_response = await self._transport.query("SRDG?")
+        log.debug("%s: SRDG? -> %s", self.name, raw_response)
         readings = self._parse_response(raw_response, unit="sensor_unit", reading_kind="raw_sensor")
         if len(readings) < 8:
+            self._srdg0_fail_count += 1
             log.warning(
-                "%s: SRDG? 0 returned %d values (expected 8), falling back to per-channel queries",
-                self.name, len(readings),
+                "%s: SRDG? returned %d values (expected 8), fallback #%d",
+                self.name, len(readings), self._srdg0_fail_count,
             )
-            readings = await self._read_srdg_per_channel()
+            if self._srdg0_fail_count >= 3:
+                self._use_per_channel_srdg = True
+                log.warning(
+                    "%s: SRDG? failed %d times, switching to per-channel mode permanently",
+                    self.name, self._srdg0_fail_count,
+                )
+            return await self._read_srdg_per_channel()
+        self._srdg0_fail_count = 0
         return readings
 
     async def _read_srdg_per_channel(self) -> list[Reading]:

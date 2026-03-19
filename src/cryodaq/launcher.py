@@ -148,9 +148,16 @@ class LauncherWindow(QMainWindow):
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
         if _is_port_busy(_ZMQ_PORT):
-            logger.info("Engine уже запущен (порт %d занят) — подключаемся", _ZMQ_PORT)
-            self._engine_external = True
-            return
+            # Verify engine is actually responding, not just a zombie port
+            from cryodaq.gui.zmq_client import send_command
+            reply = send_command({"cmd": "safety_status"})
+            if reply.get("ok"):
+                logger.info("Engine уже запущен (порт %d) и отвечает — подключаемся", _ZMQ_PORT)
+                self._engine_external = True
+                return
+            logger.warning("Порт %d занят, но engine не отвечает — запускаем новый", _ZMQ_PORT)
+            # Port busy but no response — proceed to start new engine
+            # (old process may be in TIME_WAIT or zombie state)
 
         logger.info("Запуск engine как подпроцесса...")
         python = sys.executable
@@ -181,8 +188,19 @@ class LauncherWindow(QMainWindow):
         self._engine_external = False
         logger.info("Engine запущен, PID=%d", self._engine_proc.pid)
 
-        # Дать engine время на инициализацию
-        time.sleep(1.5)
+        # Ожидание готовности engine — ping command port
+        self._wait_engine_ready()
+
+    def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
+        """Ping engine command port until it responds or timeout."""
+        from cryodaq.gui.zmq_client import send_command
+        for attempt in range(max_attempts):
+            time.sleep(interval_s)
+            reply = send_command({"cmd": "safety_status"})
+            if reply.get("ok"):
+                logger.info("Engine ready (attempt %d/%d)", attempt + 1, max_attempts)
+                return
+        logger.warning("Engine did not respond after %d attempts, proceeding anyway", max_attempts)
 
     def _stop_engine(self) -> None:
         """Остановить engine подпроцесс."""
@@ -395,6 +413,9 @@ class LauncherWindow(QMainWindow):
         self._loop.run_until_complete(self._subscriber.stop())
         self._stop_engine()
         self._loop.close()
+
+        from cryodaq.gui.zmq_client import shutdown as shutdown_zmq
+        shutdown_zmq()
         self._app.quit()
 
     def _tray_open(self) -> None:

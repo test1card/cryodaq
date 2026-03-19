@@ -239,12 +239,18 @@ class _SmuPanel(QFrame):
         if self._channel_state == "on":
             self._state_label.setText("ВКЛ")
             apply_status_label_style(self._state_label, "success", bold=True)
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(True)
         elif self._channel_state == "fault":
             self._state_label.setText("АВАРИЯ")
             apply_status_label_style(self._state_label, "error", bold=True)
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
         else:
             self._state_label.setText("ВЫКЛ")
             apply_status_label_style(self._state_label, "muted", bold=True)
+            self._start_btn.setEnabled(True)
+            self._stop_btn.setEnabled(False)
 
     def _validate_start_request(self, *, emit_feedback: bool = True) -> bool:
         if self._channel_state == "on":

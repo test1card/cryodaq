@@ -40,6 +40,9 @@ class GPIBTransport:
 
     _resource_managers: dict[str, Any] = {}
 
+    _consecutive_errors: dict[str, int] = {}  # resource_str → count
+    _IFC_THRESHOLD = 5  # IFC only after this many consecutive errors on same device
+
     def __init__(self, *, mock: bool = False) -> None:
         self.mock = mock
         self._resource_str: str = ""
@@ -157,7 +160,7 @@ class GPIBTransport:
         return resource
 
     def _blocking_query(self, cmd: str, timeout_ms: int) -> str:
-        """Open → write → sleep(0.1) → read → close, с IFC recovery."""
+        """Open → write → sleep(0.1) → read → close, with retry on failure."""
         rm = self._get_rm(self._bus_prefix)
         resource = self._open_resource(rm, timeout_ms)
         try:
@@ -169,16 +172,36 @@ class GPIBTransport:
                 resource.close()
             except Exception:
                 pass
-            log.warning("GPIB: query '%s' failed on %s, attempting IFC recovery", cmd, self._resource_str)
-            return self._ifc_retry_query(rm, cmd, timeout_ms, first_err)
+            # Retry once with fresh open (no IFC)
+            log.warning("GPIB: query '%s' failed on %s, retrying with fresh open", cmd, self._resource_str)
+            try:
+                result = self._fresh_retry_query(rm, cmd, timeout_ms)
+                GPIBTransport._consecutive_errors[self._resource_str] = 0
+                return result
+            except Exception:
+                count = GPIBTransport._consecutive_errors.get(self._resource_str, 0) + 1
+                GPIBTransport._consecutive_errors[self._resource_str] = count
+                if count >= self._IFC_THRESHOLD:
+                    log.critical(
+                        "GPIB: %d consecutive errors on %s, sending IFC (bus-wide reset)",
+                        count, self._resource_str,
+                    )
+                    try:
+                        self._send_ifc(rm)
+                        time.sleep(0.5)
+                    except Exception as ifc_err:
+                        log.error("GPIB: IFC failed on %s — %s", self._bus_prefix, ifc_err)
+                    GPIBTransport._consecutive_errors[self._resource_str] = 0
+                raise first_err
         try:
             resource.close()
         except Exception:
             pass
+        GPIBTransport._consecutive_errors[self._resource_str] = 0
         return result
 
     def _blocking_write(self, cmd: str, timeout_ms: int) -> None:
-        """Open → write → close, с IFC recovery при ошибке."""
+        """Open → write → close, with retry on failure."""
         rm = self._get_rm(self._bus_prefix)
         resource = self._open_resource(rm, timeout_ms)
         try:
@@ -188,30 +211,41 @@ class GPIBTransport:
                 resource.close()
             except Exception:
                 pass
-            log.warning("GPIB: write '%s' failed on %s, attempting IFC recovery", cmd, self._resource_str)
-            self._ifc_retry_write(rm, cmd, timeout_ms, first_err)
-            return
+            log.warning("GPIB: write '%s' failed on %s, retrying with fresh open", cmd, self._resource_str)
+            try:
+                self._fresh_retry_write(rm, cmd, timeout_ms)
+                GPIBTransport._consecutive_errors[self._resource_str] = 0
+                return
+            except Exception:
+                count = GPIBTransport._consecutive_errors.get(self._resource_str, 0) + 1
+                GPIBTransport._consecutive_errors[self._resource_str] = count
+                if count >= self._IFC_THRESHOLD:
+                    log.critical(
+                        "GPIB: %d consecutive errors on %s, sending IFC",
+                        count, self._resource_str,
+                    )
+                    try:
+                        self._send_ifc(rm)
+                        time.sleep(0.5)
+                    except Exception as ifc_err:
+                        log.error("GPIB: IFC failed — %s", ifc_err)
+                    GPIBTransport._consecutive_errors[self._resource_str] = 0
+                raise first_err
         try:
             resource.close()
         except Exception:
             pass
+        GPIBTransport._consecutive_errors[self._resource_str] = 0
 
     # ------------------------------------------------------------------
-    # IFC recovery (clear() used only here, not in hot path)
+    # Retry helpers (fresh open, no IFC)
     # ------------------------------------------------------------------
 
-    def _ifc_retry_query(self, rm: Any, cmd: str, timeout_ms: int, original_err: Exception) -> str:
-        """IFC + sleep + clear + write-delay-read retry."""
-        try:
-            self._send_ifc(rm)
-        except Exception as ifc_err:
-            log.error("GPIB: IFC failed on %s — %s", self._bus_prefix, ifc_err)
-            raise original_err from ifc_err
-        time.sleep(0.5)
+    def _fresh_retry_query(self, rm: Any, cmd: str, timeout_ms: int) -> str:
+        """Retry query with a fresh open_resource (no IFC, no clear)."""
+        time.sleep(_WRITE_READ_DELAY_S)
         resource = self._open_resource(rm, timeout_ms)
         try:
-            resource.clear()
-            time.sleep(_WRITE_READ_DELAY_S)
             resource.write(cmd)
             time.sleep(_WRITE_READ_DELAY_S)
             result = resource.read().strip()
@@ -225,21 +259,14 @@ class GPIBTransport:
             resource.close()
         except Exception:
             pass
-        log.info("GPIB: IFC recovery succeeded for '%s' on %s", cmd, self._resource_str)
+        log.info("GPIB: fresh retry succeeded for '%s' on %s", cmd, self._resource_str)
         return result
 
-    def _ifc_retry_write(self, rm: Any, cmd: str, timeout_ms: int, original_err: Exception) -> None:
-        """IFC + sleep + clear + retry write."""
-        try:
-            self._send_ifc(rm)
-        except Exception as ifc_err:
-            log.error("GPIB: IFC failed on %s — %s", self._bus_prefix, ifc_err)
-            raise original_err from ifc_err
-        time.sleep(0.5)
+    def _fresh_retry_write(self, rm: Any, cmd: str, timeout_ms: int) -> None:
+        """Retry write with a fresh open_resource (no IFC, no clear)."""
+        time.sleep(_WRITE_READ_DELAY_S)
         resource = self._open_resource(rm, timeout_ms)
         try:
-            resource.clear()
-            time.sleep(_WRITE_READ_DELAY_S)
             resource.write(cmd)
         except Exception:
             try:
@@ -251,7 +278,7 @@ class GPIBTransport:
             resource.close()
         except Exception:
             pass
-        log.info("GPIB: IFC recovery succeeded for write '%s' on %s", cmd, self._resource_str)
+        log.info("GPIB: fresh retry succeeded for write '%s' on %s", cmd, self._resource_str)
 
     def _send_ifc(self, rm: Any) -> None:
         """Send IFC (Interface Clear) to reset the GPIB bus."""
@@ -277,7 +304,7 @@ class GPIBTransport:
             return "LSCI,MODEL218S,MOCK001,010101"
         if cmd_upper.startswith("KRDG?"):
             ch = cmd_upper.replace("KRDG?", "").strip()
-            if ch and ch != "0":
+            if ch:
                 # Per-channel query: return single value
                 idx = int(ch) - 1
                 values = [
@@ -291,7 +318,7 @@ class GPIBTransport:
             )
         if cmd_upper.startswith("SRDG?"):
             ch = cmd_upper.replace("SRDG?", "").strip()
-            if ch and ch != "0":
+            if ch:
                 idx = int(ch) - 1
                 values = [
                     "+8.298000E+1", "+8.017000E+1", "+1.738000E+1", "+1.728000E+1",
