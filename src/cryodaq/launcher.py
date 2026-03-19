@@ -40,9 +40,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.main_window import MainWindow
+from cryodaq.gui.zmq_client import ZmqBridge, set_bridge
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -109,27 +109,31 @@ class LauncherWindow(QMainWindow):
         self._async_timer.timeout.connect(self._tick_async)
         self._async_timer.start()
 
-        # --- ZMQ ---
-        self._subscriber = ZMQSubscriber()
-        self._subscriber._callback = self._on_zmq_reading
+        # --- ZMQ Bridge subprocess ---
+        self._bridge = ZmqBridge()
+        set_bridge(self._bridge)
         self._reading_received.connect(self._on_reading_qt)
 
         # --- Engine ---
         self._start_engine()
 
+        # Start ZMQ bridge subprocess
+        self._bridge.start()
+
         if tray_only:
-            # Tray-only mode: minimal UI, только иконка в трее + health check.
-            # Для оператора: `cryodaq --tray` в автозагрузке Windows.
             self._main_window = None
             self._build_tray()
-            self._loop.run_until_complete(self._subscriber.start())
         else:
-            # --- GUI ---
             self._build_ui()
             self._build_tray()
-            self._loop.run_until_complete(self._subscriber.start())
 
         # --- Таймеры ---
+        # Data polling from ZMQ bridge subprocess
+        self._data_timer = QTimer(self)
+        self._data_timer.setInterval(10)  # 100 Hz
+        self._data_timer.timeout.connect(self._poll_bridge_data)
+        self._data_timer.start()
+
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(3000)
         self._health_timer.timeout.connect(self._check_engine_health)
@@ -148,14 +152,9 @@ class LauncherWindow(QMainWindow):
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
         if _is_port_busy(_ZMQ_PORT):
-            # Verify engine is actually responding, not just a zombie port
-            from cryodaq.gui.zmq_client import send_command
-            reply = send_command({"cmd": "safety_status"})
-            if reply.get("ok"):
-                logger.info("Engine уже запущен (порт %d) и отвечает — подключаемся", _ZMQ_PORT)
-                self._engine_external = True
-                return
-            logger.warning("Порт %d занят, но engine не отвечает — запускаем новый", _ZMQ_PORT)
+            logger.info("Engine уже запущен (порт %d занят) — подключаемся", _ZMQ_PORT)
+            self._engine_external = True
+            return
             # Port busy but no response — proceed to start new engine
             # (old process may be in TIME_WAIT or zombie state)
 
@@ -192,12 +191,10 @@ class LauncherWindow(QMainWindow):
         self._wait_engine_ready()
 
     def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
-        """Ping engine command port until it responds or timeout."""
-        from cryodaq.gui.zmq_client import send_command
+        """Wait for engine to start listening on ZMQ port."""
         for attempt in range(max_attempts):
             time.sleep(interval_s)
-            reply = send_command({"cmd": "safety_status"})
-            if reply.get("ok"):
+            if _is_port_busy(_ZMQ_PORT):
                 logger.info("Engine ready (attempt %d/%d)", attempt + 1, max_attempts)
                 return
         logger.warning("Engine did not respond after %d attempts, proceeding anyway", max_attempts)
@@ -284,7 +281,7 @@ class LauncherWindow(QMainWindow):
         root.addWidget(top_bar)
 
         # --- Встроенное главное окно ---
-        self._main_window = MainWindow(subscriber=self._subscriber, embedded=True)
+        self._main_window = MainWindow(bridge=self._bridge, embedded=True)
         # Скрываем statusBar MainWindow — используем launcher statusBar
         self._main_window.statusBar().setVisible(False)
         # Переносим меню MainWindow (Файл, Эксперимент, Настройки) в launcher menuBar
@@ -347,8 +344,15 @@ class LauncherWindow(QMainWindow):
     # Event handlers
     # ------------------------------------------------------------------
 
-    def _on_zmq_reading(self, reading: Reading) -> None:
-        self._reading_received.emit(reading)
+    @Slot()
+    def _poll_bridge_data(self) -> None:
+        """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
+        if not self._bridge.is_alive():
+            logger.warning("ZMQ bridge died, restarting...")
+            self._bridge.start()
+            return
+        for reading in self._bridge.poll_readings():
+            self._on_reading_qt(reading)
 
     @Slot(object)
     def _on_reading_qt(self, reading: Reading) -> None:
@@ -406,16 +410,14 @@ class LauncherWindow(QMainWindow):
     def _do_shutdown(self) -> None:
         """Корректное завершение."""
         self._health_timer.stop()
+        self._data_timer.stop()
         if hasattr(self, "_status_timer"):
             self._status_timer.stop()
         self._async_timer.stop()
         self._tray.hide()
-        self._loop.run_until_complete(self._subscriber.stop())
+        self._bridge.shutdown()
         self._stop_engine()
         self._loop.close()
-
-        from cryodaq.gui.zmq_client import shutdown as shutdown_zmq
-        shutdown_zmq()
         self._app.quit()
 
     def _tray_open(self) -> None:
@@ -528,6 +530,8 @@ def main() -> None:
                  Windows, чтобы оператор видел статус engine без открытия GUI.
     """
     import argparse
+    import multiprocessing
+    multiprocessing.freeze_support()
 
     parser = argparse.ArgumentParser(description="CryoDAQ Launcher")
     parser.add_argument("--mock", action="store_true", help="Запустить engine в mock-режиме")

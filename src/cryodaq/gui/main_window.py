@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from PySide6.QtCore import QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.paths import get_data_dir
-from cryodaq.core.zmq_bridge import ZMQSubscriber
+from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
@@ -54,22 +55,24 @@ class MainWindow(QMainWindow):
 
     Параметры
     ----------
-    subscriber:
-        ZMQSubscriber, через который приходят данные от engine.
+    bridge:
+        ZmqBridge (subprocess-based). Данные поступают через _dispatch_reading().
     """
 
-    # Внутренний сигнал для потокобезопасной передачи Reading из ZMQ callback
+    # Внутренний сигнал для потокобезопасной передачи Reading
     _reading_received = Signal(object)
 
     def __init__(
         self,
-        subscriber: ZMQSubscriber,
+        bridge: ZmqBridge | None = None,
         parent: QWidget | None = None,
         *,
         embedded: bool = False,
+        # Legacy: accept subscriber= kwarg for backwards compat with launcher
+        subscriber: Any | None = None,
     ) -> None:
         super().__init__(parent)
-        self._subscriber = subscriber
+        self._bridge = bridge
         self._embedded = embedded
         self._start_time = time.monotonic()
         self._reading_count: int = 0
@@ -104,8 +107,7 @@ class MainWindow(QMainWindow):
         self._experiment_workspace.refresh_state()
         self._sync_experiment_actions()
 
-        # ZMQ callback → сигнал → слот (потокобезопасно)
-        self._subscriber._callback = self._on_zmq_reading
+        # Reading dispatch: caller invokes _dispatch_reading directly (from QTimer)
         self._reading_received.connect(self._dispatch_reading)
 
         # Таймер обновления статусной строки (каждую секунду)
@@ -287,10 +289,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # ZMQ → Qt маршрутизация данных
     # ------------------------------------------------------------------
-
-    def _on_zmq_reading(self, reading: Reading) -> None:
-        """Callback ZMQSubscriber — вызывается из asyncio потока."""
-        self._reading_received.emit(reading)
 
     @Slot(object)
     def _dispatch_reading(self, reading: Reading) -> None:
