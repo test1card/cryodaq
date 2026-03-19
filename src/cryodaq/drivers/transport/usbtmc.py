@@ -34,6 +34,7 @@ class USBTMCTransport:
         self._resource: Any = None
         self._rm: Any = None
         self._resource_str: str = ""
+        self._lock: asyncio.Lock = asyncio.Lock()
         # Внутренний счётчик для mock: имитация буфера измерений
         self._mock_buf_index: int = 0
 
@@ -99,18 +100,19 @@ class USBTMCTransport:
             log.debug("USBTMC [mock] write: %s", cmd)
             return
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._resource.write, cmd)
-            log.debug("USBTMC write → %s: %s", self._resource_str, cmd)
-        except Exception as exc:
-            log.error(
-                "USBTMC: ошибка записи команды '%s' в %s — %s",
-                cmd,
-                self._resource_str,
-                exc,
-            )
-            raise
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._resource.write, cmd)
+                log.debug("USBTMC write → %s: %s", self._resource_str, cmd)
+            except Exception as exc:
+                log.error(
+                    "USBTMC: ошибка записи команды '%s' в %s — %s",
+                    cmd,
+                    self._resource_str,
+                    exc,
+                )
+                raise
 
     async def write_raw(self, data: bytes) -> None:
         """Отправить сырые байты прибору (для загрузки больших TSP-скриптов).
@@ -127,21 +129,22 @@ class USBTMCTransport:
             )
             return
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._resource.write_raw, data)
-            log.debug(
-                "USBTMC write_raw → %s: %d байт",
-                self._resource_str,
-                len(data),
-            )
-        except Exception as exc:
-            log.error(
-                "USBTMC: ошибка write_raw в %s — %s",
-                self._resource_str,
-                exc,
-            )
-            raise
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._resource.write_raw, data)
+                log.debug(
+                    "USBTMC write_raw → %s: %d байт",
+                    self._resource_str,
+                    len(data),
+                )
+            except Exception as exc:
+                log.error(
+                    "USBTMC: ошибка write_raw в %s — %s",
+                    self._resource_str,
+                    exc,
+                )
+                raise
 
     async def query(self, cmd: str, timeout_ms: int = 5000) -> str:
         """Отправить TSP-запрос и вернуть ответ прибора.
@@ -164,21 +167,22 @@ class USBTMCTransport:
             log.debug("USBTMC [mock] query '%s' → '%s'", cmd, response)
             return response
 
-        loop = asyncio.get_running_loop()
-        try:
-            response: str = await loop.run_in_executor(
-                None, self._blocking_query, cmd, timeout_ms
-            )
-            log.debug("USBTMC query '%s' → '%s'", cmd, response)
-            return response
-        except Exception as exc:
-            log.error(
-                "USBTMC: ошибка запроса '%s' к %s — %s",
-                cmd,
-                self._resource_str,
-                exc,
-            )
-            raise
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            try:
+                response: str = await loop.run_in_executor(
+                    None, self._blocking_query, cmd, timeout_ms
+                )
+                log.debug("USBTMC query '%s' → '%s'", cmd, response)
+                return response
+            except Exception as exc:
+                log.error(
+                    "USBTMC: ошибка запроса '%s' к %s — %s",
+                    cmd,
+                    self._resource_str,
+                    exc,
+                )
+                raise
 
     # ------------------------------------------------------------------
     # Блокирующие вспомогательные методы (выполняются в executor)

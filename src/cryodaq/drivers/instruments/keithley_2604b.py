@@ -71,6 +71,8 @@ class Keithley2604B(InstrumentDriver):
             self._instrument_id = idn
             if "2604B" not in idn:
                 raise RuntimeError(f"{self.name}: unexpected IDN {idn!r}")
+            # Drain stale errors so they don't confuse runtime error checks.
+            await self._transport.write("errorqueue.clear()")
         except Exception:
             await self._transport.close()
             raise
