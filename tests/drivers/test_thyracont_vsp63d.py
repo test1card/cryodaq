@@ -138,36 +138,51 @@ async def test_reconnect_after_disconnect() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Parse Protocol V1 response "001M100023D"
+# 9. Parse Protocol V1 — "001M100023D" → 10^((10002-20000)/4000) ≈ 0.00316 mbar
 # ---------------------------------------------------------------------------
 
-async def test_parse_v1_response_1mbar() -> None:
-    """Protocol V1: '001M100023D' → mantissa=1000, exp=2 → 1000 * 10^(2-5) = 1.0 mbar."""
+async def test_thyracont_parse_pressure() -> None:
+    """Protocol V1: '001M100023D' → value=10002 → 10^((10002-20000)/4000) ≈ 0.00316 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
 
     reading = driver._parse_v1_response("001M100023D\r")
 
+    expected = 10.0 ** ((10002 - 20000) / 4000.0)  # ≈ 0.003164
     assert reading.status == ChannelStatus.OK
-    assert math.isclose(reading.value, 1.0, rel_tol=1e-4)
+    assert math.isclose(reading.value, expected, rel_tol=1e-4)
     assert reading.unit == "mbar"
 
 
 # ---------------------------------------------------------------------------
-# 10. Parse Protocol V1 — low pressure
+# 10. Parse Protocol V1 — high pressure: value=20000 → 10^0 = 1.0 mbar
 # ---------------------------------------------------------------------------
 
-async def test_parse_v1_response_low_pressure() -> None:
-    """Protocol V1: '001M01500XX' → mantissa=0150, exp=0 → 150 * 10^(0-5) = 1.5e-3 mbar."""
+async def test_thyracont_parse_high_pressure() -> None:
+    """Protocol V1: value=20000 → 10^((20000-20000)/4000) = 1.0 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
 
-    reading = driver._parse_v1_response("001M01500XX\r")
+    reading = driver._parse_v1_response("001M20000FF\r")
 
     assert reading.status == ChannelStatus.OK
-    assert math.isclose(reading.value, 1.5e-3, rel_tol=1e-4)
+    assert math.isclose(reading.value, 1.0, rel_tol=1e-4)
 
 
 # ---------------------------------------------------------------------------
-# 11. Parse Protocol V1 — invalid response
+# 11. Parse Protocol V1 — value=24000 → 10^1 = 10 mbar
+# ---------------------------------------------------------------------------
+
+async def test_parse_v1_response_very_high_pressure() -> None:
+    """Protocol V1: value=24000 → 10^((24000-20000)/4000) = 10.0 mbar."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+
+    reading = driver._parse_v1_response("001M24000FF\r")
+
+    assert reading.status == ChannelStatus.OK
+    assert math.isclose(reading.value, 10.0, rel_tol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 12. Parse Protocol V1 — invalid response
 # ---------------------------------------------------------------------------
 
 async def test_parse_v1_response_invalid() -> None:
@@ -178,3 +193,20 @@ async def test_parse_v1_response_invalid() -> None:
 
     assert reading.status == ChannelStatus.SENSOR_ERROR
     assert math.isnan(reading.value)
+
+
+# ---------------------------------------------------------------------------
+# 13. Connect via V1 protocol probe (mock transport)
+# ---------------------------------------------------------------------------
+
+async def test_thyracont_connect_v1() -> None:
+    """connect() sends '001M^' and gets '001M100023D\\r' → connected via V1."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
+
+    await driver.connect()
+
+    assert driver.connected
+    assert driver._protocol_v1 is True
+    assert driver._instrument_id == "Thyracont-V1@001"
+
+    await driver.disconnect()

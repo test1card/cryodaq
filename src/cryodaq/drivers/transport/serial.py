@@ -1,9 +1,14 @@
 """Асинхронная обёртка над pyserial-asyncio для последовательной коммуникации (RS-232/USB-Serial)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 log = logging.getLogger(__name__)
+
+# Таймаут чтения по умолчанию (секунды).  Если прибор не отвечает за это
+# время, read_line() бросает asyncio.TimeoutError вместо вечного зависания.
+_DEFAULT_READ_TIMEOUT_S: float = 3.0
 
 # Mock-ответы для известных команд
 _MOCK_IDN = "Thyracont,VSP63D,MOCK001,1.0"
@@ -28,6 +33,7 @@ class SerialTransport:
         self._reader = None
         self._writer = None
         self._resource_str: str = ""
+        self._read_timeout_s: float = _DEFAULT_READ_TIMEOUT_S
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -46,6 +52,7 @@ class SerialTransport:
             Таймаут чтения в секундах (по умолчанию 2.0).
         """
         self._resource_str = port
+        self._read_timeout_s = timeout
 
         if self.mock:
             log.info("Serial [mock]: имитация открытия порта %s @ %d бод", port, baudrate)
@@ -126,18 +133,25 @@ class SerialTransport:
         await self._writer.drain()
         log.debug("Serial write → %s: %s", self._resource_str, data)
 
-    async def read_line(self, *, terminator: str = "\r") -> str:
+    async def read_line(self, *, terminator: str = "\r", timeout: float | None = None) -> str:
         """Читать байты из порта до терминатора.
 
         Parameters
         ----------
         terminator:
             Символ-терминатор (по умолчанию ``"\\r"``).
+        timeout:
+            Таймаут чтения в секундах (``None`` → использует значение из ``open()``).
 
         Returns
         -------
         str
             Прочитанная строка, включая терминатор.
+
+        Raises
+        ------
+        asyncio.TimeoutError
+            Если прибор не ответил за отведённое время.
         """
         if self.mock:
             return _MOCK_PRESSURE_RESPONSE
@@ -145,8 +159,29 @@ class SerialTransport:
         if self._reader is None:
             raise RuntimeError("Serial: порт не открыт")
 
-        data = await self._reader.readuntil(terminator.encode())
+        effective_timeout = timeout if timeout is not None else self._read_timeout_s
+        data = await asyncio.wait_for(
+            self._reader.readuntil(terminator.encode()),
+            timeout=effective_timeout,
+        )
         return data.decode(errors="replace")
+
+    async def flush_input(self) -> None:
+        """Очистить входной буфер (сбросить незапрошенные данные).
+
+        Полезно между probe-запросами в connect(), когда предыдущая попытка
+        могла оставить мусор в буфере.
+        """
+        if self.mock or self._reader is None:
+            return
+        try:
+            # Прочитать всё, что есть в буфере, с минимальным таймаутом
+            while True:
+                await asyncio.wait_for(self._reader.read(4096), timeout=0.1)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Mock-утилиты
@@ -155,9 +190,14 @@ class SerialTransport:
     @staticmethod
     def _mock_response(command: str) -> str:
         """Сформировать имитированный ответ для известных команд."""
-        cmd_upper = command.strip().upper()
+        cmd_stripped = command.strip()
+        cmd_upper = cmd_stripped.upper()
         if cmd_upper in ("*IDN?", "IDN?"):
             return _MOCK_IDN
         if cmd_upper.startswith("MV"):
             return _MOCK_PRESSURE_RESPONSE
+        # Protocol V1: "<addr>M^" → "<addr>M<5digits><checksum>\r"
+        if len(cmd_stripped) >= 5 and cmd_stripped[3] == "M":
+            addr = cmd_stripped[:3]
+            return f"{addr}M100023D\r"
         return "\r"

@@ -41,7 +41,7 @@ class ThyracontVSP63D(InstrumentDriver):
     **Thyracont Protocol V1 (VSM77DL и аналоги):**
       RS-232/USB-Serial, 115200 бод.
       Команда: ``"<addr>M^\\r"`` → ответ: ``"<addr>M<5digits><checksum>\\r"``
-      Кодировка значения: ``ABCDE`` → давление = ``ABCD × 10^(E - 5)`` mbar.
+      Кодировка значения: ``pressure = 10^((value - 20000) / 4000)`` mbar.
 
     Протокол определяется автоматически по формату ответа, а также может
     быть форсирован через параметр ``protocol``.
@@ -85,53 +85,44 @@ class ThyracontVSP63D(InstrumentDriver):
     async def connect(self) -> None:
         """Открыть последовательный порт и верифицировать связь с прибором.
 
-        Сначала пытается ``*IDN?`` (VSP63D). Если ответ невалидный или таймаут,
-        пробует Protocol V1 measurement запрос для определения связи (VSM77DL).
+        Thyracont VSP63D не поддерживает SCPI (``*IDN?``).  Вместо этого
+        отправляем measurement-запрос Protocol V1 (``"<addr>M^\\r"``) и
+        проверяем, что ответ начинается с ``"<addr>M"``.
+
         Устанавливает флаг ``_connected = True`` при успехе.
         """
         log.info("%s: подключение к %s @ %d бод", self.name, self._resource_str, self._baudrate)
         await self._transport.open(self._resource_str, baudrate=self._baudrate)
 
-        # Попытка 1: *IDN? (VSP63D)
-        try:
-            idn = await self._transport.query("*IDN?")
-            idn_stripped = idn.strip()
-            if idn_stripped and "thyracont" in idn_stripped.lower():
-                self._instrument_id = idn_stripped
-                self._protocol_v1 = False
-                log.info("%s: IDN = %s (VSP63D protocol)", self.name, self._instrument_id)
-                self._connected = True
-                return
-        except Exception:
-            pass
+        cmd = f"{self._address}M^"
+        expected_prefix = f"{self._address}M"
+        last_exc: Exception | None = None
 
-        # Попытка 2: Protocol V1 measurement probe
-        try:
-            cmd = f"{self._address}M^"
-            resp = await self._transport.query(cmd)
-            resp_stripped = resp.strip()
-            if resp_stripped.startswith(self._address):
-                self._protocol_v1 = True
-                self._instrument_id = f"Thyracont-V1@{self._address}"
-                log.info(
-                    "%s: Protocol V1 detected (address=%s, probe=%r)",
-                    self.name, self._address, resp_stripped,
+        for attempt in range(3):
+            if attempt > 0:
+                await self._transport.flush_input()
+            try:
+                resp = await self._transport.query(cmd)
+                resp_stripped = resp.strip()
+                if resp_stripped.startswith(expected_prefix):
+                    self._protocol_v1 = True
+                    self._instrument_id = f"Thyracont-V1@{self._address}"
+                    log.info(
+                        "%s: Protocol V1 detected (address=%s, probe=%r, attempt=%d)",
+                        self.name, self._address, resp_stripped, attempt + 1,
+                    )
+                    self._connected = True
+                    return
+            except Exception as exc:
+                last_exc = exc
+                log.debug(
+                    "%s: probe attempt %d failed — %s", self.name, attempt + 1, exc,
                 )
-                self._connected = True
-                return
-        except Exception as exc:
-            log.error(
-                "%s: не удалось связаться с прибором (ни IDN, ни Protocol V1) — %s",
-                self.name, exc,
-            )
-            await self._transport.close()
-            raise
 
-        # Оба протокола не ответили — ошибка
         await self._transport.close()
         raise RuntimeError(
-            f"{self.name}: прибор не ответил ни на *IDN?, ни на Protocol V1 probe"
-        )
+            f"{self.name}: прибор не ответил на Protocol V1 probe ({cmd!r})"
+        ) from last_exc
 
     async def disconnect(self) -> None:
         """Разорвать соединение с прибором (идемпотентно)."""
@@ -249,12 +240,11 @@ class ThyracontVSP63D(InstrumentDriver):
 
         Формат: ``"<addr>M<5digits><checksum>\\r"``, например ``"001M100023D\\r"``.
 
-        Кодировка значения ``ABCDE``:
-          мантисса = ``ABCD`` (первые 4 цифры)
-          экспонента = ``E`` (последняя цифра)
-          давление = мантисса × 10^(E - 5) mbar
+        Кодировка 5-значного значения::
 
-        Пример: ``10002`` → 1000 × 10^(2 - 5) = 1000 × 0.001 = 1.0 mbar
+            pressure_mbar = 10 ^ ((value - 20000) / 4000)
+
+        Пример: ``10002`` → 10^((10002 − 20000) / 4000) = 10^(−2.4995) ≈ 0.00316 mbar
 
         Parameters
         ----------
@@ -281,11 +271,10 @@ class ThyracontVSP63D(InstrumentDriver):
             if len(payload) < 5:
                 raise ValueError(f"Слишком короткий payload: '{payload}'")
 
-            # Первые 5 символов = значение давления
+            # Первые 5 символов = кодированное значение давления
             value_str = payload[:5]
-            mantissa = int(value_str[:4])
-            exponent = int(value_str[4])
-            pressure_mbar = mantissa * (10.0 ** (exponent - 5))
+            value_int = int(value_str)
+            pressure_mbar = 10.0 ** ((value_int - 20000) / 4000.0)
 
         except (ValueError, IndexError) as exc:
             log.error(
