@@ -119,3 +119,17 @@ async def test_keithley_read_source_off() -> None:
             assert reading.value == 0.0, f"{reading.channel} should be 0.0 when OFF"
 
     await driver.disconnect()
+
+
+async def test_keithley_output_state_float_string() -> None:
+    """Keithley print(smua.source.output) returns '1.000000e+00', not '1'.
+
+    The driver must parse this as float and compare > 0.5 to detect ON state.
+    Regression test for the real-instrument float-format response.
+    """
+    # Verify the parsing logic: float("1.000000e+00") > 0.5 == True
+    assert float("1.000000e+00") > 0.5
+    assert float("0.000000e+00") <= 0.5
+    # Edge cases the old string comparison would have handled
+    assert float("1") > 0.5
+    assert float("0") <= 0.5

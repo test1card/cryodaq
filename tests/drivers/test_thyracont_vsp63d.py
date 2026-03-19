@@ -138,47 +138,62 @@ async def test_reconnect_after_disconnect() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Parse Protocol V1 — "001M100023D" → 10^((10002-20000)/4000) ≈ 0.00316 mbar
+# 9. Parse Protocol V1 — atmosphere: "001M920022M" → value=92002
+#    10^((92002-80000)/4000) = 10^3.0005 ≈ 1001 mbar
 # ---------------------------------------------------------------------------
 
 async def test_thyracont_parse_pressure() -> None:
-    """Protocol V1: '001M100023D' → value=10002 → 10^((10002-20000)/4000) ≈ 0.00316 mbar."""
+    """Protocol V1: '001M920022M' → value=92002 → 10^((92002-80000)/4000) ≈ 1001 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
 
-    reading = driver._parse_v1_response("001M100023D\r")
+    reading = driver._parse_v1_response("001M920022M\r")
 
-    expected = 10.0 ** ((10002 - 20000) / 4000.0)  # ≈ 0.003164
+    expected = 10.0 ** ((92002 - 80000) / 4000.0)  # ≈ 1001
     assert reading.status == ChannelStatus.OK
     assert math.isclose(reading.value, expected, rel_tol=1e-4)
     assert reading.unit == "mbar"
 
 
 # ---------------------------------------------------------------------------
-# 10. Parse Protocol V1 — high pressure: value=20000 → 10^0 = 1.0 mbar
+# 10. Parse Protocol V1 — 1 mbar: value=80000 → 10^0 = 1.0 mbar
 # ---------------------------------------------------------------------------
 
 async def test_thyracont_parse_high_pressure() -> None:
-    """Protocol V1: value=20000 → 10^((20000-20000)/4000) = 1.0 mbar."""
+    """Protocol V1: value=80000 → 10^((80000-80000)/4000) = 1.0 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
 
-    reading = driver._parse_v1_response("001M20000FF\r")
+    reading = driver._parse_v1_response("001M80000FF\r")
 
     assert reading.status == ChannelStatus.OK
     assert math.isclose(reading.value, 1.0, rel_tol=1e-4)
 
 
 # ---------------------------------------------------------------------------
-# 11. Parse Protocol V1 — value=24000 → 10^1 = 10 mbar
+# 11. Parse Protocol V1 — value=84000 → 10^1 = 10 mbar
 # ---------------------------------------------------------------------------
 
 async def test_parse_v1_response_very_high_pressure() -> None:
-    """Protocol V1: value=24000 → 10^((24000-20000)/4000) = 10.0 mbar."""
+    """Protocol V1: value=84000 → 10^((84000-80000)/4000) = 10.0 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
 
-    reading = driver._parse_v1_response("001M24000FF\r")
+    reading = driver._parse_v1_response("001M84000FF\r")
 
     assert reading.status == ChannelStatus.OK
     assert math.isclose(reading.value, 10.0, rel_tol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 14. Parse Protocol V1 — good vacuum: value=56000 → 10^-6 = 1e-6 mbar
+# ---------------------------------------------------------------------------
+
+async def test_parse_v1_good_vacuum() -> None:
+    """Protocol V1: value=56000 → 10^((56000-80000)/4000) = 1e-6 mbar."""
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+
+    reading = driver._parse_v1_response("001M56000FF\r")
+
+    assert reading.status == ChannelStatus.OK
+    assert math.isclose(reading.value, 1e-6, rel_tol=1e-4)
 
 
 # ---------------------------------------------------------------------------

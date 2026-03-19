@@ -98,7 +98,10 @@ class Keithley2604B(InstrumentDriver):
                 output_raw = await self._transport.query(
                     f"print({smu_channel}.source.output)", timeout_ms=3000
                 )
-                output_on = output_raw.strip() == "1"
+                try:
+                    output_on = float(output_raw.strip()) > 0.5
+                except ValueError:
+                    output_on = False
 
                 if not output_on:
                     # Source OFF is a normal operating state — return zeros.
@@ -274,8 +277,11 @@ class Keithley2604B(InstrumentDriver):
             return
         smu_channel = normalize_smu_channel(channel)
         response = await self._transport.query(f"print({smu_channel}.source.output)", timeout_ms=3000)
-        if response.strip() != "0":
-            log.critical("%s: %s still reports output=%s", self.name, smu_channel, response.strip())
+        try:
+            if float(response.strip()) > 0.5:
+                log.critical("%s: %s still reports output=%s", self.name, smu_channel, response.strip())
+        except ValueError:
+            log.critical("%s: %s unexpected output response: %r", self.name, smu_channel, response.strip())
 
     def _load_tsp_template(self, channel: SmuChannel) -> str:
         template_path = self._tsp_dir / "p_const.lua"

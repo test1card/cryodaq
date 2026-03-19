@@ -41,7 +41,7 @@ class ThyracontVSP63D(InstrumentDriver):
     **Thyracont Protocol V1 (VSM77DL и аналоги):**
       RS-232/USB-Serial, 115200 бод.
       Команда: ``"<addr>M^\\r"`` → ответ: ``"<addr>M<5digits><checksum>\\r"``
-      Кодировка значения: ``pressure = 10^((value - 20000) / 4000)`` mbar.
+      Кодировка значения: ``pressure = 10^((value - 80000) / 4000)`` mbar.
 
     Протокол определяется автоматически по формату ответа, а также может
     быть форсирован через параметр ``protocol``.
@@ -242,9 +242,9 @@ class ThyracontVSP63D(InstrumentDriver):
 
         Кодировка 5-значного значения::
 
-            pressure_mbar = 10 ^ ((value - 20000) / 4000)
+            pressure_mbar = 10 ^ ((value - 80000) / 4000)
 
-        Пример: ``10002`` → 10^((10002 − 20000) / 4000) = 10^(−2.4995) ≈ 0.00316 mbar
+        Пример: ``92002`` → 10^((92002 − 80000) / 4000) = 10^3.0005 ≈ 1001 mbar
 
         Parameters
         ----------
@@ -274,7 +274,7 @@ class ThyracontVSP63D(InstrumentDriver):
             # Первые 5 символов = кодированное значение давления
             value_str = payload[:5]
             value_int = int(value_str)
-            pressure_mbar = 10.0 ** ((value_int - 20000) / 4000.0)
+            pressure_mbar = 10.0 ** ((value_int - 80000) / 4000.0)
 
         except (ValueError, IndexError) as exc:
             log.error(

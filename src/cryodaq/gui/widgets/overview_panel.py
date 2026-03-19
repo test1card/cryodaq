@@ -472,7 +472,7 @@ class PressureCard(QFrame):
 
         # Format: scientific for < 0.01, normal otherwise
         if value < 0.01:
-            text = f"{value:.2e} mbar"
+            text = f"{value:.2e}".replace("e-0", "e-").replace("e+0", "e+") + " mbar"
         else:
             text = f"{value:.2f} mbar"
         self._value_label.setText(text)
