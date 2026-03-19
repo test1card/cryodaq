@@ -271,10 +271,10 @@ async def test_rate_limit_ignores_non_temperature():
         await mgr.stop()
 
 
-async def test_rate_limit_catches_temperature():
-    """Temperature readings rising faster than max_dT_dt_K_per_min must FAULT."""
+async def test_rate_limit_catches_critical_temperature():
+    """Temperature readings on a CRITICAL channel rising faster than max_dT_dt_K_per_min must FAULT."""
     mgr, broker = await _make_manager(stale=30.0)
-    mgr._config.critical_channels = []  # avoid stale-channel faults
+    mgr._config.critical_channels = [re.compile("Т1.*")]
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
         # Seed enough data to fill the rate buffer (need ≥ 10 samples)
@@ -306,7 +306,40 @@ async def test_rate_limit_catches_temperature():
         await asyncio.sleep(1.5)
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"Rapid temperature rise must trigger FAULT_LATCHED, got {mgr.state}"
+            f"Rapid temperature rise on critical channel must trigger FAULT_LATCHED, got {mgr.state}"
+        )
+    finally:
+        await mgr.stop()
+
+
+async def test_rate_limit_ignores_non_critical_channel():
+    """Temperature readings on a NON-critical channel must NOT trigger FAULT_LATCHED,
+    even if dT/dt exceeds the limit. This prevents disconnected sensors (e.g. T4)
+    with noisy readings from blocking Keithley start_source."""
+    mgr, broker = await _make_manager(stale=30.0)
+    mgr._config.critical_channels = [re.compile("Т1.*")]
+    mgr._config.max_dT_dt_K_per_min = 5.0
+    try:
+        # Feed good data on critical channel to reach RUNNING
+        await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
+        await asyncio.sleep(1.5)
+        result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert result["ok"] is True
+        assert mgr.state == SafetyState.RUNNING
+
+        # Feed rapidly changing data on a NON-critical channel (T4 — disconnected sensor)
+        for i in range(20):
+            temp = 300.0 + i * 10.0  # +10 K per sample → huge rate
+            r = Reading.now(channel="Т4 Радиатор 2", value=temp, unit="K", instrument_id="test")
+            await broker.publish(r)
+            await asyncio.sleep(0.01)
+
+        # Keep critical channel fresh
+        await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
+        await asyncio.sleep(1.5)
+
+        assert mgr.state == SafetyState.RUNNING, (
+            f"Non-critical channel rate must not trigger FAULT_LATCHED, got {mgr.state}"
         )
     finally:
         await mgr.stop()

@@ -534,6 +534,8 @@ class SafetyManager:
                     return
 
         for ch, buf in self._rate_buffers.items():
+            if not any(pattern.match(ch) for pattern in self._config.critical_channels):
+                continue
             if len(buf) < 10:
                 continue
             t0, v0 = buf[0]
