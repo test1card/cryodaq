@@ -128,6 +128,11 @@ class _SmuPanel(QFrame):
         controls_layout.addWidget(self._emg_btn)
         root.addWidget(controls)
 
+        # Live-update signals: adjust P/V/I on-the-fly when channel is active
+        self._p_spin.valueChanged.connect(self._on_p_target_changed)
+        self._v_spin.valueChanged.connect(self._on_limits_changed)
+        self._i_spin.valueChanged.connect(self._on_limits_changed)
+
         self._status_banner = StatusBanner()
         self._status_banner.clear_message()
         root.addWidget(self._status_banner)
@@ -344,6 +349,33 @@ class _SmuPanel(QFrame):
             )
             logger.error("Emergency off failed on %s: %s", self._smu, result.get("error"))
         self._workers = [worker for worker in self._workers if worker.isRunning()]
+
+    def _on_p_target_changed(self, value: float) -> None:
+        if self._channel_state != "on" or value <= 0:
+            return
+        reply = send_command({
+            "cmd": "keithley_set_target",
+            "channel": self._smu,
+            "p_target": value,
+        })
+        if not reply.get("ok"):
+            logger.warning("set_target failed on %s: %s", self._smu, reply.get("error"))
+
+    def _on_limits_changed(self) -> None:
+        if self._channel_state != "on":
+            return
+        v = self._v_spin.value()
+        i = self._i_spin.value()
+        if v <= 0 or i <= 0:
+            return
+        reply = send_command({
+            "cmd": "keithley_set_limits",
+            "channel": self._smu,
+            "v_comp": v,
+            "i_comp": i,
+        })
+        if not reply.get("ok"):
+            logger.warning("set_limits failed on %s: %s", self._smu, reply.get("error"))
 
     def handle_reading(self, suffix: str, reading: Reading) -> None:
         if suffix not in self._buffers:

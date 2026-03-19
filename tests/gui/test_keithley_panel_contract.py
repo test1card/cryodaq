@@ -204,6 +204,91 @@ def test_group_actions_show_panel_level_feedback(monkeypatch) -> None:
     assert panel._smu_panels["smub"]._channel_state == "off"
 
 
+def test_stop_sends_command_when_backend_on(monkeypatch) -> None:
+    """Regression: stop button must send keithley_stop when backend state is 'on'.
+
+    Previously channel state readings were not routed to KeithleyPanel, so
+    _channel_state stayed 'off' and _on_stop early-returned.
+    """
+    _app()
+    panel = KeithleyPanel()
+    commands = []
+
+    def _send_command(payload):
+        commands.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    # Simulate backend reporting channel ON
+    panel.on_reading(_channel_state_reading("smua", "on"))
+    assert panel._smu_panels["smua"]._channel_state == "on"
+
+    panel._smu_panels["smua"]._on_stop()
+
+    assert any(c.get("cmd") == "keithley_stop" for c in commands), (
+        "Stop must send keithley_stop when channel state is 'on'"
+    )
+
+
+def test_live_p_target_sends_set_target_when_on(monkeypatch) -> None:
+    """When channel is active, changing P spinbox sends keithley_set_target."""
+    _app()
+    panel = KeithleyPanel()
+    commands = []
+
+    def _send_command(payload):
+        commands.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    panel.on_reading(_channel_state_reading("smua", "on"))
+
+    panel._smu_panels["smua"]._p_spin.setValue(0.3)
+
+    target_cmds = [c for c in commands if c.get("cmd") == "keithley_set_target"]
+    assert len(target_cmds) >= 1
+    assert target_cmds[-1]["p_target"] == 0.3
+    assert target_cmds[-1]["channel"] == "smua"
+
+
+def test_live_p_target_skipped_when_off(monkeypatch) -> None:
+    """When channel is off, changing P spinbox does NOT send commands."""
+    _app()
+    panel = KeithleyPanel()
+    commands = []
+
+    def _send_command(payload):
+        commands.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    # Channel state is "off" (default)
+
+    panel._smu_panels["smua"]._p_spin.setValue(0.3)
+
+    assert not any(c.get("cmd") == "keithley_set_target" for c in commands)
+
+
+def test_live_limits_sends_set_limits_when_on(monkeypatch) -> None:
+    """When channel is active, changing V/I spinbox sends keithley_set_limits."""
+    _app()
+    panel = KeithleyPanel()
+    commands = []
+
+    def _send_command(payload):
+        commands.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    panel.on_reading(_channel_state_reading("smua", "on"))
+
+    panel._smu_panels["smua"]._v_spin.setValue(30.0)
+
+    limit_cmds = [c for c in commands if c.get("cmd") == "keithley_set_limits"]
+    assert len(limit_cmds) >= 1
+    assert limit_cmds[-1]["v_comp"] == 30.0
+
+
 def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()

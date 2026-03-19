@@ -317,7 +317,7 @@ class MainWindow(QMainWindow):
             self._calibration_panel.on_reading(reading)
 
         # Keithley каналы → KeithleyPanel + ConductivityPanel + AutoSweep (power)
-        if "/smua/" in channel or "/smub/" in channel:
+        if "/smua/" in channel or "/smub/" in channel or channel.startswith("analytics/keithley_channel_state/"):
             self._keithley_panel.on_reading(reading)
             if channel.endswith("/power"):
                 self._conductivity_panel.on_reading(reading)
