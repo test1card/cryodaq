@@ -39,12 +39,8 @@ class LakeShore218S(InstrumentDriver):
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
-        await self._transport.open(self._resource_str)
-        try:
-            self._instrument_id = await self._transport.query("*IDN?")
-        except Exception:
-            await self._transport.close()
-            raise
+        idn = await self._transport.open(self._resource_str, verify_query="*IDN?")
+        self._instrument_id = idn or ""
         self._connected = True
 
     async def disconnect(self) -> None:

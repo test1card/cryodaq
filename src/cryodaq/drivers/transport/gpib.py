@@ -41,25 +41,51 @@ class GPIBTransport:
     # Публичный API
     # ------------------------------------------------------------------
 
-    async def open(self, resource_str: str) -> None:
+    @classmethod
+    def get_bus_lock(cls, resource_str: str) -> asyncio.Lock:
+        """Get or create the shared bus lock for a GPIB controller prefix.
+
+        Parameters
+        ----------
+        resource_str:
+            VISA resource string, e.g. ``"GPIB0::12::INSTR"``.
+            The prefix before the first ``"::"`` identifies the bus.
+
+        Returns
+        -------
+        asyncio.Lock
+            Shared lock for all instruments on the same GPIB bus.
+        """
+        bus_prefix = resource_str.split("::")[0]
+        if bus_prefix not in cls._bus_locks:
+            cls._bus_locks[bus_prefix] = asyncio.Lock()
+        return cls._bus_locks[bus_prefix]
+
+    async def open(self, resource_str: str, *, verify_query: str | None = None) -> str | None:
         """Открыть соединение с GPIB-ресурсом.
 
         Parameters
         ----------
         resource_str:
             VISA-строка ресурса, например ``"GPIB0::12::INSTR"``.
+        verify_query:
+            Необязательный SCPI-запрос (например ``"*IDN?"``) для верификации
+            связи сразу после open_resource(). Выполняется под тем же bus lock,
+            что и open_resource(), гарантируя атомарность на GPIB-шине.
+
+        Returns
+        -------
+        str | None
+            Ответ на verify_query, если он задан. Иначе None.
         """
         self._resource_str = resource_str
-
-        # Извлечь prefix шины и получить/создать общий Lock
-        bus_prefix = resource_str.split("::")[0]  # "GPIB0"
-        if bus_prefix not in GPIBTransport._bus_locks:
-            GPIBTransport._bus_locks[bus_prefix] = asyncio.Lock()
-        self._bus_lock = GPIBTransport._bus_locks[bus_prefix]
+        self._bus_lock = self.get_bus_lock(resource_str)
 
         if self.mock:
             log.info("GPIB [mock]: имитация открытия ресурса %s", resource_str)
-            return
+            if verify_query is not None:
+                return self._mock_response(verify_query)
+            return None
 
         loop = asyncio.get_running_loop()
         async with self._bus_lock:
@@ -69,6 +95,25 @@ class GPIBTransport:
             except Exception as exc:
                 log.error("GPIB: ошибка открытия ресурса %s — %s", resource_str, exc)
                 raise
+
+            if verify_query is not None:
+                try:
+                    response: str = await loop.run_in_executor(
+                        None, self._blocking_query, verify_query, 5000
+                    )
+                    log.debug("GPIB verify '%s' → '%s'", verify_query, response)
+                    return response
+                except Exception as exc:
+                    log.error("GPIB: verify query '%s' failed on %s — %s", verify_query, resource_str, exc)
+                    # Close on failed verify so the resource is not left dangling
+                    try:
+                        await loop.run_in_executor(None, self._blocking_close)
+                    except Exception:
+                        pass
+                    self._resource = None
+                    raise
+
+        return None
 
     async def close(self) -> None:
         """Закрыть соединение с ресурсом (идемпотентно)."""
