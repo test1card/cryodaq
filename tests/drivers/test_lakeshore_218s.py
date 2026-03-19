@@ -416,3 +416,35 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     assert readings[0].metadata["reading_mode"] == "curve"
     assert readings[1].metadata["reading_mode"] == "krdg"
     assert readings[1].metadata["raw_source"] == "KRDG"
+
+
+# ---------------------------------------------------------------------------
+# Per-channel fallback when KRDG? 0 returns < 8 values
+# ---------------------------------------------------------------------------
+
+async def test_krdg_fallback_to_per_channel() -> None:
+    """If KRDG? 0 returns < 8 values (SDC mux reset), fall back to KRDG? 1..8."""
+    driver = LakeShore218S("ls218s", "GPIB0::11::INSTR", mock=True)
+    await driver.connect()
+
+    # Patch mock transport to return only 1 value for KRDG? 0, then per-channel
+    original_query = driver._transport.query
+    call_count = 0
+
+    async def _patched_query(cmd, timeout_ms=None):
+        nonlocal call_count
+        call_count += 1
+        if cmd == "KRDG? 0" and call_count == 1:
+            return "+004.235E+0"  # Only 1 value — triggers fallback
+        return await original_query(cmd, timeout_ms=timeout_ms)
+
+    driver._transport.query = _patched_query
+
+    readings = await driver._read_krdg_channels()
+
+    assert len(readings) == 8, f"Expected 8 readings from fallback, got {len(readings)}"
+    for r in readings:
+        assert r.unit == "K"
+        assert r.status == ChannelStatus.OK
+
+    await driver.disconnect()

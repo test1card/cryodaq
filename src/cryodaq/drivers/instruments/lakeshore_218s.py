@@ -71,7 +71,52 @@ class LakeShore218S(InstrumentDriver):
             return self._mock_readings()
         raw_response = await self._transport.query("KRDG? 0")
         log.debug("%s: KRDG? 0 -> %s", self.name, raw_response)
-        return self._parse_response(raw_response, unit="K", reading_kind="temperature")
+        readings = self._parse_response(raw_response, unit="K", reading_kind="temperature")
+        if len(readings) < 8:
+            log.warning(
+                "%s: KRDG? 0 returned %d values (expected 8), falling back to per-channel queries",
+                self.name, len(readings),
+            )
+            readings = await self._read_krdg_per_channel()
+        return readings
+
+    async def _read_krdg_per_channel(self) -> list[Reading]:
+        """Fallback: query each channel individually (KRDG? 1 .. KRDG? 8)."""
+        readings: list[Reading] = []
+        for ch in range(1, 9):
+            try:
+                raw = await self._transport.query(f"KRDG? {ch}")
+                parsed = self._parse_response(raw, unit="K", reading_kind="temperature")
+                if parsed:
+                    # Fix channel index — _parse_response starts at 1 for first token
+                    reading = parsed[0]
+                    channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                    readings.append(
+                        Reading.now(
+                            channel=channel_name,
+                            value=reading.value,
+                            unit=reading.unit,
+                            instrument_id=self.name,
+                            status=reading.status,
+                            raw=reading.raw,
+                            metadata={"raw_channel": ch, "reading_kind": "temperature"},
+                        )
+                    )
+            except Exception as exc:
+                log.error("%s: KRDG? %d failed: %s", self.name, ch, exc)
+                channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                readings.append(
+                    Reading.now(
+                        channel=channel_name,
+                        value=float("nan"),
+                        unit="K",
+                        instrument_id=self.name,
+                        status=ChannelStatus.SENSOR_ERROR,
+                        raw=None,
+                        metadata={"raw_channel": ch, "reading_kind": "temperature"},
+                    )
+                )
+        return readings
 
     async def read_srdg_channels(self) -> list[Reading]:
         if not self._connected:
@@ -80,7 +125,51 @@ class LakeShore218S(InstrumentDriver):
             return self._mock_sensor_readings()
         raw_response = await self._transport.query("SRDG? 0")
         log.debug("%s: SRDG? 0 -> %s", self.name, raw_response)
-        return self._parse_response(raw_response, unit="sensor_unit", reading_kind="raw_sensor")
+        readings = self._parse_response(raw_response, unit="sensor_unit", reading_kind="raw_sensor")
+        if len(readings) < 8:
+            log.warning(
+                "%s: SRDG? 0 returned %d values (expected 8), falling back to per-channel queries",
+                self.name, len(readings),
+            )
+            readings = await self._read_srdg_per_channel()
+        return readings
+
+    async def _read_srdg_per_channel(self) -> list[Reading]:
+        """Fallback: query each channel individually (SRDG? 1 .. SRDG? 8)."""
+        readings: list[Reading] = []
+        for ch in range(1, 9):
+            try:
+                raw = await self._transport.query(f"SRDG? {ch}")
+                parsed = self._parse_response(raw, unit="sensor_unit", reading_kind="raw_sensor")
+                if parsed:
+                    reading = parsed[0]
+                    channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                    readings.append(
+                        Reading.now(
+                            channel=channel_name,
+                            value=reading.value,
+                            unit=reading.unit,
+                            instrument_id=self.name,
+                            status=reading.status,
+                            raw=reading.raw,
+                            metadata={"raw_channel": ch, "reading_kind": "raw_sensor"},
+                        )
+                    )
+            except Exception as exc:
+                log.error("%s: SRDG? %d failed: %s", self.name, ch, exc)
+                channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                readings.append(
+                    Reading.now(
+                        channel=channel_name,
+                        value=float("nan"),
+                        unit="sensor_unit",
+                        instrument_id=self.name,
+                        status=ChannelStatus.SENSOR_ERROR,
+                        raw=None,
+                        metadata={"raw_channel": ch, "reading_kind": "raw_sensor"},
+                    )
+                )
+        return readings
 
     async def read_calibration_pair(
         self,
