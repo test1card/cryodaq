@@ -62,12 +62,13 @@ class GPIBTransport:
             return
 
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._blocking_open, resource_str)
-            log.info("GPIB: ресурс %s успешно открыт", resource_str)
-        except Exception as exc:
-            log.error("GPIB: ошибка открытия ресурса %s — %s", resource_str, exc)
-            raise
+        async with self._bus_lock:
+            try:
+                await loop.run_in_executor(None, self._blocking_open, resource_str)
+                log.info("GPIB: ресурс %s успешно открыт", resource_str)
+            except Exception as exc:
+                log.error("GPIB: ошибка открытия ресурса %s — %s", resource_str, exc)
+                raise
 
     async def close(self) -> None:
         """Закрыть соединение с ресурсом (идемпотентно)."""
@@ -79,13 +80,22 @@ class GPIBTransport:
             return
 
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._blocking_close)
-            log.info("GPIB: ресурс %s закрыт", self._resource_str)
-        except Exception as exc:
-            log.warning("GPIB: ошибка при закрытии ресурса %s — %s", self._resource_str, exc)
-        finally:
-            self._resource = None
+        if self._bus_lock is not None:
+            async with self._bus_lock:
+                try:
+                    await loop.run_in_executor(None, self._blocking_close)
+                    log.info("GPIB: ресурс %s закрыт", self._resource_str)
+                except Exception as exc:
+                    log.warning("GPIB: ошибка при закрытии ресурса %s — %s", self._resource_str, exc)
+                finally:
+                    self._resource = None
+        else:
+            try:
+                await loop.run_in_executor(None, self._blocking_close)
+            except Exception as exc:
+                log.warning("GPIB: ошибка при закрытии ресурса %s — %s", self._resource_str, exc)
+            finally:
+                self._resource = None
 
     async def write(self, cmd: str) -> None:
         """Отправить команду прибору без ожидания ответа.
