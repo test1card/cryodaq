@@ -39,12 +39,12 @@ _MOCK_IDN = "LSCI,MODEL218S,MOCK001,010101"
 def _make_mock_transport(response: str) -> MagicMock:
     """Return a GPIBTransport mock whose query() returns *response*.
 
-    First query() call returns IDN (for connect), subsequent calls return *response*.
+    connect() no longer sends *IDN?, so query() is only called for data reads.
     """
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[_MOCK_IDN, response])
+    transport.query = AsyncMock(return_value=response)
     return transport
 
 
@@ -191,7 +191,7 @@ async def test_parse_srdg_response() -> None:
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[_MOCK_IDN, RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._transport = transport
@@ -210,7 +210,7 @@ async def test_read_calibration_pair_resolves_channels() -> None:
     transport.open = AsyncMock()
     transport.close = AsyncMock()
     transport.query = AsyncMock(
-        side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE]
+        side_effect=[NORMAL_RESPONSE, RAW_RESPONSE]
     )
     driver = LakeShore218S(
         "ls218s",
@@ -269,7 +269,7 @@ async def test_timeout_handling() -> None:
     transport.close = AsyncMock()
     # First call (IDN during connect) succeeds; read_channels query times out
     transport.query = AsyncMock(
-        side_effect=[_MOCK_IDN, asyncio.TimeoutError],
+        side_effect=[asyncio.TimeoutError],
     )
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
@@ -351,7 +351,7 @@ async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE])
+    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport
@@ -378,7 +378,7 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE, RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport
@@ -406,7 +406,7 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(side_effect=[_MOCK_IDN, NORMAL_RESPONSE, RAW_RESPONSE])
+    transport.query = AsyncMock(side_effect=[NORMAL_RESPONSE, RAW_RESPONSE])
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
     driver._transport = transport
@@ -428,8 +428,6 @@ async def test_krdg_fallback_to_per_channel() -> None:
                   "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"]
 
     async def _query_handler(cmd, timeout_ms=None):
-        if cmd == "*IDN?":
-            return _MOCK_IDN
         if cmd == "KRDG?":
             return "+004.235E+0"  # Only 1 value — triggers fallback
         if cmd.startswith("KRDG? "):
@@ -473,7 +471,7 @@ async def test_krdg_sticky_fallback() -> None:
             ch = int(cmd.split()[-1]) - 1
             return ["+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
                     "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"][ch]
-        return _MOCK_IDN
+        return ""
 
     transport.query = AsyncMock(side_effect=_patched_query)
 
@@ -498,8 +496,6 @@ async def test_krdg_no_argument_in_query() -> None:
 
     async def _tracking_query(cmd, timeout_ms=None):
         queries_sent.append(cmd)
-        if cmd == "*IDN?":
-            return _MOCK_IDN
         return NORMAL_RESPONSE
 
     transport = MagicMock()

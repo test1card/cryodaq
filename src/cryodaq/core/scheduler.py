@@ -146,67 +146,65 @@ class Scheduler:
         """Последовательный опрос всех приборов на одной GPIB шине в одном task.
 
         Гарантирует: ни в какой момент два run_in_executor вызова к одной GPIB
-        шине не выполняются параллельно.
+        шине не выполняются параллельно. Один сбойный прибор не блокирует остальные.
         """
         poll_interval = max(s.config.poll_interval_s for s in states)
+        _CONNECT_TIMEOUT_S = 5.0
+        _POLL_TIMEOUT_S = 5.0
+        _RECONNECT_INTERVAL_S = 30.0
+        last_reconnect: dict[str, float] = {}
 
-        # Подключить все последовательно
+        # Подключить все последовательно — skip failures
         for state in states:
             driver = state.config.driver
             try:
-                await driver.connect()
+                await asyncio.wait_for(driver.connect(), timeout=_CONNECT_TIMEOUT_S)
                 state.consecutive_errors = 0
-                state.backoff_s = INITIAL_BACKOFF_S
                 logger.info("Прибор '%s' подключён (GPIB bus %s)", driver.name, bus_prefix)
             except Exception:
-                logger.exception("Не удалось подключить '%s' на %s", driver.name, bus_prefix)
+                logger.warning("Не удалось подключить '%s' на %s — skipping", driver.name, bus_prefix)
+                driver._connected = False
 
         while self._running:
             next_deadline = asyncio.get_event_loop().time() + poll_interval
+            now = asyncio.get_event_loop().time()
 
             for state in states:
                 driver = state.config.driver
                 name = driver.name
 
-                # Переподключение
+                # Reconnect failed devices — rate-limited
                 if not driver.connected:
+                    last_try = last_reconnect.get(name, 0.0)
+                    if now - last_try < _RECONNECT_INTERVAL_S:
+                        continue
+                    last_reconnect[name] = now
                     try:
-                        await driver.connect()
+                        await asyncio.wait_for(driver.connect(), timeout=_CONNECT_TIMEOUT_S)
                         state.consecutive_errors = 0
-                        state.backoff_s = INITIAL_BACKOFF_S
                         logger.info("Прибор '%s' переподключён (GPIB bus %s)", name, bus_prefix)
                     except Exception:
-                        logger.exception("Не удалось переподключить '%s'", name)
-                        state.consecutive_errors += 1
+                        logger.warning("Не удалось переподключить '%s' — skipping", name)
+                        driver._connected = False
                         continue
 
-                # Опрос
+                # Poll
                 try:
                     readings = await asyncio.wait_for(
-                        driver.safe_read(), timeout=state.config.read_timeout_s
+                        driver.safe_read(), timeout=_POLL_TIMEOUT_S
                     )
                     await self._process_readings(state, readings)
-                except TimeoutError:
+                except Exception as exc:
                     state.consecutive_errors += 1
                     state.total_errors += 1
-                    logger.warning(
-                        "Таймаут опроса '%s' (%.1fs), ошибок подряд: %d",
-                        name, state.config.read_timeout_s, state.consecutive_errors,
-                    )
+                    logger.warning("Ошибка опроса '%s': %s (подряд: %d)", name, exc, state.consecutive_errors)
                     if state.consecutive_errors >= 3:
+                        logger.warning("'%s': 3+ ошибок, disconnect + skip", name)
                         try:
                             await driver.disconnect()
                         except Exception:
-                            logger.exception("Ошибка отключения '%s'", name)
-                except Exception:
-                    state.consecutive_errors += 1
-                    state.total_errors += 1
-                    logger.exception("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
-                    if state.consecutive_errors >= 3:
-                        try:
-                            await driver.disconnect()
-                        except Exception:
-                            logger.exception("Ошибка отключения '%s'", name)
+                            pass
+                        driver._connected = False
 
             sleep_remaining = max(0, next_deadline - asyncio.get_event_loop().time())
             await asyncio.sleep(sleep_remaining)

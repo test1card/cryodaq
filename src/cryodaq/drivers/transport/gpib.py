@@ -1,36 +1,35 @@
 """Асинхронная обёртка над pyvisa для GPIB-коммуникации.
 
-Open-per-query: VISA resource открывается и закрывается на каждую операцию.
-Сериализация доступа к шине обеспечивается единым asyncio task на каждую
-GPIB-шину в Scheduler.
+Persistent sessions: VISA resource открывается один раз в connect(),
+используется для всех query/write, закрывается в close().
+Точное воспроизведение LabVIEW-схемы: open → VISA Clear → loop { write → wait 100ms → read }.
 
-Query реализован как write → sleep(0.1) → read (LabVIEW-совместимо).
-resource.clear() (SDC) НЕ вызывается в горячем пути — LS218 serial LSB183
-сбрасывает channel mux при SDC. clear() используется только в IFC recovery.
+Сериализация доступа к шине обеспечивается единым asyncio task на каждую
+GPIB-шину в Scheduler. Никакого IFC, никаких retry — при ошибке raise,
+scheduler пропустит прибор и попробует на следующем цикле.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_MS = 10_000
+_DEFAULT_TIMEOUT_MS = 2000
 _WRITE_READ_DELAY_S = 0.1
 
 
 class GPIBTransport:
-    """Асинхронный GPIB транспорт: open-per-query, write-delay-read.
+    """Асинхронный GPIB транспорт: persistent session, write-delay-read.
 
-    Каждая операция (query / write) атомарно открывает VISA resource,
-    выполняет команду и закрывает resource.
+    connect() открывает VISA resource один раз + VISA Clear.
+    query() использует write → sleep(100ms) → read на persistent resource.
+    close() закрывает resource.
 
-    Query использует явный write → sleep(100ms) → read вместо
-    resource.query() для совместимости с LakeShore 218S.
-
-    Сериализация гарантируется Scheduler — все приборы на одной GPIB-шине
-    опрашиваются в одном asyncio task последовательно.
+    Никаких IFC, retry, open-per-query. При ошибке — raise.
+    Scheduler пропускает сбойный прибор и продолжает опрос остальных.
 
     Parameters
     ----------
@@ -40,13 +39,11 @@ class GPIBTransport:
 
     _resource_managers: dict[str, Any] = {}
 
-    _consecutive_errors: dict[str, int] = {}  # resource_str → count
-    _IFC_THRESHOLD = 5  # IFC only after this many consecutive errors on same device
-
     def __init__(self, *, mock: bool = False) -> None:
         self.mock = mock
         self._resource_str: str = ""
         self._bus_prefix: str = ""
+        self._resource: Any = None
         self._timeout_ms: int = _DEFAULT_TIMEOUT_MS
 
     # ------------------------------------------------------------------
@@ -62,250 +59,121 @@ class GPIBTransport:
         return cls._resource_managers[bus_prefix]
 
     async def open(self, resource_str: str, *, timeout_ms: int = _DEFAULT_TIMEOUT_MS) -> None:
-        """Сохранить параметры подключения. Не открывает VISA resource.
+        """Open VISA resource, configure termination, VISA Clear once.
 
         Parameters
         ----------
         resource_str:
-            VISA-строка ресурса, например ``"GPIB0::12::INSTR"``.
+            VISA resource string, e.g. ``"GPIB0::12::INSTR"``.
         timeout_ms:
-            Таймаут по умолчанию для query/write операций.
+            Default timeout for query/write operations.
         """
         self._resource_str = resource_str
         self._bus_prefix = resource_str.split("::")[0]
         self._timeout_ms = timeout_ms
 
         if self.mock:
-            log.info("GPIB [mock]: имитация открытия ресурса %s", resource_str)
+            log.info("GPIB [mock]: open %s", resource_str)
             return
 
-        log.info("GPIB: ресурс %s зарегистрирован (open-per-query)", resource_str)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._blocking_connect)
+        log.info("GPIB: %s opened (persistent session)", resource_str)
 
     async def close(self) -> None:
-        """No-op: ресурсы закрываются после каждой операции."""
+        """Close the persistent VISA resource."""
         if self.mock:
-            log.info("GPIB [mock]: имитация закрытия ресурса %s", self._resource_str)
+            log.info("GPIB [mock]: close %s", self._resource_str)
             return
-        log.info("GPIB: ресурс %s отключён", self._resource_str)
+
+        if self._resource is not None:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._resource.close)
+            except Exception as exc:
+                log.warning("GPIB: error closing %s — %s", self._resource_str, exc)
+            self._resource = None
+            log.info("GPIB: %s closed", self._resource_str)
 
     async def write(self, cmd: str) -> None:
-        """Отправить команду прибору (open → write → close).
+        """Write command to persistent resource.
 
         Parameters
         ----------
         cmd:
-            SCPI-команда, например ``"*RST"``.
+            SCPI command, e.g. ``"*RST"``.
         """
         if self.mock:
             log.debug("GPIB [mock] write: %s", cmd)
             return
 
-        import asyncio
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(
-                None, self._blocking_write, cmd, self._timeout_ms
-            )
-            log.debug("GPIB write → %s: %s", self._resource_str, cmd)
-        except Exception as exc:
-            log.error("GPIB: ошибка записи '%s' в %s — %s", cmd, self._resource_str, exc)
-            raise
+        await loop.run_in_executor(None, self._resource.write, cmd)
+        log.debug("GPIB write → %s: %s", self._resource_str, cmd)
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
-        """Отправить запрос и вернуть ответ (open → write → delay → read → close).
+        """Write → sleep(100ms) → read on persistent resource.
 
         Parameters
         ----------
         cmd:
-            SCPI-запрос, например ``"*IDN?"``.
+            SCPI query, e.g. ``"KRDG?"``.
         timeout_ms:
-            Таймаут в миллисекундах. По умолчанию значение из open().
+            Unused (kept for API compatibility). Timeout set at connect time.
 
         Returns
         -------
         str
-            Ответ прибора.
+            Instrument response, stripped.
         """
         if self.mock:
             response = self._mock_response(cmd)
             log.debug("GPIB [mock] query '%s' → '%s'", cmd, response)
             return response
 
-        effective_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
-        import asyncio
         loop = asyncio.get_running_loop()
-        try:
-            response: str = await loop.run_in_executor(
-                None, self._blocking_query, cmd, effective_timeout
-            )
-            log.debug("GPIB query '%s' → '%s'", cmd, response)
-            return response
-        except Exception as exc:
-            log.error("GPIB: ошибка запроса '%s' к %s — %s", cmd, self._resource_str, exc)
-            raise
+        response: str = await loop.run_in_executor(
+            None, self._blocking_query, cmd
+        )
+        log.debug("GPIB query '%s' → '%s'", cmd, response)
+        return response
 
     async def flush_input(self) -> None:
-        """No-op: open-per-query не имеет буфера для очистки."""
+        """No-op for API compatibility."""
 
     # ------------------------------------------------------------------
-    # Блокирующие методы (выполняются в executor)
+    # Blocking methods (run in executor)
     # ------------------------------------------------------------------
 
-    def _open_resource(self, rm: Any, timeout_ms: int) -> Any:
-        """Open VISA resource with timeout and termination configured."""
-        resource = rm.open_resource(self._resource_str)
-        resource.timeout = timeout_ms
-        resource.write_termination = "\n"
-        resource.read_termination = "\n"
-        return resource
-
-    def _blocking_query(self, cmd: str, timeout_ms: int) -> str:
-        """Open → write → sleep(0.1) → read → close, with retry on failure."""
+    def _blocking_connect(self) -> None:
+        """Open resource once, configure, VISA Clear once."""
         rm = self._get_rm(self._bus_prefix)
-        resource = self._open_resource(rm, timeout_ms)
-        try:
-            resource.write(cmd)
-            time.sleep(_WRITE_READ_DELAY_S)
-            result = resource.read().strip()
-        except Exception as first_err:
-            try:
-                resource.close()
-            except Exception:
-                pass
-            # Retry once with fresh open (no IFC)
-            log.warning("GPIB: query '%s' failed on %s, retrying with fresh open", cmd, self._resource_str)
-            try:
-                result = self._fresh_retry_query(rm, cmd, timeout_ms)
-                GPIBTransport._consecutive_errors[self._resource_str] = 0
-                return result
-            except Exception:
-                count = GPIBTransport._consecutive_errors.get(self._resource_str, 0) + 1
-                GPIBTransport._consecutive_errors[self._resource_str] = count
-                if count >= self._IFC_THRESHOLD:
-                    log.critical(
-                        "GPIB: %d consecutive errors on %s, sending IFC (bus-wide reset)",
-                        count, self._resource_str,
-                    )
-                    try:
-                        self._send_ifc(rm)
-                        time.sleep(0.5)
-                    except Exception as ifc_err:
-                        log.error("GPIB: IFC failed on %s — %s", self._bus_prefix, ifc_err)
-                    GPIBTransport._consecutive_errors[self._resource_str] = 0
-                raise first_err
-        try:
-            resource.close()
-        except Exception:
-            pass
-        GPIBTransport._consecutive_errors[self._resource_str] = 0
-        return result
+        res = rm.open_resource(self._resource_str)
+        res.write_termination = "\n"
+        res.read_termination = "\n"
+        res.timeout = self._timeout_ms
+        res.clear()
+        self._resource = res
 
-    def _blocking_write(self, cmd: str, timeout_ms: int) -> None:
-        """Open → write → close, with retry on failure."""
-        rm = self._get_rm(self._bus_prefix)
-        resource = self._open_resource(rm, timeout_ms)
-        try:
-            resource.write(cmd)
-        except Exception as first_err:
-            try:
-                resource.close()
-            except Exception:
-                pass
-            log.warning("GPIB: write '%s' failed on %s, retrying with fresh open", cmd, self._resource_str)
-            try:
-                self._fresh_retry_write(rm, cmd, timeout_ms)
-                GPIBTransport._consecutive_errors[self._resource_str] = 0
-                return
-            except Exception:
-                count = GPIBTransport._consecutive_errors.get(self._resource_str, 0) + 1
-                GPIBTransport._consecutive_errors[self._resource_str] = count
-                if count >= self._IFC_THRESHOLD:
-                    log.critical(
-                        "GPIB: %d consecutive errors on %s, sending IFC",
-                        count, self._resource_str,
-                    )
-                    try:
-                        self._send_ifc(rm)
-                        time.sleep(0.5)
-                    except Exception as ifc_err:
-                        log.error("GPIB: IFC failed — %s", ifc_err)
-                    GPIBTransport._consecutive_errors[self._resource_str] = 0
-                raise first_err
-        try:
-            resource.close()
-        except Exception:
-            pass
-        GPIBTransport._consecutive_errors[self._resource_str] = 0
-
-    # ------------------------------------------------------------------
-    # Retry helpers (fresh open, no IFC)
-    # ------------------------------------------------------------------
-
-    def _fresh_retry_query(self, rm: Any, cmd: str, timeout_ms: int) -> str:
-        """Retry query with a fresh open_resource (no IFC, no clear)."""
+    def _blocking_query(self, cmd: str) -> str:
+        """Write → sleep(100ms) → read. LabVIEW-style."""
+        self._resource.write(cmd)
         time.sleep(_WRITE_READ_DELAY_S)
-        resource = self._open_resource(rm, timeout_ms)
-        try:
-            resource.write(cmd)
-            time.sleep(_WRITE_READ_DELAY_S)
-            result = resource.read().strip()
-        except Exception:
-            try:
-                resource.close()
-            except Exception:
-                pass
-            raise
-        try:
-            resource.close()
-        except Exception:
-            pass
-        log.info("GPIB: fresh retry succeeded for '%s' on %s", cmd, self._resource_str)
-        return result
-
-    def _fresh_retry_write(self, rm: Any, cmd: str, timeout_ms: int) -> None:
-        """Retry write with a fresh open_resource (no IFC, no clear)."""
-        time.sleep(_WRITE_READ_DELAY_S)
-        resource = self._open_resource(rm, timeout_ms)
-        try:
-            resource.write(cmd)
-        except Exception:
-            try:
-                resource.close()
-            except Exception:
-                pass
-            raise
-        try:
-            resource.close()
-        except Exception:
-            pass
-        log.info("GPIB: fresh retry succeeded for write '%s' on %s", cmd, self._resource_str)
-
-    def _send_ifc(self, rm: Any) -> None:
-        """Send IFC (Interface Clear) to reset the GPIB bus."""
-        intf = rm.open_resource(f"{self._bus_prefix}::INTFC")
-        try:
-            intf.send_ifc()
-            log.warning("GPIB: IFC sent on %s", self._bus_prefix)
-        finally:
-            try:
-                intf.close()
-            except Exception:
-                pass
+        return self._resource.read().strip()
 
     # ------------------------------------------------------------------
-    # Mock-утилиты
+    # Mock
     # ------------------------------------------------------------------
 
     @staticmethod
     def _mock_response(cmd: str) -> str:
-        """Сформировать имитированный ответ для известных SCPI-команд."""
+        """Mock responses for known SCPI commands."""
         cmd_upper = cmd.strip().upper()
         if cmd_upper == "*IDN?":
             return "LSCI,MODEL218S,MOCK001,010101"
         if cmd_upper.startswith("KRDG?"):
             ch = cmd_upper.replace("KRDG?", "").strip()
             if ch:
-                # Per-channel query: return single value
                 idx = int(ch) - 1
                 values = [
                     "+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",

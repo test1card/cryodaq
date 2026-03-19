@@ -44,16 +44,12 @@ class LakeShore218S(InstrumentDriver):
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
         await self._transport.open(self._resource_str)
-        try:
-            self._instrument_id = await self._transport.query("*IDN?")
-        except Exception:
-            await self._transport.close()
-            raise
         self._connected = True
         self._use_per_channel_krdg = False
         self._use_per_channel_srdg = False
         self._krdg0_fail_count = 0
         self._srdg0_fail_count = 0
+        log.info("%s: connected (no *IDN? validation)", self.name)
 
     async def disconnect(self) -> None:
         if not self._connected:
