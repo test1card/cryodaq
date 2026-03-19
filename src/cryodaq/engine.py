@@ -739,7 +739,7 @@ def _load_drivers(
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
 
-        configs.append(InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s))
+        configs.append(InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource))
         logger.info(
             "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
             name, itype, resource, poll_interval_s,

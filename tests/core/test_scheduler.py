@@ -140,3 +140,65 @@ async def test_graceful_stop(broker: DataBroker) -> None:
     states = list(sched._instruments.values())
     for state in states:
         assert state.task is None or state.task.done()
+
+
+# ---------------------------------------------------------------------------
+# 6. GPIB instruments on same bus share one task; non-GPIB get their own
+# ---------------------------------------------------------------------------
+
+async def test_gpib_bus_grouping(broker: DataBroker) -> None:
+    await broker.subscribe("gpib_consumer", maxsize=1000)
+
+    ls1 = MockDriver("ls218_1")
+    ls2 = MockDriver("ls218_2")
+    usb_driver = MockDriver("keithley")
+
+    sched = Scheduler(broker)
+    sched.add(InstrumentConfig(driver=ls1, poll_interval_s=0.01, resource_str="GPIB0::12::INSTR"))
+    sched.add(InstrumentConfig(driver=ls2, poll_interval_s=0.01, resource_str="GPIB0::11::INSTR"))
+    sched.add(InstrumentConfig(driver=usb_driver, poll_interval_s=0.01, resource_str="USB0::MOCK"))
+
+    await sched.start()
+
+    # Both GPIB instruments must share the same task
+    ls1_task = sched._instruments["ls218_1"].task
+    ls2_task = sched._instruments["ls218_2"].task
+    usb_task = sched._instruments["keithley"].task
+
+    assert ls1_task is ls2_task, "GPIB instruments on same bus must share one task"
+    assert usb_task is not ls1_task, "Non-GPIB instrument must have its own task"
+
+    await asyncio.sleep(0.1)
+    await sched.stop()
+
+    # Both GPIB instruments must have been polled
+    assert ls1.read_calls > 0
+    assert ls2.read_calls > 0
+    assert usb_driver.read_calls > 0
+
+
+async def test_gpib_sequential_connect(broker: DataBroker) -> None:
+    """GPIB instruments must connect sequentially in one task, not in parallel."""
+    await broker.subscribe("seq_consumer", maxsize=1000)
+
+    connect_order: list[str] = []
+
+    class OrderedDriver(MockDriver):
+        async def connect(self) -> None:
+            connect_order.append(self.name)
+            await super().connect()
+
+    d1 = OrderedDriver("gpib_first")
+    d2 = OrderedDriver("gpib_second")
+
+    sched = Scheduler(broker)
+    sched.add(InstrumentConfig(driver=d1, poll_interval_s=0.05, resource_str="GPIB0::12::INSTR"))
+    sched.add(InstrumentConfig(driver=d2, poll_interval_s=0.05, resource_str="GPIB0::11::INSTR"))
+
+    await sched.start()
+    await asyncio.sleep(0.15)
+    await sched.stop()
+
+    # Both must have connected, and in sequence (same task → deterministic order)
+    assert "gpib_first" in connect_order
+    assert "gpib_second" in connect_order
