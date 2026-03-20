@@ -70,6 +70,7 @@ class ThyracontVSP63D(InstrumentDriver):
         baudrate: int = 9600,
         address: str = "001",
         mock: bool = False,
+        validate_checksum: bool = False,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
@@ -78,6 +79,7 @@ class ThyracontVSP63D(InstrumentDriver):
         self._transport = SerialTransport(mock=mock)
         self._instrument_id: str = ""
         self._protocol_v1: bool = False
+        self._validate_checksum: bool = validate_checksum
 
     # ------------------------------------------------------------------
     # InstrumentDriver — обязательный интерфейс
@@ -236,6 +238,23 @@ class ThyracontVSP63D(InstrumentDriver):
     # Разбор ответа Protocol V1 (VSM77DL)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _verify_v1_checksum(response: str) -> bool:
+        """Verify Thyracont Protocol V1 checksum.
+
+        Format: <payload><checksum_char>
+        Checksum = XOR of all bytes in payload, masked to 0x7F.
+        """
+        if len(response) < 2:
+            return False
+        payload = response[:-1]
+        expected_char = response[-1]
+        computed = 0
+        for byte in payload.encode("ascii", errors="replace"):
+            computed ^= byte
+        computed &= 0x7F
+        return chr(computed) == expected_char
+
     def _parse_v1_response(self, response: str) -> Reading:
         """Разобрать ответ Thyracont Protocol V1.
 
@@ -263,6 +282,23 @@ class ThyracontVSP63D(InstrumentDriver):
         """
         channel = f"{self.name}/pressure"
         response_stripped = response.strip()
+
+        # Validate checksum if enabled and response has expected structure
+        if self._validate_checksum and len(response_stripped) >= 2:
+            if not self._verify_v1_checksum(response_stripped):
+                log.warning(
+                    "%s: V1 checksum mismatch in '%s' — possible RS-232 corruption",
+                    self.name, response_stripped,
+                )
+                return Reading.now(
+                    channel=channel,
+                    value=float("nan"),
+                    unit="mbar",
+                    instrument_id=self.name,
+                    status=ChannelStatus.SENSOR_ERROR,
+                    raw=None,
+                    metadata={"raw_response": response_stripped, "error": "checksum_mismatch"},
+                )
 
         try:
             # Ожидаемый формат: <addr><cmd><6digits><checksum>

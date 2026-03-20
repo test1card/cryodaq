@@ -51,6 +51,17 @@ class GPIBTransport:
     # ------------------------------------------------------------------
 
     @classmethod
+    def close_all_managers(cls) -> None:
+        """Close all cached ResourceManagers. Call at engine shutdown."""
+        for bus, rm in cls._resource_managers.items():
+            try:
+                rm.close()
+                log.info("GPIB: ResourceManager for %s closed", bus)
+            except Exception as exc:
+                log.warning("GPIB: error closing RM for %s — %s", bus, exc)
+        cls._resource_managers.clear()
+
+    @classmethod
     def _get_rm(cls, bus_prefix: str) -> Any:
         """Get or create a shared ResourceManager for a bus prefix."""
         if bus_prefix not in cls._resource_managers:

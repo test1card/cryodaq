@@ -40,16 +40,42 @@ class LakeShore218S(InstrumentDriver):
         self._use_per_channel_srdg: bool = False
         self._krdg0_fail_count: int = 0
         self._srdg0_fail_count: int = 0
+        self._krdg_batch_retry_interval_s: float = 60.0
+        self._srdg_batch_retry_interval_s: float = 60.0
+        self._krdg_last_batch_retry: float = 0.0
+        self._srdg_last_batch_retry: float = 0.0
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
         await self._transport.open(self._resource_str)
+
+        if not self.mock:
+            try:
+                idn = await self._transport.query("*IDN?")
+                self._instrument_id = idn.strip()
+                if "218" not in self._instrument_id.upper():
+                    await self._transport.close()
+                    raise RuntimeError(
+                        f"{self.name}: unexpected IDN: {self._instrument_id!r} "
+                        f"(expected LakeShore 218)"
+                    )
+                log.info("%s: IDN = %s", self.name, self._instrument_id)
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                # Some 218 units may not respond to *IDN? cleanly on first try.
+                # Log warning but don't fail — KRDG? will validate later.
+                log.warning(
+                    "%s: *IDN? query failed (%s) — proceeding without validation",
+                    self.name, exc,
+                )
+
         self._connected = True
         self._use_per_channel_krdg = False
         self._use_per_channel_srdg = False
         self._krdg0_fail_count = 0
         self._srdg0_fail_count = 0
-        log.info("%s: connected (no *IDN? validation)", self.name)
+        log.info("%s: connected", self.name)
 
     async def disconnect(self) -> None:
         if not self._connected:
@@ -97,7 +123,28 @@ class LakeShore218S(InstrumentDriver):
         return readings
 
     async def _read_krdg_per_channel(self) -> list[Reading]:
-        """Fallback: query each channel individually (KRDG? 1 .. KRDG? 8)."""
+        """Fallback: query each channel individually (KRDG? 1 .. KRDG? 8).
+
+        Periodically retries batch KRDG? to recover from transient failures.
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._krdg_last_batch_retry >= self._krdg_batch_retry_interval_s:
+            self._krdg_last_batch_retry = now
+            try:
+                raw = await self._transport.query("KRDG?")
+                readings = self._parse_response(raw, unit="K", reading_kind="temperature")
+                if len(readings) >= 8:
+                    log.info(
+                        "%s: KRDG? batch mode recovered — switching back from per-channel",
+                        self.name,
+                    )
+                    self._use_per_channel_krdg = False
+                    self._krdg0_fail_count = 0
+                    return readings
+            except Exception:
+                pass  # Stay in per-channel mode
+
         readings: list[Reading] = []
         for ch in range(1, 9):
             try:
@@ -163,7 +210,28 @@ class LakeShore218S(InstrumentDriver):
         return readings
 
     async def _read_srdg_per_channel(self) -> list[Reading]:
-        """Fallback: query each channel individually (SRDG? 1 .. SRDG? 8)."""
+        """Fallback: query each channel individually (SRDG? 1 .. SRDG? 8).
+
+        Periodically retries batch SRDG? to recover from transient failures.
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._srdg_last_batch_retry >= self._srdg_batch_retry_interval_s:
+            self._srdg_last_batch_retry = now
+            try:
+                raw = await self._transport.query("SRDG?")
+                readings = self._parse_response(raw, unit="sensor_unit", reading_kind="raw_sensor")
+                if len(readings) >= 8:
+                    log.info(
+                        "%s: SRDG? batch mode recovered — switching back from per-channel",
+                        self.name,
+                    )
+                    self._use_per_channel_srdg = False
+                    self._srdg0_fail_count = 0
+                    return readings
+            except Exception:
+                pass
+
         readings: list[Reading] = []
         for ch in range(1, 9):
             try:

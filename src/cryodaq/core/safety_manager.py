@@ -271,6 +271,82 @@ class SafetyManager:
             "active_channels": sorted(self._active_sources),
         }
 
+    async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
+        """Live-update P_target on an active channel. Validates against config limits."""
+        smu_channel = normalize_smu_channel(channel)
+
+        if self._state == SafetyState.FAULT_LATCHED:
+            return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
+
+        if smu_channel not in self._active_sources:
+            return {"ok": False, "error": f"Channel {smu_channel} not active"}
+
+        if p_target <= 0:
+            return {"ok": False, "error": "p_target must be > 0"}
+
+        if p_target > self._config.max_power_w:
+            return {"ok": False, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
+
+        if self._keithley is None:
+            return {"ok": False, "error": "Keithley not connected"}
+
+        runtime = self._keithley._channels.get(smu_channel)
+        if runtime is None or not runtime.active:
+            return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
+
+        old_p = runtime.p_target
+        runtime.p_target = p_target
+        logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
+
+        return {"ok": True, "channel": smu_channel, "p_target": p_target}
+
+    async def update_limits(
+        self,
+        *,
+        channel: str | None = None,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> dict[str, Any]:
+        """Live-update V/I compliance limits. Validates against config limits."""
+        smu_channel = normalize_smu_channel(channel)
+
+        if self._state == SafetyState.FAULT_LATCHED:
+            return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
+
+        if smu_channel not in self._active_sources:
+            return {"ok": False, "error": f"Channel {smu_channel} not active"}
+
+        if self._keithley is None:
+            return {"ok": False, "error": "Keithley not connected"}
+
+        runtime = self._keithley._channels.get(smu_channel)
+        if runtime is None or not runtime.active:
+            return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
+
+        if v_comp is not None:
+            if v_comp <= 0:
+                return {"ok": False, "error": "v_comp must be > 0"}
+            if v_comp > self._config.max_voltage_v:
+                return {"ok": False, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
+            runtime.v_comp = v_comp
+            if not self._keithley.mock:
+                await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
+
+        if i_comp is not None:
+            if i_comp <= 0:
+                return {"ok": False, "error": "i_comp must be > 0"}
+            if i_comp > self._config.max_current_a:
+                return {"ok": False, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
+            runtime.i_comp = i_comp
+            if not self._keithley.mock:
+                await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
+
+        logger.info(
+            "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
+            smu_channel, runtime.v_comp, runtime.i_comp,
+        )
+        return {"ok": True, "channel": smu_channel, "v_comp": runtime.v_comp, "i_comp": runtime.i_comp}
+
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
         if self._state != SafetyState.FAULT_LATCHED:
             return {"ok": False, "state": self._state.value, "error": "Нет активной аварии для подтверждения"}

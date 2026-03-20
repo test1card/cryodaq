@@ -1,0 +1,10 @@
+temperature_channel: "Т7 Детектор"
+pressure_channel: "Thyracont/pressure"
+target_T_K: 4.2
+stabilization_tolerance_K: 0.05
+stabilization_window_s: 120
+cooldown_rate_threshold: -0.1
+warmup_rate_threshold: 0.1
+room_temp_K: 280
+rate_window_s: 120
+pump_rate_threshold: -0.01

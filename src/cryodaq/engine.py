@@ -103,73 +103,19 @@ async def _run_keithley_command(
         return await safety_manager.emergency_off(channel=smu_channel)
 
     if action == "keithley_set_target":
-        return await _keithley_set_target(cmd, safety_manager)
+        smu_channel = normalize_smu_channel(cmd.get("channel"))
+        p = float(cmd.get("p_target", 0))
+        return await safety_manager.update_target(p, channel=smu_channel)
 
     if action == "keithley_set_limits":
-        return await _keithley_set_limits(cmd, safety_manager)
+        smu_channel = normalize_smu_channel(cmd.get("channel"))
+        return await safety_manager.update_limits(
+            channel=smu_channel,
+            v_comp=float(cmd["v_comp"]) if cmd.get("v_comp") is not None else None,
+            i_comp=float(cmd["i_comp"]) if cmd.get("i_comp") is not None else None,
+        )
 
     raise ValueError(f"Unsupported Keithley command: {action}")
-
-
-async def _keithley_set_target(
-    cmd: dict[str, Any],
-    safety_manager: SafetyManager,
-) -> dict[str, Any]:
-    """Live-update P_target on an active channel without restart."""
-    channel = cmd.get("channel")
-    smu_channel = normalize_smu_channel(channel)
-    p_target = float(cmd.get("p_target", 0))
-    if p_target <= 0:
-        return {"ok": False, "error": "p_target must be > 0"}
-
-    keithley = safety_manager._keithley
-    if keithley is None:
-        return {"ok": False, "error": "Keithley not connected"}
-
-    runtime = keithley._channels.get(smu_channel)
-    if runtime is None or not runtime.active:
-        return {"ok": False, "error": f"Channel {smu_channel} not active"}
-
-    runtime.p_target = p_target
-    return {"ok": True, "channel": smu_channel, "p_target": p_target}
-
-
-async def _keithley_set_limits(
-    cmd: dict[str, Any],
-    safety_manager: SafetyManager,
-) -> dict[str, Any]:
-    """Live-update V/I compliance limits on an active channel."""
-    channel = cmd.get("channel")
-    smu_channel = normalize_smu_channel(channel)
-
-    keithley = safety_manager._keithley
-    if keithley is None:
-        return {"ok": False, "error": "Keithley not connected"}
-
-    runtime = keithley._channels.get(smu_channel)
-    if runtime is None or not runtime.active:
-        return {"ok": False, "error": f"Channel {smu_channel} not active"}
-
-    v_comp = cmd.get("v_comp")
-    i_comp = cmd.get("i_comp")
-
-    if v_comp is not None:
-        v_comp = float(v_comp)
-        if v_comp <= 0:
-            return {"ok": False, "error": "v_comp must be > 0"}
-        runtime.v_comp = v_comp
-        if not keithley.mock:
-            await keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
-
-    if i_comp is not None:
-        i_comp = float(i_comp)
-        if i_comp <= 0:
-            return {"ok": False, "error": "i_comp must be > 0"}
-        runtime.i_comp = i_comp
-        if not keithley.mock:
-            await keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
-
-    return {"ok": True, "channel": smu_channel, "v_comp": runtime.v_comp, "i_comp": runtime.i_comp}
 
 
 def _parse_log_time(raw: Any) -> datetime | None:
@@ -1537,6 +1483,10 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await zmq_pub.stop()
     logger.info("ZMQ Publisher остановлен")
+
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+    GPIBTransport.close_all_managers()
+    logger.info("GPIB ResourceManagers закрыты")
 
     uptime = time.monotonic() - start_ts
     logger.info(
