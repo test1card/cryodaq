@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time as _time
 from typing import Any
 
 from cryodaq.analytics.calibration import CalibrationStore
@@ -127,7 +128,7 @@ class LakeShore218S(InstrumentDriver):
 
         Periodically retries batch KRDG? to recover from transient failures.
         """
-        import time as _time
+
         now = _time.monotonic()
         if now - self._krdg_last_batch_retry >= self._krdg_batch_retry_interval_s:
             self._krdg_last_batch_retry = now
@@ -214,7 +215,7 @@ class LakeShore218S(InstrumentDriver):
 
         Periodically retries batch SRDG? to recover from transient failures.
         """
-        import time as _time
+
         now = _time.monotonic()
         if now - self._srdg_last_batch_retry >= self._srdg_batch_retry_interval_s:
             self._srdg_last_batch_retry = now

@@ -275,8 +275,11 @@ class SensorDiagnosticsEngine:
         if len(my_points) < self.min_points:
             return None
 
-        # Build aligned arrays by matching timestamps
-        my_ts_set = {t for t, _ in my_points}
+        # Build aligned arrays by matching timestamps.
+        # Round to millisecond precision to handle float imprecision
+        # (two readings "at the same time" may differ by ~1e-9).
+        _TS_ROUND = 3  # decimal places = milliseconds
+        my_ts_map = {round(t, _TS_ROUND): v for t, v in my_points}
         best_r: float | None = None
         for neighbour_id in neighbours:
             n_buf = self._buffers[neighbour_id]
@@ -284,20 +287,14 @@ class SensorDiagnosticsEngine:
             if len(n_points) < self.min_points:
                 continue
 
-            # Align by common timestamps
-            n_map = {t: v for t, v in n_points}
-            common_ts = sorted(my_ts_set & set(n_map.keys()))
+            # Align by common rounded timestamps
+            n_map = {round(t, _TS_ROUND): v for t, v in n_points}
+            common_ts = sorted(set(my_ts_map.keys()) & set(n_map.keys()))
             if len(common_ts) < self.min_points:
                 continue
 
-            my_vals = np.array([v for t, v in my_points if t in set(common_ts)])
+            my_vals = np.array([my_ts_map[t] for t in common_ts])
             n_vals = np.array([n_map[t] for t in common_ts])
-
-            if len(my_vals) != len(n_vals):
-                # Rebuild properly
-                my_map = {t: v for t, v in my_points}
-                my_vals = np.array([my_map[t] for t in common_ts])
-                n_vals = np.array([n_map[t] for t in common_ts])
 
             r = _pearson_r(my_vals, n_vals)
             if r is not None and (best_r is None or r > best_r):

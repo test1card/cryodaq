@@ -328,18 +328,18 @@ class SafetyManager:
                 return {"ok": False, "error": "v_comp must be > 0"}
             if v_comp > self._config.max_voltage_v:
                 return {"ok": False, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
-            runtime.v_comp = v_comp
             if not self._keithley.mock:
                 await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
+            runtime.v_comp = v_comp  # update only after successful write
 
         if i_comp is not None:
             if i_comp <= 0:
                 return {"ok": False, "error": "i_comp must be > 0"}
             if i_comp > self._config.max_current_a:
                 return {"ok": False, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
-            runtime.i_comp = i_comp
             if not self._keithley.mock:
                 await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
+            runtime.i_comp = i_comp  # update only after successful write
 
         logger.info(
             "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
