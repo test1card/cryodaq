@@ -393,6 +393,7 @@ class CooldownService:
             "phase": pred.phase,
             "n_references": pred.n_references,
             "cooldown_active": cooldown_active,
+            "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
         }
 
         if pred.future_t is not None:

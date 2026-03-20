@@ -390,7 +390,7 @@ class CompactTempCard(QFrame):
 # ---------------------------------------------------------------------------
 
 class _PlaceholderCard(QFrame):
-    """Greyed-out placeholder for empty grid cells."""
+    """Greyed-out placeholder for invisible / empty grid cells."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -398,17 +398,18 @@ class _PlaceholderCard(QFrame):
         self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet(
-            "background-color: #1A1A1A; border: 1px solid #333; border-radius: 4px;"
+            "background: #1a1a2e; border: 1px dashed #333; border-radius: 4px;"
         )
 
 
 class TempCardGrid(QWidget):
-    """Fixed 8-column temperature card grid, one row per instrument group.
+    """Fixed 3x8 temperature card grid — flat positional layout.
 
-    Row layout from channels.yaml groups:
-    - Row 0: криостат (Т1..Т8, with disabled channels as placeholders)
-    - Row 1: компрессор (Т9..Т16, with disabled channels as placeholders)
-    - Row 2+: other groups
+    All Т-channels sorted by number are laid out 8 per row:
+    - Row 0: Т1–Т8
+    - Row 1: Т9–Т16
+    - Row 2: Т17–Т24
+    Invisible channels render as grey placeholders.
     """
 
     _COLS = 8
@@ -422,32 +423,45 @@ class TempCardGrid(QWidget):
         self._grid.setSpacing(2)
 
         self._build_cards()
+        self._channel_mgr.on_change(self.rebuild)
+
+    def rebuild(self) -> None:
+        """Clear all cards and rebuild from current ChannelManager state."""
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        self._cards.clear()
+        self._build_cards()
 
     def _build_cards(self) -> None:
-        """Создать карточки, сгруппированные по group из channels.yaml."""
+        """Создать карточки: плоская позиционная сетка 8 в ряд."""
         all_channels = self._channel_mgr.get_all()
-        groups_map = self._channel_mgr.get_channels_by_group()
 
-        # Filter to temperature channels only (Т prefix)
-        temp_groups: list[tuple[str, list[str]]] = []
-        for group_name, ch_ids in groups_map.items():
-            temp_ids = [ch for ch in ch_ids if ch.startswith("\u0422")]  # Т
-            if temp_ids:
-                temp_groups.append((group_name, temp_ids))
+        # Collect all Т-channels and sort by numeric suffix
+        temp_channels: list[tuple[int, str]] = []
+        for ch_id in all_channels:
+            if ch_id.startswith("\u0422"):  # Т
+                try:
+                    num = int(ch_id[1:])
+                except ValueError:
+                    continue
+                temp_channels.append((num, ch_id))
+        temp_channels.sort()
 
-        for row, (group_name, ch_ids) in enumerate(temp_groups):
-            for col, ch_id in enumerate(ch_ids[:self._COLS]):
-                info = all_channels.get(ch_id, {})
-                visible = info.get("visible", True)
-                if visible:
-                    display = self._channel_mgr.get_display_name(ch_id)
-                    card = CompactTempCard(ch_id, display)
-                    self._cards[ch_id] = card
-                    self._grid.addWidget(card, row, col)
-                else:
-                    self._grid.addWidget(_PlaceholderCard(), row, col)
-            # Fill remaining columns with placeholders
-            for col in range(len(ch_ids), self._COLS):
+        for idx, (_num, ch_id) in enumerate(temp_channels):
+            row = idx // self._COLS
+            col = idx % self._COLS
+            info = all_channels.get(ch_id, {})
+            visible = info.get("visible", True)
+            if visible:
+                display = self._channel_mgr.get_display_name(ch_id)
+                card = CompactTempCard(ch_id, display)
+                self._cards[ch_id] = card
+                self._grid.addWidget(card, row, col)
+            else:
                 self._grid.addWidget(_PlaceholderCard(), row, col)
 
     def get_cards(self) -> dict[str, CompactTempCard]:
@@ -1136,6 +1150,31 @@ class OverviewPanel(QWidget):
         self._pressure_plot_item.setDownsampling(auto=True, method="peak")
         self._pressure_plot_item.setClipToView(True)
 
+        # --- Cooldown prediction overlay on temperature plot ---
+        self._pred_curve = self._plot.plot(
+            [], [],
+            pen=pg.mkPen(color="#ff7b72", width=2, style=Qt.PenStyle.DashLine),
+            name="Прогноз",
+        )
+        self._pred_curve.setVisible(False)
+
+        self._ci_upper_curve = self._plot.plot([], [], pen=None)
+        self._ci_lower_curve = self._plot.plot([], [], pen=None)
+        self._ci_band = pg.FillBetweenItem(
+            self._ci_upper_curve, self._ci_lower_curve,
+            brush=pg.mkBrush(255, 123, 114, 30),
+        )
+        self._plot.addItem(self._ci_band)
+        self._ci_band.setVisible(False)
+
+        from PySide6.QtWidgets import QLabel as _Label
+        self._eta_overlay = _Label("", self._plot)
+        self._eta_overlay.setStyleSheet(
+            "color: #ff7b72; font-size: 12pt; font-weight: bold; "
+            "background: rgba(17,17,17,200); padding: 4px 8px; border-radius: 4px;"
+        )
+        self._eta_overlay.setVisible(False)
+
     # ------------------------------------------------------------------
     # Публичный интерфейс
     # ------------------------------------------------------------------
@@ -1191,6 +1230,10 @@ class OverviewPanel(QWidget):
                 (reading.timestamp.timestamp(), reading.value)
             )
 
+        # Cooldown prediction
+        if channel.endswith("/cooldown_eta"):
+            self._update_cooldown_prediction(reading)
+
         # Keithley
         if "/smua/" in channel or "/smub/" in channel:
             self._keithley_strip.on_reading(reading)
@@ -1245,6 +1288,56 @@ class OverviewPanel(QWidget):
         if channel == "analytics/alarm_count":
             self._status_strip.set_alarm_count(int(reading.value))
 
+    def _update_cooldown_prediction(self, reading: Reading) -> None:
+        """Draw ML prediction curve on temperature chart."""
+        meta = reading.metadata or {}
+        active = meta.get("cooldown_active", False)
+
+        if not active:
+            self._pred_curve.setVisible(False)
+            self._ci_band.setVisible(False)
+            self._eta_overlay.setVisible(False)
+            return
+
+        future_t = meta.get("future_t", [])
+        future_mean = meta.get("future_T_cold_mean", [])
+        future_upper = meta.get("future_T_cold_upper", [])
+        future_lower = meta.get("future_T_cold_lower", [])
+        cooldown_start = meta.get("cooldown_start_ts", 0)
+
+        if cooldown_start and future_t and future_mean:
+            abs_ts = [cooldown_start + h * 3600 for h in future_t]
+            self._pred_curve.setData(abs_ts, future_mean)
+            self._pred_curve.setVisible(True)
+
+            if (future_upper and future_lower
+                    and len(future_upper) == len(future_t)):
+                self._ci_upper_curve.setData(abs_ts, future_upper)
+                self._ci_lower_curve.setData(abs_ts, future_lower)
+                self._ci_band.setVisible(True)
+            else:
+                self._ci_band.setVisible(False)
+        else:
+            self._pred_curve.setVisible(False)
+            self._ci_band.setVisible(False)
+
+        # ETA overlay
+        t_rem = meta.get("t_remaining_hours", 0)
+        ci_raw = meta.get("t_remaining_ci68", (0, 0))
+        ci = ci_raw[1] if isinstance(ci_raw, (list, tuple)) and len(ci_raw) > 1 else 0
+        if t_rem > 0:
+            if t_rem < 1:
+                text = f"ETA: {t_rem * 60:.0f} мин (\u00b1{ci * 60:.0f})"
+            else:
+                text = f"ETA: {t_rem:.1f} ч (\u00b1{ci:.1f})"
+            self._eta_overlay.setText(text)
+            self._eta_overlay.setVisible(True)
+            pw = self._plot.width()
+            self._eta_overlay.adjustSize()
+            self._eta_overlay.move(max(0, pw - self._eta_overlay.width() - 10), 10)
+        else:
+            self._eta_overlay.setVisible(False)
+
     @Slot()
     def _refresh_plot(self) -> None:
         """Обновить все линии на графиках (1 Гц)."""
@@ -1266,7 +1359,13 @@ class OverviewPanel(QWidget):
             item.setData(xs, ys)
 
         if self._plot_items:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+            x_max = now
+            # Extend to include prediction curve if visible
+            if self._pred_curve.isVisible():
+                pred_xs = self._pred_curve.getData()[0]
+                if pred_xs is not None and len(pred_xs) > 0:
+                    x_max = max(x_max, float(pred_xs[-1]))
+            self._plot.getPlotItem().setXRange(x_min, x_max, padding=0)
 
         # Pressure line (X range synced via setXLink)
         if self._pressure_buffer:

@@ -3,6 +3,8 @@
 Позволяет выбрать цепочку температурных датчиков, отображает R и G
 между соседними парами, прогнозирует стационарные значения T∞
 и показывает степень стабилизации (percent_settled).
+
+Включает встроенное автоизмерение (развёртка мощности Keithley).
 """
 
 from __future__ import annotations
@@ -20,12 +22,19 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -33,32 +42,33 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
+from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
     apply_button_style,
+    apply_group_box_style,
     apply_status_label_style,
     build_action_row,
     create_panel_root,
 )
+from cryodaq.gui.zmq_client import send_command
 
 logger = logging.getLogger(__name__)
 
 _BUFFER_MAXLEN = 3600
-_WINDOW_S = 600.0
+
 _STABILITY_THRESHOLD = 0.01
 
-_ALL_CHANNELS = [
-    "Т1 Криостат верх", "Т2 Криостат низ", "Т3 Радиатор 1", "Т4 Радиатор 2",
-    "Т5 Экран 77К", "Т6 Экран 4К", "Т7 Детектор", "Т8 Калибровка",
-    "Т9 Компрессор вход", "Т10 Компрессор выход",
-    "Т11 Теплообменник 1", "Т12 Теплообменник 2",
-    "Т13 Труба подачи", "Т14 Труба возврата",
-    "Т15 Вакуумный кожух", "Т16 Фланец",
-    "Т17 Зеркало 1", "Т18 Зеркало 2", "Т19 Подвес", "Т20 Рама",
-    "Т21 Резерв 1", "Т22 Резерв 2", "Т23 Резерв 3", "Т24 Резерв 4",
-]
+def _get_temperature_channels() -> list[str]:
+    """Динамический список видимых температурных каналов через ChannelManager."""
+    mgr = get_channel_manager()
+    return [
+        mgr.get_display_name(ch_id)
+        for ch_id in mgr.get_all_visible()
+        if ch_id.startswith("Т")
+    ]
 
 _LINE_COLORS = [
     "#58a6ff", "#3fb950", "#f0883e", "#f85149", "#bc8cff",
@@ -94,11 +104,24 @@ class ConductivityPanel(QWidget):
         self._chain: list[str] = []
         self._checkboxes: dict[str, QCheckBox] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
-        self._pred_lines: dict[str, pg.InfiniteLine] = {}
+        self._pred_lines: dict[str, pg.PlotDataItem] = {}
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
 
         # Предсказатель стационара
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
+
+        # Авто-развёртка state
+        self._auto_state: str = "idle"  # "idle" / "stabilizing" / "done"
+        self._auto_power_list: list[float] = []
+        self._auto_step: int = 0
+        self._auto_step_start: float = 0.0
+        self._auto_results: list[dict] = []
+
+        self._all_channels = _get_temperature_channels()
+
+        # Flight recorder
+        self._flight_log = None
+        self._flight_log_writer = None
 
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
@@ -107,6 +130,11 @@ class ConductivityPanel(QWidget):
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
+
+        # Авто-развёртка timer (1 s tick)
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(1000)
+        self._auto_timer.timeout.connect(self._auto_tick)
 
     def _build_ui(self) -> None:
         outer = create_panel_root(self)
@@ -119,24 +147,29 @@ class ConductivityPanel(QWidget):
         root = QHBoxLayout()
         root.setSpacing(8)
 
-        # --- Левая панель ---
-        left = QVBoxLayout()
-        left.setSpacing(6)
+        # --- Левая панель (splitter: ручные контролы / автоизмерение) ---
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.setFixedWidth(240)
 
         title_font = QFont()
         title_font.setPointSize(10)
         title_font.setBold(True)
 
+        # --- Верхняя секция: выбор датчиков + ручные контролы ---
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(4)
+
         t = QLabel("Выбор датчиков")
         t.setFont(title_font)
         apply_status_label_style(t, "accent", bold=True)
-        left.addWidget(t)
+        top_layout.addWidget(t)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.setFixedWidth(220)
 
         ch_container = QWidget()
         ch_container.setStyleSheet("background: transparent;")
@@ -144,7 +177,7 @@ class ConductivityPanel(QWidget):
         ch_layout.setContentsMargins(4, 4, 4, 4)
         ch_layout.setSpacing(2)
 
-        for ch_name in _ALL_CHANNELS:
+        for ch_name in self._all_channels:
             cb = QCheckBox(ch_name)
             cb.stateChanged.connect(lambda state, n=ch_name: self._on_check(n, state))
             self._checkboxes[ch_name] = cb
@@ -152,11 +185,11 @@ class ConductivityPanel(QWidget):
 
         ch_layout.addStretch()
         scroll.setWidget(ch_container)
-        left.addWidget(scroll, stretch=1)
+        top_layout.addWidget(scroll, stretch=1)
 
         src_lbl = QLabel("Источник P:")
         apply_status_label_style(src_lbl, "info")
-        left.addWidget(src_lbl)
+        top_layout.addWidget(src_lbl)
 
         self._power_combo = QComboBox()
         self._power_combo.addItems([
@@ -164,7 +197,7 @@ class ConductivityPanel(QWidget):
         ])
         self._power_combo.currentTextChanged.connect(self._on_power_changed)
         self._power_channel = self._power_combo.currentText()
-        left.addWidget(self._power_combo)
+        top_layout.addWidget(self._power_combo)
 
         up_btn = QPushButton("Вверх")
         apply_button_style(up_btn, "neutral", compact=True)
@@ -173,14 +206,107 @@ class ConductivityPanel(QWidget):
         down_btn = QPushButton("Вниз")
         apply_button_style(down_btn, "neutral", compact=True)
         down_btn.clicked.connect(self._on_move_down)
-        left.addLayout(build_action_row(up_btn, down_btn))
+        top_layout.addLayout(build_action_row(up_btn, down_btn))
 
         export_btn = QPushButton("Экспорт CSV")
         apply_button_style(export_btn, "primary")
         export_btn.clicked.connect(self._on_export)
-        left.addWidget(export_btn)
+        top_layout.addWidget(export_btn)
 
-        root.addLayout(left)
+        left_splitter.addWidget(top_widget)
+
+        # --- Нижняя секция: Автоизмерение ---
+        auto_box = QGroupBox("Автоизмерение")
+        auto_box.setCheckable(True)
+        auto_box.setChecked(False)
+        apply_group_box_style(auto_box, "#f0883e")
+        auto_layout = QGridLayout(auto_box)
+
+        auto_layout.addWidget(QLabel("Начальная P:"), 0, 0)
+        self._power_start_spin = QDoubleSpinBox()
+        self._power_start_spin.setRange(0.0001, 10.0)
+        self._power_start_spin.setValue(0.001)
+        self._power_start_spin.setDecimals(4)
+        self._power_start_spin.setSuffix(" Вт")
+        self._power_start_spin.setSingleStep(0.001)
+        auto_layout.addWidget(self._power_start_spin, 0, 1)
+
+        auto_layout.addWidget(QLabel("Шаг P:"), 1, 0)
+        self._power_step_spin = QDoubleSpinBox()
+        self._power_step_spin.setRange(0.0001, 10.0)
+        self._power_step_spin.setValue(0.005)
+        self._power_step_spin.setDecimals(4)
+        self._power_step_spin.setSuffix(" Вт")
+        self._power_step_spin.setSingleStep(0.001)
+        auto_layout.addWidget(self._power_step_spin, 1, 1)
+
+        auto_layout.addWidget(QLabel("Кол-во шагов:"), 2, 0)
+        self._power_count_spin = QSpinBox()
+        self._power_count_spin.setRange(2, 100)
+        self._power_count_spin.setValue(10)
+        auto_layout.addWidget(self._power_count_spin, 2, 1)
+
+        self._power_preview = QLabel("")
+        self._power_preview.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        self._power_preview.setWordWrap(True)
+        auto_layout.addWidget(self._power_preview, 3, 0, 1, 2)
+
+        self._power_start_spin.valueChanged.connect(self._update_power_preview)
+        self._power_step_spin.valueChanged.connect(self._update_power_preview)
+        self._power_count_spin.valueChanged.connect(self._update_power_preview)
+
+        auto_layout.addWidget(QLabel("Стабилизация:"), 4, 0)
+        self._settled_pct_spin = QDoubleSpinBox()
+        self._settled_pct_spin.setRange(80.0, 99.9)
+        self._settled_pct_spin.setValue(95.0)
+        self._settled_pct_spin.setDecimals(1)
+        self._settled_pct_spin.setSuffix(" %")
+        self._settled_pct_spin.setToolTip(
+            "Процент стабилизации по экстраполяции SteadyState.\n"
+            "95% = температура в пределах 5% от предсказанного стационара."
+        )
+        auto_layout.addWidget(self._settled_pct_spin, 4, 1)
+
+        auto_layout.addWidget(QLabel("Мин. ожидание:"), 5, 0)
+        self._min_wait_spin = QDoubleSpinBox()
+        self._min_wait_spin.setRange(10, 600)
+        self._min_wait_spin.setValue(30)
+        self._min_wait_spin.setSuffix(" с")
+        self._min_wait_spin.setToolTip("Минимальное время перед проверкой стабилизации")
+        auto_layout.addWidget(self._min_wait_spin, 5, 1)
+
+        btn_row = QHBoxLayout()
+        self._auto_start_btn = QPushButton("Старт")
+        apply_button_style(self._auto_start_btn, "primary")
+        self._auto_start_btn.clicked.connect(self._on_auto_start)
+        btn_row.addWidget(self._auto_start_btn)
+
+        self._auto_stop_btn = QPushButton("Стоп")
+        apply_button_style(self._auto_stop_btn, "neutral")
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_stop_btn.clicked.connect(self._on_auto_stop)
+        btn_row.addWidget(self._auto_stop_btn)
+        auto_layout.addLayout(btn_row, 6, 0, 1, 2)
+
+        self._auto_progress = QProgressBar()
+        self._auto_progress.setRange(0, 100)
+        self._auto_progress.setValue(0)
+        self._auto_progress.setVisible(False)
+        auto_layout.addWidget(self._auto_progress, 7, 0, 1, 2)
+
+        self._auto_status_label = QLabel("")
+        apply_status_label_style(self._auto_status_label, "muted")
+        auto_layout.addWidget(self._auto_status_label, 8, 0, 1, 2)
+
+        self._update_power_preview()
+
+        left_splitter.addWidget(auto_box)
+
+        # 60% manual, 40% auto
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 2)
+
+        root.addWidget(left_splitter)
 
         # --- Правая панель ---
         right = QVBoxLayout()
@@ -291,6 +417,9 @@ class ConductivityPanel(QWidget):
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
+        if self._empty_overlay.isVisible():
+            self._empty_overlay.setVisible(False)
+
         ch = reading.channel
         ts = reading.timestamp.timestamp()
 
@@ -318,9 +447,9 @@ class ConductivityPanel(QWidget):
         self._update_table(all_preds)
         self._update_stability()
         self._update_banner(all_preds)
-        self._update_pred_lines(all_preds)
         self._update_plot()
         self._power_label.setText(f"P = {self._power:.6g} Вт")
+        self._write_flight_log(now, all_preds)
 
     def _update_table(self, preds: dict) -> None:
         if len(self._chain) < 2:
@@ -355,7 +484,7 @@ class ConductivityPanel(QWidget):
             g_pred_str = "—"
             pct_val = 0.0
 
-            if p_hot and p_hot.valid and p_cold and p_cold.valid:
+            if self._is_good_pred(p_hot) and self._is_good_pred(p_cold):
                 t_inf_hot = p_hot.t_predicted
                 t_inf_cold = p_cold.t_predicted
                 dt_inf = t_inf_hot - t_inf_cold
@@ -440,27 +569,17 @@ class ConductivityPanel(QWidget):
                 f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин"
             )
 
-    def _update_pred_lines(self, preds: dict) -> None:
-        """Обновить горизонтальные пунктирные линии T∞ на графике."""
-        for ch in self._chain:
-            p = preds.get(ch)
-            if p and p.valid and p.t_predicted != 0:
-                if ch not in self._pred_lines:
-                    idx = list(self._plot_items.keys()).index(ch) if ch in self._plot_items else 0
-                    color = _LINE_COLORS[idx % len(_LINE_COLORS)]
-                    line = pg.InfiniteLine(
-                        pos=p.t_predicted, angle=0,
-                        pen=pg.mkPen(color=color, width=1, style=Qt.PenStyle.DashLine),
-                    )
-                    self._plot.addItem(line)
-                    self._pred_lines[ch] = line
-                else:
-                    self._pred_lines[ch].setValue(p.t_predicted)
+    def _is_good_pred(self, p) -> bool:
+        """Check if prediction is physically meaningful for display."""
+        return (p is not None and p.valid
+                and p.confidence > 0.5
+                and p.t_predicted > 0
+                and abs(p.t_predicted - p.t_current) < 50.0)
 
-        # Удалить линии для каналов, которых нет в цепочке
+    def _update_pred_lines(self, preds: dict) -> None:
+        """Clear prediction curves — steady-state chart doesn't need forecast."""
         for ch in list(self._pred_lines.keys()):
-            if ch not in self._chain:
-                self._plot.removeItem(self._pred_lines.pop(ch))
+            self._plot.removeItem(self._pred_lines.pop(ch))
 
     def _update_stability(self) -> None:
         if not self._chain:
@@ -495,18 +614,299 @@ class ConductivityPanel(QWidget):
             apply_status_label_style(self._stability_label, "warning", bold=True)
 
     def _update_plot(self) -> None:
+        """Update plot: full history + 25% extrapolation zone."""
         now = time.time()
-        x_min = now - _WINDOW_S
+
+        t_start = now
+        for ch in self._chain:
+            buf = self._buffers.get(ch)
+            if buf and len(buf) > 0:
+                t_start = min(t_start, buf[0][0])
+
         for ch, item in self._plot_items.items():
             buf = self._buffers.get(ch)
             if not buf:
                 item.setData([], [])
                 continue
-            xs = [t for t, _ in buf if t >= x_min]
-            ys = [v for t, v in buf if t >= x_min]
+            xs = [t for t, _ in buf]
+            ys = [v for t, v in buf]
             item.setData(xs, ys)
-        if self._plot_items:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+
+        if self._plot_items and t_start < now:
+            forecast_s = (now - t_start) / 3.0
+            self._plot.getPlotItem().setXRange(t_start, now + forecast_s, padding=0.02)
+
+    # ------------------------------------------------------------------
+    # Auto-sweep (Автоизмерение)
+    # ------------------------------------------------------------------
+
+    def _generate_power_list(self) -> list[float]:
+        """Generate power list from start/step/count."""
+        start = self._power_start_spin.value()
+        step = self._power_step_spin.value()
+        count = self._power_count_spin.value()
+        return [round(start + i * step, 6) for i in range(count)]
+
+    def _update_power_preview(self) -> None:
+        """Show generated power list in preview label."""
+        powers = self._generate_power_list()
+        if len(powers) <= 6:
+            text = ", ".join(f"{p:.4g}" for p in powers)
+        else:
+            first3 = ", ".join(f"{p:.4g}" for p in powers[:3])
+            text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
+        self._power_preview.setText(text)
+
+    @Slot()
+    def _on_auto_start(self) -> None:
+        """Запуск автоматической развёртки по мощности."""
+        if len(self._chain) < 2:
+            QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
+            return
+
+        powers = self._generate_power_list()
+        if not powers:
+            QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
+            return
+
+        self._auto_power_list = powers
+        self._auto_step = 0
+        self._auto_results = []
+        self._auto_state = "stabilizing"
+
+        # UI
+        self._auto_start_btn.setEnabled(False)
+        self._auto_stop_btn.setEnabled(True)
+        self._auto_progress.setVisible(True)
+        self._auto_progress.setValue(0)
+        self._auto_status_label.setText(
+            f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт"
+        )
+        apply_status_label_style(self._auto_status_label, "info")
+
+        # Send first power command
+        self._auto_step_start = time.monotonic()
+        send_command({
+            "cmd": "keithley_set_target",
+            "channel": "smua",
+            "p_target": powers[0],
+        })
+        logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
+
+        self._auto_timer.start()
+
+    @Slot()
+    def _on_auto_stop(self) -> None:
+        """Прервать автоизмерение."""
+        self._auto_state = "idle"
+        self._auto_timer.stop()
+        send_command({"cmd": "keithley_stop", "channel": "smua"})
+
+        self._auto_start_btn.setEnabled(True)
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_progress.setVisible(False)
+        self._auto_status_label.setText("Остановлено оператором")
+        apply_status_label_style(self._auto_status_label, "warning")
+        logger.info("Автоизмерение: остановлено оператором")
+
+    @Slot()
+    def _auto_tick(self) -> None:
+        """Check stabilization using SteadyStatePredictor's percent_settled."""
+        if self._auto_state != "stabilizing":
+            return
+
+        elapsed = time.monotonic() - self._auto_step_start
+        step_total = len(self._auto_power_list)
+        step_idx = self._auto_step
+        P = self._auto_power_list[step_idx]
+
+        # Collect percent_settled for all chain channels
+        settled_values: list[float] = []
+        for ch in self._chain:
+            pred = self._predictor.get_prediction(ch)
+            if pred is not None and pred.valid:
+                settled_values.append(pred.percent_settled)
+            else:
+                settled_values.append(0.0)
+
+        min_settled = min(settled_values) if settled_values else 0.0
+
+        # Check stabilization:
+        # 1. Minimum wait time elapsed (avoid false positive from initial transient)
+        # 2. All channels above threshold percent_settled
+        threshold = self._settled_pct_spin.value()
+        min_wait = self._min_wait_spin.value()
+        is_stable = elapsed >= min_wait and min_settled >= threshold
+
+        # Progress bar
+        step_progress = min(min_settled / threshold, 1.0) if threshold > 0 else 1.0
+        pct = int(((step_idx + step_progress) / step_total) * 100)
+        self._auto_progress.setValue(min(pct, 99))
+
+        # Status label with live percent_settled
+        settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
+        self._auto_status_label.setText(
+            f"Шаг {step_idx + 1}/{step_total} — "
+            f"P = {P:.4g} Вт — {elapsed:.0f} с — "
+            f"стабил.: {settled_str}"
+        )
+
+        if is_stable:
+            self._auto_record_point()
+            self._auto_step += 1
+            if self._auto_step >= step_total:
+                self._auto_complete()
+            else:
+                next_p = self._auto_power_list[self._auto_step]
+                self._auto_step_start = time.monotonic()
+                send_command({
+                    "cmd": "keithley_set_target",
+                    "channel": "smua",
+                    "p_target": next_p,
+                })
+                logger.info(
+                    "Автоизмерение: шаг %d/%d, P=%.4g Вт",
+                    self._auto_step + 1, step_total, next_p,
+                )
+
+    def _auto_record_point(self) -> None:
+        """Записать текущие R/G для данного шага."""
+        P = self._auto_power_list[self._auto_step]
+        if len(self._chain) < 2:
+            return
+
+        hot_ch = self._chain[0]
+        cold_ch = self._chain[-1]
+        T_hot = self._temps.get(hot_ch, float("nan"))
+        T_cold = self._temps.get(cold_ch, float("nan"))
+        dT = T_hot - T_cold
+        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+
+        settled_values = []
+        for ch in self._chain:
+            pred = self._predictor.get_prediction(ch)
+            if pred and pred.valid:
+                settled_values.append(pred.percent_settled)
+        min_settled = min(settled_values) if settled_values else 0.0
+
+        self._auto_results.append({
+            "P": P, "T_hot": T_hot, "T_cold": T_cold,
+            "dT": dT, "R": R, "G": G, "settled_pct": min_settled,
+        })
+        logger.info(
+            "Автоизмерение: точка P=%.4g, dT=%.4f, R=%.4g, G=%.4g, settled=%.0f%%",
+            P, dT, R, G, min_settled,
+        )
+
+    def _auto_complete(self) -> None:
+        """Завершить развёртку."""
+        self._auto_state = "done"
+        self._auto_timer.stop()
+        send_command({"cmd": "keithley_stop", "channel": "smua"})
+
+        self._auto_start_btn.setEnabled(True)
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_progress.setValue(100)
+
+        n = len(self._auto_results)
+        self._auto_status_label.setText(f"Завершено: {n} точек измерено")
+        apply_status_label_style(self._auto_status_label, "success", bold=True)
+        logger.info("Автоизмерение: завершено, %d точек", n)
+
+        if self._auto_results:
+            summary_lines = ["Автоизмерение завершено:\n"]
+            for r in self._auto_results:
+                summary_lines.append(
+                    f"  P={r['P']:.4g} Вт  dT={r['dT']:.4f} К  "
+                    f"R={r['R']:.4g} К/Вт  G={r['G']:.4g} Вт/К"
+                )
+            QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
+
+    # ------------------------------------------------------------------
+    # Flight recorder
+    # ------------------------------------------------------------------
+
+    def _write_flight_log(self, now: float, preds: dict) -> None:
+        """Append one row to the conductivity flight log CSV."""
+        if not self._chain or len(self._chain) < 2:
+            return
+
+        if self._flight_log is None:
+            from cryodaq.paths import get_data_dir
+            log_dir = get_data_dir() / "conductivity_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            log_path = log_dir / f"conductivity_{ts_str}.csv"
+            self._flight_log = log_path.open("w", newline="", encoding="utf-8-sig")
+            self._flight_log_writer = csv.writer(self._flight_log)
+            self._flight_log_writer.writerow([
+                "timestamp_utc", "elapsed_s",
+                "T_hot", "T_cold", "dT", "P",
+                "R_measured", "G_measured",
+                "R_predicted", "G_predicted",
+                "percent_settled_hot", "percent_settled_cold",
+                "tau_hot_s", "tau_cold_s",
+                "T_inf_hot", "T_inf_cold",
+                "auto_sweep_step", "auto_sweep_power",
+            ])
+
+        hot_ch = self._chain[0]
+        cold_ch = self._chain[-1]
+        T_hot = self._temps.get(hot_ch, float("nan"))
+        T_cold = self._temps.get(cold_ch, float("nan"))
+        dT = T_hot - T_cold
+        P = self._power
+
+        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+
+        p_hot = preds.get(hot_ch)
+        p_cold = preds.get(cold_ch)
+        R_pred = G_pred = float("nan")
+        pct_hot = pct_cold = 0.0
+        tau_hot = tau_cold = T_inf_hot = T_inf_cold = float("nan")
+
+        if p_hot and p_hot.valid:
+            pct_hot = p_hot.percent_settled
+            tau_hot = p_hot.tau_s
+            T_inf_hot = p_hot.t_predicted
+        if p_cold and p_cold.valid:
+            pct_cold = p_cold.percent_settled
+            tau_cold = p_cold.tau_s
+            T_inf_cold = p_cold.t_predicted
+
+        if self._is_good_pred(p_hot) and self._is_good_pred(p_cold):
+            dt_pred = T_inf_hot - T_inf_cold
+            if P != 0 and math.isfinite(dt_pred) and dt_pred != 0:
+                R_pred = dt_pred / P
+                G_pred = P / dt_pred
+
+        step = self._auto_step if self._auto_state == "stabilizing" else -1
+        step_P = (self._auto_power_list[self._auto_step]
+                  if self._auto_state == "stabilizing" and self._auto_step < len(self._auto_power_list)
+                  else 0)
+
+        elapsed = now - self._buffers[hot_ch][0][0] if self._buffers.get(hot_ch) else 0
+
+        self._flight_log_writer.writerow([
+            datetime.now(timezone.utc).isoformat(),
+            f"{elapsed:.1f}",
+            f"{T_hot:.6f}", f"{T_cold:.6f}", f"{dT:.6f}", f"{P:.6g}",
+            f"{R:.6g}", f"{G:.6g}",
+            f"{R_pred:.6g}", f"{G_pred:.6g}",
+            f"{pct_hot:.1f}", f"{pct_cold:.1f}",
+            f"{tau_hot:.1f}", f"{tau_cold:.1f}",
+            f"{T_inf_hot:.6f}", f"{T_inf_cold:.6f}",
+            step, f"{step_P:.6g}",
+        ])
+        self._flight_log.flush()
+
+    def closeEvent(self, event) -> None:
+        if self._flight_log:
+            self._flight_log.close()
+            self._flight_log = None
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Export

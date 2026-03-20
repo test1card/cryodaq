@@ -123,7 +123,7 @@ class ExperimentWorkspace(QWidget):
     def _on_create_experiment(self) -> None:
         template = self._create_template_combo.currentData() or {}
         title = self._create_title_edit.text().strip()
-        operator = self._create_operator_edit.text().strip()
+        operator = self._create_operator_edit.currentText().strip()
         if not title:
             self._workspace_status.show_warning("Укажите название нового эксперимента.")
             return
@@ -145,7 +145,7 @@ class ExperimentWorkspace(QWidget):
             "name": title,
             "operator": operator,
             "sample": self._create_sample_edit.text().strip(),
-            "cryostat": self._create_cryostat_edit.text().strip(),
+            "cryostat": self._create_cryostat_edit.currentText().strip(),
             "description": self._create_description_edit.toPlainText().strip(),
             "notes": self._create_notes_edit.toPlainText().strip(),
             "custom_fields": {
@@ -162,12 +162,24 @@ class ExperimentWorkspace(QWidget):
             self._show_shell_message(self._workspace_status.text())
             return
 
+        # Сохранить оператора в QSettings-историю
+        if operator:
+            from PySide6.QtCore import QSettings
+            _s = QSettings("FIAN", "CryoDAQ")
+            _known = _s.value("known_operators", [])
+            if not isinstance(_known, list):
+                _known = []
+            if operator not in _known:
+                _known.insert(0, operator)
+                _known = _known[:20]
+                _s.setValue("known_operators", _known)
+
         # Сохранить данные формы в историю
         self._preferences.save_last_experiment(
             template_id=str(payload.get("template_id", "")),
             operator=operator,
             sample=self._create_sample_edit.text().strip(),
-            cryostat=self._create_cryostat_edit.text().strip(),
+            cryostat=self._create_cryostat_edit.currentText().strip(),
             description=self._create_description_edit.toPlainText().strip(),
             custom_fields=payload.get("custom_fields", {}),
         )
@@ -365,9 +377,18 @@ class ExperimentWorkspace(QWidget):
         self._create_template_combo = QComboBox()
         self._create_template_combo.currentIndexChanged.connect(self._rebuild_create_custom_fields)
         self._create_title_edit = QLineEdit()
-        self._create_operator_edit = QLineEdit()
+        self._create_operator_edit = QComboBox()
+        self._create_operator_edit.setEditable(True)
+        self._create_operator_edit.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
+        from PySide6.QtCore import QSettings
+        _settings = QSettings("FIAN", "CryoDAQ")
+        _known_ops = _settings.value("known_operators", [])
+        if isinstance(_known_ops, list) and _known_ops:
+            self._create_operator_edit.addItems(_known_ops)
         self._create_sample_edit = QLineEdit()
-        self._create_cryostat_edit = QLineEdit()
+        self._create_cryostat_edit = QComboBox()
+        self._create_cryostat_edit.setEditable(True)
+        self._create_cryostat_edit.addItems(["Криостат АКЦ ФИАН"])
         self._create_description_edit = QTextEdit()
         self._create_description_edit.setMaximumHeight(70)
         self._create_notes_edit = QTextEdit()
@@ -505,12 +526,12 @@ class ExperimentWorkspace(QWidget):
         last = self._preferences.get_last_experiment()
 
         # Pre-fill fields (только если поле пустое)
-        if last.get("operator") and not self._create_operator_edit.text():
-            self._create_operator_edit.setText(last["operator"])
+        if last.get("operator") and not self._create_operator_edit.currentText():
+            self._create_operator_edit.setCurrentText(last["operator"])
         if last.get("sample") and not self._create_sample_edit.text():
             self._create_sample_edit.setText(last["sample"])
-        if last.get("cryostat") and not self._create_cryostat_edit.text():
-            self._create_cryostat_edit.setText(last["cryostat"])
+        if last.get("cryostat") and not self._create_cryostat_edit.currentText():
+            self._create_cryostat_edit.setCurrentText(last["cryostat"])
 
         # QCompleter для текстовых полей
         def _make_completer(items: list[str]) -> QCompleter:
@@ -518,13 +539,13 @@ class ExperimentWorkspace(QWidget):
             c.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             return c
 
-        self._create_operator_edit.setCompleter(
+        self._create_operator_edit.lineEdit().setCompleter(
             _make_completer(self._preferences.get_history("operator"))
         )
         self._create_sample_edit.setCompleter(
             _make_completer(self._preferences.get_history("sample"))
         )
-        self._create_cryostat_edit.setCompleter(
+        self._create_cryostat_edit.lineEdit().setCompleter(
             _make_completer(self._preferences.get_history("cryostat"))
         )
 

@@ -4,10 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QUrl, Slot
+from PySide6.QtCore import QDate, Qt, QUrl, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
+    QDateEdit,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -57,8 +58,14 @@ class ArchivePanel(QWidget):
         self._template_filter.addItem("Все шаблоны", "")
         self._operator_filter = QLineEdit()
         self._sample_filter = QLineEdit()
-        self._start_filter = QLineEdit()
-        self._end_filter = QLineEdit()
+        self._start_filter = QDateEdit()
+        self._start_filter.setCalendarPopup(True)
+        self._start_filter.setDisplayFormat("yyyy-MM-dd")
+        self._start_filter.setDate(QDate.currentDate().addDays(-30))
+        self._end_filter = QDateEdit()
+        self._end_filter.setCalendarPopup(True)
+        self._end_filter.setDisplayFormat("yyyy-MM-dd")
+        self._end_filter.setDate(QDate.currentDate())
         self._report_filter = QComboBox()
         self._report_filter.addItem("Все", "")
         self._report_filter.addItem("Есть отчёт", "true")
@@ -77,9 +84,9 @@ class ArchivePanel(QWidget):
         filters.addWidget(self._operator_filter, 0, 3)
         filters.addWidget(QLabel("Образец:"), 0, 4)
         filters.addWidget(self._sample_filter, 0, 5)
-        filters.addWidget(QLabel("Начало >="), 1, 0)
+        filters.addWidget(QLabel("С:"), 1, 0)
         filters.addWidget(self._start_filter, 1, 1)
-        filters.addWidget(QLabel("Конец <="), 1, 2)
+        filters.addWidget(QLabel("По:"), 1, 2)
         filters.addWidget(self._end_filter, 1, 3)
         filters.addWidget(QLabel("Отчёт:"), 1, 4)
         filters.addWidget(self._report_filter, 1, 5)
@@ -188,8 +195,8 @@ class ArchivePanel(QWidget):
             "template_id": self._template_filter.currentData(),
             "operator": self._operator_filter.text().strip(),
             "sample": self._sample_filter.text().strip(),
-            "start_date": self._start_filter.text().strip(),
-            "end_date": self._end_filter.text().strip(),
+            "start_date": self._start_filter.date().toString("yyyy-MM-dd"),
+            "end_date": self._end_filter.date().toString("yyyy-MM-dd"),
             "sort_by": sort_by,
             "descending": descending,
         }

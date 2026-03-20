@@ -1,7 +1,7 @@
 """Главное окно CryoDAQ GUI.
 
 QMainWindow с операторскими вкладками:
-Обзор, Эксперимент, Keithley, Аналитика, Теплопроводность, Автоизмерение,
+Обзор, Эксперимент, Keithley, Аналитика, Теплопроводность,
 Алармы, Служебный лог, Архив, Калибровка, Статус приборов.
 Меню: Файл (экспорт CSV/HDF5/Excel), Эксперимент (старт/стоп), Настройки.
 Статусная строка: подключение, uptime, скорость данных.
@@ -34,7 +34,6 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
-from cryodaq.gui.widgets.autosweep_panel import AutoSweepPanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
@@ -149,10 +148,6 @@ class MainWindow(QMainWindow):
         # Вкладка «Теплопроводность»
         self._conductivity_panel = ConductivityPanel()
         self._tabs.addTab(self._conductivity_panel, "Теплопроводность")
-
-        # Вкладка «Автоизмерение»
-        self._autosweep_panel = AutoSweepPanel()
-        self._tabs.addTab(self._autosweep_panel, "Автоизмерение")
 
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
@@ -309,21 +304,19 @@ class MainWindow(QMainWindow):
         # Все показания → ExperimentWorkspace (timeline, live data)
         self._experiment_workspace.on_reading(reading)
 
-        # Температурные каналы → ConductivityPanel + AutoSweep
+        # Температурные каналы → ConductivityPanel
         if channel.startswith("Т") and reading.unit == "K":
             self._conductivity_panel.on_reading(reading)
-            self._autosweep_panel.on_reading(reading)
 
         # Calibration live context must not depend on localized channel prefixes.
         if reading.unit == "K":
             self._calibration_panel.on_reading(reading)
 
-        # Keithley каналы → KeithleyPanel + ConductivityPanel + AutoSweep (power)
+        # Keithley каналы → KeithleyPanel + ConductivityPanel (power)
         if "/smua/" in channel or "/smub/" in channel or channel.startswith("analytics/keithley_channel_state/"):
             self._keithley_panel.on_reading(reading)
             if channel.endswith("/power"):
                 self._conductivity_panel.on_reading(reading)
-                self._autosweep_panel.on_reading(reading)
 
         # Аналитика → AnalyticsPanel
         if channel.startswith("analytics/"):
@@ -495,7 +488,7 @@ class MainWindow(QMainWindow):
         self._stop_action.setEnabled(is_experiment_mode and has_active)
 
     def _check_finalize_guard(self) -> tuple[bool, str]:
-        if getattr(self._autosweep_panel, "_running", False):
+        if getattr(self._conductivity_panel, "_auto_state", "idle") == "stabilizing":
             return False, "Нельзя завершить эксперимент, пока активно автоизмерение."
         return True, ""
 

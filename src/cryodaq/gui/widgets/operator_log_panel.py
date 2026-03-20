@@ -34,9 +34,14 @@ class OperatorLogPanel(QWidget):
             )
         )
 
+        from PySide6.QtCore import QSettings
+        self._settings = QSettings("FIAN", "CryoDAQ")
         self._author_edit = QLineEdit()
         self._author_edit.setPlaceholderText("Автор")
         self._author_edit.setMaximumWidth(220)
+        saved_author = self._settings.value("last_log_author", "")
+        if saved_author:
+            self._author_edit.setText(saved_author)
         self._current_only = QCheckBox("Только текущий эксперимент")
         self._current_only.setChecked(False)
         self._refresh_button = QPushButton("Обновить список")
@@ -120,6 +125,7 @@ class OperatorLogPanel(QWidget):
             self._status_label.show_error(str(result.get("error", "Не удалось сохранить запись.")))
             return
 
+        self._settings.setValue("last_log_author", self._author_edit.text().strip())
         self._message_edit.clear()
         self._status_label.show_success("Запись сохранена.")
         self.refresh_entries()
