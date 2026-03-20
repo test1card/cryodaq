@@ -58,7 +58,7 @@ from cryodaq.gui.zmq_client import send_command
 logger = logging.getLogger(__name__)
 
 _BUFFER_MAXLEN = 3600
-_WINDOW_S = 600.0
+
 _STABILITY_THRESHOLD = 0.01
 
 def _get_temperature_channels() -> list[str]:
@@ -104,7 +104,7 @@ class ConductivityPanel(QWidget):
         self._chain: list[str] = []
         self._checkboxes: dict[str, QCheckBox] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
-        self._pred_lines: dict[str, pg.InfiniteLine] = {}
+        self._pred_lines: dict[str, pg.PlotDataItem] = {}
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
 
         # Предсказатель стационара
@@ -413,6 +413,9 @@ class ConductivityPanel(QWidget):
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
+        if self._empty_overlay.isVisible():
+            self._empty_overlay.setVisible(False)
+
         ch = reading.channel
         ts = reading.timestamp.timestamp()
 
@@ -477,7 +480,7 @@ class ConductivityPanel(QWidget):
             g_pred_str = "—"
             pct_val = 0.0
 
-            if p_hot and p_hot.valid and p_cold and p_cold.valid:
+            if self._is_good_pred(p_hot) and self._is_good_pred(p_cold):
                 t_inf_hot = p_hot.t_predicted
                 t_inf_cold = p_cold.t_predicted
                 dt_inf = t_inf_hot - t_inf_cold
@@ -562,24 +565,62 @@ class ConductivityPanel(QWidget):
                 f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин"
             )
 
+    def _is_good_pred(self, p) -> bool:
+        """Check if prediction is physically meaningful for display."""
+        return (p is not None and p.valid
+                and p.confidence > 0.5
+                and p.t_predicted > 0
+                and abs(p.t_predicted - p.t_current) < 50.0)
+
     def _update_pred_lines(self, preds: dict) -> None:
-        """Обновить горизонтальные пунктирные линии T∞ на графике."""
+        """Draw dashed exponential extrapolation curves in the forecast zone."""
+        import numpy as np
+
+        now = time.time()
+
+        # Find history start for forecast zone
+        t_start = now
+        for ch in self._chain:
+            buf = self._buffers.get(ch)
+            if buf and len(buf) > 0:
+                t_start = min(t_start, buf[0][0])
+
+        history_duration = now - t_start
+        if history_duration < 10:
+            # Not enough history — hide all pred lines
+            for ch in list(self._pred_lines.keys()):
+                self._plot.removeItem(self._pred_lines.pop(ch))
+            return
+        forecast_s = history_duration / 3.0
+
         for ch in self._chain:
             p = preds.get(ch)
-            if p and p.valid and p.t_predicted != 0:
+            good = self._is_good_pred(p) and p.tau_s > 0
+
+            if good:
+                A_remaining = p.t_current - p.t_predicted
+                tau = p.tau_s
+                n_pts = 50
+                ts = np.linspace(0, forecast_s, n_pts)
+                temps = p.t_predicted + A_remaining * np.exp(-ts / tau)
+                xs = (now + ts).tolist()
+                ys = temps.tolist()
+
                 if ch not in self._pred_lines:
                     idx = list(self._plot_items.keys()).index(ch) if ch in self._plot_items else 0
                     color = _LINE_COLORS[idx % len(_LINE_COLORS)]
-                    line = pg.InfiniteLine(
-                        pos=p.t_predicted, angle=0,
-                        pen=pg.mkPen(color=color, width=1, style=Qt.PenStyle.DashLine),
+                    curve = self._plot.plot(
+                        xs, ys,
+                        pen=pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine),
                     )
-                    self._plot.addItem(line)
-                    self._pred_lines[ch] = line
+                    self._pred_lines[ch] = curve
                 else:
-                    self._pred_lines[ch].setValue(p.t_predicted)
+                    self._pred_lines[ch].setData(xs, ys)
+            else:
+                if ch in self._pred_lines:
+                    self._plot.removeItem(self._pred_lines.pop(ch))
 
-        # Удалить линии для каналов, которых нет в цепочке
+        # Remove curves for channels no longer in chain
         for ch in list(self._pred_lines.keys()):
             if ch not in self._chain:
                 self._plot.removeItem(self._pred_lines.pop(ch))
@@ -617,18 +658,27 @@ class ConductivityPanel(QWidget):
             apply_status_label_style(self._stability_label, "warning", bold=True)
 
     def _update_plot(self) -> None:
+        """Update plot: full history + 25% extrapolation zone."""
         now = time.time()
-        x_min = now - _WINDOW_S
+
+        t_start = now
+        for ch in self._chain:
+            buf = self._buffers.get(ch)
+            if buf and len(buf) > 0:
+                t_start = min(t_start, buf[0][0])
+
         for ch, item in self._plot_items.items():
             buf = self._buffers.get(ch)
             if not buf:
                 item.setData([], [])
                 continue
-            xs = [t for t, _ in buf if t >= x_min]
-            ys = [v for t, v in buf if t >= x_min]
+            xs = [t for t, _ in buf]
+            ys = [v for t, v in buf]
             item.setData(xs, ys)
-        if self._plot_items:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+
+        if self._plot_items and t_start < now:
+            forecast_s = (now - t_start) / 3.0
+            self._plot.getPlotItem().setXRange(t_start, now + forecast_s, padding=0.02)
 
     # ------------------------------------------------------------------
     # Auto-sweep (Автоизмерение)

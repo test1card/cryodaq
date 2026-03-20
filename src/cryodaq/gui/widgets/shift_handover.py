@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -55,6 +55,19 @@ def load_shift_config() -> dict[str, Any]:
     except Exception:
         logger.warning("Failed to load %s", _CONFIG_PATH, exc_info=True)
     return {}
+
+
+def _colored_circle_icon(color: str) -> QIcon:
+    """Create a small colored circle icon for ComboBox items."""
+    pix = QPixmap(12, 12)
+    pix.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(color))
+    painter.setPen(QColor(color))
+    painter.drawEllipse(1, 1, 10, 10)
+    painter.end()
+    return QIcon(pix)
 
 
 def _utcnow() -> datetime:
@@ -236,7 +249,9 @@ class ShiftPeriodicPrompt(QDialog):
         layout.addWidget(status_label)
 
         self._status_combo = QComboBox()
-        self._status_combo.addItems(["Штатно", "Внимание", "Проблема"])
+        self._status_combo.addItem(_colored_circle_icon("#2ECC40"), "Штатно")
+        self._status_combo.addItem(_colored_circle_icon("#FFDC00"), "Внимание")
+        self._status_combo.addItem(_colored_circle_icon("#FF4136"), "Проблема")
         layout.addWidget(self._status_combo)
 
         # Auto-filled readings

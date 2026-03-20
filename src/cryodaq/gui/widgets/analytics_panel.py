@@ -323,6 +323,9 @@ class AnalyticsPanel(QWidget):
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
+        if self._empty_overlay.isVisible():
+            self._empty_overlay.setVisible(False)
+
         ch = reading.channel
         ts = reading.timestamp.timestamp()
 
