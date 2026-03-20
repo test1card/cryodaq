@@ -85,6 +85,10 @@ def zmq_bridge_main(
     req.setsockopt(zmq.REQ_CORRELATE, 1)
     req.connect(cmd_addr)
 
+    HEARTBEAT_INTERVAL = 3.0  # seconds
+    last_heartbeat = time.monotonic()
+    dropped_count = 0
+
     try:
         while not shutdown_event.is_set():
             # 1. Receive data from engine PUB
@@ -94,6 +98,16 @@ def zmq_bridge_main(
                     try:
                         reading_dict = _unpack_reading_dict(parts[1])
                         data_queue.put_nowait(reading_dict)
+                    except queue.Full:
+                        dropped_count += 1
+                        if dropped_count % 100 == 1:
+                            try:
+                                data_queue.put_nowait({
+                                    "__type": "warning",
+                                    "message": f"Queue overflow: {dropped_count} readings dropped",
+                                })
+                            except queue.Full:
+                                pass
                     except Exception:
                         pass  # skip malformed
             except zmq.Again:
@@ -112,6 +126,15 @@ def zmq_bridge_main(
                     reply_queue.put_nowait({"ok": False, "error": str(exc)})
             except queue.Empty:
                 pass
+
+            # 3. Heartbeat — prove subprocess is alive and not hung
+            now = time.monotonic()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                try:
+                    data_queue.put_nowait({"__type": "heartbeat", "ts": now})
+                except queue.Full:
+                    pass
+                last_heartbeat = now
 
             time.sleep(0.005)  # 5ms poll — low CPU, ~200 Hz throughput
 

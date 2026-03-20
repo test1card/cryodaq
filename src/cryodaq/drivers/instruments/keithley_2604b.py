@@ -17,8 +17,18 @@ from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
 log = logging.getLogger(__name__)
 
-# Minimum measurable current for resistance calculation (avoid division by noise)
-_I_MIN_A = 1e-9
+# Minimum measurable current for resistance calculation (avoid division by noise).
+# At 1 nA, R = V/I is dominated by noise.  For heaters with R ~ 10–1000 Ω,
+# 100 nA gives R accurate to ~1%.
+_I_MIN_A = 1e-7
+
+# Maximum voltage change per poll cycle (slew rate limit).
+# Prevents target_v from jumping from 0 to V_compliance in one step when
+# resistance changes abruptly (superconducting transition, wire break).
+MAX_DELTA_V_PER_STEP = 0.5  # V — do not increase without thermal analysis
+
+# Number of consecutive compliance cycles before notifying SafetyManager.
+_COMPLIANCE_NOTIFY_THRESHOLD = 10
 
 _MOCK_R0 = 100.0
 _MOCK_T0 = 300.0
@@ -59,6 +69,10 @@ class Keithley2604B(InstrumentDriver):
             "smua": ChannelRuntime(channel="smua"),
             "smub": ChannelRuntime(channel="smub"),
         }
+        # Slew rate state: last voltage actually written to each SMU channel.
+        self._last_v: dict[SmuChannel, float] = {"smua": 0.0, "smub": 0.0}
+        # Compliance tracking: consecutive cycles where SMU reports compliance.
+        self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
 
     async def connect(self) -> None:
@@ -121,14 +135,47 @@ class Keithley2604B(InstrumentDriver):
                 raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
                 current, voltage = self._parse_iv_response(raw, smu_channel)
 
-                if abs(current) > _I_MIN_A:
-                    resistance = voltage / current
-                    if resistance > 0:
-                        target_v = math.sqrt(runtime.p_target * resistance)
-                        target_v = max(0.0, min(target_v, runtime.v_comp))
-                        await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
+                # --- Compliance check ---
+                comp_raw = await self._transport.query(f"print({smu_channel}.source.compliance)")
+                in_compliance = comp_raw.strip().lower() == "true"
 
-                readings.extend(self._build_channel_readings(smu_channel, voltage, current))
+                extra_meta: dict[str, Any] = {}
+                if in_compliance:
+                    self._compliance_count[smu_channel] += 1
+                    log.warning(
+                        "%s: %s in compliance — P=const regulation ineffective "
+                        "(consecutive=%d)",
+                        self.name, smu_channel, self._compliance_count[smu_channel],
+                    )
+                    extra_meta["compliance"] = True
+                    # Do NOT adjust voltage — the SMU is already at its limit.
+                else:
+                    self._compliance_count[smu_channel] = 0
+
+                    # --- P=const voltage regulation with slew rate limit ---
+                    if abs(current) > _I_MIN_A:
+                        resistance = voltage / current
+                        if resistance > 0:
+                            target_v = math.sqrt(runtime.p_target * resistance)
+                            target_v = max(0.0, min(target_v, runtime.v_comp))
+
+                            # Slew rate limit
+                            current_v = self._last_v[smu_channel]
+                            delta_v = target_v - current_v
+                            if abs(delta_v) > MAX_DELTA_V_PER_STEP:
+                                delta_v = MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
+                                target_v = current_v + delta_v
+                                log.debug(
+                                    "Slew rate limited: delta=%.3f V, target=%.3f V",
+                                    delta_v, target_v,
+                                )
+
+                            await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
+                            self._last_v[smu_channel] = target_v
+
+                readings.extend(
+                    self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta)
+                )
             except Exception as exc:
                 log.error("%s: read failure on %s: %s", self.name, smu_channel, exc)
                 readings.extend(self._error_readings_for_channel(smu_channel))
@@ -168,6 +215,8 @@ class Keithley2604B(InstrumentDriver):
         await self._transport.write(f"{smu_channel}.source.limiti = {i_compliance}")
         await self._transport.write(f"{smu_channel}.source.levelv = 0")
         await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON")
+        self._last_v[smu_channel] = 0.0
+        self._compliance_count[smu_channel] = 0
         runtime.active = True
 
     async def stop_source(self, channel: str) -> None:
@@ -185,6 +234,8 @@ class Keithley2604B(InstrumentDriver):
         await self._transport.write(f"{smu_channel}.source.levelv = 0")
         await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
         await self._verify_output_off(smu_channel)
+        self._last_v[smu_channel] = 0.0
+        self._compliance_count[smu_channel] = 0
         runtime.active = False
         runtime.p_target = 0.0
 
@@ -234,6 +285,26 @@ class Keithley2604B(InstrumentDriver):
     def active_channels(self) -> list[str]:
         return [channel for channel, runtime in self._channels.items() if runtime.active]
 
+    def compliance_persistent(self, channel: SmuChannel) -> bool:
+        """True if compliance has persisted for >= threshold consecutive cycles."""
+        return self._compliance_count.get(channel, 0) >= _COMPLIANCE_NOTIFY_THRESHOLD
+
+    async def diagnostics(self) -> dict[str, Any]:
+        """Periodic health check — called by scheduler every 30s."""
+        if not self._connected or self.mock:
+            return {}
+        result: dict[str, Any] = {}
+        try:
+            raw = await self._transport.query("print(errorqueue.count)")
+            err_count = int(float(raw.strip()))
+            if err_count > 0:
+                raw = await self._transport.query("print(errorqueue.next())")
+                log.warning("Keithley error queue: %s", raw.strip())
+                result["error_queue"] = raw.strip()
+        except Exception as exc:
+            log.error("%s: diagnostics error: %s", self.name, exc)
+        return result
+
     async def _verify_output_off(self, channel: str) -> None:
         if self.mock or not self._connected:
             return
@@ -258,12 +329,15 @@ class Keithley2604B(InstrumentDriver):
         current: float,
         *,
         resistance_override: float | None = None,
+        extra_meta: dict[str, Any] | None = None,
     ) -> list[Reading]:
         resistance = resistance_override if resistance_override is not None else (
             voltage / current if current != 0.0 else float("nan")
         )
         power = voltage * current
         metadata: dict[str, Any] = {"resource_str": self._resource_str, "smu_channel": channel}
+        if extra_meta:
+            metadata.update(extra_meta)
         return [
             Reading.now(
                 channel=f"{self.name}/{channel}/voltage",

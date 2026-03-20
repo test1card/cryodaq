@@ -69,6 +69,7 @@ class ZmqBridge:
         self._reply_queue: mp.Queue = mp.Queue(maxsize=1_000)
         self._shutdown_event: mp.Event = mp.Event()
         self._process: mp.Process | None = None
+        self._last_heartbeat: float = 0.0
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -93,6 +94,7 @@ class ZmqBridge:
             name="zmq_bridge",
         )
         self._process.start()
+        self._last_heartbeat = time.monotonic()
         logger.info("ZMQ bridge subprocess started (PID=%d)", self._process.pid)
 
     def is_alive(self) -> bool:
@@ -105,12 +107,28 @@ class ZmqBridge:
         while True:
             try:
                 d = self._data_queue.get_nowait()
+                # Handle internal control messages from subprocess
+                msg_type = d.get("__type")
+                if msg_type == "heartbeat":
+                    self._last_heartbeat = time.monotonic()
+                    continue
+                if msg_type == "warning":
+                    logger.warning("ZMQ bridge: %s", d.get("message", ""))
+                    continue
                 readings.append(_reading_from_dict(d))
             except (queue.Empty, EOFError):
                 break
             except Exception:
                 break
         return readings
+
+    def is_healthy(self) -> bool:
+        """True if subprocess is alive AND sending heartbeats."""
+        if not self.is_alive():
+            return False
+        if self._last_heartbeat == 0.0:
+            return True  # just started, give it time
+        return time.monotonic() - self._last_heartbeat < 9.0  # 3 * HEARTBEAT_INTERVAL
 
     def send_command(self, cmd: dict) -> dict:
         """Send command to engine via subprocess. Blocks until reply (with timeout)."""

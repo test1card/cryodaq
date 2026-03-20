@@ -234,10 +234,14 @@ class ZMQCommandServer:
                 raw = await asyncio.wait_for(self._socket.recv(), timeout=1.0)
             except TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Ошибка приёма команды ZMQ")
                 continue
 
+            # Once recv() succeeds, the REP socket is in "awaiting send" state.
+            # We MUST send a reply — otherwise the socket is stuck forever.
             try:
                 cmd = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -253,11 +257,31 @@ class ZMQCommandServer:
                     reply = result if isinstance(result, dict) else {"ok": True}
                 else:
                     reply = {"ok": False, "error": "no handler"}
+            except asyncio.CancelledError:
+                # CancelledError during handler — must still send reply
+                # to avoid leaving REP socket in stuck state.
+                try:
+                    await self._socket.send(json.dumps(
+                        {"ok": False, "error": "internal"}).encode())
+                except Exception:
+                    pass
+                raise
             except Exception as exc:
                 logger.exception("Ошибка обработки команды: %s", cmd)
                 reply = {"ok": False, "error": str(exc)}
 
-            await self._socket.send(json.dumps(reply).encode())
+            try:
+                await self._socket.send(json.dumps(reply).encode())
+            except asyncio.CancelledError:
+                # Shutting down — try best-effort send
+                try:
+                    await self._socket.send(json.dumps(
+                        {"ok": False, "error": "internal"}).encode())
+                except Exception:
+                    pass
+                raise
+            except Exception:
+                logger.exception("Ошибка отправки ответа ZMQ")
 
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
