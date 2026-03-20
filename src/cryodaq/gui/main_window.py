@@ -280,6 +280,10 @@ class MainWindow(QMainWindow):
         self._uptime_label = QLabel("Аптайм: 00:00:00")
         status_bar.addPermanentWidget(self._uptime_label)
 
+        self._sensor_diag_label = QLabel("Датчики: —")
+        self._sensor_diag_label.setStyleSheet(f"color: #8b949e;")
+        status_bar.addPermanentWidget(self._sensor_diag_label)
+
         self._rate_label = QLabel("0 изм/с")
         status_bar.addPermanentWidget(self._rate_label)
 
@@ -378,6 +382,11 @@ class MainWindow(QMainWindow):
         hours, rem = divmod(uptime_s, 3600)
         mins, secs = divmod(rem, 60)
         self._uptime_label.setText(f"Аптайм: {hours:02d}:{mins:02d}:{secs:02d}")
+
+        # Sensor diagnostics compact summary
+        diag_text = self._instrument_panel.sensor_diag_panel.summary_text
+        self._sensor_diag_label.setText(f"Датчики: {diag_text}")
+
         self._refresh_tray_status()
 
     def _refresh_tray_status(self) -> None:

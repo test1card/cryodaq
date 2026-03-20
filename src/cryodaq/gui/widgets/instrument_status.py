@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui.widgets.sensor_diag_panel import SensorDiagPanel
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,11 @@ class InstrumentStatusPanel(QWidget):
         self._liveness_timer.timeout.connect(self._refresh_all_liveness)
         self._liveness_timer.start()
 
+    @property
+    def sensor_diag_panel(self) -> SensorDiagPanel:
+        """Expose diagnostics panel for status bar integration."""
+        return self._sensor_diag
+
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
@@ -180,12 +186,22 @@ class InstrumentStatusPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
 
+        self._scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(self._scroll_content)
+        scroll_layout.setSpacing(8)
+
         self._container = QWidget()
         self._grid = QGridLayout(self._container)
         self._grid.setSpacing(8)
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_layout.addWidget(self._container)
 
-        scroll.setWidget(self._container)
+        # Sensor diagnostics section below instrument cards
+        self._sensor_diag = SensorDiagPanel()
+        scroll_layout.addWidget(self._sensor_diag)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(self._scroll_content)
         outer.addWidget(scroll)
 
     # ------------------------------------------------------------------
