@@ -3,6 +3,8 @@
 Позволяет выбрать цепочку температурных датчиков, отображает R и G
 между соседними парами, прогнозирует стационарные значения T∞
 и показывает степень стабилизации (percent_settled).
+
+Включает встроенное автоизмерение (развёртка мощности Keithley).
 """
 
 from __future__ import annotations
@@ -20,10 +22,16 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -33,15 +41,18 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
+from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
     apply_button_style,
+    apply_group_box_style,
     apply_status_label_style,
     build_action_row,
     create_panel_root,
 )
+from cryodaq.gui.zmq_client import send_command
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +60,14 @@ _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
 _STABILITY_THRESHOLD = 0.01
 
-_ALL_CHANNELS = [
-    "Т1 Криостат верх", "Т2 Криостат низ", "Т3 Радиатор 1", "Т4 Радиатор 2",
-    "Т5 Экран 77К", "Т6 Экран 4К", "Т7 Детектор", "Т8 Калибровка",
-    "Т9 Компрессор вход", "Т10 Компрессор выход",
-    "Т11 Теплообменник 1", "Т12 Теплообменник 2",
-    "Т13 Труба подачи", "Т14 Труба возврата",
-    "Т15 Вакуумный кожух", "Т16 Фланец",
-    "Т17 Зеркало 1", "Т18 Зеркало 2", "Т19 Подвес", "Т20 Рама",
-    "Т21 Резерв 1", "Т22 Резерв 2", "Т23 Резерв 3", "Т24 Резерв 4",
-]
+def _get_temperature_channels() -> list[str]:
+    """Динамический список видимых температурных каналов через ChannelManager."""
+    mgr = get_channel_manager()
+    return [
+        mgr.get_display_name(ch_id)
+        for ch_id in mgr.get_all_visible()
+        if ch_id.startswith("Т")
+    ]
 
 _LINE_COLORS = [
     "#58a6ff", "#3fb950", "#f0883e", "#f85149", "#bc8cff",
@@ -100,6 +109,15 @@ class ConductivityPanel(QWidget):
         # Предсказатель стационара
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
 
+        # Авто-развёртка state
+        self._auto_state: str = "idle"  # "idle" / "stabilizing" / "done"
+        self._auto_power_list: list[float] = []
+        self._auto_step: int = 0
+        self._auto_step_start: float = 0.0
+        self._auto_results: list[dict] = []
+
+        self._all_channels = _get_temperature_channels()
+
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
 
@@ -107,6 +125,11 @@ class ConductivityPanel(QWidget):
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
+
+        # Авто-развёртка timer (1 s tick)
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(1000)
+        self._auto_timer.timeout.connect(self._auto_tick)
 
     def _build_ui(self) -> None:
         outer = create_panel_root(self)
@@ -144,7 +167,7 @@ class ConductivityPanel(QWidget):
         ch_layout.setContentsMargins(4, 4, 4, 4)
         ch_layout.setSpacing(2)
 
-        for ch_name in _ALL_CHANNELS:
+        for ch_name in self._all_channels:
             cb = QCheckBox(ch_name)
             cb.stateChanged.connect(lambda state, n=ch_name: self._on_check(n, state))
             self._checkboxes[ch_name] = cb
@@ -179,6 +202,58 @@ class ConductivityPanel(QWidget):
         apply_button_style(export_btn, "primary")
         export_btn.clicked.connect(self._on_export)
         left.addWidget(export_btn)
+
+        # --- Автоизмерение (collapsible) ---
+        auto_box = QGroupBox("Автоизмерение")
+        auto_box.setCheckable(True)
+        auto_box.setChecked(False)
+        apply_group_box_style(auto_box, "#f0883e")
+        auto_layout = QGridLayout(auto_box)
+
+        auto_layout.addWidget(QLabel("Мощности (Вт):"), 0, 0)
+        self._auto_power_edit = QLineEdit("0.001, 0.005, 0.01, 0.05, 0.1")
+        self._auto_power_edit.setPlaceholderText("0.001, 0.005, 0.01, ...")
+        auto_layout.addWidget(self._auto_power_edit, 0, 1)
+
+        auto_layout.addWidget(QLabel("Стабилизация:"), 1, 0)
+        self._auto_stab_spin = QDoubleSpinBox()
+        self._auto_stab_spin.setRange(30.0, 3600.0)
+        self._auto_stab_spin.setValue(120.0)
+        self._auto_stab_spin.setSuffix(" с")
+        auto_layout.addWidget(self._auto_stab_spin, 1, 1)
+
+        auto_layout.addWidget(QLabel("Допуск:"), 2, 0)
+        self._auto_tol_spin = QDoubleSpinBox()
+        self._auto_tol_spin.setRange(0.001, 1.0)
+        self._auto_tol_spin.setValue(0.05)
+        self._auto_tol_spin.setDecimals(3)
+        self._auto_tol_spin.setSuffix(" K")
+        auto_layout.addWidget(self._auto_tol_spin, 2, 1)
+
+        btn_row = QHBoxLayout()
+        self._auto_start_btn = QPushButton("Старт")
+        apply_button_style(self._auto_start_btn, "primary")
+        self._auto_start_btn.clicked.connect(self._on_auto_start)
+        btn_row.addWidget(self._auto_start_btn)
+
+        self._auto_stop_btn = QPushButton("Стоп")
+        apply_button_style(self._auto_stop_btn, "neutral")
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_stop_btn.clicked.connect(self._on_auto_stop)
+        btn_row.addWidget(self._auto_stop_btn)
+        auto_layout.addLayout(btn_row, 3, 0, 1, 2)
+
+        self._auto_progress = QProgressBar()
+        self._auto_progress.setRange(0, 100)
+        self._auto_progress.setValue(0)
+        self._auto_progress.setVisible(False)
+        auto_layout.addWidget(self._auto_progress, 4, 0, 1, 2)
+
+        self._auto_status_label = QLabel("")
+        apply_status_label_style(self._auto_status_label, "muted")
+        auto_layout.addWidget(self._auto_status_label, 5, 0, 1, 2)
+
+        left.addWidget(auto_box)
 
         root.addLayout(left)
 
@@ -507,6 +582,181 @@ class ConductivityPanel(QWidget):
             item.setData(xs, ys)
         if self._plot_items:
             self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+
+    # ------------------------------------------------------------------
+    # Auto-sweep (Автоизмерение)
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _on_auto_start(self) -> None:
+        """Запуск автоматической развёртки по мощности."""
+        if len(self._chain) < 2:
+            QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
+            return
+
+        # Parse power list
+        raw = self._auto_power_edit.text().strip()
+        if not raw:
+            QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
+            return
+
+        try:
+            powers = [float(x.strip()) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "Некорректный формат списка мощностей.")
+            return
+
+        if not powers or any(p <= 0 for p in powers):
+            QMessageBox.warning(self, "Ошибка", "Все мощности должны быть положительными.")
+            return
+
+        self._auto_power_list = powers
+        self._auto_step = 0
+        self._auto_results = []
+        self._auto_state = "stabilizing"
+
+        # UI
+        self._auto_start_btn.setEnabled(False)
+        self._auto_stop_btn.setEnabled(True)
+        self._auto_progress.setVisible(True)
+        self._auto_progress.setValue(0)
+        self._auto_status_label.setText(
+            f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт"
+        )
+        apply_status_label_style(self._auto_status_label, "info")
+
+        # Send first power command
+        self._auto_step_start = time.monotonic()
+        send_command({
+            "cmd": "keithley_set_target",
+            "channel": "smua",
+            "p_target": powers[0],
+        })
+        logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
+
+        self._auto_timer.start()
+
+    @Slot()
+    def _on_auto_stop(self) -> None:
+        """Прервать автоизмерение."""
+        self._auto_state = "idle"
+        self._auto_timer.stop()
+        send_command({"cmd": "keithley_stop", "channel": "smua"})
+
+        self._auto_start_btn.setEnabled(True)
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_progress.setVisible(False)
+        self._auto_status_label.setText("Остановлено оператором")
+        apply_status_label_style(self._auto_status_label, "warning")
+        logger.info("Автоизмерение: остановлено оператором")
+
+    @Slot()
+    def _auto_tick(self) -> None:
+        """Проверка стабилизации (1 с интервал)."""
+        if self._auto_state != "stabilizing":
+            return
+
+        stab_time = self._auto_stab_spin.value()
+        tolerance = self._auto_tol_spin.value()
+        elapsed = time.monotonic() - self._auto_step_start
+
+        # Check stability: all channels in chain must have dT < tolerance
+        # over the last stab_time seconds
+        stable = True
+        if elapsed < stab_time:
+            stable = False
+        else:
+            for ch in self._chain:
+                buf = self._rate_buffers.get(ch)
+                if not buf or len(buf) < 5:
+                    stable = False
+                    break
+                # Get readings within the stabilization window
+                recent = [(t, v) for t, v in buf if t >= time.time() - stab_time]
+                if len(recent) < 2:
+                    stable = False
+                    break
+                t_min = min(v for _, v in recent)
+                t_max = max(v for _, v in recent)
+                if (t_max - t_min) > tolerance:
+                    stable = False
+                    break
+
+        step_total = len(self._auto_power_list)
+        pct = int(((self._auto_step + min(elapsed / stab_time, 1.0)) / step_total) * 100)
+        self._auto_progress.setValue(min(pct, 99))
+
+        p = self._auto_power_list[self._auto_step]
+        self._auto_status_label.setText(
+            f"Шаг {self._auto_step + 1}/{step_total} — "
+            f"P = {p:.4g} Вт — {elapsed:.0f} с"
+        )
+
+        if stable:
+            self._auto_record_point()
+            self._auto_step += 1
+            if self._auto_step >= step_total:
+                self._auto_complete()
+            else:
+                # Advance to next power
+                next_p = self._auto_power_list[self._auto_step]
+                self._auto_step_start = time.monotonic()
+                send_command({
+                    "cmd": "keithley_set_target",
+                    "channel": "smua",
+                    "p_target": next_p,
+                })
+                logger.info(
+                    "Автоизмерение: шаг %d/%d, P=%.4g Вт",
+                    self._auto_step + 1, step_total, next_p,
+                )
+
+    def _auto_record_point(self) -> None:
+        """Записать текущие R/G для данного шага."""
+        P = self._auto_power_list[self._auto_step]
+        if len(self._chain) < 2:
+            return
+
+        hot_ch = self._chain[0]
+        cold_ch = self._chain[-1]
+        T_hot = self._temps.get(hot_ch, float("nan"))
+        T_cold = self._temps.get(cold_ch, float("nan"))
+        dT = T_hot - T_cold
+        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+
+        self._auto_results.append({
+            "P": P, "T_hot": T_hot, "T_cold": T_cold,
+            "dT": dT, "R": R, "G": G,
+        })
+        logger.info(
+            "Автоизмерение: точка P=%.4g, dT=%.4f, R=%.4g, G=%.4g",
+            P, dT, R, G,
+        )
+
+    def _auto_complete(self) -> None:
+        """Завершить развёртку."""
+        self._auto_state = "done"
+        self._auto_timer.stop()
+        send_command({"cmd": "keithley_stop", "channel": "smua"})
+
+        self._auto_start_btn.setEnabled(True)
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_progress.setValue(100)
+
+        n = len(self._auto_results)
+        self._auto_status_label.setText(f"Завершено: {n} точек измерено")
+        apply_status_label_style(self._auto_status_label, "success", bold=True)
+        logger.info("Автоизмерение: завершено, %d точек", n)
+
+        if self._auto_results:
+            summary_lines = ["Автоизмерение завершено:\n"]
+            for r in self._auto_results:
+                summary_lines.append(
+                    f"  P={r['P']:.4g} Вт  dT={r['dT']:.4f} К  "
+                    f"R={r['R']:.4g} К/Вт  G={r['G']:.4g} Вт/К"
+                )
+            QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
 
     # ------------------------------------------------------------------
     # Export

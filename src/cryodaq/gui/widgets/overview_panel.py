@@ -390,7 +390,7 @@ class CompactTempCard(QFrame):
 # ---------------------------------------------------------------------------
 
 class _PlaceholderCard(QFrame):
-    """Greyed-out placeholder for empty grid cells."""
+    """Greyed-out placeholder for invisible / empty grid cells."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -398,17 +398,18 @@ class _PlaceholderCard(QFrame):
         self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet(
-            "background-color: #1A1A1A; border: 1px solid #333; border-radius: 4px;"
+            "background: #1a1a2e; border: 1px dashed #333; border-radius: 4px;"
         )
 
 
 class TempCardGrid(QWidget):
-    """Fixed 8-column temperature card grid, one row per instrument group.
+    """Fixed 3x8 temperature card grid — flat positional layout.
 
-    Row layout from channels.yaml groups:
-    - Row 0: криостат (Т1..Т8, with disabled channels as placeholders)
-    - Row 1: компрессор (Т9..Т16, with disabled channels as placeholders)
-    - Row 2+: other groups
+    All Т-channels sorted by number are laid out 8 per row:
+    - Row 0: Т1–Т8
+    - Row 1: Т9–Т16
+    - Row 2: Т17–Т24
+    Invisible channels render as grey placeholders.
     """
 
     _COLS = 8
@@ -422,32 +423,45 @@ class TempCardGrid(QWidget):
         self._grid.setSpacing(2)
 
         self._build_cards()
+        self._channel_mgr.on_change(self.rebuild)
+
+    def rebuild(self) -> None:
+        """Clear all cards and rebuild from current ChannelManager state."""
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        self._cards.clear()
+        self._build_cards()
 
     def _build_cards(self) -> None:
-        """Создать карточки, сгруппированные по group из channels.yaml."""
+        """Создать карточки: плоская позиционная сетка 8 в ряд."""
         all_channels = self._channel_mgr.get_all()
-        groups_map = self._channel_mgr.get_channels_by_group()
 
-        # Filter to temperature channels only (Т prefix)
-        temp_groups: list[tuple[str, list[str]]] = []
-        for group_name, ch_ids in groups_map.items():
-            temp_ids = [ch for ch in ch_ids if ch.startswith("\u0422")]  # Т
-            if temp_ids:
-                temp_groups.append((group_name, temp_ids))
+        # Collect all Т-channels and sort by numeric suffix
+        temp_channels: list[tuple[int, str]] = []
+        for ch_id in all_channels:
+            if ch_id.startswith("\u0422"):  # Т
+                try:
+                    num = int(ch_id[1:])
+                except ValueError:
+                    continue
+                temp_channels.append((num, ch_id))
+        temp_channels.sort()
 
-        for row, (group_name, ch_ids) in enumerate(temp_groups):
-            for col, ch_id in enumerate(ch_ids[:self._COLS]):
-                info = all_channels.get(ch_id, {})
-                visible = info.get("visible", True)
-                if visible:
-                    display = self._channel_mgr.get_display_name(ch_id)
-                    card = CompactTempCard(ch_id, display)
-                    self._cards[ch_id] = card
-                    self._grid.addWidget(card, row, col)
-                else:
-                    self._grid.addWidget(_PlaceholderCard(), row, col)
-            # Fill remaining columns with placeholders
-            for col in range(len(ch_ids), self._COLS):
+        for idx, (_num, ch_id) in enumerate(temp_channels):
+            row = idx // self._COLS
+            col = idx % self._COLS
+            info = all_channels.get(ch_id, {})
+            visible = info.get("visible", True)
+            if visible:
+                display = self._channel_mgr.get_display_name(ch_id)
+                card = CompactTempCard(ch_id, display)
+                self._cards[ch_id] = card
+                self._grid.addWidget(card, row, col)
+            else:
                 self._grid.addWidget(_PlaceholderCard(), row, col)
 
     def get_cards(self) -> dict[str, CompactTempCard]:

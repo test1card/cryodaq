@@ -93,7 +93,6 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
         "Keithley 2604B",
         "Аналитика",
         "Теплопроводность",
-        "Автоизмерение",
         "Алармы",
         "Служебный лог",
         "Архив",
