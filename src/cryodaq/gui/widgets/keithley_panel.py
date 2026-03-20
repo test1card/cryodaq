@@ -387,7 +387,9 @@ class _SmuPanel(QFrame):
         if suffix not in self._buffers:
             return
         self._buffers[suffix].append((reading.timestamp.timestamp(), reading.value))
-        self._value_labels[suffix].setText(f"{reading.value:.6g}")
+        _UNITS = {"voltage": "В", "current": "А", "resistance": "Ом", "power": "Вт"}
+        unit = _UNITS.get(suffix, "")
+        self._value_labels[suffix].setText(f"{reading.value:.6g} {unit}")
 
     def refresh(self) -> None:
         now = time.time()

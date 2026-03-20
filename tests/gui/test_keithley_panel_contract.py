@@ -39,8 +39,8 @@ def test_smua_reading_updates_only_smua_panel() -> None:
 
     panel.on_reading(Reading.now(channel="K1/smua/power", value=1.2, unit="W", instrument_id="K1"))
 
-    assert panel._smu_panels["smua"]._value_labels["power"].text() == "1.2"
-    assert panel._smu_panels["smub"]._value_labels["power"].text() != "1.2"
+    assert "1.2" in panel._smu_panels["smua"]._value_labels["power"].text()
+    assert "1.2" not in panel._smu_panels["smub"]._value_labels["power"].text()
 
 
 def test_smub_reading_updates_only_smub_panel() -> None:
@@ -49,8 +49,8 @@ def test_smub_reading_updates_only_smub_panel() -> None:
 
     panel.on_reading(Reading.now(channel="K1/smub/current", value=0.12, unit="A", instrument_id="K1"))
 
-    assert panel._smu_panels["smub"]._value_labels["current"].text() == "0.12"
-    assert panel._smu_panels["smua"]._value_labels["current"].text() != "0.12"
+    assert "0.12" in panel._smu_panels["smub"]._value_labels["current"].text()
+    assert "0.12" not in panel._smu_panels["smua"]._value_labels["current"].text()
 
 
 def test_backend_channel_state_controls_visual_status() -> None:

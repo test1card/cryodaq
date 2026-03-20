@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -142,24 +143,29 @@ class ConductivityPanel(QWidget):
         root = QHBoxLayout()
         root.setSpacing(8)
 
-        # --- Левая панель ---
-        left = QVBoxLayout()
-        left.setSpacing(6)
+        # --- Левая панель (splitter: ручные контролы / автоизмерение) ---
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.setFixedWidth(240)
 
         title_font = QFont()
         title_font.setPointSize(10)
         title_font.setBold(True)
 
+        # --- Верхняя секция: выбор датчиков + ручные контролы ---
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(4)
+
         t = QLabel("Выбор датчиков")
         t.setFont(title_font)
         apply_status_label_style(t, "accent", bold=True)
-        left.addWidget(t)
+        top_layout.addWidget(t)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.setFixedWidth(220)
 
         ch_container = QWidget()
         ch_container.setStyleSheet("background: transparent;")
@@ -175,11 +181,11 @@ class ConductivityPanel(QWidget):
 
         ch_layout.addStretch()
         scroll.setWidget(ch_container)
-        left.addWidget(scroll, stretch=1)
+        top_layout.addWidget(scroll, stretch=1)
 
         src_lbl = QLabel("Источник P:")
         apply_status_label_style(src_lbl, "info")
-        left.addWidget(src_lbl)
+        top_layout.addWidget(src_lbl)
 
         self._power_combo = QComboBox()
         self._power_combo.addItems([
@@ -187,7 +193,7 @@ class ConductivityPanel(QWidget):
         ])
         self._power_combo.currentTextChanged.connect(self._on_power_changed)
         self._power_channel = self._power_combo.currentText()
-        left.addWidget(self._power_combo)
+        top_layout.addWidget(self._power_combo)
 
         up_btn = QPushButton("Вверх")
         apply_button_style(up_btn, "neutral", compact=True)
@@ -196,14 +202,16 @@ class ConductivityPanel(QWidget):
         down_btn = QPushButton("Вниз")
         apply_button_style(down_btn, "neutral", compact=True)
         down_btn.clicked.connect(self._on_move_down)
-        left.addLayout(build_action_row(up_btn, down_btn))
+        top_layout.addLayout(build_action_row(up_btn, down_btn))
 
         export_btn = QPushButton("Экспорт CSV")
         apply_button_style(export_btn, "primary")
         export_btn.clicked.connect(self._on_export)
-        left.addWidget(export_btn)
+        top_layout.addWidget(export_btn)
 
-        # --- Автоизмерение (collapsible) ---
+        left_splitter.addWidget(top_widget)
+
+        # --- Нижняя секция: Автоизмерение ---
         auto_box = QGroupBox("Автоизмерение")
         auto_box.setCheckable(True)
         auto_box.setChecked(False)
@@ -288,9 +296,13 @@ class ConductivityPanel(QWidget):
 
         self._update_power_preview()
 
-        left.addWidget(auto_box)
+        left_splitter.addWidget(auto_box)
 
-        root.addLayout(left)
+        # 60% manual, 40% auto
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 2)
+
+        root.addWidget(left_splitter)
 
         # --- Правая панель ---
         right = QVBoxLayout()
