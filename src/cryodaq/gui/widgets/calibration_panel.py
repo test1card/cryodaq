@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QStackedWidget,
@@ -208,10 +209,10 @@ class CalibrationSetupWidget(QWidget):
         curves_layout = QVBoxLayout(curves_box)
         self._curves_table = QTableWidget()
         setup_standard_table(self._curves_table, ["Датчик", "Curve ID", "Зон", "RMSE", "Источник"])
-        curves_layout.addWidget(self._curves_table)
-        root.addWidget(curves_box)
-
-        root.addStretch()
+        curves_layout.addWidget(self._curves_table, stretch=1)
+        h = self._curves_table.horizontalHeader()
+        h.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        root.addWidget(curves_box, stretch=1)
 
     @Slot()
     def _on_start_calibration(self) -> None:
@@ -307,14 +308,12 @@ class CalibrationAcquisitionWidget(QWidget):
         self._live_label = QLabel("")
         self._live_label.setStyleSheet("color: #58a6ff;")
         self._live_label.setWordWrap(True)
-        root.addWidget(self._live_label)
+        root.addWidget(self._live_label, stretch=1)
 
         note = QLabel("Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #888888;")
         root.addWidget(note)
-
-        root.addStretch()
 
     def update_stats(self, stats: dict[str, Any]) -> None:
         self._point_count_label.setText(f"{stats.get('point_count', 0):,}")
@@ -401,7 +400,7 @@ class CalibrationResultsWidget(QWidget):
         self._status = StatusBanner()
         root.addWidget(self._status)
 
-        root.addStretch()
+        root.addStretch()  # Results form layout — stretch at bottom is appropriate
 
     def update_metrics(self, result: dict[str, Any]) -> None:
         self._raw_count_label.setText(f"{result.get('raw_count', 0):,}")
@@ -439,7 +438,7 @@ class CalibrationPanel(QWidget):
         self._stack.addWidget(self._setup_widget)
         self._stack.addWidget(self._acquisition_widget)
         self._stack.addWidget(self._results_widget)
-        layout.addWidget(self._stack)
+        layout.addWidget(self._stack, stretch=1)
 
         # Current mode
         self._current_mode = "setup"

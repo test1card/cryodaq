@@ -76,7 +76,7 @@ class CSVExporter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
 
-        with output_path.open("w", newline="", encoding="utf-8") as fh:
+        with output_path.open("w", newline="", encoding="utf-8-sig") as fh:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
 

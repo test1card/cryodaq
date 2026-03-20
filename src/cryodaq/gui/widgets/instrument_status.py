@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QFont
@@ -33,8 +34,11 @@ _COLOR_WARN = "#FFDC00"
 _COLOR_ERROR = "#FF4136"
 _COLOR_OFFLINE = "#AAAAAA"
 
-# Таймаут «живости» прибора (секунды без данных → offline)
-_LIVENESS_TIMEOUT_S = 10.0
+# Adaptive timeout: timeout = median_interval × multiplier
+_TIMEOUT_MULTIPLIER = 5.0
+_MIN_TIMEOUT_S = 10.0          # floor — don't go below even for fast sources
+_DEFAULT_TIMEOUT_S = 300.0     # before enough data to compute interval
+_MIN_READINGS_FOR_ADAPTIVE = 3  # minimum readings to compute median interval
 
 
 class _InstrumentCard(QFrame):
@@ -47,6 +51,11 @@ class _InstrumentCard(QFrame):
         self._total_readings: int = 0
         self._error_count: int = 0
         self._last_status: ChannelStatus = ChannelStatus.OK
+
+        # Adaptive timeout: track last N intervals between readings
+        self._intervals: deque[float] = deque(maxlen=20)
+        self._prev_reading_time: float = 0.0
+        self._timeout_s: float = _DEFAULT_TIMEOUT_S
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFrameShadow(QFrame.Shadow.Raised)
@@ -90,6 +99,15 @@ class _InstrumentCard(QFrame):
     def update_from_reading(self, reading: Reading) -> None:
         """Обновить карточку по новому показанию."""
         now = time.monotonic()
+
+        # Track interval between readings for adaptive timeout
+        if self._prev_reading_time > 0:
+            interval = now - self._prev_reading_time
+            if interval > 0.01:  # ignore sub-10ms duplicates
+                self._intervals.append(interval)
+                self._recompute_timeout()
+        self._prev_reading_time = now
+
         self._last_reading_time = now
         self._total_readings += 1
         self._last_status = reading.status
@@ -98,6 +116,15 @@ class _InstrumentCard(QFrame):
             self._error_count += 1
 
         self._refresh_display()
+
+    def _recompute_timeout(self) -> None:
+        """Recompute adaptive timeout from observed intervals."""
+        if len(self._intervals) < _MIN_READINGS_FOR_ADAPTIVE:
+            self._timeout_s = _DEFAULT_TIMEOUT_S
+            return
+        sorted_intervals = sorted(self._intervals)
+        median = sorted_intervals[len(sorted_intervals) // 2]
+        self._timeout_s = max(_MIN_TIMEOUT_S, median * _TIMEOUT_MULTIPLIER)
 
     def refresh_liveness(self) -> None:
         """Проверить таймаут живости и обновить индикатор."""
@@ -111,7 +138,7 @@ class _InstrumentCard(QFrame):
         if self._last_reading_time == 0.0:
             color = _COLOR_OFFLINE
             status_text = "Нет данных"
-        elif now - self._last_reading_time > _LIVENESS_TIMEOUT_S:
+        elif now - self._last_reading_time > self._timeout_s:
             color = _COLOR_ERROR
             status_text = "Нет связи"
         elif self._last_status != ChannelStatus.OK:
@@ -198,9 +225,8 @@ class InstrumentStatusPanel(QWidget):
 
         # Sensor diagnostics section below instrument cards
         self._sensor_diag = SensorDiagPanel()
-        scroll_layout.addWidget(self._sensor_diag)
+        scroll_layout.addWidget(self._sensor_diag, stretch=1)
 
-        scroll_layout.addStretch()
         scroll.setWidget(self._scroll_content)
         outer.addWidget(scroll)
 

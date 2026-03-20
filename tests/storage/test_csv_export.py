@@ -48,7 +48,7 @@ def _populate_db(data_dir: Path, readings: list[Reading]) -> None:
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
     """Return (header, rows) from a CSV file."""
-    with path.open(encoding="utf-8") as fh:
+    with path.open(encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         header = reader.fieldnames or []
         rows = list(reader)

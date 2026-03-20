@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -107,8 +108,10 @@ class SensorDiagPanel(QWidget):
         )
         h = self._table.horizontalHeader()
         h.setStretchLastSection(True)
-        h.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self._table)
+        h.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._table, stretch=1)
 
     @Slot()
     def _poll_diagnostics(self) -> None:

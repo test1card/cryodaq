@@ -4,7 +4,7 @@ sections:
   - setup
   - checks
   - operator_log
-report_enabled: false
+report_enabled: true
 report_sections:
   - title_page
   - operator_log_section
