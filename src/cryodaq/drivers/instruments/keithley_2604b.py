@@ -224,6 +224,8 @@ class Keithley2604B(InstrumentDriver):
         runtime = self._channels[smu_channel]
 
         if self.mock:
+            self._last_v[smu_channel] = 0.0
+            self._compliance_count[smu_channel] = 0
             runtime.active = False
             runtime.p_target = 0.0
             return
@@ -258,6 +260,8 @@ class Keithley2604B(InstrumentDriver):
             runtime = self._channels[smu_channel]
             runtime.active = False
             runtime.p_target = 0.0
+            self._last_v[smu_channel] = 0.0
+            self._compliance_count[smu_channel] = 0
 
         if self.mock or not self._connected:
             return

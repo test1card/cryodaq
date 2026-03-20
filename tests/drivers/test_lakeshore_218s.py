@@ -511,3 +511,26 @@ async def test_krdg_no_argument_in_query() -> None:
 
     assert "KRDG?" in queries_sent
     assert "KRDG? 0" not in queries_sent
+
+
+# ---------------------------------------------------------------------------
+# RDGST? periodic health check (read_status)
+# ---------------------------------------------------------------------------
+
+
+async def test_read_status_mock_returns_all_zero() -> None:
+    """In mock mode, read_status returns {1:0, ..., 8:0}."""
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
+    await driver.connect()
+    status = await driver.read_status()
+    assert len(status) == 8
+    for ch in range(1, 9):
+        assert status[ch] == 0
+    await driver.disconnect()
+
+
+async def test_read_status_not_connected_raises() -> None:
+    """read_status raises RuntimeError when not connected."""
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
+    with pytest.raises(RuntimeError, match="not connected"):
+        await driver.read_status()

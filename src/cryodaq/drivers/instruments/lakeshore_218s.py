@@ -199,6 +199,26 @@ class LakeShore218S(InstrumentDriver):
                 )
         return readings
 
+    async def read_status(self) -> dict[int, int]:
+        """Query RDGST? for all channels. Returns {channel_num: status_bitmap}.
+
+        Bitmap bits: 0=invalid, 4=T_under, 5=T_over, 6=sensor_overrange, 7=sensor_zero.
+        Call periodically (every 30-60s), not every poll cycle.
+        """
+        if self.mock:
+            return {ch: 0 for ch in range(1, 9)}
+        if not self._connected:
+            raise RuntimeError(f"{self.name}: instrument is not connected")
+        result: dict[int, int] = {}
+        for ch in range(1, 9):
+            try:
+                raw = await self._transport.query(f"RDGST? {ch}")
+                result[ch] = int(raw.strip())
+            except Exception as exc:
+                log.warning("%s: RDGST? %d failed: %s", self.name, ch, exc)
+                result[ch] = -1
+        return result
+
     async def read_calibration_pair(
         self,
         *,
