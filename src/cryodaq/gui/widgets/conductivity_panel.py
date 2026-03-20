@@ -29,11 +29,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -210,25 +210,58 @@ class ConductivityPanel(QWidget):
         apply_group_box_style(auto_box, "#f0883e")
         auto_layout = QGridLayout(auto_box)
 
-        auto_layout.addWidget(QLabel("Мощности (Вт):"), 0, 0)
-        self._auto_power_edit = QLineEdit("0.001, 0.005, 0.01, 0.05, 0.1")
-        self._auto_power_edit.setPlaceholderText("0.001, 0.005, 0.01, ...")
-        auto_layout.addWidget(self._auto_power_edit, 0, 1)
+        auto_layout.addWidget(QLabel("Начальная P:"), 0, 0)
+        self._power_start_spin = QDoubleSpinBox()
+        self._power_start_spin.setRange(0.0001, 10.0)
+        self._power_start_spin.setValue(0.001)
+        self._power_start_spin.setDecimals(4)
+        self._power_start_spin.setSuffix(" Вт")
+        self._power_start_spin.setSingleStep(0.001)
+        auto_layout.addWidget(self._power_start_spin, 0, 1)
 
-        auto_layout.addWidget(QLabel("Стабилизация:"), 1, 0)
-        self._auto_stab_spin = QDoubleSpinBox()
-        self._auto_stab_spin.setRange(30.0, 3600.0)
-        self._auto_stab_spin.setValue(120.0)
-        self._auto_stab_spin.setSuffix(" с")
-        auto_layout.addWidget(self._auto_stab_spin, 1, 1)
+        auto_layout.addWidget(QLabel("Шаг P:"), 1, 0)
+        self._power_step_spin = QDoubleSpinBox()
+        self._power_step_spin.setRange(0.0001, 10.0)
+        self._power_step_spin.setValue(0.005)
+        self._power_step_spin.setDecimals(4)
+        self._power_step_spin.setSuffix(" Вт")
+        self._power_step_spin.setSingleStep(0.001)
+        auto_layout.addWidget(self._power_step_spin, 1, 1)
 
-        auto_layout.addWidget(QLabel("Допуск:"), 2, 0)
-        self._auto_tol_spin = QDoubleSpinBox()
-        self._auto_tol_spin.setRange(0.001, 1.0)
-        self._auto_tol_spin.setValue(0.05)
-        self._auto_tol_spin.setDecimals(3)
-        self._auto_tol_spin.setSuffix(" K")
-        auto_layout.addWidget(self._auto_tol_spin, 2, 1)
+        auto_layout.addWidget(QLabel("Кол-во шагов:"), 2, 0)
+        self._power_count_spin = QSpinBox()
+        self._power_count_spin.setRange(2, 100)
+        self._power_count_spin.setValue(10)
+        auto_layout.addWidget(self._power_count_spin, 2, 1)
+
+        self._power_preview = QLabel("")
+        self._power_preview.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        self._power_preview.setWordWrap(True)
+        auto_layout.addWidget(self._power_preview, 3, 0, 1, 2)
+
+        self._power_start_spin.valueChanged.connect(self._update_power_preview)
+        self._power_step_spin.valueChanged.connect(self._update_power_preview)
+        self._power_count_spin.valueChanged.connect(self._update_power_preview)
+
+        auto_layout.addWidget(QLabel("Стабилизация:"), 4, 0)
+        self._settled_pct_spin = QDoubleSpinBox()
+        self._settled_pct_spin.setRange(80.0, 99.9)
+        self._settled_pct_spin.setValue(95.0)
+        self._settled_pct_spin.setDecimals(1)
+        self._settled_pct_spin.setSuffix(" %")
+        self._settled_pct_spin.setToolTip(
+            "Процент стабилизации по экстраполяции SteadyState.\n"
+            "95% = температура в пределах 5% от предсказанного стационара."
+        )
+        auto_layout.addWidget(self._settled_pct_spin, 4, 1)
+
+        auto_layout.addWidget(QLabel("Мин. ожидание:"), 5, 0)
+        self._min_wait_spin = QDoubleSpinBox()
+        self._min_wait_spin.setRange(10, 600)
+        self._min_wait_spin.setValue(30)
+        self._min_wait_spin.setSuffix(" с")
+        self._min_wait_spin.setToolTip("Минимальное время перед проверкой стабилизации")
+        auto_layout.addWidget(self._min_wait_spin, 5, 1)
 
         btn_row = QHBoxLayout()
         self._auto_start_btn = QPushButton("Старт")
@@ -241,17 +274,19 @@ class ConductivityPanel(QWidget):
         self._auto_stop_btn.setEnabled(False)
         self._auto_stop_btn.clicked.connect(self._on_auto_stop)
         btn_row.addWidget(self._auto_stop_btn)
-        auto_layout.addLayout(btn_row, 3, 0, 1, 2)
+        auto_layout.addLayout(btn_row, 6, 0, 1, 2)
 
         self._auto_progress = QProgressBar()
         self._auto_progress.setRange(0, 100)
         self._auto_progress.setValue(0)
         self._auto_progress.setVisible(False)
-        auto_layout.addWidget(self._auto_progress, 4, 0, 1, 2)
+        auto_layout.addWidget(self._auto_progress, 7, 0, 1, 2)
 
         self._auto_status_label = QLabel("")
         apply_status_label_style(self._auto_status_label, "muted")
-        auto_layout.addWidget(self._auto_status_label, 5, 0, 1, 2)
+        auto_layout.addWidget(self._auto_status_label, 8, 0, 1, 2)
+
+        self._update_power_preview()
 
         left.addWidget(auto_box)
 
@@ -587,6 +622,23 @@ class ConductivityPanel(QWidget):
     # Auto-sweep (Автоизмерение)
     # ------------------------------------------------------------------
 
+    def _generate_power_list(self) -> list[float]:
+        """Generate power list from start/step/count."""
+        start = self._power_start_spin.value()
+        step = self._power_step_spin.value()
+        count = self._power_count_spin.value()
+        return [round(start + i * step, 6) for i in range(count)]
+
+    def _update_power_preview(self) -> None:
+        """Show generated power list in preview label."""
+        powers = self._generate_power_list()
+        if len(powers) <= 6:
+            text = ", ".join(f"{p:.4g}" for p in powers)
+        else:
+            first3 = ", ".join(f"{p:.4g}" for p in powers[:3])
+            text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
+        self._power_preview.setText(text)
+
     @Slot()
     def _on_auto_start(self) -> None:
         """Запуск автоматической развёртки по мощности."""
@@ -594,20 +646,9 @@ class ConductivityPanel(QWidget):
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
             return
 
-        # Parse power list
-        raw = self._auto_power_edit.text().strip()
-        if not raw:
+        powers = self._generate_power_list()
+        if not powers:
             QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
-            return
-
-        try:
-            powers = [float(x.strip()) for x in raw.split(",") if x.strip()]
-        except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Некорректный формат списка мощностей.")
-            return
-
-        if not powers or any(p <= 0 for p in powers):
-            QMessageBox.warning(self, "Ошибка", "Все мощности должны быть положительными.")
             return
 
         self._auto_power_list = powers
@@ -652,53 +693,52 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _auto_tick(self) -> None:
-        """Проверка стабилизации (1 с интервал)."""
+        """Check stabilization using SteadyStatePredictor's percent_settled."""
         if self._auto_state != "stabilizing":
             return
 
-        stab_time = self._auto_stab_spin.value()
-        tolerance = self._auto_tol_spin.value()
         elapsed = time.monotonic() - self._auto_step_start
-
-        # Check stability: all channels in chain must have dT < tolerance
-        # over the last stab_time seconds
-        stable = True
-        if elapsed < stab_time:
-            stable = False
-        else:
-            for ch in self._chain:
-                buf = self._rate_buffers.get(ch)
-                if not buf or len(buf) < 5:
-                    stable = False
-                    break
-                # Get readings within the stabilization window
-                recent = [(t, v) for t, v in buf if t >= time.time() - stab_time]
-                if len(recent) < 2:
-                    stable = False
-                    break
-                t_min = min(v for _, v in recent)
-                t_max = max(v for _, v in recent)
-                if (t_max - t_min) > tolerance:
-                    stable = False
-                    break
-
         step_total = len(self._auto_power_list)
-        pct = int(((self._auto_step + min(elapsed / stab_time, 1.0)) / step_total) * 100)
+        step_idx = self._auto_step
+        P = self._auto_power_list[step_idx]
+
+        # Collect percent_settled for all chain channels
+        settled_values: list[float] = []
+        for ch in self._chain:
+            pred = self._predictor.get_prediction(ch)
+            if pred is not None and pred.valid:
+                settled_values.append(pred.percent_settled)
+            else:
+                settled_values.append(0.0)
+
+        min_settled = min(settled_values) if settled_values else 0.0
+
+        # Check stabilization:
+        # 1. Minimum wait time elapsed (avoid false positive from initial transient)
+        # 2. All channels above threshold percent_settled
+        threshold = self._settled_pct_spin.value()
+        min_wait = self._min_wait_spin.value()
+        is_stable = elapsed >= min_wait and min_settled >= threshold
+
+        # Progress bar
+        step_progress = min(min_settled / threshold, 1.0) if threshold > 0 else 1.0
+        pct = int(((step_idx + step_progress) / step_total) * 100)
         self._auto_progress.setValue(min(pct, 99))
 
-        p = self._auto_power_list[self._auto_step]
+        # Status label with live percent_settled
+        settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
         self._auto_status_label.setText(
-            f"Шаг {self._auto_step + 1}/{step_total} — "
-            f"P = {p:.4g} Вт — {elapsed:.0f} с"
+            f"Шаг {step_idx + 1}/{step_total} — "
+            f"P = {P:.4g} Вт — {elapsed:.0f} с — "
+            f"стабил.: {settled_str}"
         )
 
-        if stable:
+        if is_stable:
             self._auto_record_point()
             self._auto_step += 1
             if self._auto_step >= step_total:
                 self._auto_complete()
             else:
-                # Advance to next power
                 next_p = self._auto_power_list[self._auto_step]
                 self._auto_step_start = time.monotonic()
                 send_command({
@@ -725,13 +765,20 @@ class ConductivityPanel(QWidget):
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
 
+        settled_values = []
+        for ch in self._chain:
+            pred = self._predictor.get_prediction(ch)
+            if pred and pred.valid:
+                settled_values.append(pred.percent_settled)
+        min_settled = min(settled_values) if settled_values else 0.0
+
         self._auto_results.append({
             "P": P, "T_hot": T_hot, "T_cold": T_cold,
-            "dT": dT, "R": R, "G": G,
+            "dT": dT, "R": R, "G": G, "settled_pct": min_settled,
         })
         logger.info(
-            "Автоизмерение: точка P=%.4g, dT=%.4f, R=%.4g, G=%.4g",
-            P, dT, R, G,
+            "Автоизмерение: точка P=%.4g, dT=%.4f, R=%.4g, G=%.4g, settled=%.0f%%",
+            P, dT, R, G, min_settled,
         )
 
     def _auto_complete(self) -> None:
