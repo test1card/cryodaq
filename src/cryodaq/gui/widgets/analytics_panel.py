@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.widgets.vacuum_trend_panel import VacuumTrendPanel
 
 # Буфер: 7200 точек ≈ 2 часа при 1 Гц
 _T_COLD_BUFFER_MAXLEN = 7200
@@ -98,6 +99,10 @@ class AnalyticsPanel(QWidget):
 
         # --- Строка 2: график (stretch) ---
         root.addWidget(self._build_plot(), stretch=1)
+
+        # --- Строка 3: Прогноз вакуума ---
+        self._vacuum_trend = VacuumTrendPanel()
+        root.addWidget(self._vacuum_trend, stretch=1)
 
     def _build_cards_row(self) -> QHBoxLayout:
         cards = QHBoxLayout()
