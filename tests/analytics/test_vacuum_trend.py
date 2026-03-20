@@ -422,3 +422,61 @@ def test_update_interval_respected() -> None:
     _push_exponential(pred, -6.0, 5.0, 300.0, n=100, dt=5.0)
     pred.update()
     assert pred.get_prediction() is not None
+
+
+# ---------------------------------------------------------------------------
+# Integration: engine config loading + feed + command response
+# ---------------------------------------------------------------------------
+
+def test_engine_config_loading() -> None:
+    """VacuumTrendPredictor created from plugins.yaml-style config dict."""
+    config = {
+        "enabled": True,
+        "window_s": 3600,
+        "update_interval_s": 30,
+        "min_points": 60,
+        "min_points_combined": 200,
+        "targets_mbar": [1e-4, 1e-5, 1e-6],
+        "anomaly_threshold_sigma": 3.0,
+        "rising_sustained_s": 60,
+        "trend_threshold_log10_per_s": 1e-4,
+        "extrapolation_horizon_factor": 2.0,
+    }
+    pred = VacuumTrendPredictor(config=config)
+    assert pred.window_s == 3600
+    assert pred.update_interval_s == 30
+    assert pred.min_points == 60
+    assert pred.targets == [1e-4, 1e-5, 1e-6]
+    assert pred.anomaly_sigma == 3.0
+
+
+def test_engine_feed_and_command_response() -> None:
+    """Simulate engine feed → update → get_vacuum_trend response."""
+    config = {
+        "min_points": 10,
+        "targets_mbar": [1e-4, 1e-5],
+    }
+    pred = VacuumTrendPredictor(config=config)
+
+    # Simulate pressure readings arriving (like _vacuum_trend_feed)
+    _push_exponential(pred, -7.0, 6.0, 300.0, n=200, dt=5.0)
+
+    # Simulate tick
+    pred.update()
+
+    # Simulate command handler response
+    p = pred.get_prediction()
+    assert p is not None
+    d = asdict(p)
+    response = {"ok": True, **d}
+
+    # Verify response structure (what GUI will receive)
+    assert response["ok"] is True
+    assert response["model_type"] != "insufficient_data"
+    assert isinstance(response["p_ultimate_mbar"], float)
+    assert isinstance(response["eta_targets"], dict)
+    assert response["trend"] in ("pumping_down", "stable", "rising", "anomaly")
+    assert isinstance(response["extrapolation_t"], list)
+    assert len(response["extrapolation_t"]) > 0
+    assert isinstance(response["confidence"], float)
+    assert 0 <= response["confidence"] <= 1

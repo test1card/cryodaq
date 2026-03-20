@@ -38,6 +38,7 @@ from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetp
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
@@ -952,6 +953,20 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("SensorDiagnostics: отключён (plugins.yaml не найден или enabled=false)")
 
+    # --- Vacuum Trend Predictor ---
+    _vt_cfg = _plugins_raw.get("vacuum_trend", {})
+    _vt_enabled = _vt_cfg.get("enabled", False)
+    vacuum_trend: VacuumTrendPredictor | None = None
+    if _vt_enabled:
+        vacuum_trend = VacuumTrendPredictor(config=_vt_cfg)
+        logger.info(
+            "VacuumTrendPredictor: enabled, window=%ds, targets=%s",
+            _vt_cfg.get("window_s", 3600),
+            _vt_cfg.get("targets_mbar", [1e-4, 1e-5, 1e-6]),
+        )
+    else:
+        logger.info("VacuumTrendPredictor: отключён")
+
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -1038,6 +1053,38 @@ async def _run_engine(*, mock: bool = False) -> None:
                 sensor_diag.update()
             except Exception as exc:
                 logger.error("SensorDiagnostics tick error: %s", exc)
+
+    # --- Vacuum trend feed + tick tasks ---
+    async def _vacuum_trend_feed() -> None:
+        """Feed pressure readings into VacuumTrendPredictor."""
+        if vacuum_trend is None:
+            return
+        pressure_channel = _vt_cfg.get("pressure_channel", "")
+        queue = await broker.subscribe("vacuum_trend_feed", maxsize=2000)
+        try:
+            while True:
+                reading: Reading = await queue.get()
+                # Accept readings from the pressure channel or any mbar-unit reading
+                if pressure_channel and reading.channel != pressure_channel:
+                    if reading.unit != "mbar":
+                        continue
+                elif not pressure_channel and reading.unit != "mbar":
+                    continue
+                vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
+        except asyncio.CancelledError:
+            return
+
+    async def _vacuum_trend_tick() -> None:
+        """Periodically recompute vacuum trend prediction."""
+        if vacuum_trend is None:
+            return
+        interval = _vt_cfg.get("update_interval_s", 30)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                vacuum_trend.update()
+            except Exception as exc:
+                logger.error("VacuumTrendPredictor tick error: %s", exc)
 
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -1232,6 +1279,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                     "channels": {k: asdict(v) for k, v in diag.items()},
                     "summary": asdict(summary),
                 }
+            if action == "get_vacuum_trend":
+                if vacuum_trend is None:
+                    return {"ok": False, "error": "VacuumTrendPredictor отключён"}
+                from dataclasses import asdict
+                pred = vacuum_trend.get_prediction()
+                if pred is None:
+                    return {"ok": True, "status": "no_data"}
+                return {"ok": True, **asdict(pred)}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -1344,6 +1399,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     if sensor_diag is not None:
         sd_feed_task = asyncio.create_task(_sensor_diag_feed(), name="sensor_diag_feed")
         sd_tick_task = asyncio.create_task(_sensor_diag_tick(), name="sensor_diag_tick")
+    vt_feed_task: asyncio.Task | None = None
+    vt_tick_task: asyncio.Task | None = None
+    if vacuum_trend is not None:
+        vt_feed_task = asyncio.create_task(_vacuum_trend_feed(), name="vacuum_trend_feed")
+        vt_tick_task = asyncio.create_task(_vacuum_trend_tick(), name="vacuum_trend_tick")
     await housekeeping_service.start()
 
     # Watchdog
@@ -1419,6 +1479,19 @@ async def _run_engine(*, mock: bool = False) -> None:
         sd_tick_task.cancel()
         try:
             await sd_tick_task
+        except asyncio.CancelledError:
+            pass
+
+    if vt_feed_task is not None:
+        vt_feed_task.cancel()
+        try:
+            await vt_feed_task
+        except asyncio.CancelledError:
+            pass
+    if vt_tick_task is not None:
+        vt_tick_task.cancel()
+        try:
+            await vt_tick_task
         except asyncio.CancelledError:
             pass
 
