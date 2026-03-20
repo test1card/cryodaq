@@ -119,6 +119,10 @@ class ConductivityPanel(QWidget):
 
         self._all_channels = _get_temperature_channels()
 
+        # Flight recorder
+        self._flight_log = None
+        self._flight_log_writer = None
+
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
 
@@ -443,9 +447,9 @@ class ConductivityPanel(QWidget):
         self._update_table(all_preds)
         self._update_stability()
         self._update_banner(all_preds)
-        self._update_pred_lines(all_preds)
         self._update_plot()
         self._power_label.setText(f"P = {self._power:.6g} Вт")
+        self._write_flight_log(now, all_preds)
 
     def _update_table(self, preds: dict) -> None:
         if len(self._chain) < 2:
@@ -573,57 +577,9 @@ class ConductivityPanel(QWidget):
                 and abs(p.t_predicted - p.t_current) < 50.0)
 
     def _update_pred_lines(self, preds: dict) -> None:
-        """Draw dashed exponential extrapolation curves in the forecast zone."""
-        import numpy as np
-
-        now = time.time()
-
-        # Find history start for forecast zone
-        t_start = now
-        for ch in self._chain:
-            buf = self._buffers.get(ch)
-            if buf and len(buf) > 0:
-                t_start = min(t_start, buf[0][0])
-
-        history_duration = now - t_start
-        if history_duration < 10:
-            # Not enough history — hide all pred lines
-            for ch in list(self._pred_lines.keys()):
-                self._plot.removeItem(self._pred_lines.pop(ch))
-            return
-        forecast_s = history_duration / 3.0
-
-        for ch in self._chain:
-            p = preds.get(ch)
-            good = self._is_good_pred(p) and p.tau_s > 0
-
-            if good:
-                A_remaining = p.t_current - p.t_predicted
-                tau = p.tau_s
-                n_pts = 50
-                ts = np.linspace(0, forecast_s, n_pts)
-                temps = p.t_predicted + A_remaining * np.exp(-ts / tau)
-                xs = (now + ts).tolist()
-                ys = temps.tolist()
-
-                if ch not in self._pred_lines:
-                    idx = list(self._plot_items.keys()).index(ch) if ch in self._plot_items else 0
-                    color = _LINE_COLORS[idx % len(_LINE_COLORS)]
-                    curve = self._plot.plot(
-                        xs, ys,
-                        pen=pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine),
-                    )
-                    self._pred_lines[ch] = curve
-                else:
-                    self._pred_lines[ch].setData(xs, ys)
-            else:
-                if ch in self._pred_lines:
-                    self._plot.removeItem(self._pred_lines.pop(ch))
-
-        # Remove curves for channels no longer in chain
+        """Clear prediction curves — steady-state chart doesn't need forecast."""
         for ch in list(self._pred_lines.keys()):
-            if ch not in self._chain:
-                self._plot.removeItem(self._pred_lines.pop(ch))
+            self._plot.removeItem(self._pred_lines.pop(ch))
 
     def _update_stability(self) -> None:
         if not self._chain:
@@ -866,6 +822,91 @@ class ConductivityPanel(QWidget):
                     f"R={r['R']:.4g} К/Вт  G={r['G']:.4g} Вт/К"
                 )
             QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
+
+    # ------------------------------------------------------------------
+    # Flight recorder
+    # ------------------------------------------------------------------
+
+    def _write_flight_log(self, now: float, preds: dict) -> None:
+        """Append one row to the conductivity flight log CSV."""
+        if not self._chain or len(self._chain) < 2:
+            return
+
+        if self._flight_log is None:
+            from cryodaq.paths import get_data_dir
+            log_dir = get_data_dir() / "conductivity_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            log_path = log_dir / f"conductivity_{ts_str}.csv"
+            self._flight_log = log_path.open("w", newline="", encoding="utf-8-sig")
+            self._flight_log_writer = csv.writer(self._flight_log)
+            self._flight_log_writer.writerow([
+                "timestamp_utc", "elapsed_s",
+                "T_hot", "T_cold", "dT", "P",
+                "R_measured", "G_measured",
+                "R_predicted", "G_predicted",
+                "percent_settled_hot", "percent_settled_cold",
+                "tau_hot_s", "tau_cold_s",
+                "T_inf_hot", "T_inf_cold",
+                "auto_sweep_step", "auto_sweep_power",
+            ])
+
+        hot_ch = self._chain[0]
+        cold_ch = self._chain[-1]
+        T_hot = self._temps.get(hot_ch, float("nan"))
+        T_cold = self._temps.get(cold_ch, float("nan"))
+        dT = T_hot - T_cold
+        P = self._power
+
+        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+
+        p_hot = preds.get(hot_ch)
+        p_cold = preds.get(cold_ch)
+        R_pred = G_pred = float("nan")
+        pct_hot = pct_cold = 0.0
+        tau_hot = tau_cold = T_inf_hot = T_inf_cold = float("nan")
+
+        if p_hot and p_hot.valid:
+            pct_hot = p_hot.percent_settled
+            tau_hot = p_hot.tau_s
+            T_inf_hot = p_hot.t_predicted
+        if p_cold and p_cold.valid:
+            pct_cold = p_cold.percent_settled
+            tau_cold = p_cold.tau_s
+            T_inf_cold = p_cold.t_predicted
+
+        if self._is_good_pred(p_hot) and self._is_good_pred(p_cold):
+            dt_pred = T_inf_hot - T_inf_cold
+            if P != 0 and math.isfinite(dt_pred) and dt_pred != 0:
+                R_pred = dt_pred / P
+                G_pred = P / dt_pred
+
+        step = self._auto_step if self._auto_state == "stabilizing" else -1
+        step_P = (self._auto_power_list[self._auto_step]
+                  if self._auto_state == "stabilizing" and self._auto_step < len(self._auto_power_list)
+                  else 0)
+
+        elapsed = now - self._buffers[hot_ch][0][0] if self._buffers.get(hot_ch) else 0
+
+        self._flight_log_writer.writerow([
+            datetime.now(timezone.utc).isoformat(),
+            f"{elapsed:.1f}",
+            f"{T_hot:.6f}", f"{T_cold:.6f}", f"{dT:.6f}", f"{P:.6g}",
+            f"{R:.6g}", f"{G:.6g}",
+            f"{R_pred:.6g}", f"{G_pred:.6g}",
+            f"{pct_hot:.1f}", f"{pct_cold:.1f}",
+            f"{tau_hot:.1f}", f"{tau_cold:.1f}",
+            f"{T_inf_hot:.6f}", f"{T_inf_cold:.6f}",
+            step, f"{step_P:.6g}",
+        ])
+        self._flight_log.flush()
+
+    def closeEvent(self, event) -> None:
+        if self._flight_log:
+            self._flight_log.close()
+            self._flight_log = None
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Export

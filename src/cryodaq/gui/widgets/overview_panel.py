@@ -1150,6 +1150,31 @@ class OverviewPanel(QWidget):
         self._pressure_plot_item.setDownsampling(auto=True, method="peak")
         self._pressure_plot_item.setClipToView(True)
 
+        # --- Cooldown prediction overlay on temperature plot ---
+        self._pred_curve = self._plot.plot(
+            [], [],
+            pen=pg.mkPen(color="#ff7b72", width=2, style=Qt.PenStyle.DashLine),
+            name="Прогноз",
+        )
+        self._pred_curve.setVisible(False)
+
+        self._ci_upper_curve = self._plot.plot([], [], pen=None)
+        self._ci_lower_curve = self._plot.plot([], [], pen=None)
+        self._ci_band = pg.FillBetweenItem(
+            self._ci_upper_curve, self._ci_lower_curve,
+            brush=pg.mkBrush(255, 123, 114, 30),
+        )
+        self._plot.addItem(self._ci_band)
+        self._ci_band.setVisible(False)
+
+        from PySide6.QtWidgets import QLabel as _Label
+        self._eta_overlay = _Label("", self._plot)
+        self._eta_overlay.setStyleSheet(
+            "color: #ff7b72; font-size: 12pt; font-weight: bold; "
+            "background: rgba(17,17,17,200); padding: 4px 8px; border-radius: 4px;"
+        )
+        self._eta_overlay.setVisible(False)
+
     # ------------------------------------------------------------------
     # Публичный интерфейс
     # ------------------------------------------------------------------
@@ -1205,6 +1230,10 @@ class OverviewPanel(QWidget):
                 (reading.timestamp.timestamp(), reading.value)
             )
 
+        # Cooldown prediction
+        if channel.endswith("/cooldown_eta"):
+            self._update_cooldown_prediction(reading)
+
         # Keithley
         if "/smua/" in channel or "/smub/" in channel:
             self._keithley_strip.on_reading(reading)
@@ -1259,6 +1288,56 @@ class OverviewPanel(QWidget):
         if channel == "analytics/alarm_count":
             self._status_strip.set_alarm_count(int(reading.value))
 
+    def _update_cooldown_prediction(self, reading: Reading) -> None:
+        """Draw ML prediction curve on temperature chart."""
+        meta = reading.metadata or {}
+        active = meta.get("cooldown_active", False)
+
+        if not active:
+            self._pred_curve.setVisible(False)
+            self._ci_band.setVisible(False)
+            self._eta_overlay.setVisible(False)
+            return
+
+        future_t = meta.get("future_t", [])
+        future_mean = meta.get("future_T_cold_mean", [])
+        future_upper = meta.get("future_T_cold_upper", [])
+        future_lower = meta.get("future_T_cold_lower", [])
+        cooldown_start = meta.get("cooldown_start_ts", 0)
+
+        if cooldown_start and future_t and future_mean:
+            abs_ts = [cooldown_start + h * 3600 for h in future_t]
+            self._pred_curve.setData(abs_ts, future_mean)
+            self._pred_curve.setVisible(True)
+
+            if (future_upper and future_lower
+                    and len(future_upper) == len(future_t)):
+                self._ci_upper_curve.setData(abs_ts, future_upper)
+                self._ci_lower_curve.setData(abs_ts, future_lower)
+                self._ci_band.setVisible(True)
+            else:
+                self._ci_band.setVisible(False)
+        else:
+            self._pred_curve.setVisible(False)
+            self._ci_band.setVisible(False)
+
+        # ETA overlay
+        t_rem = meta.get("t_remaining_hours", 0)
+        ci_raw = meta.get("t_remaining_ci68", (0, 0))
+        ci = ci_raw[1] if isinstance(ci_raw, (list, tuple)) and len(ci_raw) > 1 else 0
+        if t_rem > 0:
+            if t_rem < 1:
+                text = f"ETA: {t_rem * 60:.0f} мин (\u00b1{ci * 60:.0f})"
+            else:
+                text = f"ETA: {t_rem:.1f} ч (\u00b1{ci:.1f})"
+            self._eta_overlay.setText(text)
+            self._eta_overlay.setVisible(True)
+            pw = self._plot.width()
+            self._eta_overlay.adjustSize()
+            self._eta_overlay.move(max(0, pw - self._eta_overlay.width() - 10), 10)
+        else:
+            self._eta_overlay.setVisible(False)
+
     @Slot()
     def _refresh_plot(self) -> None:
         """Обновить все линии на графиках (1 Гц)."""
@@ -1280,7 +1359,13 @@ class OverviewPanel(QWidget):
             item.setData(xs, ys)
 
         if self._plot_items:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+            x_max = now
+            # Extend to include prediction curve if visible
+            if self._pred_curve.isVisible():
+                pred_xs = self._pred_curve.getData()[0]
+                if pred_xs is not None and len(pred_xs) > 0:
+                    x_max = max(x_max, float(pred_xs[-1]))
+            self._plot.getPlotItem().setXRange(x_min, x_max, padding=0)
 
         # Pressure line (X range synced via setXLink)
         if self._pressure_buffer:
