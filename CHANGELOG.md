@@ -7,7 +7,50 @@
 
 ---
 
-## [Unreleased] — 2026-03-18
+## [0.13.0] — 2026-03-21
+
+### Safety & Reliability
+
+**Critical:**
+- SafetyManager fault race: `_transition(FAULT_LATCHED)` set synchronously BEFORE `await emergency_off()` — prevents channel start during fault handling
+- SQLiteWriter: `executor.shutdown(wait=True)` before `conn.close()` — last batch no longer lost
+- `float('inf')` caught by `math.isfinite()` — no more SQLite/JSON crashes
+
+**High:**
+- Keithley 2604B: 0.5V/step slew rate limit, compliance detection, `_I_MIN_A` raised to 100nA
+- ZMQ heartbeat (3s) + queue overflow handling + REP socket guaranteed reply on CancelledError
+- GPIB ResourceManager lifecycle: `close_all_managers()` at engine shutdown
+- Engine delegates channel mutations to SafetyManager (`update_target`/`update_limits`)
+- Phase detector: `reset()` on configure, LakeShore *IDN? validation, reversible KRDG fallback
+- Sensor diagnostics: float timestamp rounding for correlation, safety_manager write-before-mutate
+
+**Medium:**
+- Thyracont checksum validation (opt-in), cooldown estimator deque cap, GPIB resource leak fix
+
+### Новые аналитические модули
+
+- **SensorDiagnosticsEngine** — MAD-noise, OLS drift, Pearson correlation, health score 0-100, GUI таблица на вкладке Приборы
+- **VacuumTrendPredictor** — 3 модели откачки (exp/power/combined), BIC model selection, ETA, GUI на вкладке Аналитика
+- **PhaseDetector** — plugin автоопределения фаз эксперимента (preparation→vacuum→cooldown→measurement→warmup→teardown)
+
+### UI Refactor
+
+- Overview: 3×8 temperature grid, channel editor hot-reload
+- "Автоизмерение" merged into "Теплопроводность" (11→10 tabs), QSplitter layout
+- Auto-sweep: start/step/count spin boxes, percent_settled stabilization
+- Forecast: ML cooldown prediction curve + CI band on Overview chart, conductivity flight recorder CSV
+- Archive: QDateEdit calendar popup, operator log author persistence, Keithley units (В/А/Ом/Вт)
+- Adaptive liveness timeout, shift status colored icons, Russian calibration policy names
+- CSV export with UTF-8 BOM, empty overlays hidden on first reading, prediction filtering (confidence>50%, T>0K)
+
+### Configuration
+
+- `report_enabled: true` for calibration and debug_checkout templates
+- Launcher scripts: `start.bat`, `start_mock.bat`, `start.sh`, `start_mock.sh`
+
+---
+
+## [Unreleased]
 
 ### Alarm Engine v2
 
