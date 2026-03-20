@@ -37,6 +37,7 @@ from cryodaq.core.alarm_config import load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
+from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
@@ -925,6 +926,32 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Alarm Engine v2: config/alarms_v3.yaml не найден, v2 отключён")
 
+    # --- Sensor Diagnostics Engine ---
+    _plugins_cfg_path = _cfg("plugins")
+    _plugins_raw: dict[str, Any] = {}
+    if _plugins_cfg_path.exists():
+        with _plugins_cfg_path.open(encoding="utf-8") as fh:
+            _plugins_raw = yaml.safe_load(fh) or {}
+    _sd_cfg = _plugins_raw.get("sensor_diagnostics", {})
+    _sd_enabled = _sd_cfg.get("enabled", False)
+    sensor_diag: SensorDiagnosticsEngine | None = None
+    if _sd_enabled:
+        from cryodaq.core.channel_manager import get_channel_manager
+        _ch_mgr = get_channel_manager()
+        # Build correlation groups from config; channel ids use display prefix (Т1→T1)
+        sensor_diag = SensorDiagnosticsEngine(config=_sd_cfg)
+        # Set display names from channel_manager
+        sensor_diag.set_channel_names(
+            {ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()}
+        )
+        logger.info(
+            "SensorDiagnostics: enabled, update_interval=%ds, groups=%d",
+            _sd_cfg.get("update_interval_s", 10),
+            len(_sd_cfg.get("correlation_groups", {})),
+        )
+    else:
+        logger.info("SensorDiagnostics: отключён (plugins.yaml не найден или enabled=false)")
+
     housekeeping_service = HousekeepingService(
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
@@ -982,6 +1009,35 @@ async def _run_engine(*, mock: bool = False) -> None:
                             )
                 except Exception as exc:
                     logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
+
+    # --- Sensor diagnostics feed + tick tasks ---
+    async def _sensor_diag_feed() -> None:
+        """Feed readings into SensorDiagnosticsEngine buffers."""
+        if sensor_diag is None:
+            return
+        queue = await broker.subscribe("sensor_diag_feed", maxsize=2000)
+        try:
+            while True:
+                reading: Reading = await queue.get()
+                sensor_diag.push(
+                    reading.channel,
+                    reading.timestamp.timestamp(),
+                    reading.value,
+                )
+        except asyncio.CancelledError:
+            return
+
+    async def _sensor_diag_tick() -> None:
+        """Periodically recompute sensor diagnostics."""
+        if sensor_diag is None:
+            return
+        interval = _sd_cfg.get("update_interval_s", 10)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                sensor_diag.update()
+            except Exception as exc:
+                logger.error("SensorDiagnostics tick error: %s", exc)
 
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -1165,6 +1221,17 @@ async def _run_engine(*, mock: bool = False) -> None:
                     experiment_manager=experiment_manager,
                     drivers_by_name=drivers_by_name,
                 )
+            if action == "get_sensor_diagnostics":
+                if sensor_diag is None:
+                    return {"ok": False, "error": "SensorDiagnostics отключён"}
+                from dataclasses import asdict
+                diag = sensor_diag.get_diagnostics()
+                summary = sensor_diag.get_summary()
+                return {
+                    "ok": True,
+                    "channels": {k: asdict(v) for k, v in diag.items()},
+                    "summary": asdict(summary),
+                }
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -1272,6 +1339,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
         alarm_v2_tick_task = asyncio.create_task(_alarm_v2_tick(), name="alarm_v2_tick")
+    sd_feed_task: asyncio.Task | None = None
+    sd_tick_task: asyncio.Task | None = None
+    if sensor_diag is not None:
+        sd_feed_task = asyncio.create_task(_sensor_diag_feed(), name="sensor_diag_feed")
+        sd_tick_task = asyncio.create_task(_sensor_diag_tick(), name="sensor_diag_tick")
     await housekeeping_service.start()
 
     # Watchdog
@@ -1334,6 +1406,19 @@ async def _run_engine(*, mock: bool = False) -> None:
         alarm_v2_tick_task.cancel()
         try:
             await alarm_v2_tick_task
+        except asyncio.CancelledError:
+            pass
+
+    if sd_feed_task is not None:
+        sd_feed_task.cancel()
+        try:
+            await sd_feed_task
+        except asyncio.CancelledError:
+            pass
+    if sd_tick_task is not None:
+        sd_tick_task.cancel()
+        try:
+            await sd_tick_task
         except asyncio.CancelledError:
             pass
 

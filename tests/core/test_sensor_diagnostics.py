@@ -385,3 +385,83 @@ def test_serialization() -> None:
     assert isinstance(json_str2, str)
     parsed2 = json.loads(json_str2)
     assert parsed2["total_channels"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Integration: engine config loading + feed + command response
+# ---------------------------------------------------------------------------
+
+def test_engine_config_loading() -> None:
+    """SensorDiagnosticsEngine created from plugins.yaml-style config dict."""
+    config = {
+        "enabled": True,
+        "update_interval_s": 10,
+        "noise_window_s": 120,
+        "drift_window_s": 600,
+        "outlier_window_s": 300,
+        "correlation_window_s": 600,
+        "min_points": 10,
+        "thresholds": {
+            "drift_K_per_min": 0.1,
+            "outlier_sigma": 5.0,
+            "correlation_min": 0.8,
+        },
+        "correlation_groups": {
+            "shield": ["T1", "T2", "T3"],
+            "cold": ["T9", "T10"],
+        },
+    }
+    engine = SensorDiagnosticsEngine(config=config)
+    assert engine.noise_window_s == 120
+    assert engine.drift_window_s == 600
+    assert engine.drift_threshold == 0.1
+    assert engine.corr_min == 0.8
+    assert "T1" in engine._channel_to_group
+    assert engine._channel_to_group["T1"] == "shield"
+    assert engine._channel_to_group["T9"] == "cold"
+
+
+def test_engine_feed_and_command_response() -> None:
+    """Simulate engine feed loop → update → get_sensor_diagnostics response."""
+    config = {
+        "correlation_groups": {"shield": ["T1", "T2"]},
+    }
+    engine = SensorDiagnosticsEngine(config=config)
+    engine.set_channel_names({"T1": "Т1 Экран", "T2": "Т2 Экран"})
+
+    # Simulate readings arriving (like _sensor_diag_feed)
+    rng = np.random.default_rng(42)
+    for i in range(200):
+        ts = i * 0.5
+        shared = rng.normal(0, 0.01)
+        engine.push("T1", ts, 250.0 + shared)
+        engine.push("T2", ts, 250.0 + shared)
+
+    # Simulate tick
+    engine.update()
+
+    # Simulate command handler response
+    diag = engine.get_diagnostics()
+    summary = engine.get_summary()
+    response = {
+        "ok": True,
+        "channels": {k: asdict(v) for k, v in diag.items()},
+        "summary": asdict(summary),
+    }
+
+    # Verify response structure (what GUI will receive)
+    assert response["ok"] is True
+    assert "T1" in response["channels"]
+    assert "T2" in response["channels"]
+    ch1 = response["channels"]["T1"]
+    assert ch1["channel_name"] == "Т1 Экран"
+    assert ch1["health_score"] == 100
+    assert isinstance(ch1["noise_mK"], float)
+    assert isinstance(ch1["drift_mK_per_min"], float)
+    assert isinstance(ch1["fault_flags"], list)
+
+    s = response["summary"]
+    assert s["total_channels"] == 2
+    assert s["healthy"] == 2
+    assert s["warning"] == 0
+    assert s["critical"] == 0

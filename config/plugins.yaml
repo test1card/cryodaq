@@ -1,0 +1,22 @@
+sensor_diagnostics:
+  enabled: true
+  update_interval_s: 10
+  noise_window_s: 120
+  drift_window_s: 600
+  outlier_window_s: 300
+  correlation_window_s: 600
+  min_points: 10
+  thresholds:
+    noise_cold_K: 0.02        # T < 30K (DT-670 high sensitivity zone)
+    noise_mid1_K: 0.05        # 30-100K
+    noise_mid2_K: 0.1         # 100-200K
+    noise_warm_K: 0.2         # T > 200K
+    drift_K_per_min: 0.1      # absolute drift threshold
+    outlier_sigma: 5.0        # outlier = deviation > 5σ from median
+    correlation_min: 0.8      # flag uncorrelated below this
+    health_warning: 50
+    health_critical: 30
+  correlation_groups:
+    shield:    [T1, T2, T3, T4, T5, T6, T7, T8]
+    cold:      [T9, T10, T11, T12, T13, T14]
+    periphery: [T15, T16, T17, T18, T19, T20]
