@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -159,7 +160,7 @@ class SQLiteWriter:
         rows = []
         skipped = 0
         for r in batch:
-            if r.value is None or (isinstance(r.value, float) and r.value != r.value):
+            if r.value is None or (isinstance(r.value, float) and not math.isfinite(r.value)):
                 skipped += 1
                 continue
             rows.append(
@@ -432,10 +433,13 @@ class SQLiteWriter:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # Shutdown executor FIRST — waits for any in-flight write_batch to finish.
+        # Then close connection — no race with executor thread.
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
         if self._conn:
             self._conn.close()
             self._conn = None
-        self._executor.shutdown(wait=False)
         logger.info("SQLiteWriter остановлен (записано: %d)", self._total_written)
 
     # ------------------------------------------------------------------

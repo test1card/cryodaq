@@ -463,8 +463,14 @@ class SafetyManager:
             pass
 
     async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:
+        # 1. Latch fault state IMMEDIATELY — no awaits before this.
+        #    _transition is synchronous, so request_run() will see
+        #    FAULT_LATCHED and reject before any yield point.
         self._fault_reason = reason
         self._fault_time = time.monotonic()
+        self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
+
+        # 2. Now safe to do async cleanup — state already protects us.
         self._active_sources.clear()
 
         if self._keithley is not None:
@@ -473,7 +479,6 @@ class SafetyManager:
             except Exception as exc:
                 logger.critical("FAULT: emergency_off failed: %s", exc)
 
-        self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
         fault_channel = channel if channel in {"smua", "smub"} else None
         await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
 

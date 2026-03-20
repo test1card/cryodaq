@@ -69,9 +69,9 @@ class CooldownEstimator(AnalyticsPlugin):
         self._fit_window_s: float = 600.0
 
         # Скользящее окно: deque[(timestamp_s: float, T: float)]
-        # Максимальный размер deque не ограничиваем по количеству записей —
-        # удаление старых точек выполняется явно по времени в process().
-        self._buffer: deque[tuple[float, float]] = deque()
+        # Удаление старых точек выполняется по времени в process().
+        # maxlen — safety cap: предотвращает OOM при скачках системных часов.
+        self._buffer: deque[tuple[float, float]] = deque(maxlen=12_000)
 
     # ------------------------------------------------------------------
     # Конфигурация
@@ -116,8 +116,9 @@ class CooldownEstimator(AnalyticsPlugin):
             )
             self._fit_window_s = 600.0
 
-        # Сбросить буфер при переконфигурации
-        self._buffer.clear()
+        # Обновить maxlen по размеру окна и сбросить буфер
+        max_entries = max(12_000, int(self._fit_window_s * 20))
+        self._buffer = deque(self._buffer, maxlen=max_entries)
 
         _log.info(
             "CooldownEstimator сконфигурирован: канал=%r, цель=%.4f K, окно=%.1f с",

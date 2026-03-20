@@ -160,10 +160,18 @@ class GPIBTransport:
         """Open resource once, configure, VISA Clear once."""
         rm = self._get_rm(self._bus_prefix)
         res = rm.open_resource(self._resource_str)
-        res.write_termination = "\n"
-        res.read_termination = "\n"
-        res.timeout = self._timeout_ms
-        res.clear()
+        try:
+            res.write_termination = "\n"
+            res.read_termination = "\n"
+            res.timeout = self._timeout_ms
+            res.clear()
+        except Exception:
+            # Don't leak the VISA handle if clear() or config fails
+            try:
+                res.close()
+            except Exception:
+                pass
+            raise
         self._resource = res
 
     def _blocking_query(self, cmd: str) -> str:

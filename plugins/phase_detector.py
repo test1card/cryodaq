@@ -67,7 +67,16 @@ class PhaseDetector(AnalyticsPlugin):
         self._last_phase: str = "unknown"
         self._warmup_started: bool = False
 
+    def reset(self) -> None:
+        """Reset all state. Call between experiments or from configure()."""
+        self._temp_buf.clear()
+        self._pres_buf.clear()
+        self._stable_since = None
+        self._last_phase = "unknown"
+        self._warmup_started = False
+
     def configure(self, config: dict[str, Any]) -> None:
+        self.reset()
         self._config = config
         self._temp_channel = config.get("temperature_channel", "")
         self._pressure_channel = config.get("pressure_channel", "")
