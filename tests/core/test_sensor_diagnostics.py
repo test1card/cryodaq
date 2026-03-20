@@ -465,3 +465,11 @@ def test_engine_feed_and_command_response() -> None:
     assert s["healthy"] == 2
     assert s["warning"] == 0
     assert s["critical"] == 0
+
+    # Regression: response must be JSON-serializable with default=str
+    # (ZMQ bridge uses json.dumps(reply, default=str) to handle datetime)
+    json_str = json.dumps(response, default=str)
+    assert isinstance(json_str, str)
+    parsed = json.loads(json_str)
+    assert parsed["ok"] is True
+    assert "T1" in parsed["channels"]

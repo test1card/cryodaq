@@ -480,3 +480,11 @@ def test_engine_feed_and_command_response() -> None:
     assert len(response["extrapolation_t"]) > 0
     assert isinstance(response["confidence"], float)
     assert 0 <= response["confidence"] <= 1
+
+    # Regression: response must be JSON-serializable with default=str
+    # (ZMQ bridge uses json.dumps(reply, default=str) to handle datetime)
+    json_str = json.dumps(response, default=str)
+    assert isinstance(json_str, str)
+    parsed = json.loads(json_str)
+    assert parsed["ok"] is True
+    assert parsed["model_type"] != "insufficient_data"

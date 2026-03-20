@@ -271,7 +271,7 @@ class ZMQCommandServer:
                 reply = {"ok": False, "error": str(exc)}
 
             try:
-                await self._socket.send(json.dumps(reply).encode())
+                await self._socket.send(json.dumps(reply, default=str).encode())
             except asyncio.CancelledError:
                 # Shutting down — try best-effort send
                 try:
@@ -282,6 +282,13 @@ class ZMQCommandServer:
                 raise
             except Exception:
                 logger.exception("Ошибка отправки ответа ZMQ")
+                # Serialization or send failure — must still send a reply
+                # to avoid leaving the REP socket in stuck state.
+                try:
+                    await self._socket.send(json.dumps(
+                        {"ok": False, "error": "serialization error"}).encode())
+                except Exception:
+                    pass
 
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
