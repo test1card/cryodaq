@@ -1,0 +1,387 @@
+"""Tests for SensorDiagnosticsEngine — 20 unit tests per spec."""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from dataclasses import asdict
+
+import numpy as np
+import pytest
+
+from cryodaq.core.sensor_diagnostics import (
+    ChannelDiagnostics,
+    DiagnosticsSummary,
+    SensorDiagnosticsEngine,
+    _get_noise_threshold,
+    _mad_sigma,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _push_constant(engine: SensorDiagnosticsEngine, ch: str, T: float, n: int = 200,
+                   dt: float = 0.5, t0: float = 0.0) -> None:
+    """Push n constant-temperature readings."""
+    for i in range(n):
+        engine.push(ch, t0 + i * dt, T)
+
+
+def _push_noisy(engine: SensorDiagnosticsEngine, ch: str, T: float, sigma: float,
+                n: int = 200, dt: float = 0.5, t0: float = 0.0,
+                rng: np.random.Generator | None = None) -> None:
+    """Push n readings with Gaussian noise around T."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    for i in range(n):
+        engine.push(ch, t0 + i * dt, T + rng.normal(0, sigma))
+
+
+def _push_linear(engine: SensorDiagnosticsEngine, ch: str, T0: float,
+                 rate_K_per_min: float, n: int = 200, dt: float = 0.5,
+                 t0: float = 0.0) -> None:
+    """Push n readings with a linear drift: T = T0 + rate * t."""
+    rate_per_sec = rate_K_per_min / 60.0
+    for i in range(n):
+        ts = t0 + i * dt
+        engine.push(ch, ts, T0 + rate_per_sec * ts)
+
+
+# ---------------------------------------------------------------------------
+# 1. test_noise_std_constant_signal — const T → noise ≈ 0
+# ---------------------------------------------------------------------------
+
+def test_noise_std_constant_signal() -> None:
+    engine = SensorDiagnosticsEngine()
+    _push_constant(engine, "T1", 50.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.noise_std < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 2. test_noise_std_known_gaussian — T + N(0,σ) → noise ≈ σ (±20%)
+# ---------------------------------------------------------------------------
+
+def test_noise_std_known_gaussian() -> None:
+    engine = SensorDiagnosticsEngine()
+    sigma = 0.05
+    _push_noisy(engine, "T1", 100.0, sigma, n=500)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert abs(diag.noise_std - sigma) / sigma < 0.2
+
+
+# ---------------------------------------------------------------------------
+# 3. test_noise_mad_robust_to_outlier — one spike does not inflate noise
+# ---------------------------------------------------------------------------
+
+def test_noise_mad_robust_to_outlier() -> None:
+    engine = SensorDiagnosticsEngine()
+    rng = np.random.default_rng(123)
+    sigma = 0.01
+    n = 500
+    for i in range(n):
+        v = 50.0 + rng.normal(0, sigma)
+        if i == 250:
+            v = 50.0 + 100.0  # massive spike
+        engine.push("T1", i * 0.5, v)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    # MAD should stay near sigma, not be inflated by the spike
+    assert diag.noise_std < sigma * 3
+
+    # Compare with std which WOULD be inflated
+    vals = np.array([50.0 + rng.normal(0, sigma) for _ in range(n)])
+    vals[250] = 50.0 + 100.0
+    std_val = float(np.std(vals))
+    assert std_val > diag.noise_std * 10  # std is much larger due to outlier
+
+
+# ---------------------------------------------------------------------------
+# 4. test_drift_zero_constant — const T → drift ≈ 0
+# ---------------------------------------------------------------------------
+
+def test_drift_zero_constant() -> None:
+    engine = SensorDiagnosticsEngine()
+    _push_constant(engine, "T1", 50.0, n=200, dt=3.0)  # 600s window
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert abs(diag.drift_rate) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 5. test_drift_known_slope — T = T₀ + rate·t → drift ≈ rate (±10%)
+# ---------------------------------------------------------------------------
+
+def test_drift_known_slope() -> None:
+    engine = SensorDiagnosticsEngine()
+    rate = 0.5  # K/min
+    _push_linear(engine, "T1", 50.0, rate, n=200, dt=3.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert abs(diag.drift_rate - rate) / rate < 0.10
+
+
+# ---------------------------------------------------------------------------
+# 6. test_correlation_identical_signals — r ≈ 1.0
+# ---------------------------------------------------------------------------
+
+def test_correlation_identical_signals() -> None:
+    engine = SensorDiagnosticsEngine(config={
+        "correlation_groups": {"shield": ["T1", "T2"]},
+    })
+    rng = np.random.default_rng(42)
+    for i in range(200):
+        v = 50.0 + rng.normal(0, 0.1)
+        engine.push("T1", i * 0.5, v)
+        engine.push("T2", i * 0.5, v)  # identical
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.correlation is not None
+    assert diag.correlation > 0.99
+
+
+# ---------------------------------------------------------------------------
+# 7. test_correlation_uncorrelated — random vs random → |r| < 0.3
+# ---------------------------------------------------------------------------
+
+def test_correlation_uncorrelated() -> None:
+    engine = SensorDiagnosticsEngine(config={
+        "correlation_groups": {"shield": ["T1", "T2"]},
+    })
+    rng = np.random.default_rng(42)
+    for i in range(500):
+        engine.push("T1", i * 0.5, 50.0 + rng.normal(0, 1.0))
+        engine.push("T2", i * 0.5, 50.0 + rng.normal(0, 1.0))  # independent
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.correlation is not None
+    assert abs(diag.correlation) < 0.3
+
+
+# ---------------------------------------------------------------------------
+# 8. test_correlation_no_neighbor — single channel in group → None
+# ---------------------------------------------------------------------------
+
+def test_correlation_no_neighbor() -> None:
+    engine = SensorDiagnosticsEngine(config={
+        "correlation_groups": {"shield": ["T1"]},
+    })
+    _push_constant(engine, "T1", 50.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.correlation is None
+
+
+# ---------------------------------------------------------------------------
+# 9. test_health_perfect — low noise, zero drift, no outliers → 100
+# ---------------------------------------------------------------------------
+
+def test_health_perfect() -> None:
+    engine = SensorDiagnosticsEngine(config={
+        "correlation_groups": {"shield": ["T1", "T2"]},
+    })
+    rng = np.random.default_rng(42)
+    # Shared noise at warm T (threshold=0.2K) — noise ~0.01K << threshold,
+    # identical signal → r=1.0, no drift, no outliers.
+    for i in range(200):
+        shared = rng.normal(0, 0.01)
+        engine.push("T1", i * 0.5, 250.0 + shared)
+        engine.push("T2", i * 0.5, 250.0 + shared)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.health_score == 100
+
+
+# ---------------------------------------------------------------------------
+# 10. test_health_noisy — noise > 3× threshold → health ≤ 60
+# ---------------------------------------------------------------------------
+
+def test_health_noisy() -> None:
+    engine = SensorDiagnosticsEngine()
+    # At T=50K, threshold=0.05K; noise = 0.2K → >3× threshold → -40
+    _push_noisy(engine, "T1", 50.0, sigma=0.2, n=500)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.health_score <= 60
+
+
+# ---------------------------------------------------------------------------
+# 11. test_health_drifting — high drift → health ≤ 75
+# ---------------------------------------------------------------------------
+
+def test_health_drifting() -> None:
+    engine = SensorDiagnosticsEngine()
+    # Drift 0.5 K/min > threshold 0.1 → -25 → health = 75
+    _push_linear(engine, "T1", 50.0, rate_K_per_min=0.5, n=200, dt=3.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.health_score <= 75
+
+
+# ---------------------------------------------------------------------------
+# 12. test_health_multiple_faults — noisy + drifting → health ≤ 35
+# ---------------------------------------------------------------------------
+
+def test_health_multiple_faults() -> None:
+    engine = SensorDiagnosticsEngine()
+    rng = np.random.default_rng(42)
+    rate_per_sec = 0.5 / 60.0  # 0.5 K/min → > drift threshold
+    sigma = 0.2  # > 3× threshold at 50K → -40 noise penalty
+    for i in range(500):
+        ts = i * 1.2  # spread over drift window
+        v = 50.0 + rate_per_sec * ts + rng.normal(0, sigma)
+        engine.push("T1", ts, v)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    # noise -40 + drift -25 = 35
+    assert diag.health_score <= 35
+
+
+# ---------------------------------------------------------------------------
+# 13. test_noise_threshold_temperature_dependent
+# ---------------------------------------------------------------------------
+
+def test_noise_threshold_temperature_dependent() -> None:
+    assert _get_noise_threshold(10.0) == pytest.approx(0.02)
+    assert _get_noise_threshold(50.0) == pytest.approx(0.05)
+    assert _get_noise_threshold(150.0) == pytest.approx(0.1)
+    assert _get_noise_threshold(250.0) == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# 14. test_outlier_detection — spikes detected, count correct
+# ---------------------------------------------------------------------------
+
+def test_outlier_detection() -> None:
+    engine = SensorDiagnosticsEngine()
+    rng = np.random.default_rng(42)
+    sigma = 0.01
+    spike_indices = {50, 100, 150}
+    for i in range(300):
+        v = 50.0 + rng.normal(0, sigma)
+        if i in spike_indices:
+            v = 50.0 + 10.0  # massive spike: >> 5σ
+        engine.push("T1", i * 0.5, v)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert diag.outlier_count == len(spike_indices)
+
+
+# ---------------------------------------------------------------------------
+# 15. test_fault_flags_disconnected — T = 380K → ["disconnected"]
+# ---------------------------------------------------------------------------
+
+def test_fault_flags_disconnected() -> None:
+    engine = SensorDiagnosticsEngine()
+    _push_constant(engine, "T1", 380.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert "disconnected" in diag.fault_flags
+    assert diag.health_score == 0
+
+
+# ---------------------------------------------------------------------------
+# 16. test_fault_flags_shorted — T ≈ 0K → ["shorted"]
+# ---------------------------------------------------------------------------
+
+def test_fault_flags_shorted() -> None:
+    engine = SensorDiagnosticsEngine()
+    _push_constant(engine, "T1", 0.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert "shorted" in diag.fault_flags
+    assert diag.health_score == 0
+
+
+# ---------------------------------------------------------------------------
+# 17. test_summary_counts — 18 ok + 1 warn + 1 crit → summary correct
+# ---------------------------------------------------------------------------
+
+def test_summary_counts() -> None:
+    engine = SensorDiagnosticsEngine()
+    # 18 healthy channels
+    for i in range(1, 19):
+        _push_constant(engine, f"T{i}", 50.0)
+    # 1 warning: noise > threshold at warm T (-20) + 3 outliers (-15) → health=65
+    rng = np.random.default_rng(42)
+    spike_at = {50, 100, 150}
+    for i in range(200):
+        v = 250.0 + rng.normal(0, 0.25)
+        if i in spike_at:
+            v = 260.0  # >> 5σ from median
+        engine.push("T19", i * 0.5, v)
+    # 1 critical (disconnected)
+    _push_constant(engine, "T20", 380.0)
+
+    engine.update()
+    summary = engine.get_summary()
+    assert summary.total_channels == 20
+    assert summary.healthy == 18
+    assert summary.warning == 1
+    assert summary.critical == 1
+    assert summary.worst_channel == "T20"
+    assert summary.worst_score == 0
+
+
+# ---------------------------------------------------------------------------
+# 18. test_insufficient_data — <10 points → noise/drift = NaN, health = 100
+# ---------------------------------------------------------------------------
+
+def test_insufficient_data() -> None:
+    engine = SensorDiagnosticsEngine()
+    for i in range(5):
+        engine.push("T1", i * 0.5, 50.0)
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    assert math.isnan(diag.noise_std)
+    assert math.isnan(diag.drift_rate)
+    assert diag.health_score == 100
+
+
+# ---------------------------------------------------------------------------
+# 19. test_buffer_window_sliding — old points expire
+# ---------------------------------------------------------------------------
+
+def test_buffer_window_sliding() -> None:
+    engine = SensorDiagnosticsEngine(config={"noise_window_s": 10})
+    # Push 100 points spanning 50 seconds
+    for i in range(100):
+        engine.push("T1", i * 0.5, 50.0 + (1.0 if i < 50 else 0.0))
+    engine.update()
+    diag = engine.get_diagnostics()["T1"]
+    # Noise window is 10s → only last 20 points (all = 50.0) → noise ≈ 0
+    assert diag.noise_std < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 20. test_serialization — asdict → JSON-compatible
+# ---------------------------------------------------------------------------
+
+def test_serialization() -> None:
+    engine = SensorDiagnosticsEngine(config={
+        "correlation_groups": {"shield": ["T1", "T2"]},
+    })
+    _push_constant(engine, "T1", 50.0)
+    _push_constant(engine, "T2", 51.0)
+    engine.update()
+
+    diag = engine.get_diagnostics()["T1"]
+    d = asdict(diag)
+    # Must be JSON-serializable (datetimes become strings via default handler)
+    json_str = json.dumps(d, default=str)
+    assert isinstance(json_str, str)
+    parsed = json.loads(json_str)
+    assert parsed["channel_id"] == "T1"
+    assert isinstance(parsed["health_score"], int)
+
+    summary = engine.get_summary()
+    sd = asdict(summary)
+    json_str2 = json.dumps(sd, default=str)
+    assert isinstance(json_str2, str)
+    parsed2 = json.loads(json_str2)
+    assert parsed2["total_channels"] == 2
