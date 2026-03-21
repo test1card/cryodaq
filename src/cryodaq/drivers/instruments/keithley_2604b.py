@@ -176,6 +176,12 @@ class Keithley2604B(InstrumentDriver):
                 readings.extend(
                     self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta)
                 )
+            except OSError as exc:
+                # Transport-level error (USB disconnect, pipe broken) —
+                # mark disconnected so scheduler triggers reconnect.
+                log.error("%s: transport error on %s: %s", self.name, smu_channel, exc)
+                self._connected = False
+                raise
             except Exception as exc:
                 log.error("%s: read failure on %s: %s", self.name, smu_channel, exc)
                 readings.extend(self._error_readings_for_channel(smu_channel))

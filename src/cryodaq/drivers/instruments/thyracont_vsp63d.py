@@ -88,44 +88,60 @@ class ThyracontVSP63D(InstrumentDriver):
     async def connect(self) -> None:
         """Открыть последовательный порт и верифицировать связь с прибором.
 
-        Thyracont VSP63D не поддерживает SCPI (``*IDN?``).  Вместо этого
-        отправляем measurement-запрос Protocol V1 (``"<addr>M^\\r"``) и
-        проверяем, что ответ начинается с ``"<addr>M"``.
-
-        Устанавливает флаг ``_connected = True`` при успехе.
+        Пробует Protocol V1 (``"<addr>M^"``), затем MV00. Устанавливает
+        флаг ``_connected = True`` при успехе.
         """
         log.info("%s: подключение к %s @ %d бод", self.name, self._resource_str, self._baudrate)
         await self._transport.open(self._resource_str, baudrate=self._baudrate)
 
+        # Try Protocol V1
+        if await self._try_v1_probe():
+            self._protocol_v1 = True
+            self._instrument_id = f"Thyracont-V1@{self._address}"
+            self._connected = True
+            log.info("%s: connected via Protocol V1", self.name)
+            return
+
+        # Fallback: try MV00
+        if await self._try_mv00_probe():
+            self._protocol_v1 = False
+            self._instrument_id = f"Thyracont-MV00@{self._resource_str}"
+            self._connected = True
+            log.info("%s: connected via MV00", self.name)
+            return
+
+        await self._transport.close()
+        raise RuntimeError(f"{self.name}: neither V1 nor MV00 responded")
+
+    async def _try_v1_probe(self) -> bool:
+        """Attempt Protocol V1 probe. Returns True on success."""
         cmd = f"{self._address}M^"
         expected_prefix = f"{self._address}M"
-        last_exc: Exception | None = None
-
         for attempt in range(3):
             if attempt > 0:
                 await self._transport.flush_input()
             try:
                 resp = await self._transport.query(cmd)
-                resp_stripped = resp.strip()
-                if resp_stripped.startswith(expected_prefix):
-                    self._protocol_v1 = True
-                    self._instrument_id = f"Thyracont-V1@{self._address}"
-                    log.info(
-                        "%s: Protocol V1 detected (address=%s, probe=%r, attempt=%d)",
-                        self.name, self._address, resp_stripped, attempt + 1,
-                    )
-                    self._connected = True
-                    return
+                if resp.strip().startswith(expected_prefix):
+                    log.debug("%s: V1 probe OK (attempt %d)", self.name, attempt + 1)
+                    return True
             except Exception as exc:
-                last_exc = exc
-                log.debug(
-                    "%s: probe attempt %d failed — %s", self.name, attempt + 1, exc,
-                )
+                log.debug("%s: V1 probe attempt %d failed: %s", self.name, attempt + 1, exc)
+        return False
 
-        await self._transport.close()
-        raise RuntimeError(
-            f"{self.name}: прибор не ответил на Protocol V1 probe ({cmd!r})"
-        ) from last_exc
+    async def _try_mv00_probe(self) -> bool:
+        """Attempt MV00 protocol probe. Returns True on success."""
+        await self._transport.flush_input()
+        try:
+            resp = await self._transport.query("MV00")
+            resp_stripped = resp.strip()
+            # MV00 returns "<status>,<value>" e.g. "0,1.234E-06"
+            if "," in resp_stripped:
+                log.debug("%s: MV00 probe OK: %s", self.name, resp_stripped)
+                return True
+        except Exception as exc:
+            log.debug("%s: MV00 probe failed: %s", self.name, exc)
+        return False
 
     async def disconnect(self) -> None:
         """Разорвать соединение с прибором (идемпотентно)."""

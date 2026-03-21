@@ -115,7 +115,8 @@ class SQLiteWriter:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_written: int = 0
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_write")
+        self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
 
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
@@ -437,6 +438,8 @@ class SQLiteWriter:
         # Then close connection — no race with executor thread.
         if self._executor is not None:
             self._executor.shutdown(wait=True)
+        if self._read_executor is not None:
+            self._read_executor.shutdown(wait=True)
         if self._conn:
             self._conn.close()
             self._conn = None
@@ -538,7 +541,7 @@ class SQLiteWriter:
             to_ts=to_ts,
             limit_per_channel=limit_per_channel,
         )
-        return await loop.run_in_executor(self._executor, task)
+        return await loop.run_in_executor(self._read_executor, task)
 
     @property
     def stats(self) -> dict[str, Any]:

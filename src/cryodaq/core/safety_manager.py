@@ -510,7 +510,10 @@ class SafetyManager:
 
         self._active_sources.difference_update(channels)
         if self._active_sources:
-            self._state = SafetyState.RUNNING
+            self._transition(
+                SafetyState.RUNNING,
+                f"Partial stop: {sorted(channels)}, still active: {sorted(self._active_sources)}",
+            )
             return
 
         self._transition(SafetyState.SAFE_OFF, reason)
