@@ -1495,25 +1495,69 @@ async def _run_engine(*, mock: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Single-instance guard
+# ---------------------------------------------------------------------------
+
+from pathlib import Path as _Path
+
+_LOCK_FILE = _Path("data/.engine.lock")
+
+
+def _acquire_engine_lock() -> bool:
+    import os
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _LOCK_FILE.exists():
+        try:
+            old_pid = int(_LOCK_FILE.read_text().strip())
+            if sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, old_pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return False
+            else:
+                os.kill(old_pid, 0)
+                return False
+        except (ValueError, OSError, ProcessLookupError):
+            pass
+    _LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_engine_lock() -> None:
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    mock = "--mock" in sys.argv or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
-    if mock:
-        logger.info("Режим MOCK: реальные приборы не используются")
-
+    if not _acquire_engine_lock():
+        print("CryoDAQ engine уже запущен. Только один экземпляр может работать одновременно.")
+        sys.exit(1)
     try:
-        asyncio.run(_run_engine(mock=mock))
-    except KeyboardInterrupt:
-        logger.info("Прервано оператором (Ctrl+C)")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        mock = "--mock" in sys.argv or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
+        if mock:
+            logger.info("Режим MOCK: реальные приборы не используются")
+
+        try:
+            asyncio.run(_run_engine(mock=mock))
+        except KeyboardInterrupt:
+            logger.info("Прервано оператором (Ctrl+C)")
+    finally:
+        _release_engine_lock()
 
 
 if __name__ == "__main__":

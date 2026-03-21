@@ -105,10 +105,10 @@ class Scheduler:
         cfg = state.config
         driver = cfg.driver
         name = driver.name
+        loop = asyncio.get_event_loop()
+        next_deadline = loop.time() + cfg.poll_interval_s
 
         while self._running:
-            next_deadline = asyncio.get_event_loop().time() + cfg.poll_interval_s
-
             if not driver.connected:
                 try:
                     await driver.connect()
@@ -139,7 +139,12 @@ class Scheduler:
                 logger.exception("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
                 await self._handle_error(state)
 
-            sleep_remaining = max(0, next_deadline - asyncio.get_event_loop().time())
+            next_deadline += cfg.poll_interval_s
+            now = loop.time()
+            if next_deadline < now:
+                missed = int((now - next_deadline) / cfg.poll_interval_s) + 1
+                next_deadline += missed * cfg.poll_interval_s
+            sleep_remaining = max(0, next_deadline - loop.time())
             await asyncio.sleep(sleep_remaining)
 
     async def _gpib_poll_loop(self, bus_prefix: str, states: list[_InstrumentState]) -> None:
@@ -165,9 +170,11 @@ class Scheduler:
                 logger.warning("Не удалось подключить '%s' на %s — skipping", driver.name, bus_prefix)
                 driver._connected = False
 
+        loop = asyncio.get_event_loop()
+        next_deadline = loop.time() + poll_interval
+
         while self._running:
-            next_deadline = asyncio.get_event_loop().time() + poll_interval
-            now = asyncio.get_event_loop().time()
+            now = loop.time()
 
             for state in states:
                 driver = state.config.driver
@@ -206,7 +213,12 @@ class Scheduler:
                             pass
                         driver._connected = False
 
-            sleep_remaining = max(0, next_deadline - asyncio.get_event_loop().time())
+            next_deadline += poll_interval
+            now = loop.time()
+            if next_deadline < now:
+                missed = int((now - next_deadline) / poll_interval) + 1
+                next_deadline += missed * poll_interval
+            sleep_remaining = max(0, next_deadline - loop.time())
             await asyncio.sleep(sleep_remaining)
 
     async def _process_readings(

@@ -170,8 +170,39 @@ class LauncherWindow(QMainWindow):
     # Engine management
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_process_alive(pid: int) -> bool:
+        import os
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+                if handle:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                    return True
+                return False
+            else:
+                os.kill(pid, 0)
+                return True
+        except (OSError, ProcessLookupError):
+            return False
+
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
+        lock_path = Path("data/.engine.lock")
+        if lock_path.exists():
+            try:
+                pid = int(lock_path.read_text().strip())
+                if self._is_process_alive(pid) and _ping_engine():
+                    logger.info("Engine already running (PID %d, lock + ping) — connecting", pid)
+                    self._engine_external = True
+                    return
+                else:
+                    logger.warning("Stale lock file for PID %d — removing", pid)
+                    lock_path.unlink(missing_ok=True)
+            except (ValueError, OSError):
+                lock_path.unlink(missing_ok=True)
+
         if _is_port_busy(_ZMQ_PORT):
             if _ping_engine():
                 logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
