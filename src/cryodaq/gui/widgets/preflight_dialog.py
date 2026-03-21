@@ -37,10 +37,8 @@ _STATUS_ICON = {"ok": "✅", "warning": "⚠️", "error": "❌"}
 _STATUS_COLOR = {"ok": "#3fb950", "warning": "#d29922", "error": "#f85149"}
 
 # Пороги
-_PRESSURE_WARN_MBAR = 1e-2
 _DISK_WARN_GB = 10
 _DISK_ERROR_GB = 2
-_READING_STALE_S = 10
 
 
 class PreFlightDialog(QDialog):
@@ -65,16 +63,20 @@ class PreFlightDialog(QDialog):
 
     def _run_checks(self) -> None:
         """Выполнить все проверки и заполнить self._checks."""
-        # 1. Engine connection
+        # 1. Engine connection + Safety state
         try:
             result = send_command({"cmd": "safety_status"})
             if result.get("ok"):
                 self._checks.append(PreFlightCheck("Engine подключён", "ok", ""))
                 # 2. Safety state
                 state = result.get("state", "")
-                if state in ("FAULT", "FAULT_LATCHED"):
+                if state in ("fault", "fault_latched"):
+                    reason = result.get("fault_reason", "")
+                    detail = f"Состояние: {state}"
+                    if reason:
+                        detail += f" ({reason})"
                     self._checks.append(
-                        PreFlightCheck("Safety state", "error", f"Состояние: {state}")
+                        PreFlightCheck("Safety state", "error", detail)
                     )
                 else:
                     self._checks.append(
@@ -95,109 +97,27 @@ class PreFlightDialog(QDialog):
                 PreFlightCheck("Safety state", "error", "Engine недоступен")
             )
 
-        # 3. Instruments freshness via experiment status (readings freshness)
+        # 3. Alarm status
         try:
-            exp_result = send_command({"cmd": "experiment_status"})
-            inst_status = exp_result.get("instruments", {})
-            if not inst_status:
-                # Попробуем через readings
-                inst_status = {}
-            self._check_instruments(inst_status)
-        except Exception:
-            self._checks.append(
-                PreFlightCheck("Приборы", "warning", "Не удалось получить статус")
-            )
-
-        # 4. Alarm count
-        try:
-            alarm_result = send_command({"cmd": "alarm_list"})
+            alarm_result = send_command({"cmd": "alarm_v2_status"})
             if alarm_result.get("ok"):
-                active = [
-                    a for a in alarm_result.get("alarms", [])
-                    if a.get("state") in ("ACTIVE", "ACTIVE_UNACKED")
-                ]
+                active = alarm_result.get("active", {})
                 count = len(active)
                 if count > 0:
+                    names = ", ".join(list(active.keys())[:3])
+                    detail = f"{count} активных: {names}"
+                    if count > 3:
+                        detail += "..."
                     self._checks.append(
-                        PreFlightCheck("Алармы", "warning", f"{count} активных")
+                        PreFlightCheck("Алармы", "warning", detail)
                     )
                 else:
                     self._checks.append(PreFlightCheck("Алармы", "ok", "0"))
         except Exception:
             pass  # alarm check is non-critical
 
-        # 5. Pressure
-        try:
-            readings_result = send_command({"cmd": "readings_snapshot"})
-            if readings_result.get("ok"):
-                readings = readings_result.get("readings", {})
-                self._check_pressure(readings)
-        except Exception:
-            pass  # pressure check non-critical
-
-        # 6. Disk space
+        # 4. Disk space
         self._check_disk()
-
-    def _check_instruments(self, inst_status: dict) -> None:
-        if not inst_status:
-            # Нет информации — предупреждение
-            self._checks.append(
-                PreFlightCheck("Приборы", "warning", "Нет данных о приборах")
-            )
-            return
-
-        import time
-        from datetime import datetime, timezone
-
-        problem_count = 0
-        for inst_id, info in inst_status.items():
-            last_seen = info.get("last_seen", "")
-            if last_seen:
-                try:
-                    ts = datetime.fromisoformat(last_seen)
-                    age_s = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()
-                    if age_s > _READING_STALE_S:
-                        problem_count += 1
-                except Exception:
-                    problem_count += 1
-
-        if problem_count == len(inst_status):
-            self._checks.append(
-                PreFlightCheck("Приборы", "error", "Нет данных ни от одного прибора")
-            )
-        elif problem_count > 0:
-            self._checks.append(
-                PreFlightCheck(
-                    "Приборы", "warning",
-                    f"{problem_count} из {len(inst_status)} не отвечают"
-                )
-            )
-        else:
-            self._checks.append(
-                PreFlightCheck("Приборы", "ok", f"{len(inst_status)} активны")
-            )
-
-    def _check_pressure(self, readings: dict) -> None:
-        pressure_readings = {
-            ch: r for ch, r in readings.items() if r.get("unit") == "mbar"
-        }
-        if not pressure_readings:
-            return  # нет данных давления — пропускаем
-        for ch, r in pressure_readings.items():
-            val = r.get("value", 0.0)
-            if val > _PRESSURE_WARN_MBAR:
-                self._checks.append(
-                    PreFlightCheck(
-                        "Давление", "warning",
-                        f"{val:.2e} mbar (выше {_PRESSURE_WARN_MBAR:.0e})"
-                    )
-                )
-                return
-        # Все в норме — берём первое
-        first = next(iter(pressure_readings.values()))
-        self._checks.append(
-            PreFlightCheck("Давление", "ok", f"{first.get('value', 0):.2e} mbar")
-        )
 
     def _check_disk(self) -> None:
         try:

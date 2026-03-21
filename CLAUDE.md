@@ -90,7 +90,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 - `Обзор` — двухколоночный layout (графики слева, sidebar справа)
 - `Эксперимент` — ExperimentWorkspace (создание, управление, финализация)
-- `Keithley 2604B`
+- `Источник мощности`
 - `Аналитика`
 - `Теплопроводность` — включает встроенное автоизмерение (ранее отдельная вкладка)
 - `Алармы`
@@ -141,6 +141,10 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/widgets/operator_log_panel.py`
 - `src/cryodaq/gui/widgets/overview_panel.py` — двухколоночный: графики + карточки
 - `src/cryodaq/gui/widgets/keithley_panel.py`
+- `src/cryodaq/gui/widgets/conductivity_panel.py` — теплопроводность + автоизмерение
+- `src/cryodaq/gui/widgets/sensor_diag_panel.py` — диагностика датчиков
+- `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
+- `src/cryodaq/gui/widgets/autosweep_panel.py` — DEPRECATED
 - `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
 
 **Reporting**

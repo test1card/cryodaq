@@ -58,7 +58,7 @@ async def test_calibration_curve_export_import(
     store = CalibrationStore(tmp_path / "calibration")
     _fit_and_save(store, "sensor-002")
 
-    exported = await _run_calibration_command(
+    exported = _run_calibration_command(
         "calibration_curve_export",
         {"sensor_id": "sensor-002"},
         calibration_store=store,
@@ -70,7 +70,7 @@ async def test_calibration_curve_export_import(
     assert Path(exported["table_path"]).exists()
 
     imported_store = CalibrationStore(tmp_path / "imported")
-    imported = await _run_calibration_command(
+    imported = _run_calibration_command(
         "calibration_curve_import",
         {"path": exported["json_path"]},
         calibration_store=imported_store,
@@ -87,20 +87,20 @@ async def test_calibration_curve_list_and_lookup(
     store = CalibrationStore(tmp_path / "calibration")
     curve_id = _fit_and_save(store, "sensor-lookup")
 
-    assigned = await _run_calibration_command(
+    assigned = _run_calibration_command(
         "calibration_curve_assign",
         {"sensor_id": "sensor-lookup", "curve_id": curve_id, "channel_key": "LS218:CH2"},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
-    listed = await _run_calibration_command(
+    listed = _run_calibration_command(
         "calibration_curve_list", {},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
-    lookup = await _run_calibration_command(
+    lookup = _run_calibration_command(
         "calibration_curve_lookup",
         {"channel_key": "LS218:CH2"},
         calibration_store=store,
@@ -120,7 +120,7 @@ async def test_calibration_runtime_set_global_and_channel_policy(
     store = CalibrationStore(tmp_path / "calibration")
     _fit_and_save(store, "LS218_1:CH2")
 
-    await _run_calibration_command(
+    _run_calibration_command(
         "calibration_curve_assign",
         {
             "sensor_id": "LS218_1:CH2",
@@ -132,14 +132,14 @@ async def test_calibration_runtime_set_global_and_channel_policy(
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
-    runtime_on = await _run_calibration_command(
+    runtime_on = _run_calibration_command(
         "calibration_runtime_set_global",
         {"global_mode": "on"},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
-    channel_policy = await _run_calibration_command(
+    channel_policy = _run_calibration_command(
         "calibration_runtime_set_channel_policy",
         {
             "sensor_id": "LS218_1:CH2",
@@ -151,7 +151,7 @@ async def test_calibration_runtime_set_global_and_channel_policy(
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
-    status = await _run_calibration_command(
+    status = _run_calibration_command(
         "calibration_runtime_status", {},
         calibration_store=store,
         experiment_manager=experiment_manager,

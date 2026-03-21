@@ -61,11 +61,14 @@ _BUFFER_MAXLEN = 3600
 
 _STABILITY_THRESHOLD = 0.01
 
-def _get_temperature_channels() -> list[str]:
-    """Динамический список видимых температурных каналов через ChannelManager."""
+def _get_temperature_channels() -> list[tuple[str, str]]:
+    """Динамический список видимых температурных каналов через ChannelManager.
+
+    Returns list of (channel_id, display_name) tuples keyed by canonical ID.
+    """
     mgr = get_channel_manager()
     return [
-        mgr.get_display_name(ch_id)
+        (ch_id, mgr.get_display_name(ch_id))
         for ch_id in mgr.get_all_visible()
         if ch_id.startswith("Т")
     ]
@@ -178,10 +181,10 @@ class ConductivityPanel(QWidget):
         ch_layout.setContentsMargins(4, 4, 4, 4)
         ch_layout.setSpacing(2)
 
-        for ch_name in self._all_channels:
-            cb = QCheckBox(ch_name)
-            cb.stateChanged.connect(lambda state, n=ch_name: self._on_check(n, state))
-            self._checkboxes[ch_name] = cb
+        for ch_id, display_name in self._all_channels:
+            cb = QCheckBox(display_name)
+            cb.stateChanged.connect(lambda state, cid=ch_id: self._on_check(cid, state))
+            self._checkboxes[ch_id] = cb
             ch_layout.addWidget(cb)
 
         ch_layout.addStretch()
@@ -384,7 +387,8 @@ class ConductivityPanel(QWidget):
                     self._rate_buffers[ch_name] = deque(maxlen=120)
                 idx = len(self._plot_items)
                 color = _LINE_COLORS[idx % len(_LINE_COLORS)]
-                item = self._plot.plot([], [], pen=pg.mkPen(color=color, width=2), name=ch_name)
+                display = get_channel_manager().get_display_name(ch_name)
+                item = self._plot.plot([], [], pen=pg.mkPen(color=color, width=2), name=display)
                 self._plot_items[ch_name] = item
         else:
             if ch_name in self._chain:
@@ -409,10 +413,17 @@ class ConductivityPanel(QWidget):
     def _on_power_changed(self, text: str) -> None:
         self._power_channel = text
 
+    def _smu_channel(self) -> str:
+        """Extract SMU channel (smua/smub) from power source path."""
+        parts = self._power_channel.split("/")
+        return parts[1] if len(parts) >= 2 else "smua"
+
     def _on_channels_changed(self) -> None:
         """Refresh channel list when ChannelManager changes."""
         new_channels = _get_temperature_channels()
-        if new_channels != self._all_channels:
+        new_ids = {ch_id for ch_id, _ in new_channels}
+        old_ids = {ch_id for ch_id, _ in self._all_channels}
+        if new_ids != old_ids:
             self._all_channels = new_channels
             logger.info("ConductivityPanel: channel list updated (%d channels)", len(new_channels))
 
@@ -429,15 +440,17 @@ class ConductivityPanel(QWidget):
             self._empty_overlay.setVisible(False)
 
         ch = reading.channel
+        # Normalize to canonical channel ID (e.g. "Т7 Детектор" -> "Т7")
+        ch_id = ch.split(" ")[0] if " " in ch else ch
         ts = reading.timestamp.timestamp()
 
-        if ch in self._checkboxes and reading.unit == "K":
-            self._temps[ch] = reading.value
-            if ch in self._buffers:
-                self._buffers[ch].append((ts, reading.value))
-                self._rate_buffers[ch].append((ts, reading.value))
+        if ch_id in self._checkboxes and reading.unit == "K":
+            self._temps[ch_id] = reading.value
+            if ch_id in self._buffers:
+                self._buffers[ch_id].append((ts, reading.value))
+                self._rate_buffers[ch_id].append((ts, reading.value))
             # Кормить предсказатель
-            self._predictor.add_point(ch, ts, reading.value)
+            self._predictor.add_point(ch_id, ts, reading.value)
 
         if ch == self._power_channel:
             self._power = reading.value
@@ -696,7 +709,7 @@ class ConductivityPanel(QWidget):
         self._auto_step_start = time.monotonic()
         send_command({
             "cmd": "keithley_set_target",
-            "channel": "smua",
+            "channel": self._smu_channel(),
             "p_target": powers[0],
         })
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
@@ -708,7 +721,7 @@ class ConductivityPanel(QWidget):
         """Прервать автоизмерение."""
         self._auto_state = "idle"
         self._auto_timer.stop()
-        send_command({"cmd": "keithley_stop", "channel": "smua"})
+        send_command({"cmd": "keithley_stop", "channel": self._smu_channel()})
 
         self._auto_start_btn.setEnabled(True)
         self._auto_stop_btn.setEnabled(False)
@@ -769,7 +782,7 @@ class ConductivityPanel(QWidget):
                 self._auto_step_start = time.monotonic()
                 send_command({
                     "cmd": "keithley_set_target",
-                    "channel": "smua",
+                    "channel": self._smu_channel(),
                     "p_target": next_p,
                 })
                 logger.info(
@@ -811,7 +824,7 @@ class ConductivityPanel(QWidget):
         """Завершить развёртку."""
         self._auto_state = "done"
         self._auto_timer.stop()
-        send_command({"cmd": "keithley_stop", "channel": "smua"})
+        send_command({"cmd": "keithley_stop", "channel": self._smu_channel()})
 
         self._auto_start_btn.setEnabled(True)
         self._auto_stop_btn.setEnabled(False)
