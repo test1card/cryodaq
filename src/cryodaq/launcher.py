@@ -272,11 +272,17 @@ class LauncherWindow(QMainWindow):
         logger.info("Engine остановлен")
 
     def _restart_engine(self) -> None:
-        """Перезапустить engine."""
+        """Restart engine AND bridge for clean ZMQ connections."""
+        self._data_timer.stop()
+        self._health_timer.stop()
+        self._bridge.shutdown()
         self._stop_engine()
         time.sleep(1)
         self._engine_external = False
         self._start_engine()
+        self._bridge.start()
+        self._data_timer.start()
+        self._health_timer.start()
 
     def _is_engine_alive(self) -> bool:
         """Проверить, жив ли engine."""
@@ -404,7 +410,8 @@ class LauncherWindow(QMainWindow):
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
         if not self._bridge.is_alive():
-            logger.warning("ZMQ bridge died, restarting...")
+            logger.warning("ZMQ bridge died, cleaning up and restarting...")
+            self._bridge.shutdown()  # Clean up dead process handle
             self._bridge.start()
             return
         for reading in self._bridge.poll_readings():
@@ -452,13 +459,13 @@ class LauncherWindow(QMainWindow):
             self._do_shutdown()
 
     def _on_open_full_gui(self) -> None:
-        """Tray-only → launch full GUI in a separate process."""
+        """Launch standalone GUI window (connects to existing engine, no second launcher)."""
         python = sys.executable
         env = os.environ.copy()
         if self._mock:
             env["CRYODAQ_MOCK"] = "1"
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        cmd = [python, "-m", "cryodaq.launcher"]
+        cmd = [python, "-m", "cryodaq.gui.app"]
         if self._mock:
             cmd.append("--mock")
         subprocess.Popen(cmd, env=env, creationflags=creationflags)

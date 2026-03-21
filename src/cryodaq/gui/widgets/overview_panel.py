@@ -1154,6 +1154,15 @@ class OverviewPanel(QWidget):
             self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
             self._channel_visible[ch_id] = True
 
+        # Update legend names for renamed channels
+        legend = self._plot.getPlotItem().legend
+        if legend is not None:
+            legend.clear()
+            for ch_id, item in self._plot_items.items():
+                new_name = self._channel_mgr.get_display_name(ch_id)
+                item.opts["name"] = new_name
+                legend.addItem(item, new_name)
+
     # ------------------------------------------------------------------
     # Публичный интерфейс
     # ------------------------------------------------------------------
