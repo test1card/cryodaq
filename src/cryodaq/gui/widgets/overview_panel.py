@@ -928,6 +928,9 @@ class OverviewPanel(QWidget):
         self._history_worker = None
         QTimer.singleShot(500, self._load_initial_history)
 
+        # Sync plot items when channels change
+        self._channel_mgr.on_change(self._on_channels_changed)
+
     # ------------------------------------------------------------------
     # Построение UI
     # ------------------------------------------------------------------
@@ -1122,6 +1125,34 @@ class OverviewPanel(QWidget):
             "background: rgba(17,17,17,200); padding: 4px 8px; border-radius: 4px;"
         )
         self._eta_overlay.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Channel change sync
+    # ------------------------------------------------------------------
+
+    def _on_channels_changed(self) -> None:
+        """Rebuild plot items to match current channel config."""
+        new_visible = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("\u0422")]
+        old_ids = set(self._plot_items.keys())
+        new_ids = set(new_visible)
+
+        for ch_id in old_ids - new_ids:
+            item = self._plot_items.pop(ch_id)
+            self._plot.removeItem(item)
+            self._buffers.pop(ch_id, None)
+            self._channel_visible.pop(ch_id, None)
+
+        for ch_id in new_ids - old_ids:
+            idx = new_visible.index(ch_id)
+            display = self._channel_mgr.get_display_name(ch_id)
+            color = _LINE_PALETTE[idx % len(_LINE_PALETTE)]
+            pen = pg.mkPen(color=color, width=1.5)
+            item = self._plot.plot([], [], pen=pen, name=display)
+            item.setDownsampling(auto=True, method="peak")
+            item.setClipToView(True)
+            self._plot_items[ch_id] = item
+            self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
+            self._channel_visible[ch_id] = True
 
     # ------------------------------------------------------------------
     # Публичный интерфейс
@@ -1355,7 +1386,7 @@ class OverviewPanel(QWidget):
             "cmd": "readings_history",
             "from_ts": now - hours * 3600,
             "to_ts": now,
-            "limit_per_channel": _BUFFER_MAXLEN,
+            "limit_per_channel": max(_BUFFER_MAXLEN, hours * 360),
         }
         self._history_worker = ZmqCommandWorker(cmd)
         self._history_hours = hours
@@ -1438,7 +1469,7 @@ class OverviewPanel(QWidget):
         default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
         path, _ = QFileDialog.getSaveFileName(self, "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c CSV", default_name, "CSV (*.csv)")
         if path:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8-sig") as f:
                 # Заголовок: Время;Channel1;Channel2;...
                 channels = sorted(self._buffers.keys())
                 f.write("\u0412\u0440\u0435\u043c\u044f;" + ";".join(channels) + "\n")
