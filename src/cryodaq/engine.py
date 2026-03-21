@@ -377,7 +377,7 @@ def _try_activate_calibration_acquisition(
         logger.warning("Failed to activate calibration acquisition", exc_info=True)
 
 
-async def _run_experiment_command(
+def _run_experiment_command(
     action: str,
     cmd: dict[str, Any],
     experiment_manager: ExperimentManager,
@@ -480,17 +480,8 @@ async def _run_experiment_command(
             custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
             end_time=_parse_experiment_time(cmd.get("end_time")),
         )
-        # Auto-generate report if template enables it
-        report_generated = False
-        try:
-            template = experiment_manager.get_template(info.template_id)
-            if template.report_enabled:
-                generator = ReportGenerator(experiment_manager.data_dir)
-                generator.generate(info.experiment_id)
-                report_generated = True
-        except Exception as exc:
-            logger.warning("Auto-report generation failed: %s", exc)
-        return {"ok": True, "experiment": info.to_payload(), "report_generated": report_generated}
+        # Report is generated inside finalize_experiment() by ExperimentManager.
+        return {"ok": True, "experiment": info.to_payload()}
 
     if action == "experiment_abort":
         info = experiment_manager.abort_experiment(
@@ -589,6 +580,39 @@ async def _run_experiment_command(
         }
 
     raise ValueError(f"Unsupported experiment command: {action}")
+
+
+def _run_calibration_v2_command(
+    action: str, cmd: dict[str, Any], calibration_store: Any,
+) -> dict[str, Any]:
+    """Sync calibration fitter commands — runs in thread to avoid blocking event loop."""
+    from cryodaq.analytics.calibration_fitter import CalibrationFitter
+
+    fitter = CalibrationFitter()
+    if action == "calibration_v2_extract":
+        pairs = fitter.extract_pairs(
+            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]), str(cmd["target_channel"]),
+        )
+        return {"ok": True, "pair_count": len(pairs), "pairs_sample": pairs[:20]}
+    if action == "calibration_v2_coverage":
+        pairs = fitter.extract_pairs(
+            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]), str(cmd["target_channel"]),
+        )
+        coverage = fitter.compute_coverage(pairs)
+        return {"ok": True, "coverage": coverage, "total_points": len(pairs)}
+    if action == "calibration_v2_fit":
+        result = fitter.fit(
+            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]), str(cmd["target_channel"]), calibration_store,
+        )
+        return {
+            "ok": True, "sensor_id": result.sensor_id, "curve_id": result.curve.curve_id,
+            "metrics": result.metrics, "raw_count": result.raw_pairs_count,
+            "downsampled_count": result.downsampled_count, "breakpoint_count": result.breakpoint_count,
+        }
+    raise ValueError(f"Unknown calibration_v2 action: {action}")
 
 
 def _get_memory_mb() -> float:
@@ -1103,10 +1127,13 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "experiment_advance_phase",
                 "experiment_phase_status",
             }:
-                result = await _run_experiment_command(action, cmd, experiment_manager)
+                result = await asyncio.to_thread(
+                    _run_experiment_command, action, cmd, experiment_manager,
+                )
                 # Hook calibration acquisition on experiment lifecycle
                 if result.get("ok") and action in {"experiment_start", "experiment_create"}:
-                    _try_activate_calibration_acquisition(
+                    await asyncio.to_thread(
+                        _try_activate_calibration_acquisition,
                         calibration_acquisition, experiment_manager, cmd,
                     )
                     name = cmd.get("name") or cmd.get("title") or "?"
@@ -1130,46 +1157,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "calibration_v2_fit",
                 "calibration_v2_coverage",
             }:
-                from cryodaq.analytics.calibration_fitter import CalibrationFitter
-
-                fitter = CalibrationFitter()
-                if action == "calibration_v2_extract":
-                    pairs = fitter.extract_pairs(
-                        _DATA_DIR,
-                        float(cmd.get("start_ts", 0)),
-                        float(cmd.get("end_ts", 0)),
-                        str(cmd["reference_channel"]),
-                        str(cmd["target_channel"]),
-                    )
-                    return {"ok": True, "pair_count": len(pairs), "pairs_sample": pairs[:20]}
-                if action == "calibration_v2_coverage":
-                    pairs = fitter.extract_pairs(
-                        _DATA_DIR,
-                        float(cmd.get("start_ts", 0)),
-                        float(cmd.get("end_ts", 0)),
-                        str(cmd["reference_channel"]),
-                        str(cmd["target_channel"]),
-                    )
-                    coverage = fitter.compute_coverage(pairs)
-                    return {"ok": True, "coverage": coverage, "total_points": len(pairs)}
-                if action == "calibration_v2_fit":
-                    result = fitter.fit(
-                        _DATA_DIR,
-                        float(cmd.get("start_ts", 0)),
-                        float(cmd.get("end_ts", 0)),
-                        str(cmd["reference_channel"]),
-                        str(cmd["target_channel"]),
-                        calibration_store,
-                    )
-                    return {
-                        "ok": True,
-                        "sensor_id": result.sensor_id,
-                        "curve_id": result.curve.curve_id,
-                        "metrics": result.metrics,
-                        "raw_count": result.raw_pairs_count,
-                        "downsampled_count": result.downsampled_count,
-                        "breakpoint_count": result.breakpoint_count,
-                    }
+                return await asyncio.to_thread(
+                    _run_calibration_v2_command, action, cmd, calibration_store,
+                )
             if action == "readings_history":
                 channels_raw = cmd.get("channels")
                 channels = list(channels_raw) if channels_raw else None

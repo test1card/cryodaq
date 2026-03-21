@@ -44,7 +44,7 @@ def manager(tmp_path: Path, instruments_yaml: Path, templates_dir: Path) -> Expe
 
 
 async def test_experiment_templates_command_returns_templates(manager: ExperimentManager) -> None:
-    result = await _run_experiment_command("experiment_templates", {}, manager)
+    result = _run_experiment_command("experiment_templates", {}, manager)
 
     assert result["ok"] is True
     ids = {item["id"] for item in result["templates"]}
@@ -52,17 +52,17 @@ async def test_experiment_templates_command_returns_templates(manager: Experimen
 
 
 async def test_get_and_set_app_mode_commands(manager: ExperimentManager) -> None:
-    current = await _run_experiment_command("get_app_mode", {}, manager)
+    current = _run_experiment_command("get_app_mode", {}, manager)
     assert current == {"ok": True, "app_mode": "experiment"}
 
-    updated = await _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
+    updated = _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
     assert updated["ok"] is True
     assert updated["app_mode"] == "debug"
     assert updated["active_experiment"] is None
 
 
 async def test_experiment_start_and_finalize_commands(manager: ExperimentManager) -> None:
-    start = await _run_experiment_command(
+    start = _run_experiment_command(
         "experiment_start",
         {
             "template_id": "cooldown_test",
@@ -75,7 +75,7 @@ async def test_experiment_start_and_finalize_commands(manager: ExperimentManager
     assert start["ok"] is True
     assert start["active_experiment"]["template_id"] == "cooldown_test"
 
-    finalize = await _run_experiment_command(
+    finalize = _run_experiment_command(
         "experiment_finalize",
         {
             "experiment_id": start["experiment_id"],
@@ -90,7 +90,7 @@ async def test_experiment_start_and_finalize_commands(manager: ExperimentManager
 
 
 async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None:
-    create = await _run_experiment_command(
+    create = _run_experiment_command(
         "experiment_create",
         {
             "template_id": "cooldown_test",
@@ -106,10 +106,10 @@ async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None
     experiment_id = create["experiment_id"]
     assert create["app_mode"] == "experiment"
 
-    active = await _run_experiment_command("experiment_get_active", {}, manager)
+    active = _run_experiment_command("experiment_get_active", {}, manager)
     assert active["active_experiment"]["experiment_id"] == experiment_id
 
-    updated = await _run_experiment_command(
+    updated = _run_experiment_command(
         "experiment_update",
         {
             "experiment_id": experiment_id,
@@ -122,9 +122,9 @@ async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None
     assert updated["experiment"]["notes"] == "Stabilized"
 
     with pytest.raises(RuntimeError, match="debug mode"):
-        await _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
+        _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
 
-    finalized = await _run_experiment_command(
+    finalized = _run_experiment_command(
         "experiment_finalize",
         {"experiment_id": experiment_id, "status": "COMPLETED"},
         manager,
@@ -132,10 +132,10 @@ async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None
     assert finalized["ok"] is True
     assert finalized["experiment"]["status"] == "COMPLETED"
 
-    archive_list = await _run_experiment_command("experiment_list_archive", {}, manager)
+    archive_list = _run_experiment_command("experiment_list_archive", {}, manager)
     assert [entry["experiment_id"] for entry in archive_list["entries"]] == [experiment_id]
 
-    archive_item = await _run_experiment_command(
+    archive_item = _run_experiment_command(
         "experiment_get_archive_item",
         {"experiment_id": experiment_id},
         manager,
@@ -144,7 +144,7 @@ async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None
 
 
 async def test_experiment_abort_command(manager: ExperimentManager) -> None:
-    created = await _run_experiment_command(
+    created = _run_experiment_command(
         "experiment_create",
         {
             "template_id": "cooldown_test",
@@ -154,7 +154,7 @@ async def test_experiment_abort_command(manager: ExperimentManager) -> None:
         manager,
     )
 
-    aborted = await _run_experiment_command(
+    aborted = _run_experiment_command(
         "experiment_abort",
         {"experiment_id": created["experiment_id"], "notes": "Manual abort"},
         manager,
@@ -165,7 +165,7 @@ async def test_experiment_abort_command(manager: ExperimentManager) -> None:
 
 
 async def test_experiment_attach_run_record_persists_metadata(manager: ExperimentManager) -> None:
-    created = await _run_experiment_command(
+    created = _run_experiment_command(
         "experiment_create",
         {
             "template_id": "cooldown_test",
@@ -175,7 +175,7 @@ async def test_experiment_attach_run_record_persists_metadata(manager: Experimen
         },
         manager,
     )
-    attached = await _run_experiment_command(
+    attached = _run_experiment_command(
         "experiment_attach_run_record",
         {
             "source_tab": "autosweep",
@@ -204,9 +204,9 @@ async def test_experiment_attach_run_record_persists_metadata(manager: Experimen
 
 
 async def test_experiment_attach_run_record_skips_in_debug_mode(manager: ExperimentManager) -> None:
-    await _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
+    _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
 
-    attached = await _run_experiment_command(
+    attached = _run_experiment_command(
         "experiment_attach_run_record",
         {
             "source_tab": "autosweep",
@@ -222,7 +222,7 @@ async def test_experiment_attach_run_record_skips_in_debug_mode(manager: Experim
 
 
 async def test_experiment_create_retroactive_command(manager: ExperimentManager) -> None:
-    result = await _run_experiment_command(
+    result = _run_experiment_command(
         "experiment_create_retroactive",
         {
             "template_id": "cooldown_test",
