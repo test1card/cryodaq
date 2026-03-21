@@ -9,7 +9,10 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import queue
+import threading
 import time
+import uuid
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any
 
@@ -70,6 +73,11 @@ class ZmqBridge:
         self._shutdown_event: mp.Event = mp.Event()
         self._process: mp.Process | None = None
         self._last_heartbeat: float = 0.0
+        # Future-per-request command routing
+        self._pending: dict[str, Future] = {}
+        self._pending_lock = threading.Lock()
+        self._reply_stop = threading.Event()
+        self._reply_consumer: threading.Thread | None = None
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -95,6 +103,12 @@ class ZmqBridge:
         )
         self._process.start()
         self._last_heartbeat = time.monotonic()
+        # Start dedicated reply consumer thread
+        self._reply_stop.clear()
+        self._reply_consumer = threading.Thread(
+            target=self._consume_replies, daemon=True, name="zmq-reply-consumer",
+        )
+        self._reply_consumer.start()
         logger.info("ZMQ bridge subprocess started (PID=%d)", self._process.pid)
 
     def is_alive(self) -> bool:
@@ -131,45 +145,58 @@ class ZmqBridge:
         return time.monotonic() - self._last_heartbeat < 9.0  # 3 * HEARTBEAT_INTERVAL
 
     def send_command(self, cmd: dict) -> dict:
-        """Send command to engine via subprocess. Blocks until reply (with timeout).
-
-        Uses a correlation ID (_rid) to match replies to requests, preventing
-        cross-contamination when multiple threads send commands concurrently.
-        """
+        """Thread-safe command dispatch with Future-per-request correlation."""
         if not self.is_alive():
             return {"ok": False, "error": "ZMQ bridge subprocess not running"}
 
-        # Generate correlation ID
-        import uuid
         rid = uuid.uuid4().hex[:8]
         cmd = {**cmd, "_rid": rid}
+        future: Future = Future()
+
+        with self._pending_lock:
+            self._pending[rid] = future
 
         try:
-            self._cmd_queue.put_nowait(cmd)
-        except queue.Full:
-            return {"ok": False, "error": "Command queue full"}
+            self._cmd_queue.put(cmd, timeout=2.0)
+            return future.result(timeout=_CMD_REPLY_TIMEOUT_S)
+        except Exception as exc:
+            return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__})"}
+        finally:
+            with self._pending_lock:
+                self._pending.pop(rid, None)
 
-        deadline = time.monotonic() + _CMD_REPLY_TIMEOUT_S
-        while time.monotonic() < deadline:
+    def _consume_replies(self) -> None:
+        """Dedicated thread: reads replies from subprocess, routes to correct Future."""
+        while not self._reply_stop.is_set():
             try:
-                reply = self._reply_queue.get(timeout=0.1)
-                # Check correlation
-                if reply.get("_rid") == rid:
-                    reply.pop("_rid", None)
-                    return reply
-                # Wrong reply — put back (another thread's reply)
-                try:
-                    self._reply_queue.put_nowait(reply)
-                except queue.Full:
-                    pass
+                reply = self._reply_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            except EOFError:
-                return {"ok": False, "error": "ZMQ bridge subprocess died"}
-        return {"ok": False, "error": "Engine не отвечает (таймаут)"}
+            except (EOFError, OSError):
+                break
+
+            rid = reply.pop("_rid", None)
+            if rid:
+                with self._pending_lock:
+                    future = self._pending.get(rid)
+                if future and not future.done():
+                    future.set_result(reply)
+                    continue
+            logger.debug("Unmatched ZMQ reply (rid=%s)", rid)
 
     def shutdown(self) -> None:
-        """Signal subprocess to stop and wait for it to exit."""
+        """Signal subprocess to stop, cancel pending futures, wait for exit."""
+        # Stop reply consumer thread
+        self._reply_stop.set()
+        with self._pending_lock:
+            for rid, future in self._pending.items():
+                if not future.done():
+                    future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
+            self._pending.clear()
+        if self._reply_consumer is not None and self._reply_consumer.is_alive():
+            self._reply_consumer.join(timeout=3.0)
+
+        # Stop subprocess
         self._shutdown_event.set()
         if self._process is not None:
             self._process.join(timeout=3)
