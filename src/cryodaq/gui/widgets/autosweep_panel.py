@@ -1,5 +1,10 @@
-"""Панель автоматического развёртывания по мощности.
+"""DEPRECATED — merged into conductivity_panel.py (v0.13.0).
 
+This file is kept as reference only. It is not imported anywhere.
+Remove in v0.14.0.
+
+Original description:
+Панель автоматического развёртывания по мощности.
 Последовательно задаёт мощности на Keithley, ждёт стабилизации
 температур, записывает R(P) и G(P), строит итоговый график.
 """

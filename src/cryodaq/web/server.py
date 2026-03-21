@@ -19,6 +19,12 @@
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import version as _get_version
+
+try:
+    _VERSION = _get_version("cryodaq")
+except Exception:
+    _VERSION = "dev"
 import json
 import logging
 import sqlite3
@@ -256,7 +262,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
-        version="0.12.0",
+        version=_VERSION,
     )
 
     _zmq_task: asyncio.Task[None] | None = None
@@ -289,7 +295,7 @@ def create_app() -> FastAPI:
     @application.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         """Главная страница — self-contained HTML dashboard."""
-        return HTMLResponse(content=_DASHBOARD_HTML)
+        return HTMLResponse(content=_DASHBOARD_HTML.replace("__VERSION__", _VERSION))
 
     @application.get("/status")
     async def status() -> dict[str, Any]:
@@ -386,7 +392,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,-apple-system,sans-s
 </style>
 </head>
 <body>
-<div class="header"><h1>CryoDAQ Monitor</h1><span class="ver">v0.12.0</span></div>
+<div class="header"><h1>CryoDAQ Monitor</h1><span class="ver">v__VERSION__</span></div>
 <div class="status-bar">
  <span class="item" id="safety">SAFE_OFF</span>
  <span class="item" id="uptime">Аптайм: --:--:--</span>
