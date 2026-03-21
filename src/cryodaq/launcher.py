@@ -189,7 +189,8 @@ class LauncherWindow(QMainWindow):
 
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
-        lock_path = Path("data/.engine.lock")
+        from cryodaq.paths import get_data_dir
+        lock_path = get_data_dir() / ".engine.lock"
         if lock_path.exists():
             try:
                 pid = int(lock_path.read_text().strip())

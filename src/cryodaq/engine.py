@@ -1498,31 +1498,47 @@ async def _run_engine(*, mock: bool = False) -> None:
 # Single-instance guard
 # ---------------------------------------------------------------------------
 
-from pathlib import Path as _Path
+_LOCK_FILE = get_data_dir() / ".engine.lock"
 
-_LOCK_FILE = _Path("data/.engine.lock")
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError):
+        return False
 
 
 def _acquire_engine_lock() -> bool:
-    import os
+    """Atomically acquire single-instance lock via O_CREAT|O_EXCL."""
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if _LOCK_FILE.exists():
+    try:
+        fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
         try:
             old_pid = int(_LOCK_FILE.read_text().strip())
-            if sys.platform == "win32":
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                handle = kernel32.OpenProcess(0x1000, False, old_pid)
-                if handle:
-                    kernel32.CloseHandle(handle)
-                    return False
-            else:
-                os.kill(old_pid, 0)
+            if _is_process_alive(old_pid):
                 return False
-        except (ValueError, OSError, ProcessLookupError):
-            pass
-    _LOCK_FILE.write_text(str(os.getpid()))
-    return True
+            _LOCK_FILE.unlink(missing_ok=True)
+            fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
 
 
 def _release_engine_lock() -> None:
