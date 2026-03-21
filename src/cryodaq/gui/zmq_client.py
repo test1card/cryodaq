@@ -132,8 +132,9 @@ class ZmqBridge:
                 readings.append(_reading_from_dict(d))
             except (queue.Empty, EOFError):
                 break
-            except Exception:
-                break
+            except Exception as exc:
+                logger.warning("poll_readings: error processing item: %s", exc)
+                continue
         return readings
 
     def is_healthy(self) -> bool:

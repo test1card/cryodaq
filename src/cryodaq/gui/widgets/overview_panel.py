@@ -980,7 +980,7 @@ class OverviewPanel(QWidget):
             btn.clicked.connect(lambda checked, s=seconds: self._set_window(s))
             btn_bar.addWidget(btn)
 
-        all_btn = QPushButton("Всё")
+        all_btn = QPushButton("Сутки")
         all_btn.setFixedSize(QSize(50, 24))
         apply_button_style(all_btn, "neutral", compact=True)
         all_btn.clicked.connect(self._set_window_all)
@@ -1386,6 +1386,7 @@ class OverviewPanel(QWidget):
             "cmd": "readings_history",
             "from_ts": now - hours * 3600,
             "to_ts": now,
+            "channels": channels if channels else None,
             "limit_per_channel": max(_BUFFER_MAXLEN, hours * 360),
         }
         self._history_worker = ZmqCommandWorker(cmd)
