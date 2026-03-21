@@ -96,13 +96,14 @@ def test_backend_state_off_controls_visual_off_even_with_nonzero_telemetry() -> 
 # KeithleyStrip quick-action buttons
 # ---------------------------------------------------------------------------
 
-def test_keithley_strip_has_quick_action_methods() -> None:
+def test_keithley_strip_is_monitoring_only() -> None:
+    """KeithleyStrip is for monitoring — no start/stop buttons (removed in v0.13)."""
     _app()
     widget = KeithleyStrip()
-    assert hasattr(widget, "_on_quick_start")
-    assert hasattr(widget, "_on_quick_stop")
-    assert hasattr(widget, "_on_emergency_off")
-    assert isinstance(widget._workers, list)
+    # Quick-action methods removed — overview is monitoring only
+    assert not hasattr(widget, "_on_quick_start")
+    assert not hasattr(widget, "_on_quick_stop")
+    assert not hasattr(widget, "_on_emergency_off")
 
 
 # ---------------------------------------------------------------------------

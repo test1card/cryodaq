@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -590,35 +589,12 @@ class KeithleyStrip(QFrame):
         apply_status_label_style(self._smub_label, "muted")
         layout.addWidget(self._smub_label)
 
-        layout.addSpacing(12)
-
-        # Quick-action buttons
-        for smu in ("smua", "smub"):
-            start_btn = QPushButton(f"\u25b6 {smu}")
-            start_btn.setFixedSize(QSize(70, 28))
-            apply_button_style(start_btn, "primary", compact=True)
-            start_btn.clicked.connect(lambda _, ch=smu: self._on_quick_start(ch))
-            layout.addWidget(start_btn)
-
-            stop_btn = QPushButton(f"\u25a0 {smu}")
-            stop_btn.setFixedSize(QSize(70, 28))
-            apply_button_style(stop_btn, "neutral", compact=True)
-            stop_btn.clicked.connect(lambda _, ch=smu: self._on_quick_stop(ch))
-            layout.addWidget(stop_btn)
-
-        eoff_btn = QPushButton("\u26a1 E-Off")
-        eoff_btn.setFixedSize(QSize(70, 28))
-        apply_button_style(eoff_btn, "danger", compact=True)
-        eoff_btn.clicked.connect(self._on_emergency_off)
-        layout.addWidget(eoff_btn)
-
         layout.addStretch()
 
         # Состояние
         self._smua_data: dict[str, float] = {}
         self._smub_data: dict[str, float] = {}
         self._channel_state: dict[str, str] = {"smua": "off", "smub": "off"}
-        self._workers: list[object] = []
 
     def on_reading(self, reading: Reading) -> None:
         """Update display values from backend telemetry."""
@@ -663,40 +639,6 @@ class KeithleyStrip(QFrame):
             or bool(self._smua_data)
             or bool(self._smub_data)
         )
-
-    def _on_quick_start(self, channel: str) -> None:
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-        worker = ZmqCommandWorker({"cmd": "keithley_start", "channel": channel})
-        worker.finished.connect(lambda r: None)
-        self._workers.append(worker)
-        worker.start()
-
-    def _on_quick_stop(self, channel: str) -> None:
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-        worker = ZmqCommandWorker({"cmd": "keithley_stop", "channel": channel})
-        worker.finished.connect(lambda r: None)
-        self._workers.append(worker)
-        worker.start()
-
-    def _on_emergency_off(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "Emergency Off",
-            "Аварийное отключение Keithley?\n\nИсточник будет немедленно отключён.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-        for ch in ("smua", "smub"):
-            worker = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": ch})
-            worker.finished.connect(lambda r: None)
-            self._workers.append(worker)
-            worker.start()
 
     @staticmethod
     def _update_smu_label(
@@ -1365,8 +1307,10 @@ class OverviewPanel(QWidget):
             item.setData(xs, ys)
 
         if self._plot_items:
-            x_max = now
-            # Extend to include prediction curve if visible
+            # 75% data / 25% forecast zone
+            forecast_s = self._window_s / 3.0
+            x_max = now + forecast_s
+            # Extend further if prediction curve goes beyond
             if self._pred_curve.isVisible():
                 pred_xs = self._pred_curve.getData()[0]
                 if pred_xs is not None and len(pred_xs) > 0:
