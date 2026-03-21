@@ -90,7 +90,7 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
     assert labels == [
         "Обзор",
         "Эксперимент",
-        "Keithley 2604B",
+        "Источник мощности",
         "Аналитика",
         "Теплопроводность",
         "Алармы",

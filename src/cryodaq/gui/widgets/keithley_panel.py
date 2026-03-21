@@ -7,7 +7,7 @@ import time
 from collections import deque
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
@@ -65,7 +65,11 @@ class _SmuPanel(QFrame):
         self._workers: list[ZmqCommandWorker] = []
         self._channel_state = "off"
         self._channel_label = f"канал {self._smu[-1].upper()}"
+        self._window_s: float = _WINDOW_S
         self._build_ui(colors)
+
+    def set_window(self, seconds: float) -> None:
+        self._window_s = seconds
 
     def _show_info(self, text: str, *, emit: bool = True) -> None:
         if emit:
@@ -393,7 +397,7 @@ class _SmuPanel(QFrame):
 
     def refresh(self) -> None:
         now = time.time()
-        x_min = now - _WINDOW_S
+        x_min = now - self._window_s
         for key, item in self._plots.items():
             buffer = self._buffers[key]
             if not buffer:
@@ -437,6 +441,16 @@ class KeithleyPanel(QWidget):
         self._status_banner.clear_message()
         root.addWidget(self._status_banner)
 
+        btn_bar = QHBoxLayout()
+        for label, seconds in [("10м", 600), ("1ч", 3600), ("6ч", 21600)]:
+            btn = QPushButton(label)
+            btn.setFixedSize(QSize(40, 22))
+            apply_button_style(btn, "neutral", compact=True)
+            btn.clicked.connect(lambda checked, s=seconds: self._set_keithley_window(s))
+            btn_bar.addWidget(btn)
+        btn_bar.addStretch()
+        root.addLayout(btn_bar)
+
         panels = QHBoxLayout()
         panels.setSpacing(10)
         for smu_name, colors in _SMU_COLORS.items():
@@ -451,6 +465,10 @@ class KeithleyPanel(QWidget):
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
+
+    def _set_keithley_window(self, seconds: int) -> None:
+        for panel in self._smu_panels.values():
+            panel.set_window(float(seconds))
 
     def on_reading(self, reading: Reading) -> None:
         self._reading_signal.emit(reading)

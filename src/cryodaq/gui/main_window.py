@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
 
         # Вкладка «Keithley»
         self._keithley_panel = KeithleyPanel()
-        self._tabs.addTab(self._keithley_panel, "Keithley 2604B")
+        self._tabs.addTab(self._keithley_panel, "Источник мощности")
 
         # Вкладка «Аналитика»
         self._analytics_panel = AnalyticsPanel()
