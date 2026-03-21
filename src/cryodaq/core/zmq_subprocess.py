@@ -116,14 +116,21 @@ def zmq_bridge_main(
             # 2. Forward commands from GUI to engine
             try:
                 cmd = cmd_queue.get_nowait()
+                rid = cmd.pop("_rid", None)
                 try:
                     req.send_string(json.dumps(cmd))
                     reply_raw = req.recv_string()
-                    reply_queue.put_nowait(json.loads(reply_raw))
+                    reply = json.loads(reply_raw)
                 except zmq.ZMQError:
-                    reply_queue.put_nowait({"ok": False, "error": "Engine не отвечает (таймаут)"})
+                    reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
                 except Exception as exc:
-                    reply_queue.put_nowait({"ok": False, "error": str(exc)})
+                    reply = {"ok": False, "error": str(exc)}
+                if rid is not None:
+                    reply["_rid"] = rid
+                try:
+                    reply_queue.put_nowait(reply)
+                except queue.Full:
+                    pass  # reply lost — client will timeout
             except queue.Empty:
                 pass
 

@@ -131,11 +131,19 @@ class ZmqBridge:
         return time.monotonic() - self._last_heartbeat < 9.0  # 3 * HEARTBEAT_INTERVAL
 
     def send_command(self, cmd: dict) -> dict:
-        """Send command to engine via subprocess. Blocks until reply (with timeout)."""
+        """Send command to engine via subprocess. Blocks until reply (with timeout).
+
+        Uses a correlation ID (_rid) to match replies to requests, preventing
+        cross-contamination when multiple threads send commands concurrently.
+        """
         if not self.is_alive():
             return {"ok": False, "error": "ZMQ bridge subprocess not running"}
-        # Drain stale replies
-        _drain(self._reply_queue)
+
+        # Generate correlation ID
+        import uuid
+        rid = uuid.uuid4().hex[:8]
+        cmd = {**cmd, "_rid": rid}
+
         try:
             self._cmd_queue.put_nowait(cmd)
         except queue.Full:
@@ -144,7 +152,16 @@ class ZmqBridge:
         deadline = time.monotonic() + _CMD_REPLY_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
-                return self._reply_queue.get(timeout=0.1)
+                reply = self._reply_queue.get(timeout=0.1)
+                # Check correlation
+                if reply.get("_rid") == rid:
+                    reply.pop("_rid", None)
+                    return reply
+                # Wrong reply — put back (another thread's reply)
+                try:
+                    self._reply_queue.put_nowait(reply)
+                except queue.Full:
+                    pass
             except queue.Empty:
                 continue
             except EOFError:
