@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
+import re
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -31,6 +33,14 @@ logger = logging.getLogger("cryodaq.notifications.periodic_report")
 
 # Имя подписки в DataBroker
 _SUBSCRIPTION_NAME = "periodic_reporter"
+
+
+def _natural_sort_key(channel: str) -> tuple:
+    """Т1→(0,1), Т10→(0,10), Keithley/smua/voltage→(1,'...')."""
+    m = re.match(r"^\u0422(\d+)", channel)
+    if m:
+        return (0, int(m.group(1)))
+    return (1, channel)
 
 
 class PeriodicReporter:
@@ -309,13 +319,26 @@ class PeriodicReporter:
             ax.set_ylabel(ylabel)
             return
 
-        for channel in sorted(channels):
+        all_positive_values: list[float] = []
+
+        for channel in sorted(channels, key=_natural_sort_key):
             buf = self._buffers.get(channel)
             if not buf:
                 continue
 
             times_unix = [p[0] for p in buf]
             values = [p[1] for p in buf]
+
+            # For log scale: filter out non-positive/non-finite values
+            if log_scale:
+                pairs = [(t, v) for t, v in zip(times_unix, values)
+                         if v > 0 and math.isfinite(v)]
+                if not pairs:
+                    continue
+                times_unix, values = zip(*pairs)
+                times_unix = list(times_unix)
+                values = list(values)
+                all_positive_values.extend(values)
 
             # Преобразовать unix timestamp в datetime для matplotlib
             times_dt = [dt.fromtimestamp(t, tz=timezone.utc) for t in times_unix]
@@ -353,11 +376,13 @@ class PeriodicReporter:
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
 
-        if log_scale:
-            try:
-                ax.set_yscale("log")
-            except Exception:
-                pass  # Если данные не позволяют лог-шкалу
+        if log_scale and all_positive_values:
+            ax.set_yscale("log")
+            import numpy as np
+            p5, p95 = np.percentile(all_positive_values, [5, 95])
+            if p5 > 0 and p95 > p5:
+                log_margin = (p95 / p5) ** 0.15
+                ax.set_ylim(p5 / log_margin, p95 * log_margin)
 
         if channels:
             ax.legend(
@@ -381,25 +406,19 @@ class PeriodicReporter:
         lines.append("")
 
         # --- Температурные каналы ---
-        temp_channels = sorted(ch for ch, u in self._units.items() if u == "K")
+        temp_channels = sorted((ch for ch, u in self._units.items() if u == "K"), key=_natural_sort_key)
         if temp_channels:
             lines.append("<b>Температуры:</b>")
             for ch in temp_channels:
                 buf = self._buffers.get(ch)
                 if not buf:
                     continue
-                values = [p[1] for p in buf]
-                cur = values[-1]
-                mn = min(values)
-                mx = max(values)
+                cur = buf[-1][1]
                 label = ch.split("/")[-1] if "/" in ch else ch
-                lines.append(
-                    f"  {label}: {cur:.4g} К  "
-                    f"[мин {mn:.4g} / макс {mx:.4g}]"
-                )
+                lines.append(f"  {label}: {cur:.4g} К")
 
         # --- Каналы давления ---
-        pres_channels = sorted(ch for ch, u in self._units.items() if u == "mbar")
+        pres_channels = sorted((ch for ch, u in self._units.items() if u == "mbar"), key=_natural_sort_key)
         if pres_channels:
             lines.append("")
             lines.append("<b>Давление:</b>")
@@ -407,20 +426,15 @@ class PeriodicReporter:
                 buf = self._buffers.get(ch)
                 if not buf:
                     continue
-                values = [p[1] for p in buf]
-                cur = values[-1]
-                mn = min(values)
-                mx = max(values)
+                cur = buf[-1][1]
                 label = ch.split("/")[-1] if "/" in ch else ch
-                lines.append(
-                    f"  {label}: {cur:.4g} мбар  "
-                    f"[мин {mn:.4g} / макс {mx:.4g}]"
-                )
+                lines.append(f"  {label}: {cur:.4g} мбар")
 
         # --- Прочие каналы (мощность, ток и т.д.) ---
         other_channels = sorted(
-            ch for ch, u in self._units.items()
-            if u not in ("K", "mbar")
+            (ch for ch, u in self._units.items()
+             if u not in ("K", "mbar")),
+            key=_natural_sort_key,
         )
         if other_channels:
             lines.append("")
