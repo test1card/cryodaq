@@ -149,3 +149,21 @@ class PanelHeader(QFrame):
             subtitle_label.setWordWrap(True)
             subtitle_label.setStyleSheet("color: #8b949e;")
             layout.addWidget(subtitle_label)
+
+
+def snap_x_range(
+    plot_item: object,
+    now: float,
+    window_s: float,
+    earliest: float,
+    margin_frac: float = 0.05,
+) -> None:
+    """Set X range, snapping left edge to earliest data point.
+
+    Prevents empty space when data is younger than the window.
+    """
+    x_min = now - window_s
+    if earliest < now:
+        margin = (now - earliest) * margin_frac
+        x_min = max(x_min, earliest - margin)
+    plot_item.setXRange(x_min, now, padding=0)

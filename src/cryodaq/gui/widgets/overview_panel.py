@@ -1320,8 +1320,11 @@ class OverviewPanel(QWidget):
     @Slot()
     def _refresh_plot(self) -> None:
         """Обновить все линии на графиках (1 Гц)."""
+        from cryodaq.gui.widgets.common import snap_x_range
+
         now = time.time()
         x_min = now - self._window_s
+        earliest = now
 
         # Temperature lines
         for ch_id, item in self._plot_items.items():
@@ -1336,17 +1339,23 @@ class OverviewPanel(QWidget):
                     xs.append(ts)
                     ys.append(val)
             item.setData(xs, ys)
+            if xs:
+                earliest = min(earliest, xs[0])
 
         if self._plot_items:
+            # Snap left edge to data start
+            snapped_min = x_min
+            if earliest < now:
+                margin = (now - earliest) * 0.05
+                snapped_min = max(x_min, earliest - margin)
             # 75% data / 25% forecast zone
-            forecast_s = self._window_s / 3.0
+            forecast_s = (now - snapped_min) / 3.0 if snapped_min < now else self._window_s / 3.0
             x_max = now + forecast_s
-            # Extend further if prediction curve goes beyond
             if self._pred_curve.isVisible():
                 pred_xs = self._pred_curve.getData()[0]
                 if pred_xs is not None and len(pred_xs) > 0:
                     x_max = max(x_max, float(pred_xs[-1]))
-            self._plot.getPlotItem().setXRange(x_min, x_max, padding=0)
+            self._plot.getPlotItem().setXRange(snapped_min, x_max, padding=0)
 
         # Pressure line (X range synced via setXLink)
         if self._pressure_buffer:

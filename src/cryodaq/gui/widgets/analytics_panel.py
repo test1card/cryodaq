@@ -456,14 +456,19 @@ class AnalyticsPanel(QWidget):
         # Показать R_thermal
         self._r_line.setVisible(True)
 
+        from cryodaq.gui.widgets.common import snap_x_range
+
         now = time.time()
         x_min = now - _R_THERMAL_WINDOW_S
         buf = self._r_thermal_buf
+        earliest = now
         if buf:
             xs = [t for t, _ in buf if t >= x_min]
             ys = [v for t, v in buf if t >= x_min]
             self._r_line.setData(xs, ys)
-            pi.setXRange(x_min, now, padding=0)
+            if xs:
+                earliest = xs[0]
+            snap_x_range(pi, now, _R_THERMAL_WINDOW_S, earliest)
 
     def _refresh_cooldown_plot(self) -> None:
         """Режим cooldown: живая T_cold + прогноз + CI полоса."""

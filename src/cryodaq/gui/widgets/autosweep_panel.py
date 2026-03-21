@@ -495,9 +495,12 @@ class AutoSweepPanel(QWidget):
 
     @Slot()
     def _tick(self) -> None:
+        from cryodaq.gui.widgets.common import snap_x_range
+
         # Update live plot
         now = time.time()
         x_min = now - _WINDOW_S
+        earliest = now
         for ch, item in self._plot_items.items():
             buf = self._buffers.get(ch)
             if not buf:
@@ -506,8 +509,10 @@ class AutoSweepPanel(QWidget):
             xs = [t for t, _ in buf if t >= x_min]
             ys = [v for t, v in buf if t >= x_min]
             item.setData(xs, ys)
+            if xs:
+                earliest = min(earliest, xs[0])
         if self._plot_items:
-            self._live_plot.getPlotItem().setXRange(x_min, now, padding=0)
+            snap_x_range(self._live_plot.getPlotItem(), now, _WINDOW_S, earliest)
 
         if not self._running or self._paused:
             return

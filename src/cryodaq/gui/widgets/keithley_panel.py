@@ -396,8 +396,11 @@ class _SmuPanel(QFrame):
         self._value_labels[suffix].setText(f"{reading.value:.6g} {unit}")
 
     def refresh(self) -> None:
+        from cryodaq.gui.widgets.common import snap_x_range
+
         now = time.time()
         x_min = now - self._window_s
+        earliest = now
         for key, item in self._plots.items():
             buffer = self._buffers[key]
             if not buffer:
@@ -406,7 +409,11 @@ class _SmuPanel(QFrame):
             xs = [ts for ts, _ in buffer if ts >= x_min]
             ys = [value for ts, value in buffer if ts >= x_min]
             item.setData(xs, ys)
-            self._plot_widgets[key].getPlotItem().setXRange(x_min, now, padding=0)
+            if xs:
+                earliest = min(earliest, xs[0])
+        # All sub-plots share the same X range for alignment
+        for key in self._plot_widgets:
+            snap_x_range(self._plot_widgets[key].getPlotItem(), now, self._window_s, earliest)
 
 
 class KeithleyPanel(QWidget):

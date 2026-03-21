@@ -333,8 +333,11 @@ class TemperaturePanel(QWidget):
     @Slot()
     def _refresh_plot(self) -> None:
         """Обновить данные всех видимых линий на графике (вызывается по таймеру)."""
+        from cryodaq.gui.widgets.common import snap_x_range
+
         now = time.time()
         x_min = now - _DEFAULT_WINDOW_S
+        earliest = now
 
         any_visible = False
         for channel_id, item in self._plot_items.items():
@@ -346,7 +349,6 @@ class TemperaturePanel(QWidget):
                 item.setData([], [])
                 continue
 
-            # Фильтруем по окну отображения
             xs: list[float] = []
             ys: list[float] = []
             for ts, val in buf:
@@ -355,10 +357,11 @@ class TemperaturePanel(QWidget):
                     ys.append(val)
 
             item.setData(xs, ys)
+            if xs:
+                earliest = min(earliest, xs[0])
 
         if any_visible:
-            plot_item = self._plot_widget.getPlotItem()
-            plot_item.setXRange(x_min, now, padding=0)
+            snap_x_range(self._plot_widget.getPlotItem(), now, _DEFAULT_WINDOW_S, earliest)
 
     # ------------------------------------------------------------------
     # Вспомогательные методы

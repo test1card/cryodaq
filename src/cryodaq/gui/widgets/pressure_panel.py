@@ -161,8 +161,11 @@ class PressurePanel(QWidget):
 
     @Slot()
     def _refresh(self) -> None:
+        from cryodaq.gui.widgets.common import snap_x_range
+
         now = time.time()
         x_min = now - _WINDOW_S
+        earliest = now
         for ch, item in self._plot_items.items():
             buf = self._buffers.get(ch)
             if not buf:
@@ -171,5 +174,7 @@ class PressurePanel(QWidget):
             xs = [t for t, _ in buf if t >= x_min]
             ys = [v for t, v in buf if t >= x_min]
             item.setData(xs, ys)
+            if xs:
+                earliest = min(earliest, xs[0])
         if self._plot_items:
-            self._plot.getPlotItem().setXRange(x_min, now, padding=0)
+            snap_x_range(self._plot.getPlotItem(), now, _WINDOW_S, earliest)
