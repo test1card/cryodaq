@@ -412,6 +412,7 @@ class TempCardGrid(QWidget):
     Invisible channels render as grey placeholders.
     """
 
+    card_toggled = Signal(str)  # forwarded from individual cards
     _COLS = 8
 
     def __init__(self, channel_manager: ChannelManager, parent: QWidget | None = None) -> None:
@@ -459,6 +460,7 @@ class TempCardGrid(QWidget):
             if visible:
                 display = self._channel_mgr.get_display_name(ch_id)
                 card = CompactTempCard(ch_id, display)
+                card.toggled.connect(self.card_toggled.emit)
                 self._cards[ch_id] = card
                 self._grid.addWidget(card, row, col)
             else:
@@ -1019,9 +1021,8 @@ class OverviewPanel(QWidget):
 
         root.addLayout(cards_row)
 
-        # Wire card toggle signals
-        for card in self._card_grid.get_cards().values():
-            card.toggled.connect(self._on_card_toggled)
+        # Wire card toggle signal (grid-level — survives rebuild)
+        self._card_grid.card_toggled.connect(self._on_card_toggled)
 
         # ============ 3. BUTTON BAR (full width) ============
         btn_bar = QHBoxLayout()
@@ -1149,6 +1150,11 @@ class OverviewPanel(QWidget):
         self._pressure_plot_item = pp.plot([], [], pen=pen)
         self._pressure_plot_item.setDownsampling(auto=True, method="peak")
         self._pressure_plot_item.setClipToView(True)
+
+        # Sync Y-axis widths between temp and pressure plots
+        _AXIS_WIDTH = 60
+        self._plot.getPlotItem().getAxis("left").setWidth(_AXIS_WIDTH)
+        self._pressure_plot.getPlotItem().getAxis("left").setWidth(_AXIS_WIDTH)
 
         # --- Cooldown prediction overlay on temperature plot ---
         self._pred_curve = self._plot.plot(
@@ -1380,6 +1386,8 @@ class OverviewPanel(QWidget):
 
     def _set_window(self, seconds: int) -> None:
         self._window_s = float(seconds)
+        hours = max(1, seconds // 3600)
+        self._load_history(hours=hours)
 
     @Slot()
     def _set_window_all(self) -> None:

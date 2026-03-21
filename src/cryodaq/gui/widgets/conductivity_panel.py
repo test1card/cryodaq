@@ -118,6 +118,7 @@ class ConductivityPanel(QWidget):
         self._auto_results: list[dict] = []
 
         self._all_channels = _get_temperature_channels()
+        get_channel_manager().on_change(self._on_channels_changed)
 
         # Flight recorder
         self._flight_log = None
@@ -407,6 +408,13 @@ class ConductivityPanel(QWidget):
 
     def _on_power_changed(self, text: str) -> None:
         self._power_channel = text
+
+    def _on_channels_changed(self) -> None:
+        """Refresh channel list when ChannelManager changes."""
+        new_channels = _get_temperature_channels()
+        if new_channels != self._all_channels:
+            self._all_channels = new_channels
+            logger.info("ConductivityPanel: channel list updated (%d channels)", len(new_channels))
 
     # ------------------------------------------------------------------
     # Data input
