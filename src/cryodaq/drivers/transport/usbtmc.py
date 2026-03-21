@@ -51,41 +51,43 @@ class USBTMCTransport:
             VISA-строка ресурса, например
             ``"USB0::0x05E6::0x2604::SERIALNUM::INSTR"``.
         """
-        self._resource_str = resource_str
+        async with self._lock:
+            self._resource_str = resource_str
 
-        if self.mock:
-            log.info("USBTMC [mock]: имитация открытия ресурса %s", resource_str)
-            return
+            if self.mock:
+                log.info("USBTMC [mock]: имитация открытия ресурса %s", resource_str)
+                return
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._blocking_open, resource_str)
-            log.info("USBTMC: ресурс %s успешно открыт", resource_str)
-        except Exception as exc:
-            log.error("USBTMC: ошибка открытия ресурса %s — %s", resource_str, exc)
-            raise
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._blocking_open, resource_str)
+                log.info("USBTMC: ресурс %s успешно открыт", resource_str)
+            except Exception as exc:
+                log.error("USBTMC: ошибка открытия ресурса %s — %s", resource_str, exc)
+                raise
 
     async def close(self) -> None:
         """Закрыть соединение с ресурсом (идемпотентно)."""
-        if self.mock:
-            log.info("USBTMC [mock]: имитация закрытия ресурса %s", self._resource_str)
-            return
+        async with self._lock:
+            if self.mock:
+                log.info("USBTMC [mock]: имитация закрытия ресурса %s", self._resource_str)
+                return
 
-        if self._resource is None:
-            return
+            if self._resource is None:
+                return
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._blocking_close)
-            log.info("USBTMC: ресурс %s закрыт", self._resource_str)
-        except Exception as exc:
-            log.warning(
-                "USBTMC: ошибка при закрытии ресурса %s — %s",
-                self._resource_str,
-                exc,
-            )
-        finally:
-            self._resource = None
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._blocking_close)
+                log.info("USBTMC: ресурс %s закрыт", self._resource_str)
+            except Exception as exc:
+                log.warning(
+                    "USBTMC: ошибка при закрытии ресурса %s — %s",
+                    self._resource_str,
+                    exc,
+                )
+            finally:
+                self._resource = None
 
     async def write(self, cmd: str) -> None:
         """Отправить TSP-команду прибору без ожидания ответа.

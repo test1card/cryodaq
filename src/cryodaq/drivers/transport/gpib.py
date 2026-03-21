@@ -130,7 +130,8 @@ class GPIBTransport:
         cmd:
             SCPI query, e.g. ``"KRDG?"``.
         timeout_ms:
-            Unused (kept for API compatibility). Timeout set at connect time.
+            Per-query timeout override in milliseconds. If ``None``,
+            uses the default timeout set at connect time.
 
         Returns
         -------
@@ -144,7 +145,7 @@ class GPIBTransport:
 
         loop = asyncio.get_running_loop()
         response: str = await loop.run_in_executor(
-            None, self._blocking_query, cmd
+            None, self._blocking_query, cmd, timeout_ms
         )
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
@@ -174,11 +175,22 @@ class GPIBTransport:
             raise
         self._resource = res
 
-    def _blocking_query(self, cmd: str) -> str:
+    def _blocking_query(self, cmd: str, timeout_ms: int | None = None) -> str:
         """Write → sleep(100ms) → read. LabVIEW-style."""
-        self._resource.write(cmd)
-        time.sleep(_WRITE_READ_DELAY_S)
-        return self._resource.read().strip()
+        res = self._resource
+        if res is None:
+            raise RuntimeError("GPIB resource not connected")
+        old_timeout = None
+        if timeout_ms is not None and timeout_ms != self._timeout_ms:
+            old_timeout = res.timeout
+            res.timeout = timeout_ms
+        try:
+            res.write(cmd)
+            time.sleep(_WRITE_READ_DELAY_S)
+            return res.read().strip()
+        finally:
+            if old_timeout is not None:
+                res.timeout = old_timeout
 
     # ------------------------------------------------------------------
     # Mock
