@@ -75,6 +75,27 @@ def _is_port_busy(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _ping_engine() -> bool:
+    """Check if a CryoDAQ engine is actually running on the command port."""
+    try:
+        import json
+        import socket
+        import zmq
+        ctx = zmq.Context()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.RCVTIMEO, 2000)
+        sock.setsockopt(zmq.SNDTIMEO, 2000)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://127.0.0.1:{_ZMQ_PORT + 1}")
+        sock.send_string(json.dumps({"cmd": "safety_status"}))
+        reply = json.loads(sock.recv_string())
+        sock.close()
+        ctx.term()
+        return reply.get("ok", False)
+    except Exception:
+        return False
+
+
 class LauncherWindow(QMainWindow):
     """Главное окно лаунчера — встраивает MainWindow и управляет engine."""
 
@@ -152,11 +173,14 @@ class LauncherWindow(QMainWindow):
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
         if _is_port_busy(_ZMQ_PORT):
-            logger.info("Engine уже запущен (порт %d занят) — подключаемся", _ZMQ_PORT)
-            self._engine_external = True
-            return
-            # Port busy but no response — proceed to start new engine
-            # (old process may be in TIME_WAIT or zombie state)
+            if _ping_engine():
+                logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
+                self._engine_external = True
+                return
+            logger.warning(
+                "Порт %d занят, но CryoDAQ engine не отвечает — запускаем новый",
+                _ZMQ_PORT,
+            )
 
         logger.info("Запуск engine как подпроцесса...")
         python = sys.executable

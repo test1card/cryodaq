@@ -65,6 +65,7 @@ Source OFF is the default. Running requires continuous proof of health.
 SafetyBroker (dedicated, overflow=FAULT)
   -> SafetyManager
      States: SAFE_OFF -> READY -> RUN_PERMITTED -> RUNNING -> FAULT_LATCHED
+     Note: request_run() can shortcut SAFE_OFF -> RUNNING when all preconditions met
      Fail-on-silence: stale data -> FAULT + emergency_off
      Rate limit: dT/dt > 5 K/min -> FAULT
      Recovery: acknowledge + precondition re-check + cooldown

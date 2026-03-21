@@ -297,6 +297,19 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
     n = len(curves)
     p_grid = np.linspace(0, 1, N_PROGRESS_GRID)
 
+    if n == 0:
+        empty = np.full(N_PROGRESS_GRID, np.nan)
+        return EnsembleModel(
+            curves=[], p_grid=p_grid,
+            t_matrix=np.empty((0, N_PROGRESS_GRID)),
+            Tc_matrix=np.empty((0, N_PROGRESS_GRID)),
+            Tw_matrix=np.empty((0, N_PROGRESS_GRID)),
+            t_mean=empty, t_std=empty,
+            Tc_mean=empty, Tc_std=empty,
+            Tw_mean=empty, Tw_std=empty,
+            n_curves=0, duration_mean=0.0, duration_std=0.0,
+        )
+
     t_mat = np.full((n, N_PROGRESS_GRID), np.nan)
     Tc_mat = np.full((n, N_PROGRESS_GRID), np.nan)
     Tw_mat = np.full((n, N_PROGRESS_GRID), np.nan)

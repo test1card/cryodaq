@@ -101,7 +101,15 @@ class PhaseDetector(AnalyticsPlugin):
             if r.status != ChannelStatus.OK:
                 continue
             if r.channel == self._temp_channel:
-                self._temp_buf.append((r.timestamp.timestamp(), r.value))
+                ts = r.timestamp.timestamp()
+                # Auto-reset on large time gap (engine restart, GPIB disconnect)
+                if self._temp_buf:
+                    gap = ts - self._temp_buf[-1][0]
+                    if gap > 300:
+                        _log.info("PhaseDetector: auto-reset after %.0fs gap", gap)
+                        self.reset()
+                        return []
+                self._temp_buf.append((ts, r.value))
             elif self._pressure_channel and r.channel == self._pressure_channel:
                 if r.value > 0:
                     self._pres_buf.append((r.timestamp.timestamp(), math.log10(r.value)))

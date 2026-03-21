@@ -45,6 +45,8 @@ class LakeShore218S(InstrumentDriver):
         self._srdg_batch_retry_interval_s: float = 60.0
         self._krdg_last_batch_retry: float = 0.0
         self._srdg_last_batch_retry: float = 0.0
+        self._last_status_check: float = 0.0
+        self._last_status_result: dict[int, int] = {}
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
@@ -90,12 +92,31 @@ class LakeShore218S(InstrumentDriver):
 
         runtime_policies = self._runtime_channel_policies()
         if not runtime_policies:
-            return await self._read_krdg_channels()
+            readings = await self._read_krdg_channels()
+        else:
+            temperature_readings = await self._read_krdg_channels()
+            needs_curve = any(policy.get("reading_mode") == "curve" for policy in runtime_policies.values())
+            raw_readings = await self.read_srdg_channels() if needs_curve else []
+            readings = self._merge_runtime_readings(temperature_readings, raw_readings, runtime_policies)
 
-        temperature_readings = await self._read_krdg_channels()
-        needs_curve = any(policy.get("reading_mode") == "curve" for policy in runtime_policies.values())
-        raw_readings = await self.read_srdg_channels() if needs_curve else []
-        return self._merge_runtime_readings(temperature_readings, raw_readings, runtime_policies)
+        # Periodic RDGST? status check (every 60s)
+        now = _time.monotonic()
+        if not self.mock and now - self._last_status_check > 60.0:
+            self._last_status_check = now
+            try:
+                self._last_status_result = await self.read_status()
+            except Exception as exc:
+                log.debug("%s: RDGST? periodic check failed: %s", self.name, exc)
+        # Attach status bits as metadata
+        if self._last_status_result:
+            for r in readings:
+                ch_num = (r.metadata or {}).get("raw_channel")
+                if ch_num is not None and ch_num in self._last_status_result:
+                    if r.metadata is None:
+                        r.metadata = {}
+                    r.metadata["sensor_status"] = self._last_status_result[ch_num]
+
+        return readings
 
     async def _read_krdg_channels(self) -> list[Reading]:
         if self.mock:
