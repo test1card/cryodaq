@@ -1492,8 +1492,29 @@ async def _run_engine(*, mock: bool = False) -> None:
 _LOCK_FILE = get_data_dir() / ".engine.lock"
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID exists."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def _acquire_engine_lock() -> int:
-    """Acquire exclusive engine lock via flock/msvcrt. Returns fd."""
+    """Acquire exclusive engine lock via flock/msvcrt. Returns fd.
+
+    If lock is held by a dead process, auto-cleans and retries.
+    Shows helpful error with PID and kill command if lock is live.
+    """
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
     try:
@@ -1504,13 +1525,71 @@ def _acquire_engine_lock() -> int:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (IOError, OSError):
+        # Lock held — read PID for diagnostics
+        pid = None
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            pid = int(os.read(fd, 64).decode().strip())
+        except (ValueError, OSError):
+            pass
         os.close(fd)
-        logger.error("Another CryoDAQ engine is already running (lock: %s)", _LOCK_FILE)
-        raise SystemExit(1)
+
+        if pid and _is_pid_alive(pid):
+            logger.error(
+                "CryoDAQ engine уже запущен (PID %d, lock: %s).\n"
+                "  Для принудительного запуска: cryodaq-engine --force\n"
+                "  Windows: taskkill /PID %d /F\n"
+                "  Linux:   kill %d",
+                pid, _LOCK_FILE, pid, pid,
+            )
+            raise SystemExit(1)
+        else:
+            logger.warning(
+                "Stale lock (PID %s мёртв, lock: %s) — удаляю и продолжаю",
+                pid or "?", _LOCK_FILE,
+            )
+            try:
+                _LOCK_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return _acquire_engine_lock()  # retry
+
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, f"{os.getpid()}\n".encode())
     return fd
+
+
+def _force_kill_existing() -> None:
+    """Force-kill any running engine and remove lock."""
+    if not _LOCK_FILE.exists():
+        return
+    try:
+        pid = int(_LOCK_FILE.read_text().strip())
+    except (ValueError, OSError):
+        _LOCK_FILE.unlink(missing_ok=True)
+        return
+    if _is_pid_alive(pid):
+        logger.warning("Принудительная остановка engine (PID %d)...", pid)
+        try:
+            if sys.platform == "win32":
+                import subprocess
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               capture_output=True, timeout=5)
+            else:
+                os.kill(pid, 9)  # SIGKILL
+        except Exception as exc:
+            logger.error("Не удалось завершить PID %d: %s", pid, exc)
+            raise SystemExit(1)
+        for _ in range(20):
+            time.sleep(0.25)
+            if not _is_pid_alive(pid):
+                break
+        else:
+            logger.error("PID %d не завершился после 5с", pid)
+            raise SystemExit(1)
+    _LOCK_FILE.unlink(missing_ok=True)
+    logger.info("Старый engine остановлен, lock очищен")
 
 
 def _release_engine_lock(fd: int) -> None:
@@ -1530,18 +1609,28 @@ def _release_engine_lock(fd: int) -> None:
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
+    import argparse
+    parser = argparse.ArgumentParser(description="CryoDAQ Engine")
+    parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
+    parser.add_argument("--force", action="store_true",
+                        help="Kill existing engine and take over")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if args.force:
+        _force_kill_existing()
+
+    mock = args.mock or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
+
     lock_fd = _acquire_engine_lock()
     try:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-
-        mock = "--mock" in sys.argv or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
         if mock:
             logger.info("Режим MOCK: реальные приборы не используются")
-
         try:
             asyncio.run(_run_engine(mock=mock))
         except KeyboardInterrupt:

@@ -117,6 +117,8 @@ class LauncherWindow(QMainWindow):
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
+        self._last_safety_state: str | None = None
+        self._last_alarm_count: int = 0
 
         self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
         self.setMinimumSize(1360, 860)
@@ -528,11 +530,27 @@ class LauncherWindow(QMainWindow):
                         3000,
                     )
 
-        # Tray icon color + tooltip
+        # Poll safety state (non-blocking, quick)
+        if alive and self._bridge.is_alive():
+            try:
+                safety_result = self._bridge.send_command({"cmd": "safety_status"})
+                if safety_result.get("ok"):
+                    self._last_safety_state = safety_result.get("state")
+            except Exception:
+                pass
+
+        # Tray icon color + tooltip — reflects engine safety state
         data_flowing = (time.monotonic() - self._last_reading_time) < 5.0
+        safety = self._last_safety_state or ""
         if not alive:
             self._tray.setIcon(self._tray_icon_red)
             self._tray.setToolTip("CryoDAQ — engine остановлен")
+        elif safety in ("fault_latched", "fault"):
+            self._tray.setIcon(self._tray_icon_red)
+            self._tray.setToolTip(f"CryoDAQ — АВАРИЯ ({safety})")
+        elif self._last_alarm_count > 0:
+            self._tray.setIcon(self._tray_icon_yellow)
+            self._tray.setToolTip(f"CryoDAQ — {self._last_alarm_count} алармов")
         elif not data_flowing:
             self._tray.setIcon(self._tray_icon_yellow)
             self._tray.setToolTip("CryoDAQ — ожидание данных")

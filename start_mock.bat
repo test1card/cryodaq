@@ -8,3 +8,4 @@ echo.
 set CRYODAQ_MOCK=1
 echo Запуск engine (mock) + GUI...
 python -m cryodaq.launcher
+pause
