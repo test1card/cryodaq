@@ -35,6 +35,9 @@ web = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
 ]
+archive = [
+    "pyarrow>=15.0",
+]
 
 [project.scripts]
 cryodaq-engine = "cryodaq.engine:main"

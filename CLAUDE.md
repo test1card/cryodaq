@@ -19,6 +19,7 @@ Python 3.12+, asyncio, PySide6. Current package metadata: `0.13.0`.
 
 ```bash
 pip install -e ".[dev,web]"    # Install runtime, dev, and optional web dependencies
+pip install -e ".[dev,web,archive]"  # + Parquet archive support (pyarrow)
 cryodaq                        # Operator launcher
 cryodaq-engine                 # Run engine headless (real instruments)
 cryodaq-engine --mock          # Run engine with simulated data
@@ -149,6 +150,11 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/widgets/preflight_dialog.py` — предполётная проверка перед экспериментом
 - `src/cryodaq/gui/widgets/instrument_status.py` — вкладка приборов + адаптивный liveness
 - `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
+
+**Storage**
+
+- `src/cryodaq/storage/sqlite_writer.py` — WAL-mode SQLite, daily rotation, persistence-first
+- `src/cryodaq/storage/parquet_archive.py` — Parquet export/read для архива экспериментов (pyarrow optional)
 
 **Reporting**
 

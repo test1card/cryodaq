@@ -1202,6 +1202,24 @@ class ExperimentManager:
             }
         )
 
+        # Parquet archive (same readings, no re-scan from SQLite)
+        from cryodaq.storage.parquet_archive import write_experiment_parquet
+        parquet_path = tables_dir / "readings.parquet"
+        parquet_result = write_experiment_parquet(readings, parquet_path)
+        if parquet_result is not None:
+            artifact_index.append(
+                self._artifact_entry(
+                    category="table",
+                    role="experiment_data",
+                    path=parquet_path,
+                    summary={
+                        "row_count": len(readings),
+                        "format": "parquet",
+                        "channels": sorted({r["channel"] for r in readings}),
+                    },
+                )
+            )
+
         setpoint_values_path = tables_dir / "setpoint_values.csv"
         setpoint_rows = self._write_setpoint_values_table(setpoint_values_path, normalized_records)
         artifact_index.append(
