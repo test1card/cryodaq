@@ -371,6 +371,10 @@ class ExperimentManager:
     ) -> list[ArchiveEntry]:
         start_dt = _parse_time(start_date)
         end_dt = _parse_time(end_date)
+        # Date-only input (00:00:00) → make inclusive: include entire selected day
+        if end_dt and end_dt.hour == 0 and end_dt.minute == 0 and end_dt.second == 0:
+            from datetime import timedelta
+            end_dt = end_dt + timedelta(days=1)
         entries: list[ArchiveEntry] = []
         if not self._artifacts_dir.exists():
             return entries

@@ -36,7 +36,7 @@ from cryodaq.gui.zmq_client import send_command
 
 
 class ArchivePanel(QWidget):
-    _COLUMNS = ["Начало", "Эксперимент", "Шаблон", "Оператор", "Образец", "Статус", "Отчёт", "Данные"]
+    _COLUMNS = ["Начало", "Конец", "Эксперимент", "Шаблон", "Оператор", "Образец", "Статус", "Отчёт", "Данные"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -248,6 +248,7 @@ class ArchivePanel(QWidget):
             )
             values = [
                 self._format_datetime(entry.get("start_time")),
+                self._format_datetime(entry.get("end_time")) or "—",
                 str(entry.get("title", "")),
                 str(entry.get("template_name", entry.get("template_id", ""))),
                 str(entry.get("operator", "")),
@@ -261,7 +262,7 @@ class ArchivePanel(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, entry)
                 self._table.setItem(row, col, item)
             # Color "Данные" column
-            data_item = self._table.item(row, 7)
+            data_item = self._table.item(row, 8)
             if data_item:
                 from PySide6.QtGui import QColor
                 if data_item.text() == "✓":
