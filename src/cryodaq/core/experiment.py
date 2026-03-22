@@ -962,6 +962,17 @@ class ExperimentManager:
     def _db_path_for_day(self, day: datetime) -> Path:
         return self._data_dir / f"data_{day.date().isoformat()}.db"
 
+    def _all_db_names_for_range(self, start: datetime, end: datetime) -> set[str]:
+        """Return all daily DB filenames that overlap [start, end]."""
+        from datetime import timedelta
+        names: set[str] = set()
+        day = start.date()
+        end_day = end.date()
+        while day <= end_day:
+            names.add(f"data_{day.isoformat()}.db")
+            day += timedelta(days=1)
+        return names
+
     def _db_path_for_today(self) -> Path:
         return self._db_path_for_day(datetime.now(timezone.utc))
 
@@ -1062,12 +1073,9 @@ class ExperimentManager:
             "data_range": {
                 "start_time": info.start_time.isoformat(),
                 "end_time": info.end_time.isoformat() if info.end_time else None,
-                "daily_db_files": sorted(
-                    {
-                        self._db_path_for_day(info.start_time).name,
-                        self._db_path_for_day(info.end_time or info.start_time).name,
-                    }
-                ),
+                "daily_db_files": sorted(self._all_db_names_for_range(
+                    info.start_time, info.end_time or info.start_time,
+                )),
             },
             "artifacts": {
                 "root_dir": str(artifact_dir),

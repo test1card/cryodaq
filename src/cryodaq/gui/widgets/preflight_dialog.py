@@ -118,7 +118,7 @@ class PreFlightDialog(QDialog):
                     PreFlightCheck("Алармы", "warning", alarm_result.get("error", "Статус недоступен"))
                 )
         except Exception:
-            pass  # alarm check is non-critical
+            self._checks.append(PreFlightCheck("Алармы", "warning", "Проверка недоступна"))
 
         # 4. Sensor diagnostics
         try:
@@ -128,7 +128,7 @@ class PreFlightDialog(QDialog):
                 critical = summary.get("critical", 0)
                 warning = summary.get("warning", 0)
                 if critical > 0:
-                    self._checks.append(PreFlightCheck("Датчики", "warning", f"{critical} критичных"))
+                    self._checks.append(PreFlightCheck("Датчики", "error", f"{critical} критичных"))
                 elif warning > 0:
                     self._checks.append(PreFlightCheck("Датчики", "warning", f"{warning} с предупреждениями"))
                 else:

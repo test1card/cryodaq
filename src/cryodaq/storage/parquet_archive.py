@@ -81,7 +81,7 @@ def read_experiment_parquet(
 
     Args:
         parquet_path: path to readings.parquet file.
-        channels: optional channel filter (predicate pushdown).
+        channels: optional channel filter (applied in Python after read).
 
     Returns:
         Dict mapping channel name to list of (timestamp_epoch, value) tuples.
@@ -100,9 +100,8 @@ def read_experiment_parquet(
     try:
         table = pq.read_table(str(parquet_path))
 
-        # Convert timestamp column to epoch float directly via Arrow compute
+        # Convert timestamp column to epoch float via int64 cast
         # (avoids Python datetime timezone lookup which fails without tzdata)
-        import pyarrow.compute as pc
         ts_col = table.column("timestamp")
         # Cast to int64 microseconds since epoch, then divide to get seconds
         ts_us = ts_col.cast(pa.int64())

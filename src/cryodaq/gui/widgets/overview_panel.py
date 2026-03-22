@@ -1229,14 +1229,19 @@ class OverviewPanel(QWidget):
             self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
             self._channel_visible[ch_id] = True
 
-        # Update legend names for renamed channels
+        # Update legend names for renamed channels (targeted, not global clear)
         legend = self._plot.getPlotItem().legend
         if legend is not None:
-            legend.clear()
             for ch_id, item in self._plot_items.items():
                 new_name = self._channel_mgr.get_display_name(ch_id)
-                item.opts["name"] = new_name
-                legend.addItem(item, new_name)
+                old_name = item.opts.get("name", "")
+                if old_name != new_name:
+                    item.opts["name"] = new_name
+                    try:
+                        legend.removeItem(item)
+                    except Exception:
+                        pass
+                    legend.addItem(item, new_name)
 
     # ------------------------------------------------------------------
     # Публичный интерфейс
@@ -1262,6 +1267,19 @@ class OverviewPanel(QWidget):
             card.set_active(visible)
 
     # ------------------------------------------------------------------
+    # Channel resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_temp_id(self, channel: str) -> str | None:
+        """Resolve reading channel to canonical buffer key. None if unknown."""
+        if channel in self._buffers:
+            return channel
+        short = channel.split(" ")[0] if " " in channel else channel
+        if short in self._buffers:
+            return short
+        return None
+
+    # ------------------------------------------------------------------
     # Внутренние слоты
     # ------------------------------------------------------------------
 
@@ -1272,19 +1290,16 @@ class OverviewPanel(QWidget):
 
         # Температуры → карточки + буфер графика
         if channel.startswith("\u0422") and reading.unit == "K":
-            # Обновить карточку
-            cards = self._card_grid.get_cards()
-            # channel_id в карточках — короткий (Т1), в reading — может быть полный
-            short_id = channel.split(" ")[0] if " " in channel else channel
-            card = cards.get(short_id)
-            if card is not None:
-                card.update_reading(reading)
-
-            # Буфер графика
-            if short_id in self._buffers:
-                self._buffers[short_id].append(
-                    (reading.timestamp.timestamp(), reading.value)
-                )
+            ch_id = self._resolve_temp_id(channel)
+            if ch_id is not None:
+                cards = self._card_grid.get_cards()
+                card = cards.get(ch_id)
+                if card is not None:
+                    card.update_reading(reading)
+                if ch_id in self._buffers:
+                    self._buffers[ch_id].append(
+                        (reading.timestamp.timestamp(), reading.value)
+                    )
 
         # Давление → карточка + буфер графика
         if reading.unit == "mbar":
@@ -1505,10 +1520,10 @@ class OverviewPanel(QWidget):
         for channel, points in data.items():
             if not points:
                 continue
-            # Temperature channels — match by short_id (Т1, Т2, ...)
-            short_id = channel.split(" ")[0] if " " in channel else channel
-            if short_id in self._buffers:
-                buf = self._buffers[short_id]
+            # Temperature channels — resolve via canonical ID
+            ch_id = self._resolve_temp_id(channel)
+            if ch_id is not None and ch_id in self._buffers:
+                buf = self._buffers[ch_id]
                 # Only prepend points older than existing data
                 existing_min_ts = buf[0][0] if buf else float("inf")
                 new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
