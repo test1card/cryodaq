@@ -145,6 +145,9 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/widgets/sensor_diag_panel.py` — диагностика датчиков
 - `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
 - `src/cryodaq/gui/widgets/autosweep_panel.py` — DEPRECATED
+- `src/cryodaq/gui/widgets/channel_editor.py` — редактор каналов (видимость, имена)
+- `src/cryodaq/gui/widgets/preflight_dialog.py` — предполётная проверка перед экспериментом
+- `src/cryodaq/gui/widgets/instrument_status.py` — вкладка приборов + адаптивный liveness
 - `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
 
 **Reporting**
@@ -192,9 +195,11 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - Keithley disconnect must call emergency off first.
 - No blocking I/O on the engine event loop.
 - Operator-facing GUI text should remain in Russian.
+- No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
 
 ## Известные ограничения
 
 - Best-effort PDF generation по-прежнему зависит от внешнего `soffice` / `LibreOffice`; отсутствие этого инструмента является ограничением окружения, а не code regression.
 - `WindowsSelectorEventLoopPolicy` продолжает давать известные Python 3.14+ deprecation warnings.
+- Supported deployment: `pip install -e .` из корня репозитория. Wheel-install не self-contained — config/, plugins/, data/ находятся вне пакета. Используйте CRYODAQ_ROOT для нестандартных layout.
