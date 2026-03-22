@@ -189,8 +189,6 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(manag
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
-    assert (result.assets_dir / "cooldown_temperature.png").exists()
-    assert (result.assets_dir / "pressure.png").exists()
     text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
     assert "Алармы" in text
@@ -290,8 +288,6 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
 
     assert result.docx_path.exists()
     assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
-    assert (result.assets_dir / "cooldown_temperature.png").exists()
-    assert (result.assets_dir / "pressure.png").exists()
 
 
 def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:

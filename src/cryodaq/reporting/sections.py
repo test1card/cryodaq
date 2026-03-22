@@ -241,6 +241,57 @@ def _add_plot(document: Document, title: str, readings: list[HistoricalReading],
     run.font.size = Pt(12)
 
 
+def _add_multichannel_plot(document: Document, title: str, readings: list[HistoricalReading],
+                           output_path: Path, *, xlabel: str = "", ylabel: str = "") -> None:
+    """Plot multiple channels with legend (not one blob)."""
+    if not readings:
+        document.add_paragraph(f"{title}: данные отсутствуют.")
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    series: dict[str, list[tuple[Any, float]]] = {}
+    for r in readings:
+        series.setdefault(r.channel, []).append((r.timestamp, r.value))
+    plt.figure(figsize=(8, 4))
+    for channel, points in sorted(series.items()):
+        points.sort()
+        xs = [t for t, _ in points]
+        ys = [v for _, v in points]
+        label = channel.split(" ")[0] if " " in channel else channel
+        plt.plot(xs, ys, label=label, linewidth=0.8)
+    plt.title(title)
+    if xlabel:
+        plt.xlabel(xlabel)
+    if ylabel:
+        plt.ylabel(ylabel)
+    if len(series) <= 12:
+        plt.legend(fontsize=7, loc="best")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    document.add_picture(str(output_path), width=Mm(160))
+    cap = document.add_paragraph()
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.paragraph_format.first_line_indent = Cm(0)
+    cap.add_run(f"Рисунок {_next_figure()} — {title}").font.size = Pt(12)
+
+
+def _add_archived_or_multichannel(document: Document, dataset: ReportDataset,
+                                   artifact_role: str, title: str,
+                                   readings: list[HistoricalReading],
+                                   fallback_path: Path, **kwargs: Any) -> None:
+    """Use archived plot if available, otherwise generate multi-channel."""
+    archived = _existing_artifact(dataset, artifact_role, category="plot")
+    if archived:
+        document.add_picture(str(archived), width=Mm(160))
+        cap = document.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap.paragraph_format.first_line_indent = Cm(0)
+        cap.add_run(f"Рисунок {_next_figure()} — {title}").font.size = Pt(12)
+    else:
+        _add_multichannel_plot(document, title, readings, fallback_path, **kwargs)
+
+
 def _channel_display(raw: str) -> str:
     """Keithley_1/smua/power → SMU A: мощность."""
     if "/smua/" in raw:
@@ -455,8 +506,11 @@ def render_artifact_manifest_section(document: Document, dataset: ReportDataset,
 def render_cooldown_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Охлаждение", level=1)
     temp_readings = [item for item in dataset.readings if item.unit == "K"]
-    _add_plot(document, "Температура", temp_readings, assets_dir / "cooldown_temperature.png",
-              xlabel="Время", ylabel="Температура (К)")
+    _add_archived_or_multichannel(
+        document, dataset, "temperature_overview", "Температура каналов",
+        temp_readings, assets_dir / "cooldown_temperature.png",
+        xlabel="Время", ylabel="Температура (К)",
+    )
     if temp_readings:
         t_init = temp_readings[0].value
         t_final = temp_readings[-1].value
@@ -485,8 +539,11 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
 def render_thermal_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Тепловая нагрузка", level=1)
     power_readings = [item for item in dataset.readings if item.channel.endswith("/power")]
-    _add_plot(document, "Мощность Keithley", power_readings, assets_dir / "thermal_power.png",
-              xlabel="Время", ylabel="Мощность (Вт)")
+    _add_archived_or_multichannel(
+        document, dataset, "thermal_power", "Мощность Keithley",
+        power_readings, assets_dir / "thermal_power.png",
+        xlabel="Время", ylabel="Мощность (Вт)",
+    )
     if power_readings:
         by_channel: dict[str, list[float]] = defaultdict(list)
         for item in power_readings:
@@ -507,8 +564,11 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
     pressure = [
         item for item in dataset.readings if "pressure" in item.channel.lower() or item.unit.lower() in {"mbar", "pa"}
     ]
-    _add_plot(document, "Давление", pressure, assets_dir / "pressure.png",
-              xlabel="Время", ylabel="Давление (мбар)")
+    _add_archived_or_multichannel(
+        document, dataset, "pressure", "Давление",
+        pressure, assets_dir / "pressure.png",
+        xlabel="Время", ylabel="Давление (мбар)",
+    )
     if pressure:
         vals = [p.value for p in pressure if math.isfinite(p.value) and p.value > 0]
         if vals:

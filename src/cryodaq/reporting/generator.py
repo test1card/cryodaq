@@ -95,11 +95,17 @@ class ReportGenerator:
         from cryodaq.reporting.sections import _reset_counters
         _reset_counters()
 
+        # Only break before major sections, not after every one
+        _PAGE_BREAK_BEFORE = {
+            "cooldown_section", "thermal_section", "pressure_section",
+            "operator_log_section", "alarms_section", "config_section",
+            "operator_comments_section", "artifact_manifest_section",
+        }
         for index, section_name in enumerate(sections):
+            if index > 0 and section_name in _PAGE_BREAK_BEFORE:
+                document.add_page_break()
             renderer = SECTION_REGISTRY[section_name]
             renderer(document, dataset, assets_dir)
-            if index < len(sections) - 1:
-                document.add_page_break()
         return document
 
     @staticmethod
@@ -152,6 +158,18 @@ class ReportGenerator:
         ts.font.color.rgb = RGBColor(0, 0, 0)
         ts.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
         ts.paragraph_format.first_line_indent = Cm(0)
+
+        # Force black headings — clear theme color that overrides rgb
+        from docx.oxml.ns import qn as _qn
+        for sn in ("Heading 1", "Heading 2", "Title"):
+            rpr = document.styles[sn].element.find(_qn("w:rPr"))
+            if rpr is not None:
+                ce = rpr.find(_qn("w:color"))
+                if ce is not None:
+                    ce.set(_qn("w:val"), "000000")
+                    for attr in ("w:themeColor", "w:themeShade", "w:themeTint"):
+                        if _qn(attr) in ce.attrib:
+                            del ce.attrib[_qn(attr)]
 
         # List Bullet
         if "List Bullet" in document.styles:
