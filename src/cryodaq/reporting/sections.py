@@ -18,11 +18,38 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from docx.document import Document
-from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, Inches, Mm, Pt
 
 from cryodaq.reporting.data import HistoricalReading, ReportDataset
 
 SectionRenderer = Callable[[Document, ReportDataset, Path], None]
+
+# ---------------------------------------------------------------------------
+# ГОСТ counters
+# ---------------------------------------------------------------------------
+
+_figure_counter = 0
+_table_counter = 0
+
+
+def _reset_counters() -> None:
+    global _figure_counter, _table_counter
+    _figure_counter = 0
+    _table_counter = 0
+
+
+def _next_figure() -> int:
+    global _figure_counter
+    _figure_counter += 1
+    return _figure_counter
+
+
+def _next_table() -> int:
+    global _table_counter
+    _table_counter += 1
+    return _table_counter
+
 
 # ---------------------------------------------------------------------------
 # Global helpers
@@ -159,18 +186,31 @@ def _read_csv_preview(path: Path, *, limit: int = 6) -> tuple[list[str], list[li
 def _add_table_preview(document: Document, path: Path, *, title: str, limit: int = 6) -> None:
     header, rows, total = _read_csv_preview(path, limit=limit)
     shown = len(rows)
-    suffix = f" ({total:,} строк, показано {shown})" if total > shown else f" ({total:,} строк)"
-    document.add_paragraph(f"{title}{suffix}")
+    suffix = f", показано {shown}" if total > shown else ""
+    # ГОСТ: caption above table
+    num = _next_table()
+    cap = document.add_paragraph()
+    cap.paragraph_format.first_line_indent = Cm(0)
+    run = cap.add_run(f"Таблица {num} — {title} ({total:,} строк{suffix})")
+    run.font.size = Pt(12)
+    run.bold = True
     if not header:
         document.add_paragraph("Нет данных.")
         return
     table = document.add_table(rows=1 + len(rows), cols=len(header))
     table.style = "Table Grid"
     for index, value in enumerate(header):
-        table.cell(0, index).text = value
+        cell = table.cell(0, index)
+        cell.text = value
+        for r in cell.paragraphs[0].runs:
+            r.bold = True
+            r.font.size = Pt(12)
     for row_index, row in enumerate(rows, start=1):
         for col_index, value in enumerate(row):
-            table.cell(row_index, col_index).text = value
+            cell = table.cell(row_index, col_index)
+            cell.text = value
+            for r in cell.paragraphs[0].runs:
+                r.font.size = Pt(12)
 
 
 def _add_plot(document: Document, title: str, readings: list[HistoricalReading], output_path: Path,
@@ -192,7 +232,13 @@ def _add_plot(document: Document, title: str, readings: list[HistoricalReading],
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
-    document.add_picture(str(output_path), width=Inches(6.5))
+    document.add_picture(str(output_path), width=Mm(160))
+    # ГОСТ caption below figure, centered
+    cap = document.add_paragraph()
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.paragraph_format.first_line_indent = Cm(0)
+    run = cap.add_run(f"Рисунок {_next_figure()} — {title}")
+    run.font.size = Pt(12)
 
 
 def _channel_display(raw: str) -> str:
@@ -350,7 +396,11 @@ def render_conductivity_section(document: Document, dataset: ReportDataset, asse
     document.add_heading("Теплопроводность vs температура", level=1)
     archived_plot = _existing_artifact(dataset, "conductivity_vs_temperature", category="plot")
     if archived_plot is not None:
-        document.add_picture(str(archived_plot), width=Inches(6.2))
+        document.add_picture(str(archived_plot), width=Mm(160))
+        cap = document.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap.paragraph_format.first_line_indent = Cm(0)
+        cap.add_run(f"Рисунок {_next_figure()} — Теплопроводность vs температура").font.size = Pt(12)
         return
     path = _find_table_path(dataset, "conductivity_vs_temperature")
     if path is None:

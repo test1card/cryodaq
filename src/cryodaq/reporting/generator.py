@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, Mm, Pt, RGBColor
 
 from cryodaq.reporting.data import ReportDataExtractor
 from cryodaq.reporting.sections import SECTION_REGISTRY
@@ -29,6 +31,9 @@ class ReportGenerator:
         "run_parameters_section",
         "result_tables_section",
         "conductivity_section",
+        "cooldown_section",
+        "thermal_section",
+        "pressure_section",
         "artifact_manifest_section",
     )
     _EDITABLE_ONLY_SECTIONS = (
@@ -85,12 +90,90 @@ class ReportGenerator:
 
     def _build_document(self, dataset, assets_dir: Path, sections: tuple[str, ...]) -> Document:
         document = Document()
+        self._apply_gost_formatting(document)
+
+        from cryodaq.reporting.sections import _reset_counters
+        _reset_counters()
+
         for index, section_name in enumerate(sections):
             renderer = SECTION_REGISTRY[section_name]
             renderer(document, dataset, assets_dir)
             if index < len(sections) - 1:
                 document.add_page_break()
         return document
+
+    @staticmethod
+    def _apply_gost_formatting(document: Document) -> None:
+        """Apply ГОСТ Р 2.105-2019 page setup and styles."""
+        # Page setup: A4, margins
+        sec = document.sections[0]
+        sec.page_width = Mm(210)
+        sec.page_height = Mm(297)
+        sec.left_margin = Mm(30)
+        sec.right_margin = Mm(15)
+        sec.top_margin = Mm(20)
+        sec.bottom_margin = Mm(20)
+
+        # Normal style: Times New Roman 14pt, 1.5 spacing, first-line indent
+        style = document.styles["Normal"]
+        style.font.name = "Times New Roman"
+        style.font.size = Pt(14)
+        pf = style.paragraph_format
+        pf.space_after = Pt(0)
+        pf.space_before = Pt(0)
+        pf.line_spacing = 1.5
+        pf.first_line_indent = Cm(1.25)
+
+        # Heading 1: 16pt bold black
+        h1 = document.styles["Heading 1"]
+        h1.font.name = "Times New Roman"
+        h1.font.size = Pt(16)
+        h1.font.bold = True
+        h1.font.color.rgb = RGBColor(0, 0, 0)
+        h1.paragraph_format.space_before = Pt(24)
+        h1.paragraph_format.space_after = Pt(12)
+        h1.paragraph_format.first_line_indent = Cm(0)
+
+        # Heading 2: 14pt bold black
+        h2 = document.styles["Heading 2"]
+        h2.font.name = "Times New Roman"
+        h2.font.size = Pt(14)
+        h2.font.bold = True
+        h2.font.color.rgb = RGBColor(0, 0, 0)
+        h2.paragraph_format.space_before = Pt(18)
+        h2.paragraph_format.space_after = Pt(6)
+        h2.paragraph_format.first_line_indent = Cm(0)
+
+        # Title: 18pt bold centered
+        ts = document.styles["Title"]
+        ts.font.name = "Times New Roman"
+        ts.font.size = Pt(18)
+        ts.font.bold = True
+        ts.font.color.rgb = RGBColor(0, 0, 0)
+        ts.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        ts.paragraph_format.first_line_indent = Cm(0)
+
+        # List Bullet
+        if "List Bullet" in document.styles:
+            lb = document.styles["List Bullet"]
+            lb.font.name = "Times New Roman"
+            lb.font.size = Pt(14)
+            lb.paragraph_format.line_spacing = 1.5
+
+        # Footer with page number (center)
+        footer = sec.footer
+        footer.is_linked_to_previous = False
+        fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        from docx.oxml.ns import qn
+        run = fp.add_run()
+        run._element.append(run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"}))
+        run2 = fp.add_run()
+        instr = run2._element.makeelement(qn("w:instrText"), {qn("xml:space"): "preserve"})
+        instr.text = " PAGE "
+        run2._element.append(instr)
+        run3 = fp.add_run()
+        run3._element.append(run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"}))
 
     def _resolve_raw_sections(self, metadata: dict) -> tuple[str, ...]:
         template = metadata.get("template", {})
