@@ -1,11 +1,17 @@
+"""Report section renderers for CryoDAQ experiment reports.
+
+Each function has signature: (document: Document, dataset: ReportDataset, assets_dir: Path) -> None
+"""
+
 from __future__ import annotations
 
 import csv
-import json
+import math
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
-from typing import Callable
+from typing import Any, Callable
 
 import matplotlib
 
@@ -18,19 +24,96 @@ from cryodaq.reporting.data import HistoricalReading, ReportDataset
 
 SectionRenderer = Callable[[Document, ReportDataset, Path], None]
 
+# ---------------------------------------------------------------------------
+# Global helpers
+# ---------------------------------------------------------------------------
 
-def _status_label(raw: object) -> str:
+_MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+
+
+def _format_dt(raw: Any, *, time_only: bool = False) -> str:
+    """Format datetime as '22 марта 2026, 15:42' or '15:42:05'."""
+    if raw is None:
+        return "—"
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return "—"
+        try:
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            raw = datetime.fromisoformat(raw)
+        except ValueError:
+            return str(raw)
+    if not isinstance(raw, datetime):
+        return str(raw)
+    if time_only:
+        return raw.strftime("%H:%M:%S")
+    month = _MONTHS_RU.get(raw.month, str(raw.month))
+    return f"{raw.day} {month} {raw.year}, {raw.strftime('%H:%M')}"
+
+
+def _format_duration(start: Any, end: Any) -> str:
+    """Format duration as '3 мин 11 с', '2 ч 15 мин', etc."""
+    try:
+        if isinstance(start, str):
+            start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if isinstance(end, str):
+            end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            return "—"
+        delta = end - start
+        total_s = int(delta.total_seconds())
+    except (ValueError, TypeError):
+        return "—"
+    if total_s < 0:
+        return "—"
+    days, rem = divmod(total_s, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if mins:
+        parts.append(f"{mins} мин")
+    if secs or not parts:
+        parts.append(f"{secs} с")
+    return " ".join(parts)
+
+
+def _status_ru(raw: Any) -> str:
     value = str(raw or "").strip().upper()
     return {
         "RUNNING": "Выполняется",
         "COMPLETED": "Завершён",
         "ABORTED": "Прерван",
-    }.get(value, str(raw or ""))
+        "FINALIZED": "Завершён",
+    }.get(value, str(raw or "—"))
 
 
-def _display_value(raw: object, *, empty: str = "не указано") -> str:
+def _display_value(raw: Any, *, empty: str = "не указано") -> str:
     text = str(raw or "").strip()
     return text or empty
+
+
+def _add_kv_table(document: Document, rows: list[tuple[str, str]]) -> None:
+    """Add a clean 2-column key-value table."""
+    if not rows:
+        return
+    table = document.add_table(rows=len(rows), cols=2)
+    table.style = "Table Grid"
+    for i, (label, value) in enumerate(rows):
+        cell_l = table.cell(i, 0)
+        cell_l.text = label
+        for run in cell_l.paragraphs[0].runs:
+            run.bold = True
+        table.cell(i, 1).text = value
 
 
 def _existing_artifact(dataset: ReportDataset, role: str, *, category: str | None = None) -> Path | None:
@@ -55,24 +138,34 @@ def _find_table_path(dataset: ReportDataset, table_id: str) -> Path | None:
     return None
 
 
-def _read_csv_preview(path: Path, *, limit: int = 6) -> tuple[list[str], list[list[str]]]:
-    with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle)
-        rows = list(reader)
+def _read_csv_preview(path: Path, *, limit: int = 6) -> tuple[list[str], list[list[str]], int]:
+    """Returns (header, body_rows, total_row_count)."""
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            rows = list(reader)
+    except Exception:
+        with path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            rows = list(reader)
     if not rows:
-        return [], []
+        return [], [], 0
     header = [str(item) for item in rows[0]]
-    body = [[str(item) for item in row] for row in rows[1 : 1 + limit]]
-    return header, body
+    total = len(rows) - 1
+    body = [[str(item) for item in row] for row in rows[1: 1 + limit]]
+    return header, body, total
 
 
 def _add_table_preview(document: Document, path: Path, *, title: str, limit: int = 6) -> None:
-    document.add_paragraph(f"{title}: {path}")
-    header, rows = _read_csv_preview(path, limit=limit)
+    header, rows, total = _read_csv_preview(path, limit=limit)
+    shown = len(rows)
+    suffix = f" ({total:,} строк, показано {shown})" if total > shown else f" ({total:,} строк)"
+    document.add_paragraph(f"{title}{suffix}")
     if not header:
-        document.add_paragraph("Таблица пуста.")
+        document.add_paragraph("Нет данных.")
         return
     table = document.add_table(rows=1 + len(rows), cols=len(header))
+    table.style = "Table Grid"
     for index, value in enumerate(header):
         table.cell(0, index).text = value
     for row_index, row in enumerate(rows, start=1):
@@ -80,7 +173,8 @@ def _add_table_preview(document: Document, path: Path, *, title: str, limit: int
             table.cell(row_index, col_index).text = value
 
 
-def _add_plot(document: Document, title: str, readings: list[HistoricalReading], output_path: Path) -> None:
+def _add_plot(document: Document, title: str, readings: list[HistoricalReading], output_path: Path,
+              *, xlabel: str = "", ylabel: str = "") -> None:
     if not readings:
         document.add_paragraph(f"{title}: данные за интервал эксперимента отсутствуют.")
         return
@@ -90,55 +184,132 @@ def _add_plot(document: Document, title: str, readings: list[HistoricalReading],
     plt.figure(figsize=(7, 3))
     plt.plot(xs, ys)
     plt.title(title)
+    if xlabel:
+        plt.xlabel(xlabel)
+    if ylabel:
+        plt.ylabel(ylabel)
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_path)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
     document.add_picture(str(output_path), width=Inches(6.5))
+
+
+def _channel_display(raw: str) -> str:
+    """Keithley_1/smua/power → SMU A: мощность."""
+    if "/smua/" in raw:
+        suffix = raw.split("/")[-1]
+        labels = {"power": "мощность", "voltage": "напряжение", "current": "ток", "resistance": "сопротивление"}
+        return f"SMU A: {labels.get(suffix, suffix)}"
+    if "/smub/" in raw:
+        suffix = raw.split("/")[-1]
+        labels = {"power": "мощность", "voltage": "напряжение", "current": "ток", "resistance": "сопротивление"}
+        return f"SMU B: {labels.get(suffix, suffix)}"
+    return raw
+
+
+_ROLE_RU = {
+    "measured_values": "Измеренные величины (CSV)",
+    "experiment_data": "Данные эксперимента (Parquet)",
+    "setpoint_values": "Заданные величины (CSV)",
+    "run_results": "Результаты прогонов (CSV)",
+    "temperature_overview": "Температура: обзор",
+    "thermal_power": "Тепловая мощность",
+    "pressure": "Давление",
+    "summary_metadata": "Сводка эксперимента",
+    "conductivity_vs_temperature": "Теплопроводность vs температура",
+}
+
+_SOURCE_TAB_RU = {
+    "Keithley 2604B": "Источник мощности",
+    "keithley": "Источник мощности",
+    "conductivity": "Теплопроводность",
+    "autosweep": "Автоизмерение",
+}
+
+
+# ---------------------------------------------------------------------------
+# Section renderers
+# ---------------------------------------------------------------------------
 
 
 def render_title_page(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     experiment = dataset.metadata["experiment"]
     template = dataset.metadata["template"]
-    document.add_heading(str(experiment.get("title") or experiment.get("name") or "Отчёт по эксперименту"), 0)
-    document.add_paragraph(f"Идентификатор эксперимента: {experiment.get('experiment_id', '')}")
-    document.add_paragraph(f"Шаблон: {_display_value(template.get('name', template.get('id', '')))}")
-    document.add_paragraph(f"Оператор: {_display_value(experiment.get('operator'))}")
-    document.add_paragraph(f"Образец: {_display_value(experiment.get('sample'))}")
-    document.add_paragraph(f"Статус: {_status_label(experiment.get('status', ''))}")
-    document.add_paragraph(f"Начало: {_display_value(experiment.get('start_time'))}")
-    document.add_paragraph(f"Завершение: {experiment.get('end_time', '') or 'выполняется'}")
+    template_name = template.get("name", template.get("id", "Эксперимент"))
+    document.add_heading(f"Отчёт: {template_name}", 0)
+
+    title = str(experiment.get("title") or experiment.get("name") or "").strip()
+    if title and title != template_name and title not in ("1", ""):
+        document.add_paragraph(title).italic = True
+
+    _add_kv_table(document, [
+        ("Оператор", _display_value(experiment.get("operator"))),
+        ("Образец", _display_value(experiment.get("sample"))),
+        ("Криостат", _display_value(experiment.get("cryostat"))),
+        ("Статус", _status_ru(experiment.get("status", ""))),
+        ("Начало", _format_dt(experiment.get("start_time"))),
+        ("Завершение", _format_dt(experiment.get("end_time"))),
+        ("Длительность", _format_duration(experiment.get("start_time"), experiment.get("end_time"))),
+        ("Идентификатор", str(experiment.get("experiment_id", ""))[:12]),
+    ])
+
     if experiment.get("notes"):
-        document.add_paragraph(f"Заметки карточки: {experiment['notes']}")
+        document.add_paragraph("")
+        document.add_paragraph(f"Заметки: {experiment['notes']}")
 
 
 def render_experiment_metadata_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     experiment = dataset.metadata["experiment"]
+    template = dataset.metadata["template"]
     summary = dataset.summary_metadata
     document.add_heading("Метаданные эксперимента", level=1)
-    document.add_paragraph(f"Образец: {_display_value(experiment.get('sample'))}")
-    document.add_paragraph(f"Криостат: {_display_value(experiment.get('cryostat'))}")
-    if experiment.get("custom_fields"):
-        document.add_paragraph(
-            f"Поля карточки: {json.dumps(experiment.get('custom_fields', {}), ensure_ascii=False)}"
-        )
+
+    # Custom fields with template labels
+    custom_values = experiment.get("custom_fields", {})
+    custom_defs = template.get("custom_fields", [])
+    if custom_values and custom_defs:
+        label_map = {str(f.get("id", "")): str(f.get("label", f.get("id", ""))) for f in custom_defs}
+        rows = []
+        for field_id, value in custom_values.items():
+            label = label_map.get(field_id, field_id)
+            rows.append((label, _display_value(value)))
+        if rows:
+            _add_kv_table(document, rows)
+    elif custom_values:
+        rows = [(k, _display_value(v)) for k, v in custom_values.items()]
+        _add_kv_table(document, rows)
+
+    # Summary stats
     if summary:
-        document.add_paragraph(f"Сводка архива: {json.dumps(summary, ensure_ascii=False)}")
+        parts = []
+        if "reading_count" in summary:
+            parts.append(f"Измерений: {summary['reading_count']:,}")
+        if "run_count" in summary:
+            parts.append(f"Прогонов: {summary['run_count']}")
+        if "artifact_count" in summary:
+            parts.append(f"Артефактов: {summary['artifact_count']}")
+        if parts:
+            document.add_paragraph(" │ ".join(parts))
 
 
 def render_run_timeline_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Таймлайн прогонов", level=1)
     if not dataset.run_records:
-        document.add_paragraph("Прогоны для этой карточки не зафиксированы.")
+        document.add_paragraph("Прогоны не выполнялись.")
         return
-    for item in dataset.run_records:
-        document.add_paragraph(
-            (
-                f"{item.get('started_at', '')} → {item.get('finished_at', '') or '—'} | "
-                f"{item.get('source_tab', '')}/{item.get('run_type', '')} | "
-                f"{item.get('status', '')}"
-            ),
-            style="List Bullet",
-        )
+
+    table = document.add_table(rows=1 + len(dataset.run_records), cols=5)
+    table.style = "Table Grid"
+    for i, hdr in enumerate(["№", "Начало", "Конец", "Источник", "Статус"]):
+        table.cell(0, i).text = hdr
+    for idx, item in enumerate(dataset.run_records, 1):
+        source = _SOURCE_TAB_RU.get(item.get("source_tab", ""), item.get("source_tab", "—"))
+        table.cell(idx, 0).text = str(idx)
+        table.cell(idx, 1).text = _format_dt(item.get("started_at"), time_only=True)
+        table.cell(idx, 2).text = _format_dt(item.get("finished_at"), time_only=True)
+        table.cell(idx, 3).text = source
+        table.cell(idx, 4).text = _status_ru(item.get("status", ""))
 
 
 def render_run_parameters_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
@@ -146,14 +317,14 @@ def render_run_parameters_section(document: Document, dataset: ReportDataset, _a
     if not dataset.run_records:
         document.add_paragraph("Параметры запусков отсутствуют.")
         return
-    for item in dataset.run_records:
-        title = f"{item.get('source_tab', '')}/{item.get('run_type', '')}"
-        document.add_paragraph(title, style="List Bullet")
+    for idx, item in enumerate(dataset.run_records, 1):
         params = item.get("parameters") or {}
         if not params:
-            document.add_paragraph("Параметры не сохранены.")
             continue
-        document.add_paragraph(json.dumps(params, ensure_ascii=False, indent=2))
+        run_type = item.get("run_type", "")
+        document.add_heading(f"Прогон {idx}: {run_type}", level=2)
+        rows = [(str(k), _display_value(v)) for k, v in params.items()]
+        _add_kv_table(document, rows)
 
 
 def render_result_tables_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
@@ -191,21 +362,23 @@ def render_conductivity_section(document: Document, dataset: ReportDataset, asse
     if not rows:
         document.add_paragraph("График теплопроводности не удалось построить: таблица пуста.")
         return
+    temps = [float(item["temperature_k"]) for item in rows]
+    conds = [float(item["conductance_wk"]) for item in rows]
     plot_path = assets_dir / "conductivity_vs_temperature.png"
     plt.figure(figsize=(6, 4))
-    plt.plot(
-        [float(item["temperature_k"]) for item in rows],
-        [float(item["conductance_wk"]) for item in rows],
-        marker="o",
-    )
-    plt.title("Conductivity vs temperature")
-    plt.xlabel("Temperature (K)")
-    plt.ylabel("Conductance (W/K)")
+    plt.plot(temps, conds, marker="o")
+    plt.title("Теплопроводность vs температура")
+    plt.xlabel("Температура (К)")
+    plt.ylabel("Теплопроводность (Вт/К)")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
     document.add_picture(str(plot_path), width=Inches(6.2))
+    document.add_paragraph(
+        f"Диапазон: {min(temps):.1f} — {max(temps):.1f} К, "
+        f"максимум: {max(conds):.3g} Вт/К"
+    )
 
 
 def render_artifact_manifest_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
@@ -213,32 +386,70 @@ def render_artifact_manifest_section(document: Document, dataset: ReportDataset,
     if not dataset.artifact_index:
         document.add_paragraph("Артефакты в архивной карточке отсутствуют.")
         return
-    for item in dataset.artifact_index[:20]:
-        document.add_paragraph(
-            f"{item.get('category', '')} | {item.get('role', '')} | {item.get('path', '')}",
-            style="List Bullet",
-        )
+
+    by_category: dict[str, list[dict]] = defaultdict(list)
+    for item in dataset.artifact_index:
+        cat = str(item.get("category", "other")).strip() or "other"
+        by_category[cat].append(item)
+
+    cat_names = {"table": "Таблицы", "plot": "Графики", "summary": "Сводки", "other": "Прочее"}
+    for cat, items in by_category.items():
+        document.add_paragraph(cat_names.get(cat, cat), style="List Bullet")
+        for item in items:
+            role = str(item.get("role", "")).strip()
+            name_ru = _ROLE_RU.get(role, role)
+            path = Path(str(item.get("path", "")))
+            document.add_paragraph(f"    {name_ru} — {path.name}")
 
 
 def render_cooldown_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Охлаждение", level=1)
     temp_readings = [item for item in dataset.readings if item.unit == "K"]
-    _add_plot(document, "Температура", temp_readings, assets_dir / "cooldown_temperature.png")
+    _add_plot(document, "Температура", temp_readings, assets_dir / "cooldown_temperature.png",
+              xlabel="Время", ylabel="Температура (К)")
     if temp_readings:
-        document.add_paragraph(f"Число точек: {len(temp_readings)}")
-        document.add_paragraph(f"Средняя температура: {mean(item.value for item in temp_readings):.3f} K")
+        t_init = temp_readings[0].value
+        t_final = temp_readings[-1].value
+        duration = _format_duration(temp_readings[0].timestamp, temp_readings[-1].timestamp)
+        _add_kv_table(document, [
+            ("Начальная температура", f"{t_init:.2f} К"),
+            ("Конечная температура", f"{t_final:.2f} К"),
+            ("Время охлаждения", duration),
+            ("Число точек", f"{len(temp_readings):,}"),
+        ])
+
+        # Check target temperature from custom fields
+        custom = dataset.metadata.get("experiment", {}).get("custom_fields", {})
+        target = custom.get("target_temperature")
+        if target:
+            try:
+                target_k = float(target)
+                reached = t_final <= target_k * 1.05  # 5% tolerance
+                document.add_paragraph(
+                    f"Целевая: {target_k:.1f} К — {'достигнута ✓' if reached else 'не достигнута'}"
+                )
+            except (ValueError, TypeError):
+                pass
 
 
 def render_thermal_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Тепловая нагрузка", level=1)
     power_readings = [item for item in dataset.readings if item.channel.endswith("/power")]
-    _add_plot(document, "Мощность Keithley", power_readings, assets_dir / "thermal_power.png")
+    _add_plot(document, "Мощность Keithley", power_readings, assets_dir / "thermal_power.png",
+              xlabel="Время", ylabel="Мощность (Вт)")
     if power_readings:
         by_channel: dict[str, list[float]] = defaultdict(list)
         for item in power_readings:
             by_channel[item.channel].append(item.value)
-        for channel, values in sorted(by_channel.items()):
-            document.add_paragraph(f"{channel}: среднее = {mean(values):.3f} {power_readings[0].unit}")
+
+        table = document.add_table(rows=1 + len(by_channel), cols=3)
+        table.style = "Table Grid"
+        for i, hdr in enumerate(["Канал", "Средняя мощность", "Макс. мощность"]):
+            table.cell(0, i).text = hdr
+        for idx, (channel, values) in enumerate(sorted(by_channel.items()), 1):
+            table.cell(idx, 0).text = _channel_display(channel)
+            table.cell(idx, 1).text = f"{mean(values):.4g} Вт"
+            table.cell(idx, 2).text = f"{max(values):.4g} Вт"
 
 
 def render_pressure_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
@@ -246,10 +457,17 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
     pressure = [
         item for item in dataset.readings if "pressure" in item.channel.lower() or item.unit.lower() in {"mbar", "pa"}
     ]
-    _add_plot(document, "Давление", pressure, assets_dir / "pressure.png")
+    _add_plot(document, "Давление", pressure, assets_dir / "pressure.png",
+              xlabel="Время", ylabel="Давление (мбар)")
     if pressure:
-        document.add_paragraph(f"Число точек: {len(pressure)}")
-        document.add_paragraph(f"Последнее значение: {pressure[-1].value:.3e} {pressure[-1].unit}")
+        vals = [p.value for p in pressure if math.isfinite(p.value) and p.value > 0]
+        if vals:
+            _add_kv_table(document, [
+                ("Число точек", f"{len(pressure):,}"),
+                ("Последнее значение", f"{pressure[-1].value:.3e} {pressure[-1].unit}"),
+                ("Минимум", f"{min(vals):.3e} мбар"),
+                ("Максимум", f"{max(vals):.3e} мбар"),
+            ])
 
 
 def render_operator_log_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
@@ -257,23 +475,42 @@ def render_operator_log_section(document: Document, dataset: ReportDataset, _ass
     if not dataset.operator_log:
         document.add_paragraph("Записи служебного лога за интервал эксперимента отсутствуют.")
         return
-    for item in dataset.operator_log:
+    entries = dataset.operator_log
+    total = len(entries)
+    if total > 30:
+        show = list(entries[:15]) + list(entries[-5:])
+        skipped = total - 20
+    else:
+        show = entries
+        skipped = 0
+
+    for item in show[:15]:
         who = item.author or item.source or "система"
         tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
         document.add_paragraph(
-            f"{item.timestamp.isoformat()} | {who}: {item.message}{tag_suffix}",
+            f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}",
             style="List Bullet",
         )
+    if skipped > 0:
+        document.add_paragraph(f"... ещё {skipped} записей ...")
+        for item in show[15:]:
+            who = item.author or item.source or "система"
+            tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
+            document.add_paragraph(
+                f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}",
+                style="List Bullet",
+            )
 
 
 def render_alarms_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Алармы", level=1)
     if not dataset.alarm_readings:
-        document.add_paragraph("События алармов за интервал эксперимента отсутствуют.")
+        document.add_paragraph("Алармов не зафиксировано ✓")
         return
     for item in dataset.alarm_readings[-20:]:
         document.add_paragraph(
-            f"{item.timestamp.isoformat()} | {item.channel} = {item.value:g} {item.unit} [{item.status}]",
+            f"{_format_dt(item.timestamp, time_only=True)} │ "
+            f"{_channel_display(item.channel)} = {item.value:g} {item.unit} [{item.status}]",
             style="List Bullet",
         )
 
@@ -284,8 +521,39 @@ def render_config_section(document: Document, dataset: ReportDataset, _assets_di
     if not config_snapshot:
         document.add_paragraph("Снимок конфигурации для этого эксперимента не сохранён.")
         return
-    config_text = json.dumps(config_snapshot, ensure_ascii=False, indent=2)
-    document.add_paragraph(config_text)
+
+    # Instruments table
+    instruments = config_snapshot.get("instruments", [])
+    if instruments:
+        document.add_heading("Приборы", level=2)
+        table = document.add_table(rows=1 + len(instruments), cols=3)
+        table.style = "Table Grid"
+        for i, hdr in enumerate(["Прибор", "Интерфейс", "Адрес"]):
+            table.cell(0, i).text = hdr
+        for idx, instr in enumerate(instruments, 1):
+            name = str(instr.get("name", instr.get("type", "—")))
+            itype = str(instr.get("type", "—"))
+            resource = str(instr.get("resource", instr.get("resource_str", "—")))
+            iface = "GPIB" if "GPIB" in resource.upper() else "USB-TMC" if "USB" in resource.upper() else "RS-232" if "COM" in resource.upper() else "—"
+            table.cell(idx, 0).text = name
+            table.cell(idx, 1).text = iface
+            table.cell(idx, 2).text = resource
+
+    # Safety limits
+    safety = config_snapshot.get("safety", {})
+    if safety:
+        document.add_heading("Лимиты безопасности", level=2)
+        rows = []
+        if "max_power_w" in safety:
+            rows.append(("Макс. мощность", f"{safety['max_power_w']} Вт"))
+        if "max_voltage_v" in safety:
+            rows.append(("Макс. напряжение", f"{safety['max_voltage_v']} В"))
+        if "max_current_a" in safety:
+            rows.append(("Макс. ток", f"{safety['max_current_a']} А"))
+        if "max_dT_dt_K_per_min" in safety:
+            rows.append(("Макс. dT/dt", f"{safety['max_dT_dt_K_per_min']} К/мин"))
+        if rows:
+            _add_kv_table(document, rows)
 
 
 def render_operator_comments_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
@@ -311,6 +579,10 @@ def render_operator_photos_section(document: Document, dataset: ReportDataset, _
     table.cell(1, 0).text = ""
     table.cell(1, 1).text = ""
 
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
 
 SECTION_REGISTRY: dict[str, SectionRenderer] = {
     "title_page": render_title_page,
