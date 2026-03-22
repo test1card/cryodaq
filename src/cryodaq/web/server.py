@@ -42,7 +42,7 @@ import zmq
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
-from cryodaq.storage.sqlite_writer import _parse_timestamp
+
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,12 @@ def _send_engine_command(cmd: dict) -> dict:
     finally:
         sock.close()
 
+
+async def _async_engine_command(cmd: dict) -> dict:
+    """Non-blocking engine command via thread pool."""
+    return await asyncio.to_thread(_send_engine_command, cmd)
+
+
 # Директория с файлами данных SQLite (data_YYYY-MM-DD.db)
 _DATA_DIR = get_data_dir()
 
@@ -86,6 +92,7 @@ class _ServerState:
         self.total_readings: int = 0
         self.last_readings: dict[str, dict[str, Any]] = {}  # channel → serialized reading
         self.active_alarms: dict[str, dict[str, Any]] = {}
+        self.safety_state: str = "unknown"
         self.instrument_status: dict[str, dict[str, Any]] = {}
         self.clients: set[WebSocket] = set()
         self.subscriber: ZMQSubscriber | None = None
@@ -143,6 +150,7 @@ class _ServerState:
             "total_readings": self.total_readings,
             "channels": len(self.last_readings),
             "instruments": self.instrument_status,
+            "safety_state": self.safety_state,
             "active_alarms": self.active_alarms,
             "ws_clients": len(self.clients),
         }
@@ -239,41 +247,38 @@ def _find_recent_db(data_dir: Path) -> Path | None:
 def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
     """Запросить данные из SQLite за последние N минут.
 
+    Сканирует все DB-файлы, чей date-суффикс может пересекаться с окном запроса,
+    чтобы корректно обрабатывать cross-midnight запросы.
+
     Возвращает словарь: channel → [{"t": iso, "v": float, "u": unit}, ...]
     """
-    db_path = _find_recent_db(_DATA_DIR)
-    if db_path is None:
-        return {}
-
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     cutoff_epoch = cutoff.timestamp()
 
     result: dict[str, list[dict[str, Any]]] = {}
-    try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
-        conn.row_factory = sqlite3.Row
+
+    if not _DATA_DIR.exists():
+        return result
+
+    for db_path in sorted(_DATA_DIR.glob("data_????-??-??.db")):
         try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT timestamp, channel, value, unit FROM readings "
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
                 (cutoff_epoch,),
             ).fetchall()
-        finally:
             conn.close()
-    except Exception:
-        logger.exception("Ошибка чтения истории из %s", db_path)
-        return {}
-
-    for row in rows:
-        ch = row["channel"]
-        if ch not in result:
-            result[ch] = []
-        ts = _parse_timestamp(row["timestamp"])
-        result[ch].append({
-            "t": ts.isoformat(),
-            "v": row["value"],
-            "u": row["unit"],
-        })
+        except Exception:
+            continue
+        for row in rows:
+            ch = row["channel"]
+            result.setdefault(ch, []).append({
+                "t": datetime.fromtimestamp(row["timestamp"], tz=timezone.utc).isoformat(),
+                "v": row["value"],
+                "u": row["unit"],
+            })
 
     return result
 
@@ -334,20 +339,23 @@ def create_app() -> FastAPI:
         base["readings"] = _state.last_readings
         # Safety status via engine command
         try:
-            safety = _send_engine_command({"cmd": "safety_status"})
+            safety = await _async_engine_command({"cmd": "safety_status"})
             base["safety"] = safety if safety.get("ok") else None
+            if safety.get("ok"):
+                _state.safety_state = safety.get("state", "unknown")
         except Exception:
             base["safety"] = None
         # Alarm status via engine command
         try:
-            alarms = _send_engine_command({"cmd": "alarm_v2_status"})
+            alarms = await _async_engine_command({"cmd": "alarm_v2_status"})
             if alarms.get("ok"):
                 base["active_alarms"] = alarms.get("active", {})
+                _state.active_alarms = alarms.get("active", {})
         except Exception:
             pass
-        # Experiment/shift data via ZMQ command (sync, ok for web server)
+        # Experiment/shift data via ZMQ command
         try:
-            exp = _send_engine_command({"cmd": "experiment_status"})
+            exp = await _async_engine_command({"cmd": "experiment_status"})
             base["experiment"] = exp if exp.get("ok") else None
         except Exception:
             base["experiment"] = None
@@ -357,7 +365,7 @@ def create_app() -> FastAPI:
     async def api_log(limit: int = 10) -> dict[str, Any]:
         """Последние записи журнала."""
         try:
-            result = _send_engine_command({"cmd": "log_get", "limit": limit})
+            result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):
                 return {"ok": True, "entries": result.get("entries", [])}
         except Exception:
