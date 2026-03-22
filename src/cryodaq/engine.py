@@ -1525,34 +1525,15 @@ def _acquire_engine_lock() -> int:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (IOError, OSError):
-        # Lock held — read PID for diagnostics
-        pid = None
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            pid = int(os.read(fd, 64).decode().strip())
-        except (ValueError, OSError):
-            pass
+        # Lock held by another process (flock/msvcrt is authoritative)
         os.close(fd)
-
-        if pid and _is_pid_alive(pid):
-            logger.error(
-                "CryoDAQ engine уже запущен (PID %d, lock: %s).\n"
-                "  Для принудительного запуска: cryodaq-engine --force\n"
-                "  Windows: taskkill /PID %d /F\n"
-                "  Linux:   kill %d",
-                pid, _LOCK_FILE, pid, pid,
-            )
-            raise SystemExit(1)
-        else:
-            logger.warning(
-                "Stale lock (PID %s мёртв, lock: %s) — удаляю и продолжаю",
-                pid or "?", _LOCK_FILE,
-            )
-            try:
-                _LOCK_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return _acquire_engine_lock()  # retry
+        logger.error(
+            "CryoDAQ engine уже запущен (lock: %s).\n"
+            "  Для принудительного запуска: cryodaq-engine --force\n"
+            "  Или завершите процесс через Диспетчер задач (python/pythonw).",
+            _LOCK_FILE,
+        )
+        raise SystemExit(1)
 
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
