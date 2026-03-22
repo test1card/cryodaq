@@ -68,11 +68,19 @@ def _make_icon(color: str) -> QIcon:
 
 
 def _is_port_busy(port: int) -> bool:
-    """Проверить, занят ли TCP-порт (engine уже работает)."""
+    """Check if engine is listening by probing BOTH PUB and CMD ports."""
     import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.5)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+    for p in (port, port + 1):  # PUB=5555, CMD=5556
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            result = s.connect_ex(("127.0.0.1", p))
+            s.close()
+            if result == 0:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def _ping_engine() -> bool:
@@ -117,6 +125,8 @@ class LauncherWindow(QMainWindow):
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
+        self._last_safety_state: str | None = None
+        self._last_alarm_count: int = 0
 
         self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
         self.setMinimumSize(1360, 860)
@@ -189,21 +199,6 @@ class LauncherWindow(QMainWindow):
 
     def _start_engine(self) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
-        from cryodaq.paths import get_data_dir
-        lock_path = get_data_dir() / ".engine.lock"
-        if lock_path.exists():
-            try:
-                pid = int(lock_path.read_text().strip())
-                if self._is_process_alive(pid) and _ping_engine():
-                    logger.info("Engine already running (PID %d, lock + ping) — connecting", pid)
-                    self._engine_external = True
-                    return
-                else:
-                    logger.warning("Stale lock file for PID %d — removing", pid)
-                    lock_path.unlink(missing_ok=True)
-            except (ValueError, OSError):
-                lock_path.unlink(missing_ok=True)
-
         if _is_port_busy(_ZMQ_PORT):
             if _ping_engine():
                 logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
@@ -213,6 +208,47 @@ class LauncherWindow(QMainWindow):
                 "Порт %d занят, но CryoDAQ engine не отвечает — запускаем новый",
                 _ZMQ_PORT,
             )
+
+        # Probe lock file via flock — OS-agnostic, no read_text on Windows
+        from cryodaq.paths import get_data_dir
+        lock_path = get_data_dir() / ".engine.lock"
+        if lock_path.exists():
+            probe_fd = None
+            try:
+                probe_fd = os.open(str(lock_path), os.O_RDWR)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(probe_fd, msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(probe_fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(probe_fd, fcntl.LOCK_UN)
+                # Lock was free → stale file, proceed
+                logger.info("Stale lock file — proceeding with engine start")
+            except (IOError, OSError):
+                # Lock held → engine alive but port not ready yet
+                if probe_fd is not None:
+                    try:
+                        os.close(probe_fd)
+                    except OSError:
+                        pass
+                    probe_fd = None
+                logger.warning("Engine lock held. Waiting for port...")
+                for _ in range(30):
+                    time.sleep(0.5)
+                    if _is_port_busy(_ZMQ_PORT):
+                        logger.info("Engine ready — connecting")
+                        self._engine_external = True
+                        return
+                logger.error("Engine holds lock but port not ready. Run: cryodaq-engine --force")
+                return
+            finally:
+                if probe_fd is not None:
+                    try:
+                        os.close(probe_fd)
+                    except OSError:
+                        pass
 
         logger.info("Запуск engine как подпроцесса...")
         python = sys.executable
@@ -272,11 +308,17 @@ class LauncherWindow(QMainWindow):
         logger.info("Engine остановлен")
 
     def _restart_engine(self) -> None:
-        """Перезапустить engine."""
+        """Restart engine AND bridge for clean ZMQ connections."""
+        self._data_timer.stop()
+        self._health_timer.stop()
+        self._bridge.shutdown()
         self._stop_engine()
         time.sleep(1)
         self._engine_external = False
         self._start_engine()
+        self._bridge.start()
+        self._data_timer.start()
+        self._health_timer.start()
 
     def _is_engine_alive(self) -> bool:
         """Проверить, жив ли engine."""
@@ -404,7 +446,8 @@ class LauncherWindow(QMainWindow):
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
         if not self._bridge.is_alive():
-            logger.warning("ZMQ bridge died, restarting...")
+            logger.warning("ZMQ bridge died, cleaning up and restarting...")
+            self._bridge.shutdown()  # Clean up dead process handle
             self._bridge.start()
             return
         for reading in self._bridge.poll_readings():
@@ -452,13 +495,13 @@ class LauncherWindow(QMainWindow):
             self._do_shutdown()
 
     def _on_open_full_gui(self) -> None:
-        """Tray-only → launch full GUI in a separate process."""
+        """Launch standalone GUI window (connects to existing engine, no second launcher)."""
         python = sys.executable
         env = os.environ.copy()
         if self._mock:
             env["CRYODAQ_MOCK"] = "1"
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        cmd = [python, "-m", "cryodaq.launcher"]
+        cmd = [python, "-m", "cryodaq.gui"]
         if self._mock:
             cmd.append("--mock")
         subprocess.Popen(cmd, env=env, creationflags=creationflags)
@@ -521,11 +564,27 @@ class LauncherWindow(QMainWindow):
                         3000,
                     )
 
-        # Tray icon color + tooltip
+        # Poll safety state (non-blocking, quick)
+        if alive and self._bridge.is_alive():
+            try:
+                safety_result = self._bridge.send_command({"cmd": "safety_status"})
+                if safety_result.get("ok"):
+                    self._last_safety_state = safety_result.get("state")
+            except Exception:
+                pass
+
+        # Tray icon color + tooltip — reflects engine safety state
         data_flowing = (time.monotonic() - self._last_reading_time) < 5.0
+        safety = self._last_safety_state or ""
         if not alive:
             self._tray.setIcon(self._tray_icon_red)
             self._tray.setToolTip("CryoDAQ — engine остановлен")
+        elif safety in ("fault_latched", "fault"):
+            self._tray.setIcon(self._tray_icon_red)
+            self._tray.setToolTip(f"CryoDAQ — АВАРИЯ ({safety})")
+        elif self._last_alarm_count > 0:
+            self._tray.setIcon(self._tray_icon_yellow)
+            self._tray.setToolTip(f"CryoDAQ — {self._last_alarm_count} алармов")
         elif not data_flowing:
             self._tray.setIcon(self._tray_icon_yellow)
             self._tray.setToolTip("CryoDAQ — ожидание данных")

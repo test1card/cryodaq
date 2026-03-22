@@ -203,7 +203,7 @@ async def _run_operator_log_command(
     raise ValueError(f"Unsupported operator log command: {action}")
 
 
-async def _run_calibration_command(
+def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
     *,
@@ -1197,7 +1197,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "calibration_curve_export",
                 "calibration_curve_import",
             }:
-                return await _run_calibration_command(
+                return await asyncio.to_thread(
+                    _run_calibration_command,
                     action,
                     cmd,
                     calibration_store=calibration_store,
@@ -1491,7 +1492,8 @@ async def _run_engine(*, mock: bool = False) -> None:
 _LOCK_FILE = get_data_dir() / ".engine.lock"
 
 
-def _is_process_alive(pid: int) -> bool:
+def _is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID exists."""
     try:
         if sys.platform == "win32":
             import ctypes
@@ -1507,34 +1509,78 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
-def _acquire_engine_lock() -> bool:
-    """Atomically acquire single-instance lock via O_CREAT|O_EXCL."""
+def _acquire_engine_lock() -> int:
+    """Acquire exclusive engine lock via flock/msvcrt. Returns fd.
+
+    If lock is held by a dead process, auto-cleans and retries.
+    Shows helpful error with PID and kill command if lock is live.
+    """
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Lock held by another process (flock/msvcrt is authoritative)
         os.close(fd)
-        return True
-    except FileExistsError:
+        logger.error(
+            "CryoDAQ engine уже запущен (lock: %s).\n"
+            "  Для принудительного запуска: cryodaq-engine --force\n"
+            "  Или завершите процесс через Диспетчер задач (python/pythonw).",
+            _LOCK_FILE,
+        )
+        raise SystemExit(1)
+
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def _force_kill_existing() -> None:
+    """Force-kill any running engine and remove lock."""
+    if not _LOCK_FILE.exists():
+        return
+    try:
+        pid = int(_LOCK_FILE.read_text().strip())
+    except (ValueError, OSError):
+        _LOCK_FILE.unlink(missing_ok=True)
+        return
+    if _is_pid_alive(pid):
+        logger.warning("Принудительная остановка engine (PID %d)...", pid)
         try:
-            old_pid = int(_LOCK_FILE.read_text().strip())
-            if _is_process_alive(old_pid):
-                return False
-            _LOCK_FILE.unlink(missing_ok=True)
-            fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            return True
-        except Exception:
-            return False
-    except Exception:
-        return False
+            if sys.platform == "win32":
+                import subprocess
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               capture_output=True, timeout=5)
+            else:
+                os.kill(pid, 9)  # SIGKILL
+        except Exception as exc:
+            logger.error("Не удалось завершить PID %d: %s", pid, exc)
+            raise SystemExit(1)
+        for _ in range(20):
+            time.sleep(0.25)
+            if not _is_pid_alive(pid):
+                break
+        else:
+            logger.error("PID %d не завершился после 5с", pid)
+            raise SystemExit(1)
+    _LOCK_FILE.unlink(missing_ok=True)
+    logger.info("Старый engine остановлен, lock очищен")
 
 
-def _release_engine_lock() -> None:
+def _release_engine_lock(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
     try:
         _LOCK_FILE.unlink(missing_ok=True)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -1544,26 +1590,34 @@ def _release_engine_lock() -> None:
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
-    if not _acquire_engine_lock():
-        print("CryoDAQ engine уже запущен. Только один экземпляр может работать одновременно.")
-        sys.exit(1)
-    try:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    import argparse
+    parser = argparse.ArgumentParser(description="CryoDAQ Engine")
+    parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
+    parser.add_argument("--force", action="store_true",
+                        help="Kill existing engine and take over")
+    args = parser.parse_args()
 
-        mock = "--mock" in sys.argv or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if args.force:
+        _force_kill_existing()
+
+    mock = args.mock or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
+
+    lock_fd = _acquire_engine_lock()
+    try:
         if mock:
             logger.info("Режим MOCK: реальные приборы не используются")
-
         try:
             asyncio.run(_run_engine(mock=mock))
         except KeyboardInterrupt:
             logger.info("Прервано оператором (Ctrl+C)")
     finally:
-        _release_engine_lock()
+        _release_engine_lock(lock_fd)
 
 
 if __name__ == "__main__":

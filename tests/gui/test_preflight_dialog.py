@@ -22,20 +22,18 @@ def _make_dialog(monkeypatch, safety_result=None, extra_cmds=None):
     """Создать PreFlightDialog с замоканным send_command."""
     _app()
 
-    default_safety = {"ok": True, "state": "SAFE_OFF"}
+    default_safety = {"ok": True, "state": "safe_off"}
     safety_resp = safety_result if safety_result is not None else default_safety
 
     responses = {
         "safety_status": safety_resp,
-        "experiment_status": {"ok": True, "instruments": {}},
-        "alarm_list": {"ok": True, "alarms": []},
-        "readings_snapshot": {"ok": False},
+        "alarm_v2_status": {"ok": True, "active": {}, "history": []},
     }
     if extra_cmds:
         responses.update(extra_cmds)
 
     def _fake_send(payload: dict) -> dict:
-        return responses.get(payload.get("cmd", ""), {"ok": False})
+        return responses.get(payload.get("cmd", ""), {"ok": False, "error": "unknown"})
 
     monkeypatch.setattr("cryodaq.gui.widgets.preflight_dialog.send_command", _fake_send)
     return PreFlightDialog()
@@ -64,7 +62,7 @@ def test_all_ok_enables_start(monkeypatch) -> None:
     # Manually set all checks to ok to isolate the logic
     dialog._checks = [
         PreFlightCheck("Engine подключён", "ok", ""),
-        PreFlightCheck("Safety state", "ok", "SAFE_OFF"),
+        PreFlightCheck("Safety state", "ok", "safe_off"),
         PreFlightCheck("Диск", "ok", "500 ГБ свободно"),
     ]
     dialog._build_ui()
@@ -77,7 +75,7 @@ def test_warnings_allow_start(monkeypatch) -> None:
     dialog = _make_dialog(monkeypatch)
     dialog._checks = [
         PreFlightCheck("Engine подключён", "ok", ""),
-        PreFlightCheck("Приборы", "warning", "1 из 2 не отвечает"),
+        PreFlightCheck("Алармы", "warning", "1 активных: test_alarm"),
         PreFlightCheck("Диск", "warning", "8.5 ГБ"),
     ]
     dialog._build_ui()
@@ -86,11 +84,28 @@ def test_warnings_allow_start(monkeypatch) -> None:
 
 
 def test_fault_state_is_error(monkeypatch) -> None:
-    """Safety state FAULT → error check → кнопка disabled."""
+    """Safety state fault_latched → error check → кнопка disabled."""
     dialog = _make_dialog(
         monkeypatch,
-        safety_result={"ok": True, "state": "FAULT_LATCHED"},
+        safety_result={"ok": True, "state": "fault_latched"},
     )
     error_checks = [c for c in dialog._checks if c.status == "error"]
     assert len(error_checks) >= 1
     assert not dialog._start_btn.isEnabled()
+
+
+def test_active_alarms_warning(monkeypatch) -> None:
+    """Active alarms → warning check."""
+    dialog = _make_dialog(
+        monkeypatch,
+        extra_cmds={
+            "alarm_v2_status": {
+                "ok": True,
+                "active": {"test_alarm": {"severity": "warning"}},
+                "history": [],
+            },
+        },
+    )
+    alarm_checks = [c for c in dialog._checks if c.name == "Алармы"]
+    assert len(alarm_checks) == 1
+    assert alarm_checks[0].status == "warning"

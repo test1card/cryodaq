@@ -161,7 +161,7 @@ class ZmqBridge:
             self._cmd_queue.put(cmd, timeout=2.0)
             return future.result(timeout=_CMD_REPLY_TIMEOUT_S)
         except Exception as exc:
-            return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__})"}
+            return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__}: {exc})"}
         finally:
             with self._pending_lock:
                 self._pending.pop(rid, None)
@@ -176,14 +176,20 @@ class ZmqBridge:
             except (EOFError, OSError):
                 break
 
-            rid = reply.pop("_rid", None)
-            if rid:
-                with self._pending_lock:
-                    future = self._pending.get(rid)
-                if future and not future.done():
-                    future.set_result(reply)
+            try:
+                if not isinstance(reply, dict):
+                    logger.warning("ZMQ reply consumer: non-dict reply: %r", type(reply))
                     continue
-            logger.debug("Unmatched ZMQ reply (rid=%s)", rid)
+                rid = reply.pop("_rid", None)
+                if rid:
+                    with self._pending_lock:
+                        future = self._pending.get(rid)
+                    if future and not future.done():
+                        future.set_result(reply)
+                        continue
+                logger.debug("Unmatched ZMQ reply (rid=%s)", rid)
+            except Exception:
+                logger.exception("ZMQ reply consumer: error processing reply")
 
     def shutdown(self) -> None:
         """Signal subprocess to stop, cancel pending futures, wait for exit."""

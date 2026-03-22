@@ -201,7 +201,7 @@ class HousekeepingService:
         if self._dry_run:
             return actions
         for action in actions:
-            self._apply(action)
+            await asyncio.to_thread(self._apply, action)
         return actions
 
     def plan_actions(self, *, now: datetime | None = None) -> list[HousekeepingAction]:

@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Константы
 # ---------------------------------------------------------------------------
-_BUFFER_MAXLEN = 3600
+_BUFFER_MAXLEN = 86400  # 1 point/s × 24h ≈ 3 MB per channel — acceptable
 _DEFAULT_WINDOW_S = 3600.0  # 1 час по умолчанию
 
 _LINE_PALETTE: list[str] = [
@@ -64,6 +64,14 @@ _LINE_PALETTE: list[str] = [
     "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
     "#393B79", "#637939", "#8C6D31", "#843C39",
 ]
+
+
+def _decimate(points: list[tuple[float, float]], max_points: int) -> list[tuple[float, float]]:
+    """Downsample to *max_points* by taking every Nth point."""
+    if len(points) <= max_points:
+        return points
+    step = len(points) // max_points
+    return points[::step]
 
 
 def _disk_free_gb() -> float:
@@ -245,6 +253,10 @@ class CompactTempCard(QFrame):
         self._last_ui_update: float = 0.0
         self._current_bg: str = ""
         self._active: bool = True
+        # Staleness detection (adaptive, like instrument_status.py)
+        self._update_intervals: deque[float] = deque(maxlen=20)
+        self._prev_update_time: float = 0.0
+        self._stale: bool = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.setMinimumSize(80, 54)
@@ -297,6 +309,15 @@ class CompactTempCard(QFrame):
         value = reading.value
         status = reading.status
 
+        # Track update intervals for adaptive staleness
+        now = time.monotonic()
+        if self._prev_update_time > 0:
+            interval = now - self._prev_update_time
+            if interval > 0.01:
+                self._update_intervals.append(interval)
+        self._prev_update_time = now
+        self._stale = False
+
         # Compute dT/dt and store state (cheap, no UI)
         if status not in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
             if self._last_ts is not None and ts > self._last_ts:
@@ -333,7 +354,9 @@ class CompactTempCard(QFrame):
 
         if self._has_error:
             self._has_error = False
-            self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        value_color = "#555555" if self._stale else "#FFFFFF"
+        self._value_label.setStyleSheet(f"color: {value_color}; border: none;")
 
         if value is not None:
             self._value_label.setText(f"{value:.2f} K")
@@ -363,6 +386,23 @@ class CompactTempCard(QFrame):
         elif not self._has_error:
             abs_rate = abs(self._dt_dt)
             self._set_bg("#1E2A3A" if abs_rate > 10 else "#2A2A2A")
+
+    def check_staleness(self) -> None:
+        """Check if the channel is stale (no updates for adaptive timeout)."""
+        if self._prev_update_time == 0:
+            return  # never received data
+        elapsed = time.monotonic() - self._prev_update_time
+        # Adaptive timeout: median interval × 5, floor 10s, default 30s
+        if len(self._update_intervals) >= 3:
+            sorted_iv = sorted(self._update_intervals)
+            median = sorted_iv[len(sorted_iv) // 2]
+            timeout = max(10.0, median * 5.0)
+        else:
+            timeout = 30.0
+        was_stale = self._stale
+        self._stale = elapsed > timeout
+        if self._stale != was_stale:
+            self._flush_ui()
 
     def _set_bg(self, color: str) -> None:
         """Set background only if color actually changed."""
@@ -507,9 +547,22 @@ class PressureCard(QFrame):
         layout.addWidget(self._value_label)
 
         self._last_value: float | None = None
+        # Staleness detection
+        self._update_intervals: deque[float] = deque(maxlen=20)
+        self._prev_update_time: float = 0.0
+        self._stale: bool = False
 
     def update_pressure(self, reading: Reading) -> None:
         """Обновить карточку давления."""
+        # Track update intervals for adaptive staleness
+        now = time.monotonic()
+        if self._prev_update_time > 0:
+            interval = now - self._prev_update_time
+            if interval > 0.01:
+                self._update_intervals.append(interval)
+        self._prev_update_time = now
+        self._stale = False
+
         value = reading.value
 
         if reading.status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
@@ -544,6 +597,27 @@ class PressureCard(QFrame):
             # Good vacuum
             self._value_label.setStyleSheet("color: #2ECC40; border: none;")
             self._set_bg("#1A2A1A")
+
+    def check_staleness(self) -> None:
+        """Check if pressure readings are stale (no updates for adaptive timeout)."""
+        if self._prev_update_time == 0:
+            return  # never received data
+        elapsed = time.monotonic() - self._prev_update_time
+        if len(self._update_intervals) >= 3:
+            sorted_iv = sorted(self._update_intervals)
+            median = sorted_iv[len(sorted_iv) // 2]
+            timeout = max(10.0, median * 5.0)
+        else:
+            timeout = 30.0
+        was_stale = self._stale
+        self._stale = elapsed > timeout
+        if self._stale != was_stale:
+            if self._stale:
+                self._value_label.setStyleSheet("color: #555555; border: none;")
+            elif self._last_value is not None:
+                # Re-apply normal color by re-running the color logic
+                # Trigger a minimal refresh — just restore white, next real reading fixes color
+                self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
 
     def _set_bg(self, color: str) -> None:
         if color == self._current_bg:
@@ -907,6 +981,7 @@ class OverviewPanel(QWidget):
         # Channel visibility for click-toggle
         self._channel_visible: dict[str, bool] = {}
         # Pressure buffer
+        self._pressure_channel_name: str | None = None
         self._pressure_buffer: deque[tuple[float, float]] = deque(maxlen=_BUFFER_MAXLEN)
         self._pressure_plot_item: pg.PlotDataItem | None = None
         # Текущее окно времени (секунды)
@@ -1154,6 +1229,15 @@ class OverviewPanel(QWidget):
             self._buffers[ch_id] = deque(maxlen=_BUFFER_MAXLEN)
             self._channel_visible[ch_id] = True
 
+        # Update legend names for renamed channels
+        legend = self._plot.getPlotItem().legend
+        if legend is not None:
+            legend.clear()
+            for ch_id, item in self._plot_items.items():
+                new_name = self._channel_mgr.get_display_name(ch_id)
+                item.opts["name"] = new_name
+                legend.addItem(item, new_name)
+
     # ------------------------------------------------------------------
     # Публичный интерфейс
     # ------------------------------------------------------------------
@@ -1204,6 +1288,7 @@ class OverviewPanel(QWidget):
 
         # Давление → карточка + буфер графика
         if reading.unit == "mbar":
+            self._pressure_channel_name = reading.channel
             self._pressure_card.update_pressure(reading)
             self._pressure_buffer.append(
                 (reading.timestamp.timestamp(), reading.value)
@@ -1357,6 +1442,11 @@ class OverviewPanel(QWidget):
                     x_max = max(x_max, float(pred_xs[-1]))
             self._plot.getPlotItem().setXRange(snapped_min, x_max, padding=0)
 
+        # Staleness checks (piggyback on 1 Hz plot timer)
+        for card in self._card_grid.get_cards().values():
+            card.check_staleness()
+        self._pressure_card.check_staleness()
+
         # Pressure line (X range synced via setXLink)
         if self._pressure_buffer:
             xs = [t for t, _ in self._pressure_buffer if t >= x_min]
@@ -1390,13 +1480,14 @@ class OverviewPanel(QWidget):
 
         now = time.time()
         channels = list(self._buffers.keys())
-        # Also include pressure channels — unit-based match, use broad query
+        if self._pressure_channel_name:
+            channels.append(self._pressure_channel_name)
         cmd = {
             "cmd": "readings_history",
             "from_ts": now - hours * 3600,
             "to_ts": now,
             "channels": channels if channels else None,
-            "limit_per_channel": max(_BUFFER_MAXLEN, hours * 360),
+            "limit_per_channel": min(86400, max(3600, hours * 3600)),
         }
         self._history_worker = ZmqCommandWorker(cmd)
         self._history_hours = hours
@@ -1425,20 +1516,25 @@ class OverviewPanel(QWidget):
                     # Prepend: create merged deque (historical + existing)
                     existing = list(buf)
                     merged = new_points + existing
+                    decimated = _decimate(merged, _BUFFER_MAXLEN)
                     buf.clear()
-                    buf.extend(merged[-_BUFFER_MAXLEN:])
+                    buf.extend(decimated)
                     loaded += len(new_points)
             # Pressure channel
             if any(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in points[:1]):
                 # Check if this is a pressure channel (unit=mbar) by channel name patterns
-                if "mbar" in channel.lower() or "pressure" in channel.lower() or channel.startswith("P"):
+                if self._pressure_channel_name and (
+                    channel == self._pressure_channel_name
+                    or channel.startswith(self._pressure_channel_name.split("/")[0])
+                ):
                     existing_min_ts = self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
                     new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
                     if new_points:
                         existing = list(self._pressure_buffer)
                         merged = new_points + existing
+                        decimated = _decimate(merged, _BUFFER_MAXLEN)
                         self._pressure_buffer.clear()
-                        self._pressure_buffer.extend(merged[-_BUFFER_MAXLEN:])
+                        self._pressure_buffer.extend(decimated)
                         loaded += len(new_points)
 
         if loaded > 0:

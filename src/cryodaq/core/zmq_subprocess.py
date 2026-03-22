@@ -128,9 +128,13 @@ def zmq_bridge_main(
                 if rid is not None:
                     reply["_rid"] = rid
                 try:
-                    reply_queue.put_nowait(reply)
+                    reply_queue.put(reply, timeout=2.0)
                 except queue.Full:
-                    pass  # reply lost — client will timeout
+                    # Log via data_queue warning so health monitoring sees it
+                    try:
+                        data_queue.put_nowait({"__type": "warning", "message": "Reply queue overflow"})
+                    except queue.Full:
+                        pass
             except queue.Empty:
                 pass
 
