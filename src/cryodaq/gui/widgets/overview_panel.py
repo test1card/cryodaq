@@ -1523,7 +1523,10 @@ class OverviewPanel(QWidget):
             # Pressure channel
             if any(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in points[:1]):
                 # Check if this is a pressure channel (unit=mbar) by channel name patterns
-                if "mbar" in channel.lower() or "pressure" in channel.lower() or channel.startswith("P"):
+                if self._pressure_channel_name and (
+                    channel == self._pressure_channel_name
+                    or channel.startswith(self._pressure_channel_name.split("/")[0])
+                ):
                     existing_min_ts = self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
                     new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
                     if new_points:

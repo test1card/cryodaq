@@ -142,7 +142,9 @@ async def test_archive_finalize_generates_editable_report_entry(manager: Experim
     assert entry.report_present is True
     assert entry.docx_path is not None
     assert entry.docx_path.name == "report_editable.docx"
-    assert entry.pdf_path is None
+    # PDF generation depends on soffice availability — both outcomes valid
+    if entry.pdf_path is not None:
+        assert entry.pdf_path.name == "report_raw.pdf"
 
 
 async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -> None:

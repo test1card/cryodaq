@@ -113,10 +113,32 @@ class PreFlightDialog(QDialog):
                     )
                 else:
                     self._checks.append(PreFlightCheck("Алармы", "ok", "0"))
+            else:
+                self._checks.append(
+                    PreFlightCheck("Алармы", "warning", alarm_result.get("error", "Статус недоступен"))
+                )
         except Exception:
             pass  # alarm check is non-critical
 
-        # 4. Disk space
+        # 4. Sensor diagnostics
+        try:
+            diag_result = send_command({"cmd": "get_sensor_diagnostics"})
+            if diag_result.get("ok"):
+                summary = diag_result.get("summary", {})
+                critical = summary.get("critical", 0)
+                warning = summary.get("warning", 0)
+                if critical > 0:
+                    self._checks.append(PreFlightCheck("Датчики", "error", f"{critical} критичных"))
+                elif warning > 0:
+                    self._checks.append(PreFlightCheck("Датчики", "warning", f"{warning} с предупреждениями"))
+                else:
+                    self._checks.append(PreFlightCheck("Датчики", "ok", "Все в норме"))
+            else:
+                self._checks.append(PreFlightCheck("Датчики", "warning", "Диагностика недоступна"))
+        except Exception:
+            self._checks.append(PreFlightCheck("Датчики", "warning", "Проверка недоступна"))
+
+        # 5. Disk space
         self._check_disk()
 
     def _check_disk(self) -> None:

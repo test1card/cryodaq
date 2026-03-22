@@ -492,17 +492,25 @@ class ConductivityPanel(QWidget):
     def on_reading(self, reading: Reading) -> None:
         self._reading_signal.emit(reading)
 
+    def _resolve_channel_id(self, channel: str) -> str | None:
+        """Resolve reading channel to canonical checkbox key."""
+        if channel in self._checkboxes:
+            return channel
+        short = channel.split(" ")[0] if " " in channel else channel
+        if short in self._checkboxes:
+            return short
+        return None
+
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
         if self._empty_overlay.isVisible():
             self._empty_overlay.setVisible(False)
 
         ch = reading.channel
-        # Normalize to canonical channel ID (e.g. "Т7 Детектор" -> "Т7")
-        ch_id = ch.split(" ")[0] if " " in ch else ch
+        ch_id = self._resolve_channel_id(ch)
         ts = reading.timestamp.timestamp()
 
-        if ch_id in self._checkboxes and reading.unit == "K":
+        if ch_id is not None and reading.unit == "K":
             self._temps[ch_id] = reading.value
             if ch_id in self._buffers:
                 self._buffers[ch_id].append((ts, reading.value))
