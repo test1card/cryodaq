@@ -36,7 +36,7 @@ from cryodaq.gui.zmq_client import send_command
 
 
 class ArchivePanel(QWidget):
-    _COLUMNS = ["Начало", "Эксперимент", "Шаблон", "Оператор", "Образец", "Статус", "Отчёт"]
+    _COLUMNS = ["Начало", "Эксперимент", "Шаблон", "Оператор", "Образец", "Статус", "Отчёт", "Данные"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -240,6 +240,12 @@ class ArchivePanel(QWidget):
         self._table.setRowCount(0)
         for row, entry in enumerate(self._entries):
             self._table.insertRow(row)
+            has_parquet = any(
+                isinstance(a, dict)
+                and a.get("role") == "experiment_data"
+                and "parquet" in str(a.get("summary", {}).get("format", ""))
+                for a in entry.get("artifact_index", [])
+            )
             values = [
                 self._format_datetime(entry.get("start_time")),
                 str(entry.get("title", "")),
@@ -248,11 +254,20 @@ class ArchivePanel(QWidget):
                 str(entry.get("sample", "")),
                 str(entry.get("status", "")),
                 "есть" if entry.get("report_present") else "нет",
+                "✓" if has_parquet else "—",
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, entry)
                 self._table.setItem(row, col, item)
+            # Color "Данные" column
+            data_item = self._table.item(row, 7)
+            if data_item:
+                from PySide6.QtGui import QColor
+                if data_item.text() == "✓":
+                    data_item.setForeground(QColor("#2ECC40"))
+                else:
+                    data_item.setForeground(QColor("#555555"))
         self._table.resizeColumnsToContents()
 
     def _selected_entry(self) -> dict[str, Any] | None:
@@ -352,12 +367,32 @@ class ArchivePanel(QWidget):
         artifacts = [item for item in entry.get("artifact_index", []) if isinstance(item, dict)]
         if not artifacts:
             return "Артефакты отсутствуют."
-        return "\n".join(
-            f"{str(item.get('category', '')).strip() or 'artifact'} | "
-            f"{str(item.get('role', '')).strip() or 'unknown'} | "
-            f"{str(item.get('path', '')).strip() or '—'}"
-            for item in artifacts
-        )
+        lines = []
+        for item in artifacts:
+            role = str(item.get("role", "")).strip() or "unknown"
+            summary = item.get("summary", {}) if isinstance(item.get("summary"), dict) else {}
+
+            if role == "experiment_data":
+                row_count = summary.get("row_count", "?")
+                fmt = summary.get("format", "?")
+                channels = summary.get("channels", [])
+                ch_count = len(channels) if isinstance(channels, list) else "?"
+                from pathlib import Path
+                p = Path(str(item.get("path", "")))
+                size_str = ""
+                if p.exists():
+                    size_kb = p.stat().st_size / 1024
+                    size_str = f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
+                lines.append(f"📊 Данные | {fmt} | {row_count} строк | {ch_count} каналов{size_str}")
+            elif role == "measured_values":
+                lines.append(f"📋 Измерения | {summary.get('rows', '?')} строк | CSV")
+            elif role == "setpoint_values":
+                lines.append(f"📋 Уставки | {summary.get('rows', '?')} строк | CSV")
+            else:
+                category = str(item.get("category", "")).strip() or "artifact"
+                path = str(item.get("path", "")).strip() or "—"
+                lines.append(f"{category} | {role} | {path}")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_results(entry: dict[str, Any]) -> str:

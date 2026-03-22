@@ -88,6 +88,7 @@ def read_experiment_parquet(
         Empty dict if pyarrow not installed or file not found.
     """
     try:
+        import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError:
         logger.warning("pyarrow not installed — cannot read Parquet")
@@ -97,21 +98,25 @@ def read_experiment_parquet(
         return {}
 
     try:
-        filters = None
-        if channels:
-            import pyarrow.compute as pc
-            filters = pc.field("channel").isin(channels)
+        table = pq.read_table(str(parquet_path))
 
-        table = pq.read_table(str(parquet_path), filters=filters)
-
-        ts_array = table.column("timestamp").to_pylist()
+        # Convert timestamp column to epoch float directly via Arrow compute
+        # (avoids Python datetime timezone lookup which fails without tzdata)
+        import pyarrow.compute as pc
+        ts_col = table.column("timestamp")
+        # Cast to int64 microseconds since epoch, then divide to get seconds
+        ts_us = ts_col.cast(pa.int64())
         ch_array = table.column("channel").to_pylist()
         val_array = table.column("value").to_pylist()
 
+        channel_set = set(channels) if channels else None
         result: dict[str, list[tuple[float, float]]] = {}
-        for ts, ch, val in zip(ts_array, ch_array, val_array):
-            epoch = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
-            result.setdefault(ch, []).append((epoch, val))
+        for i in range(table.num_rows):
+            ch = ch_array[i]
+            if channel_set is not None and ch not in channel_set:
+                continue
+            epoch = float(ts_us[i].as_py()) / 1_000_000.0
+            result.setdefault(ch, []).append((epoch, val_array[i]))
 
         return result
 
