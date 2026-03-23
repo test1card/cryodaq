@@ -158,8 +158,10 @@ class Scheduler:
         _POLL_TIMEOUT_S = 3.0
         _RECONNECT_INTERVAL_S = 30.0
         _PREVENTIVE_CLEAR_INTERVAL_S = 300.0
+        _IFC_COOLDOWN_S = 2.0
         last_reconnect: dict[str, float] = {}
         last_preventive_clear: dict[str, float] = {}
+        bus_error_count: int = 0  # consecutive errors across ALL devices on this bus
 
         # Подключить все последовательно — skip failures
         for state in states:
@@ -214,18 +216,53 @@ class Scheduler:
                         driver.safe_read(), timeout=_POLL_TIMEOUT_S
                     )
                     await self._process_readings(state, readings)
+                    bus_error_count = 0  # reset on success
                 except Exception as exc:
                     state.consecutive_errors += 1
                     state.total_errors += 1
-                    logger.warning("Ошибка опроса '%s': %s (подряд: %d)", name, exc, state.consecutive_errors)
+                    bus_error_count += 1
+                    logger.warning(
+                        "Ошибка опроса '%s': %s (device: %d, bus: %d)",
+                        name, exc, state.consecutive_errors, bus_error_count,
+                    )
 
-                    # Clear bus after error to unblock other instruments
                     transport = getattr(driver, '_transport', None)
-                    if transport is not None and hasattr(transport, 'clear_bus'):
-                        try:
-                            await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
-                        except Exception:
-                            logger.warning("Bus clear failed after '%s' error", name)
+
+                    if bus_error_count <= 2:
+                        # Level 1: SDC on the specific device
+                        if transport is not None and hasattr(transport, 'clear_bus'):
+                            try:
+                                await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
+                            except Exception:
+                                logger.warning("SDC failed after '%s' error", name)
+                    elif bus_error_count <= 5:
+                        # Level 2: IFC — reset entire bus
+                        if transport is not None and hasattr(transport, 'send_ifc'):
+                            try:
+                                await asyncio.wait_for(transport.send_ifc(), timeout=3.0)
+                            except Exception:
+                                logger.warning("IFC failed on bus %s", bus_prefix)
+                            await asyncio.sleep(_IFC_COOLDOWN_S)
+                            # After IFC, all devices need reconnect
+                            for s in states:
+                                try:
+                                    await s.config.driver.disconnect()
+                                except Exception:
+                                    pass
+                                s.config.driver._connected = False
+                            break  # restart the for-loop (all devices disconnected)
+                    else:
+                        # Level 3: Close and reopen ResourceManager
+                        logger.error(
+                            "GPIB bus %s: %d consecutive errors, resetting ResourceManager",
+                            bus_prefix, bus_error_count,
+                        )
+                        from cryodaq.drivers.transport.gpib import GPIBTransport
+                        GPIBTransport.close_all_managers()
+                        for s in states:
+                            s.config.driver._connected = False
+                        bus_error_count = 0
+                        break  # restart the for-loop
 
                     if state.consecutive_errors >= 3:
                         logger.warning("'%s': 3+ ошибок, disconnect + skip", name)

@@ -2,11 +2,15 @@
 
 Persistent sessions: VISA resource открывается один раз в connect(),
 используется для всех query/write, закрывается в close().
-Точное воспроизведение LabVIEW-схемы: open → VISA Clear → loop { write → wait 100ms → read }.
+LabVIEW-схема: open → VISA Clear → loop { write → wait 100ms → read }.
 
-Сериализация доступа к шине обеспечивается единым asyncio task на каждую
-GPIB-шину в Scheduler. Никакого IFC, никаких retry — при ошибке raise,
-scheduler пропустит прибор и попробует на следующем цикле.
+Recovery: three-level escalation on errors:
+  Level 1: SDC (res.clear()) — clears device input buffer
+  Level 2: IFC (Interface Clear) — resets entire GPIB bus
+  Level 3: Close and reopen ResourceManager
+
+Unaddressing (VI_ATTR_GPIB_UNADDR_EN) enabled on connect to prevent
+bus lockup from addressing state corruption in TNT4882 ASIC.
 """
 from __future__ import annotations
 
@@ -28,8 +32,8 @@ class GPIBTransport:
     query() использует write → sleep(100ms) → read на persistent resource.
     close() закрывает resource.
 
-    Никаких IFC, retry, open-per-query. При ошибке — raise.
-    Scheduler пропускает сбойный прибор и продолжает опрос остальных.
+    Escalating recovery: SDC → IFC → RM reset (driven by Scheduler).
+    On query error: auto-clear + buffer drain, then raise for Scheduler.
 
     Parameters
     ----------
@@ -154,11 +158,10 @@ class GPIBTransport:
         """No-op for API compatibility."""
 
     async def clear_bus(self) -> bool:
-        """Send Selected Device Clear to recover a hung instrument.
+        """Send Selected Device Clear (Level 1 recovery).
 
         IEEE 488 SDC tells the addressed device to abort its current
-        operation and release the bus. Safe to call even if the resource
-        is in a bad state.
+        operation and release the bus.
 
         Returns True if clear succeeded, False otherwise.
         """
@@ -167,12 +170,28 @@ class GPIBTransport:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._blocking_clear)
 
+    async def send_ifc(self) -> bool:
+        """Send IFC — Interface Clear (Level 2 recovery).
+
+        Pulses the IFC line to reset the entire GPIB bus. All devices
+        release bus lines and go to idle. This is what NI MAX does
+        when you click "Reset Interface".
+
+        WARNING: resets ALL devices on this bus, not just one.
+
+        Returns True if IFC succeeded, False otherwise.
+        """
+        if self.mock:
+            return True
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._blocking_ifc)
+
     # ------------------------------------------------------------------
     # Blocking methods (run in executor)
     # ------------------------------------------------------------------
 
     def _blocking_connect(self) -> None:
-        """Open resource once, configure, VISA Clear once."""
+        """Open resource once, configure, VISA Clear once, enable unaddressing."""
         rm = self._get_rm(self._bus_prefix)
         res = rm.open_resource(self._resource_str)
         try:
@@ -180,8 +199,16 @@ class GPIBTransport:
             res.read_termination = "\n"
             res.timeout = self._timeout_ms
             res.clear()
+            # Enable unaddressing: UNT+UNL after each transfer.
+            # Prevents bus lockup from addressing state corruption
+            # in TNT4882 ASIC (NI GPIB-USB-HS).
+            _VI_ATTR_GPIB_UNADDR_EN = 0x3FFF00B0
+            try:
+                res.set_visa_attribute(_VI_ATTR_GPIB_UNADDR_EN, True)
+                log.debug("GPIB unaddressing enabled on %s", self._resource_str)
+            except Exception:
+                log.debug("GPIB unaddressing not available on %s", self._resource_str)
         except Exception:
-            # Don't leak the VISA handle if clear() or config fails
             try:
                 res.close()
             except Exception:
@@ -190,7 +217,7 @@ class GPIBTransport:
         self._resource = res
 
     def _blocking_query(self, cmd: str, timeout_ms: int | None = None) -> str:
-        """Write → sleep(100ms) → read. Auto-clear on error to release bus."""
+        """Write → sleep(100ms) → read. Auto-clear + drain on error."""
         res = self._resource
         if res is None:
             raise RuntimeError("GPIB resource not connected")
@@ -209,6 +236,17 @@ class GPIBTransport:
                 log.info("GPIB: auto-clear after error on %s", self._resource_str)
             except Exception:
                 log.warning("GPIB: auto-clear failed on %s", self._resource_str)
+            # Drain any leftover data from a partial response
+            try:
+                saved = res.timeout
+                res.timeout = 200
+                try:
+                    res.read()
+                except Exception:
+                    pass
+                res.timeout = saved
+            except Exception:
+                pass
             raise
         finally:
             if old_timeout is not None:
@@ -224,6 +262,24 @@ class GPIBTransport:
         except Exception as exc:
             log.warning("GPIB: clear failed on %s: %s", self._resource_str, exc)
         return False
+
+    def _blocking_ifc(self) -> bool:
+        """Send IFC (Interface Clear) to reset the entire GPIB bus."""
+        try:
+            rm = self._get_rm(self._bus_prefix)
+            intf = rm.open_resource(f"{self._bus_prefix}::INTFC")
+            try:
+                intf.send_ifc()
+                log.warning("GPIB: IFC sent on %s — full bus reset", self._bus_prefix)
+                return True
+            finally:
+                try:
+                    intf.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            log.warning("GPIB: IFC failed on %s: %s", self._bus_prefix, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Mock
