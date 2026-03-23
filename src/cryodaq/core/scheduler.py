@@ -154,10 +154,12 @@ class Scheduler:
         шине не выполняются параллельно. Один сбойный прибор не блокирует остальные.
         """
         poll_interval = max(s.config.poll_interval_s for s in states)
-        _CONNECT_TIMEOUT_S = 5.0
-        _POLL_TIMEOUT_S = 5.0
+        _CONNECT_TIMEOUT_S = 3.0
+        _POLL_TIMEOUT_S = 3.0
         _RECONNECT_INTERVAL_S = 30.0
+        _PREVENTIVE_CLEAR_INTERVAL_S = 300.0
         last_reconnect: dict[str, float] = {}
+        last_preventive_clear: dict[str, float] = {}
 
         # Подключить все последовательно — skip failures
         for state in states:
@@ -195,6 +197,17 @@ class Scheduler:
                         driver._connected = False
                         continue
 
+                # Preventive clear — every 5 minutes per device
+                last_clear = last_preventive_clear.get(name, 0.0)
+                if now - last_clear > _PREVENTIVE_CLEAR_INTERVAL_S:
+                    transport = getattr(driver, '_transport', None)
+                    if transport is not None and hasattr(transport, 'clear_bus'):
+                        try:
+                            await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
+                            last_preventive_clear[name] = now
+                        except Exception:
+                            pass
+
                 # Poll
                 try:
                     readings = await asyncio.wait_for(
@@ -205,6 +218,15 @@ class Scheduler:
                     state.consecutive_errors += 1
                     state.total_errors += 1
                     logger.warning("Ошибка опроса '%s': %s (подряд: %d)", name, exc, state.consecutive_errors)
+
+                    # Clear bus after error to unblock other instruments
+                    transport = getattr(driver, '_transport', None)
+                    if transport is not None and hasattr(transport, 'clear_bus'):
+                        try:
+                            await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
+                        except Exception:
+                            logger.warning("Bus clear failed after '%s' error", name)
+
                     if state.consecutive_errors >= 3:
                         logger.warning("'%s': 3+ ошибок, disconnect + skip", name)
                         try:

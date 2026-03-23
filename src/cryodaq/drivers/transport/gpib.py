@@ -17,7 +17,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_MS = 2000
+_DEFAULT_TIMEOUT_MS = 3000
 _WRITE_READ_DELAY_S = 0.1
 
 
@@ -153,6 +153,20 @@ class GPIBTransport:
     async def flush_input(self) -> None:
         """No-op for API compatibility."""
 
+    async def clear_bus(self) -> bool:
+        """Send Selected Device Clear to recover a hung instrument.
+
+        IEEE 488 SDC tells the addressed device to abort its current
+        operation and release the bus. Safe to call even if the resource
+        is in a bad state.
+
+        Returns True if clear succeeded, False otherwise.
+        """
+        if self.mock or self._resource is None:
+            return False
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._blocking_clear)
+
     # ------------------------------------------------------------------
     # Blocking methods (run in executor)
     # ------------------------------------------------------------------
@@ -176,7 +190,7 @@ class GPIBTransport:
         self._resource = res
 
     def _blocking_query(self, cmd: str, timeout_ms: int | None = None) -> str:
-        """Write → sleep(100ms) → read. LabVIEW-style."""
+        """Write → sleep(100ms) → read. Auto-clear on error to release bus."""
         res = self._resource
         if res is None:
             raise RuntimeError("GPIB resource not connected")
@@ -188,9 +202,28 @@ class GPIBTransport:
             res.write(cmd)
             time.sleep(_WRITE_READ_DELAY_S)
             return res.read().strip()
+        except Exception:
+            # Timeout or bus error — clear device to release the bus
+            try:
+                res.clear()
+                log.info("GPIB: auto-clear after error on %s", self._resource_str)
+            except Exception:
+                log.warning("GPIB: auto-clear failed on %s", self._resource_str)
+            raise
         finally:
             if old_timeout is not None:
                 res.timeout = old_timeout
+
+    def _blocking_clear(self) -> bool:
+        """Send Selected Device Clear. Returns True on success."""
+        try:
+            if self._resource is not None:
+                self._resource.clear()
+                log.info("GPIB: clear OK on %s", self._resource_str)
+                return True
+        except Exception as exc:
+            log.warning("GPIB: clear failed on %s: %s", self._resource_str, exc)
+        return False
 
     # ------------------------------------------------------------------
     # Mock
