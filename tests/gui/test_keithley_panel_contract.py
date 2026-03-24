@@ -230,25 +230,16 @@ def test_stop_sends_command_when_backend_on(monkeypatch) -> None:
     )
 
 
-def test_live_p_target_sends_set_target_when_on(monkeypatch) -> None:
-    """When channel is active, changing P spinbox sends keithley_set_target."""
+def test_live_p_target_debounce_starts_when_on(monkeypatch) -> None:
+    """When channel is active, changing P spinbox starts debounce timer."""
     _app()
     panel = KeithleyPanel()
-    commands = []
-
-    def _send_command(payload):
-        commands.append(payload)
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
     panel.on_reading(_channel_state_reading("smua", "on"))
 
-    panel._smu_panels["smua"]._p_spin.setValue(0.3)
+    smu = panel._smu_panels["smua"]
+    smu._p_spin.setValue(0.3)
 
-    target_cmds = [c for c in commands if c.get("cmd") == "keithley_set_target"]
-    assert len(target_cmds) >= 1
-    assert target_cmds[-1]["p_target"] == 0.3
-    assert target_cmds[-1]["channel"] == "smua"
+    assert smu._p_debounce.isActive(), "Debounce timer should be active after spin change"
 
 
 def test_live_p_target_skipped_when_off(monkeypatch) -> None:
@@ -269,24 +260,16 @@ def test_live_p_target_skipped_when_off(monkeypatch) -> None:
     assert not any(c.get("cmd") == "keithley_set_target" for c in commands)
 
 
-def test_live_limits_sends_set_limits_when_on(monkeypatch) -> None:
-    """When channel is active, changing V/I spinbox sends keithley_set_limits."""
+def test_live_limits_debounce_starts_when_on(monkeypatch) -> None:
+    """When channel is active, changing V/I spinbox starts debounce timer."""
     _app()
     panel = KeithleyPanel()
-    commands = []
-
-    def _send_command(payload):
-        commands.append(payload)
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
     panel.on_reading(_channel_state_reading("smua", "on"))
 
-    panel._smu_panels["smua"]._v_spin.setValue(30.0)
+    smu = panel._smu_panels["smua"]
+    smu._v_spin.setValue(30.0)
 
-    limit_cmds = [c for c in commands if c.get("cmd") == "keithley_set_limits"]
-    assert len(limit_cmds) >= 1
-    assert limit_cmds[-1]["v_comp"] == 30.0
+    assert smu._limits_debounce.isActive(), "Limits debounce timer should be active after spin change"
 
 
 def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:

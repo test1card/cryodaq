@@ -132,10 +132,23 @@ class _SmuPanel(QFrame):
         controls_layout.addWidget(self._emg_btn)
         root.addWidget(controls)
 
-        # Live-update signals: adjust P/V/I on-the-fly when channel is active
-        self._p_spin.valueChanged.connect(self._on_p_target_changed)
-        self._v_spin.valueChanged.connect(self._on_limits_changed)
-        self._i_spin.valueChanged.connect(self._on_limits_changed)
+        # Live-update signals: debounced, non-blocking
+        self._p_spin.valueChanged.connect(self._on_p_spin_changed)
+        self._v_spin.valueChanged.connect(self._on_limits_spin_changed)
+        self._i_spin.valueChanged.connect(self._on_limits_spin_changed)
+
+        # Debounce timers for live-update spinboxes (300ms)
+        self._p_debounce = QTimer(self)
+        self._p_debounce.setSingleShot(True)
+        self._p_debounce.setInterval(300)
+        self._p_debounce.timeout.connect(self._send_p_target)
+
+        self._limits_debounce = QTimer(self)
+        self._limits_debounce.setSingleShot(True)
+        self._limits_debounce.setInterval(300)
+        self._limits_debounce.timeout.connect(self._send_limits)
+
+        self._live_worker: ZmqCommandWorker | None = None
 
         self._status_banner = StatusBanner()
         self._status_banner.clear_message()
@@ -360,32 +373,53 @@ class _SmuPanel(QFrame):
             logger.error("Emergency off failed on %s: %s", self._smu, result.get("error"))
         self._workers = [worker for worker in self._workers if worker.isRunning()]
 
-    def _on_p_target_changed(self, value: float) -> None:
+    def _on_p_spin_changed(self, value: float) -> None:
+        """Debounce P target changes — restart 300ms timer on every spin."""
         if self._channel_state != "on" or value <= 0:
             return
-        reply = send_command({
+        self._p_debounce.start()
+
+    def _send_p_target(self) -> None:
+        """Send final P target after debounce (non-blocking)."""
+        value = self._p_spin.value()
+        if self._channel_state != "on" or value <= 0:
+            return
+        worker = ZmqCommandWorker({
             "cmd": "keithley_set_target",
             "channel": self._smu,
             "p_target": value,
-        })
-        if not reply.get("ok"):
-            logger.warning("set_target failed on %s: %s", self._smu, reply.get("error"))
+        }, parent=self)
+        worker.finished.connect(self._on_live_update_result)
+        self._live_worker = worker
+        worker.start()
 
-    def _on_limits_changed(self) -> None:
+    def _on_limits_spin_changed(self) -> None:
+        """Debounce V/I limit changes — restart 300ms timer on every spin."""
         if self._channel_state != "on":
             return
+        self._limits_debounce.start()
+
+    def _send_limits(self) -> None:
+        """Send final V/I limits after debounce (non-blocking)."""
         v = self._v_spin.value()
         i = self._i_spin.value()
-        if v <= 0 or i <= 0:
+        if self._channel_state != "on" or v <= 0 or i <= 0:
             return
-        reply = send_command({
+        worker = ZmqCommandWorker({
             "cmd": "keithley_set_limits",
             "channel": self._smu,
             "v_comp": v,
             "i_comp": i,
-        })
-        if not reply.get("ok"):
-            logger.warning("set_limits failed on %s: %s", self._smu, reply.get("error"))
+        }, parent=self)
+        worker.finished.connect(self._on_live_update_result)
+        self._live_worker = worker
+        worker.start()
+
+    @Slot(dict)
+    def _on_live_update_result(self, result: dict) -> None:
+        """Log failures from debounced live-update commands."""
+        if not result.get("ok"):
+            logger.warning("Keithley live update failed on %s: %s", self._smu, result.get("error"))
 
     def handle_reading(self, suffix: str, reading: Reading) -> None:
         if suffix not in self._buffers:
