@@ -1,4 +1,4 @@
-"""Панель тревог (AlarmPanel).
+﻿"""Панель тревог (AlarmPanel).
 
 Отображает таблицу тревог с цветовой индикацией по severity.
 Позволяет оператору подтверждать тревоги (acknowledge).
@@ -106,6 +106,7 @@ class AlarmPanel(QWidget):
         self._alarms: dict[str, _AlarmRow] = {}
         # v2: alarm_id → {level, message, triggered_at, channels}
         self._v2_alarms: dict[str, dict] = {}
+        self._v2_worker = None
 
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
@@ -290,14 +291,18 @@ class AlarmPanel(QWidget):
 
     @Slot()
     def _poll_v2_status(self) -> None:
-        """Poll alarm_v2_status from engine and refresh v2 table."""
-        try:
-            from cryodaq.gui.zmq_client import send_command
-            reply = send_command({"cmd": "alarm_v2_status"})
-            if reply.get("ok"):
-                self.update_v2_status(reply)
-        except Exception as exc:
-            logger.debug("alarm_v2_status poll error: %s", exc)
+        """Poll alarm_v2_status from engine (non-blocking background thread)."""
+        if self._v2_worker is not None and not self._v2_worker.isFinished():
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+        self._v2_worker = ZmqCommandWorker({"cmd": "alarm_v2_status"})
+        self._v2_worker.finished.connect(self._on_v2_poll_result)
+        self._v2_worker.start()
+
+    @Slot(dict)
+    def _on_v2_poll_result(self, reply: dict) -> None:
+        if reply.get("ok"):
+            self.update_v2_status(reply)
 
     def update_v2_status(self, payload: dict) -> None:
         """Update v2 alarm table from alarm_v2_status response payload."""
