@@ -15,10 +15,11 @@ import multiprocessing
 import sys
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cryodaq.gui.main_window import MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
+from cryodaq.instance_lock import try_acquire_lock, release_lock
 
 logger = logging.getLogger("cryodaq.gui")
 
@@ -36,6 +37,17 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("CryoDAQ")
     app.setOrganizationName("АКЦ ФИАН")
+
+    # Single-instance guard
+    lock_fd = try_acquire_lock(".gui.lock")
+    if lock_fd is None:
+        QMessageBox.critical(
+            None,
+            "CryoDAQ",
+            "CryoDAQ GUI уже запущен.\n\n"
+            "Используйте уже открытый экземпляр.",
+        )
+        sys.exit(0)
 
     # --- ZMQ Bridge subprocess ---
     bridge = ZmqBridge()
@@ -74,6 +86,7 @@ def main() -> None:
     # --- Корректное завершение ---
     timer.stop()
     shutdown()
+    release_lock(lock_fd, ".gui.lock")
     logger.info("GUI завершён")
 
     sys.exit(exit_code)

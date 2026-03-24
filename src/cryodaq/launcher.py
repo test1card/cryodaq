@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.main_window import MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
+from cryodaq.instance_lock import try_acquire_lock, release_lock
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -115,11 +116,13 @@ class LauncherWindow(QMainWindow):
         *,
         mock: bool = False,
         tray_only: bool = False,
+        lock_fd: int | None = None,
     ) -> None:
         super().__init__()
         self._app = app
         self._mock = mock
         self._tray_only = tray_only
+        self._lock_fd = lock_fd
         self._engine_proc: subprocess.Popen | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
         self._reading_count = 0
@@ -518,6 +521,8 @@ class LauncherWindow(QMainWindow):
         self._bridge.shutdown()
         self._stop_engine()
         self._loop.close()
+        if self._lock_fd is not None:
+            release_lock(self._lock_fd, ".launcher.lock")
         self._app.quit()
 
     def _tray_open(self) -> None:
@@ -676,7 +681,19 @@ def main() -> None:
     app.setOrganizationName("АКЦ ФИАН")
     app.setQuitOnLastWindowClosed(False)  # Не выходить при закрытии окна (трей)
 
-    window = LauncherWindow(app, mock=mock, tray_only=args.tray)
+    # Single-instance guard
+    lock_fd = try_acquire_lock(".launcher.lock")
+    if lock_fd is None:
+        QMessageBox.critical(
+            None,
+            "CryoDAQ",
+            "CryoDAQ Launcher уже запущен.\n\n"
+            "Используйте уже открытый экземпляр\n"
+            "или завершите его через иконку в трее → Выход.",
+        )
+        sys.exit(0)
+
+    window = LauncherWindow(app, mock=mock, tray_only=args.tray, lock_fd=lock_fd)
     if not args.tray:
         window.show()
 
