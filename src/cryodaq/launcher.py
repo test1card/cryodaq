@@ -449,9 +449,12 @@ class LauncherWindow(QMainWindow):
     @Slot()
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
-        if not self._bridge.is_alive():
-            logger.warning("ZMQ bridge died, cleaning up and restarting...")
-            self._bridge.shutdown()  # Clean up dead process handle
+        if not self._bridge.is_healthy():
+            if self._bridge.is_alive():
+                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+                self._bridge.shutdown()
+            else:
+                logger.warning("ZMQ bridge died, restarting...")
             self._bridge.start()
             return
         for reading in self._bridge.poll_readings():

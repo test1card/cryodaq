@@ -53,7 +53,7 @@ from cryodaq.gui.widgets.common import (
     build_action_row,
     create_panel_root,
 )
-from cryodaq.gui.zmq_client import send_command
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,7 @@ class ConductivityPanel(QWidget):
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(1000)
         self._auto_timer.timeout.connect(self._auto_tick)
+        self._auto_cmd_worker: ZmqCommandWorker | None = None
 
     def _build_ui(self) -> None:
         outer = create_panel_root(self)
@@ -744,6 +745,19 @@ class ConductivityPanel(QWidget):
             text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
         self._power_preview.setText(text)
 
+    def _send_auto_cmd(self, cmd: dict) -> None:
+        """Fire-and-forget Keithley command via worker thread (non-blocking)."""
+        worker = ZmqCommandWorker(cmd, parent=self)
+        worker.finished.connect(self._on_auto_cmd_result)
+        self._auto_cmd_worker = worker
+        worker.start()
+
+    @Slot(dict)
+    def _on_auto_cmd_result(self, result: dict) -> None:
+        """Log failures from async Keithley commands."""
+        if not result.get("ok"):
+            logger.warning("Авто-команда Keithley: %s", result.get("error", "?"))
+
     @Slot()
     def _on_auto_start(self) -> None:
         """Запуск автоматической развёртки по мощности."""
@@ -773,7 +787,7 @@ class ConductivityPanel(QWidget):
 
         # Send first power command
         self._auto_step_start = time.monotonic()
-        send_command({
+        self._send_auto_cmd({
             "cmd": "keithley_set_target",
             "channel": self._smu_channel(),
             "p_target": powers[0],
@@ -787,7 +801,7 @@ class ConductivityPanel(QWidget):
         """Прервать автоизмерение."""
         self._auto_state = "idle"
         self._auto_timer.stop()
-        send_command({"cmd": "keithley_stop", "channel": self._smu_channel()})
+        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
 
         self._auto_start_btn.setEnabled(True)
         self._auto_stop_btn.setEnabled(False)
@@ -846,7 +860,7 @@ class ConductivityPanel(QWidget):
             else:
                 next_p = self._auto_power_list[self._auto_step]
                 self._auto_step_start = time.monotonic()
-                send_command({
+                self._send_auto_cmd({
                     "cmd": "keithley_set_target",
                     "channel": self._smu_channel(),
                     "p_target": next_p,
@@ -890,7 +904,7 @@ class ConductivityPanel(QWidget):
         """Завершить развёртку."""
         self._auto_state = "done"
         self._auto_timer.stop()
-        send_command({"cmd": "keithley_stop", "channel": self._smu_channel()})
+        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
 
         self._auto_start_btn.setEnabled(True)
         self._auto_stop_btn.setEnabled(False)

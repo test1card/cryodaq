@@ -125,3 +125,16 @@ def test_is_healthy_threshold_generous():
     from cryodaq.gui.zmq_client import ZmqBridge
     source = inspect.getsource(ZmqBridge.is_healthy)
     assert "30.0" in source, "is_healthy threshold must be 30s"
+
+
+def test_launcher_poll_checks_is_healthy():
+    """Launcher _poll_bridge_data must check is_healthy, not just is_alive."""
+    import inspect
+    from cryodaq.launcher import LauncherWindow
+    source = inspect.getsource(LauncherWindow._poll_bridge_data)
+    assert "is_healthy()" in source, (
+        "_poll_bridge_data must call is_healthy() to detect hung bridge"
+    )
+    assert "is_alive()" in source, (
+        "_poll_bridge_data must also distinguish alive-but-hung from dead"
+    )
