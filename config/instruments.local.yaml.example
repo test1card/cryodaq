@@ -3,12 +3,17 @@
 #
 # Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
 # Если instruments.local.yaml существует — engine использует его вместо instruments.yaml.
+#
+# Адреса стенда АКЦ ФИАН (март 2026):
+#   LS218_1: GPIB0::12  |  LS218_2: GPIB0::11 (poll 2.0s)
+#   LS218_3: GPIB0::13  |  Keithley: USB0::0x05E6::0x2604::4083236
+#   Thyracont: COM8, 115200
 
 instruments:
   - type: lakeshore_218s
     name: "LS218_1"
-    resource: "GPIB0::12::INSTR"       # ← укажите ваш GPIB-адрес
-    poll_interval_s: 0.5
+    resource: "GPIB0::12::INSTR"
+    poll_interval_s: 2.0
     channels:
       1: "Т1 Криостат верх"
       2: "Т2 Криостат низ"
@@ -17,12 +22,12 @@ instruments:
       5: "Т5 Экран 77К"
       6: "Т6 Экран 4К"
       7: "Т7 Детектор"
-      8: "Т8 Калибровка"
+      # 8: "Т8 Калибровка"  # раскомментировать если подключён
 
   - type: lakeshore_218s
     name: "LS218_2"
-    resource: "GPIB0::14::INSTR"       # ← укажите ваш GPIB-адрес
-    poll_interval_s: 0.5
+    resource: "GPIB0::11::INSTR"       # АКЦ ФИАН: GPIB0::11
+    poll_interval_s: 2.0               # 2.0s для стабильности GPIB
     channels:
       1: "Т9 Компрессор вход"
       2: "Т10 Компрессор выход"
@@ -31,29 +36,26 @@ instruments:
       5: "Т13 Труба подачи"
       6: "Т14 Труба возврата"
       7: "Т15 Вакуумный кожух"
-      8: "Т16 Фланец"
+      # 8: "Т16 Фланец"  # раскомментировать если подключён
 
   - type: lakeshore_218s
     name: "LS218_3"
-    resource: "GPIB0::16::INSTR"       # ← укажите ваш GPIB-адрес
-    poll_interval_s: 0.5
+    resource: "GPIB0::13::INSTR"       # АКЦ ФИАН: GPIB0::13
+    poll_interval_s: 2.0
     channels:
       1: "Т17 Зеркало 1"
       2: "Т18 Зеркало 2"
       3: "Т19 Подвес"
       4: "Т20 Рама"
-      5: "Т21 Резерв 1"
-      6: "Т22 Резерв 2"
-      7: "Т23 Резерв 3"
-      8: "Т24 Резерв 4"
+      # 5–8: резервные, раскомментировать по необходимости
 
   - type: keithley_2604b
     name: "Keithley_1"
-    resource: "USB0::0x05E6::0x2604::СЕРИЙНЫЙ_НОМЕР::INSTR"  # ← серийный номер
+    resource: "USB0::0x05E6::0x2604::4083236::INSTR"  # АКЦ ФИАН серийный
     poll_interval_s: 1.0
 
   - type: thyracont_vsp63d
     name: "VSP63D_1"
-    resource: "COM3"                   # ← укажите ваш COM-порт
-    baudrate: 9600
+    resource: "COM8"                    # АКЦ ФИАН: COM8
+    baudrate: 115200                    # АКЦ ФИАН: 115200
     poll_interval_s: 2.0

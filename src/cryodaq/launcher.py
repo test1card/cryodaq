@@ -201,7 +201,7 @@ class LauncherWindow(QMainWindow):
         except (OSError, ProcessLookupError):
             return False
 
-    def _start_engine(self) -> None:
+    def _start_engine(self, *, wait: bool = True) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
         if _is_port_busy(_ZMQ_PORT):
             if _ping_engine():
@@ -284,7 +284,8 @@ class LauncherWindow(QMainWindow):
         logger.info("Engine запущен, PID=%d", self._engine_proc.pid)
 
         # Ожидание готовности engine — ping command port
-        self._wait_engine_ready()
+        if wait:
+            self._wait_engine_ready()
 
     def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
         """Wait for engine to start listening on ZMQ port."""
@@ -564,7 +565,7 @@ class LauncherWindow(QMainWindow):
                 logger.warning("Engine упал, автоматический перезапуск...")
                 if not self._tray_only:
                     self._engine_label.setText("Engine: перезапуск...")
-                self._start_engine()
+                self._start_engine(wait=False)
                 if self._tray.isVisible():
                     self._tray.showMessage(
                         "CryoDAQ",

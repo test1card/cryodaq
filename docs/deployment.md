@@ -24,19 +24,20 @@ cd cryodaq
 ## 3. Установка пакета
 
 ```powershell
-pip install -e ".[dev,web]"
+pip install -e ".[dev,web,archive]"
 ```
 
 Минимальная runtime-установка без dev/web extras:
 
 ```powershell
-pip install -e .
+pip install -e .          # без Parquet архива
+pip install -e ".[archive]"  # + Parquet (рекомендуется)
 ```
 
 Если нужен только web dashboard, используйте:
 
 ```powershell
-pip install -e ".[web]"
+pip install -e ".[web,archive]"
 ```
 
 Эта установка подтягивает и GUI dependencies, включая:
@@ -199,6 +200,18 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
+Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web,archive]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
+
+## USB Selective Suspend (Windows)
+
+Windows по умолчанию отключает USB-устройства для экономии энергии.
+На лабораторном ПК это приводит к потере связи с приборами через 20+ часов.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\disable_usb_suspend.ps1
+```
+
+Дополнительно: Device Manager → каждый USB Root Hub → Properties →
+Power Management → убрать "Allow the computer to turn off this device to save power".

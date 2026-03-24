@@ -28,10 +28,10 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo  Устанавливаю зависимости...
-pip install -e ".[dev,web]" >nul 2>&1
+pip install -e ".[dev,web,archive]" >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo  ОШИБКА: pip install завершился с ошибкой.
-    echo  Попробуйте: pip install -e ".[dev,web]"
+    echo  Попробуйте: pip install -e ".[dev,web,archive]"
     pause
     exit /b 1
 )
