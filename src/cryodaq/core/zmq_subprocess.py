@@ -85,7 +85,7 @@ def zmq_bridge_main(
     req.setsockopt(zmq.REQ_CORRELATE, 1)
     req.connect(cmd_addr)
 
-    HEARTBEAT_INTERVAL = 3.0  # seconds
+    HEARTBEAT_INTERVAL = 5.0  # seconds — keep generous vs is_healthy() threshold
     last_heartbeat = time.monotonic()
     dropped_count = 0
 

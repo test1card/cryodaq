@@ -108,3 +108,20 @@ def test_gui_never_imports_zmq():
                     violations.append(f"{py_file.name}:{node.lineno}: from {node.module}")
 
     assert not violations, f"GUI modules must not import zmq:\n" + "\n".join(violations)
+
+
+def test_heartbeat_interval_value():
+    """HEARTBEAT_INTERVAL must be 5s (matches is_healthy threshold)."""
+    import importlib
+    import inspect
+    mod = importlib.import_module("cryodaq.core.zmq_subprocess")
+    source = inspect.getsource(mod.zmq_bridge_main)
+    assert "HEARTBEAT_INTERVAL = 5.0" in source
+
+
+def test_is_healthy_threshold_generous():
+    """is_healthy() threshold must be >= 25s to survive GUI thread blocks."""
+    import inspect
+    from cryodaq.gui.zmq_client import ZmqBridge
+    source = inspect.getsource(ZmqBridge.is_healthy)
+    assert "30.0" in source, "is_healthy threshold must be 30s"

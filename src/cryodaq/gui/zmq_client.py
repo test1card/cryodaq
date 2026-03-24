@@ -143,7 +143,7 @@ class ZmqBridge:
             return False
         if self._last_heartbeat == 0.0:
             return True  # just started, give it time
-        return time.monotonic() - self._last_heartbeat < 9.0  # 3 * HEARTBEAT_INTERVAL
+        return time.monotonic() - self._last_heartbeat < 30.0  # generous: survives blocked GUI thread
 
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""

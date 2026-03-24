@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.main_window import MainWindow
-from cryodaq.gui.zmq_client import ZmqBridge, set_bridge
+from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -127,6 +127,7 @@ class LauncherWindow(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_alarm_count: int = 0
+        self._safety_worker: ZmqCommandWorker | None = None
 
         self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
         self.setMinimumSize(1360, 860)
@@ -564,14 +565,13 @@ class LauncherWindow(QMainWindow):
                         3000,
                     )
 
-        # Poll safety state (non-blocking, quick)
+        # Poll safety state — non-blocking via worker thread
         if alive and self._bridge.is_alive():
-            try:
-                safety_result = self._bridge.send_command({"cmd": "safety_status"})
-                if safety_result.get("ok"):
-                    self._last_safety_state = safety_result.get("state")
-            except Exception:
-                pass
+            if self._safety_worker is None or self._safety_worker.isFinished():
+                worker = ZmqCommandWorker({"cmd": "safety_status"}, parent=self)
+                worker.finished.connect(self._on_safety_result)
+                self._safety_worker = worker
+                worker.start()
 
         # Tray icon color + tooltip — reflects engine safety state
         data_flowing = (time.monotonic() - self._last_reading_time) < 5.0
@@ -591,6 +591,12 @@ class LauncherWindow(QMainWindow):
         else:
             self._tray.setIcon(self._tray_icon_green)
             self._tray.setToolTip("CryoDAQ — работает")
+
+    @Slot(dict)
+    def _on_safety_result(self, result: dict) -> None:
+        """Handle async safety_status reply."""
+        if result.get("ok"):
+            self._last_safety_state = result.get("state")
 
     @Slot()
     def _update_status(self) -> None:
