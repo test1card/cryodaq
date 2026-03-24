@@ -27,6 +27,10 @@ MAX_BACKOFF_S = 60.0
 INITIAL_BACKOFF_S = 1.0
 READ_TIMEOUT_S = 10.0
 
+# Standalone (non-GPIB) instrument disconnect backoff
+_STANDALONE_INITIAL_BACKOFF_S = 30.0
+_STANDALONE_MAX_BACKOFF_S = 300.0
+
 _GPIB_PREFIX = "GPIB"
 
 
@@ -124,6 +128,8 @@ class Scheduler:
                 readings = await asyncio.wait_for(
                     driver.safe_read(), timeout=cfg.read_timeout_s
                 )
+                state.consecutive_errors = 0
+                state.backoff_s = INITIAL_BACKOFF_S
                 await self._process_readings(state, readings)
             except TimeoutError:
                 state.consecutive_errors += 1
@@ -132,12 +138,34 @@ class Scheduler:
                     "Таймаут опроса '%s' (%.1fs), ошибок подряд: %d",
                     name, cfg.read_timeout_s, state.consecutive_errors,
                 )
-                await self._handle_error(state)
+                if state.consecutive_errors >= 3:
+                    logger.warning(
+                        "'%s': %d consecutive errors, disconnect + backoff",
+                        name, state.consecutive_errors,
+                    )
+                    try:
+                        await driver.disconnect()
+                    except Exception:
+                        logger.exception("Ошибка отключения '%s'", name)
+                    state.backoff_s = max(state.backoff_s, _STANDALONE_INITIAL_BACKOFF_S)
+                    await self._backoff(state, max_s=_STANDALONE_MAX_BACKOFF_S)
+                    continue
             except Exception:
                 state.consecutive_errors += 1
                 state.total_errors += 1
-                logger.exception("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
-                await self._handle_error(state)
+                logger.warning("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
+                if state.consecutive_errors >= 3:
+                    logger.warning(
+                        "'%s': %d consecutive errors, disconnect + backoff",
+                        name, state.consecutive_errors,
+                    )
+                    try:
+                        await driver.disconnect()
+                    except Exception:
+                        logger.exception("Ошибка отключения '%s'", name)
+                    state.backoff_s = max(state.backoff_s, _STANDALONE_INITIAL_BACKOFF_S)
+                    await self._backoff(state, max_s=_STANDALONE_MAX_BACKOFF_S)
+                    continue
 
             next_deadline += cfg.poll_interval_s
             now = loop.time()
@@ -339,12 +367,12 @@ class Scheduler:
                 logger.exception("Ошибка отключения '%s'", driver.name)
             await self._backoff(state)
 
-    async def _backoff(self, state: _InstrumentState) -> None:
+    async def _backoff(self, state: _InstrumentState, *, max_s: float = MAX_BACKOFF_S) -> None:
         """Экспоненциальная задержка перед переподключением."""
-        delay = min(state.backoff_s, MAX_BACKOFF_S)
+        delay = min(state.backoff_s, max_s)
         logger.info("Backoff '%s': %.1fs", state.config.driver.name, delay)
         await asyncio.sleep(delay)
-        state.backoff_s = min(state.backoff_s * 2, MAX_BACKOFF_S)
+        state.backoff_s = min(state.backoff_s * 2, max_s)
 
     async def start(self) -> None:
         """Запустить все циклы опроса.
