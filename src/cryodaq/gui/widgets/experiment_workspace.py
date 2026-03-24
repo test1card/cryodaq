@@ -332,24 +332,24 @@ class ExperimentWorkspace(QWidget):
         phase_layout.setSpacing(4)
         self._phase_labels: dict[str, QLabel] = {}
         _phase_names = [
-            ("preparation", "Подготовка"),
+            ("preparation", "Подгот."),
             ("vacuum", "Откачка"),
-            ("cooldown", "Захолаживание"),
-            ("measurement", "Измерение"),
-            ("warmup", "Растепление"),
+            ("cooldown", "Захолаж."),
+            ("measurement", "Измерен."),
+            ("warmup", "Растепл."),
             ("teardown", "Разборка"),
         ]
         for i, (key, label) in enumerate(_phase_names):
             if i > 0:
                 arrow = QLabel("→")
-                arrow.setStyleSheet("color: #555555; border: none;")
+                arrow.setStyleSheet("color: #555555; border: none; font-size: 11px;")
                 phase_layout.addWidget(arrow)
             lbl = QLabel(f"○ {label}")
-            lbl.setStyleSheet("color: #555555; border: none;")
+            lbl.setStyleSheet("color: #555555; border: none; font-size: 11px;")
             phase_layout.addWidget(lbl)
             self._phase_labels[key] = lbl
         phase_layout.addStretch()
-        self._advance_phase_btn = QPushButton("Следующая фаза →")
+        self._advance_phase_btn = QPushButton("Фаза →")
         apply_button_style(self._advance_phase_btn, "neutral")
         self._advance_phase_btn.clicked.connect(self._on_advance_phase)
         phase_layout.addWidget(self._advance_phase_btn)
@@ -374,6 +374,8 @@ class ExperimentWorkspace(QWidget):
         create_layout = QVBoxLayout(self._create_box)
         create_layout.setSpacing(8)
         create_form = QFormLayout()
+        create_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        create_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._create_template_combo = QComboBox()
         self._create_template_combo.currentIndexChanged.connect(self._rebuild_create_custom_fields)
         self._create_title_edit = QLineEdit()
@@ -427,12 +429,20 @@ class ExperimentWorkspace(QWidget):
         self._passport_box = QGroupBox("Паспортные данные")
         apply_group_box_style(self._passport_box, "#58a6ff")
         passport_layout = QFormLayout(self._passport_box)
+        passport_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        passport_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._card_experiment_id = QLabel("—")
+        self._card_experiment_id.setWordWrap(True)
         self._card_status = QLabel("—")
+        self._card_status.setWordWrap(True)
         self._card_operator = QLabel("—")
+        self._card_operator.setWordWrap(True)
         self._card_template = QLabel("—")
+        self._card_template.setWordWrap(True)
         self._card_started = QLabel("—")
+        self._card_started.setWordWrap(True)
         self._card_cryostat = QLabel("—")
+        self._card_cryostat.setWordWrap(True)
         add_form_rows(
             passport_layout,
             [
@@ -450,6 +460,8 @@ class ExperimentWorkspace(QWidget):
         apply_group_box_style(self._card_fields_box, "#3fb950")
         card_fields_layout = QVBoxLayout(self._card_fields_box)
         card_form = QFormLayout()
+        card_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        card_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._card_title_edit = QLineEdit()
         self._card_sample_edit = QLineEdit()
         self._card_description_edit = QTextEdit()
@@ -769,14 +781,14 @@ class ExperimentWorkspace(QWidget):
         for key, lbl in self._phase_labels.items():
             if key == current:
                 lbl.setText(f"● {lbl.text().split(' ', 1)[-1]}")
-                lbl.setStyleSheet("color: #2ECC40; font-weight: bold; border: none;")
+                lbl.setStyleSheet("color: #2ECC40; font-weight: bold; border: none; font-size: 11px;")
             elif key in completed:
                 lbl.setText(f"✓ {lbl.text().split(' ', 1)[-1]}")
-                lbl.setStyleSheet("color: #58a6ff; border: none;")
+                lbl.setStyleSheet("color: #58a6ff; border: none; font-size: 11px;")
             else:
                 name = lbl.text().split(" ", 1)[-1]
                 lbl.setText(f"○ {name}")
-                lbl.setStyleSheet("color: #555555; border: none;")
+                lbl.setStyleSheet("color: #555555; border: none; font-size: 11px;")
 
     @Slot()
     def _on_advance_phase(self) -> None:
