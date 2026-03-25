@@ -476,6 +476,7 @@ class ShiftBar(QFrame):
         self._missed_timer.timeout.connect(self._on_periodic_missed)
 
         self._prompt_pending = False
+        self._prompt_dialog: QDialog | None = None
         self._workers: list[object] = []
 
     # --- Public API ---
@@ -556,6 +557,8 @@ class ShiftBar(QFrame):
     def _on_periodic_due(self) -> None:
         if not self._active:
             return
+        if self._prompt_pending:
+            return  # previous dialog still open — skip
         self._prompt_pending = True
         # Start missed timer
         if self._missed_timeout_ms > 0:
@@ -566,7 +569,9 @@ class ShiftBar(QFrame):
             shift_id=self._shift_id,
             parent=self,
         )
+        self._prompt_dialog = dialog
         result = dialog.exec()
+        self._prompt_dialog = None
         self._prompt_pending = False
         self._missed_timer.stop()
 
@@ -579,6 +584,11 @@ class ShiftBar(QFrame):
             return
         self._missed_count += 1
         logger.warning("Shift periodic check missed for %s", self._shift_id)
+
+        # Auto-dismiss the dialog — operator didn't respond in time
+        if self._prompt_dialog is not None:
+            logger.info("Auto-dismissing periodic prompt (missed timeout)")
+            self._prompt_dialog.reject()
 
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 

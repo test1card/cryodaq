@@ -1545,10 +1545,26 @@ def _force_kill_existing() -> None:
     """Force-kill any running engine and remove lock."""
     if not _LOCK_FILE.exists():
         return
+    # Read PID via os.open — works even when file is locked by msvcrt
+    pid = None
+    fd = None
     try:
-        pid = int(_LOCK_FILE.read_text().strip())
-    except (ValueError, OSError):
-        _LOCK_FILE.unlink(missing_ok=True)
+        fd = os.open(str(_LOCK_FILE), os.O_RDONLY)
+        raw = os.read(fd, 64).decode().strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if pid is None:
+        try:
+            _LOCK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
         return
     if _is_pid_alive(pid):
         logger.warning("Принудительная остановка engine (PID %d)...", pid)
@@ -1569,7 +1585,10 @@ def _force_kill_existing() -> None:
         else:
             logger.error("PID %d не завершился после 5с", pid)
             raise SystemExit(1)
-    _LOCK_FILE.unlink(missing_ok=True)
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Lock file busy (will be released by OS)")
     logger.info("Старый engine остановлен, lock очищен")
 
 
