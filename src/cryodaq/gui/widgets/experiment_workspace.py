@@ -36,7 +36,7 @@ from cryodaq.gui.widgets.common import (
     apply_status_label_style,
     build_action_row,
 )
-from cryodaq.gui.zmq_client import send_command
+from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
 
 
 class ExperimentWorkspace(QWidget):
@@ -47,6 +47,7 @@ class ExperimentWorkspace(QWidget):
         self._active_experiment: dict[str, Any] | None = None
         self._app_mode = "experiment"
         self._timeline_entries: list[str] = []
+        self._workers: list[ZmqCommandWorker] = []
         self._post_action: Callable[[], None] | None = None
         self._shell_message: Callable[[str, int], None] | None = None
         self._finalize_guard: Callable[[], tuple[bool, str]] | None = None
@@ -154,7 +155,15 @@ class ExperimentWorkspace(QWidget):
                 if edit.text().strip()
             },
         }
-        result = send_command(payload)
+        self._create_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(lambda result, op=operator, pl=payload: self._on_create_result(result, op, pl))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_create_result(self, result: dict, operator: str, payload: dict) -> None:
+        self._create_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._workspace_status.show_error(
                 str(result.get("error", "Не удалось создать эксперимент."))
@@ -178,9 +187,9 @@ class ExperimentWorkspace(QWidget):
         self._preferences.save_last_experiment(
             template_id=str(payload.get("template_id", "")),
             operator=operator,
-            sample=self._create_sample_edit.text().strip(),
-            cryostat=self._create_cryostat_edit.currentText().strip(),
-            description=self._create_description_edit.toPlainText().strip(),
+            sample=str(payload.get("sample", "")),
+            cryostat=str(payload.get("cryostat", "")),
+            description=str(payload.get("description", "")),
             custom_fields=payload.get("custom_fields", {}),
         )
 
@@ -209,7 +218,15 @@ class ExperimentWorkspace(QWidget):
                 if edit.text().strip()
             },
         }
-        result = send_command(payload)
+        self._save_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(self._on_save_card_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_save_card_result(self, result: dict) -> None:
+        self._save_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._save_status.show_error(str(result.get("error", "Не удалось сохранить карточку.")))
             self._show_shell_message(self._save_status.text())
@@ -256,7 +273,17 @@ class ExperimentWorkspace(QWidget):
                 if edit.text().strip()
             },
         }
-        result = send_command(payload)
+        self._finalize_button.setEnabled(False)
+        self._abort_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(lambda result, cmd=command: self._on_finalize_result(result, cmd))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_finalize_result(self, result: dict, command: str) -> None:
+        self._finalize_button.setEnabled(True)
+        self._abort_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._save_status.show_error(
                 str(result.get("error", "Не удалось закрыть карточку эксперимента."))
@@ -766,11 +793,15 @@ class ExperimentWorkspace(QWidget):
         )
 
     def _update_phase_display(self) -> None:
-        """Update phase labels from current experiment status."""
-        try:
-            result = send_command({"cmd": "experiment_phase_status"})
-        except BaseException:
-            return
+        """Update phase labels from current experiment status (non-blocking)."""
+        worker = ZmqCommandWorker({"cmd": "experiment_phase_status"}, parent=self)
+        worker.finished.connect(self._on_phase_display_result)
+        self._workers.append(worker)
+        worker.start()
+
+    @Slot(dict)
+    def _on_phase_display_result(self, result: dict) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not isinstance(result, dict) or not result.get("ok"):
             return
         current = result.get("current_phase")
@@ -799,10 +830,18 @@ class ExperimentWorkspace(QWidget):
         if not ok:
             return
         idx = labels.index(item)
-        result = send_command({"cmd": "experiment_advance_phase", "phase": phases[idx]})
+        self._advance_phase_btn.setEnabled(False)
+        worker = ZmqCommandWorker({"cmd": "experiment_advance_phase", "phase": phases[idx]})
+        worker.finished.connect(lambda result, label=item: self._on_advance_phase_result(result, label))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_advance_phase_result(self, result: dict, label: str) -> None:
+        self._advance_phase_btn.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if result.get("ok"):
             self._update_phase_display()
-            self._workspace_status.show_success(f"Фаза: {item}")
+            self._workspace_status.show_success(f"Фаза: {label}")
         else:
             self._workspace_status.show_error(str(result.get("error", "Ошибка смены фазы")))
 

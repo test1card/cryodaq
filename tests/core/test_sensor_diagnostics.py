@@ -473,3 +473,36 @@ def test_engine_feed_and_command_response() -> None:
     parsed = json.loads(json_str)
     assert parsed["ok"] is True
     assert "T1" in parsed["channels"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: correlation groups resolve short config IDs to full runtime names
+# ---------------------------------------------------------------------------
+
+def test_correlation_groups_resolve_short_to_full() -> None:
+    """Correlation groups use short IDs (Т12), push uses full names (Т12 Теплообменник 2)."""
+    cfg = {
+        "correlation_groups": {
+            "cold": ["\u0422\u0031\u0031", "\u0422\u0031\u0032"],  # Т11, Т12 (Cyrillic)
+        },
+        "noise_window_s": 10,
+        "drift_window_s": 10,
+        "outlier_window_s": 10,
+        "correlation_window_s": 10,
+        "min_points": 3,
+    }
+    engine = SensorDiagnosticsEngine(cfg)
+    t0 = time.time()
+    # Push with full runtime names (Cyrillic Т)
+    for i in range(10):
+        engine.push("\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1", t0 + i, 80.0 + i * 0.1)
+        engine.push("\u0422\u0031\u0032 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", t0 + i, 4.2 + i * 0.05)
+    engine.update()
+    diag = engine.get_diagnostics()
+    # Channel with full name should have correlation computed (not None)
+    d11 = diag.get("\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1")
+    assert d11 is not None, "\u0422\u003111 diagnostics missing"
+    # Correlation should be computable (both channels in same group)
+    assert d11.correlation is not None, (
+        "Correlation should be computed \u2014 short IDs in config must resolve to full runtime names"
+    )

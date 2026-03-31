@@ -6,6 +6,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui.widgets.preflight_dialog import PreFlightCheck, PreFlightDialog
@@ -18,6 +19,15 @@ def _app() -> QApplication:
     return app
 
 
+def _process_workers(dialog: PreFlightDialog, timeout_ms: int = 5000) -> None:
+    """Process Qt events until all async preflight checks complete."""
+    import time
+    deadline = time.monotonic() + timeout_ms / 1000
+    while dialog._pending_checks > 0 and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+
+
 def _make_dialog(monkeypatch, safety_result=None, extra_cmds=None):
     """Создать PreFlightDialog с замоканным send_command."""
     _app()
@@ -28,6 +38,7 @@ def _make_dialog(monkeypatch, safety_result=None, extra_cmds=None):
     responses = {
         "safety_status": safety_resp,
         "alarm_v2_status": {"ok": True, "active": {}, "history": []},
+        "get_sensor_diagnostics": {"ok": False, "error": "mock"},
     }
     if extra_cmds:
         responses.update(extra_cmds)
@@ -35,8 +46,11 @@ def _make_dialog(monkeypatch, safety_result=None, extra_cmds=None):
     def _fake_send(payload: dict) -> dict:
         return responses.get(payload.get("cmd", ""), {"ok": False, "error": "unknown"})
 
-    monkeypatch.setattr("cryodaq.gui.widgets.preflight_dialog.send_command", _fake_send)
-    return PreFlightDialog()
+    # Monkeypatch send_command where ZmqCommandWorker calls it
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
+    dialog = PreFlightDialog()
+    _process_workers(dialog)
+    return dialog
 
 
 def test_dialog_creates_without_crash(monkeypatch) -> None:
@@ -59,13 +73,13 @@ def test_error_disables_start(monkeypatch) -> None:
 def test_all_ok_enables_start(monkeypatch) -> None:
     """Все проверки ok → кнопка Начать enabled."""
     dialog = _make_dialog(monkeypatch)
-    # Manually set all checks to ok to isolate the logic
+    # Manually set all checks to ok and rebuild
     dialog._checks = [
         PreFlightCheck("Engine подключён", "ok", ""),
         PreFlightCheck("Safety state", "ok", "safe_off"),
         PreFlightCheck("Диск", "ok", "500 ГБ свободно"),
     ]
-    dialog._build_ui()
+    dialog._rebuild_checks_ui()
     assert dialog._start_btn is not None
     assert dialog._start_btn.isEnabled()
 
@@ -78,7 +92,7 @@ def test_warnings_allow_start(monkeypatch) -> None:
         PreFlightCheck("Алармы", "warning", "1 активных: test_alarm"),
         PreFlightCheck("Диск", "warning", "8.5 ГБ"),
     ]
-    dialog._build_ui()
+    dialog._rebuild_checks_ui()
     assert dialog._start_btn is not None
     assert dialog._start_btn.isEnabled()
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -260,13 +260,34 @@ class SensorDiagnosticsEngine:
             return 0
         return int(np.sum(np.abs(values - median) > self.outlier_sigma * sigma))
 
+    def _resolve_channel(self, short_id: str) -> str:
+        """Resolve short config ID ('Т12') to full runtime name ('Т12 Теплообменник 2').
+
+        Config uses short IDs, runtime uses full names from drivers.
+        """
+        if short_id in self._buffers:
+            return short_id
+        for full_id in self._buffers:
+            if full_id.split(" ", 1)[0] == short_id:
+                return full_id
+        return short_id
+
     def _compute_correlation(self, channel_id: str) -> float | None:
         """Pearson r with best-correlated neighbour in the same group."""
-        group_name = self._channel_to_group.get(channel_id)
+        # Resolve full channel_id → short ID for group lookup
+        short_id = channel_id.split(" ", 1)[0] if " " in channel_id else channel_id
+        group_name = self._channel_to_group.get(short_id)
+        if group_name is None:
+            group_name = self._channel_to_group.get(channel_id)
         if group_name is None:
             return None
         group_channels = self._correlation_groups.get(group_name, [])
-        neighbours = [ch for ch in group_channels if ch != channel_id and ch in self._buffers]
+        # Resolve short config IDs to full runtime names, exclude self
+        neighbours = []
+        for ch in group_channels:
+            full = self._resolve_channel(ch)
+            if full != channel_id and full in self._buffers:
+                neighbours.append(full)
         if not neighbours:
             return None
 

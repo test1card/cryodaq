@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QSize, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
 from cryodaq.gui.widgets.common import (
     apply_button_style,
     apply_panel_frame_style,
-    apply_status_label_style,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,30 +82,13 @@ def _shift_id() -> str:
 # Auto-checks for shift start
 # ---------------------------------------------------------------------------
 
-def _run_auto_checks() -> list[dict[str, Any]]:
-    """Run pre-shift health checks via ZMQ. Returns list of {name, ok, detail}."""
-    from cryodaq.gui.zmq_client import send_command
+def _send_log_fire_and_forget(payload: dict[str, Any], parent: QWidget) -> None:
+    """Fire-and-forget log entry via background worker."""
+    from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-    checks: list[dict[str, Any]] = []
-
-    # 1. Engine connected
-    status = send_command({"cmd": "experiment_status"})
-    engine_ok = status.get("ok", False)
-    checks.append({
-        "name": "Engine подключён",
-        "ok": engine_ok,
-        "detail": "OK" if engine_ok else "Engine не отвечает",
-    })
-
-    # 2. Active alarms
-    # We infer from experiment_status response availability
-    checks.append({
-        "name": "Критических алармов нет",
-        "ok": engine_ok,  # If engine responds, base health is fine
-        "detail": "OK" if engine_ok else "Невозможно проверить",
-    })
-
-    return checks
+    worker = ZmqCommandWorker(payload, parent=parent)
+    worker.finished.connect(lambda r: None)
+    worker.start()
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +156,31 @@ class ShiftStartDialog(QDialog):
             if item and item.widget():
                 item.widget().deleteLater()
 
-        self._checks = _run_auto_checks()
+        self._run_checks_btn.setEnabled(False)
+        self._run_checks_btn.setText("Проверка...")
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+        worker.finished.connect(self._on_checks_result)
+        self._workers: list[object] = [worker]
+        worker.start()
+
+    @Slot(dict)
+    def _on_checks_result(self, result: dict) -> None:
+        engine_ok = result.get("ok", False)
+        self._checks = [
+            {
+                "name": "Engine подключён",
+                "ok": engine_ok,
+                "detail": "OK" if engine_ok else "Engine не отвечает",
+            },
+            {
+                "name": "Критических алармов нет",
+                "ok": engine_ok,
+                "detail": "OK" if engine_ok else "Невозможно проверить",
+            },
+        ]
         for check in self._checks:
             row = QLabel(f"{'✓' if check['ok'] else '✗'} {check['name']} — {check['detail']}")
             row.setStyleSheet(
@@ -182,7 +188,10 @@ class ShiftStartDialog(QDialog):
             )
             self._checks_frame.addWidget(row)
 
+        self._run_checks_btn.setEnabled(True)
+        self._run_checks_btn.setText("Запустить проверки")
         self._start_btn.setEnabled(True)
+        self._workers = []
 
     @Slot()
     def _on_accept(self) -> None:
@@ -197,9 +206,7 @@ class ShiftStartDialog(QDialog):
             for c in self._checks
         ]
 
-        from cryodaq.gui.zmq_client import send_command
-
-        send_command({
+        _send_log_fire_and_forget({
             "cmd": "log_entry",
             "message": f"Заступление на смену: {operator}",
             "author": operator,
@@ -210,7 +217,7 @@ class ShiftStartDialog(QDialog):
                 "operator": operator,
                 "checks": checks_summary,
             }),
-        })
+        }, parent=self)
 
         self.shift_started.emit(operator, sid)
         self.accept()
@@ -288,9 +295,7 @@ class ShiftPeriodicPrompt(QDialog):
         if notes:
             message_parts.append(notes)
 
-        from cryodaq.gui.zmq_client import send_command
-
-        send_command({
+        _send_log_fire_and_forget({
             "cmd": "log_entry",
             "message": " | ".join(message_parts),
             "author": self._operator,
@@ -301,7 +306,7 @@ class ShiftPeriodicPrompt(QDialog):
                 "status": status,
                 "readings": self._readings_label.text(),
             }),
-        })
+        }, parent=self)
         self.accept()
 
 
@@ -378,9 +383,7 @@ class ShiftEndDialog(QDialog):
     def _on_end(self) -> None:
         comment = self._comment.toPlainText().strip()
 
-        from cryodaq.gui.zmq_client import send_command
-
-        send_command({
+        _send_log_fire_and_forget({
             "cmd": "log_entry",
             "message": f"Сдача смены: {self._operator}" + (f" | {comment}" if comment else ""),
             "author": self._operator,
@@ -395,7 +398,7 @@ class ShiftEndDialog(QDialog):
                 "missed_count": self._missed_count,
                 "comment": comment,
             }),
-        })
+        }, parent=self)
 
         self.shift_ended.emit()
         self.accept()
