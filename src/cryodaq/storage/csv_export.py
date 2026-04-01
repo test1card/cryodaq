@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import logging
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 
 from cryodaq.storage.sqlite_writer import _parse_timestamp

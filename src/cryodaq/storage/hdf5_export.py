@@ -138,8 +138,8 @@ class HDF5Exporter:
             inst_group = hf.require_group(_sanitize_name(inst_id))
             for ch_name, ch_data in channels.items():
                 ch_group = inst_group.require_group(_sanitize_name(ch_name))
-                ch_group.create_dataset("timestamp", data=ch_data.timestamps)
-                ch_group.create_dataset("value", data=ch_data.values)
+                ch_group.create_dataset("timestamp", data=ch_data.timestamps, chunks=True, compression="gzip", compression_opts=4)
+                ch_group.create_dataset("value", data=ch_data.values, chunks=True, compression="gzip", compression_opts=4)
                 ch_group.attrs["unit"] = ch_data.unit
                 ch_group.attrs["count"] = len(ch_data.timestamps)
                 count += len(ch_data.timestamps)
@@ -174,14 +174,14 @@ class HDF5Exporter:
             powers.append(row["power"] if row["power"] is not None else float("nan"))
 
         grp = hf.require_group("source_data")
-        grp.create_dataset("timestamp", data=timestamps)
+        grp.create_dataset("timestamp", data=timestamps, chunks=True, compression="gzip", compression_opts=4)
         # h5py не поддерживает list[str] напрямую — используем variable-length
         dt = h5py.string_dtype()
-        grp.create_dataset("channel", data=channels, dtype=dt)
-        grp.create_dataset("voltage", data=voltages)
-        grp.create_dataset("current", data=currents)
-        grp.create_dataset("resistance", data=resistances)
-        grp.create_dataset("power", data=powers)
+        grp.create_dataset("channel", data=channels, dtype=dt, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("voltage", data=voltages, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("current", data=currents, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("resistance", data=resistances, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("power", data=powers, chunks=True, compression="gzip", compression_opts=4)
 
         return len(rows)
 

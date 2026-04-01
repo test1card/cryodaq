@@ -8,8 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from pathlib import Path
-
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)

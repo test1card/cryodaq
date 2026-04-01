@@ -614,7 +614,13 @@ class ExperimentWorkspace(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        result = send_command({"cmd": "set_app_mode", "app_mode": mode})
+        worker = ZmqCommandWorker({"cmd": "set_app_mode", "app_mode": mode})
+        worker.finished.connect(lambda result, m=mode: self._on_switch_mode_result(result, m))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_switch_mode_result(self, result: dict, mode: str) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._workspace_status.show_error(str(result.get("error", "Не удалось сменить режим.")))
             self._show_shell_message(self._workspace_status.text())
@@ -750,10 +756,17 @@ class ExperimentWorkspace(QWidget):
         self._timeline_list.clear()
         if not self._active_experiment:
             return
-        result = send_command({"cmd": "log_get", "current_experiment": True, "limit": 50})
+        worker = ZmqCommandWorker({"cmd": "log_get", "current_experiment": True, "limit": 50})
+        worker.finished.connect(self._on_reload_timeline_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_reload_timeline_result(self, result: dict) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
         if result.get("ok"):
             entries = list(result.get("entries", []))
             self._timeline_entries = [self._format_timeline_entry(entry) for entry in entries]
+        self._timeline_list.clear()
         for item in self._timeline_entries:
             self._timeline_list.addItem(QListWidgetItem(item))
         if self._timeline_list.count() == 0:

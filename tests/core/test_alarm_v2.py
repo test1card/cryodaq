@@ -400,3 +400,30 @@ def test_state_manager_history() -> None:
     assert len(hist) == 2
     assert hist[0]["transition"] == "TRIGGERED"
     assert hist[1]["transition"] == "CLEARED"
+
+
+# ---------------------------------------------------------------------------
+# Prefix resolution: config uses short ID, readings use full channel name
+# ---------------------------------------------------------------------------
+
+def test_threshold_alarm_with_full_channel_names() -> None:
+    """Alarm config references short '\u042212', readings arrive as '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'.
+
+    The ChannelStateTracker prefix resolution must bridge the gap.
+    """
+    # Feed readings with full channel names (as drivers produce)
+    ev = _make_evaluator([
+        _reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 15.0),
+    ])
+    # Config uses short channel ID (as in alarms_v3.yaml)
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "\u042212",
+        "check": "above",
+        "threshold": 10.0,
+        "level": "CRITICAL",
+        "message": "\u042212 > 10K",
+    }
+    result = ev.evaluate("detector_warmup", cfg)
+    assert result is not None
+    assert result.level == "CRITICAL"

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
@@ -20,6 +22,14 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _process_events(timeout_ms: int = 500) -> None:
+    """Process Qt events until workers finish or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
 
 
 class _TrayStub:
@@ -43,23 +53,20 @@ def _fake_workspace_send(payload: dict) -> dict:
     return {"ok": True}
 
 
-def test_main_window_instantiates_with_calibration_tab(monkeypatch) -> None:
-    _app()
-
-    def _fake_archive_send(_payload: dict) -> dict:
-        return {"ok": True, "entries": []}
-
-    def _fake_log_send(payload: dict) -> dict:
-        if payload["cmd"] == "log_get":
-            return {"ok": True, "entries": []}
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+def _patch_all_sends(monkeypatch) -> None:
+    """Patch send_command at the zmq_client level (used by ZmqCommandWorker) and
+    at the widget module level (used by blocking calls like refresh_state)."""
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
+
+def test_main_window_instantiates_with_calibration_tab(monkeypatch) -> None:
+    _app()
+    _patch_all_sends(monkeypatch)
+
     window = MainWindow(_SubscriberStub())
+    _process_events()
 
     labels = [window._tabs.tabText(index) for index in range(window._tabs.count())]
     assert "Калибровка" in labels
@@ -70,21 +77,10 @@ def test_main_window_instantiates_with_calibration_tab(monkeypatch) -> None:
 
 def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None:
     _app()
-
-    def _fake_archive_send(_payload: dict) -> dict:
-        return {"ok": True, "entries": []}
-
-    def _fake_log_send(payload: dict) -> dict:
-        if payload["cmd"] == "log_get":
-            return {"ok": True, "entries": []}
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
-    monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
+    _patch_all_sends(monkeypatch)
 
     window = MainWindow(_SubscriberStub())
+    _process_events()
 
     labels = [window._tabs.tabText(index) for index in range(window._tabs.count())]
     assert labels == [
@@ -108,21 +104,10 @@ def test_main_window_exposes_expected_tab_set_and_switching(monkeypatch) -> None
 
 def test_main_window_routes_nonlocalized_temperature_readings_to_calibration(monkeypatch) -> None:
     _app()
-
-    def _fake_archive_send(_payload: dict) -> dict:
-        return {"ok": True, "entries": []}
-
-    def _fake_log_send(payload: dict) -> dict:
-        if payload["cmd"] == "log_get":
-            return {"ok": True, "entries": []}
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
-    monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
+    _patch_all_sends(monkeypatch)
 
     window = MainWindow(_SubscriberStub())
+    _process_events()
 
     # CalibrationPanel v2 routes readings via on_reading()
     window._dispatch_reading(
@@ -137,21 +122,10 @@ def test_main_window_routes_nonlocalized_temperature_readings_to_calibration(mon
 
 def test_main_window_updates_tray_from_backend_truth(monkeypatch) -> None:
     _app()
-
-    def _fake_archive_send(_payload: dict) -> dict:
-        return {"ok": True, "entries": []}
-
-    def _fake_log_send(payload: dict) -> dict:
-        if payload["cmd"] == "log_get":
-            return {"ok": True, "entries": []}
-        return {"ok": True}
-
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
-    monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
+    _patch_all_sends(monkeypatch)
 
     window = MainWindow(_SubscriberStub())
+    _process_events()
 
     window._dispatch_reading(
         Reading.now(
@@ -181,25 +155,19 @@ def test_main_window_updates_tray_from_backend_truth(monkeypatch) -> None:
 def test_main_window_experiment_failures_use_status_bar(monkeypatch) -> None:
     _app()
 
-    def _fake_archive_send(_payload: dict) -> dict:
-        return {"ok": True, "entries": []}
-
-    def _fake_log_send(payload: dict) -> dict:
+    def _fail_send(payload: dict) -> dict:
+        if payload["cmd"] == "experiment_status":
+            return {"ok": False, "error": "experiment backend offline"}
         if payload["cmd"] == "log_get":
             return {"ok": True, "entries": []}
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_archive_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_log_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fail_send)
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fail_send)
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
-    monkeypatch.setattr(
-        "cryodaq.gui.widgets.experiment_workspace.send_command",
-        lambda payload: {"ok": False, "error": "experiment backend offline"}
-        if payload["cmd"] == "experiment_status"
-        else {"ok": True, "entries": []},
-    )
 
     window = MainWindow(_SubscriberStub())
+    _process_events()
     window._on_start_experiment()
     assert window.statusBar().currentMessage() == "experiment backend offline"
 

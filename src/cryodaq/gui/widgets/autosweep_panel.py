@@ -12,22 +12,19 @@ Original description:
 from __future__ import annotations
 
 import csv
-import io
 import logging
 import math
 import time
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,

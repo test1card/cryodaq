@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.gui.widgets.common import PanelHeader, apply_panel_frame_style
+from cryodaq.gui.widgets.common import apply_panel_frame_style
 
 logger = logging.getLogger(__name__)
 

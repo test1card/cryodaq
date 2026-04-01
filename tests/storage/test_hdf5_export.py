@@ -168,3 +168,29 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
 
     assert count == 0, f"Expected 0 for empty DB, got {count}"
     assert output_path.exists(), "HDF5 file should still be created even for empty DB"
+
+
+# ---------------------------------------------------------------------------
+# 6. All datasets have gzip compression enabled
+# ---------------------------------------------------------------------------
+
+async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
+    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)
+    readings = [
+        _reading("T_STAGE", 4.235, "K", ts=ts),
+        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=timezone.utc)),
+    ]
+    db_path = _populate_db(tmp_path, readings)
+    output_path = tmp_path / "compressed.h5"
+
+    HDF5Exporter().export(db_path, output_path)
+
+    with h5py.File(str(output_path), "r") as hf:
+
+        def _check_compression(name: str, obj: h5py.Dataset | h5py.Group) -> None:
+            if isinstance(obj, h5py.Dataset):
+                assert obj.compression == "gzip", (
+                    f"Dataset '{name}' missing gzip compression: {obj.compression}"
+                )
+
+        hf.visititems(_check_compression)

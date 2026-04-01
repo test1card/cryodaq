@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
@@ -14,6 +16,14 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _process_events(timeout_ms: int = 500) -> None:
+    """Process Qt events until workers finish or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
 
 
 def test_workspace_debug_mode_hides_experiment_card(monkeypatch) -> None:
@@ -112,9 +122,13 @@ def test_workspace_active_card_saves_without_clearing_fields(monkeypatch) -> Non
             return {"ok": True, "entries": []}
         if payload["cmd"] == "experiment_update":
             return {"ok": True, "experiment": dict(status_payload["active_experiment"], **payload)}
+        if payload["cmd"] == "experiment_phase_status":
+            return {"ok": True, "current_phase": "measurement", "phases": []}
         raise AssertionError(payload)
 
+    # Patch both: blocking send_command (for refresh_state) and zmq_client (for ZmqCommandWorker)
     monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
 
     widget = ExperimentWorkspace()
     widget.refresh_state()
@@ -122,6 +136,7 @@ def test_workspace_active_card_saves_without_clearing_fields(monkeypatch) -> Non
     widget._card_custom_edits["target_temperature"].setText("3.8 K")
 
     widget._on_save_card()
+    _process_events()
 
     update_calls = [payload for payload in calls if payload["cmd"] == "experiment_update"]
     assert len(update_calls) == 1

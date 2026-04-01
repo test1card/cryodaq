@@ -1420,7 +1420,6 @@ class OverviewPanel(QWidget):
     @Slot()
     def _refresh_plot(self) -> None:
         """Обновить все линии на графиках (1 Гц)."""
-        from cryodaq.gui.widgets.common import snap_x_range
 
         now = time.time()
         x_min = now - self._window_s

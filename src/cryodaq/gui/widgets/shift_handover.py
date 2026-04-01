@@ -277,7 +277,7 @@ class ShiftPeriodicPrompt(QDialog):
 
         # Buttons
         btn_box = QDialogButtonBox()
-        submit_btn = btn_box.addButton("Записать", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_box.addButton("Записать", QDialogButtonBox.ButtonRole.AcceptRole)
         btn_box.addButton(QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(self._on_submit)
         btn_box.rejected.connect(self.reject)
@@ -368,7 +368,7 @@ class ShiftEndDialog(QDialog):
 
         # Buttons
         btn_box = QDialogButtonBox()
-        end_btn = btn_box.addButton("Сдать смену", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_box.addButton("Сдать смену", QDialogButtonBox.ButtonRole.AcceptRole)
         btn_box.addButton(QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(self._on_end)
         btn_box.rejected.connect(self.reject)

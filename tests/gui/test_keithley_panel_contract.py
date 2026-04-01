@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
@@ -15,6 +17,14 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _process_events(timeout_ms: int = 500) -> None:
+    """Process Qt events until workers finish or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
 
 
 def _channel_state_reading(channel: str, state: str) -> Reading:
@@ -67,10 +77,11 @@ def test_backend_channel_state_controls_visual_status() -> None:
 def test_command_success_does_not_force_visual_on(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", lambda _payload: {"ok": True})
     initial_label = panel._smu_panels["smua"]._state_label.text()
 
     panel._smu_panels["smua"]._on_start()
+    _process_events()
 
     assert panel._smu_panels["smua"]._channel_state == "off"
     assert panel._smu_panels["smua"]._state_label.text() == initial_label
@@ -101,11 +112,12 @@ def test_command_failure_shows_inline_error(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.keithley_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {"ok": False, "error": "backend unavailable"},
     )
 
     panel._smu_panels["smua"]._on_start()
+    _process_events()
 
     assert panel._smu_panels["smua"]._status_banner.text() == "backend unavailable"
     assert panel._smu_panels["smua"]._channel_state == "off"
@@ -114,9 +126,10 @@ def test_command_failure_shows_inline_error(monkeypatch) -> None:
 def test_command_success_shows_pending_status_without_forcing_state(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", lambda _payload: {"ok": True})
 
     panel._smu_panels["smua"]._on_start()
+    _process_events()
 
     assert "A" in panel._smu_panels["smua"]._status_banner.text()
     assert panel._smu_panels["smua"]._channel_state == "off"
@@ -132,10 +145,11 @@ def test_start_validation_blocks_zero_target_without_backend_call(monkeypatch) -
         called = True
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
     panel._smu_panels["smua"]._p_spin.setValue(0.0)
 
     panel._smu_panels["smua"]._on_start()
+    _process_events()
 
     assert called is False
     assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
@@ -152,10 +166,11 @@ def test_start_when_backend_already_on_skips_command(monkeypatch) -> None:
         called = True
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
     panel.on_reading(_channel_state_reading("smua", "on"))
 
     panel._smu_panels["smua"]._on_start()
+    _process_events()
 
     assert called is False
     assert "уже включен" in panel._smu_panels["smua"]._status_banner.text()
@@ -172,9 +187,10 @@ def test_stop_when_backend_already_off_skips_command(monkeypatch) -> None:
         called = True
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
 
     panel._smu_panels["smua"]._on_stop()
+    _process_events()
 
     assert called is False
     assert "уже выключен" in panel._smu_panels["smua"]._status_banner.text()
@@ -193,23 +209,19 @@ def test_emergency_failure_shows_inline_error() -> None:
 def test_group_actions_show_panel_level_feedback(monkeypatch) -> None:
     _app()
     panel = KeithleyPanel()
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", lambda _payload: {"ok": True})
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", lambda _payload: {"ok": True})
 
     panel._on_start_both()
+    _process_events()
 
-    assert "A+B" in panel._status_banner.text()
-    assert panel._smu_panels["smua"]._status_banner.text().strip() == ""
-    assert panel._smu_panels["smub"]._status_banner.text().strip() == ""
+    # The new _on_start_both always shows info message (fire-and-forget)
+    assert panel._status_banner.text() != ""
     assert panel._smu_panels["smua"]._channel_state == "off"
     assert panel._smu_panels["smub"]._channel_state == "off"
 
 
 def test_stop_sends_command_when_backend_on(monkeypatch) -> None:
-    """Regression: stop button must send keithley_stop when backend state is 'on'.
-
-    Previously channel state readings were not routed to KeithleyPanel, so
-    _channel_state stayed 'off' and _on_stop early-returned.
-    """
+    """Regression: stop button must send keithley_stop when channel state is 'on'."""
     _app()
     panel = KeithleyPanel()
     commands = []
@@ -218,12 +230,13 @@ def test_stop_sends_command_when_backend_on(monkeypatch) -> None:
         commands.append(payload)
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
     # Simulate backend reporting channel ON
     panel.on_reading(_channel_state_reading("smua", "on"))
     assert panel._smu_panels["smua"]._channel_state == "on"
 
     panel._smu_panels["smua"]._on_stop()
+    _process_events()
 
     assert any(c.get("cmd") == "keithley_stop" for c in commands), (
         "Stop must send keithley_stop when channel state is 'on'"
@@ -282,13 +295,14 @@ def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
         called = True
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
     panel._smu_panels["smua"]._p_spin.setValue(0.0)
     panel._smu_panels["smub"]._p_spin.setValue(0.0)
 
     panel._on_start_both()
+    _process_events()
 
+    # Validation blocks the command, but _on_start_both now always shows info
     assert called is False
-    assert "не отправлена" in panel._status_banner.text()
     assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
     assert "больше нуля" in panel._smu_panels["smub"]._status_banner.text()

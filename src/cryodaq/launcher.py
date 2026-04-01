@@ -25,7 +25,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPixmap, QPainter
+from PySide6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QStatusBar,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -88,7 +87,6 @@ def _ping_engine() -> bool:
     """Check if a CryoDAQ engine is actually running on the command port."""
     try:
         import json
-        import socket
         import zmq
         ctx = zmq.Context()
         sock = ctx.socket(zmq.REQ)

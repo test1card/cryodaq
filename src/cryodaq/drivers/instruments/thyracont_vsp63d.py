@@ -11,6 +11,9 @@ from cryodaq.drivers.transport.serial import SerialTransport
 
 log = logging.getLogger(__name__)
 
+# Известные пары baudrate ↔ fallback для автоопределения протокола
+_FALLBACK_BAUDRATES: dict[int, int] = {9600: 115200, 115200: 9600}
+
 # Коды статуса из ответа прибора
 _STATUS_OK = 0
 _STATUS_UNDERRANGE = 1
@@ -88,30 +91,58 @@ class ThyracontVSP63D(InstrumentDriver):
     async def connect(self) -> None:
         """Открыть последовательный порт и верифицировать связь с прибором.
 
-        Пробует Protocol V1 (``"<addr>M^"``), затем MV00. Устанавливает
-        флаг ``_connected = True`` при успехе.
+        Пробует Protocol V1 (``"<addr>M^"``), затем MV00. Если ни один
+        протокол не отвечает на сконфигурированном baudrate, пробует
+        fallback baudrate (9600 ↔ 115200). Устанавливает флаг
+        ``_connected = True`` при успехе.
         """
-        log.info("%s: подключение к %s @ %d бод", self.name, self._resource_str, self._baudrate)
-        await self._transport.open(self._resource_str, baudrate=self._baudrate)
+        baudrates_to_try = [self._baudrate]
+        fallback = _FALLBACK_BAUDRATES.get(self._baudrate)
+        if fallback is not None:
+            baudrates_to_try.append(fallback)
 
-        # Try Protocol V1
-        if await self._try_v1_probe():
-            self._protocol_v1 = True
-            self._instrument_id = f"Thyracont-V1@{self._address}"
-            self._connected = True
-            log.info("%s: connected via Protocol V1", self.name)
-            return
+        last_error = ""
+        for baud in baudrates_to_try:
+            log.info("%s: подключение к %s @ %d бод", self.name, self._resource_str, baud)
+            try:
+                await self._transport.open(self._resource_str, baudrate=baud)
+            except Exception as exc:
+                log.warning("%s: failed to open port @ %d baud: %s", self.name, baud, exc)
+                last_error = str(exc)
+                continue
 
-        # Fallback: try MV00
-        if await self._try_mv00_probe():
-            self._protocol_v1 = False
-            self._instrument_id = f"Thyracont-MV00@{self._resource_str}"
-            self._connected = True
-            log.info("%s: connected via MV00", self.name)
-            return
+            # Try Protocol V1
+            if await self._try_v1_probe():
+                self._protocol_v1 = True
+                self._instrument_id = f"Thyracont-V1@{self._address}"
+                self._connected = True
+                if baud != self._baudrate:
+                    log.info(
+                        "%s: connected via Protocol V1 @ %d baud (fallback from %d)",
+                        self.name, baud, self._baudrate,
+                    )
+                else:
+                    log.info("%s: connected via Protocol V1", self.name)
+                return
 
-        await self._transport.close()
-        raise RuntimeError(f"{self.name}: neither V1 nor MV00 responded")
+            # Try MV00
+            if await self._try_mv00_probe():
+                self._protocol_v1 = False
+                self._instrument_id = f"Thyracont-MV00@{self._resource_str}"
+                self._connected = True
+                if baud != self._baudrate:
+                    log.info(
+                        "%s: connected via MV00 @ %d baud (fallback from %d)",
+                        self.name, baud, self._baudrate,
+                    )
+                else:
+                    log.info("%s: connected via MV00", self.name)
+                return
+
+            await self._transport.close()
+            last_error = f"neither V1 nor MV00 responded @ {baud} baud"
+
+        raise RuntimeError(f"{self.name}: {last_error}")
 
     async def _try_v1_probe(self) -> bool:
         """Attempt Protocol V1 probe. Returns True on success."""

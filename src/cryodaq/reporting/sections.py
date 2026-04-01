@@ -8,7 +8,7 @@ from __future__ import annotations
 import csv
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from statistics import mean
 from typing import Any, Callable
@@ -642,7 +642,6 @@ def render_config_section(document: Document, dataset: ReportDataset, _assets_di
             table.cell(0, i).text = hdr
         for idx, instr in enumerate(instruments, 1):
             name = str(instr.get("name", instr.get("type", "—")))
-            itype = str(instr.get("type", "—"))
             resource = str(instr.get("resource", instr.get("resource_str", "—")))
             iface = "GPIB" if "GPIB" in resource.upper() else "USB-TMC" if "USB" in resource.upper() else "RS-232" if "COM" in resource.upper() else "—"
             table.cell(idx, 0).text = name

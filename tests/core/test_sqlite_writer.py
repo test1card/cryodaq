@@ -244,3 +244,35 @@ async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
     assert len(rows) == 2
     channels = {r["channel"] for r in rows}
     assert channels == {"CH1", "CH3"}
+
+
+# ---------------------------------------------------------------------------
+# 9. Batch spanning midnight is split into two separate daily DBs
+# ---------------------------------------------------------------------------
+
+async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+
+    before_midnight = datetime(2026, 3, 27, 23, 59, 59, tzinfo=timezone.utc)
+    after_midnight = datetime(2026, 3, 28, 0, 0, 1, tzinfo=timezone.utc)
+
+    batch = [
+        _reading("CH1", 4.5, ts=before_midnight),
+        _reading("CH1", 4.6, ts=after_midnight),
+    ]
+    writer._write_batch(batch)
+
+    db_day1 = tmp_path / "data_2026-03-27.db"
+    db_day2 = tmp_path / "data_2026-03-28.db"
+
+    assert db_day1.exists(), "DB for 2026-03-27 not created"
+    assert db_day2.exists(), "DB for 2026-03-28 not created"
+
+    rows1 = _read_db(db_day1)
+    rows2 = _read_db(db_day2)
+
+    assert len(rows1) == 1, f"Expected 1 row in day1, got {len(rows1)}"
+    assert len(rows2) == 1, f"Expected 1 row in day2, got {len(rows2)}"
+
+    assert abs(rows1[0]["value"] - 4.5) < 1e-6
+    assert abs(rows2[0]["value"] - 4.6) < 1e-6

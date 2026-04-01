@@ -153,11 +153,23 @@ class SQLiteWriter:
 
         Readings с value=None или value=NaN пропускаются (sqlite3 maps NaN
         to NULL, which violates the NOT NULL constraint on readings.value).
+
+        Readings are grouped by day before writing so that a batch spanning
+        midnight is correctly split across daily DB files.
         """
         if not batch:
             return
-        day = batch[0].timestamp.date()
-        conn = self._ensure_connection(day)
+        # Group readings by day to handle midnight crossing
+        by_day: dict[date, list[Reading]] = {}
+        for r in batch:
+            day = r.timestamp.date()
+            by_day.setdefault(day, []).append(r)
+        for day, day_readings in sorted(by_day.items()):
+            conn = self._ensure_connection(day)
+            self._write_day_batch(conn, day_readings)
+
+    def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:
+        """Write a single day's readings to the given connection."""
         rows = []
         skipped = 0
         for r in batch:

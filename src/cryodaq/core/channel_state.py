@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -53,6 +53,8 @@ class ChannelStateTracker:
         self._states: dict[str, ChannelState] = {}
         # channel → deque of fault timestamps (unix)
         self._fault_history: dict[str, deque[float]] = {}
+        # short prefix → full channel name (e.g. "Т12" → "Т12 Теплообменник 2")
+        self._short_to_full: dict[str, str] = {}
 
     def update(self, reading: Reading) -> None:
         """Обновить состояние канала из нового Reading.
@@ -71,6 +73,11 @@ class ChannelStateTracker:
         )
         self._states[reading.channel] = state
 
+        # Build short→full index for prefix resolution
+        short = reading.channel.split(" ", 1)[0] if " " in reading.channel else reading.channel
+        if short != reading.channel:
+            self._short_to_full[short] = reading.channel
+
         # Fault detection: только для temperature channels (unit == "K")
         if reading.unit == "K":
             if reading.value < _FAULT_MIN or reading.value > _FAULT_MAX:
@@ -79,8 +86,15 @@ class ChannelStateTracker:
         # Обновляем fault_count в state
         state.fault_count_window = self.get_fault_count(reading.channel)
 
+    def resolve_channel(self, channel: str) -> str:
+        """Resolve short channel ID to full runtime name."""
+        if channel in self._states:
+            return channel
+        return self._short_to_full.get(channel, channel)
+
     def get(self, channel: str) -> ChannelState | None:
         """Текущее состояние канала. None если нет данных."""
+        channel = self.resolve_channel(channel)
         state = self._states.get(channel)
         if state is None:
             return None
@@ -111,6 +125,7 @@ class ChannelStateTracker:
 
     def get_fault_count(self, channel: str) -> int:
         """Количество fault readings в текущем окне fault_window_s."""
+        channel = self.resolve_channel(channel)
         hist = self._fault_history.get(channel)
         if not hist:
             return 0

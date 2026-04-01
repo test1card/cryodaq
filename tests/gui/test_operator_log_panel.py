@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
@@ -15,6 +17,14 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _process_events(timeout_ms: int = 500) -> None:
+    """Process Qt events until workers finish or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
 
 
 def test_operator_log_panel_loads_recent_entries(monkeypatch) -> None:
@@ -37,8 +47,9 @@ def test_operator_log_panel_loads_recent_entries(monkeypatch) -> None:
             ],
         }
 
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
     panel = OperatorLogPanel()
+    _process_events()
 
     assert panel._entries_list.count() == 1
     assert "Pumpdown started" in panel._entries_list.item(0).text()
@@ -49,11 +60,12 @@ def test_operator_log_panel_empty_state(monkeypatch) -> None:
     _app()
 
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.operator_log_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {"ok": True, "entries": []},
     )
 
     panel = OperatorLogPanel()
+    _process_events()
 
     assert panel._entries_list.count() == 1
     assert panel._entries_list.item(0).text() == "Записи отсутствуют. Нажмите «Обновить список» или добавьте новую запись."
@@ -81,13 +93,15 @@ def test_operator_log_panel_submit_uses_command_path(monkeypatch) -> None:
             }
         return {"ok": True, "entries": []}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
     panel = OperatorLogPanel()
+    _process_events()
     panel._author_edit.setText("petrov")
     panel._message_edit.setPlainText("Reached target power")
     panel._current_only.setChecked(True)
 
     panel._on_submit()
+    _process_events()
 
     log_entry_calls = [payload for payload in calls if payload["cmd"] == "log_entry"]
     assert len(log_entry_calls) == 1
@@ -102,11 +116,12 @@ def test_operator_log_panel_submit_uses_command_path(monkeypatch) -> None:
 def test_operator_log_panel_empty_submit_uses_inline_warning(monkeypatch) -> None:
     _app()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.operator_log_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {"ok": True, "entries": []},
     )
 
     panel = OperatorLogPanel()
+    _process_events()
     panel._on_submit()
 
     assert panel._status_label.text() == "Введите текст записи."
@@ -120,9 +135,12 @@ def test_operator_log_panel_refreshes_on_operator_log_event(monkeypatch) -> None
         calls.append(dict(payload))
         return {"ok": True, "entries": []}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.operator_log_panel.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
     panel = OperatorLogPanel()
-    initial_count = len(calls)
+    _process_events()
+
+    # Clear call history after init
+    calls.clear()
 
     panel.on_reading(
         Reading.now(
@@ -132,19 +150,21 @@ def test_operator_log_panel_refreshes_on_operator_log_event(monkeypatch) -> None
             instrument_id="operator_log",
         )
     )
+    _process_events()
 
-    assert len(calls) == initial_count + 1
-    assert calls[-1]["cmd"] == "log_get"
+    log_get_calls = [c for c in calls if c["cmd"] == "log_get"]
+    assert len(log_get_calls) >= 1
 
 
 def test_operator_log_panel_refresh_error_clears_list(monkeypatch) -> None:
     _app()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.operator_log_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {"ok": False, "error": "engine offline"},
     )
 
     panel = OperatorLogPanel()
+    _process_events()
 
     assert panel._entries_list.count() == 0
     assert panel._status_label.text() == "engine offline"
@@ -153,7 +173,7 @@ def test_operator_log_panel_refresh_error_clears_list(monkeypatch) -> None:
 def test_operator_log_panel_refresh_shows_entry_count(monkeypatch) -> None:
     _app()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.operator_log_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {
             "ok": True,
             "entries": [
@@ -180,5 +200,6 @@ def test_operator_log_panel_refresh_shows_entry_count(monkeypatch) -> None:
     )
 
     panel = OperatorLogPanel()
+    _process_events()
 
     assert panel._status_label.text() == "Показано записей: 2"

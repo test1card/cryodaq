@@ -141,3 +141,29 @@ def test_channels_list() -> None:
     chs = tracker.channels()
     assert "T1" in chs
     assert "T2" in chs
+
+
+def test_resolve_short_to_full() -> None:
+    """Short ID '\u042212' resolves to full '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'."""
+    tracker = ChannelStateTracker()
+    tracker.update(_reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 4.2))
+    # Lookup by short ID should resolve
+    state = tracker.get("\u042212")
+    assert state is not None
+    assert state.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    assert abs(state.value - 4.2) < 1e-9
+    # Full name also works
+    state2 = tracker.get("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2")
+    assert state2 is not None
+    assert state2.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+
+
+def test_resolve_fault_count() -> None:
+    """get_fault_count works with short IDs via prefix resolution."""
+    tracker = ChannelStateTracker(fault_window_s=300.0)
+    now = time.time()
+    # Update with full channel name and fault value (> 350 K)
+    tracker.update(_reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 999.0, ts=now))
+    # Query by short ID
+    count = tracker.get_fault_count("\u042212")
+    assert count >= 1

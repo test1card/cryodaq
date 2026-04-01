@@ -353,7 +353,7 @@ def _try_activate_calibration_acquisition(
     """Activate SRDG acquisition if the experiment template requests it."""
     try:
         template_id = str(cmd.get("template_id", "custom")).strip() or "custom"
-        template = experiment_manager.get_template(template_id)
+        experiment_manager.get_template(template_id)  # validate template exists
         # Check raw YAML for calibration_acquisition flag
         raw_path = experiment_manager._templates_dir / f"{template_id}.yaml"
         if not raw_path.exists():

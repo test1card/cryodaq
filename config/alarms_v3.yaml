@@ -4,8 +4,8 @@
 #
 # Криовакуумный стенд, проект Миллиметрон, АКЦ ФИАН
 #
-# Калиброванные датчики:  T11 (Азотная плита, 1-я ступень)
-#                         T12 (2-я ступень, холодная точка)
+# Калиброванные датчики:  Т11 (Азотная плита, 1-я ступень)
+#                         Т12 (2-я ступень, холодная точка)
 # Остальные:              только fault-детекция (0 K / 350+ K)
 #
 # Физическое обоснование: alarm_tz_physics_v3.md
@@ -28,12 +28,12 @@ engine:
 # Группы каналов
 # --------------------------------------------------------------------------
 channel_groups:
-  calibrated:    [T11, T12]
-  # T4 (Радиатор 2), T8 (Калибровка) — отключённые датчики, исключены
-  uncalibrated:  [T1, T2, T3, T5, T6, T7, T9, T10,
-                  T13, T14, T15, T16, T17, T18, T19, T20]
-  all_temp:      [T1, T2, T3, T5, T6, T7, T9, T10,
-                  T11, T12, T13, T14, T15, T16, T17, T18, T19, T20]
+  calibrated:    [Т11, Т12]
+  # Т4 (Радиатор 2), Т8 (Калибровка) — отключённые датчики, исключены
+  uncalibrated:  [Т1, Т2, Т3, Т5, Т6, Т7, Т9, Т10,
+                  Т13, Т14, Т15, Т16, Т17, Т18, Т19, Т20]
+  all_temp:      [Т1, Т2, Т3, Т5, Т6, Т7, Т9, Т10,
+                  Т11, Т12, Т13, Т14, Т15, Т16, Т17, Т18, Т19, Т20]
 
 # ============================================================================
 # ГЛОБАЛЬНЫЕ АЛАРМЫ (работают при ЛЮБОЙ фазе)
@@ -45,7 +45,7 @@ global_alarms:
     alarm_type: composite
     operator: AND
     conditions:
-      - channels: [T11, T12]
+      - channels: [Т11, Т12]
         check: any_below
         threshold: 200           # K
       - channel: P1
@@ -65,7 +65,7 @@ global_alarms:
     alarm_type: composite
     operator: AND
     conditions:
-      - channels: [T11, T12]
+      - channels: [Т11, Т12]
         check: any_below
         threshold: 200
       - channel: P1
@@ -113,7 +113,7 @@ global_alarms:
   # --- Fault на калиброванных (те же границы, но отдельно для ясности) ---
   calibrated_sensor_fault:
     alarm_type: threshold
-    channels: [T11, T12]
+    channels: [Т11, Т12]
     check: outside_range
     range: [1.0, 350.0]         # K — нижняя граница 1K (ниже калибровки DT-670)
     level: CRITICAL              # CRITICAL — потеря калиброванного датчика опасна
@@ -216,7 +216,7 @@ phase_alarms:
   cooldown:
     excessive_cooling_rate:
       alarm_type: rate
-      channels: [T11, T12]
+      channels: [Т11, Т12]
       check: rate_below
       threshold: -5.0            # K/мин (отрицательный = охлаждение)
       rate_window_s: 120
@@ -228,54 +228,54 @@ phase_alarms:
       alarm_type: composite
       operator: AND
       conditions:
-        - channel: T12
+        - channel: Т12
           check: rate_near_zero
           rate_threshold: 0.1    # K/мин
           rate_window_s: 900     # 15 мин
-        - channel: T12
+        - channel: Т12
           check: above
           threshold_expr: "T12_setpoint + 50"
       level: WARNING
-      message: "Охлаждение остановилось, T12 далеко от setpoint."
+      message: "Охлаждение остановилось, Т12 далеко от setpoint."
       notify: [gui, telegram]
 
   measurement:
     detector_drift:
       alarm_type: threshold
-      channel: T12
+      channel: Т12
       check: deviation_from_setpoint
       setpoint_source: T12_setpoint
       threshold: 0.5             # K
       sustained_s: 60
       level: WARNING
-      message: "T12 отклонился от setpoint на > 0.5 K > 60с."
+      message: "Т12 отклонился от setpoint на > 0.5 K > 60с."
       notify: [gui]
 
     detector_unstable:
       alarm_type: threshold
-      channel: T12
+      channel: Т12
       check: deviation_from_setpoint
       setpoint_source: T12_setpoint
       threshold: 2.0
       sustained_s: 10
       level: CRITICAL
-      message: "T12 ушёл от setpoint на > 2 K. Измерения невалидны."
+      message: "Т12 ушёл от setpoint на > 2 K. Измерения невалидны."
       notify: [gui, telegram, sound]
 
     shield_warming:
       alarm_type: rate
-      channel: T11               # азотная плита — индикатор 1-й ступени
+      channel: Т11               # азотная плита — индикатор 1-й ступени
       check: rate_above
       threshold: 0.5             # K/мин
       rate_window_s: 300
       level: WARNING
-      message: "Азотная плита (T11) нагревается при measurement."
+      message: "Азотная плита (Т11) нагревается при measurement."
       notify: [gui, telegram]
 
   warmup:
     excessive_warmup_rate:
       alarm_type: rate
-      channels: [T11, T12]
+      channels: [Т11, Т12]
       check: rate_above
       threshold: 5.0
       rate_window_s: 120
@@ -302,13 +302,13 @@ interlocks:
     action: stop_source
 
   detector_warmup_interlock:
-    channel: T12
+    channel: Т12
     check: above
     threshold: 10
     conditions:                  # фазозависимый!
       - phase: measurement
       - keithley_source: on
     action: stop_source
-    message: "T12 > 10K при активном нагревателе — source OFF"
+    message: "Т12 > 10K при активном нагревателе — source OFF"
 
   # УДАЛЁН: undercool_shield (T5 < 50K) — ложное срабатывание при штатном cooldown

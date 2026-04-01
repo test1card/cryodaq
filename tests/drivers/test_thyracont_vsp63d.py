@@ -7,7 +7,7 @@ import math
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
+from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D, _FALLBACK_BAUDRATES
 
 
 # ---------------------------------------------------------------------------
@@ -222,4 +222,40 @@ async def test_thyracont_connect_v1() -> None:
     assert driver._protocol_v1 is True
     assert driver._instrument_id == "Thyracont-V1@001"
 
+    await driver.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# 15. Fallback baudrate mapping
+# ---------------------------------------------------------------------------
+
+def test_fallback_baudrates_mapping() -> None:
+    """Verify known fallback baudrate pairs."""
+    assert _FALLBACK_BAUDRATES[9600] == 115200
+    assert _FALLBACK_BAUDRATES[115200] == 9600
+    assert _FALLBACK_BAUDRATES.get(19200) is None
+
+
+# ---------------------------------------------------------------------------
+# 16. Connect with fallback baudrate (mock)
+# ---------------------------------------------------------------------------
+
+async def test_connect_fallback_baudrate() -> None:
+    """When primary baudrate is 9600 in mock mode, connection still succeeds."""
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=9600, mock=True)
+    await driver.connect()
+    assert driver.connected
+    await driver.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# 17. Connect preserves original baudrate on success
+# ---------------------------------------------------------------------------
+
+async def test_connect_preserves_original_baudrate_on_success() -> None:
+    """When primary baudrate probe succeeds, no fallback is attempted."""
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=115200, mock=True)
+    await driver.connect()
+    assert driver.connected
+    assert driver._protocol_v1 is True
     await driver.disconnect()

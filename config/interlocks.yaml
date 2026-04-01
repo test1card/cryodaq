@@ -38,7 +38,7 @@ interlocks:
   # Данный интерлок — аппаратная страховка для любой фазы при T12 > 10 K.
   - name: "detector_warmup"
     description: "Нагрев детектора (T12) выше рабочей температуры — остановка источника"
-    channel_pattern: "T12"
+    channel_pattern: "Т12 .*"
     threshold: 10.0
     comparison: ">"
     action: "stop_source"

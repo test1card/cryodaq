@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import yaml
 
+from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.smu_channel import SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
@@ -85,7 +86,7 @@ class SafetyManager:
         self._active_sources: set[SmuChannel] = set()
 
         self._latest: dict[str, tuple[float, float, str]] = {}
-        self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
+        self._rate_estimator = RateEstimator(window_s=120.0, min_points=10)
 
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
@@ -563,7 +564,7 @@ class SafetyManager:
                 now = time.monotonic()
                 self._latest[reading.channel] = (now, reading.value, reading.status.value)
                 if reading.unit == "K":
-                    self._rate_buffers.setdefault(reading.channel, deque(maxlen=120)).append((now, reading.value))
+                    self._rate_estimator.push(reading.channel, now, reading.value)
         except asyncio.CancelledError:
             return
 
@@ -617,22 +618,18 @@ class SafetyManager:
                     )
                     return
 
-        for ch, buf in self._rate_buffers.items():
+        for ch in self._rate_estimator.channels():
             if not any(pattern.match(ch) for pattern in self._config.critical_channels):
                 continue
-            if len(buf) < 10:
+            rate = self._rate_estimator.get_rate(ch)
+            if rate is None:
                 continue
-            t0, v0 = buf[0]
-            t1, v1 = buf[-1]
-            dt_s = t1 - t0
-            if dt_s <= 0:
-                continue
-            rate_k_min = abs(v1 - v0) / (dt_s / 60.0)
-            if rate_k_min > self._config.max_dT_dt_K_per_min:
+            abs_rate = abs(rate)
+            if abs_rate > self._config.max_dT_dt_K_per_min:
                 await self._fault(
-                    f"Rate limit exceeded {ch}: {rate_k_min:.2f} K/min > {self._config.max_dT_dt_K_per_min}",
+                    f"Rate limit exceeded {ch}: {abs_rate:.2f} K/min > {self._config.max_dT_dt_K_per_min}",
                     channel=ch,
-                    value=rate_k_min,
+                    value=abs_rate,
                 )
                 return
 

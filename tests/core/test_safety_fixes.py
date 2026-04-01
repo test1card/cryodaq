@@ -372,3 +372,20 @@ async def test_fault_event_has_channel_and_value():
         )
     finally:
         await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
+# RateEstimator integration — verify SafetyManager uses RateEstimator
+# ---------------------------------------------------------------------------
+
+
+async def test_rate_limit_uses_rate_estimator():
+    """SafetyManager uses RateEstimator instead of raw _rate_buffers."""
+    mgr, broker = await _make_manager(stale=30.0)
+    try:
+        assert not hasattr(mgr, "_rate_buffers"), \
+            "SafetyManager should use RateEstimator, not raw _rate_buffers"
+        assert hasattr(mgr, "_rate_estimator"), \
+            "SafetyManager should have _rate_estimator attribute"
+    finally:
+        await mgr.stop()

@@ -31,6 +31,7 @@ export/
 
 # Local config overrides (machine-specific, not committed)
 config/*.local.yaml
+config/*.local.yaml.yaml
 
 # Claude Code
 .claude/

@@ -30,7 +30,7 @@ from cryodaq.gui.widgets.common import (
     build_action_row,
     create_panel_root,
 )
-from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
@@ -302,10 +302,11 @@ class _SmuPanel(QFrame):
             return False
         return True
 
-    def _on_start(self, *, emit_success_feedback: bool = True) -> bool:
+    def _on_start(self, *, emit_success_feedback: bool = True) -> None:
         if not self._validate_start_request(emit_feedback=True):
-            return False
-        reply = send_command(
+            return
+        self._start_btn.setEnabled(False)
+        worker = ZmqCommandWorker(
             {
                 "cmd": "keithley_start",
                 "channel": self._smu,
@@ -314,36 +315,49 @@ class _SmuPanel(QFrame):
                 "i_comp": self._i_spin.value(),
             }
         )
-        if not reply.get("ok"):
-            self._show_error(
-                str(reply.get("error", f"Не удалось запустить {self._channel_label}."))
-            )
-            logger.warning("Keithley start failed on %s: %s", self._smu, reply.get("error"))
-            return False
-        self._show_info(
-            f"Команда запуска для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
-            emit=emit_success_feedback,
-        )
-        return True
+        worker.finished.connect(lambda result, ef=emit_success_feedback: self._on_start_result(result, ef))
+        self._workers.append(worker)
+        worker.start()
 
-    def _on_stop(self, *, emit_success_feedback: bool = True) -> bool:
+    def _on_start_result(self, result: dict, emit_feedback: bool) -> None:
+        self._start_btn.setEnabled(self._channel_state != "on")
+        if not result.get("ok"):
+            self._show_error(
+                str(result.get("error", f"Не удалось запустить {self._channel_label}."))
+            )
+            logger.warning("Keithley start failed on %s: %s", self._smu, result.get("error"))
+        else:
+            self._show_info(
+                f"Команда запуска для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
+                emit=emit_feedback,
+            )
+        self._workers = [w for w in self._workers if w.isRunning()]
+
+    def _on_stop(self, *, emit_success_feedback: bool = True) -> None:
         if self._channel_state == "off":
             self._show_info(
                 f"{self._channel_label.capitalize()} уже выключен по подтвержденному состоянию backend. Повторная команда остановки не отправлена."
             )
-            return False
-        reply = send_command({"cmd": "keithley_stop", "channel": self._smu})
-        if not reply.get("ok"):
+            return
+        self._stop_btn.setEnabled(False)
+        worker = ZmqCommandWorker({"cmd": "keithley_stop", "channel": self._smu})
+        worker.finished.connect(lambda result, ef=emit_success_feedback: self._on_stop_result(result, ef))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_stop_result(self, result: dict, emit_feedback: bool) -> None:
+        self._stop_btn.setEnabled(self._channel_state == "on")
+        if not result.get("ok"):
             self._show_error(
-                str(reply.get("error", f"Не удалось остановить {self._channel_label}."))
+                str(result.get("error", f"Не удалось остановить {self._channel_label}."))
             )
-            logger.warning("Keithley stop failed on %s: %s", self._smu, reply.get("error"))
-            return False
-        self._show_info(
-            f"Команда остановки для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
-            emit=emit_success_feedback,
-        )
-        return True
+            logger.warning("Keithley stop failed on %s: %s", self._smu, result.get("error"))
+        else:
+            self._show_info(
+                f"Команда остановки для {self._channel_label} отправлена. Дождитесь подтверждения состояния.",
+                emit=emit_feedback,
+            )
+        self._workers = [w for w in self._workers if w.isRunning()]
 
     def _on_emergency(self, *, emit_progress_feedback: bool = True) -> bool:
         if any(worker.isRunning() for worker in self._workers):
@@ -515,22 +529,14 @@ class KeithleyPanel(QWidget):
         self._reading_signal.emit(reading)
 
     def _on_start_both(self) -> None:
-        dispatched = sum(1 for panel in self._smu_panels.values() if panel._on_start(emit_success_feedback=False))
-        if dispatched:
-            self._status_banner.show_info(
-                "Команда запуска для каналов A+B отправлена. Дождитесь подтверждения состояния."
-            )
-            return
-        self._status_banner.show_warning("Команда запуска A+B не отправлена. Проверьте сообщения по каналам.")
+        for panel in self._smu_panels.values():
+            panel._on_start(emit_success_feedback=False)
+        self._status_banner.show_info("Команды запуска отправлены для обоих каналов.")
 
     def _on_stop_both(self) -> None:
-        dispatched = sum(1 for panel in self._smu_panels.values() if panel._on_stop(emit_success_feedback=False))
-        if dispatched:
-            self._status_banner.show_info(
-                "Команда остановки для каналов A+B отправлена. Дождитесь подтверждения состояния."
-            )
-            return
-        self._status_banner.show_warning("Команда остановки A+B не отправлена. Проверьте сообщения по каналам.")
+        for panel in self._smu_panels.values():
+            panel._on_stop(emit_success_feedback=False)
+        self._status_banner.show_info("Команды остановки отправлены для обоих каналов.")
 
     def _on_emergency_both(self) -> None:
         dispatched = sum(

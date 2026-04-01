@@ -12,14 +12,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import pyqtgraph as pg
 import yaml
-from PySide6.QtCore import QSize, Qt, QTimer, Slot
+from PySide6.QtCore import QTimer, Slot
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -28,7 +26,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStackedWidget,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -38,7 +35,6 @@ from cryodaq.gui.widgets.common import (
     StatusBanner,
     apply_button_style,
     apply_group_box_style,
-    apply_panel_frame_style,
     create_panel_root,
     setup_standard_table,
 )

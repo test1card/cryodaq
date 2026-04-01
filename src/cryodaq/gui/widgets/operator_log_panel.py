@@ -12,19 +12,19 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
-    QVBoxLayout,
     QWidget,
 )
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.widgets.common import PanelHeader, StatusBanner, build_action_row, create_panel_root
-from cryodaq.gui.zmq_client import send_command
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 
 class OperatorLogPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._entries: list[dict] = []
+        self._workers: list[ZmqCommandWorker] = []
 
         layout = create_panel_root(self)
         layout.addWidget(
@@ -82,7 +82,15 @@ class OperatorLogPanel(QWidget):
         payload: dict[str, object] = {"cmd": "log_get", "limit": 50}
         if self._current_only.isChecked():
             payload["current_experiment"] = True
-        result = send_command(payload)
+        self._refresh_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(self._on_refresh_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_refresh_result(self, result: dict) -> None:
+        self._refresh_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._entries_list.clear()
             self._status_label.show_error(str(result.get("error", "Не удалось загрузить журнал.")))
@@ -120,7 +128,15 @@ class OperatorLogPanel(QWidget):
         if self._current_only.isChecked():
             payload["current_experiment"] = True
 
-        result = send_command(payload)
+        self._submit_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(self._on_submit_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_submit_result(self, result: dict) -> None:
+        self._submit_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._status_label.show_error(str(result.get("error", "Не удалось сохранить запись.")))
             return

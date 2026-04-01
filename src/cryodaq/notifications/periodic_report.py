@@ -232,8 +232,6 @@ class PeriodicReporter:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
-        from datetime import timezone
 
         # Разделить каналы по типу
         temp_channels = [ch for ch, u in self._units.items() if u == "K"]
@@ -242,7 +240,6 @@ class PeriodicReporter:
         has_pressure = bool(pres_channels)
 
         # Активные тревоги для подсветки каналов
-        active_alarms = set(self._alarm_engine.get_active_alarms())
         alarm_states = self._alarm_engine.get_state()
 
         # Определить «тревожные» каналы: те, чьё имя совпадает с именем активной тревоги

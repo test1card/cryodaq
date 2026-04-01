@@ -13,6 +13,8 @@ from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
 
+_XLSX_MAX_ROWS = 1_048_576
+
 
 class XLSXExporter:
     """Экспортирует данные из SQLite daily-файлов в Excel .xlsx.
@@ -117,6 +119,12 @@ class XLSXExporter:
 
         row_num = 2
         for ts_str in sorted(by_time.keys()):
+            if row_num >= _XLSX_MAX_ROWS:
+                logger.warning(
+                    "XLSX row limit reached (%d). Truncating export — some data omitted.",
+                    _XLSX_MAX_ROWS,
+                )
+                break
             # Разобрать REAL или ISO-строку в datetime для Excel
             try:
                 dt = _parse_timestamp(ts_str)

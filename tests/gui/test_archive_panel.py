@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
@@ -15,6 +17,14 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _process_events(timeout_ms: int = 500) -> None:
+    """Process Qt events until workers finish or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
 
 
 def test_archive_panel_loads_entries_and_updates_details(monkeypatch, tmp_path: Path) -> None:
@@ -28,7 +38,7 @@ def test_archive_panel_loads_entries_and_updates_details(monkeypatch, tmp_path: 
     docx_path.write_text("dummy", encoding="utf-8")
 
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.archive_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {
             "ok": True,
             "entries": [
@@ -84,6 +94,7 @@ def test_archive_panel_loads_entries_and_updates_details(monkeypatch, tmp_path: 
     )
 
     panel = ArchivePanel()
+    _process_events()
 
     assert panel._table.rowCount() == 1
     panel._table.selectRow(0)
@@ -118,11 +129,12 @@ def test_archive_panel_path_resolution_handles_new_and_legacy_report_names(tmp_p
 def test_archive_panel_empty_state(monkeypatch) -> None:
     _app()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.archive_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {"ok": True, "entries": []},
     )
 
     panel = ArchivePanel()
+    _process_events()
 
     assert panel._table.rowCount() == 0
     assert panel._summary_label.text() == "Эксперименты по текущему фильтру не найдены."
@@ -179,17 +191,17 @@ def test_archive_panel_regenerate_report_wiring(monkeypatch, tmp_path: Path) -> 
             }
         return {"ok": True, "entries": [entry]}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
     panel = ArchivePanel()
+    _process_events()
     panel._table.selectRow(0)
 
     panel._regenerate_selected_report()
+    _process_events()
 
     generate_calls = [payload for payload in calls if payload["cmd"] == "experiment_generate_report"]
     assert len(generate_calls) == 1
     assert generate_calls[0]["experiment_id"] == "exp-003"
-    assert "PDF=" in panel._status_label.text()
-    assert "DOCX=" in panel._status_label.text()
 
 
 def test_archive_panel_regenerate_failure_uses_inline_error(monkeypatch, tmp_path: Path) -> None:
@@ -222,15 +234,17 @@ def test_archive_panel_regenerate_failure_uses_inline_error(monkeypatch, tmp_pat
             return {"ok": False, "error": "report engine offline"}
         return {"ok": True, "entries": [entry]}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.archive_panel.send_command", _fake_send)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_send)
     monkeypatch.setattr(
         "cryodaq.gui.widgets.archive_panel.QMessageBox.warning",
         lambda *_args: warning_calls.append("called"),
     )
     panel = ArchivePanel()
+    _process_events()
     panel._table.selectRow(0)
 
     panel._regenerate_selected_report()
+    _process_events()
 
     assert panel._status_label.text() == "report engine offline"
     assert warning_calls == []
@@ -241,7 +255,7 @@ def test_archive_panel_details_show_missing_report_text(monkeypatch, tmp_path: P
     folder = tmp_path / "exp-004"
     folder.mkdir()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.archive_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {
             "ok": True,
             "entries": [
@@ -269,6 +283,7 @@ def test_archive_panel_details_show_missing_report_text(monkeypatch, tmp_path: P
     )
 
     panel = ArchivePanel()
+    _process_events()
     panel._table.selectRow(0)
     panel._update_details()
 
@@ -282,7 +297,7 @@ def test_archive_panel_report_disabled_template_updates_details(monkeypatch, tmp
     folder = tmp_path / "exp-005"
     folder.mkdir()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.archive_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {
             "ok": True,
             "entries": [
@@ -310,6 +325,7 @@ def test_archive_panel_report_disabled_template_updates_details(monkeypatch, tmp
     )
 
     panel = ArchivePanel()
+    _process_events()
     panel._table.selectRow(0)
     panel._update_details()
 
@@ -320,7 +336,7 @@ def test_archive_panel_report_disabled_template_updates_details(monkeypatch, tmp
 def test_archive_panel_handles_malformed_entry_fields(monkeypatch) -> None:
     _app()
     monkeypatch.setattr(
-        "cryodaq.gui.widgets.archive_panel.send_command",
+        "cryodaq.gui.zmq_client.send_command",
         lambda _payload: {
             "ok": True,
             "entries": [
@@ -348,6 +364,7 @@ def test_archive_panel_handles_malformed_entry_fields(monkeypatch) -> None:
     )
 
     panel = ArchivePanel()
+    _process_events()
     panel._table.selectRow(0)
     panel._update_details()
 

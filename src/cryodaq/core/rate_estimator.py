@@ -34,6 +34,8 @@ class RateEstimator:
         self._maxlen: int = max(500, int(window_s * 20) + 100)
         # channel → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
+        # short prefix → full channel name (e.g. "Т12" → "Т12 Теплообменник 2")
+        self._short_to_full: dict[str, str] = {}
 
     def push(self, channel: str, timestamp: float, value: float) -> None:
         """Добавить точку. Автоматически удаляет точки старше окна."""
@@ -42,9 +44,20 @@ class RateEstimator:
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:
             buf.popleft()
+        # Build short→full index for prefix resolution
+        short = channel.split(" ", 1)[0] if " " in channel else channel
+        if short != channel:
+            self._short_to_full[short] = channel
+
+    def resolve_channel(self, channel: str) -> str:
+        """Resolve short channel ID to full runtime name."""
+        if channel in self._buffers:
+            return channel
+        return self._short_to_full.get(channel, channel)
 
     def get_rate(self, channel: str) -> float | None:
         """Вернуть dX/dt в единицах [unit/мин]. None если недостаточно данных."""
+        channel = self.resolve_channel(channel)
         buf = self._buffers.get(channel)
         if not buf or len(buf) < self._min_points:
             return None
@@ -56,6 +69,7 @@ class RateEstimator:
         Использует самые свежие точки в пределах `window_s` из буфера канала.
         Требует min_points точек в этом окне.
         """
+        channel = self.resolve_channel(channel)
         buf = self._buffers.get(channel)
         if not buf:
             return None
@@ -72,6 +86,7 @@ class RateEstimator:
 
     def buffer_size(self, channel: str) -> int:
         """Размер буфера для канала (для диагностики)."""
+        channel = self.resolve_channel(channel)
         buf = self._buffers.get(channel)
         return len(buf) if buf else 0
 

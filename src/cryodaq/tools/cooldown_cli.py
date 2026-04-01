@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 
 from cryodaq.analytics.cooldown_predictor import (
-    EnsembleModel,
     ReferenceCurve,
     T_PHASE_BOUNDARY,
     build_ensemble,

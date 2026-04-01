@@ -65,19 +65,19 @@ channels:
     group: компрессор
   Т17:
     name: Зеркало 1
-    visible: false
+    visible: true
     group: оптика
   Т18:
     name: Зеркало 2
-    visible: false
+    visible: true
     group: оптика
   Т19:
     name: Подвес
-    visible: false
+    visible: true
     group: оптика
   Т20:
     name: Рама
-    visible: false
+    visible: true
     group: оптика
   Т21:
     name: Резерв 1

@@ -171,3 +171,16 @@ async def test_xlsx_channel_filter(tmp_path: Path) -> None:
     assert "CH1" in header, f"CH1 missing from header: {header}"
     assert "CH2" not in header, f"CH2 should not be in filtered output: {header}"
     assert "CH3" not in header, f"CH3 should not be in filtered output: {header}"
+
+
+# ---------------------------------------------------------------------------
+# 6. _XLSX_MAX_ROWS constant is defined and has the correct value
+# ---------------------------------------------------------------------------
+
+
+async def test_xlsx_max_rows_constant() -> None:
+    from cryodaq.storage.xlsx_export import _XLSX_MAX_ROWS
+
+    assert _XLSX_MAX_ROWS == 1_048_576, (
+        f"Expected _XLSX_MAX_ROWS == 1_048_576, got {_XLSX_MAX_ROWS}"
+    )

@@ -388,6 +388,20 @@ async def test_get_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_detector_warmup_pattern_matches_full_channel() -> None:
+    """Regex pattern '\u042212 .*' from interlocks.yaml matches full channel name."""
+    import re
+    pattern = "\u042212 .*"
+    full_name = "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    assert re.fullmatch(pattern, full_name), (
+        f"Pattern {pattern!r} should match {full_name!r}"
+    )
+    # Also verify it does NOT match Latin T12
+    assert not re.fullmatch(pattern, "T12 Something"), (
+        "Cyrillic pattern should not match Latin T"
+    )
+
+
 async def test_multiple_interlocks() -> None:
     called_a: list[bool] = []
     called_b: list[bool] = []

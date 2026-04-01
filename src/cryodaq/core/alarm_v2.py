@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -321,8 +321,6 @@ class AlarmEvaluator:
                 if add_cond and not self._eval_condition(add_cond):
                     continue
 
-                state = self._state.get(ch)
-                value = state.value if state else 0.0
                 msg = self._format_message(message_tmpl, channel=ch, value=rate)
                 return AlarmEvent(
                     alarm_id=alarm_id,

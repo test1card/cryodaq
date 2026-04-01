@@ -32,7 +32,7 @@ from cryodaq.gui.widgets.common import (
     create_panel_root,
     setup_standard_table,
 )
-from cryodaq.gui.zmq_client import send_command
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 
 class ArchivePanel(QWidget):
@@ -41,6 +41,7 @@ class ArchivePanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._entries: list[dict[str, Any]] = []
+        self._workers: list[ZmqCommandWorker] = []
         self._build_ui()
         self.refresh_archive()
 
@@ -206,7 +207,15 @@ class ArchivePanel(QWidget):
         elif report_value == "false":
             payload["report_present"] = False
 
-        result = send_command(payload)
+        self._refresh_button.setEnabled(False)
+        worker = ZmqCommandWorker(payload)
+        worker.finished.connect(self._on_refresh_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_refresh_result(self, result: dict) -> None:
+        self._refresh_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._status_label.show_error(str(result.get("error", "Не удалось загрузить архив.")))
             return
@@ -483,7 +492,16 @@ class ArchivePanel(QWidget):
         if not bool(entry.get("report_enabled", True)):
             self._status_label.show_warning("Для этого шаблона формирование отчёта отключено.")
             return
-        result = send_command({"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")})
+        self._regenerate_button.setEnabled(False)
+        self._status_label.show_info("Генерация отчёта...")
+        worker = ZmqCommandWorker({"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")})
+        worker.finished.connect(self._on_regenerate_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_regenerate_result(self, result: dict) -> None:
+        self._regenerate_button.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
             self._status_label.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
             return

@@ -1,4 +1,4 @@
-﻿"""Панель тревог (AlarmPanel).
+"""Панель тревог (AlarmPanel).
 
 Отображает таблицу тревог с цветовой индикацией по severity.
 Позволяет оператору подтверждать тревоги (acknowledge).
@@ -9,13 +9,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
@@ -26,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ class AlarmPanel(QWidget):
         self._alarms: dict[str, _AlarmRow] = {}
         # v2: alarm_id → {level, message, triggered_at, channels}
         self._v2_alarms: dict[str, dict] = {}
-        self._v2_worker = None
+        self._workers: list[ZmqCommandWorker] = []
 
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
@@ -277,13 +276,18 @@ class AlarmPanel(QWidget):
                 self._table.setItem(row_idx, 7, QTableWidgetItem(state_text))
 
     def _acknowledge(self, alarm_name: str) -> None:
-        """Send acknowledge to engine via ZMQ."""
-        from cryodaq.gui.zmq_client import send_command
-        reply = send_command({"cmd": "alarm_acknowledge", "alarm_name": alarm_name})
-        if reply.get("ok"):
+        """Send acknowledge to engine via ZMQ (non-blocking)."""
+        worker = ZmqCommandWorker({"cmd": "alarm_acknowledge", "alarm_name": alarm_name})
+        worker.finished.connect(lambda result, name=alarm_name: self._on_ack_result(result, name))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_ack_result(self, result: dict, alarm_name: str) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
+        if result.get("ok"):
             logger.info("Тревога '%s' подтверждена через engine", alarm_name)
         else:
-            logger.warning("Ошибка подтверждения тревоги '%s': %s", alarm_name, reply.get("error"))
+            logger.warning("Ошибка подтверждения тревоги '%s': %s", alarm_name, result.get("error"))
 
     # ------------------------------------------------------------------
     # Alarm Engine v2 polling
@@ -291,18 +295,20 @@ class AlarmPanel(QWidget):
 
     @Slot()
     def _poll_v2_status(self) -> None:
-        """Poll alarm_v2_status from engine (non-blocking background thread)."""
-        if self._v2_worker is not None and not self._v2_worker.isFinished():
+        """Poll alarm_v2_status from engine and refresh v2 table (non-blocking)."""
+        # Skip if a poll worker is already running
+        if any(w.isRunning() for w in self._workers if getattr(w, "_poll_marker", False)):
             return
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-        self._v2_worker = ZmqCommandWorker({"cmd": "alarm_v2_status"})
-        self._v2_worker.finished.connect(self._on_v2_poll_result)
-        self._v2_worker.start()
+        worker = ZmqCommandWorker({"cmd": "alarm_v2_status"})
+        worker._poll_marker = True  # type: ignore[attr-defined]
+        worker.finished.connect(self._on_poll_v2_result)
+        self._workers.append(worker)
+        worker.start()
 
-    @Slot(dict)
-    def _on_v2_poll_result(self, reply: dict) -> None:
-        if reply.get("ok"):
-            self.update_v2_status(reply)
+    def _on_poll_v2_result(self, result: dict) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
+        if result.get("ok"):
+            self.update_v2_status(result)
 
     def update_v2_status(self, payload: dict) -> None:
         """Update v2 alarm table from alarm_v2_status response payload."""
@@ -357,13 +363,15 @@ class AlarmPanel(QWidget):
             self._v2_table.setCellWidget(row_idx, 5, btn)
 
     def _acknowledge_v2(self, alarm_id: str) -> None:
-        """Send alarm_v2_ack to engine."""
-        try:
-            from cryodaq.gui.zmq_client import send_command
-            reply = send_command({"cmd": "alarm_v2_ack", "alarm_name": alarm_id})
-            if reply.get("ok"):
-                logger.info("Alarm v2 '%s' подтверждён", alarm_id)
-            else:
-                logger.warning("Ошибка ack alarm v2 '%s': %s", alarm_id, reply.get("error"))
-        except Exception as exc:
-            logger.warning("alarm_v2_ack error: %s", exc)
+        """Send alarm_v2_ack to engine (non-blocking)."""
+        worker = ZmqCommandWorker({"cmd": "alarm_v2_ack", "alarm_name": alarm_id})
+        worker.finished.connect(lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid))
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_ack_v2_result(self, result: dict, alarm_id: str) -> None:
+        self._workers = [w for w in self._workers if w.isRunning()]
+        if result.get("ok"):
+            logger.info("Alarm v2 '%s' подтверждён", alarm_id)
+        else:
+            logger.warning("Ошибка ack alarm v2 '%s': %s", alarm_id, result.get("error"))
