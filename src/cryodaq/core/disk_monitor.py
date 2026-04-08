@@ -5,6 +5,7 @@ import logging
 import shutil
 
 from pathlib import Path
+from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
@@ -27,14 +28,20 @@ class DiskMonitor:
         check_interval_s: float = _DEFAULT_CHECK_INTERVAL_S,
         warning_gb: float = _WARNING_THRESHOLD_GB,
         critical_gb: float = _CRITICAL_THRESHOLD_GB,
+        sqlite_writer: Any | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._broker = broker
         self._interval = check_interval_s
         self._warn_gb = warning_gb
         self._crit_gb = critical_gb
+        self._sqlite_writer = sqlite_writer
         self._task: asyncio.Task | None = None
         self._running = False
+
+    def set_sqlite_writer(self, writer: Any) -> None:
+        """Inject the writer for disk-full flag clearing (Phase 2a H.1)."""
+        self._sqlite_writer = writer
 
     async def start(self) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -89,3 +96,20 @@ class DiskMonitor:
             logger.critical("КРИТИЧЕСКИ мало места на диске: %.1f GB", free_gb)
         elif free_gb < self._warn_gb:
             logger.warning("Мало места на диске: %.1f GB", free_gb)
+
+        # Disk recovery (Phase 2a H.1): if free space recovered above the
+        # warning threshold, log a recovery notice — but do NOT clear the
+        # writer's _disk_full flag here. Clearing must go through
+        # SafetyManager.acknowledge_fault() so the operator stays in the
+        # loop and we don't cycle on disk flapping. The flag is cleared by
+        # the persistence_failure_clear callback wired in engine.py.
+        if (
+            self._sqlite_writer is not None
+            and getattr(self._sqlite_writer, "is_disk_full", False)
+            and free_gb >= self._warn_gb
+        ):
+            logger.warning(
+                "Disk recovered (%.1f GB free >= %.1f GB threshold). "
+                "Operator must acknowledge_fault to resume polling.",
+                free_gb, self._warn_gb,
+            )

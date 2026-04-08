@@ -85,6 +85,30 @@ class Keithley2604B(InstrumentDriver):
                 raise RuntimeError(f"{self.name}: unexpected IDN {idn!r}")
             # Drain stale errors so they don't confuse runtime error checks.
             await self._transport.write("errorqueue.clear()")
+            # SAFETY (Phase 2a G.1): force outputs off on every connect.
+            # The previous engine process may have crashed mid-experiment
+            # while sourcing — Keithley holds the last programmed voltage
+            # indefinitely with no TSP-side watchdog (see CLAUDE.md). This
+            # guarantees a known-safe state every time we assume control.
+            # Best-effort: an exception here is logged but does NOT abort
+            # connect (the higher-level health checks will catch a truly
+            # broken instrument; our priority is to avoid leaving an
+            # unconnected lab in a worse state than "possibly still sourcing").
+            if not self.mock:
+                try:
+                    await self._transport.write("smua.source.levelv = 0")
+                    await self._transport.write("smub.source.levelv = 0")
+                    await self._transport.write("smua.source.output = smua.OUTPUT_OFF")
+                    await self._transport.write("smub.source.output = smub.OUTPUT_OFF")
+                    log.info(
+                        "%s: SAFETY: forced outputs off on connect (crash-recovery guard)",
+                        self.name,
+                    )
+                except Exception as exc:
+                    log.critical(
+                        "%s: SAFETY: failed to force output off on connect: %s",
+                        self.name, exc,
+                    )
         except Exception:
             await self._transport.close()
             raise
@@ -278,6 +302,20 @@ class Keithley2604B(InstrumentDriver):
                 await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
+            # SAFETY (Phase 2a Codex G.1): readback-verify each channel.
+            # emergency_off is the most critical path — silent failure here
+            # is unacceptable. _verify_output_off logs CRITICAL on mismatch.
+            # Wrap in try because the caller is already in an emergency path
+            # and a raise here would just propagate noise; the CRITICAL log
+            # is the signalling mechanism (alarm pipeline filters on level).
+            try:
+                await self._verify_output_off(smu_channel)
+            except Exception as exc:
+                log.critical(
+                    "%s: emergency_off verify FAILED on %s: %s — "
+                    "instrument may still be sourcing!",
+                    self.name, smu_channel, exc,
+                )
 
     async def check_error(self) -> str | None:
         if not self._connected:

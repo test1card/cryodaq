@@ -70,7 +70,11 @@ SafetyBroker (dedicated, overflow=FAULT)
      Fail-on-silence: stale data -> FAULT + emergency_off
      Rate limit: dT/dt > 5 K/min -> FAULT
      Recovery: acknowledge + precondition re-check + cooldown
-     Double protection: Python safety path + hardware watchdog
+     Safety regulation is host-side only (no Keithley TSP watchdog yet —
+     planned for Phase 3, requires hardware verification).
+     Crash-recovery guard: Keithley2604B.connect() forces OUTPUT_OFF on
+     both SMU channels before assuming control, so a known-safe state is
+     guaranteed every time the engine comes up.
 ```
 
 ### Persistence-first ordering
@@ -172,8 +176,8 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 **TSP**
 
-- `tsp/p_const.lua` — primary runtime script
-- `tsp/p_const_single.lua` — legacy/fallback artifact, который всё ещё присутствует в дереве
+- `tsp/p_const.lua` — draft TSP supervisor for Phase 3 hardware watchdog
+  upload (currently NOT loaded — keithley_2604b.py runs P=const host-side)
 
 ## Конфигурационные файлы
 

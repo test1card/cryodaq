@@ -821,6 +821,15 @@ async def _run_engine(*, mock: bool = False) -> None:
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR)
     await writer.start_immediate()
+    # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
+    # engine event loop and SafetyManager so a disk-full error in the
+    # writer thread can latch a safety fault via run_coroutine_threadsafe.
+    # The reverse hook (acknowledge_fault → clear writer flag) ensures
+    # polling does NOT resume until the operator explicitly acknowledges,
+    # even if free space recovered earlier (no auto-recovery on flapping).
+    writer.set_event_loop(asyncio.get_running_loop())
+    writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
+    safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
 
     # Calibration acquisition — continuous SRDG during calibration experiments
     calibration_acquisition = CalibrationAcquisitionService(writer)
@@ -847,19 +856,58 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.warning("Файл тревог не найден: %s", alarms_cfg)
 
-    # Interlock Engine — действия делегируются SafetyManager
-    async def _interlock_emergency_off() -> None:
-        await safety_manager.on_interlock_trip("interlock", "", 0)
-
-    async def _interlock_stop_source() -> None:
-        await safety_manager.on_interlock_trip("interlock", "", 0)
+    # Interlock Engine — действия делегируются SafetyManager.
+    # Phase 2a Codex I.1: the actions-dict callables are kept as no-ops for
+    # backwards compatibility with InterlockEngine's required interface, but
+    # the REAL safety routing happens via trip_handler which receives the
+    # full (condition, reading) context. Without this the action name and
+    # channel would be discarded and stop_source would behave as emergency_off.
+    async def _interlock_noop() -> None:
+        return None
 
     interlock_actions: dict[str, Any] = {
-        "emergency_off": _interlock_emergency_off,
-        "stop_source": _interlock_stop_source,
+        "emergency_off": _interlock_noop,
+        "stop_source": _interlock_noop,
     }
 
-    interlock_engine = InterlockEngine(broker, actions=interlock_actions)
+    async def _interlock_trip_handler(condition: Any, reading: Any) -> None:
+        # SAFETY (Phase 2a Codex P1): the actions-dict callables are no-ops,
+        # so this handler is the SOLE path that triggers a SafetyManager
+        # response. If anything raises here, InterlockEngine._trip will
+        # log-and-swallow → fail-open. We catch ourselves and escalate to
+        # a guaranteed _fault as a last resort. _fault is unlocked and
+        # idempotent on the Keithley side (verified Phase 1).
+        try:
+            await safety_manager.on_interlock_trip(
+                interlock_name=condition.name,
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else 0.0,
+                action=condition.action,
+            )
+        except Exception as exc:
+            logger.critical(
+                "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
+                "escalating to guaranteed fault.",
+                condition.name, condition.action, exc, exc_info=True,
+            )
+            try:
+                await safety_manager._fault(
+                    f"Interlock trip_handler failed: {condition.name}: {exc}",
+                    channel=reading.channel,
+                    value=float(reading.value) if reading.value is not None else 0.0,
+                )
+            except Exception as exc2:
+                logger.critical(
+                    "INTERLOCK escalation _fault FAILED for '%s': %s — "
+                    "instrument state UNKNOWN, immediate operator intervention!",
+                    condition.name, exc2, exc_info=True,
+                )
+
+    interlock_engine = InterlockEngine(
+        broker,
+        actions=interlock_actions,
+        trip_handler=_interlock_trip_handler,
+    )
     if interlocks_cfg.exists():
         interlock_engine.load_config(interlocks_cfg)
     else:
@@ -1355,8 +1403,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         _watchdog(broker, scheduler, writer, start_ts), name="engine_watchdog",
     )
 
-    # DiskMonitor
-    disk_monitor = DiskMonitor(data_dir=_DATA_DIR, broker=broker)
+    # DiskMonitor — also wires the writer so disk-recovery can clear the
+    # _disk_full flag (Phase 2a H.1).
+    disk_monitor = DiskMonitor(data_dir=_DATA_DIR, broker=broker, sqlite_writer=writer)
     await disk_monitor.start()
 
     logger.info(

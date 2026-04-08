@@ -98,6 +98,11 @@ class SafetyManager:
         # See DEEP_AUDIT_CC.md A.2/I.2.
         self._pending_publishes: set[asyncio.Task[None]] = set()
 
+        # Hook called from acknowledge_fault to clear external persistence
+        # flags (Phase 2a H.1). Engine wires this to writer.clear_disk_full
+        # so operator acknowledgment, not auto-recovery, resumes polling.
+        self._persistence_failure_clear: Callable[[], None] | None = None
+
         # Lock that serializes _active_sources mutations across await points.
         # Multiple REQ clients (GUI subprocess + web dashboard + future
         # operator CLI) can race on request_run / request_stop / emergency_off.
@@ -400,9 +405,24 @@ class SafetyManager:
                 return {"ok": False, "state": self._state.value, "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
 
             self._recovery_reason = reason.strip()
+            # Phase 2a H.1: clear persistence-failure latch on the writer
+            # via the engine-wired callback. This is what unblocks scheduler
+            # polling — DiskMonitor only logs recovery, it does not clear.
+            if self._persistence_failure_clear is not None:
+                try:
+                    self._persistence_failure_clear()
+                except Exception as exc:
+                    logger.error(
+                        "persistence_failure_clear callback failed: %s", exc
+                    )
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
+
+    def set_persistence_failure_clear(self, callback: Callable[[], None]) -> None:
+        """Register a sync callback that clears external persistence-failure
+        flags (Phase 2a H.1). Called from acknowledge_fault."""
+        self._persistence_failure_clear = callback
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -690,9 +710,91 @@ class SafetyManager:
                 return True
         return False
 
-    async def on_interlock_trip(self, interlock_name: str, channel: str, value: float) -> None:
+    async def on_interlock_trip(
+        self,
+        interlock_name: str,
+        channel: str,
+        value: float,
+        *,
+        action: str = "emergency_off",
+    ) -> None:
+        """Handle an interlock trip from InterlockEngine.
+
+        ``action="emergency_off"`` (default, backwards-compatible):
+            Full fault latch — outputs off, FAULT_LATCHED, operator must
+            acknowledge_fault to recover.
+
+        ``action="stop_source"``:
+            Soft stop — outputs off, transition to SAFE_OFF, no fault latch.
+            Operator can call ``request_run`` again as soon as the underlying
+            condition (e.g. detector_warmup) clears.
+
+        Any other action escalates to a full fault as the safe default.
+
+        See DEEP_AUDIT_CODEX.md I.1.
+        """
+        reason = f"Interlock '{interlock_name}' tripped: channel={channel}, value={value:.4g}"
+
+        if action == "emergency_off":
+            logger.critical("INTERLOCK emergency_off: %s", reason)
+            await self._fault(reason, channel=channel, value=value)
+            return
+
+        if action == "stop_source":
+            logger.warning("INTERLOCK stop_source: %s", reason)
+            # Soft stop: outputs off, no fault latch.
+            async with self._cmd_lock:
+                if self._keithley is not None:
+                    try:
+                        await self._keithley.emergency_off()
+                    except Exception as exc:
+                        logger.error(
+                            "stop_source interlock: emergency_off failed: %s — "
+                            "escalating to full fault", exc,
+                        )
+                        # The lock is released when this `async with` block
+                        # exits via the `return` below. _fault itself is
+                        # unlocked, so it does not deadlock — but it WILL
+                        # serialize behind the lock until _fault returns.
+                        await self._fault(
+                            f"{reason} (emergency_off failed: {exc})",
+                            channel=channel, value=value,
+                        )
+                        return
+                self._active_sources.clear()
+                await self._publish_keithley_channel_states(f"interlock_stop:{interlock_name}")
+                if self._state not in (SafetyState.FAULT_LATCHED, SafetyState.MANUAL_RECOVERY):
+                    self._transition(
+                        SafetyState.SAFE_OFF,
+                        f"Interlock stop_source: {interlock_name}",
+                        channel=channel,
+                        value=value,
+                    )
+            return
+
+        # Unknown action — fail-safe to a full fault rather than ignore.
+        logger.critical(
+            "Unknown interlock action %r for '%s' — escalating to full fault",
+            action, interlock_name,
+        )
         await self._fault(
-            f"Interlock '{interlock_name}' tripped: channel={channel}, value={value:.4g}",
-            channel=channel,
-            value=value,
+            f"Unknown interlock action {action!r}: {reason}",
+            channel=channel, value=value,
+        )
+
+    async def on_persistence_failure(self, reason: str) -> None:
+        """Called by SQLiteWriter when persistent storage fails (disk full etc).
+
+        Immediately triggers ``_fault`` with a persistence-failure reason.
+        ``_fault`` is intentionally NOT wrapped in ``_cmd_lock`` so this can
+        be called from any context (including the writer thread via
+        :func:`asyncio.run_coroutine_threadsafe`). The fault path itself
+        latches the state synchronously before any await, so concurrent
+        ``request_run`` callers will see ``FAULT_LATCHED`` and abort.
+        """
+        logger.critical("PERSISTENCE FAILURE: %s — triggering safety fault", reason)
+        await self._fault(
+            f"Persistence failure: {reason}",
+            channel="",
+            value=0.0,
         )

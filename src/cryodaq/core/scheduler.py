@@ -314,6 +314,20 @@ class Scheduler:
         """Persist, calibrate, and publish readings — shared by both loop types."""
         driver = state.config.driver
         name = driver.name
+
+        # Disk-full graceful degradation (Phase 2a H.1).
+        # If the writer has detected disk-full, skip the entire pipeline:
+        # we cannot persist (so persistence-first invariant blocks publish),
+        # and SafetyManager has already latched a fault via the writer's
+        # callback. Returning here keeps the loop alive (so when disk
+        # recovers and the operator acknowledges, polling resumes cleanly)
+        # without spamming CRITICAL logs.
+        if (
+            self._sqlite_writer is not None
+            and getattr(self._sqlite_writer, "is_disk_full", False)
+        ):
+            return
+
         persisted_readings = list(readings)
         if self._adaptive_throttle is not None:
             persisted_readings = self._adaptive_throttle.filter_for_archive(readings)
@@ -332,6 +346,12 @@ class Scheduler:
                 )
                 state.consecutive_errors += 1
                 state.total_errors += 1
+                return
+
+            # If write_immediate silently absorbed a disk-full error
+            # (no raise but flag set inside _write_day_batch), bail out
+            # before publishing — persistence-first invariant.
+            if getattr(self._sqlite_writer, "is_disk_full", False):
                 return
 
         # Step 1b: If calibration acquisition active, read SRDG

@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import sqlite3
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from functools import partial
@@ -149,10 +150,81 @@ class SQLiteWriter:
         self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
         # Periodic explicit WAL checkpoint counter (DEEP_AUDIT_CC.md D.1).
         self._checkpoint_counter = 0
+
+        # Disk-full graceful degradation (Phase 2a H.1).
+        # When the writer thread detects disk-full from sqlite3.OperationalError,
+        # it sets _disk_full=True and (optionally) schedules a callback on the
+        # engine event loop via run_coroutine_threadsafe so the SafetyManager
+        # can latch a fault. The flag is cleared by DiskMonitor when free
+        # space recovers, BUT the operator still has to acknowledge_fault to
+        # actually resume polling.
+        self._disk_full = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._persistence_failure_callback: (
+            Callable[[str], Awaitable[None]] | None
+        ) = None
+
         _check_sqlite_version()
 
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
+
+    # ------------------------------------------------------------------
+    # Disk-full graceful degradation (Phase 2a H.1)
+    # ------------------------------------------------------------------
+    @property
+    def is_disk_full(self) -> bool:
+        """True when the most recent write hit a disk-full / out-of-space error."""
+        return self._disk_full
+
+    def clear_disk_full(self) -> None:
+        """Clear the disk-full flag.
+
+        Called by DiskMonitor when free space recovers above the threshold.
+        Note: this does NOT auto-resume polling — the SafetyManager has
+        already latched a fault, and the operator must acknowledge_fault
+        explicitly. This is a deliberate guard against disk-space flapping.
+        """
+        if self._disk_full:
+            logger.warning(
+                "Disk space recovered — clearing _disk_full flag. "
+                "SafetyManager fault remains latched until operator acknowledge."
+            )
+            self._disk_full = False
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Bind the writer to an event loop so the executor thread can
+        schedule the persistence-failure callback on it."""
+        self._loop = loop
+
+    def set_persistence_failure_callback(
+        self, callback: Callable[[str], Awaitable[None]]
+    ) -> None:
+        """Register an async callback for persistence failures (disk full etc).
+
+        The callback is awaited via :func:`asyncio.run_coroutine_threadsafe`
+        from the writer thread, so it lands on the engine event loop where
+        SafetyManager.on_persistence_failure can latch a fault.
+        """
+        self._persistence_failure_callback = callback
+
+    def _signal_persistence_failure(self, reason: str) -> None:
+        """Schedule persistence-failure callback on the engine event loop.
+
+        Runs in the writer thread (called from _write_day_batch) — must NOT
+        block. We use run_coroutine_threadsafe and intentionally do NOT await
+        the resulting Future, because the writer thread does not have an
+        event loop of its own.
+        """
+        if self._persistence_failure_callback is None or self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._persistence_failure_callback(reason),
+                self._loop,
+            )
+        except Exception as exc:
+            logger.error("Failed to schedule persistence_failure callback: %s", exc)
 
     def _ensure_connection(self, day: date) -> sqlite3.Connection:
         """Открыть/переоткрыть БД если сменился день."""
@@ -243,12 +315,44 @@ class SQLiteWriter:
             )
         if not rows:
             return
-        conn.executemany(
-            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-            "VALUES (?, ?, ?, ?, ?, ?);",
-            rows,
-        )
-        conn.commit()
+        try:
+            conn.executemany(
+                "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
+                "VALUES (?, ?, ?, ?, ?, ?);",
+                rows,
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Disk-full graceful degradation (Phase 2a H.1).
+            # Detect by exact PHRASES to avoid false positives like
+            # "database disk image is malformed" (SQLITE_CORRUPT) or
+            # "disk I/O error" (SQLITE_IOERR), which are NOT disk-full.
+            # Phrases cover SQLITE_FULL on Linux/macOS/Windows + quota.
+            msg = str(exc).lower()
+            disk_full_phrases = (
+                "database or disk is full",
+                "database is full",
+                "no space left on device",
+                "not enough space on the disk",
+                "disk quota exceeded",
+            )
+            if any(phrase in msg for phrase in disk_full_phrases):
+                if not self._disk_full:
+                    logger.critical(
+                        "DISK FULL detected in SQLite write: %s. "
+                        "Pausing polling, triggering safety fault.",
+                        exc,
+                    )
+                self._disk_full = True
+                self._signal_persistence_failure(f"disk full: {exc}")
+                # Do NOT re-raise. Re-raising would propagate up to
+                # write_immediate / scheduler and cause the historic tight
+                # CRITICAL-log loop. The flag + signalled callback are the
+                # signalling mechanism now.
+                return
+            # Any other OperationalError keeps the existing semantics.
+            raise
+
         # Periodic explicit PASSIVE checkpoint (~once per minute at 1 Hz batch
         # cadence). Prevents WAL file growth under concurrent reader pressure.
         # See DEEP_AUDIT_CC.md D.1.

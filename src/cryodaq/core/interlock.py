@@ -160,9 +160,28 @@ class InterlockEngine:
         self,
         broker: DataBroker,
         actions: dict[str, Callable[[], Any]],
+        *,
+        trip_handler: Callable[["InterlockCondition", "Reading"], Any] | None = None,
     ) -> None:
+        """Initialize.
+
+        Parameters
+        ----------
+        actions:
+            Dict of action_name → zero-arg callable. The callable is called
+            from ``_trip`` after the trip event is logged. Backward-compatible
+            with existing tests.
+        trip_handler:
+            Optional async/sync callback receiving the full ``InterlockCondition``
+            and ``Reading`` context. Called from ``_trip`` ALONGSIDE the
+            actions-dict callable. Used by SafetyManager wiring (Phase 2a
+            Codex I.1) so the action name, condition name, channel, and value
+            survive the trip path instead of being collapsed by zero-arg
+            callbacks.
+        """
         self._broker = broker
         self._actions = actions
+        self._trip_handler = trip_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[Reading] | None = None
@@ -426,6 +445,22 @@ class InterlockEngine:
                 exc,
                 exc_info=True,
             )
+
+        # Phase 2a Codex I.1: notify the optional trip_handler with FULL
+        # context. SafetyManager uses this to differentiate "stop_source"
+        # (soft stop, no fault latch) from "emergency_off" (full latch).
+        # The handler is called even if the actions-dict callable above
+        # raised — both paths run independently.
+        if self._trip_handler is not None:
+            try:
+                result = self._trip_handler(condition, reading)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.critical(
+                    "trip_handler failed for interlock '%s': %s",
+                    condition.name, exc, exc_info=True,
+                )
 
     # ------------------------------------------------------------------
     # Управление состоянием
