@@ -8,8 +8,10 @@ ZMQCommandServer — REP-сокет в engine, принимает JSON-кома�
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -24,6 +26,51 @@ logger = logging.getLogger(__name__)
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
+
+# Phase 2b H.4: bind with EADDRINUSE retry. On Windows the socket from a
+# SIGKILL'd engine can hold the port for up to 240s (TIME_WAIT). Linux is
+# usually fine due to SO_REUSEADDR but the same logic protects both.
+_BIND_MAX_ATTEMPTS = 10
+_BIND_INITIAL_DELAY_S = 0.5
+_BIND_MAX_DELAY_S = 10.0
+
+
+def _bind_with_retry(socket: Any, address: str) -> None:
+    """Bind a ZMQ socket, retrying on EADDRINUSE with exponential backoff.
+
+    Caller MUST set ``zmq.LINGER = 0`` on the socket BEFORE calling this
+    helper, otherwise close() will hold the address even after retry succeeds.
+    """
+    delay = _BIND_INITIAL_DELAY_S
+    for attempt in range(_BIND_MAX_ATTEMPTS):
+        try:
+            socket.bind(address)
+            if attempt > 0:
+                logger.info(
+                    "ZMQ bound to %s after %d retries", address, attempt,
+                )
+            return
+        except zmq.ZMQError as exc:
+            # libzmq maps EADDRINUSE to its own errno value.
+            is_addr_in_use = (
+                exc.errno == zmq.EADDRINUSE
+                or exc.errno == errno.EADDRINUSE
+            )
+            if not is_addr_in_use:
+                raise
+            if attempt == _BIND_MAX_ATTEMPTS - 1:
+                logger.critical(
+                    "ZMQ bind FAILED after %d attempts: %s still in use. "
+                    "Check for stale sockets via lsof/netstat.",
+                    _BIND_MAX_ATTEMPTS, address,
+                )
+                raise
+            logger.warning(
+                "ZMQ bind EADDRINUSE on %s, retry in %.1fs (attempt %d/%d)",
+                address, delay, attempt + 1, _BIND_MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, _BIND_MAX_DELAY_S)
 
 
 def _pack_reading(reading: Reading) -> bytes:
@@ -92,7 +139,11 @@ class ZMQPublisher:
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.PUB)
-        self._socket.bind(self._address)
+        # Phase 2b H.4: LINGER=0 so the socket doesn't hold the port open
+        # after close — relevant on Windows where TIME_WAIT can keep
+        # 5555 occupied for 240s after a SIGKILL'd engine.
+        self._socket.setsockopt(zmq.LINGER, 0)
+        _bind_with_retry(self._socket, self._address)
         self._running = True
         self._task = asyncio.create_task(self._publish_loop(queue), name="zmq_publisher")
         logger.info("ZMQPublisher запущен: %s", self._address)
@@ -293,7 +344,9 @@ class ZMQCommandServer:
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.REP)
-        self._socket.bind(self._address)
+        # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
+        self._socket.setsockopt(zmq.LINGER, 0)
+        _bind_with_retry(self._socket, self._address)
         self._running = True
         self._task = asyncio.create_task(self._serve_loop(), name="zmq_cmd_server")
         logger.info("ZMQCommandServer запущен: %s", self._address)

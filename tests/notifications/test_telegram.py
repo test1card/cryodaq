@@ -147,11 +147,13 @@ def test_from_config(tmp_path: Path) -> None:
 
     notifier = TelegramNotifier.from_config(config_path)
 
-    assert notifier._bot_token == "987654:SECRET_TOKEN"
+    # Phase 2b K.1: token is wrapped in SecretStr; compare via get_secret_value.
+    assert notifier._bot_token.get_secret_value() == "987654:SECRET_TOKEN"
     assert notifier._chat_id == -9998887776665
     assert notifier._send_cleared is False
     assert abs(notifier._timeout_s - 15.0) < 1e-9
-    assert "987654:SECRET_TOKEN" in notifier._api_url
+    # _api_url is no longer a stored attribute; the URL is built on demand.
+    assert "987654:SECRET_TOKEN" in notifier._build_api_url("sendMessage")
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +214,10 @@ def _make_bot(**kwargs):
     alarm_engine.get_active_alarms.return_value = {}
     alarm_engine.get_state.return_value = {}
     alarm_engine.get_events.return_value = []
+    # Phase 2b Codex K.1: TelegramCommandBot now refuses empty allowlist
+    # when commands are enabled. Pass a default test chat id unless the
+    # caller overrides it.
+    kwargs.setdefault("allowed_chat_ids", [1234])
     bot = TelegramCommandBot(
         broker, alarm_engine,
         bot_token="fake:TOKEN",

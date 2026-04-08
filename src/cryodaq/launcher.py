@@ -123,6 +123,20 @@ class LauncherWindow(QMainWindow):
         self._lock_fd = lock_fd
         self._engine_proc: subprocess.Popen | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
+        # Phase 2b H.3: exponential backoff for engine restart attempts.
+        # Without this, a corrupted YAML or persistent EADDRINUSE produces
+        # a tight 3s restart loop. Reset after a 5-min healthy run.
+        self._restart_attempts: int = 0
+        self._last_restart_time: float = 0.0
+        self._max_restart_attempts: int = 5
+        self._restart_backoff_s: list[int] = [3, 10, 30, 60, 120]
+        self._restart_giving_up: bool = False  # latched after max attempts
+        self._config_error_modal_shown: bool = False
+        # Guards against multiple QTimer.singleShot restarts piling up while
+        # _check_engine_health keeps firing every 3s during the backoff
+        # window. Set when we schedule a restart, cleared when _start_engine
+        # actually runs. (Codex Phase 2b Block A P1.)
+        self._restart_pending: bool = False
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
@@ -557,6 +571,103 @@ class LauncherWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     @Slot()
+    def _handle_engine_exit(self) -> None:
+        """Inspect exit code and decide whether to restart with backoff.
+
+        Phase 2b H.3:
+        - Exit code 2 (ENGINE_CONFIG_ERROR_EXIT_CODE) → block, modal, no restart
+        - Other crash → exponential backoff up to _max_restart_attempts
+        - Once max reached → block, modal, no further attempts
+
+        Idempotent — guarded by _restart_pending so the 3s health timer can't
+        burn through every backoff slot in 15 seconds (Codex Phase 2b P1).
+        """
+        if self._restart_pending:
+            return
+
+        from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
+
+        returncode: int | None = None
+        if self._engine_proc is not None:
+            returncode = self._engine_proc.poll()
+
+        if returncode == ENGINE_CONFIG_ERROR_EXIT_CODE:
+            logger.critical(
+                "Engine exited with CONFIG ERROR (code %d). NOT auto-restarting.",
+                returncode,
+            )
+            self._restart_giving_up = True
+            self._engine_proc = None
+            if not self._config_error_modal_shown:
+                self._config_error_modal_shown = True
+                self._show_config_error_modal()
+            return
+
+        if self._restart_attempts >= self._max_restart_attempts:
+            logger.critical(
+                "Engine crashed %d times in succession (last code=%s). "
+                "Surrendering auto-restart.",
+                self._restart_attempts, returncode,
+            )
+            self._restart_giving_up = True
+            self._engine_proc = None
+            self._show_crash_loop_modal()
+            return
+
+        backoff_idx = min(self._restart_attempts, len(self._restart_backoff_s) - 1)
+        delay_s = self._restart_backoff_s[backoff_idx]
+        logger.warning(
+            "Engine crashed (code=%s). Restart attempt %d/%d in %ds.",
+            returncode, self._restart_attempts + 1, self._max_restart_attempts, delay_s,
+        )
+        self._restart_attempts += 1
+        self._last_restart_time = time.monotonic()
+        self._engine_proc = None
+
+        if not self._tray_only:
+            self._engine_label.setText(
+                f"Engine: рестарт через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})"
+            )
+        if self._tray.isVisible():
+            self._tray.showMessage(
+                "CryoDAQ",
+                f"Engine перезапуск через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})",
+                QSystemTrayIcon.MessageIcon.Warning,
+                3000,
+            )
+
+        self._restart_pending = True
+
+        def _do_restart() -> None:
+            self._restart_pending = False
+            self._start_engine(wait=False)
+
+        QTimer.singleShot(delay_s * 1000, _do_restart)
+
+    def _show_config_error_modal(self) -> None:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle("Ошибка конфигурации")
+        msg.setText(
+            "Engine не смог запуститься из-за ошибки в конфигурационном файле.\n\n"
+            "Проверьте config/*.yaml. Подробности в logs/engine.log.\n\n"
+            "Автоматический перезапуск отключён."
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
+    def _show_crash_loop_modal(self) -> None:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle("Engine постоянно падает")
+        msg.setText(
+            f"Engine упал {self._max_restart_attempts} раз подряд. "
+            "Автоматический перезапуск прекращён.\n\n"
+            "Проверьте logs/engine.log и перезапустите launcher вручную."
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
     def _check_engine_health(self) -> None:
         """Проверить состояние engine, перезапустить при падении."""
         alive = self._is_engine_alive()
@@ -565,23 +676,23 @@ class LauncherWindow(QMainWindow):
             if not self._tray_only:
                 self._engine_indicator.setStyleSheet("color: #2ECC40;")
                 self._engine_label.setText("Engine: работает")
+            # Reset the backoff counter after a healthy run window.
+            if (
+                self._restart_attempts > 0
+                and time.monotonic() - self._last_restart_time > 300.0
+            ):
+                logger.info(
+                    "Engine healthy for >5min, resetting restart counter (was %d)",
+                    self._restart_attempts,
+                )
+                self._restart_attempts = 0
         else:
             if not self._tray_only:
                 self._engine_indicator.setStyleSheet("color: #FF4136;")
                 self._engine_label.setText("Engine: остановлен")
 
-            if not self._engine_external:
-                logger.warning("Engine упал, автоматический перезапуск...")
-                if not self._tray_only:
-                    self._engine_label.setText("Engine: перезапуск...")
-                self._start_engine(wait=False)
-                if self._tray.isVisible():
-                    self._tray.showMessage(
-                        "CryoDAQ",
-                        "Engine перезапущен автоматически",
-                        QSystemTrayIcon.MessageIcon.Warning,
-                        3000,
-                    )
+            if not self._engine_external and not self._restart_giving_up:
+                self._handle_engine_exit()
 
         # Poll safety state — non-blocking via worker thread
         if alive and self._bridge.is_alive():
@@ -683,11 +794,8 @@ def main() -> None:
     )
     args, remaining = parser.parse_known_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    from cryodaq.logging_setup import setup_logging
+    setup_logging("launcher")
 
     mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
 

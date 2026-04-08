@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -42,6 +44,11 @@ class GPIBTransport:
     """
 
     _resource_managers: dict[str, Any] = {}
+    # Phase 2b F.1: serialise concurrent ResourceManager creation across
+    # threads. Without this, two driver-connect tasks racing on the same
+    # bus prefix can both pass the ``not in`` check and call pyvisa.
+    # ResourceManager() twice, leaking the first handle until process exit.
+    _rm_lock: threading.Lock = threading.Lock()
 
     def __init__(self, *, mock: bool = False) -> None:
         self.mock = mock
@@ -49,6 +56,11 @@ class GPIBTransport:
         self._bus_prefix: str = ""
         self._resource: Any = None
         self._timeout_ms: int = _DEFAULT_TIMEOUT_MS
+        # Phase 2b F.2: dedicated single-worker executor per transport so
+        # PyVISA blocking I/O does NOT contend with analytics/matplotlib/
+        # SQLite reads on the default asyncio executor. A hung PyVISA call
+        # only blocks its own transport, not the entire engine.
+        self._executor: ThreadPoolExecutor | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -56,22 +68,44 @@ class GPIBTransport:
 
     @classmethod
     def close_all_managers(cls) -> None:
-        """Close all cached ResourceManagers. Call at engine shutdown."""
-        for bus, rm in cls._resource_managers.items():
-            try:
-                rm.close()
-                log.info("GPIB: ResourceManager for %s closed", bus)
-            except Exception as exc:
-                log.warning("GPIB: error closing RM for %s — %s", bus, exc)
-        cls._resource_managers.clear()
+        """Close all cached ResourceManagers.
+
+        Called at engine shutdown AND from the scheduler's Level-3 recovery
+        path. Held under ``_rm_lock`` so concurrent ``_get_rm()`` calls on
+        healthy buses do not race with the close-and-clear (Codex Phase 2b
+        Block B P1).
+        """
+        with cls._rm_lock:
+            for bus, rm in cls._resource_managers.items():
+                try:
+                    rm.close()
+                    log.info("GPIB: ResourceManager for %s closed", bus)
+                except Exception as exc:
+                    log.warning("GPIB: error closing RM for %s — %s", bus, exc)
+            cls._resource_managers.clear()
 
     @classmethod
     def _get_rm(cls, bus_prefix: str) -> Any:
-        """Get or create a shared ResourceManager for a bus prefix."""
-        if bus_prefix not in cls._resource_managers:
-            import pyvisa
-            cls._resource_managers[bus_prefix] = pyvisa.ResourceManager()
-        return cls._resource_managers[bus_prefix]
+        """Get or create a shared ResourceManager for a bus prefix.
+
+        Thread-safe (Phase 2b F.1) — under the class-level ``_rm_lock``
+        so concurrent connects on the same bus do not race on the dict.
+        """
+        with cls._rm_lock:
+            if bus_prefix not in cls._resource_managers:
+                import pyvisa
+                cls._resource_managers[bus_prefix] = pyvisa.ResourceManager()
+            return cls._resource_managers[bus_prefix]
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the per-transport executor on first use."""
+        if self._executor is None:
+            label = self._resource_str or self._bus_prefix or "gpib"
+            self._executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"visa_gpib_{label}",
+            )
+        return self._executor
 
     async def open(self, resource_str: str, *, timeout_ms: int = _DEFAULT_TIMEOUT_MS) -> None:
         """Open VISA resource, configure termination, VISA Clear once.
@@ -92,7 +126,7 @@ class GPIBTransport:
             return
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._blocking_connect)
+        await loop.run_in_executor(self._get_executor(), self._blocking_connect)
         log.info("GPIB: %s opened (persistent session)", resource_str)
 
     async def close(self) -> None:
@@ -104,11 +138,16 @@ class GPIBTransport:
         if self._resource is not None:
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, self._resource.close)
+                await loop.run_in_executor(self._get_executor(), self._resource.close)
             except Exception as exc:
                 log.warning("GPIB: error closing %s — %s", self._resource_str, exc)
             self._resource = None
             log.info("GPIB: %s closed", self._resource_str)
+        # Shut down the dedicated executor so threads don't accumulate
+        # across reconnect cycles.
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
 
     async def write(self, cmd: str) -> None:
         """Write command to persistent resource.
@@ -123,7 +162,7 @@ class GPIBTransport:
             return
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._resource.write, cmd)
+        await loop.run_in_executor(self._get_executor(), self._resource.write, cmd)
         log.debug("GPIB write → %s: %s", self._resource_str, cmd)
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
@@ -149,7 +188,7 @@ class GPIBTransport:
 
         loop = asyncio.get_running_loop()
         response: str = await loop.run_in_executor(
-            None, self._blocking_query, cmd, timeout_ms
+            self._get_executor(), self._blocking_query, cmd, timeout_ms
         )
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
@@ -168,7 +207,7 @@ class GPIBTransport:
         if self.mock or self._resource is None:
             return False
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._blocking_clear)
+        return await loop.run_in_executor(self._get_executor(), self._blocking_clear)
 
     async def send_ifc(self) -> bool:
         """Send IFC — Interface Clear (Level 2 recovery).
@@ -184,7 +223,7 @@ class GPIBTransport:
         if self.mock:
             return True
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._blocking_ifc)
+        return await loop.run_in_executor(self._get_executor(), self._blocking_ifc)
 
     # ------------------------------------------------------------------
     # Blocking methods (run in executor)

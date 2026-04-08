@@ -8,7 +8,11 @@ telegram:
   chat_id: 0                                     # ← ID чата (число)
   send_cleared: true
   timeout_s: 10
-  allowed_chat_ids: []                            # ← [12345, 67890] или пусто = все
+  # SECURITY (Phase 2b Codex K.1): if commands.enabled is true, this list
+  # MUST contain at least one chat ID. Empty list + commands enabled is
+  # treated as a config error and the bot refuses to start (default-deny).
+  # Get your chat ID via @userinfobot on Telegram.
+  allowed_chat_ids: []                            # ← [12345, 67890]
 
 periodic_report:
   enabled: true
@@ -16,8 +20,10 @@ periodic_report:
   chart_hours: 2.0
   include_channels: null
 
+# SECURITY: keep commands.enabled: false until allowed_chat_ids above
+# is populated with at least one trusted chat ID.
 commands:
-  enabled: true
+  enabled: false
   poll_interval_s: 2.0
 
 # Цепочка эскалации при критических событиях (missed shift, emergency off)

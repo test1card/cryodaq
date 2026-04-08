@@ -22,6 +22,8 @@ from typing import Any
 import aiohttp
 import yaml
 
+from cryodaq.notifications._secrets import SecretStr
+
 logger = logging.getLogger(__name__)
 
 # Эмодзи по уровню критичности
@@ -61,18 +63,25 @@ class TelegramNotifier:
 
     def __init__(
         self,
-        bot_token: str,
+        bot_token: str | SecretStr,
         chat_id: int | str,
         *,
         send_cleared: bool = True,
         timeout_s: float = 10.0,
     ) -> None:
-        self._bot_token = bot_token
+        # Phase 2b K.1: store the token in a SecretStr wrapper so accidental
+        # repr/str/f-string never leaks it. The API URL is computed on demand.
+        self._bot_token = (
+            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
+        )
         self._chat_id = chat_id
         self._send_cleared = send_cleared
         self._timeout_s = timeout_s
-        self._api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self._session: aiohttp.ClientSession | None = None
+
+    def _build_api_url(self, method: str = "sendMessage") -> str:
+        """Compute the Telegram API URL on demand. Never store as attribute."""
+        return f"https://api.telegram.org/bot{self._bot_token.get_secret_value()}/{method}"
 
     @classmethod
     def from_config(cls, config_path: Path) -> TelegramNotifier:
@@ -193,7 +202,7 @@ class TelegramNotifier:
         }
         try:
             session = await self._get_session()
-            async with session.post(self._api_url, json=payload) as resp:
+            async with session.post(self._build_api_url("sendMessage"), json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
@@ -215,7 +224,7 @@ class TelegramNotifier:
 
         try:
             session = await self._get_session()
-            async with session.post(self._api_url, json=payload) as resp:
+            async with session.post(self._build_api_url("sendMessage"), json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error(

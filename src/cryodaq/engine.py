@@ -44,6 +44,7 @@ from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
+    load_critical_channels_from_alarms_v3,
     HousekeepingService,
     load_housekeeping_config,
     load_protected_channel_patterns,
@@ -813,9 +814,21 @@ async def _run_engine(*, mock: bool = False) -> None:
     safety_manager.load_config(safety_cfg)
 
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
+    # Phase 2b Codex H.1: merge legacy alarms.yaml/interlocks.yaml protection
+    # patterns with the modern alarms_v3.yaml critical channels. Without this
+    # the throttle thins critical channels even though alarms_v3 marks them
+    # CRITICAL.
+    legacy_patterns = load_protected_channel_patterns(alarms_cfg, interlocks_cfg)
+    alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
+    v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
+    merged_patterns = list({*legacy_patterns, *v3_patterns})
+    logger.info(
+        "Adaptive-throttle protection: %d legacy + %d v3 = %d unique patterns",
+        len(legacy_patterns), len(v3_patterns), len(merged_patterns),
+    )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
-        protected_patterns=load_protected_channel_patterns(alarms_cfg, interlocks_cfg),
+        protected_patterns=merged_patterns,
     )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
@@ -1337,16 +1350,32 @@ async def _run_engine(*, mock: bool = False) -> None:
 
             # TelegramCommandBot
             cmd_cfg = notif_raw.get("commands", {})
-            if cmd_cfg.get("enabled", False) and token_valid:
-                allowed = tg_cfg.get("allowed_chat_ids") or []
-                telegram_bot = TelegramCommandBot(
-                    broker, alarm_engine,
-                    bot_token=bot_token,
-                    allowed_chat_ids=[int(x) for x in allowed] if allowed else None,
-                    poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
-                    command_handler=_handle_gui_command,
-                )
-                logger.info("TelegramCommandBot создан")
+            commands_enabled = bool(cmd_cfg.get("enabled", False)) and token_valid
+            if commands_enabled:
+                allowed_raw = tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
+                allowed_ids = [int(x) for x in allowed_raw]
+                # Phase 2b Codex K.1 — TelegramCommandBot raises on empty list,
+                # so refuse to enable cleanly here with a config-error log
+                # rather than letting the constructor surface an exception
+                # mid-startup.
+                if not allowed_ids:
+                    logger.error(
+                        "Telegram commands are enabled but allowed_chat_ids "
+                        "is empty. Refusing to start TelegramCommandBot. "
+                        "Add at least one chat ID or set commands.enabled: false."
+                    )
+                else:
+                    telegram_bot = TelegramCommandBot(
+                        broker, alarm_engine,
+                        bot_token=bot_token,
+                        allowed_chat_ids=allowed_ids,
+                        poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
+                        command_handler=_handle_gui_command,
+                    )
+                    logger.info(
+                        "TelegramCommandBot создан (allowed=%d chat ids)",
+                        len(allowed_ids),
+                    )
 
             # EscalationService
             if token_valid and notif_raw.get("escalation"):
@@ -1663,20 +1692,24 @@ def _release_engine_lock(fd: int) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+#: Exit code for unrecoverable startup config errors (Phase 2b H.3).
+#: Launcher detects this and refuses to auto-restart.
+ENGINE_CONFIG_ERROR_EXIT_CODE = 2
+
+
 def main() -> None:
     """Точка входа cryodaq-engine."""
     import argparse
+    import traceback
+
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
     parser.add_argument("--force", action="store_true",
                         help="Kill existing engine and take over")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    from cryodaq.logging_setup import setup_logging
+    setup_logging("engine")
 
     if args.force:
         _force_kill_existing()
@@ -1691,6 +1724,23 @@ def main() -> None:
             asyncio.run(_run_engine(mock=mock))
         except KeyboardInterrupt:
             logger.info("Прервано оператором (Ctrl+C)")
+        except yaml.YAMLError as exc:
+            # Phase 2b H.3: a YAML parse error during startup is
+            # unrecoverable by retry — exit with a distinct code so the
+            # launcher refuses to spin in a tight restart loop.
+            logger.critical(
+                "CONFIG ERROR (YAML parse): %s\n%s",
+                exc, traceback.format_exc(),
+            )
+            sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
+        except FileNotFoundError as exc:
+            # Missing required config file at startup is also a config
+            # error: same exit code.
+            logger.critical(
+                "CONFIG ERROR (file not found): %s\n%s",
+                exc, traceback.format_exc(),
+            )
+            sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:
         _release_engine_lock(lock_fd)
 

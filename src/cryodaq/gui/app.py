@@ -30,11 +30,8 @@ def main() -> None:
     # Do not add it here — too late for Windows spawn bootloader because
     # PySide6 is already imported at module load time above.
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    from cryodaq.logging_setup import setup_logging
+    setup_logging("gui")
 
     app = QApplication(sys.argv)
     app.setApplicationName("CryoDAQ")

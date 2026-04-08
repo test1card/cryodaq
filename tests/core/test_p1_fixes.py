@@ -331,7 +331,8 @@ async def test_telegram_notifier_stores_config():
         timeout_s=5.0,
     )
 
-    assert notifier._bot_token == "abc:TEST"
+    # Phase 2b K.1: token is wrapped in SecretStr.
+    assert notifier._bot_token.get_secret_value() == "abc:TEST"
     assert notifier._chat_id == 12345
     assert notifier._send_cleared is False
     assert notifier._timeout_s == pytest.approx(5.0)

@@ -17,6 +17,7 @@ import aiohttp
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
+from cryodaq.notifications._secrets import SecretStr
 
 logger = logging.getLogger(__name__)
 
@@ -47,38 +48,67 @@ class TelegramCommandBot:
     ----------
     broker:       DataBroker для подписки на данные.
     alarm_engine: AlarmEngine для запроса состояния тревог.
-    bot_token:    Токен Telegram-бота.
-    allowed_chat_ids: Список разрешённых chat_id. Пустой = все разрешены.
+    bot_token:    Токен Telegram-бота (str или SecretStr).
+    allowed_chat_ids: Список разрешённых chat_id. Phase 2b Codex K.1:
+        пустой список + commands_enabled=True → ValueError при создании
+        (default-deny — пустой ALLOW_ALL для safety-sensitive команд
+        /phase / /log недопустим).
+    commands_enabled: Если False, конструктор не валидирует allowed_chat_ids
+        и бот стартует только для чтения (без обработки команд).
     poll_interval_s: Интервал опроса getUpdates.
     """
 
     def __init__(
         self,
-        broker: DataBroker,
-        alarm_engine: AlarmEngine,
+        broker: DataBroker | None = None,
+        alarm_engine: AlarmEngine | None = None,
         *,
-        bot_token: str,
+        bot_token: str | SecretStr,
         allowed_chat_ids: list[int] | None = None,
         poll_interval_s: float = 2.0,
         command_handler: Callable[[dict], Awaitable[dict]] | None = None,
+        commands_enabled: bool = True,
     ) -> None:
+        # Phase 2b Codex K.1: default-deny — empty allowlist with commands
+        # enabled would let any chat issue /phase and /log (safety-sensitive
+        # control surface). Refuse to construct in that state.
+        if commands_enabled and not (allowed_chat_ids or []):
+            raise ValueError(
+                "Telegram commands are enabled but allowed_chat_ids is empty. "
+                "This would allow ANY chat to issue /phase and /log commands. "
+                "Add at least one chat ID to config/notifications.local.yaml, "
+                "or set commands.enabled: false."
+            )
+
         self._broker = broker
         self._alarm_engine = alarm_engine
-        self._bot_token = bot_token
+        # Phase 2b K.1: SecretStr wrapper.
+        self._bot_token = (
+            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
+        )
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
         self._poll_interval_s = poll_interval_s
         self._command_handler = command_handler
-        self._api = f"https://api.telegram.org/bot{bot_token}"
+        self._commands_enabled = commands_enabled
 
-        # Текущие значения каналов
+        # Runtime state — restored from the original constructor (the Phase 2b
+        # rewrite of __init__ accidentally dropped these initializers).
         self._latest: dict[str, Reading] = {}
         self._start_time = datetime.now(timezone.utc)
         self._last_update_id = 0
-
         self._collect_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Reading] | None = None
         self._session: aiohttp.ClientSession | None = None
+
+    @property
+    def _api(self) -> str:
+        """Compute the Telegram API base URL on demand (no stored plain string)."""
+        return f"https://api.telegram.org/bot{self._bot_token.get_secret_value()}"
+
+    def _is_chat_allowed(self, chat_id: int) -> bool:
+        """Default-deny chat permission check (Phase 2b Codex K.1)."""
+        return chat_id in self._allowed_ids
 
     async def start(self) -> None:
         self._queue = await self._broker.subscribe(_SUBSCRIBE_NAME, maxsize=5000)
@@ -194,18 +224,29 @@ class TelegramCommandBot:
             if not chat_id or not text.startswith("/"):
                 continue
 
-            # Security check
-            if self._allowed_ids and chat_id not in self._allowed_ids:
+            # Security check (Phase 2b Codex K.1: default-deny on empty list).
+            if not self._is_chat_allowed(chat_id):
                 logger.warning("Отклонён запрос от chat_id=%s", chat_id)
                 continue
 
             await self._handle_message(msg)
 
     async def _handle_message(self, msg: dict) -> None:
-        """Обработать входящее сообщение с полным контекстом (текст + from + chat)."""
+        """Обработать входящее сообщение с полным контекстом (текст + from + chat).
+
+        Defense-in-depth (Phase 2b Codex K.1): re-checks ``_is_chat_allowed``
+        even though ``_fetch_updates`` already filters. Direct callers
+        (tests, future code paths) must NOT bypass the allowlist.
+        """
         text = msg.get("text", "").strip()
         chat_id = msg.get("chat", {}).get("id")
         if not chat_id or not text.startswith("/"):
+            return
+
+        if not self._is_chat_allowed(chat_id):
+            logger.warning(
+                "Отклонён прямой вызов _handle_message от chat_id=%s", chat_id,
+            )
             return
 
         command = text.split()[0].split("@")[0].lower()

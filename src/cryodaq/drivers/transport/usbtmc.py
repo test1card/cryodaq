@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -35,8 +36,20 @@ class USBTMCTransport:
         self._rm: Any = None
         self._resource_str: str = ""
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Phase 2b F.2: dedicated single-worker executor — see GPIBTransport.
+        self._executor: ThreadPoolExecutor | None = None
         # Внутренний счётчик для mock: имитация буфера измерений
         self._mock_buf_index: int = 0
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the per-transport executor on first use."""
+        if self._executor is None:
+            label = self._resource_str or "usbtmc"
+            self._executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"visa_usbtmc_{label}",
+            )
+        return self._executor
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -60,7 +73,7 @@ class USBTMCTransport:
 
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, self._blocking_open, resource_str)
+                await loop.run_in_executor(self._get_executor(), self._blocking_open, resource_str)
                 log.info("USBTMC: ресурс %s успешно открыт", resource_str)
             except Exception as exc:
                 log.error("USBTMC: ошибка открытия ресурса %s — %s", resource_str, exc)
@@ -78,7 +91,7 @@ class USBTMCTransport:
 
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, self._blocking_close)
+                await loop.run_in_executor(self._get_executor(), self._blocking_close)
                 log.info("USBTMC: ресурс %s закрыт", self._resource_str)
             except Exception as exc:
                 log.warning(
@@ -88,6 +101,11 @@ class USBTMCTransport:
                 )
             finally:
                 self._resource = None
+                # Shut down the dedicated executor so threads do not
+                # accumulate across reconnects.
+                if self._executor is not None:
+                    self._executor.shutdown(wait=True)
+                    self._executor = None
 
     async def write(self, cmd: str) -> None:
         """Отправить TSP-команду прибору без ожидания ответа.
@@ -105,7 +123,7 @@ class USBTMCTransport:
         async with self._lock:
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, self._resource.write, cmd)
+                await loop.run_in_executor(self._get_executor(), self._resource.write, cmd)
                 log.debug("USBTMC write → %s: %s", self._resource_str, cmd)
             except Exception as exc:
                 log.error(
@@ -134,7 +152,7 @@ class USBTMCTransport:
         async with self._lock:
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, self._resource.write_raw, data)
+                await loop.run_in_executor(self._get_executor(), self._resource.write_raw, data)
                 log.debug(
                     "USBTMC write_raw → %s: %d байт",
                     self._resource_str,
@@ -173,7 +191,7 @@ class USBTMCTransport:
             loop = asyncio.get_running_loop()
             try:
                 response: str = await loop.run_in_executor(
-                    None, self._blocking_query, cmd, timeout_ms
+                    self._get_executor(), self._blocking_query, cmd, timeout_ms
                 )
                 log.debug("USBTMC query '%s' → '%s'", cmd, response)
                 return response

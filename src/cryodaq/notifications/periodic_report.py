@@ -71,24 +71,26 @@ class PeriodicReporter:
         broker: DataBroker,
         alarm_engine: AlarmEngine,
         *,
-        bot_token: str,
+        bot_token,
         chat_id: int | str,
         report_interval_s: float = 1800.0,
         chart_hours: float = 2.0,
         include_channels: list[str] | None = None,
         timeout_s: float = 30.0,
     ) -> None:
+        from cryodaq.notifications._secrets import SecretStr
+
         self._broker = broker
         self._alarm_engine = alarm_engine
-        self._bot_token = bot_token
+        # Phase 2b K.1: SecretStr wrapper.
+        self._bot_token = (
+            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
+        )
         self._chat_id = chat_id
         self._report_interval_s = report_interval_s
         self._chart_hours = chart_hours
         self._include_channels = set(include_channels) if include_channels else None
         self._timeout_s = timeout_s
-
-        # URL для sendPhoto
-        self._api_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
 
         # Кольцевые буферы: канал → deque[(timestamp_unix, value)]
         # Размер — на chart_hours при интервале опроса ~0.5 с, плюс запас
@@ -480,7 +482,8 @@ class PeriodicReporter:
             form.add_field("caption", caption[:1024])  # Telegram лимит 1024 символа
             form.add_field("parse_mode", "HTML")
 
-            async with session.post(self._api_url, data=form) as resp:
+            api_url = f"https://api.telegram.org/bot{self._bot_token.get_secret_value()}/sendPhoto"
+            async with session.post(api_url, data=form) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error(

@@ -40,6 +40,171 @@ def load_protected_channel_patterns(*config_paths: Path) -> list[str]:
     return patterns
 
 
+# --------------------------------------------------------------------------
+# Phase 2b Codex H.1: alarms_v3.yaml integration
+# --------------------------------------------------------------------------
+#
+# The legacy ``load_protected_channel_patterns`` only knows the old top-level
+# ``alarms`` / ``interlocks`` schema (with explicit ``channel_pattern`` fields).
+# Production now uses ``alarms_v3.yaml`` with a richer schema:
+#
+#     channel_groups:
+#       calibrated: [Т11, Т12]
+#     global_alarms:
+#       <name>:
+#         alarm_type: threshold|composite|stale|rate
+#         channel: P1                      # OR
+#         channels: [Т11, Т12]             # OR
+#         conditions: [{channel/channels/channel_group: ...}, ...]   # composite
+#         level: CRITICAL|WARNING|...
+#     phase_alarms: { same shape }
+#     interlocks:
+#       <name>:
+#         channel|channels|channel_group: ...
+#         action: emergency_off|stop_source
+#
+# Without reading this file, the throttle silently thins critical channels
+# even though the operator has marked them in alarms_v3.yaml.
+#
+# This loader is intentionally tolerant: missing file → empty set, parse
+# errors → empty set + ERROR log, unknown fields ignored.
+
+_CRITICAL_LEVELS = frozenset({"critical", "high"})
+
+
+def _extract_channel_refs(node: Any) -> list[str]:
+    """Recursively pull every channel/channels/channel_group string from a node.
+
+    Walks any nested dicts and lists. This catches:
+
+    - top-level ``channel`` / ``channels`` / ``channel_group``
+    - composite ``conditions: [{channel/channels/channel_group: ...}, ...]``
+    - rate ``additional_condition: {channel: ..., ...}`` (Phase 2b Codex P2)
+    - any future nested form added to alarms_v3 schema
+    """
+    refs: list[str] = []
+    if isinstance(node, dict):
+        ch = node.get("channel")
+        if isinstance(ch, str) and ch.strip():
+            refs.append(ch.strip())
+
+        chs = node.get("channels")
+        if isinstance(chs, list):
+            for c in chs:
+                if isinstance(c, str) and c.strip():
+                    refs.append(c.strip())
+
+        group = node.get("channel_group")
+        if isinstance(group, str) and group.strip():
+            refs.append("__group__:" + group.strip())
+
+        # Walk every nested dict / list value to catch additional_condition,
+        # conditions, and any future container fields. We've already pulled
+        # the leaf channel/channels/channel_group above; the recursive walk
+        # only re-enters containers, so leaf strings are not double-counted
+        # (the recursion handles dicts/lists, not bare strings).
+        for key, value in node.items():
+            if key in ("channel", "channels", "channel_group"):
+                continue
+            if isinstance(value, (dict, list)):
+                refs.extend(_extract_channel_refs(value))
+
+    elif isinstance(node, list):
+        for item in node:
+            refs.extend(_extract_channel_refs(item))
+
+    return refs
+
+
+def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
+    """Extract channel patterns of critical alarms + all interlocks from alarms_v3.yaml.
+
+    Returns a set of regex pattern strings (each one re.escape'd so it
+    matches the short ID as a substring of the full reading channel name).
+    Empty set on missing file / parse error.
+    """
+    if not config_path.exists():
+        return set()
+
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        logger.error(
+            "Failed to load alarms_v3 for throttle protection: %s", exc
+        )
+        return set()
+
+    if not isinstance(data, dict):
+        return set()
+
+    # Build the channel_group → [channels] map first.
+    raw_groups = data.get("channel_groups") or {}
+    groups: dict[str, list[str]] = {}
+    if isinstance(raw_groups, dict):
+        for name, channels in raw_groups.items():
+            if isinstance(channels, list):
+                groups[str(name)] = [str(c) for c in channels if isinstance(c, str)]
+
+    refs: list[str] = []
+
+    # Critical/high alarms in global_alarms (flat: alarm_id → alarm)
+    global_alarms = data.get("global_alarms") or {}
+    if isinstance(global_alarms, dict):
+        for _alarm_name, alarm in global_alarms.items():
+            if not isinstance(alarm, dict):
+                continue
+            level = str(alarm.get("level", "")).strip().lower()
+            if level not in _CRITICAL_LEVELS:
+                continue
+            refs.extend(_extract_channel_refs(alarm))
+
+    # Critical/high alarms in phase_alarms (nested: phase → alarm_id → alarm).
+    # Codex Phase 2b Block D P1: previous code treated phase_alarms as flat
+    # and silently skipped every entry.
+    phase_alarms = data.get("phase_alarms") or {}
+    if isinstance(phase_alarms, dict):
+        for _phase_name, phase_section in phase_alarms.items():
+            if not isinstance(phase_section, dict):
+                continue
+            for _alarm_name, alarm in phase_section.items():
+                if not isinstance(alarm, dict):
+                    continue
+                level = str(alarm.get("level", "")).strip().lower()
+                if level not in _CRITICAL_LEVELS:
+                    continue
+                refs.extend(_extract_channel_refs(alarm))
+
+    # ALL interlocks — every interlock is by definition worth protecting,
+    # regardless of action (emergency_off / stop_source).
+    interlocks = data.get("interlocks") or {}
+    if isinstance(interlocks, dict):
+        for _name, interlock in interlocks.items():
+            if isinstance(interlock, dict):
+                refs.extend(_extract_channel_refs(interlock))
+
+    # Resolve channel_group references and re.escape short IDs so they
+    # match as substrings of the full reading channel name.
+    patterns: set[str] = set()
+    for ref in refs:
+        if ref.startswith("__group__:"):
+            group_name = ref.removeprefix("__group__:")
+            channels = groups.get(group_name)
+            if not channels:
+                logger.warning(
+                    "alarms_v3 references unknown channel_group %r — "
+                    "no channels protected for this reference",
+                    group_name,
+                )
+                continue
+            for ch in channels:
+                patterns.add(re.escape(ch))
+        else:
+            patterns.add(re.escape(ref))
+
+    return patterns
+
+
 @dataclass
 class _ThrottleState:
     last_seen_value: float
