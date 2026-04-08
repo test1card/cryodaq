@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import time as _time
@@ -53,24 +54,52 @@ class LakeShore218S(InstrumentDriver):
         await self._transport.open(self._resource_str)
 
         if not self.mock:
-            try:
-                idn = await self._transport.query("*IDN?")
-                self._instrument_id = idn.strip()
-                if "218" not in self._instrument_id.upper():
-                    await self._transport.close()
-                    raise RuntimeError(
-                        f"{self.name}: unexpected IDN: {self._instrument_id!r} "
-                        f"(expected LakeShore 218)"
+            # Phase 2c Codex F.1: validate IDN with retry-after-clear fallback.
+            # The previous fallback (log a warning and proceed) allowed silent
+            # mis-routing to a wrong GPIB address — KRDG? would still produce
+            # numbers, just from the wrong instrument.
+            idn_valid = False
+            idn_raw = ""
+
+            for attempt in range(2):  # initial + one retry after device clear
+                try:
+                    idn_raw = (await self._transport.query("*IDN?")).strip()
+                except Exception as exc:
+                    log.warning(
+                        "%s: *IDN? query failed (attempt %d/2): %s",
+                        self.name, attempt + 1, exc,
                     )
-                log.info("%s: IDN = %s", self.name, self._instrument_id)
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                # Some 218 units may not respond to *IDN? cleanly on first try.
-                # Log warning but don't fail — KRDG? will validate later.
-                log.warning(
-                    "%s: *IDN? query failed (%s) — proceeding without validation",
-                    self.name, exc,
+                    idn_raw = ""
+
+                upper = idn_raw.upper()
+                if idn_raw and "LSCI" in upper and "218" in upper:
+                    idn_valid = True
+                    self._instrument_id = idn_raw
+                    log.info("%s: IDN verified: %s", self.name, idn_raw)
+                    break
+
+                if attempt == 0:
+                    # Try a Selected Device Clear before the second attempt.
+                    log.warning(
+                        "%s: IDN validation failed (response=%r), "
+                        "issuing GPIB clear and retrying",
+                        self.name, idn_raw,
+                    )
+                    try:
+                        await self._transport.clear_bus()
+                    except Exception as clear_exc:
+                        log.warning(
+                            "%s: clear_bus before IDN retry failed: %s",
+                            self.name, clear_exc,
+                        )
+                    await asyncio.sleep(0.2)
+
+            if not idn_valid:
+                await self._transport.close()
+                raise RuntimeError(
+                    f"{self.name}: LakeShore 218S IDN validation failed. "
+                    f"Expected 'LSCI,MODEL218...', got {idn_raw!r}. "
+                    f"Check GPIB address and cabling."
                 )
 
         self._connected = True

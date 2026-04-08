@@ -10,6 +10,7 @@ Read-only аналитика поверх ChannelStateTracker:
 from __future__ import annotations
 
 import math
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,59 @@ from typing import Any
 import numpy as np
 
 from cryodaq.core.rate_estimator import _ols_slope_per_min
+
+
+# ---------------------------------------------------------------------------
+# Channel classifier (Phase 2c user report)
+# ---------------------------------------------------------------------------
+#
+# The sensor diagnostics panel was showing health=0 ("red") for ~20 channels
+# that aren't physical sensors at all — analytics state, system metrics,
+# Keithley derived values (V/I/R/P that are 0 when source is off). Operators
+# spent time investigating "broken sensors" that were actually working
+# computed/derived signals with no noise or drift physics.
+#
+# is_physical_sensor() returns True only for channels whose values come from
+# a real measurement (cryogenic thermometer, vacuum gauge, etc). Health
+# scoring only makes sense for those.
+
+# Patterns for derived / computed / system channels — checked FIRST so they
+# can pre-empt anything that looks like a physical name.
+_DERIVED_CHANNEL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^system/"),
+    re.compile(r"^analytics/"),
+    re.compile(r"/smu[ab]/"),  # Keithley dual-channel derived metrics
+    re.compile(r"^Keithley.*/(voltage|current|power|resistance)$"),
+)
+
+# Patterns for physical sensors — actual measurements with noise/drift
+# physics. Accepts both Cyrillic Т (canonical, per CLAUDE.md) and Latin T
+# (used in some test fixtures and legacy configs).
+_PHYSICAL_SENSOR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^[ТT]\d+(\b|\s|/|$)"),    # T-prefixed cryo channels
+    re.compile(r"/[ТT]\d+(\b|\s|/|$)"),    # …with instrument prefix
+    re.compile(r"/pressure\b"),            # Vacuum gauges
+    re.compile(r"/temperature\b"),         # Generic temperature sensors
+    re.compile(r"VSP63D"),                 # Thyracont vacuum gauge namespace
+)
+
+
+def is_physical_sensor(channel: str) -> bool:
+    """Return True if a channel represents a physical sensor measurement.
+
+    Physical sensors have noise floor and drift physics that make health
+    scoring meaningful. Derived / computed / system channels do not and
+    should be excluded from the sensor diagnostics panel's health column.
+
+    Phase 2c user report: operators see ~20 red '0' health values for
+    analytics/system/derived-Keithley channels and waste time investigating
+    non-existent sensor faults.
+    """
+    if not channel:
+        return False
+    if any(p.search(channel) for p in _DERIVED_CHANNEL_PATTERNS):
+        return False
+    return any(p.search(channel) for p in _PHYSICAL_SENSOR_PATTERNS)
 
 
 @dataclass
@@ -137,7 +191,15 @@ class SensorDiagnosticsEngine:
         self._channel_names = dict(names)
 
     def push(self, channel_id: str, timestamp: float, value: float) -> None:
-        """Add a data point for a channel."""
+        """Add a data point for a channel.
+
+        Phase 2c user report: only physical sensor channels are buffered.
+        Derived / system / analytics channels are silently dropped — they
+        don't have noise/drift physics so health scoring is meaningless,
+        and including them produces a wall of red zeroes in the panel.
+        """
+        if not is_physical_sensor(channel_id):
+            return
         buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))
 

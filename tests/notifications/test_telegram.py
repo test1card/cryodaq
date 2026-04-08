@@ -264,13 +264,17 @@ async def test_cmd_log_empty_text_returns_error() -> None:
 
 
 async def test_cmd_phase_advances() -> None:
+    """Phase 2c Codex I.2: legacy 'cooling' alias canonicalises to the
+    ExperimentPhase enum value 'cooldown' before being dispatched."""
     handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
     await bot._handle_message(_tg_msg("/phase cooling"))
     handler.assert_called_once()
     cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "experiment_advance_phase"
-    assert cmd["phase"] == "cooling"
+    assert cmd["phase"] == "cooldown", (
+        "legacy 'cooling' must canonicalise to enum value 'cooldown'"
+    )
     assert "✅" in bot._send.call_args[0][1]
 
 

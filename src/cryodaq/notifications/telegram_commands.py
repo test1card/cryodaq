@@ -34,7 +34,22 @@ _HELP_TEXT = (
     "/help — список команд"
 )
 
-_VALID_PHASES = ["preparation", "cooling", "measurement", "warming", "teardown"]
+# Phase 2c Codex I.2: derive the accepted phase vocabulary from the canonical
+# ExperimentPhase enum. Previously this was a hand-maintained list that
+# drifted ("cooling"/"warming" instead of the enum's "cooldown"/"warmup",
+# missing "vacuum") so remote operators received bogus "unknown phase"
+# errors for phases that exist locally.
+from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
+
+VALID_PHASES: frozenset[str] = frozenset(p.value for p in _ExperimentPhase)
+# Backwards-compatible aliases for Telegram clients that learned the old
+# vocabulary. Mapped to canonical enum values at command-handler entry.
+_PHASE_ALIASES: dict[str, str] = {
+    "cooling": "cooldown",
+    "warming": "warmup",
+}
+# Legacy mutable list kept for any callers that import it. Prefer VALID_PHASES.
+_VALID_PHASES = sorted(VALID_PHASES)
 
 
 class _TelegramAuthError(Exception):
@@ -395,10 +410,15 @@ class TelegramCommandBot:
             await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
 
     async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
-        if phase not in _VALID_PHASES:
-            phases_str = ", ".join(_VALID_PHASES)
+        # Phase 2c Codex I.2: accept legacy aliases (cooling/warming) and
+        # canonicalise to ExperimentPhase enum values.
+        normalized = phase.strip().lower()
+        normalized = _PHASE_ALIASES.get(normalized, normalized)
+        if normalized not in VALID_PHASES:
+            phases_str = ", ".join(sorted(VALID_PHASES))
             await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_str}")
             return
+        phase = normalized
         if self._command_handler is None:
             await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
             return

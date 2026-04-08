@@ -7,7 +7,36 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+
+def _patch_worker_capture():
+    """Patch ZmqCommandWorker to capture payloads synchronously instead of
+    spawning a thread (Phase 2c baseline cleanup).
+
+    Returns a tuple of (patcher, capture_list). The capture_list collects
+    every payload dict passed to the worker constructor — this lets the
+    test assert on the dispatched command without running a real Qt thread.
+    """
+    captured: list[dict] = []
+
+    def _fake_worker(payload, parent=None, **kw):
+        captured.append(payload)
+        worker = MagicMock()
+        worker.start = MagicMock()
+        worker.finished = MagicMock()
+        worker.finished.connect = MagicMock()
+        worker.isRunning = MagicMock(return_value=False)
+        worker.deleteLater = MagicMock()
+        return worker
+
+    # The widget imports ZmqCommandWorker inside method bodies, so the
+    # binding only exists on the source module. Patch there.
+    patcher = patch(
+        "cryodaq.gui.zmq_client.ZmqCommandWorker",
+        side_effect=_fake_worker,
+    )
+    return patcher, captured
 
 from PySide6.QtWidgets import QApplication
 
@@ -85,6 +114,10 @@ def test_shift_start_dialog_accepts_with_operator() -> None:
 # ---------------------------------------------------------------------------
 
 def test_periodic_prompt_submits_log_entry() -> None:
+    """Phase 2c baseline cleanup: shift_handover dispatches via ZmqCommandWorker
+    on a Qt thread now (was direct send_command). Patch the worker class
+    to capture the payload synchronously instead of waiting on the thread.
+    """
     _app()
     dialog = ShiftPeriodicPrompt(
         operator="Фоменко В.Н.",
@@ -93,15 +126,16 @@ def test_periodic_prompt_submits_log_entry() -> None:
     dialog._status_combo.setCurrentText("Штатно")
     dialog._notes.setPlainText("Всё в порядке")
 
-    with patch("cryodaq.gui.zmq_client.send_command", return_value={"ok": True}) as mock_cmd:
+    patcher, captured = _patch_worker_capture()
+    with patcher:
         dialog._on_submit()
 
-    mock_cmd.assert_called_once()
-    call_args = mock_cmd.call_args[0][0]
-    assert call_args["cmd"] == "log_entry"
-    assert "shift_periodic" in call_args["tags"]
-    assert "Штатно" in call_args["message"]
-    assert call_args["author"] == "Фоменко В.Н."
+    assert len(captured) == 1, f"Expected 1 worker dispatch, got {len(captured)}"
+    payload = captured[0]
+    assert payload["cmd"] == "log_entry"
+    assert "shift_periodic" in payload["tags"]
+    assert "Штатно" in payload["message"]
+    assert payload["author"] == "Фоменко В.Н."
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +158,16 @@ def test_shift_end_dialog_generates_summary() -> None:
     received = []
     dialog.shift_ended.connect(lambda: received.append(True))
 
-    with patch("cryodaq.gui.zmq_client.send_command", return_value={"ok": True}) as mock_cmd:
+    patcher, captured = _patch_worker_capture()
+    with patcher:
         dialog._comment.setPlainText("Штатно, система стабильна")
         dialog._on_end()
 
-    mock_cmd.assert_called_once()
-    call_args = mock_cmd.call_args[0][0]
-    assert call_args["cmd"] == "log_entry"
-    assert "shift_end" in call_args["tags"]
-    metadata = json.loads(call_args["metadata"])
+    assert len(captured) == 1, f"Expected 1 worker dispatch, got {len(captured)}"
+    payload = captured[0]
+    assert payload["cmd"] == "log_entry"
+    assert "shift_end" in payload["tags"]
+    metadata = json.loads(payload["metadata"])
     assert metadata["periodic_count"] == 3
     assert metadata["missed_count"] == 1
     assert metadata["comment"] == "Штатно, система стабильна"

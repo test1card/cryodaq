@@ -154,15 +154,21 @@ def test_zmq_bridge_is_healthy_initial() -> None:
 
 
 def test_zmq_bridge_poll_handles_heartbeat() -> None:
-    """poll_readings recognizes heartbeat messages and updates timestamp."""
+    """poll_readings recognizes heartbeat messages and updates timestamp.
+
+    Phase 2c baseline cleanup: ``mp.Queue.put_nowait`` is asynchronous —
+    a feeder thread flushes to the underlying pipe — so the immediate
+    follow-up ``poll_readings`` would race and find an empty queue.
+    Use blocking ``put`` with a tiny timeout so the item is guaranteed
+    visible before polling.
+    """
     from cryodaq.gui.zmq_client import ZmqBridge
     bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59996", cmd_addr="tcp://127.0.0.1:59997")
-    # Manually inject a heartbeat into the data queue
-    bridge._data_queue.put_nowait({"__type": "heartbeat", "ts": time.monotonic()})
+    bridge._data_queue.put({"__type": "heartbeat", "ts": time.monotonic()}, timeout=1.0)
+    # Tiny yield so the feeder thread definitely flushes before get_nowait().
+    time.sleep(0.05)
     readings = bridge.poll_readings()
-    # Heartbeat should NOT appear as a Reading
     assert len(readings) == 0
-    # But _last_heartbeat should be updated
     assert bridge._last_heartbeat > 0
 
 

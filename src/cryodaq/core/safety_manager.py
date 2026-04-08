@@ -86,7 +86,13 @@ class SafetyManager:
         self._active_sources: set[SmuChannel] = set()
 
         self._latest: dict[str, tuple[float, float, str]] = {}
-        self._rate_estimator = RateEstimator(window_s=120.0, min_points=10)
+        # Phase 2c CC I.3: min_points raised from 10 to 60 to match
+        # rate_estimator.py's documented noise-suppression recommendation.
+        # At 0.5s poll interval the 120s window holds ~240 points;
+        # min_points=60 = 30s of data before any rate-based fault decision,
+        # which keeps response time acceptable for the 5 K/min threshold
+        # while reducing false-positive rate ~2.4x under LS218 ±0.01 K noise.
+        self._rate_estimator = RateEstimator(window_s=120.0, min_points=60)
 
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None

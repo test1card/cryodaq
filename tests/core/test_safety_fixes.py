@@ -277,14 +277,16 @@ async def test_rate_limit_catches_critical_temperature():
     mgr._config.critical_channels = [re.compile("Т1.*")]
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
-        # Seed enough data to fill the rate buffer (need ≥ 10 samples)
-        # Start at 4 K and simulate rapid rise in temperature
-        for i in range(15):
-            # 15 samples rising at ~60 K/min (well above 5 K/min threshold)
-            temp = 4.0 + i * 1.0  # +1 K per 10 ms → ~6000 K/min
+        # Phase 2c CC I.3: SafetyManager rate estimator now requires >=60
+        # samples (was 10) before producing a slope estimate. The test
+        # therefore needs to push enough data to fill the buffer before any
+        # rate-based fault check can trigger.
+        for i in range(80):
+            # +1 K per sample at 1 ms cadence → effectively a steep rise
+            temp = 4.0 + i * 1.0
             r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
             await broker.publish(r)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
         await asyncio.sleep(1.5)
 
@@ -297,11 +299,11 @@ async def test_rate_limit_catches_critical_temperature():
                 return
 
         # Feed more rapidly rising samples to keep triggering rate check
-        for i in range(15):
-            temp = 20.0 + i * 1.0
+        for i in range(80):
+            temp = 84.0 + i * 1.0
             r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
             await broker.publish(r)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
         await asyncio.sleep(1.5)
 

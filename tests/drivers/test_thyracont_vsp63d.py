@@ -142,8 +142,13 @@ async def test_reconnect_after_disconnect() -> None:
 # ---------------------------------------------------------------------------
 
 async def test_thyracont_parse_pressure() -> None:
-    """Protocol V1: '001M260017N' → mantissa=2600, exp=17 → 2.6e-3 mbar."""
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
+    """Protocol V1: '001M260017N' → mantissa=2600, exp=17 → 2.6e-3 mbar.
+
+    These hard-coded fixture strings predate Phase 2c F.2 (default flip
+    of validate_checksum to True). They test the *parser*, not the
+    checksum validator, so explicit opt-out is correct.
+    """
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False)
 
     reading = driver._parse_v1_response("001M260017N\r")
 
@@ -158,7 +163,7 @@ async def test_thyracont_parse_pressure() -> None:
 
 async def test_thyracont_parse_high_pressure() -> None:
     """Protocol V1: '001M100023D' → mantissa=1000, exp=23 → 1000 mbar."""
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001", validate_checksum=False)
 
     reading = driver._parse_v1_response("001M100023D\r")
 
@@ -172,7 +177,7 @@ async def test_thyracont_parse_high_pressure() -> None:
 
 async def test_parse_v1_response_very_high_pressure() -> None:
     """Protocol V1: '001M400016O' → mantissa=4000, exp=16 → 4.0e-4 mbar."""
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001", validate_checksum=False)
 
     reading = driver._parse_v1_response("001M400016O\r")
 
@@ -186,7 +191,7 @@ async def test_parse_v1_response_very_high_pressure() -> None:
 
 async def test_parse_v1_good_vacuum() -> None:
     """Protocol V1: '001M100014X' → mantissa=1000, exp=14 → 1e-6 mbar."""
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001", validate_checksum=False)
 
     reading = driver._parse_v1_response("001M100014X\r")
 

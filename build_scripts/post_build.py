@@ -32,6 +32,11 @@ def main() -> None:
     for example in config_src.glob("*.local.yaml.example"):
         shutil.copy2(example, config_dst / example.name)
 
+    # LICENSE next to exe (Phase 2c O.1)
+    license_src = project_root / "LICENSE"
+    if license_src.exists():
+        shutil.copy2(license_src, dist_dir / "LICENSE")
+
     # Experiment templates subdirectory
     templates_src = config_src / "experiment_templates"
     if templates_src.exists():

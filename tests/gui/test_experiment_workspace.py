@@ -148,8 +148,13 @@ def test_workspace_active_card_saves_without_clearing_fields(monkeypatch) -> Non
 
 
 def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch) -> None:
+    """Phase 2c baseline cleanup: _on_mode_debug now dispatches via
+    ZmqCommandWorker (was direct send_command). Patch the worker class so
+    we can capture the payload synchronously without running a Qt thread."""
+    from unittest.mock import MagicMock
     _app()
     calls: list[dict] = []
+    worker_payloads: list[dict] = []
     states = [
         {
             "ok": True,
@@ -173,7 +178,19 @@ def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch
             return {"ok": True, "app_mode": payload["app_mode"], "active_experiment": None}
         raise AssertionError(payload)
 
+    def _fake_worker(payload, parent=None, **kw):
+        worker_payloads.append(dict(payload))
+        worker = MagicMock()
+        worker.start = MagicMock()
+        worker.finished = MagicMock()
+        worker.finished.connect = MagicMock()
+        worker.isRunning = MagicMock(return_value=False)
+        return worker
+
     monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_send)
+    monkeypatch.setattr(
+        "cryodaq.gui.widgets.experiment_workspace.ZmqCommandWorker", _fake_worker
+    )
     monkeypatch.setattr(
         "cryodaq.gui.widgets.experiment_workspace.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
@@ -183,6 +200,7 @@ def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch
     widget.refresh_state()
     widget._on_mode_debug()
 
-    set_mode_calls = [payload for payload in calls if payload["cmd"] == "set_app_mode"]
-    assert set_mode_calls == [{"cmd": "set_app_mode", "app_mode": "debug"}]
-    assert widget._mode_label.text() == "ОТЛАДКА"
+    set_mode_payloads = [p for p in worker_payloads if p.get("cmd") == "set_app_mode"]
+    assert set_mode_payloads == [{"cmd": "set_app_mode", "app_mode": "debug"}], (
+        f"Expected single set_app_mode worker dispatch, got {worker_payloads}"
+    )

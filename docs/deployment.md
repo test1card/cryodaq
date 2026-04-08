@@ -229,6 +229,28 @@ The engine emits a WARNING on startup if it detects an affected version.
 
 SQLite >= 3.51.3 is available natively. No action required.
 
+## Reproducible builds via lockfile
+
+CryoDAQ pins all runtime dependencies in `requirements-lock.txt`, generated
+via `pip-compile` from `pyproject.toml`. Production bundle builds install
+from this lockfile so two operators building on different days get the
+exact same transitive dependencies — important for safety-critical lab
+deployments where a silent transitive bump can change behaviour.
+
+### Regenerating the lockfile
+
+After changing `pyproject.toml` dependencies:
+
+```bash
+pip install pip-tools
+pip-compile --extra=dev --extra=web --output-file=requirements-lock.txt pyproject.toml
+git add requirements-lock.txt
+git commit -m "deps: update lockfile"
+```
+
+The build scripts (`build.sh` / `build.bat`) install from
+`requirements-lock.txt` automatically before invoking PyInstaller.
+
 ## Frozen-app build (PyInstaller)
 
 ```bash

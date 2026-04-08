@@ -265,7 +265,9 @@ def test_live_p_target_skipped_when_off(monkeypatch) -> None:
         commands.append(payload)
         return {"ok": True}
 
-    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.send_command", _send_command)
+    # Phase 2c baseline cleanup: keithley_panel doesn't import send_command
+    # at module level — only ZmqCommandWorker. Patch at the source module.
+    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
     # Channel state is "off" (default)
 
     panel._smu_panels["smua"]._p_spin.setValue(0.3)
@@ -286,23 +288,41 @@ def test_live_limits_debounce_starts_when_on(monkeypatch) -> None:
 
 
 def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
+    """Phase 2c baseline cleanup: assert what matters — both channels show
+    the validation warning when target P is zero. The previous assertion
+    (`called is False`) was over-specific to direct send_command plumbing
+    that has since been replaced by ZmqCommandWorker."""
     _app()
     panel = KeithleyPanel()
-    called = False
 
-    def _send_command(_payload):
-        nonlocal called
-        called = True
-        return {"ok": True}
+    # Patch ZmqCommandWorker so background polling can't interfere with
+    # the assertion. The validation in _validate_start_request is the
+    # contract under test.
+    from unittest.mock import MagicMock
+    captured: list[dict] = []
 
-    monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _send_command)
+    def _fake_worker(payload, parent=None, **kw):
+        captured.append(payload)
+        w = MagicMock()
+        w.start = MagicMock()
+        w.finished = MagicMock()
+        w.finished.connect = MagicMock()
+        return w
+
+    monkeypatch.setattr(
+        "cryodaq.gui.widgets.keithley_panel.ZmqCommandWorker", _fake_worker
+    )
     panel._smu_panels["smua"]._p_spin.setValue(0.0)
     panel._smu_panels["smub"]._p_spin.setValue(0.0)
 
     panel._on_start_both()
     _process_events()
 
-    # Validation blocks the command, but _on_start_both now always shows info
-    assert called is False
+    # No keithley_start commands should be issued for either channel.
+    starts = [p for p in captured if p.get("cmd") == "keithley_start"]
+    assert starts == [], (
+        f"Validation should block keithley_start when p=0, got: {starts}"
+    )
+    # Validation message visible on both channels.
     assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
     assert "больше нуля" in panel._smu_panels["smub"]._status_banner.text()

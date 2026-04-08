@@ -7,21 +7,28 @@ name = "cryodaq"
 version = "0.13.0"
 description = "Система сбора данных для криогенной лаборатории (АКЦ ФИАН, Millimetron)"
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Vladimir Fomenko" },
+]
 dependencies = [
-    "pyside6>=6.6",
-    "pyqtgraph>=0.13",
-    "pyvisa>=1.14",
-    "pyserial-asyncio>=0.6",
-    "pyzmq>=25",
-    "h5py>=3.10",
-    "pyyaml>=6.0",
-    "msgpack>=1.0",
-    "matplotlib>=3.8",
-    "aiohttp>=3.9",
-    "numpy>=1.26",
-    "scipy>=1.12",
-    "openpyxl>=3.1",
-    "python-docx>=1.1",
+    # Phase 2c M.1: upper bounds added so a future major-version bump
+    # cannot silently break the bundle build. Lockfile in
+    # requirements-lock.txt pins exact versions for reproducible builds.
+    "pyside6>=6.6,<7",
+    "pyqtgraph>=0.13,<0.14",
+    "pyvisa>=1.14,<2",
+    "pyserial-asyncio>=0.6,<1",
+    "pyzmq>=25,<27",
+    "h5py>=3.10,<4",
+    "pyyaml>=6.0,<7",
+    "msgpack>=1.0,<2",
+    "matplotlib>=3.8,<4",
+    "aiohttp>=3.9.5,<4",
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    "openpyxl>=3.1,<4",
+    "python-docx>=1.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +38,7 @@ dev = [
     "pytest-cov>=4",
     "ruff>=0.3",
     "pyinstaller>=6.0",
+    "pip-tools>=7.4",
 ]
 web = [
     "fastapi>=0.111",
