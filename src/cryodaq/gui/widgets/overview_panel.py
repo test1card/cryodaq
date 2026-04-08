@@ -788,6 +788,8 @@ class ExperimentStatusWidget(QFrame):
         layout.addWidget(self._elapsed_label)
 
         self._worker = None
+        # Phase 2d: cache for the OverviewPanel "Всё" preset.
+        self._cached_active_experiment: dict | None = None
 
         # Refresh timer
         self._timer = QTimer(self)
@@ -811,6 +813,9 @@ class ExperimentStatusWidget(QFrame):
     @Slot(dict)
     def _on_refresh_result(self, result: dict) -> None:
         exp = result.get("active_experiment")
+        # Phase 2d: cache for the OverviewPanel "Всё" preset. Stored on
+        # this widget; OverviewPanel reads it via its child reference.
+        self._cached_active_experiment = exp if (result.get("ok") and exp) else None
         if not result.get("ok") or not exp:
             self._status_label.setText("Нет активного эксперимента")
             self._status_label.setStyleSheet("color: #888888; border: none;")
@@ -987,6 +992,15 @@ class OverviewPanel(QWidget):
         # Текущее окно времени (секунды)
         self._window_s = _DEFAULT_WINDOW_S
 
+        # Phase 2d: wall-clock approximation of engine launch — used as the
+        # "Всё" preset fallback when no experiment is active. The launcher
+        # starts the engine and this panel ~simultaneously, so panel
+        # construction time is within a few hundred ms of engine.main().
+        self._panel_start_ts: float = time.time()
+        # Cached experiment dict — updated by ExperimentStatusWidget via the
+        # child reference below; the slot reads it on each click.
+        self._cached_active_experiment: dict | None = None
+
         self._build_ui()
         self._init_plot()
 
@@ -1055,11 +1069,20 @@ class OverviewPanel(QWidget):
             btn.clicked.connect(lambda checked, s=seconds: self._set_window(s))
             btn_bar.addWidget(btn)
 
-        all_btn = QPushButton("Сутки")
-        all_btn.setFixedSize(QSize(50, 24))
-        apply_button_style(all_btn, "neutral", compact=True)
-        all_btn.clicked.connect(self._set_window_all)
-        btn_bar.addWidget(all_btn)
+        # Phase 2d: "Сутки" was a duplicate of "24ч" — both computed
+        # ``now - 86400``. Replaced with "Всё" which uses the active
+        # experiment's start_time, falling back to panel-init wall-clock
+        # (≈ engine uptime) when no experiment is active. Decimation is
+        # handled by pyqtgraph downsample, same as the other presets.
+        self._btn_all = QPushButton("Всё")
+        self._btn_all.setFixedSize(QSize(50, 24))
+        self._btn_all.setToolTip(
+            "Весь период текущего эксперимента "
+            "(или с запуска engine, если эксперимент не активен)"
+        )
+        apply_button_style(self._btn_all, "neutral", compact=True)
+        self._btn_all.clicked.connect(self._on_all_clicked)
+        btn_bar.addWidget(self._btn_all)
 
         btn_bar.addStretch()
 
@@ -1478,9 +1501,64 @@ class OverviewPanel(QWidget):
         self._load_history(hours=hours)
 
     @Slot()
-    def _set_window_all(self) -> None:
-        """Show full buffer range — load full history from SQLite then expand window."""
-        self._load_history(hours=24)
+    def _on_all_clicked(self) -> None:
+        """Set time range to cover the full active experiment, or engine
+        uptime if no experiment is active. Phase 2d UI fix — replaces
+        the old "Сутки" preset which was a dup of "24ч".
+
+        Decimation is handled by pyqtgraph downsample, same as other
+        presets. Both temperature and pressure plots update because the
+        pressure plot is X-linked to the temperature plot.
+        """
+        now_ts = time.time()
+        start_ts: float | None = None
+        source = ""
+
+        # Primary: active experiment start_time. Cached on either:
+        #   (a) the child ExperimentStatusWidget (populated by its periodic
+        #       experiment_status refresh), or
+        #   (b) self (set directly by tests).
+        exp = self._cached_active_experiment
+        if exp is None and hasattr(self, "_experiment_status"):
+            exp = getattr(self._experiment_status, "_cached_active_experiment", None)
+        if exp:
+            raw_start = exp.get("start_time", "")
+            if raw_start:
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(str(raw_start))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    start_ts = dt.timestamp()
+                    source = "experiment"
+                except Exception as exc:
+                    logger.warning(
+                        "_on_all_clicked: failed to parse experiment start_time %r: %s",
+                        raw_start, exc,
+                    )
+
+        # Fallback: panel construction time ≈ engine launch wall-clock.
+        if start_ts is None:
+            start_ts = self._panel_start_ts
+            source = "engine_uptime"
+
+        # Sanity: never request a negative or zero window.
+        duration_s = max(now_ts - start_ts, 60.0)
+        # Round up to whole hours (>= 1) — _load_history takes hours.
+        import math
+        hours = max(1, math.ceil(duration_s / 3600.0))
+
+        # Set the visible window so setXRange in _draw uses the full span.
+        self._window_s = float(duration_s)
+
+        logger.info(
+            "Overview 'Всё' preset: from=%.0f to=%.0f duration=%.1fmin source=%s hours=%d",
+            start_ts, now_ts, duration_s / 60.0, source, hours,
+        )
+
+        # Load history from SQLite at the same hourly granularity as the
+        # other presets. Pressure plot is X-linked, so it updates too.
+        self._load_history(hours=hours)
 
     def _load_initial_history(self) -> None:
         """Load 1 hour of history from SQLite on startup."""
