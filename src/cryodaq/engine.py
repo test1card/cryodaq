@@ -966,6 +966,11 @@ async def _run_engine(*, mock: bool = False) -> None:
         except asyncio.CancelledError:
             return
 
+    # Strong-ref set for fire-and-forget Telegram dispatch tasks.
+    # Without this the loop only weak-refs tasks and GC can drop a pending
+    # alarm notification mid-flight. See DEEP_AUDIT_CC.md A.1/A.2/I.2.
+    _alarm_dispatch_tasks: set[asyncio.Task] = set()
+
     async def _alarm_v2_tick() -> None:
         """Периодически вычислять алармы v2 и диспетчеризировать события."""
         poll_s = _alarm_v2_engine_cfg.poll_interval_s
@@ -988,10 +993,12 @@ async def _run_engine(*, mock: bool = False) -> None:
                         # GUI polls via alarm_v2_status command; optionally notify via Telegram
                         if "telegram" in alarm_cfg.notify and telegram_bot is not None:
                             msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
-                            asyncio.create_task(
+                            t = asyncio.create_task(
                                 telegram_bot._send_to_all(msg),
                                 name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
                             )
+                            _alarm_dispatch_tasks.add(t)
+                            t.add_done_callback(_alarm_dispatch_tasks.discard)
                 except Exception as exc:
                     logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
 

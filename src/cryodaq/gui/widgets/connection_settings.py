@@ -31,8 +31,9 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_CONFIG_DIR = _PROJECT_ROOT / "config"
+from cryodaq.paths import get_config_dir as _get_config_dir
+
+_CONFIG_DIR = _get_config_dir()
 _LOCAL_CONFIG = _CONFIG_DIR / "instruments.local.yaml"
 _DEFAULT_CONFIG = _CONFIG_DIR / "instruments.yaml"
 

@@ -37,7 +37,9 @@ from cryodaq.gui.widgets.common import (
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = Path(__file__).resolve().parents[4] / "config" / "shifts.yaml"
+from cryodaq.paths import get_config_dir as _get_config_dir
+
+_CONFIG_PATH = _get_config_dir() / "shifts.yaml"
 
 
 # ---------------------------------------------------------------------------

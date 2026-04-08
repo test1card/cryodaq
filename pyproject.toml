@@ -30,6 +30,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=4",
     "ruff>=0.3",
+    "pyinstaller>=6.0",
 ]
 web = [
     "fastapi>=0.111",
@@ -44,6 +45,11 @@ cryodaq-engine = "cryodaq.engine:main"
 cryodaq-gui = "cryodaq.gui.app:main"
 cryodaq = "cryodaq.launcher:main"
 cryodaq-cooldown = "cryodaq.tools.cooldown_cli:main"
+# Frozen entry points — used by PyInstaller spec. Call freeze_support()
+# BEFORE importing PySide6 / cryodaq submodules to avoid Windows fork bomb.
+cryodaq-frozen = "cryodaq._frozen_main:main_launcher"
+cryodaq-frozen-engine = "cryodaq._frozen_main:main_engine"
+cryodaq-frozen-gui = "cryodaq._frozen_main:main_gui"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cryodaq"]

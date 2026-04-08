@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -89,6 +90,35 @@ def _parse_timestamp(raw) -> datetime:
     return datetime.fromisoformat(str(raw))
 
 
+_SQLITE_VERSION_CHECKED = False
+
+
+def _check_sqlite_version() -> None:
+    """Warn if running on a SQLite version affected by the March 2026 WAL-reset bug.
+
+    The bug affects SQLite versions in [3.7.0, 3.51.3) when multiple
+    connections across threads/processes write or checkpoint "at the same
+    instant". CryoDAQ uses WAL with multiple concurrent connections (writer,
+    history reader, web dashboard, reporting); upgrade to >= 3.51.3 in
+    production. See: https://www.sqlite.org/wal.html
+    """
+    global _SQLITE_VERSION_CHECKED
+    if _SQLITE_VERSION_CHECKED:
+        return
+    _SQLITE_VERSION_CHECKED = True
+    version = sqlite3.sqlite_version_info  # tuple, e.g. (3, 37, 2)
+    if (3, 7, 0) <= version < (3, 51, 3):
+        logger.warning(
+            "SQLite %d.%d.%d is affected by the March 2026 WAL-reset corruption "
+            "bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple "
+            "connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu "
+            "22.04 this means building libsqlite3 from source or bundling a "
+            "custom libsqlite3 in the PyInstaller build. "
+            "See https://www.sqlite.org/wal.html",
+            version[0], version[1], version[2],
+        )
+
+
 class SQLiteWriter:
     """Асинхронный писатель показаний в SQLite.
 
@@ -117,6 +147,9 @@ class SQLiteWriter:
         self._total_written: int = 0
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_write")
         self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
+        # Periodic explicit WAL checkpoint counter (DEEP_AUDIT_CC.md D.1).
+        self._checkpoint_counter = 0
+        _check_sqlite_version()
 
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
@@ -127,13 +160,31 @@ class SQLiteWriter:
             return self._conn
         if self._conn is not None:
             logger.info("Смена дня: закрываю %s", self._db_path(self._current_date))
+            # Final WAL checkpoint at rotation (DEEP_AUDIT_CC.md D.1, H.2).
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                self._conn.commit()
+            except sqlite3.OperationalError as exc:
+                logger.warning("Final WAL checkpoint at rotation failed: %s", exc)
             self._conn.close()
         db_path = self._db_path(day)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
+        # WAL with explicit checkpoint policy (DEEP_AUDIT_CC.md D.1).
+        # Default autocheckpoint (1000 pages) can starve under concurrent
+        # readers. See https://www.sqlite.org/wal.html
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        # synchronous=NORMAL loses last ~1s on power loss but gives ~10x
+        # throughput. Production deployments must be on a UPS. If no UPS,
+        # set CRYODAQ_SQLITE_SYNC=FULL.
+        sync_mode = os.environ.get("CRYODAQ_SQLITE_SYNC", "NORMAL").upper()
+        if sync_mode not in ("NORMAL", "FULL"):
+            sync_mode = "NORMAL"
+        conn.execute(f"PRAGMA synchronous={sync_mode};")
         conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA wal_autocheckpoint=1000;")  # ~4 MB
+        conn.execute("PRAGMA cache_size=-16384;")  # 16 MB cache
+        conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute(SCHEMA_READINGS)
         conn.execute(SCHEMA_SOURCE_DATA)
         conn.execute(SCHEMA_OPERATOR_LOG)
@@ -198,6 +249,16 @@ class SQLiteWriter:
             rows,
         )
         conn.commit()
+        # Periodic explicit PASSIVE checkpoint (~once per minute at 1 Hz batch
+        # cadence). Prevents WAL file growth under concurrent reader pressure.
+        # See DEEP_AUDIT_CC.md D.1.
+        self._checkpoint_counter += 1
+        if self._checkpoint_counter >= 60:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+            except sqlite3.OperationalError as exc:
+                logger.warning("Periodic WAL checkpoint failed: %s", exc)
+            self._checkpoint_counter = 0
         self._total_written += len(rows)
 
     def _write_source_row(

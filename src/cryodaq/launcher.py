@@ -253,12 +253,20 @@ class LauncherWindow(QMainWindow):
                         pass
 
         logger.info("Запуск engine как подпроцесса...")
-        python = sys.executable
-        # Используем pythonw на Windows чтобы не показывать терминал
-        if sys.platform == "win32":
-            pythonw = Path(python).parent / "pythonw.exe"
-            if pythonw.exists():
-                python = str(pythonw)
+        # In a PyInstaller frozen build, sys.executable IS the bundled exe
+        # (not a Python interpreter). Re-invoke ourselves with --mode=engine
+        # which _frozen_main._dispatch() routes to cryodaq.engine.main().
+        # In dev mode, fall back to "python -m cryodaq.engine".
+        if getattr(sys, "frozen", False):
+            python = sys.executable
+            cmd = [python, "--mode=engine"]
+        else:
+            python = sys.executable
+            if sys.platform == "win32":
+                pythonw = Path(python).parent / "pythonw.exe"
+                if pythonw.exists():
+                    python = str(pythonw)
+            cmd = [python, "-m", "cryodaq.engine"]
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -267,7 +275,6 @@ class LauncherWindow(QMainWindow):
 
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
-        cmd = [python, "-m", "cryodaq.engine"]
         if self._mock:
             cmd.append("--mock")
 
@@ -502,12 +509,16 @@ class LauncherWindow(QMainWindow):
 
     def _on_open_full_gui(self) -> None:
         """Launch standalone GUI window (connects to existing engine, no second launcher)."""
-        python = sys.executable
+        # Frozen build: re-invoke our own exe with --mode=gui (handled by
+        # _frozen_main._dispatch). Dev build: python -m cryodaq.gui.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--mode=gui"]
+        else:
+            cmd = [sys.executable, "-m", "cryodaq.gui"]
         env = os.environ.copy()
         if self._mock:
             env["CRYODAQ_MOCK"] = "1"
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        cmd = [python, "-m", "cryodaq.gui"]
         if self._mock:
             cmd.append("--mock")
         subprocess.Popen(cmd, env=env, creationflags=creationflags)
@@ -658,8 +669,10 @@ def main() -> None:
                  Windows, чтобы оператор видел статус engine без открытия GUI.
     """
     import argparse
-    import multiprocessing
-    multiprocessing.freeze_support()
+    # NOTE: multiprocessing.freeze_support() is called in
+    # cryodaq._frozen_main.main_launcher() BEFORE importing this module.
+    # Do not add it here — would be too late for the Windows spawn bootloader,
+    # because PySide6 is already imported at module load time above.
 
     parser = argparse.ArgumentParser(description="CryoDAQ Launcher")
     parser.add_argument("--mock", action="store_true", help="Запустить engine в mock-режиме")

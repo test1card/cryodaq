@@ -92,6 +92,18 @@ class SafetyManager:
         self._monitor_task: asyncio.Task[None] | None = None
         self._collect_task: asyncio.Task[None] | None = None
 
+        # Strong-ref set for fire-and-forget _publish_state tasks scheduled
+        # from synchronous _transition. Without this the event loop only
+        # weak-refs the task and GC can silently drop a fault-state broadcast.
+        # See DEEP_AUDIT_CC.md A.2/I.2.
+        self._pending_publishes: set[asyncio.Task[None]] = set()
+
+        # Lock that serializes _active_sources mutations across await points.
+        # Multiple REQ clients (GUI subprocess + web dashboard + future
+        # operator CLI) can race on request_run / request_stop / emergency_off.
+        # See DEEP_AUDIT_CC.md I.1.
+        self._cmd_lock = asyncio.Lock()
+
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
         self._broker.set_overflow_callback(
@@ -169,137 +181,163 @@ class SafetyManager:
         *,
         channel: str | None = None,
     ) -> dict[str, Any]:
-        smu_channel = normalize_smu_channel(channel)
+        async with self._cmd_lock:
+            smu_channel = normalize_smu_channel(channel)
 
-        if self._state == SafetyState.FAULT_LATCHED:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"FAULT: {self._fault_reason}"}
+            if self._state == SafetyState.FAULT_LATCHED:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"FAULT: {self._fault_reason}"}
 
-        if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Start not allowed from {self._state.value}"}
+            if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Start not allowed from {self._state.value}"}
 
-        if smu_channel in self._active_sources:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Channel {smu_channel} already active"}
+            if smu_channel in self._active_sources:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Channel {smu_channel} already active"}
 
-        ok, reason = self._check_preconditions()
-        if not ok:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": reason}
+            ok, reason = self._check_preconditions()
+            if not ok:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": reason}
 
-        if p_target > self._config.max_power_w:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
-        if v_comp > self._config.max_voltage_v:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
-        if i_comp > self._config.max_current_a:
-            return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
+            if p_target > self._config.max_power_w:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
+            if v_comp > self._config.max_voltage_v:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
+            if i_comp > self._config.max_current_a:
+                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
 
-        if self._state != SafetyState.RUNNING:
-            self._transition(
-                SafetyState.RUN_PERMITTED,
-                f"Start requested for {smu_channel}: P={p_target}W",
-                channel=smu_channel,
-                value=p_target,
-            )
+            if self._state != SafetyState.RUNNING:
+                self._transition(
+                    SafetyState.RUN_PERMITTED,
+                    f"Start requested for {smu_channel}: P={p_target}W",
+                    channel=smu_channel,
+                    value=p_target,
+                )
 
-        if self._keithley is None:
-            if self._config.require_keithley_for_run and not self._mock:
-                self._transition(SafetyState.SAFE_OFF, "Keithley not connected")
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": "Keithley not connected"}
-        else:
-            try:
-                await self._keithley.start_source(smu_channel, p_target, v_comp, i_comp)
-            except Exception as exc:
-                await self._fault(f"Source start failed on {smu_channel}: {exc}", channel=smu_channel)
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": str(exc)}
+            if self._keithley is None:
+                if self._config.require_keithley_for_run and not self._mock:
+                    self._transition(SafetyState.SAFE_OFF, "Keithley not connected")
+                    return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": "Keithley not connected"}
+            else:
+                try:
+                    await self._keithley.start_source(smu_channel, p_target, v_comp, i_comp)
+                except Exception as exc:
+                    await self._fault(f"Source start failed on {smu_channel}: {exc}", channel=smu_channel)
+                    return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": str(exc)}
 
-        self._active_sources.add(smu_channel)
-        if self._state != SafetyState.RUNNING:
-            self._transition(
-                SafetyState.RUNNING,
-                f"Source {smu_channel} enabled: P={p_target}W",
-                channel=smu_channel,
-                value=p_target,
-            )
-        await self._publish_keithley_channel_states(f"run:{smu_channel}")
-        return {
-            "ok": True,
-            "state": self._state.value,
-            "channel": smu_channel,
-            "active_channels": sorted(self._active_sources),
-        }
+                # CRITICAL safety reconciliation (Codex Phase 1 review P0-2):
+                # _fault() runs OUTSIDE _cmd_lock — a fail-on-silence /
+                # rate-limit / interlock fault can fire while we are awaiting
+                # start_source(). When that happens, _fault has already issued
+                # emergency_off and latched FAULT_LATCHED. We must NOT add the
+                # channel to _active_sources, and as defense-in-depth we
+                # re-issue emergency_off in case start_source's last write
+                # interleaved after the fault's OUTPUT_OFF.
+                if self._state == SafetyState.FAULT_LATCHED:
+                    try:
+                        await self._keithley.emergency_off()
+                    except Exception as exc:
+                        logger.critical(
+                            "FAULT after start_source: emergency_off failed: %s", exc
+                        )
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": f"Fault during start: {self._fault_reason}",
+                    }
 
-    async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
-        channels = self._resolve_channels(channel)
-        if self._state == SafetyState.FAULT_LATCHED:
-            await self._ensure_output_off(channel)
+            self._active_sources.add(smu_channel)
+            if self._state != SafetyState.RUNNING:
+                self._transition(
+                    SafetyState.RUNNING,
+                    f"Source {smu_channel} enabled: P={p_target}W",
+                    channel=smu_channel,
+                    value=p_target,
+                )
+            await self._publish_keithley_channel_states(f"run:{smu_channel}")
             return {
-                "ok": False,
+                "ok": True,
                 "state": self._state.value,
-                "channels": sorted(channels),
-                "error": "System is fault-latched - acknowledge_fault required",
+                "channel": smu_channel,
+                "active_channels": sorted(self._active_sources),
             }
 
-        await self._safe_off("Operator stop", channels=channels)
-        await self._publish_keithley_channel_states("stop")
-        return {
-            "ok": True,
-            "state": self._state.value,
-            "channels": sorted(channels),
-            "active_channels": sorted(self._active_sources),
-        }
+    async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
+        async with self._cmd_lock:
+            channels = self._resolve_channels(channel)
+            if self._state == SafetyState.FAULT_LATCHED:
+                await self._ensure_output_off(channel)
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "error": "System is fault-latched - acknowledge_fault required",
+                }
 
-    async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
-        channels = self._resolve_channels(channel)
-        await self._ensure_output_off(channel)
-        self._active_sources.difference_update(channels)
-        await self._publish_keithley_channel_states("emergency_off")
-
-        if self._state == SafetyState.FAULT_LATCHED:
+            await self._safe_off("Operator stop", channels=channels)
+            await self._publish_keithley_channel_states("stop")
             return {
                 "ok": True,
                 "state": self._state.value,
                 "channels": sorted(channels),
                 "active_channels": sorted(self._active_sources),
-                "latched": True,
-                "warning": "Outputs disabled but fault remains latched",
             }
 
-        if not self._active_sources:
-            self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
+    async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
+        async with self._cmd_lock:
+            channels = self._resolve_channels(channel)
+            await self._ensure_output_off(channel)
+            self._active_sources.difference_update(channels)
+            await self._publish_keithley_channel_states("emergency_off")
 
-        return {
-            "ok": True,
-            "state": self._state.value,
-            "channels": sorted(channels),
-            "active_channels": sorted(self._active_sources),
-        }
+            if self._state == SafetyState.FAULT_LATCHED:
+                return {
+                    "ok": True,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "active_channels": sorted(self._active_sources),
+                    "latched": True,
+                    "warning": "Outputs disabled but fault remains latched",
+                }
+
+            if not self._active_sources:
+                self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
+
+            return {
+                "ok": True,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
+            }
 
     async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
         """Live-update P_target on an active channel. Validates against config limits."""
-        smu_channel = normalize_smu_channel(channel)
+        async with self._cmd_lock:
+            smu_channel = normalize_smu_channel(channel)
 
-        if self._state == SafetyState.FAULT_LATCHED:
-            return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
+            if self._state == SafetyState.FAULT_LATCHED:
+                return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
 
-        if smu_channel not in self._active_sources:
-            return {"ok": False, "error": f"Channel {smu_channel} not active"}
+            if smu_channel not in self._active_sources:
+                return {"ok": False, "error": f"Channel {smu_channel} not active"}
 
-        if p_target <= 0:
-            return {"ok": False, "error": "p_target must be > 0"}
+            if p_target <= 0:
+                return {"ok": False, "error": "p_target must be > 0"}
 
-        if p_target > self._config.max_power_w:
-            return {"ok": False, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
+            if p_target > self._config.max_power_w:
+                return {"ok": False, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
 
-        if self._keithley is None:
-            return {"ok": False, "error": "Keithley not connected"}
+            if self._keithley is None:
+                return {"ok": False, "error": "Keithley not connected"}
 
-        runtime = self._keithley._channels.get(smu_channel)
-        if runtime is None or not runtime.active:
-            return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
+            runtime = self._keithley._channels.get(smu_channel)
+            if runtime is None or not runtime.active:
+                return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
 
-        old_p = runtime.p_target
-        runtime.p_target = p_target
-        logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
+            old_p = runtime.p_target
+            runtime.p_target = p_target
+            logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
 
-        return {"ok": True, "channel": smu_channel, "p_target": p_target}
+            return {"ok": True, "channel": smu_channel, "p_target": p_target}
 
     async def update_limits(
         self,
@@ -309,60 +347,62 @@ class SafetyManager:
         i_comp: float | None = None,
     ) -> dict[str, Any]:
         """Live-update V/I compliance limits. Validates against config limits."""
-        smu_channel = normalize_smu_channel(channel)
+        async with self._cmd_lock:
+            smu_channel = normalize_smu_channel(channel)
 
-        if self._state == SafetyState.FAULT_LATCHED:
-            return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
+            if self._state == SafetyState.FAULT_LATCHED:
+                return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
 
-        if smu_channel not in self._active_sources:
-            return {"ok": False, "error": f"Channel {smu_channel} not active"}
+            if smu_channel not in self._active_sources:
+                return {"ok": False, "error": f"Channel {smu_channel} not active"}
 
-        if self._keithley is None:
-            return {"ok": False, "error": "Keithley not connected"}
+            if self._keithley is None:
+                return {"ok": False, "error": "Keithley not connected"}
 
-        runtime = self._keithley._channels.get(smu_channel)
-        if runtime is None or not runtime.active:
-            return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
+            runtime = self._keithley._channels.get(smu_channel)
+            if runtime is None or not runtime.active:
+                return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
 
-        if v_comp is not None:
-            if v_comp <= 0:
-                return {"ok": False, "error": "v_comp must be > 0"}
-            if v_comp > self._config.max_voltage_v:
-                return {"ok": False, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
-            if not self._keithley.mock:
-                await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
-            runtime.v_comp = v_comp  # update only after successful write
+            if v_comp is not None:
+                if v_comp <= 0:
+                    return {"ok": False, "error": "v_comp must be > 0"}
+                if v_comp > self._config.max_voltage_v:
+                    return {"ok": False, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
+                if not self._keithley.mock:
+                    await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
+                runtime.v_comp = v_comp  # update only after successful write
 
-        if i_comp is not None:
-            if i_comp <= 0:
-                return {"ok": False, "error": "i_comp must be > 0"}
-            if i_comp > self._config.max_current_a:
-                return {"ok": False, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
-            if not self._keithley.mock:
-                await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
-            runtime.i_comp = i_comp  # update only after successful write
+            if i_comp is not None:
+                if i_comp <= 0:
+                    return {"ok": False, "error": "i_comp must be > 0"}
+                if i_comp > self._config.max_current_a:
+                    return {"ok": False, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
+                if not self._keithley.mock:
+                    await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
+                runtime.i_comp = i_comp  # update only after successful write
 
-        logger.info(
-            "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
-            smu_channel, runtime.v_comp, runtime.i_comp,
-        )
-        return {"ok": True, "channel": smu_channel, "v_comp": runtime.v_comp, "i_comp": runtime.i_comp}
+            logger.info(
+                "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
+                smu_channel, runtime.v_comp, runtime.i_comp,
+            )
+            return {"ok": True, "channel": smu_channel, "v_comp": runtime.v_comp, "i_comp": runtime.i_comp}
 
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
-        if self._state != SafetyState.FAULT_LATCHED:
-            return {"ok": False, "state": self._state.value, "error": "Нет активной аварии для подтверждения"}
-        if self._config.require_reason and not reason.strip():
-            return {"ok": False, "state": self._state.value, "error": "Укажите причину аварии"}
+        async with self._cmd_lock:
+            if self._state != SafetyState.FAULT_LATCHED:
+                return {"ok": False, "state": self._state.value, "error": "Нет активной аварии для подтверждения"}
+            if self._config.require_reason and not reason.strip():
+                return {"ok": False, "state": self._state.value, "error": "Укажите причину аварии"}
 
-        elapsed = time.monotonic() - self._fault_time
-        if elapsed < self._config.cooldown_before_rearm_s:
-            remaining = self._config.cooldown_before_rearm_s - elapsed
-            return {"ok": False, "state": self._state.value, "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
+            elapsed = time.monotonic() - self._fault_time
+            if elapsed < self._config.cooldown_before_rearm_s:
+                remaining = self._config.cooldown_before_rearm_s - elapsed
+                return {"ok": False, "state": self._state.value, "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
 
-        self._recovery_reason = reason.strip()
-        self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
-        await self._publish_keithley_channel_states("fault_acknowledged")
-        return {"ok": True, "state": self._state.value}
+            self._recovery_reason = reason.strip()
+            self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
+            await self._publish_keithley_channel_states("fault_acknowledged")
+            return {"ok": True, "state": self._state.value}
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -459,8 +499,14 @@ class SafetyManager:
                 logger.exception("State change callback failed")
 
         try:
-            asyncio.get_running_loop().create_task(self._publish_state(reason))
+            task = asyncio.get_running_loop().create_task(
+                self._publish_state(reason),
+                name=f"safety_publish_{new_state.value}",
+            )
+            self._pending_publishes.add(task)
+            task.add_done_callback(self._pending_publishes.discard)
         except RuntimeError:
+            # No running loop (sync caller during tests). Publish skipped.
             pass
 
     async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:

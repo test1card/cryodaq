@@ -11,7 +11,6 @@ GUI process не импортирует zmq — все ZMQ сокеты живу
 from __future__ import annotations
 
 import logging
-import multiprocessing
 import sys
 
 from PySide6.QtCore import QTimer
@@ -26,7 +25,10 @@ logger = logging.getLogger("cryodaq.gui")
 
 def main() -> None:
     """Точка входа cryodaq-gui."""
-    multiprocessing.freeze_support()
+    # NOTE: multiprocessing.freeze_support() is called in
+    # cryodaq._frozen_main.main_gui() BEFORE importing this module.
+    # Do not add it here — too late for Windows spawn bootloader because
+    # PySide6 is already imported at module load time above.
 
     logging.basicConfig(
         level=logging.INFO,

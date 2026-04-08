@@ -41,7 +41,9 @@ from cryodaq.gui.widgets.common import (
 
 logger = logging.getLogger(__name__)
 
-_INSTRUMENTS_DEFAULT = Path(__file__).resolve().parents[4] / "config" / "instruments.yaml"
+from cryodaq.paths import get_config_dir as _get_config_dir
+
+_INSTRUMENTS_DEFAULT = _get_config_dir() / "instruments.yaml"
 
 
 # ---------------------------------------------------------------------------

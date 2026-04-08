@@ -204,6 +204,44 @@ python -m pytest tests/reporting -q
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
 
+## SQLite version requirement
+
+CryoDAQ uses SQLite WAL mode with multiple concurrent connections (writer +
+history readers + reporting + web dashboard). Due to a WAL-reset race
+condition documented at https://www.sqlite.org/wal.html, production
+deployments **must** run SQLite >= 3.51.3.
+
+### Ubuntu 22.04
+
+Ubuntu 22.04 ships `libsqlite3-0 3.37.2`, which is inside the affected range.
+Options, in order of preference:
+
+1. **Recommended.** Build SQLite from source under `/opt/sqlite-3.51.3/` and
+   preload it: `LD_PRELOAD=/opt/sqlite-3.51.3/lib/libsqlite3.so cryodaq`.
+2. Bundle a custom `libsqlite3` in the PyInstaller frozen build (see
+   `build_scripts/cryodaq.spec`).
+3. (Fallback) Set `CRYODAQ_SQLITE_SYNC=FULL` to reduce the race window at the
+   cost of write throughput.
+
+The engine emits a WARNING on startup if it detects an affected version.
+
+### Ubuntu 24.04 / Windows 11
+
+SQLite >= 3.51.3 is available natively. No action required.
+
+## Frozen-app build (PyInstaller)
+
+```bash
+pip install -e ".[dev,web]"   # ensures pyinstaller is installed
+./build_scripts/build.sh       # Linux / macOS
+build_scripts\build.bat        # Windows
+```
+
+The build produces `dist/CryoDAQ/CryoDAQ[.exe]` plus a runtime tree of
+`config/`, `data/`, `logs/`, `plugins/` next to the exe (NOT inside
+`_internal/_MEIPASS`). Operators copy the entire `dist/CryoDAQ/` directory
+to the lab PC.
+
 ## USB Selective Suspend (Windows)
 
 Windows по умолчанию отключает USB-устройства для экономии энергии.

@@ -246,6 +246,14 @@ class MainWindow(QMainWindow):
         pass  # placeholder for future per-tab refresh
 
     def _emergency_off_shortcut(self) -> None:
+        """Emergency Off (Ctrl+Shift+X) — retain worker threads to avoid Qt segfault.
+
+        QThreads MUST be retained until ``finished``. Otherwise Qt destroys
+        the underlying C++ object while ``run()`` is still executing → segfault
+        on the operator panic button. We retain via ``parent=self`` (Qt parent
+        ownership) AND in ``self._emergency_workers`` (Python refcount).
+        See DEEP_AUDIT_CC.md B.1 and https://doc.qt.io/qt-6/qthread.html .
+        """
         from PySide6.QtWidgets import QMessageBox
 
         reply = QMessageBox.question(
@@ -255,13 +263,39 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
-            from cryodaq.gui.zmq_client import ZmqCommandWorker
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
-            for ch in ("smua", "smub"):
-                w = ZmqCommandWorker({"cmd": "keithley_emergency_off", "channel": ch})
-                w.finished.connect(lambda r: None)
-                w.start()
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        if not hasattr(self, "_emergency_workers"):
+            self._emergency_workers: list[ZmqCommandWorker] = []
+
+        for ch in ("smua", "smub"):
+            worker = ZmqCommandWorker(
+                {"cmd": "keithley_emergency_off", "channel": ch},
+                parent=self,
+            )
+            worker.finished.connect(self._on_emergency_worker_finished)
+            self._emergency_workers.append(worker)
+            worker.start()
+
+    def _on_emergency_worker_finished(self, result: dict) -> None:
+        """Clean up finished emergency workers and surface failures."""
+        if isinstance(result, dict) and not result.get("ok", True):
+            try:
+                logger.error(
+                    "Emergency off worker failed: %s",
+                    result.get("error", "unknown"),
+                )
+            except Exception:
+                pass
+        # Prune finished workers (Qt parent ownership keeps them alive
+        # until then, but pruning avoids unbounded list growth across uses).
+        if hasattr(self, "_emergency_workers"):
+            self._emergency_workers = [
+                w for w in self._emergency_workers if w.isRunning()
+            ]
 
     def _build_status_bar(self) -> None:
         """Создать статусную строку."""
