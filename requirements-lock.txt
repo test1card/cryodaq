@@ -118,6 +118,9 @@ pyproject-hooks==1.2.0
     # via
     #   build
     #   pip-tools
+pyqtdarktheme-fork==2.3.6
+    # via cryodaq (pyproject.toml)
+    # sha256:876dc8cc0e01468a3f7fe5a860dfd422ccab48b33beef18dfdecb6312c20c556
 pyqtgraph==0.13.7
     # via cryodaq (pyproject.toml)
 pyserial==3.5
