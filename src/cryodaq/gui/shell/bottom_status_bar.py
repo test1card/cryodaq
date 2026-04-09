@@ -114,7 +114,7 @@ class BottomStatusBar(QWidget):
 
     def set_connected(self, connected: bool, label: str | None = None) -> None:
         if connected:
-            self._conn_label.setText("● " + (label or "Connected"))
+            self._conn_label.setText("● " + (label or "Подключено"))
             self._conn_label.setStyleSheet(f"color: {theme.STATUS_OK};")
         else:
             self._conn_label.setText("● " + (label or "Отключено"))

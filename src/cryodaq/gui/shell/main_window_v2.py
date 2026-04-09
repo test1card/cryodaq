@@ -172,6 +172,12 @@ class MainWindowV2(QMainWindow):
             dlg = NewExperimentDialog(self)
             dlg.exec()
             return
+        if name == "web_panel":
+            self._open_web_panel()
+            return
+        if name == "restart_engine":
+            self._restart_engine()
+            return
         if name == "settings":
             # Stub: settings dialog comes later. Open existing channel editor.
             from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
@@ -258,13 +264,15 @@ class MainWindowV2(QMainWindow):
         now = time.monotonic()
         silence = now - self._last_reading_time if self._last_reading_time > 0 else 999.0
         connected = silence < 3.0
+        # Engine state derives from data flow — single source of truth
+        self._top_bar.set_engine_state(connected)
         if connected:
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
             self._rate_count = 0
             self._last_rate_time = now
             self._bottom_bar.set_data_rate(rate)
-            self._bottom_bar.set_connected(True, "Connected")
+            self._bottom_bar.set_connected(True, "Подключено")
         else:
             if self._reading_count == 0:
                 self._bottom_bar.set_connected(False, "Отключено")
@@ -272,3 +280,52 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
+
+    # ------------------------------------------------------------------
+    # More-menu actions ported from launcher
+    # ------------------------------------------------------------------
+
+    def _open_web_panel(self) -> None:
+        import webbrowser
+
+        from cryodaq.launcher import _WEB_PORT  # constant only
+
+        webbrowser.open(f"http://127.0.0.1:{_WEB_PORT}")
+
+    def _restart_engine(self) -> None:
+        """Restart engine subprocess.
+
+        When embedded in LauncherWindow, walks up the parent chain to
+        find the launcher and delegates. In standalone mode (cryodaq-gui)
+        the engine is owned by another process so the action surfaces a
+        message instead of attempting a restart.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "Перезапуск Engine",
+            "Перезапустить Engine?\n\n"
+            "Запись данных будет прервана на несколько секунд.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        host = self._find_launcher_host()
+        if host is not None:
+            host._on_restart_engine_from_shell()
+            return
+        QMessageBox.information(
+            self,
+            "Перезапуск Engine",
+            "Перезапуск Engine доступен только при запуске через лаунчер.",
+        )
+
+    def _find_launcher_host(self):
+        parent = self.parent()
+        while parent is not None:
+            if parent.__class__.__name__ == "LauncherWindow":
+                return parent
+            parent = parent.parent() if callable(getattr(parent, "parent", None)) else None
+        return None

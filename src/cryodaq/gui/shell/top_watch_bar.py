@@ -114,7 +114,7 @@ class TopWatchBar(QWidget):
         layout.setSpacing(theme.SPACE_4)
 
         # Zone 1: engine
-        self._engine_label = QLabel("● Engine —")
+        self._engine_label = QLabel("● Engine: —")
         self._engine_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._engine_label)
 
@@ -127,7 +127,7 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._exp_label, stretch=1)
 
         # Zone 3: channel summary
-        self._channel_label = QLabel("● —/— OK")
+        self._channel_label = QLabel("● —/— норма")
         self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._channel_label)
 
@@ -165,15 +165,9 @@ class TopWatchBar(QWidget):
 
     def _on_experiment_result(self, result: dict) -> None:
         ok = bool(result.get("ok"))
-        # Zone 1 — engine status (derived from command success)
-        if ok:
-            self._engine_label.setText("● Engine OK")
-            self._engine_label.setStyleSheet(f"color: {theme.STATUS_OK};")
-        else:
-            self._engine_label.setText("● Engine offline")
-            self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
-
-        # Zone 2 — experiment
+        # Zone 2 — experiment (zone 1 engine state is driven externally
+        # via set_engine_state() so it stays consistent with the launcher
+        # and the reading data flow).
         exp = result.get("active_experiment") if ok else None
         if not exp:
             self._exp_label.setText("○ Нет активного эксперимента")
@@ -194,7 +188,7 @@ class TopWatchBar(QWidget):
     def _refresh_channels(self) -> None:
         """Re-render zone 3 from local channel state cache."""
         if not self._channel_status:
-            self._channel_label.setText("● —/— OK")
+            self._channel_label.setText("● —/— норма")
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
         total = len(self._channel_status)
@@ -212,9 +206,9 @@ class TopWatchBar(QWidget):
             ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
         }.get(worst, theme.TEXT_MUTED)
         non_ok = total - ok_count
-        text = f"● {ok_count}/{total} OK"
+        text = f"● {ok_count}/{total} норма"
         if non_ok > 0:
-            text += f" · {non_ok} в caution"
+            text += f" · {non_ok} вне нормы"
         self._channel_label.setText(text)
         self._channel_label.setStyleSheet(f"color: {color};")
 
@@ -238,12 +232,26 @@ class TopWatchBar(QWidget):
             self._alarms_label.setText("🛎 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"🛎 {n} active")
+            self._alarms_label.setText(f"🛎 {n} актив.")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
     # ------------------------------------------------------------------
     # External setters (for direct injection from MainWindowV2 dispatchers)
     # ------------------------------------------------------------------
+
+    def set_engine_state(self, alive: bool) -> None:
+        """Update zone 1 from authoritative external source.
+
+        Called by MainWindowV2 (which knows whether readings are flowing)
+        and by the launcher (which owns the engine subprocess lifecycle).
+        Single source of truth — no internal polling for engine state.
+        """
+        if alive:
+            self._engine_label.setText("● Engine: работает")
+            self._engine_label.setStyleSheet(f"color: {theme.STATUS_OK};")
+        else:
+            self._engine_label.setText("● Engine: нет связи")
+            self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
     def set_alarm_count(self, n: int) -> None:
         self._alarm_count = max(0, int(n))

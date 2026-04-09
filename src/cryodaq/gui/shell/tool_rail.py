@@ -76,6 +76,9 @@ _MORE_ITEMS = [
     ("archive", "Архив"),
     ("calibration", "Калибровка"),
     ("settings", "Настройки"),
+    ("__separator__", ""),
+    ("web_panel", "Открыть Web-панель"),
+    ("restart_engine", "Перезапустить Engine"),
 ]
 
 
@@ -191,6 +194,9 @@ class ToolRail(QFrame):
     def _show_more_menu(self) -> None:
         menu = QMenu(self)
         for name, label in _MORE_ITEMS:
+            if name == "__separator__":
+                menu.addSeparator()
+                continue
             action = menu.addAction(label)
             action.triggered.connect(lambda checked=False, n=name: self.tool_clicked.emit(n))
         # Position near the more button

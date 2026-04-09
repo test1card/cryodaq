@@ -365,7 +365,12 @@ class LauncherWindow(QMainWindow):
         root.setSpacing(0)
 
         # --- Верхняя панель статуса engine ---
+        # Phase UI-1 v2: this top bar is hidden because shell v2's
+        # TopWatchBar replaces it. The widgets remain constructed because
+        # other launcher methods (_check_engine_health, _on_restart_engine)
+        # still write to self._engine_indicator and self._engine_label.
         top_bar = QWidget()
+        self._top_bar = top_bar
         top_bar.setFixedHeight(40)
         top_bar.setStyleSheet("background-color: #161b22; border-bottom: 1px solid #30363d;")
         tbl = QHBoxLayout(top_bar)
@@ -402,26 +407,24 @@ class LauncherWindow(QMainWindow):
         tbl.addWidget(restart_btn)
 
         root.addWidget(top_bar)
+        # Phase UI-1 v2: shell v2 provides TopWatchBar; hide launcher's
+        # own engine bar to avoid duplicated chrome.
+        top_bar.hide()
 
         # --- Встроенное главное окно ---
         self._main_window = MainWindow(bridge=self._bridge, embedded=True)
-        # Скрываем statusBar MainWindow — используем launcher statusBar
-        self._main_window.statusBar().setVisible(False)
-        # Переносим меню MainWindow (Файл, Эксперимент, Настройки) в launcher menuBar
+        # Phase UI-1 v2: shell v2 has its own BottomStatusBar; hide
+        # launcher's status bar entirely.
+        self.statusBar().setVisible(False)
+        # MainWindowV2 has no menu actions, so this is a no-op for v2.
         self._merge_main_window_menus()
         root.addWidget(self._main_window, stretch=1)
 
-        # --- Статусная строка ---
-        status_bar = self.statusBar()
+        # Phase UI-1 v2: status bar widgets retained as orphaned
+        # attributes because other launcher methods read/write them.
         self._status_conn = QLabel("⬤ Отключено")
-        self._status_conn.setStyleSheet("color: #FF4136; font-weight: bold;")
-        status_bar.addWidget(self._status_conn)
-
         self._status_rate = QLabel("0 изм/с")
-        status_bar.addPermanentWidget(self._status_rate)
-
         self._status_uptime = QLabel("")
-        status_bar.addPermanentWidget(self._status_uptime)
 
     def _build_tray(self) -> None:
         """Создать иконку в системном трее."""
@@ -492,6 +495,12 @@ class LauncherWindow(QMainWindow):
     @Slot()
     def _on_open_web(self) -> None:
         webbrowser.open(f"http://127.0.0.1:{_WEB_PORT}")
+
+    def _on_restart_engine_from_shell(self) -> None:
+        """Entry point for shell v2 ⋯ menu — restart without re-prompting."""
+        if not self._tray_only:
+            self._engine_label.setText("Engine: перезапуск...")
+        self._restart_engine()
 
     @Slot()
     def _on_restart_engine(self) -> None:
