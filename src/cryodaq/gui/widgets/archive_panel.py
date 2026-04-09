@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -275,9 +276,9 @@ class ArchivePanel(QWidget):
             if data_item:
                 from PySide6.QtGui import QColor
                 if data_item.text() == "✓":
-                    data_item.setForeground(QColor("#2ECC40"))
+                    data_item.setForeground(QColor(theme.STATUS_OK))
                 else:
-                    data_item.setForeground(QColor("#555555"))
+                    data_item.setForeground(QColor(theme.TEXT_DISABLED))
         self._table.resizeColumnsToContents()
 
     def _selected_entry(self) -> dict[str, Any] | None:

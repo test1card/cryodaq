@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -175,7 +176,7 @@ class CalibrationSetupWidget(QWidget):
 
         # Note + start button
         note = QLabel("Опорный канал автоматически исключается из целевых.")
-        note.setStyleSheet("color: #888888;")
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         root.addWidget(note)
 
         self._start_btn = QPushButton("Начать калибровочный прогон")
@@ -298,19 +299,19 @@ class CalibrationAcquisitionWidget(QWidget):
             "▓ dense (>10 pts/K)  ▒ medium (3-10 pts/K)  "
             "░ sparse (<3 pts/K)  ▁ empty"
         )
-        legend.setStyleSheet("color: #888888; font-size: 9pt;")
+        legend.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 9pt;")
         cov_layout.addWidget(legend)
         root.addWidget(coverage_box)
 
         # Live readings area
         self._live_label = QLabel("")
-        self._live_label.setStyleSheet("color: #58a6ff;")
+        self._live_label.setStyleSheet(f"color: {theme.TEXT_ACCENT};")
         self._live_label.setWordWrap(True)
         root.addWidget(self._live_label, stretch=1)
 
         note = QLabel("Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент.")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #888888;")
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         root.addWidget(note)
 
     def update_stats(self, stats: dict[str, Any]) -> None:
@@ -393,7 +394,7 @@ class CalibrationResultsWidget(QWidget):
 
         # Before/after
         self._delta_label = QLabel("")
-        self._delta_label.setStyleSheet("color: #58a6ff;")
+        self._delta_label.setStyleSheet(f"color: {theme.TEXT_ACCENT};")
         apply_layout.addRow("Δ:", self._delta_label)
         root.addWidget(apply_box)
 

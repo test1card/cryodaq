@@ -24,15 +24,16 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
 # Цвета severity
 _SEVERITY_COLORS: dict[str, str] = {
-    "CRITICAL": "#FF4136",
-    "WARNING": "#FF851B",
-    "INFO": "#0074D9",
+    "CRITICAL": theme.STATUS_FAULT,
+    "WARNING": theme.STATUS_WARNING,
+    "INFO": theme.STATUS_INFO,
 }
 
 # Иконки severity (Unicode)
@@ -262,8 +263,8 @@ class AlarmPanel(QWidget):
             if alarm.state == "active":
                 btn = QPushButton("Подтвердить")
                 btn.setStyleSheet(
-                    f"background-color: {_SEVERITY_COLORS.get(alarm.severity, '#666')}; "
-                    "color: white; border: none; padding: 4px 8px; border-radius: 3px;"
+                    f"background-color: {_SEVERITY_COLORS.get(alarm.severity, theme.STONE_400)}; "
+                    f"color: {theme.TEXT_INVERSE}; border: none; padding: {theme.SPACE_1}px {theme.SPACE_2}px; border-radius: {theme.RADIUS_SM}px;"
                 )
                 btn.clicked.connect(lambda checked=False, name=alarm.name: self._acknowledge(name))
                 self._table.setCellWidget(row_idx, 7, btn)
@@ -356,8 +357,8 @@ class AlarmPanel(QWidget):
             # ACK button
             btn = QPushButton("ACK")
             btn.setStyleSheet(
-                f"background-color: {_SEVERITY_COLORS.get(level, '#666')}; "
-                "color: white; border: none; padding: 2px 6px; border-radius: 3px;"
+                f"background-color: {_SEVERITY_COLORS.get(level, theme.STONE_400)}; "
+                f"color: {theme.TEXT_INVERSE}; border: none; padding: 2px 6px; border-radius: {theme.RADIUS_SM}px;"
             )
             btn.clicked.connect(lambda checked=False, aid=alarm_id: self._acknowledge_v2(aid))
             self._v2_table.setCellWidget(row_idx, 5, btn)

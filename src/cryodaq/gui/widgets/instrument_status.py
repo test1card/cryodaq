@@ -24,15 +24,16 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.sensor_diag_panel import SensorDiagPanel
 
 logger = logging.getLogger(__name__)
 
 # Цвета состояния прибора
-_COLOR_OK = "#2ECC40"
-_COLOR_WARN = "#FFDC00"
-_COLOR_ERROR = "#FF4136"
-_COLOR_OFFLINE = "#AAAAAA"
+_COLOR_OK = theme.STATUS_OK
+_COLOR_WARN = theme.STATUS_CAUTION
+_COLOR_ERROR = theme.STATUS_FAULT
+_COLOR_OFFLINE = theme.STATUS_STALE
 
 # Adaptive timeout: timeout = median_interval × multiplier
 _TIMEOUT_MULTIPLIER = 5.0
@@ -171,8 +172,8 @@ class _InstrumentCard(QFrame):
         """Обновить цвет индикатора и рамки."""
         self._indicator.setStyleSheet(f"color: {color};")
         self.setStyleSheet(
-            f"_InstrumentCard {{ border: 2px solid {color}; border-radius: 6px; "
-            f"background-color: #1a1a2e; }}"
+            f"_InstrumentCard {{ border: 2px solid {color}; border-radius: {theme.RADIUS_LG}px; "
+            f"background-color: {theme.SURFACE_CARD}; }}"
         )
 
 

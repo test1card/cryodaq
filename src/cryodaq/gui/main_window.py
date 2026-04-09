@@ -27,6 +27,9 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.paths import get_data_dir
+from cryodaq.gui import theme
+from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.tray_status import TrayController, resolve_tray_status
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
@@ -309,7 +312,7 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self._uptime_label)
 
         self._sensor_diag_label = QLabel("Датчики: —")
-        self._sensor_diag_label.setStyleSheet("color: #8b949e;")
+        self._sensor_diag_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         status_bar.addPermanentWidget(self._sensor_diag_label)
 
         self._rate_label = QLabel("0 изм/с")

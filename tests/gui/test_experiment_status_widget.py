@@ -7,6 +7,7 @@ from datetime import UTC
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.overview_panel import ExperimentStatusWidget
 
 
@@ -42,7 +43,7 @@ def test_active_experiment_shows_name(widget) -> None:
     text = widget._status_label.text()
     assert "Cooldown #42" in text
     assert "Захолаживание" in text
-    assert widget._status_label.styleSheet() == "color: #2ECC40; border: none;"
+    assert widget._status_label.styleSheet() == f"color: {theme.STATUS_OK}; border: none;"
 
 
 def test_no_experiment_shows_inactive(widget) -> None:

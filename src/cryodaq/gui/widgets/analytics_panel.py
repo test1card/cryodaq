@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.vacuum_trend_panel import VacuumTrendPanel
 
 # Буфер: 7200 точек ≈ 2 часа при 1 Гц
@@ -57,7 +58,6 @@ class AnalyticsPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         # --- Буферы данных ---
         # (unix_timestamp, value) для R_thermal
@@ -117,7 +117,7 @@ class AnalyticsPanel(QWidget):
         """Карточка: Тепловое сопротивление."""
         card = QFrame()
         card.setStyleSheet(
-            "background-color: #2A2A2A; border: 1px solid #f0883e; border-radius: 8px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -132,19 +132,19 @@ class AnalyticsPanel(QWidget):
 
         title = QLabel("Тепловое сопротивление")
         title.setFont(label_font)
-        title.setStyleSheet("color: #f0883e; border: none;")
+        title.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; border: none;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         self._r_value = QLabel("—")
         self._r_value.setFont(big_font)
-        self._r_value.setStyleSheet("color: #FFFFFF; border: none;")
+        self._r_value.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         self._r_value.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._r_value)
 
         unit = QLabel("К/Вт")
         unit.setFont(label_font)
-        unit.setStyleSheet("color: #888888; border: none;")
+        unit.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         unit.setAlignment(Qt.AlignCenter)
         layout.addWidget(unit)
 
@@ -154,7 +154,7 @@ class AnalyticsPanel(QWidget):
         """Карточка: Прогноз охлаждения."""
         card = QFrame()
         card.setStyleSheet(
-            "background-color: #2A2A2A; border: 1px solid #58a6ff; border-radius: 8px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -173,21 +173,21 @@ class AnalyticsPanel(QWidget):
         # Заголовок
         title = QLabel("Прогноз охлаждения")
         title.setFont(label_font)
-        title.setStyleSheet("color: #58a6ff; border: none;")
+        title.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; border: none;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         # Большое число ETA
         self._eta_value = QLabel("Ожидание cooldown...")
         self._eta_value.setFont(big_font)
-        self._eta_value.setStyleSheet("color: #FFFFFF; border: none;")
+        self._eta_value.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         self._eta_value.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._eta_value)
 
         # Подзаголовок "До 4K"
         self._eta_subtitle = QLabel("До 4K")
         self._eta_subtitle.setFont(label_font)
-        self._eta_subtitle.setStyleSheet("color: #888888; border: none;")
+        self._eta_subtitle.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         self._eta_subtitle.setAlignment(Qt.AlignCenter)
         self._eta_subtitle.setVisible(False)
         layout.addWidget(self._eta_subtitle)
@@ -198,19 +198,9 @@ class AnalyticsPanel(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
         self._progress_bar.setStyleSheet(
-            """
-            QProgressBar {
-                border: 1px solid #444444;
-                border-radius: 4px;
-                background-color: #1A1A1A;
-                color: #CCCCCC;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #58a6ff;
-                border-radius: 3px;
-            }
-            """
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; "
+            f"background-color: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; }} "
+            f"QProgressBar::chunk {{ background-color: {theme.ACCENT_400}; border-radius: {theme.RADIUS_SM}px; }}"
         )
         self._progress_bar.setVisible(False)
         layout.addWidget(self._progress_bar)
@@ -218,7 +208,7 @@ class AnalyticsPanel(QWidget):
         # Метка фазы
         self._phase_label = QLabel("")
         self._phase_label.setFont(label_font)
-        self._phase_label.setStyleSheet("color: #79c0ff; border: none;")
+        self._phase_label.setStyleSheet(f"color: {theme.TEXT_ACCENT}; border: none;")
         self._phase_label.setAlignment(Qt.AlignCenter)
         self._phase_label.setVisible(False)
         layout.addWidget(self._phase_label)
@@ -226,7 +216,7 @@ class AnalyticsPanel(QWidget):
         # Статус модели
         self._model_label = QLabel("")
         self._model_label.setFont(small_font)
-        self._model_label.setStyleSheet("color: #666666; border: none;")
+        self._model_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none;")
         self._model_label.setAlignment(Qt.AlignCenter)
         self._model_label.setVisible(False)
         layout.addWidget(self._model_label)
@@ -242,7 +232,7 @@ class AnalyticsPanel(QWidget):
         from PySide6.QtWidgets import QLabel as _Label
         self._empty_overlay = _Label("Нет данных для аналитики.\nНачните эксперимент.", self._plot)
         self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_overlay.setStyleSheet("color: #666666; font-size: 14pt; background: transparent;")
+        self._empty_overlay.setStyleSheet(f"color: {theme.TEXT_DISABLED}; font-size: 14pt; background: transparent;")
         self._empty_overlay.setGeometry(0, 0, 400, 100)
 
         pi = self._plot.getPlotItem()

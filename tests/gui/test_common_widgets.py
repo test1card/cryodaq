@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel, QTableWidget
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     StatusBanner,
     add_form_rows,
@@ -52,11 +53,11 @@ def test_status_banner_switches_levels() -> None:
 
     banner.show_error("Ошибка")
     assert banner.text() == "Ошибка"
-    assert "#FF4136" in banner.styleSheet()
+    assert theme.STATUS_FAULT in banner.styleSheet()
 
     banner.show_success("Готово")
     assert banner.text() == "Готово"
-    assert "#2ECC40" in banner.styleSheet()
+    assert theme.STATUS_OK in banner.styleSheet()
 
 
 def test_add_form_rows_adds_widgets_in_order() -> None:

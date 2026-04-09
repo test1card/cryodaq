@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -86,10 +87,10 @@ _COL_HEADERS = [
 
 def _pct_color(pct: float) -> str:
     if pct >= 99.0:
-        return "#2ECC40"
+        return theme.STATUS_OK
     if pct >= 90.0:
-        return "#FFDC00"
-    return "#FF4136"
+        return theme.STATUS_CAUTION
+    return theme.STATUS_FAULT
 
 
 class ConductivityPanel(QWidget):
@@ -253,7 +254,7 @@ class ConductivityPanel(QWidget):
         auto_layout.addWidget(self._power_count_spin, 2, 1)
 
         self._power_preview = QLabel("")
-        self._power_preview.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        self._power_preview.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 9pt;")
         self._power_preview.setWordWrap(True)
         auto_layout.addWidget(self._power_preview, 3, 0, 1, 2)
 
@@ -358,7 +359,7 @@ class ConductivityPanel(QWidget):
         from PySide6.QtWidgets import QLabel as _Label
         self._empty_overlay = _Label("Нет данных для теплопроводности.\nНачните эксперимент.", self._plot)
         self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_overlay.setStyleSheet("color: #666666; font-size: 14pt; background: transparent;")
+        self._empty_overlay.setStyleSheet(f"color: {theme.TEXT_DISABLED}; font-size: 14pt; background: transparent;")
         self._empty_overlay.setGeometry(0, 0, 400, 100)
 
         pi = self._plot.getPlotItem()

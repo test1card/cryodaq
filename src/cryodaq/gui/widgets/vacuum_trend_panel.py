@@ -24,13 +24,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import apply_panel_frame_style
 
-_COLOR_GREEN = "#2ECC40"
-_COLOR_YELLOW = "#FFDC00"
-_COLOR_RED = "#FF4136"
-_COLOR_WHITE = "#c9d1d9"
-_COLOR_MUTED = "#8b949e"
+_COLOR_GREEN = theme.STATUS_OK
+_COLOR_YELLOW = theme.STATUS_CAUTION
+_COLOR_RED = theme.STATUS_FAULT
+_COLOR_WHITE = theme.TEXT_PRIMARY
+_COLOR_MUTED = theme.TEXT_MUTED
 
 _TREND_ICONS: dict[str, tuple[str, str]] = {
     "pumping_down": ("↓", _COLOR_GREEN),
@@ -104,7 +105,7 @@ class VacuumTrendPanel(QWidget):
         header_layout.setContentsMargins(12, 8, 12, 8)
         title = QLabel("ПРОГНОЗ ВАКУУМА")
         title.setFont(QFont("", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f0f6fc;")
+        title.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
         header_layout.addWidget(title)
         header_layout.addStretch()
         self._status_label = QLabel("")
@@ -179,8 +180,8 @@ class VacuumTrendPanel(QWidget):
         self._confidence_bar.setTextVisible(True)
         self._confidence_bar.setFixedHeight(16)
         self._confidence_bar.setStyleSheet(
-            "QProgressBar { border: 1px solid #21262d; border-radius: 3px; "
-            "background: #0d1117; color: #c9d1d9; text-align: center; font-size: 9px; } "
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "
+            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "
             f"QProgressBar::chunk {{ background: {_COLOR_GREEN}; border-radius: 2px; }}"
         )
         sb.addWidget(self._confidence_bar)
@@ -220,7 +221,7 @@ class VacuumTrendPanel(QWidget):
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet(
-            "color: #666666; font-size: 12pt; background: transparent;"
+            f"color: {theme.TEXT_DISABLED}; font-size: 12pt; background: transparent;"
         )
         self._empty_label.setGeometry(50, 50, 400, 80)
         self._empty_visible = True  # track state ourselves (widget visibility depends on show())
@@ -311,8 +312,8 @@ class VacuumTrendPanel(QWidget):
         self._confidence_bar.setValue(int(confidence * 100))
         color = _confidence_color(confidence)
         self._confidence_bar.setStyleSheet(
-            "QProgressBar { border: 1px solid #21262d; border-radius: 3px; "
-            "background: #0d1117; color: #c9d1d9; text-align: center; font-size: 9px; } "
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "
+            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "
             f"QProgressBar::chunk {{ background: {color}; border-radius: 2px; }}"
         )
 
