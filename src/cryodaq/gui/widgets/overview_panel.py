@@ -1032,8 +1032,12 @@ class OverviewPanel(QWidget):
         root.setSpacing(2)
 
         # ============ 1. STATUS BARS (full width, compact) ============
-        self._status_strip = StatusStrip()
-        root.addWidget(self._status_strip)
+        # Phase UI-1 v2: StatusStrip duplicates info now in TopWatchBar +
+        # BottomStatusBar. Constructed but not added to layout so existing
+        # set_safety_state / set_alarm_count / set_keithley_status calls
+        # below remain valid no-ops until Block B rewrite.
+        self._status_strip = StatusStrip(self)
+        self._status_strip.hide()
 
         # Phase UI-1 v2: ExperimentStatusWidget moved to TopWatchBar zone 2.
         # Widgets are still constructed (orphaned, parented to self) so other

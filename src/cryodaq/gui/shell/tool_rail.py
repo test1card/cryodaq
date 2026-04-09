@@ -10,10 +10,12 @@ Lucide SVGs.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QByteArray, QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFrame,
     QMenu,
@@ -23,6 +25,28 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.gui import theme
+
+
+@lru_cache(maxsize=128)
+def _colored_icon(svg_path_str: str, color: str, size: int) -> QIcon:
+    """Render a Lucide stroke-based SVG with a specific stroke color.
+
+    Lucide icons declare ``stroke="currentColor"`` so we can substitute the
+    placeholder before handing the bytes to QSvgRenderer.
+    """
+    path = Path(svg_path_str)
+    if not path.exists():
+        return QIcon()
+    raw = path.read_text(encoding="utf-8")
+    raw = raw.replace('stroke="currentColor"', f'stroke="{color}"')
+    raw = raw.replace('fill="currentColor"', f'fill="{color}"')
+    renderer = QSvgRenderer(QByteArray(raw.encode("utf-8")))
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 _RAIL_WIDTH = 50  # [calibrate]
 _BUTTON_SIZE = 40  # [calibrate]
@@ -68,15 +92,37 @@ class ToolRailButton(QToolButton):
         super().__init__(parent)
         self._name = name
         self._active = False
+        self._hover = False
+        self._icon_path = icon_path
         self.setFixedSize(_RAIL_WIDTH, _BUTTON_SIZE)
         self.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        if icon_path.exists():
-            self.setIcon(QIcon(str(icon_path)))
-        else:
+        if not icon_path.exists():
             self.setText(tooltip[:2])
+        self._refresh_icon()
         self._apply_style()
+
+    def _refresh_icon(self) -> None:
+        if not self._icon_path.exists():
+            return
+        if self._active:
+            color = theme.ACCENT_400
+        elif self._hover:
+            color = theme.TEXT_SECONDARY
+        else:
+            color = theme.TEXT_MUTED
+        self.setIcon(_colored_icon(str(self._icon_path), color, _ICON_SIZE))
+
+    def enterEvent(self, event):  # noqa: ANN001
+        self._hover = True
+        self._refresh_icon()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: ANN001
+        self._hover = False
+        self._refresh_icon()
+        super().leaveEvent(event)
 
     @property
     def name(self) -> str:
@@ -86,6 +132,7 @@ class ToolRailButton(QToolButton):
         if active == self._active:
             return
         self._active = active
+        self._refresh_icon()
         self._apply_style()
 
     def _apply_style(self) -> None:

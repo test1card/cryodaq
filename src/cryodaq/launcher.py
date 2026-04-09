@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
-from cryodaq.gui.main_window import MainWindow
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 
