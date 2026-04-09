@@ -25,7 +25,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from cryodaq.gui.main_window import MainWindow
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 

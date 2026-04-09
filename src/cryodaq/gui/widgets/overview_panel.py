@@ -1035,14 +1035,13 @@ class OverviewPanel(QWidget):
         self._status_strip = StatusStrip()
         root.addWidget(self._status_strip)
 
-        # Experiment status + Shift bar in one row
-        exp_shift_row = QHBoxLayout()
-        exp_shift_row.setSpacing(4)
-        self._experiment_status = ExperimentStatusWidget()
-        exp_shift_row.addWidget(self._experiment_status, stretch=1)
-        self._shift_bar = ShiftBar()
-        exp_shift_row.addWidget(self._shift_bar, stretch=1)
-        root.addLayout(exp_shift_row)
+        # Phase UI-1 v2: ExperimentStatusWidget moved to TopWatchBar zone 2.
+        # Widgets are still constructed (orphaned, parented to self) so other
+        # code that references them keeps working until Block B rewrite.
+        self._experiment_status = ExperimentStatusWidget(self)
+        self._experiment_status.hide()
+        self._shift_bar = ShiftBar(self)
+        self._shift_bar.hide()
 
         # ============ 2. TEMPERATURE CARDS + PRESSURE CARD ============
         self._card_grid = TempCardGrid(self._channel_mgr)
@@ -1130,18 +1129,15 @@ class OverviewPanel(QWidget):
 
         root.addWidget(graph_splitter, stretch=1)
 
-        # ============ 5. BOTTOM BAR: Keithley left, QuickLog right ============
-        bottom_bar = QHBoxLayout()
-        bottom_bar.setSpacing(4)
-
-        self._keithley_strip = KeithleyStrip()
-        bottom_bar.addWidget(self._keithley_strip, stretch=55)
-
-        self._quick_log = QuickLogWidget()
-        self._quick_log.setFixedHeight(40)
-        bottom_bar.addWidget(self._quick_log, stretch=45)
-
-        root.addLayout(bottom_bar)
+        # Phase UI-1 v2: KeithleyStrip and QuickLogWidget removed from layout.
+        # KeithleyStrip duplicates info now in tool rail Source overlay;
+        # QuickLogWidget returns as a collapsible block in Block G. Widgets
+        # remain constructed (orphaned, parented to self) so the existing
+        # _dispatch_reading routing in this file keeps working.
+        self._keithley_strip = KeithleyStrip(self)
+        self._keithley_strip.hide()
+        self._quick_log = QuickLogWidget(self)
+        self._quick_log.hide()
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика и графика давления."""
