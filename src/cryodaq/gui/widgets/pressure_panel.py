@@ -109,7 +109,7 @@ class PressurePanel(QWidget):
 
         # --- Низ: логарифмический график ---
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        self._plot.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Давление", units="мбар", color="#AAAAAA")
         pi.setLabel("bottom", "Время", color="#AAAAAA")

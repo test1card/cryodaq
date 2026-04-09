@@ -226,7 +226,7 @@ class AnalyticsPanel(QWidget):
     def _build_plot(self) -> pg.PlotWidget:
         """Построить PlotWidget с поддержкой режимов R_thermal и cooldown."""
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        self._plot.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         # Empty state overlay
         from PySide6.QtWidgets import QLabel as _Label

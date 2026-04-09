@@ -1147,7 +1147,7 @@ class OverviewPanel(QWidget):
         """Настроить внешний вид основного графика и графика давления."""
         # --- Temperature plot ---
         pw = self._plot
-        pw.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         pi = pw.getPlotItem()
         pi.setLabel("left", "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u0430", units="\u041a", color="#AAAAAA")
@@ -1176,7 +1176,7 @@ class OverviewPanel(QWidget):
 
         # --- Pressure plot ---
         pp = self._pressure_plot
-        pp.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         ppi = pp.getPlotItem()
         ppi.setLabel("left", "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435", units="mbar", color="#AAAAAA")
@@ -1657,10 +1657,10 @@ class OverviewPanel(QWidget):
         default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
         path, _ = QFileDialog.getSaveFileName(self, "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c PNG", default_name, "PNG (*.png)")
         if path:
-            # Белый фон для печати
+            # Print mode override — intentionally light background for report export.
             self._plot.setBackground("white")
             self._plot.grab().save(path, "PNG")
-            self._plot.setBackground("#111111")
+            self._plot.setBackground(theme.PLOT_BG)
 
     @Slot()
     def _on_export_csv(self) -> None:

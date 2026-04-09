@@ -299,7 +299,7 @@ class AutoSweepPanel(QWidget):
 
         # График температур (live)
         self._live_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        self._live_plot.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
         pi = self._live_plot.getPlotItem()
         pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
         pi.showGrid(x=True, y=True, alpha=0.3)

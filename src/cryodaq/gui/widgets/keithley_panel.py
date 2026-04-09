@@ -205,7 +205,7 @@ class _SmuPanel(QFrame):
         for idx, (key, (title_text, unit)) in enumerate(_MEASUREMENTS.items()):
             time_axis = pg.DateAxisItem(orientation="bottom")
             plot = pg.PlotWidget(axisItems={"bottom": time_axis})
-            plot.setBackground("#111111")
+            # Background provided by gui.theme global pyqtgraph config.
             item = plot.getPlotItem()
             item.setLabel("left", title_text, units=unit, color="#AAAAAA")
             item.showGrid(x=True, y=True, alpha=0.2)

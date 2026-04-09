@@ -264,7 +264,7 @@ class TemperaturePanel(QWidget):
     def _init_plot(self) -> None:
         """Настроить внешний вид графика."""
         pw = self._plot_widget
-        pw.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         plot_item = pw.getPlotItem()
         plot_item.setLabel("left", "Температура", units="К", color="#AAAAAA")

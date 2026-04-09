@@ -191,7 +191,7 @@ class VacuumTrendPanel(QWidget):
 
         # --- Right: plot ---
         self._plot = pg.PlotWidget()
-        self._plot.setBackground("#0d1117")
+        # Background provided by gui.theme global pyqtgraph config.
         pi = self._plot.getPlotItem()
         pi.showGrid(x=True, y=True, alpha=0.2)
         pi.setLabel("left", "log₁₀(P), мбар", color="#AAAAAA")

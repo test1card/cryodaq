@@ -353,7 +353,7 @@ class ConductivityPanel(QWidget):
 
         # График
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        self._plot.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         # Empty state overlay
         from PySide6.QtWidgets import QLabel as _Label
