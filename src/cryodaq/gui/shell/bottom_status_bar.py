@@ -32,9 +32,10 @@ class BottomStatusBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
+        self.setObjectName("BottomStatusBar")
         self.setAutoFillBackground(True)
         self.setStyleSheet(
-            f"QWidget {{ background-color: {theme.SURFACE_PANEL}; "
+            f"#BottomStatusBar {{ background-color: {theme.SURFACE_PANEL}; "
             f"border-top: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 
