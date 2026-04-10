@@ -160,8 +160,9 @@ class ToolRail(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(_RAIL_WIDTH)
+        self.setAutoFillBackground(True)
         self.setStyleSheet(
-            f"ToolRail {{ background-color: {theme.SURFACE_PANEL}; "
+            f"QFrame {{ background-color: {theme.SURFACE_PANEL}; "
             f"border-right: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 

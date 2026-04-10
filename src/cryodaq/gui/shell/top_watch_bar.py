@@ -70,8 +70,9 @@ class TopWatchBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
+        self.setAutoFillBackground(True)
         self.setStyleSheet(
-            f"TopWatchBar {{ background-color: {theme.SURFACE_PANEL}; "
+            f"QWidget {{ background-color: {theme.SURFACE_PANEL}; "
             f"border-bottom: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 
