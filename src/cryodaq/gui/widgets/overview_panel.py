@@ -85,6 +85,48 @@ def _disk_free_gb() -> float:
         return -1.0
 
 
+class _NullValue:
+    """Falsy callable that also supports .get() for dict-like access."""
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, *args, **kwargs):
+        return None
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def __iter__(self):
+        return iter(())
+
+    def __getattr__(self, name):
+        return self
+
+
+_NOOP = _NullValue()
+
+
+class _OrphanedStub:
+    """Phase UI-1 v2: no-op replacement for widgets removed during shell
+    transition.
+
+    OverviewPanel still has many code paths (_dispatch_reading,
+    set_safety_state, on_reading, set_alarm_count, set_keithley_status,
+    set_cooldown_eta) that call methods on widgets which were removed
+    from layout. Constructing the real widgets and hiding them is
+    fragile because some of them call setVisible(True) on data arrival,
+    re-introducing visible orphan rendering at (0, 0).
+
+    This stub absorbs every attribute/method access as no-op via
+    __getattr__, returning a _NullValue that is falsy, callable, and
+    supports .get(). Removed completely in Block B.
+    """
+
+    def __getattr__(self, name):
+        return _NOOP
+
+
 # ---------------------------------------------------------------------------
 # StatusStrip
 # ---------------------------------------------------------------------------
@@ -1032,18 +1074,12 @@ class OverviewPanel(QWidget):
         root.setSpacing(2)
 
         # ============ 1. STATUS BARS (full width, compact) ============
-        # Phase UI-1 v2: StatusStrip duplicates info now in TopWatchBar +
-        # BottomStatusBar. Constructed but not added to layout so existing
-        # set_safety_state / set_alarm_count / set_keithley_status calls
-        # below remain valid no-ops until Block B rewrite.
-        self._status_strip = StatusStrip(self)
-        self._status_strip.hide()
+        # Phase UI-1 v2 (A.9): orphan widgets replaced with no-op stubs.
+        # Real widgets caused visible rendering at (0,0) when their internal
+        # logic called setVisible(True) on data arrival. See Block A.9 spec.
+        self._status_strip = _OrphanedStub()
 
-        # Phase UI-1 v2: ExperimentStatusWidget moved to TopWatchBar zone 2.
-        # Widgets are still constructed (orphaned, parented to self) so other
-        # code that references them keeps working until Block B rewrite.
-        self._experiment_status = ExperimentStatusWidget(self)
-        self._experiment_status.hide()
+        self._experiment_status = _OrphanedStub()
         self._shift_bar = ShiftBar(self)
         self._shift_bar.hide()
 
@@ -1133,15 +1169,8 @@ class OverviewPanel(QWidget):
 
         root.addWidget(graph_splitter, stretch=1)
 
-        # Phase UI-1 v2: KeithleyStrip and QuickLogWidget removed from layout.
-        # KeithleyStrip duplicates info now in tool rail Source overlay;
-        # QuickLogWidget returns as a collapsible block in Block G. Widgets
-        # remain constructed (orphaned, parented to self) so the existing
-        # _dispatch_reading routing in this file keeps working.
-        self._keithley_strip = KeithleyStrip(self)
-        self._keithley_strip.hide()
-        self._quick_log = QuickLogWidget(self)
-        self._quick_log.hide()
+        self._keithley_strip = _OrphanedStub()
+        self._quick_log = _OrphanedStub()
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика и графика давления."""

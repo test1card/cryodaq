@@ -120,7 +120,7 @@ class MainWindowV2(QMainWindow):
         self._calibration_panel: CalibrationPanel | None = None
 
         # Shell components
-        self._top_bar = TopWatchBar()
+        self._top_bar = TopWatchBar(channel_manager=self._channel_mgr)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
         self._overlay = OverlayContainer()
@@ -286,11 +286,27 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_web_panel(self) -> None:
+        import socket
         import webbrowser
+
+        from PySide6.QtWidgets import QMessageBox
 
         from cryodaq.launcher import _WEB_PORT  # constant only
 
-        webbrowser.open(f"http://127.0.0.1:{_WEB_PORT}")
+        host = "127.0.0.1"
+        try:
+            with socket.create_connection((host, _WEB_PORT), timeout=0.5):
+                pass
+        except (OSError, socket.timeout):
+            QMessageBox.information(
+                self,
+                "Web-панель",
+                f"Веб-сервер не запущен на порту {_WEB_PORT}.\n\n"
+                f"Запустите его командой:\n"
+                f"uvicorn cryodaq.web.server:app --host 0.0.0.0 --port {_WEB_PORT}",
+            )
+            return
+        webbrowser.open(f"http://{host}:{_WEB_PORT}")
 
     def _restart_engine(self) -> None:
         """Restart engine subprocess.

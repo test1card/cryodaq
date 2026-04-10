@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
+from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+
+_STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
 
 _HEIGHT_PX = 48  # [calibrate]
 
@@ -67,7 +70,7 @@ class TopWatchBar(QWidget):
     experiment_clicked = Signal()
     alarms_clicked = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
         self.setObjectName("TopWatchBar")
@@ -77,8 +80,9 @@ class TopWatchBar(QWidget):
             f"border-bottom: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 
-        # Channel state cache (channel_id -> ChannelStatus)
-        self._channel_status: dict[str, ChannelStatus] = {}
+        self._channel_mgr = channel_manager
+        # Per-channel last-seen tracking: channel_id -> (monotonic_ts, status)
+        self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
         self._alarm_count: int = 0
 
         self._build_ui()
@@ -101,10 +105,10 @@ class TopWatchBar(QWidget):
         self._slow_timer.timeout.connect(self._poll_alarms)
         self._slow_timer.start()
 
-        self._workers: list = []
-        # Note: no singleShot initial poll — periodic timers fire on first
-        # interval. Avoiding singleShot prevents leaking pending callbacks
-        # across test boundaries (cf. test_keithley_panel_contract pollution).
+        # One in-flight worker per poll stream — skip tick if previous
+        # request still running (Codex Finding 2, Block A.9).
+        self._experiment_worker = None
+        self._alarm_worker = None
 
     # ------------------------------------------------------------------
     # UI construction
@@ -146,24 +150,24 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        """Update channel state cache for zone 3."""
+        """Update per-channel last-seen cache for zone 3."""
         ch = reading.channel
         if ch.startswith("Т") and reading.unit == "K":
-            self._channel_status[ch] = reading.status
+            self._channel_last_seen[ch] = (time.monotonic(), reading.status)
 
     # ------------------------------------------------------------------
     # Zone refresh
     # ------------------------------------------------------------------
 
     def _poll_fast(self) -> None:
-        """Poll engine status + experiment status (zones 1, 2)."""
+        """Poll experiment status (zone 2). Skips if previous still in flight."""
+        if self._experiment_worker is not None and not self._experiment_worker.isFinished():
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
-        worker.finished.connect(self._on_experiment_result)
-        self._workers.append(worker)
-        self._workers = [w for w in self._workers if w.isRunning()]
-        worker.start()
+        self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+        self._experiment_worker.finished.connect(self._on_experiment_result)
+        self._experiment_worker.start()
 
     def _on_experiment_result(self, result: dict) -> None:
         ok = bool(result.get("ok"))
@@ -188,41 +192,64 @@ class TopWatchBar(QWidget):
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
 
     def _refresh_channels(self) -> None:
-        """Re-render zone 3 from local channel state cache."""
-        if not self._channel_status:
+        """Re-render zone 3 using ChannelManager visible channels as denominator."""
+        if self._channel_mgr is None:
             self._channel_label.setText("● —/— норма")
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
-        total = len(self._channel_status)
-        ok_count = sum(1 for s in self._channel_status.values() if s == ChannelStatus.OK)
+
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("Т")]
+        total = len(visible_ids)
+        if total == 0:
+            self._channel_label.setText("● —/— норма")
+            self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            return
+
+        now = time.monotonic()
+        ok_count = 0
+        non_ok = 0
+        waiting = 0
         worst = ChannelStatus.OK
-        for s in self._channel_status.values():
-            if s in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
-                worst = ChannelStatus.SENSOR_ERROR
-                break
-            if s in (ChannelStatus.OVERRANGE, ChannelStatus.UNDERRANGE):
-                worst = ChannelStatus.OVERRANGE
+        for ch in visible_ids:
+            entry = self._channel_last_seen.get(ch)
+            if entry is None or (now - entry[0]) > _STALE_TIMEOUT_S:
+                waiting += 1
+                continue
+            status = entry[1]
+            if status == ChannelStatus.OK:
+                ok_count += 1
+            else:
+                non_ok += 1
+                if status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
+                    worst = ChannelStatus.SENSOR_ERROR
+                elif worst != ChannelStatus.SENSOR_ERROR and status in (
+                    ChannelStatus.OVERRANGE, ChannelStatus.UNDERRANGE
+                ):
+                    worst = ChannelStatus.OVERRANGE
+
         color = {
             ChannelStatus.OK: theme.STATUS_OK,
             ChannelStatus.OVERRANGE: theme.STATUS_CAUTION,
             ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
         }.get(worst, theme.TEXT_MUTED)
-        non_ok = total - ok_count
+
         text = f"● {ok_count}/{total} норма"
         if non_ok > 0:
             text += f" · {non_ok} вне нормы"
+        if waiting > 0:
+            text += f" · {waiting} ожидают"
         self._channel_label.setText(text)
         self._channel_label.setStyleSheet(f"color: {color};")
 
     def _poll_alarms(self) -> None:
-        """Poll alarm_v2_status for zone 4."""
+        """Poll alarm_v2_status for zone 4. Skips if previous still in flight."""
+        if self._alarm_worker is not None and not self._alarm_worker.isFinished():
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
-        worker.finished.connect(self._on_alarms_result)
-        self._workers.append(worker)
-        self._workers = [w for w in self._workers if w.isRunning()]
-        worker.start()
+        self._alarm_worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
+        self._alarm_worker.finished.connect(self._on_alarms_result)
+        self._alarm_worker.start()
 
     def _on_alarms_result(self, result: dict) -> None:
         if not result.get("ok"):
@@ -261,5 +288,5 @@ class TopWatchBar(QWidget):
             self._alarms_label.setText("🛎 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"🛎 {self._alarm_count} active")
+            self._alarms_label.setText(f"🛎 {self._alarm_count} актив.")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
