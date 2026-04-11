@@ -19,10 +19,10 @@ from cryodaq.gui import theme
 
 # Zone definitions: (objectName, label, stretch)
 _ZONES = [
-    ("phaseZone", "[ФАЗА ЭКСПЕРИМЕНТА — будет в B.4]", 14),
-    ("tempPlotZone", "[ГРАФИК ТЕМПЕРАТУР — будет в B.2]", 38),
-    ("pressurePlotZone", "[ГРАФИК ДАВЛЕНИЯ — будет в B.2]", 14),
-    ("sensorGridZone", "[ДАТЧИКИ — будет в B.3]", 30),
+    ("phaseZone", "[ФАЗА ЭКСПЕРИМЕНТА — будет в B.4]", 10),
+    ("sensorGridZone", "[ДАТЧИКИ — будет в B.3]", 22),
+    ("tempPlotZone", "[ГРАФИК ТЕМПЕРАТУР — будет в B.2]", 44),
+    ("pressurePlotZone", "[ГРАФИК ДАВЛЕНИЯ — будет в B.2]", 20),
     ("quickLogZone", "[ЖУРНАЛ — будет в B.6]", 4),
 ]
 
