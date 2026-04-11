@@ -38,8 +38,8 @@ def test_dashboard_view_has_five_zones(app):
     assert expected == actual, f"Missing: {expected - actual}"
 
 
-def test_dashboard_view_on_reading_is_noop(app):
-    """on_reading() accepts a reading without raising (B.1 stub)."""
+def test_dashboard_view_on_reading_accepts(app):
+    """on_reading() accepts a reading without raising."""
     from datetime import datetime, timezone
 
     from cryodaq.drivers.base import ChannelStatus, Reading
@@ -47,7 +47,7 @@ def test_dashboard_view_on_reading_is_noop(app):
     mgr = ChannelManager()
     view = DashboardView(mgr)
     reading = Reading(
-        channel="Т1",
+        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=4.2,
         unit="K",
         timestamp=datetime.now(timezone.utc),
@@ -55,3 +55,47 @@ def test_dashboard_view_on_reading_is_noop(app):
         instrument_id="lakeshore_218s",
     )
     view.on_reading(reading)  # should not raise
+
+
+def test_on_reading_temperature_stores_short_id(app):
+    """Temperature reading stored under short ID (Т1) in buffer."""
+    from datetime import datetime, timezone
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    mgr = ChannelManager()
+    view = DashboardView(mgr)
+    reading = Reading(
+        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+        value=77.5,
+        unit="K",
+        timestamp=datetime.now(timezone.utc),
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+    view.on_reading(reading)
+    last = view._buffer_store.get_last("\u04221")
+    assert last is not None
+    assert last[1] == 77.5
+
+
+def test_on_reading_pressure_stores_full_id(app):
+    """Pressure reading stored under full channel ID."""
+    from datetime import datetime, timezone
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    mgr = ChannelManager()
+    view = DashboardView(mgr)
+    reading = Reading(
+        channel="VSP63D_1/pressure",
+        value=1e-4,
+        unit="mbar",
+        timestamp=datetime.now(timezone.utc),
+        status=ChannelStatus.OK,
+        instrument_id="thyracont_vsp63d",
+    )
+    view.on_reading(reading)
+    last = view._buffer_store.get_last("VSP63D_1/pressure")
+    assert last is not None
+    assert last[1] == 1e-4

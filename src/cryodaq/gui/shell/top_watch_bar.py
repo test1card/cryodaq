@@ -126,11 +126,15 @@ class TopWatchBar(QWidget):
 
         layout.addSpacing(theme.SPACE_3)
 
-        # Zone 2: experiment + phase + elapsed (clickable)
+        # Zone 2: experiment + phase + elapsed (clickable) + time window echo
         self._exp_label = _ClickableLabel("○ Нет активного эксперимента")
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
+
+        self._time_window_echo_label = QLabel("▸ окно 1ч")
+        self._time_window_echo_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        layout.addWidget(self._time_window_echo_label)
 
         # Zone 3: channel summary
         self._channel_label = QLabel("● —/— норма")
@@ -267,6 +271,13 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
     # External setters (for direct injection from MainWindowV2 dispatchers)
     # ------------------------------------------------------------------
+
+    def set_time_window_echo(self, label: str) -> None:
+        """Set the time window display in zone 2 footer.
+
+        Called by MainWindowV2 when TempPlotWidget emits time_window_changed.
+        """
+        self._time_window_echo_label.setText(f"▸ окно {label}")
 
     def set_engine_state(self, alive: bool) -> None:
         """Update zone 1 from authoritative external source.

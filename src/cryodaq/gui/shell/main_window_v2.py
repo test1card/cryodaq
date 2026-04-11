@@ -44,6 +44,7 @@ from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.dashboard.time_window import TimeWindow
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
@@ -147,6 +148,14 @@ class MainWindowV2(QMainWindow):
 
         # Forward alarm count from AlarmPanel directly to top bar
         self._alarm_panel.v2_alarm_count_changed.connect(self._top_bar.set_alarm_count)
+
+        # Wire dashboard time window picker → top bar echo
+        if hasattr(self._overview_panel, '_temp_plot') and \
+           self._overview_panel._temp_plot is not None:
+            self._overview_panel._temp_plot.time_window_changed.connect(
+                lambda window: self._top_bar.set_time_window_echo(window.label)
+            )
+            self._top_bar.set_time_window_echo(TimeWindow.default().label)
 
         # Compose layout
         central = QWidget()
