@@ -65,16 +65,21 @@ Source OFF is the default. Running requires continuous proof of health.
 ```text
 SafetyBroker (dedicated, overflow=FAULT)
   -> SafetyManager
-     States: SAFE_OFF -> READY -> RUN_PERMITTED -> RUNNING -> FAULT_LATCHED
+     States: SAFE_OFF -> READY -> RUN_PERMITTED -> RUNNING -> FAULT_LATCHED -> MANUAL_RECOVERY -> READY
      Note: request_run() can shortcut SAFE_OFF -> RUNNING when all preconditions met
-     Fail-on-silence: stale data -> FAULT + emergency_off
-     Rate limit: dT/dt > 5 K/min -> FAULT
+     MANUAL_RECOVERY: entered after acknowledge_fault(), transitions to
+     READY when preconditions restore.
+     Fail-on-silence: stale data -> FAULT + emergency_off (fires only
+     while state=RUNNING; outside RUNNING, stale data blocks readiness
+     via preconditions, not via fault)
+     Rate limit: dT/dt > 5 K/min -> FAULT (5 K/min is the configurable
+     default in safety.yaml, not a hard-coded invariant)
      Recovery: acknowledge + precondition re-check + cooldown
      Safety regulation is host-side only (no Keithley TSP watchdog yet —
      planned for Phase 3, requires hardware verification).
      Crash-recovery guard: Keithley2604B.connect() forces OUTPUT_OFF on
-     both SMU channels before assuming control, so a known-safe state is
-     guaranteed every time the engine comes up.
+     both SMU channels before assuming control (best-effort: if force-OFF
+     fails, logs CRITICAL and continues — not guaranteed).
 ```
 
 ### Persistence-first ordering
@@ -120,21 +125,54 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 **Core**
 
-- `src/cryodaq/core/alarm.py`
+- `src/cryodaq/core/alarm.py` — v1 alarm engine (threshold + hysteresis)
+- `src/cryodaq/core/alarm_v2.py` — v2 alarm engine (YAML-driven, phase-aware, composite conditions)
+- `src/cryodaq/core/atomic_write.py` — atomic file write via os.replace()
+- `src/cryodaq/core/broker.py` — DataBroker fan-out pub/sub
 - `src/cryodaq/core/calibration_acquisition.py` — непрерывный сбор SRDG при калибровке
+- `src/cryodaq/core/channel_manager.py` — channel name/visibility singleton (get_channel_manager())
+- `src/cryodaq/core/channel_state.py` — per-channel state tracker for alarm evaluation (staleness, fault history)
 - `src/cryodaq/core/event_logger.py` — автоматическое логирование системных событий
 - `src/cryodaq/core/experiment.py` — управление экспериментами, фазы (ExperimentPhase)
 - `src/cryodaq/core/housekeeping.py`
+- `src/cryodaq/core/interlock.py` — threshold detection, delegates actions to SafetyManager
 - `src/cryodaq/core/operator_log.py`
-- `src/cryodaq/core/safety_broker.py`
-- `src/cryodaq/core/safety_manager.py`
-- `src/cryodaq/core/scheduler.py`
-- `src/cryodaq/core/zmq_bridge.py`
+- `src/cryodaq/core/rate_estimator.py` — rolling dT/dt estimator with min_points gate
+- `src/cryodaq/core/safety_broker.py` — dedicated safety channel (overflow=FAULT)
+- `src/cryodaq/core/safety_manager.py` — 6-state FSM, fail-on-silence, rate limiting
+- `src/cryodaq/core/scheduler.py` — instrument polling, persistence-first ordering
+- `src/cryodaq/core/sensor_diagnostics.py` — noise/drift/correlation health scoring (numpy exception)
+- `src/cryodaq/core/zmq_bridge.py` — ZMQ PUB/SUB + REP/REQ command server
+- `src/cryodaq/core/zmq_subprocess.py` — subprocess isolation for ZMQ bridge
 
 **Аналитика**
 
+- `src/cryodaq/analytics/base_plugin.py` — AnalyticsPlugin ABC
 - `src/cryodaq/analytics/calibration.py` — CalibrationStore, Chebyshev fit, runtime policy
 - `src/cryodaq/analytics/calibration_fitter.py` — post-run pipeline (extract, downsample, breakpoints, fit)
+- `src/cryodaq/analytics/cooldown_predictor.py` — progress-variable ensemble cooldown ETA
+- `src/cryodaq/analytics/cooldown_service.py` — async cooldown orchestration
+- `src/cryodaq/analytics/plugin_loader.py` — hot-reload plugin pipeline (5s mtime polling)
+- `src/cryodaq/analytics/steady_state.py` — T∞ predictor via exponential decay fit
+- `src/cryodaq/analytics/vacuum_trend.py` — BIC-selected vacuum pump-down extrapolation
+
+**Драйверы**
+
+- `src/cryodaq/drivers/base.py` — InstrumentDriver ABC, Reading dataclass, ChannelStatus enum
+- `src/cryodaq/drivers/instruments/keithley_2604b.py` — Keithley 2604B dual-SMU (host-side P=const)
+- `src/cryodaq/drivers/instruments/lakeshore_218s.py` — LakeShore 218S 8-channel thermometer
+- `src/cryodaq/drivers/instruments/thyracont_vsp63d.py` — Thyracont VSP63D vacuum gauge (MV00 + V1)
+- `src/cryodaq/drivers/transport/gpib.py` — async GPIB transport via PyVISA
+- `src/cryodaq/drivers/transport/serial.py` — async serial transport via pyserial-asyncio
+- `src/cryodaq/drivers/transport/usbtmc.py` — async USB-TMC transport via PyVISA
+
+**Уведомления**
+
+- `src/cryodaq/notifications/telegram.py` — TelegramNotifier (alarm callbacks)
+- `src/cryodaq/notifications/telegram_commands.py` — interactive command bot (/status /temps /pressure)
+- `src/cryodaq/notifications/escalation.py` — timed escalation service
+- `src/cryodaq/notifications/periodic_report.py` — scheduled Telegram reports with charts
+- `src/cryodaq/notifications/_secrets.py` — SecretStr wrapper for token leak prevention
 
 **GUI**
 
@@ -206,7 +244,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `SAFE_OFF` — состояние по умолчанию.
 - GUI — отдельный процесс и не должен быть источником истины для runtime state.
 - Keithley disconnect must call emergency off first.
-- No blocking I/O on the engine event loop.
+- No blocking I/O on the engine event loop (known exception: `reporting/generator.py` uses sync `subprocess.run()` for LibreOffice PDF conversion — DEEP_AUDIT finding E.2).
 - Operator-facing GUI text should remain in Russian.
 - No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
