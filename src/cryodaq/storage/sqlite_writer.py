@@ -301,12 +301,20 @@ class SQLiteWriter:
             self._write_day_batch(conn, day_readings)
 
     # Status values where a non-finite value IS the sensor state (not garbage).
-    # Persist these so post-mortem analysis has evidence of OVL/fault events.
+    # Only inf-valued statuses are persisted — SQLite accepts ±inf in a REAL
+    # column but rejects NaN (SQLite treats NaN as NULL, violating NOT NULL).
+    #
+    # OVERRANGE  → +inf (LakeShore +OVL)  — stored as REAL, no issue.
+    # UNDERRANGE → -inf or finite float    — stored as REAL, no issue.
+    # SENSOR_ERROR → NaN (driver sentinel) — NOT persistable, dropped.
+    # TIMEOUT    → NaN (driver sentinel)   — NOT persistable, dropped.
+    #
+    # Full post-mortem evidence for NaN-valued sensor states requires
+    # schema migration (nullable value column) or sentinel substitution.
+    # Deferred to Phase 3 item B.1.2.
     _STATE_CARRYING_STATUSES = {
-        ChannelStatus.OVERRANGE,
-        ChannelStatus.UNDERRANGE,
-        ChannelStatus.SENSOR_ERROR,
-        ChannelStatus.TIMEOUT,
+        ChannelStatus.OVERRANGE,    # +OVL → +inf (stored as REAL)
+        ChannelStatus.UNDERRANGE,   # -OVL → -inf or finite (stored as REAL)
     }
 
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:

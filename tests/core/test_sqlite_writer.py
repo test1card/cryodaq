@@ -336,6 +336,76 @@ async def test_garbage_nan_ok_still_dropped(tmp_path: Path) -> None:
     assert len(rows) == 0, "NaN with status=OK should have been dropped"
 
 
+async def test_sensor_error_nan_dropped_not_raised(tmp_path: Path) -> None:
+    """B-2 BLOCKING fix: SENSOR_ERROR NaN must be dropped, not raise IntegrityError."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т3 Радиатор 1",
+        value=float("nan"),
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.SENSOR_ERROR,
+    )
+    await writer.write_immediate([r])  # must NOT raise
+
+    db_files = list(tmp_path.glob("data_*.db"))
+    if not db_files:
+        return
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT * FROM readings WHERE channel='Т3 Радиатор 1'").fetchall()
+    conn.close()
+    assert len(rows) == 0
+
+
+async def test_timeout_nan_dropped_not_raised(tmp_path: Path) -> None:
+    """B-2 BLOCKING fix: TIMEOUT NaN must be dropped, not raise IntegrityError."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т4 Радиатор 2",
+        value=float("nan"),
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.TIMEOUT,
+    )
+    await writer.write_immediate([r])  # must NOT raise
+
+    db_files = list(tmp_path.glob("data_*.db"))
+    if not db_files:
+        return
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT * FROM readings WHERE channel='Т4 Радиатор 2'").fetchall()
+    conn.close()
+    assert len(rows) == 0
+
+
+async def test_underrange_negative_inf_persists(tmp_path: Path) -> None:
+    """B-2: UNDERRANGE with -inf must persist (symmetric to OVERRANGE)."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т5 Экран 77К",
+        value=float("-inf"),
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.UNDERRANGE,
+    )
+    await writer.write_immediate([r])
+
+    db_files = list(tmp_path.glob("data_*.db"))
+    assert db_files
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т5 Экран 77К'").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == float("-inf")
+    assert rows[0][1] == "underrange"
+
+
 def test_sqlite_writer_wal_mode_verified(tmp_path: Path) -> None:
     """B-1.3: SQLiteWriter must verify WAL mode is active on new DB."""
     source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")
