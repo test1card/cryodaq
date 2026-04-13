@@ -18,11 +18,30 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 logger = logging.getLogger(__name__)
 
 
+class HousekeepingConfigError(RuntimeError):
+    """Raised when housekeeping.yaml cannot be loaded in a fail-closed manner."""
+
+
 def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
+    """Load housekeeping.yaml. Raises HousekeepingConfigError on failure."""
     if not config_path.exists():
-        return {}
-    with config_path.open(encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
+        raise HousekeepingConfigError(
+            f"housekeeping.yaml not found at {config_path} — refusing to start "
+            f"without housekeeping configuration"
+        )
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            raw = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise HousekeepingConfigError(
+            f"housekeeping.yaml at {config_path}: YAML parse error — {exc}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise HousekeepingConfigError(
+            f"housekeeping.yaml at {config_path}: expected mapping, "
+            f"got {type(raw).__name__}"
+        )
+    return raw
 
 
 def load_protected_channel_patterns(*config_paths: Path) -> list[str]:

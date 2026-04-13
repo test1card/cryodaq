@@ -461,3 +461,52 @@ async def test_multiple_interlocks() -> None:
     assert len(called_b) == 1
 
     await engine.stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d C-1.1: fail-closed interlock loading
+# ---------------------------------------------------------------------------
+
+from cryodaq.core.interlock import InterlockConfigError
+
+
+def test_interlock_missing_file_raises(tmp_path):
+    """C-1.1: missing interlocks.yaml must raise InterlockConfigError."""
+    from cryodaq.core.interlock import InterlockEngine
+
+    engine = InterlockEngine(broker=None, actions={"emergency_off": lambda: None})
+    with pytest.raises(InterlockConfigError, match="not found"):
+        engine.load_config(tmp_path / "nonexistent.yaml")
+
+
+def test_interlock_malformed_yaml_raises(tmp_path):
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("not: valid: [yaml")
+    from cryodaq.core.interlock import InterlockEngine
+
+    engine = InterlockEngine(broker=None, actions={"emergency_off": lambda: None})
+    with pytest.raises(InterlockConfigError, match="YAML parse error"):
+        engine.load_config(cfg)
+
+
+def test_interlock_valid_config_loads(tmp_path):
+    cfg = tmp_path / "ok.yaml"
+    cfg.write_text(yaml.dump({
+        "interlocks": [{
+            "name": "test_lock",
+            "description": "test",
+            "channel_pattern": "Т1 .*",
+            "threshold": 350.0,
+            "comparison": ">",
+            "action": "emergency_off",
+            "cooldown_s": 10.0,
+        }],
+    }))
+    from cryodaq.core.interlock import InterlockEngine
+
+    engine = InterlockEngine(
+        broker=None,
+        actions={"emergency_off": lambda: None},
+    )
+    engine.load_config(cfg)
+    assert len(engine.get_state()) == 1

@@ -42,3 +42,7 @@ source_limits:
 # Регулярные выражения для определения каналов Keithley (heartbeat check)
 keithley_channels:
   - ".*/smu.*"
+
+# Graceful shutdown drain timeout (seconds) before forced cancellation.
+# Scheduler waits this long for in-flight polls to complete persist+publish.
+scheduler_drain_timeout_s: 5.0

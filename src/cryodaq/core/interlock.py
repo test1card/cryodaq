@@ -27,6 +27,10 @@ from typing import Any
 
 import yaml
 
+
+class InterlockConfigError(RuntimeError):
+    """Raised when interlocks.yaml cannot be loaded in a fail-closed manner."""
+
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
 
@@ -219,33 +223,51 @@ class InterlockEngine:
             Если конфигурация содержит ошибки (дублирование имён, неизвестные действия).
         """
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"Файл конфигурации блокировок не найден: {config_path}"
+            raise InterlockConfigError(
+                f"interlocks.yaml not found at {config_path} — refusing to start "
+                f"interlock engine without interlock configuration"
             )
 
-        with config_path.open(encoding="utf-8") as fh:
-            raw: dict[str, Any] = yaml.safe_load(fh)
+        try:
+            with config_path.open(encoding="utf-8") as fh:
+                raw: dict[str, Any] = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: YAML parse error — {exc}"
+            ) from exc
+
+        if not isinstance(raw, dict):
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: expected mapping, "
+                f"got {type(raw).__name__}"
+            )
 
         entries = raw.get("interlocks", [])
         if not isinstance(entries, list):
-            raise ValueError(
-                f"Некорректный формат файла блокировок: ключ 'interlocks' должен "
-                f"содержать список, получен {type(entries).__name__}."
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, "
+                f"got {type(entries).__name__}"
             )
 
         loaded = 0
         for entry in entries:
-            condition = InterlockCondition(
-                name=entry["name"],
-                description=entry["description"],
-                channel_pattern=entry["channel_pattern"],
-                threshold=float(entry["threshold"]),
-                comparison=entry["comparison"],
-                action=entry["action"],
-                cooldown_s=float(entry.get("cooldown_s", 0.0)),
-            )
-            self.add_condition(condition)
-            loaded += 1
+            try:
+                condition = InterlockCondition(
+                    name=entry["name"],
+                    description=entry["description"],
+                    channel_pattern=entry["channel_pattern"],
+                    threshold=float(entry["threshold"]),
+                    comparison=entry["comparison"],
+                    action=entry["action"],
+                    cooldown_s=float(entry.get("cooldown_s", 0.0)),
+                )
+                self.add_condition(condition)
+                loaded += 1
+            except (KeyError, ValueError, TypeError, re.error) as exc:
+                raise InterlockConfigError(
+                    f"interlocks.yaml at {config_path}: invalid interlock entry — "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",

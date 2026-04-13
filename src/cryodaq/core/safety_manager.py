@@ -70,6 +70,7 @@ class SafetyConfig:
     max_voltage_v: float = 40.0
     max_current_a: float = 1.0
     keithley_channel_patterns: list[str] = field(default_factory=lambda: [".*/smu.*"])
+    scheduler_drain_timeout_s: float = 5.0
 
 
 class SafetyManager:
@@ -203,6 +204,7 @@ class SafetyManager:
                 max_power_w=float(src_limits.get("max_power_w", 5.0)),
                 max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
                 max_current_a=float(src_limits.get("max_current_a", 1.0)),
+                scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
             )
             self._keithley_patterns = [
                 re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])

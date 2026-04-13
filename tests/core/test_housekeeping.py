@@ -187,3 +187,32 @@ async def test_housekeeping_compresses_old_unlinked_db(tmp_path: Path) -> None:
 
     assert not old_unlinked.exists()
     assert old_unlinked.with_suffix(".db.gz").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d C-1.2: fail-closed housekeeping loading
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from cryodaq.core.housekeeping import HousekeepingConfigError, load_housekeeping_config
+
+
+def test_housekeeping_missing_file_raises(tmp_path):
+    with pytest.raises(HousekeepingConfigError, match="not found"):
+        load_housekeeping_config(tmp_path / "nonexistent.yaml")
+
+
+def test_housekeeping_malformed_yaml_raises(tmp_path):
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("not: valid: [yaml")
+    with pytest.raises(HousekeepingConfigError, match="YAML parse error"):
+        load_housekeeping_config(cfg)
+
+
+def test_housekeeping_valid_config_loads(tmp_path):
+    cfg = tmp_path / "ok.yaml"
+    cfg.write_text("adaptive_throttle:\n  enabled: true\n")
+    result = load_housekeeping_config(cfg)
+    assert isinstance(result, dict)
+    assert "adaptive_throttle" in result

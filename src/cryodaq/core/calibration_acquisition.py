@@ -148,7 +148,18 @@ class CalibrationAcquisitionService:
         krdg: list[Reading],
         srdg: list[Reading],
     ) -> None:
-        """Legacy method — kept for backward compatibility."""
+        """Deprecated: use prepare_srdg_readings + on_srdg_persisted.
+
+        Kept for test backward compatibility. Production code uses the
+        new split via Scheduler. Will be removed in next major version.
+        """
+        import warnings
+
+        warnings.warn(
+            "on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not self._active:
             return
 

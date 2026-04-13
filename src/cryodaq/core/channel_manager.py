@@ -15,6 +15,10 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+class ChannelConfigError(RuntimeError):
+    """Raised when channels.yaml cannot be loaded in a fail-closed manner."""
+
 from cryodaq.paths import get_config_dir as _get_config_dir
 
 _DEFAULT_CONFIG = _get_config_dir() / "channels.yaml"
@@ -71,22 +75,40 @@ class ChannelManager:
     # ------------------------------------------------------------------
 
     def load(self, path: Path | None = None) -> None:
-        """Загрузить конфигурацию каналов из YAML."""
+        """Загрузить конфигурацию каналов из YAML.
+
+        Raises ChannelConfigError on missing file, malformed YAML, or
+        missing 'channels' key. Fail-closed: no silent fallback to defaults.
+        """
         if path is not None:
             self._config_path = path
 
-        if self._config_path.exists():
-            try:
-                with self._config_path.open(encoding="utf-8") as fh:
-                    raw = yaml.safe_load(fh) or {}
-                self._channels = raw.get("channels", {})
-                logger.info("Загружена конфигурация каналов: %s", self._config_path)
-            except Exception as exc:
-                logger.error("Ошибка загрузки channels.yaml: %s", exc)
-                self._channels = dict(_DEFAULT_CHANNELS)
-        else:
-            self._channels = dict(_DEFAULT_CHANNELS)
-            logger.info("channels.yaml не найден — используются стандартные имена")
+        if not self._config_path.exists():
+            raise ChannelConfigError(
+                f"channels.yaml not found at {self._config_path} — refusing "
+                f"to start without channel configuration"
+            )
+        try:
+            with self._config_path.open(encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:
+            raise ChannelConfigError(
+                f"channels.yaml at {self._config_path}: YAML parse error — {exc}"
+            ) from exc
+
+        if not isinstance(raw, dict):
+            raise ChannelConfigError(
+                f"channels.yaml at {self._config_path}: expected mapping, "
+                f"got {type(raw).__name__}"
+            )
+        channels = raw.get("channels")
+        if not isinstance(channels, dict):
+            raise ChannelConfigError(
+                f"channels.yaml at {self._config_path}: missing or invalid "
+                f"'channels' key"
+            )
+        self._channels = channels
+        logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
     def save(self, path: Path | None = None) -> None:
         """Сохранить конфигурацию каналов в YAML."""

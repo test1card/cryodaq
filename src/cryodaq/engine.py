@@ -32,7 +32,10 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
-from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
+from cryodaq.core.alarm_config import AlarmConfigError
+from cryodaq.core.channel_manager import ChannelConfigError
+from cryodaq.core.housekeeping import HousekeepingConfigError
+from cryodaq.core.interlock import InterlockConfigError
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
@@ -876,6 +879,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         sqlite_writer=writer,
         adaptive_throttle=adaptive_throttle,
         calibration_acquisition=calibration_acquisition,
+        drain_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
@@ -943,10 +947,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         actions=interlock_actions,
         trip_handler=_interlock_trip_handler,
     )
-    if interlocks_cfg.exists():
-        interlock_engine.load_config(interlocks_cfg)
-    else:
-        logger.warning("Файл блокировок не найден: %s", interlocks_cfg)
+    interlock_engine.load_config(interlocks_cfg)
 
     # ExperimentManager
     experiment_manager = ExperimentManager(
@@ -1763,8 +1764,15 @@ def main() -> None:
                 exc, traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
-        except (SafetyConfigError, AlarmConfigError) as exc:
-            label = "safety" if isinstance(exc, SafetyConfigError) else "alarm"
+        except (SafetyConfigError, AlarmConfigError, InterlockConfigError, HousekeepingConfigError, ChannelConfigError) as exc:
+            labels = {
+                SafetyConfigError: "safety",
+                AlarmConfigError: "alarm",
+                InterlockConfigError: "interlock",
+                HousekeepingConfigError: "housekeeping",
+                ChannelConfigError: "channel",
+            }
+            label = labels.get(type(exc), "config")
             logger.critical(
                 "CONFIG ERROR (%s config): %s\n%s",
                 label, exc, traceback.format_exc(),

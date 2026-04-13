@@ -86,12 +86,14 @@ class Scheduler:
         sqlite_writer: Any | None = None,
         adaptive_throttle: Any | None = None,
         calibration_acquisition: Any | None = None,
+        drain_timeout_s: float = 5.0,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
         self._sqlite_writer = sqlite_writer
         self._adaptive_throttle = adaptive_throttle
         self._calibration_acquisition = calibration_acquisition
+        self._drain_timeout_s = drain_timeout_s
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._gpib_tasks: dict[str, asyncio.Task[None]] = {}
@@ -453,8 +455,6 @@ class Scheduler:
             total, len(gpib_groups), len(standalone),
         )
 
-    _DRAIN_TIMEOUT_S = 5.0
-
     async def stop(self) -> None:
         """Остановить все циклы, отключить приборы.
 
@@ -479,13 +479,13 @@ class Scheduler:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*all_tasks, return_exceptions=True),
-                    timeout=self._DRAIN_TIMEOUT_S,
+                    timeout=self._drain_timeout_s,
                 )
                 logger.info("Scheduler: graceful drain complete")
             except TimeoutError:
                 logger.warning(
                     "Scheduler: drain timed out after %.1fs, force-cancelling",
-                    self._DRAIN_TIMEOUT_S,
+                    self._drain_timeout_s,
                 )
                 # Phase 2: forced cancel
                 for task in all_tasks:
