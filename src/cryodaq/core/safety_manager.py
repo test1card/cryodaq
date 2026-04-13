@@ -123,18 +123,50 @@ class SafetyManager:
 
     def load_config(self, path: Path) -> None:
         if not path.exists():
-            logger.warning("safety.yaml not found: %s", path)
-            return
+            raise RuntimeError(
+                f"safety.yaml not found at {path} — refusing to start "
+                f"SafetyManager without safety configuration"
+            )
 
         with path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
 
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"safety.yaml at {path} is malformed (expected mapping, "
+                f"got {type(raw).__name__})"
+            )
+
+        raw_patterns = raw.get("critical_channels", [])
+        if not raw_patterns:
+            raise RuntimeError(
+                f"safety.yaml at {path} has no critical_channels defined — "
+                f"refusing to start SafetyManager without critical channel monitoring"
+            )
+
         patterns: list[re.Pattern[str]] = []
-        for pattern in raw.get("critical_channels", []):
+        errors: list[str] = []
+        for pattern in raw_patterns:
             try:
                 patterns.append(re.compile(pattern))
             except re.error as exc:
-                logger.error("Invalid critical_channels regex %r: %s", pattern, exc)
+                errors.append(f"  - {pattern!r}: {exc}")
+
+        if errors:
+            raise RuntimeError(
+                f"safety.yaml at {path} has invalid critical_channels regex:\n"
+                + "\n".join(errors)
+            )
+
+        if not patterns:
+            raise RuntimeError(
+                f"safety.yaml at {path} produced no valid critical_channels"
+            )
+
+        logger.info(
+            "SafetyManager config: %d critical channel patterns from %s",
+            len(patterns), path,
+        )
 
         src_limits = raw.get("source_limits", {})
         self._config = SafetyConfig(
@@ -547,13 +579,31 @@ class SafetyManager:
         self._active_sources.clear()
 
         if self._keithley is not None:
+            # Hardware shutdown must complete even if our caller is cancelled.
+            # asyncio.shield prevents outer cancellation from interrupting
+            # emergency_off. We catch CancelledError to ensure the shielded
+            # task finishes before re-raising.
+            shutdown_task = asyncio.create_task(self._keithley.emergency_off())
             try:
-                await self._keithley.emergency_off()
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                logger.critical(
+                    "FAULT: _fault() cancelled but emergency_off is shielded; "
+                    "waiting for hardware shutdown to complete"
+                )
+                try:
+                    await shutdown_task
+                except Exception as exc:
+                    logger.critical("FAULT: shielded emergency_off failed: %s", exc)
+                raise
             except Exception as exc:
                 logger.critical("FAULT: emergency_off failed: %s", exc)
 
         fault_channel = channel if channel in {"smua", "smub"} else None
-        await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
+        try:
+            await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
+        except asyncio.CancelledError:
+            raise
 
     async def _ensure_output_off(self, channel: str | None = None) -> None:
         if self._keithley is None:
@@ -663,7 +713,10 @@ class SafetyManager:
                 self._transition(SafetyState.READY, "All preconditions satisfied")
             return
 
-        if self._state != SafetyState.RUNNING:
+        # Active monitoring states: RUN_PERMITTED (source starting) and
+        # RUNNING (source on). Both need stale/rate/heartbeat checks because
+        # a stuck start_source() call must not silently disable monitoring.
+        if self._state not in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
             return
 
         for pattern in self._config.critical_channels:

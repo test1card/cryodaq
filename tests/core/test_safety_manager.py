@@ -322,3 +322,106 @@ async def test_interlock_trip_causes_fault():
         k.emergency_off.assert_called()
     finally:
         await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase-2d-A1 regression tests
+# ---------------------------------------------------------------------------
+
+async def test_fault_hardware_shutdown_completes_under_cancellation():
+    """F2 regression: _fault() hardware shutdown must complete even if
+    the calling coroutine is cancelled during the await."""
+    emergency_off_calls = []
+    shutdown_event = asyncio.Event()
+
+    async def slow_emergency_off(channel=None):
+        await asyncio.sleep(0.05)
+        emergency_off_calls.append("done")
+        shutdown_event.set()
+
+    k = _mock_keithley()
+    k.emergency_off.side_effect = slow_emergency_off
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
+
+    fault_task = asyncio.create_task(sm._fault("test cancellation"))
+    await asyncio.sleep(0.01)
+    fault_task.cancel()
+
+    try:
+        await fault_task
+    except asyncio.CancelledError:
+        pass
+
+    # Wait briefly for shielded task to finish if still running
+    await asyncio.sleep(0.1)
+
+    assert shutdown_event.is_set(), (
+        "emergency_off did not complete when _fault() was cancelled — "
+        "F2 regression: hardware shutdown is not shielded from cancellation"
+    )
+    assert emergency_off_calls == ["done"]
+    assert sm._state == SafetyState.FAULT_LATCHED
+
+
+async def test_run_permitted_state_is_actively_monitored():
+    """F1 regression: _run_checks() must evaluate stale/rate/heartbeat
+    in RUN_PERMITTED state, not just RUNNING."""
+    import re
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=None, mock=True)
+
+    sm._state = SafetyState.RUN_PERMITTED
+    stale_ts = time.monotonic() - 100.0
+    sm._latest["Т1 Криостат верх"] = (stale_ts, 77.0, "ok")
+    sm._config.critical_channels = [re.compile(r"Т1 .*")]
+    sm._config.stale_timeout_s = 10.0
+
+    await sm._run_checks()
+
+    assert sm._state != SafetyState.RUN_PERMITTED, (
+        "RUN_PERMITTED state did not react to stale critical channel — "
+        "F1 regression: monitoring disabled during source start"
+    )
+
+
+def test_load_config_fails_on_missing_file(tmp_path):
+    """C.2 regression: missing safety.yaml must be startup-fatal."""
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(RuntimeError, match="not found"):
+        sm.load_config(tmp_path / "nonexistent.yaml")
+
+
+def test_load_config_fails_on_empty_critical_channels(tmp_path):
+    """C.2 regression: empty critical_channels must be startup-fatal."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text("critical_channels: []\nstale_timeout_s: 10.0\n")
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(RuntimeError, match="no critical_channels"):
+        sm.load_config(cfg)
+
+
+def test_load_config_fails_on_all_invalid_regex(tmp_path):
+    """C.2 regression: all-invalid regex must be startup-fatal."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text("critical_channels:\n  - '[invalid(regex'\nstale_timeout_s: 10.0\n")
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(RuntimeError, match="invalid.*regex"):
+        sm.load_config(cfg)
+
+
+def test_load_config_succeeds_with_valid_config(tmp_path):
+    """Positive case: valid config loads correctly."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text(
+        "critical_channels:\n"
+        "  - 'Т1 .*'\n"
+        "  - 'Т7 .*'\n"
+        "stale_timeout_s: 10.0\n"
+        "heartbeat_timeout_s: 15.0\n"
+    )
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    sm.load_config(cfg)
+    assert len(sm._config.critical_channels) == 2

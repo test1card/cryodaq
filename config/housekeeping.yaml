@@ -1,7 +1,9 @@
 adaptive_throttle:
   enabled: true
   include_patterns:
-    - "^T(?![1-8] ).*"
+    # Match both Cyrillic Т (U+0422) and Latin T (U+0054) to guard against
+    # homoglyph regressions. Canonical runtime uses Cyrillic Т.
+    - "^[TТ](?![1-8] ).*"
     - "pressure"
   exclude_patterns:
     - "^analytics/"

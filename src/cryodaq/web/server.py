@@ -450,6 +450,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,-apple-system,sans-s
 <div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
 <div id="updated"></div>
 <script>
+function escapeHtml(s){if(s==null)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function tempColor(v){if(v<10)return'cold';if(v<100)return'mid';if(v<250)return'warm';return'hot'}
 async function refresh(){
  try{
@@ -475,7 +476,7 @@ async function refresh(){
   for(const[ch,r]of sorted){
    if(r.unit==='K'&&ch.match(/^\\u0422|^T/)){
     const c=tempColor(r.value);
-    temps+=`<div class="temp-card"><div class="name">${ch.split(' ')[0]}</div><div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
+    temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div><div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
    }
    if(r.unit==='mbar')pressure=r.value.toExponential(2)+' mbar';
    if(ch.includes('/smua/'))kA=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kA;
@@ -498,7 +499,7 @@ async function refresh(){
   let html='';
   for(const e of(ld.entries||[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
-   html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> [${e.author||e.source||'?'}] ${e.message||''}</div>`;
+   html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> [${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
   document.getElementById('log').innerHTML=html||'Нет записей';
  }catch(e){}
