@@ -736,6 +736,26 @@ class ExperimentManager:
                 ReportGenerator(self.data_dir).generate(finished.experiment_id)
             except Exception as exc:
                 logger.warning("Failed to auto-generate reports for %s: %s", finished.experiment_id, exc)
+
+        # Phase 2e stage 1: Parquet archive — best-effort
+        try:
+            from cryodaq.storage.parquet_archive import export_experiment_readings_to_parquet
+
+            export_experiment_readings_to_parquet(
+                experiment_id=finished.experiment_id,
+                start_time=finished.start_time,
+                end_time=finished.end_time,
+                sqlite_root=self._data_dir,
+                output_path=finished.artifact_dir / "readings.parquet",
+            )
+        except ImportError:
+            logger.warning("pyarrow not installed — skipping Parquet archive")
+        except Exception:
+            logger.exception(
+                "Parquet archive export failed for %s — experiment finalized without parquet",
+                finished.experiment_id,
+            )
+
         self._clear_active()
         return finished
 
@@ -1227,23 +1247,9 @@ class ExperimentManager:
             }
         )
 
-        # Parquet archive (same readings, no re-scan from SQLite)
-        from cryodaq.storage.parquet_archive import write_experiment_parquet
-        parquet_path = tables_dir / "readings.parquet"
-        parquet_result = write_experiment_parquet(readings, parquet_path)
-        if parquet_result is not None:
-            artifact_index.append(
-                self._artifact_entry(
-                    category="table",
-                    role="experiment_data",
-                    path=parquet_path,
-                    summary={
-                        "row_count": len(readings),
-                        "format": "parquet",
-                        "channels": sorted({r["channel"] for r in readings}),
-                    },
-                )
-            )
+        # Parquet archive — deferred to finalize_experiment hook (Phase 2e).
+        # The streaming export reads from SQLite directly, avoiding memory
+        # duplication of the readings list.
 
         setpoint_values_path = tables_dir / "setpoint_values.csv"
         setpoint_rows = self._write_setpoint_values_table(setpoint_values_path, normalized_records)
