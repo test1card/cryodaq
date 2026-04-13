@@ -335,10 +335,31 @@ class Scheduler:
         state.consecutive_errors = 0
         state.backoff_s = INITIAL_BACKOFF_S
 
-        # Step 1: Persist to disk FIRST
-        if self._sqlite_writer is not None and persisted_readings:
+        # Step 1a: If calibration acquisition active, read SRDG BEFORE persisting
+        # so KRDG+SRDG can be written atomically in one transaction (H.10).
+        srdg_to_persist: list = []
+        if (
+            self._calibration_acquisition is not None
+            and self._calibration_acquisition.is_active
+            and hasattr(driver, "read_srdg_channels")
+        ):
             try:
-                await self._sqlite_writer.write_immediate(persisted_readings)
+                srdg = await driver.read_srdg_channels()
+                srdg_to_persist = self._calibration_acquisition.prepare_srdg_readings(
+                    readings, srdg
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to read SRDG for calibration on '%s'",
+                    name,
+                    exc_info=True,
+                )
+
+        # Step 1b: Persist KRDG + SRDG atomically in one transaction
+        combined = list(persisted_readings) + srdg_to_persist
+        if self._sqlite_writer is not None and combined:
+            try:
+                await self._sqlite_writer.write_immediate(combined)
             except Exception:
                 logger.exception(
                     "CRITICAL: Ошибка записи '%s' — данные НЕ отправлены подписчикам",
@@ -349,26 +370,12 @@ class Scheduler:
                 return
 
             # If write_immediate silently absorbed a disk-full error
-            # (no raise but flag set inside _write_day_batch), bail out
-            # before publishing — persistence-first invariant.
             if getattr(self._sqlite_writer, "is_disk_full", False):
                 return
 
-        # Step 1b: If calibration acquisition active, read SRDG
-        if (
-            self._calibration_acquisition is not None
-            and self._calibration_acquisition.is_active
-            and hasattr(driver, "read_srdg_channels")
-        ):
-            try:
-                srdg = await driver.read_srdg_channels()
-                await self._calibration_acquisition.on_readings(readings, srdg)
-            except Exception:
-                logger.warning(
-                    "Failed to read SRDG for calibration on '%s'",
-                    name,
-                    exc_info=True,
-                )
+        # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
+        if srdg_to_persist:
+            self._calibration_acquisition.on_srdg_persisted(len(srdg_to_persist))
 
         # Step 2: Publish to brokers
         if persisted_readings:
@@ -443,8 +450,16 @@ class Scheduler:
             total, len(gpib_groups), len(standalone),
         )
 
+    _DRAIN_TIMEOUT_S = 5.0
+
     async def stop(self) -> None:
-        """Остановить все циклы, отключить приборы."""
+        """Остановить все циклы, отключить приборы.
+
+        Two-phase shutdown (P1 fix):
+        Phase 1 — graceful drain: set _running=False and wait for in-flight
+        polls to complete their persist+publish cycle naturally.
+        Phase 2 — forced cancel: if drain times out, cancel remaining tasks.
+        """
         self._running = False
 
         # Gather all unique tasks
@@ -456,9 +471,24 @@ class Scheduler:
             if not task.done():
                 all_tasks.add(task)
 
-        for task in all_tasks:
-            task.cancel()
-        await asyncio.gather(*all_tasks, return_exceptions=True)
+        if all_tasks:
+            # Phase 1: graceful drain — let polls finish persist+publish
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*all_tasks, return_exceptions=True),
+                    timeout=self._DRAIN_TIMEOUT_S,
+                )
+                logger.info("Scheduler: graceful drain complete")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scheduler: drain timed out after %.1fs, force-cancelling",
+                    self._DRAIN_TIMEOUT_S,
+                )
+                # Phase 2: forced cancel
+                for task in all_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*all_tasks, return_exceptions=True)
 
         for state in self._instruments.values():
             state.task = None

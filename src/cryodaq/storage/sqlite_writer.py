@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
 
@@ -300,14 +300,28 @@ class SQLiteWriter:
             conn = self._ensure_connection(day)
             self._write_day_batch(conn, day_readings)
 
+    # Status values where a non-finite value IS the sensor state (not garbage).
+    # Persist these so post-mortem analysis has evidence of OVL/fault events.
+    _STATE_CARRYING_STATUSES = {
+        ChannelStatus.OVERRANGE,
+        ChannelStatus.UNDERRANGE,
+        ChannelStatus.SENSOR_ERROR,
+        ChannelStatus.TIMEOUT,
+    }
+
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:
         """Write a single day's readings to the given connection."""
         rows = []
         skipped = 0
         for r in batch:
-            if r.value is None or (isinstance(r.value, float) and not math.isfinite(r.value)):
+            if r.value is None:
                 skipped += 1
                 continue
+            if isinstance(r.value, float) and not math.isfinite(r.value):
+                # Non-finite value: persist if status says this IS the sensor state
+                if r.status not in self._STATE_CARRYING_STATUSES:
+                    skipped += 1
+                    continue
             rows.append(
                 (
                     r.timestamp.timestamp(),

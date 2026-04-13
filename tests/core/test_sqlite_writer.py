@@ -283,6 +283,59 @@ async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 2d B-2.1: OVERRANGE persist
+# ---------------------------------------------------------------------------
+
+
+async def test_overrange_reading_persists(tmp_path: Path) -> None:
+    """B-2.1: OVERRANGE readings with value=inf must be persisted."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т7 Детектор",
+        value=float("inf"),
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.OVERRANGE,
+    )
+    await writer.write_immediate([r])
+
+    # Query SQLite directly
+    db_files = list(tmp_path.glob("data_*.db"))
+    assert db_files, "No DB file created"
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т7 Детектор'").fetchall()
+    conn.close()
+    assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+    assert rows[0][0] == float("inf")
+    assert rows[0][1] == "overrange"
+
+
+async def test_garbage_nan_ok_still_dropped(tmp_path: Path) -> None:
+    """B-2.1: NaN with status=OK must still be dropped (garbage)."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т1 Криостат верх",
+        value=float("nan"),
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.OK,
+    )
+    await writer.write_immediate([r])
+
+    db_files = list(tmp_path.glob("data_*.db"))
+    if not db_files:
+        return  # No DB created = correctly dropped
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT * FROM readings WHERE channel='Т1 Криостат верх'").fetchall()
+    conn.close()
+    assert len(rows) == 0, "NaN with status=OK should have been dropped"
+
+
 def test_sqlite_writer_wal_mode_verified(tmp_path: Path) -> None:
     """B-1.3: SQLiteWriter must verify WAL mode is active on new DB."""
     source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")

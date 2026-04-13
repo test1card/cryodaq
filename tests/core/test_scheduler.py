@@ -202,3 +202,40 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     # Both must have connected, and in sequence (same task → deterministic order)
     assert "gpib_first" in connect_order
     assert "gpib_second" in connect_order
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d B-2.3: P1 — graceful drain
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_graceful_drain_completes_inflight():
+    """P1: stop() graceful drain must let in-flight polls finish."""
+    broker = DataBroker()
+    sched = Scheduler(broker=broker, sqlite_writer=None)
+    driver = MockDriver("drainer")
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.1, resource_str="mock"))
+
+    await sched.start()
+    await asyncio.sleep(0.15)  # let at least one poll complete
+    await sched.stop()
+
+    # Drain should have completed — driver disconnected cleanly
+    assert driver._connected is False
+    assert driver.disconnect_calls >= 1
+
+
+async def test_stop_drain_timeout_forces_cancel():
+    """P1: if drain times out, forced cancel still works."""
+    broker = DataBroker()
+    sched = Scheduler(broker=broker, sqlite_writer=None)
+    sched._DRAIN_TIMEOUT_S = 0.1  # very short
+
+    driver = MockDriver("slow")
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=60.0, resource_str="mock"))
+
+    await sched.start()
+    await asyncio.sleep(0.05)  # let it start
+    await sched.stop()  # drain should timeout, force cancel
+
+    # If we got here, stop returned — drain timeout + cancel worked

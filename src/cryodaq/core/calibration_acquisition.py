@@ -68,18 +68,19 @@ class CalibrationAcquisitionService:
             "target_channels": self._target_channels,
         }
 
-    async def on_readings(
+    def prepare_srdg_readings(
         self,
         krdg: list[Reading],
         srdg: list[Reading],
-    ) -> None:
-        """Process one poll cycle of KRDG + SRDG readings.
+    ) -> list[Reading]:
+        """Prepare SRDG readings for persistence (H.10: atomic with KRDG).
 
-        Updates temperature range from the reference KRDG channel and
-        persists SRDG readings for target channels as ``{channel}_raw``.
+        Updates temperature range from reference KRDG channel and returns
+        the list of SRDG readings to persist. The caller (Scheduler)
+        persists them in the same transaction as KRDG readings.
         """
         if not self._active:
-            return
+            return []
 
         # Update t_min / t_max from reference KRDG
         for r in krdg:
@@ -92,7 +93,7 @@ class CalibrationAcquisitionService:
                 if self._t_max is None or t > self._t_max:
                     self._t_max = t
 
-        # Persist SRDG for target channels
+        # Build SRDG readings for target channels
         to_write: list[Reading] = []
         for reading in srdg:
             if reading.channel not in self._target_channels:
@@ -117,6 +118,27 @@ class CalibrationAcquisitionService:
                 )
             )
 
+        return to_write
+
+    def on_srdg_persisted(self, count: int) -> None:
+        """Update point counter after SRDG readings are persisted by scheduler."""
+        self._point_count += count
+
+    async def on_readings(
+        self,
+        krdg: list[Reading],
+        srdg: list[Reading],
+    ) -> None:
+        """Legacy method — kept for backward compatibility.
+
+        In the new H.10 flow, scheduler calls prepare_srdg_readings +
+        on_srdg_persisted instead. This method still works but writes
+        SRDG in a separate transaction (not atomic with KRDG).
+        """
+        if not self._active:
+            return
+
+        to_write = self.prepare_srdg_readings(krdg, srdg)
         if to_write:
             await self._writer.write_immediate(to_write)
             self._point_count += len(to_write)
