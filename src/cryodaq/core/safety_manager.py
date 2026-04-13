@@ -148,6 +148,11 @@ class SafetyManager:
             )
 
         raw_patterns = raw.get("critical_channels", [])
+        if not isinstance(raw_patterns, list):
+            raise SafetyConfigError(
+                f"safety.yaml at {path}: critical_channels must be a list, "
+                f"got {type(raw_patterns).__name__}"
+            )
         if not raw_patterns:
             raise SafetyConfigError(
                 f"safety.yaml at {path} has no critical_channels defined — "
@@ -157,6 +162,9 @@ class SafetyManager:
         patterns: list[re.Pattern[str]] = []
         errors: list[str] = []
         for pattern in raw_patterns:
+            if not isinstance(pattern, str):
+                errors.append(f"  - {pattern!r}: expected string, got {type(pattern).__name__}")
+                continue
             try:
                 patterns.append(re.compile(pattern))
             except re.error as exc:
@@ -178,23 +186,29 @@ class SafetyManager:
             len(patterns), path,
         )
 
-        src_limits = raw.get("source_limits", {})
-        self._config = SafetyConfig(
-            critical_channels=patterns,
-            stale_timeout_s=float(raw.get("stale_timeout_s", 10.0)),
-            heartbeat_timeout_s=float(raw.get("heartbeat_timeout_s", 15.0)),
-            max_safety_backlog=int(raw.get("max_safety_backlog", 100)),
-            require_keithley_for_run=bool(raw.get("require_keithley_for_run", True)),
-            max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
-            require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
-            cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
-            max_power_w=float(src_limits.get("max_power_w", 5.0)),
-            max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
-            max_current_a=float(src_limits.get("max_current_a", 1.0)),
-        )
-        self._keithley_patterns = [
-            re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])
-        ]
+        try:
+            src_limits = raw.get("source_limits", {})
+            self._config = SafetyConfig(
+                critical_channels=patterns,
+                stale_timeout_s=float(raw.get("stale_timeout_s", 10.0)),
+                heartbeat_timeout_s=float(raw.get("heartbeat_timeout_s", 15.0)),
+                max_safety_backlog=int(raw.get("max_safety_backlog", 100)),
+                require_keithley_for_run=bool(raw.get("require_keithley_for_run", True)),
+                max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
+                require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
+                cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
+                max_power_w=float(src_limits.get("max_power_w", 5.0)),
+                max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
+                max_current_a=float(src_limits.get("max_current_a", 1.0)),
+            )
+            self._keithley_patterns = [
+                re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])
+            ]
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise SafetyConfigError(
+                f"safety.yaml at {path}: invalid config value — "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     async def start(self) -> None:
         self._queue = self._broker.subscribe("safety_manager", maxsize=self._config.max_safety_backlog)

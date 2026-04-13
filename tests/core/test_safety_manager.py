@@ -435,6 +435,64 @@ def test_safety_config_error_is_runtime_error_subclass():
     assert str(err) == "test message"
 
 
+def test_load_config_fails_on_non_list_critical_channels(tmp_path):
+    """A.4.1 residual: critical_channels: 123 (not a list) must raise SafetyConfigError."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text("critical_channels: 123\n")
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(SafetyConfigError, match="must be a list"):
+        sm.load_config(cfg)
+
+
+def test_load_config_fails_on_non_string_pattern(tmp_path):
+    """A.4.1 residual: critical_channels: [123] (non-string) must raise SafetyConfigError."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text("critical_channels:\n  - 123\n")
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(SafetyConfigError, match="invalid.*regex"):
+        sm.load_config(cfg)
+
+
+def test_load_config_fails_on_non_numeric_timeout(tmp_path):
+    """A.4.1 residual: non-numeric stale_timeout_s must raise SafetyConfigError."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text(
+        "critical_channels:\n"
+        "  - 'Т1 .*'\n"
+        "stale_timeout_s: 'not_a_number'\n"
+    )
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(SafetyConfigError, match="invalid config value"):
+        sm.load_config(cfg)
+
+
+def test_load_config_fails_on_non_dict_source_limits(tmp_path):
+    """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text(
+        "critical_channels:\n"
+        "  - 'Т1 .*'\n"
+        "source_limits: 'not_a_dict'\n"
+    )
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(SafetyConfigError, match="invalid config value"):
+        sm.load_config(cfg)
+
+
+def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
+    """A.4.1 residual: non-numeric source limit must raise SafetyConfigError."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text(
+        "critical_channels:\n"
+        "  - 'Т1 .*'\n"
+        "source_limits:\n"
+        "  max_power_w: [1, 2, 3]\n"
+    )
+    sm = SafetyManager(SafetyBroker(), mock=True)
+    with pytest.raises(SafetyConfigError, match="invalid config value"):
+        sm.load_config(cfg)
+
+
 async def test_keithley_heartbeat_monitored_in_run_permitted():
     """A.3.1: RUN_PERMITTED must detect stuck start_source() via
     heartbeat timeout even when _active_sources is empty."""
