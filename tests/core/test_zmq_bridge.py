@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from cryodaq.core.zmq_bridge import (
-    ZMQPublisher,
-    ZMQSubscriber,
     _pack_reading,
     _unpack_reading,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,7 +25,7 @@ def _make_reading(
     metadata: dict | None = None,
 ) -> Reading:
     return Reading(
-        timestamp=datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC),
         instrument_id="test",
         channel=channel,
         value=value,
@@ -63,7 +59,7 @@ async def test_pack_unpack_roundtrip() -> None:
 
 async def test_pack_preserves_all_fields() -> None:
     original = Reading(
-        timestamp=datetime(2026, 1, 15, 8, 30, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 1, 15, 8, 30, 0, tzinfo=UTC),
         instrument_id="vg1",
         channel="VACUUM",
         value=1.23e-5,

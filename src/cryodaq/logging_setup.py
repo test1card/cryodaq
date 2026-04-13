@@ -17,7 +17,6 @@ import sys
 
 from cryodaq.paths import get_logs_dir
 
-
 # Telegram bot tokens follow ``botID:secret`` shape — 8+ digit bot ID +
 # colon + ~35-char base64-ish secret. The token can leak in TWO forms:
 #

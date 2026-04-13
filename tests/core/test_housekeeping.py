@@ -6,8 +6,6 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.housekeeping import AdaptiveThrottle, HousekeepingService
 from cryodaq.core.safety_broker import SafetyBroker

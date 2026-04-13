@@ -124,6 +124,7 @@ def test_concurrent_get_rm_creates_single_manager():
 def test_close_all_managers_holds_rm_lock():
     """Codex Phase 2b Block B P1: close_all_managers must take _rm_lock."""
     import inspect
+
     from cryodaq.drivers.transport.gpib import GPIBTransport
     src = inspect.getsource(GPIBTransport.close_all_managers)
     assert "_rm_lock" in src, (

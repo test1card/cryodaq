@@ -178,7 +178,7 @@ class SerialTransport:
             # Прочитать всё, что есть в буфере, с минимальным таймаутом
             while True:
                 await asyncio.wait_for(self._reader.read(4096), timeout=0.1)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             pass
         except Exception:
             pass

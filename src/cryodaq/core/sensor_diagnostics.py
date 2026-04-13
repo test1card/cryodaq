@@ -13,13 +13,12 @@ import math
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
 
 from cryodaq.core.rate_estimator import _ols_slope_per_min
-
 
 # ---------------------------------------------------------------------------
 # Channel classifier (Phase 2c user report)
@@ -87,7 +86,7 @@ class ChannelDiagnostics:
     correlation: float | None  # Pearson r with nearest neighbour in group
     health_score: int          # 0-100
     fault_flags: list[str] = field(default_factory=list)
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass
@@ -205,7 +204,7 @@ class SensorDiagnosticsEngine:
 
     def update(self) -> None:
         """Recompute diagnostics for all channels with data."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for channel_id, buf in self._buffers.items():
             if not buf:
                 continue

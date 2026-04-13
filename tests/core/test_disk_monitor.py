@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from cryodaq.core.disk_monitor import DiskMonitor
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------

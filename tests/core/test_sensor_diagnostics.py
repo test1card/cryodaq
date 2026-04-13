@@ -11,13 +11,9 @@ import numpy as np
 import pytest
 
 from cryodaq.core.sensor_diagnostics import (
-    ChannelDiagnostics,
-    DiagnosticsSummary,
     SensorDiagnosticsEngine,
     _get_noise_threshold,
-    _mad_sigma,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

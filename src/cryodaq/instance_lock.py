@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def try_acquire_lock(lock_name: str) -> int | None:
         else:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
+    except OSError:
         os.close(fd)
         return None
 

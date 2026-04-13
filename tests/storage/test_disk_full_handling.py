@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,7 +19,7 @@ def _reading(channel: str = "Т1", value: float = 4.5) -> Reading:
         value=value,
         unit="K",
         instrument_id="ls218",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         raw=value,
         metadata={},

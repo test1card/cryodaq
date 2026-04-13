@@ -56,7 +56,8 @@ async def test_handle_message_defense_in_depth_blocks_unknown_chat(caplog):
     Defense-in-depth against future direct callers (and tests).
     """
     import logging
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
+
     from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
     bot = TelegramCommandBot(

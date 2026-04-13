@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 
@@ -109,7 +110,7 @@ class TelegramCommandBot:
         # Runtime state — restored from the original constructor (the Phase 2b
         # rewrite of __init__ accidentally dropped these initializers).
         self._latest: dict[str, Reading] = {}
-        self._start_time = datetime.now(timezone.utc)
+        self._start_time = datetime.now(UTC)
         self._last_update_id = 0
         self._collect_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
@@ -292,7 +293,7 @@ class TelegramCommandBot:
     # ------------------------------------------------------------------
 
     def _cmd_status(self) -> str:
-        uptime = datetime.now(timezone.utc) - self._start_time
+        uptime = datetime.now(UTC) - self._start_time
         h, rem = divmod(int(uptime.total_seconds()), 3600)
         m, s = divmod(rem, 60)
 

@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import re
 import sqlite3
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -86,7 +84,7 @@ def _reading(
     instrument_id: str = "ls218s",
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
-    timestamp = ts or datetime.now(timezone.utc)
+    timestamp = ts or datetime.now(UTC)
     return Reading(
         timestamp=timestamp,
         instrument_id=instrument_id,
@@ -420,7 +418,7 @@ async def test_telegram_notifier_sends_activated_event():
     event.channel = "Т1 Криостат верх"
     event.value = 350.0
     event.threshold = 100.0
-    event.timestamp = datetime.now(timezone.utc)
+    event.timestamp = datetime.now(UTC)
 
     await notifier(event)
 
@@ -465,7 +463,7 @@ async def test_sqlite_writes_real_timestamp(tmp_path: Path):
         )
 
     writer = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     batch = [_reading("T_STAGE", 4.235, "K", ts=ts)]
     writer._write_batch(batch)
 
@@ -505,7 +503,7 @@ async def test_parse_timestamp_real():
         "_parse_timestamp(float) must return a timezone-aware datetime"
     )
     # Verify the epoch is decoded correctly (within 1 s tolerance)
-    expected = datetime.fromtimestamp(epoch_float, tz=timezone.utc)
+    expected = datetime.fromtimestamp(epoch_float, tz=UTC)
     delta = abs((dt - expected).total_seconds())
     assert delta < 1.0, (
         f"_parse_timestamp({epoch_float}) decoded to {dt}, expected ~{expected}"
@@ -562,7 +560,7 @@ async def test_sqlite_timestamp_precision_preserved(tmp_path: Path):
     the stored value round-trips back to within 1 ms of the original.
     """
     writer = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     batch = [_reading("CH1", 4.5, "K", ts=ts)]
     writer._write_batch(batch)
 
@@ -578,11 +576,11 @@ async def test_sqlite_timestamp_precision_preserved(tmp_path: Path):
 
     # Parse back to datetime regardless of storage format (TEXT or REAL)
     if isinstance(stored, float):
-        recovered = datetime.fromtimestamp(stored, tz=timezone.utc)
+        recovered = datetime.fromtimestamp(stored, tz=UTC)
     else:
         recovered = datetime.fromisoformat(stored)
         if recovered.tzinfo is None:
-            recovered = recovered.replace(tzinfo=timezone.utc)
+            recovered = recovered.replace(tzinfo=UTC)
 
     delta_ms = abs((recovered - ts).total_seconds()) * 1000
     assert delta_ms < 1.0, (
@@ -595,7 +593,7 @@ async def test_sqlite_timestamp_precision_preserved(tmp_path: Path):
 async def test_sqlite_schema_has_timestamp_column(tmp_path: Path):
     """The readings table must have a 'timestamp' column after schema creation."""
     writer = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     batch = [_reading("CH1", 4.5, "K", ts=ts)]
     writer._write_batch(batch)
 

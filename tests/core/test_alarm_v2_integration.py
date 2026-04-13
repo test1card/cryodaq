@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
-import pytest
-
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager, AlarmEvent
-from cryodaq.core.alarm_config import AlarmConfig, EngineConfig, SetpointDef
+from cryodaq.core.alarm_config import AlarmConfig, SetpointDef
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.drivers.base import Reading
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -24,7 +21,7 @@ def _reading(channel: str, value: float, unit: str = "K", ts: float | None = Non
     if ts is None:
         ts = time.time()
     return Reading(
-        timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(ts, tz=UTC),
         instrument_id="LS218",
         channel=channel,
         value=value,

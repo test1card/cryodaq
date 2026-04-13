@@ -9,8 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 import yaml
@@ -72,7 +71,7 @@ def _colored_circle_icon(color: str) -> QIcon:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _shift_id() -> str:

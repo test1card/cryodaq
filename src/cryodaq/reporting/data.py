@@ -5,7 +5,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,7 @@ class ReportDataExtractor:
         metadata = self.load_metadata(metadata_path)
         experiment = metadata.get("experiment", {})
         start_time = self._parse_time(experiment.get("start_time"))
-        end_time = self._parse_time(experiment.get("end_time")) or datetime.now(timezone.utc)
+        end_time = self._parse_time(experiment.get("end_time")) or datetime.now(UTC)
         experiment_id = experiment.get("experiment_id")
 
         readings = self._load_archived_readings(metadata)
@@ -196,5 +196,5 @@ class ReportDataExtractor:
             text = f"{text[:-1]}+00:00"
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from pathlib import Path
 
 import pytest
@@ -18,7 +17,6 @@ from cryodaq.core.alarm import (
 )
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -17,17 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,7 +49,7 @@ class MockDriver(InstrumentDriver):
 
 def _make_batch(n: int) -> list[Reading]:
     """Create a batch of n readings with instrument_id set."""
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     return [
         Reading(
             timestamp=ts,

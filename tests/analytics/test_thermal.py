@@ -7,7 +7,6 @@ import pytest
 from cryodaq.drivers.base import ChannelStatus, Reading
 from plugins.thermal_calculator import ThermalCalculator
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

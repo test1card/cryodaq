@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -43,7 +43,7 @@ async def test_operator_log_persists_in_sqlite(tmp_path: Path) -> None:
         source="gui",
         experiment_id="exp-001",
         tags=["ops", "nitrogen"],
-        timestamp=datetime(2026, 3, 16, 12, 30, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 3, 16, 12, 30, tzinfo=UTC),
     )
 
     db_path = tmp_path / "data_2026-03-16.db"
@@ -99,7 +99,7 @@ async def test_log_entry_command_uses_active_experiment(
 
 async def test_log_get_filters_by_time_range(tmp_path: Path, experiment_manager: ExperimentManager) -> None:
     writer = SQLiteWriter(tmp_path)
-    start_ts = datetime(2026, 3, 16, 8, 0, tzinfo=timezone.utc)
+    start_ts = datetime(2026, 3, 16, 8, 0, tzinfo=UTC)
     middle_ts = start_ts + timedelta(hours=1)
     end_ts = start_ts + timedelta(hours=2)
 

@@ -9,7 +9,7 @@ differentiates the two actions.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -159,7 +159,7 @@ async def test_interlock_engine_trip_handler_receives_full_context():
         value=15.0,
         unit="K",
         instrument_id="ls",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         raw=15.0,
         metadata={},

@@ -8,10 +8,11 @@ from __future__ import annotations
 import csv
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Any, Callable
+from typing import Any
 
 import matplotlib
 

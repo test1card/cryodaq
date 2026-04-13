@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import multiprocessing as mp
 import queue
 import time
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Heartbeat
@@ -103,6 +99,7 @@ def test_heartbeat_has_timestamp() -> None:
 def test_overflow_counter_exists_in_subprocess() -> None:
     """Verify dropped_count variable and warning message pattern are in the code."""
     import inspect
+
     from cryodaq.core import zmq_subprocess
     source = inspect.getsource(zmq_subprocess.zmq_bridge_main)
     assert "dropped_count" in source
@@ -121,6 +118,7 @@ def test_serve_loop_sends_reply_on_serialization_error() -> None:
     Verify the code has default=str in json.dumps and a fallback error reply.
     """
     import inspect
+
     from cryodaq.core import zmq_bridge
     source = inspect.getsource(zmq_bridge.ZMQCommandServer._serve_loop)
     # Must use default=str to handle datetime etc.
@@ -132,6 +130,7 @@ def test_serve_loop_sends_reply_on_serialization_error() -> None:
 def test_serve_loop_handles_cancelled_error() -> None:
     """The serve loop sends error reply on CancelledError after recv."""
     import inspect
+
     from cryodaq.core import zmq_bridge
     source = inspect.getsource(zmq_bridge.ZMQCommandServer._serve_loop)
     # Must catch CancelledError and send reply

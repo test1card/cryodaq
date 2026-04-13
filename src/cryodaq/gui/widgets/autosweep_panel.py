@@ -16,7 +16,7 @@ import logging
 import math
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Signal, Slot
@@ -345,7 +345,7 @@ class AutoSweepPanel(QWidget):
         self._results = []
         self._running = True
         self._paused = False
-        self._run_started_at = datetime.now(timezone.utc)
+        self._run_started_at = datetime.now(UTC)
         self._run_finished_at = None
 
         # Reset predictor
@@ -383,7 +383,7 @@ class AutoSweepPanel(QWidget):
     def _on_stop(self) -> None:
         self._running = False
         self._paused = False
-        self._run_finished_at = datetime.now(timezone.utc)
+        self._run_finished_at = datetime.now(UTC)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
@@ -422,7 +422,7 @@ class AutoSweepPanel(QWidget):
 
     def _finish_sweep(self) -> None:
         self._running = False
-        self._run_finished_at = datetime.now(timezone.utc)
+        self._run_finished_at = datetime.now(UTC)
         send_command({"cmd": "keithley_stop", "channel": self._smu_channel})
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)

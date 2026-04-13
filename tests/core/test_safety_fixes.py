@@ -13,10 +13,8 @@ via the correct module path "cryodaq.core.disk_monitor.shutil.disk_usage".
 from __future__ import annotations
 
 import asyncio
-import math
 import re
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

@@ -6,7 +6,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel, QTableWidget
 
-from cryodaq.gui.widgets.common import StatusBanner, add_form_rows, build_action_row, setup_standard_table
+from cryodaq.gui.widgets.common import (
+    StatusBanner,
+    add_form_rows,
+    build_action_row,
+    setup_standard_table,
+)
 
 
 def _app() -> QApplication:

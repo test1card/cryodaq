@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
-from cryodaq.drivers.base import ChannelStatus
 from cryodaq.drivers.instruments.keithley_2604b import (
-    Keithley2604B,
-    MAX_DELTA_V_PER_STEP,
     _COMPLIANCE_NOTIFY_THRESHOLD,
+    MAX_DELTA_V_PER_STEP,
+    Keithley2604B,
 )
-
 
 # ---------------------------------------------------------------------------
 # Slew rate limiting

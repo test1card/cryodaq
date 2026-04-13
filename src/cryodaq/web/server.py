@@ -29,20 +29,18 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import zmq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-import zmq
-
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
-
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +250,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
     Возвращает словарь: channel → [{"t": iso, "v": float, "u": unit}, ...]
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     cutoff_epoch = cutoff.timestamp()
 
     result: dict[str, list[dict[str, Any]]] = {}
@@ -275,7 +273,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
         for row in rows:
             ch = row["channel"]
             result.setdefault(ch, []).append({
-                "t": datetime.fromtimestamp(row["timestamp"], tz=timezone.utc).isoformat(),
+                "t": datetime.fromtimestamp(row["timestamp"], tz=UTC).isoformat(),
                 "v": row["value"],
                 "u": row["unit"],
             })

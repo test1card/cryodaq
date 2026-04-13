@@ -8,7 +8,6 @@ P0-04: SafetyManager.emergency_off returns latched flag when FAULT_LATCHED
 
 from __future__ import annotations
 
-import ast
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,7 +17,7 @@ from cryodaq.core.alarm import AlarmCondition, AlarmEngine, AlarmSeverity
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
-from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.base import Reading
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,7 +82,7 @@ async def _drain_queue(queue: asyncio.Queue, *, timeout: float = 0.1) -> list[Re
         try:
             item = await asyncio.wait_for(queue.get(), timeout=remaining)
             items.append(item)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             break
     return items
 

@@ -5,13 +5,11 @@ import importlib
 import io
 import logging
 
-import pytest
-
 
 def test_setup_logging_creates_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
 
-    from cryodaq import paths, logging_setup
+    from cryodaq import logging_setup, paths
     importlib.reload(paths)
     importlib.reload(logging_setup)
 
@@ -74,7 +72,7 @@ def test_telegram_token_redacted_in_args():
 
 def test_setup_logging_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
-    from cryodaq import paths, logging_setup
+    from cryodaq import logging_setup, paths
     importlib.reload(paths)
     importlib.reload(logging_setup)
 

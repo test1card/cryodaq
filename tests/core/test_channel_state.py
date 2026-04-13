@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import UTC, datetime
 
-import pytest
-
-from cryodaq.core.channel_state import ChannelState, ChannelStateTracker
+from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.drivers.base import Reading
 
 
@@ -16,7 +13,7 @@ def _reading(channel: str, value: float, unit: str = "K",
              instrument_id: str = "LS218", ts: float | None = None) -> Reading:
     if ts is None:
         ts = time.time()
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts, tz=UTC)
     return Reading(
         timestamp=dt,
         instrument_id=instrument_id,

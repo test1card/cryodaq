@@ -10,11 +10,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui.widgets.vacuum_trend_panel import (
-    VacuumTrendPanel,
     _COLOR_GREEN,
-    _COLOR_YELLOW,
     _COLOR_RED,
-    _COLOR_MUTED,
+    _COLOR_YELLOW,
+    VacuumTrendPanel,
     _fmt_eta,
 )
 

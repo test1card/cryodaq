@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,7 +13,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 
 def _reading(channel: str, value: float, unit: str = "K") -> Reading:
     return Reading(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         instrument_id="ls218",
         channel=channel,
         value=value,
@@ -27,7 +26,7 @@ def _reading(channel: str, value: float, unit: str = "K") -> Reading:
 
 def _srdg_reading(channel: str, value: float) -> Reading:
     return Reading(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         instrument_id="ls218",
         channel=channel,
         value=value,

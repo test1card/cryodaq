@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import sys
 
-import pytest
-
 from cryodaq import paths
 
 

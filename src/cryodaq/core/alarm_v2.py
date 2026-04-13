@@ -343,7 +343,7 @@ class AlarmEvaluator:
         timeout = cfg.get("timeout_s", 30.0)
         channels = self._resolve_channels(cfg)
         level = cfg.get("level", "WARNING")
-        message_tmpl = cfg.get("message", f"Stale data: {{channel}}")
+        message_tmpl = cfg.get("message", "Stale data: {channel}")
         now = time.time()
 
         for ch in channels:

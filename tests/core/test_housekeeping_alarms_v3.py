@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC
 
-import pytest
 import yaml
 
 from cryodaq.core.housekeeping import (
@@ -226,7 +226,8 @@ def test_warning_level_NOT_protected(tmp_path):
 
 def test_throttle_protects_alarms_v3_channels(tmp_path):
     """End-to-end: AdaptiveThrottle uses the merged patterns to skip thinning."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from cryodaq.drivers.base import ChannelStatus, Reading
 
     config = tmp_path / "alarms_v3.yaml"
@@ -258,7 +259,7 @@ def test_throttle_protects_alarms_v3_channels(tmp_path):
             value=value,
             unit="K",
             instrument_id="ls",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             status=ChannelStatus.OK,
             raw=value,
             metadata={},

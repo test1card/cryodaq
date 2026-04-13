@@ -252,7 +252,7 @@ class PluginPipeline:
                         self._queue.get(), timeout=remaining
                     )
                     batch.append(reading)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 except asyncio.CancelledError:
                     return

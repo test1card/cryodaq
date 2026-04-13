@@ -27,23 +27,23 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
-from cryodaq.paths import get_data_dir
-from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.tray_status import TrayController, resolve_tray_status
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.channel_editor import ChannelEditorDialog
+from cryodaq.gui.widgets.common import apply_status_label_style
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.connection_settings import ConnectionSettingsDialog
+from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
-from cryodaq.gui.widgets.common import apply_status_label_style
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
-from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
-from cryodaq.gui.tray_status import TrayController, resolve_tray_status
+from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self._uptime_label)
 
         self._sensor_diag_label = QLabel("Датчики: —")
-        self._sensor_diag_label.setStyleSheet(f"color: #8b949e;")
+        self._sensor_diag_label.setStyleSheet("color: #8b949e;")
         status_bar.addPermanentWidget(self._sensor_diag_label)
 
         self._rate_label = QLabel("0 изм/с")

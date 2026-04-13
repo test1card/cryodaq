@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import sqlite3
-import time
-from collections import deque
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cryodaq.drivers.base import ChannelStatus, Reading
-
+from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------
 # BUG-1: Safety state machine race — request_run rejected during _fault()
@@ -111,7 +107,7 @@ async def test_sqlite_stop_after_write(tmp_path) -> None:
     await writer.start_immediate()
 
     reading = Reading(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         instrument_id="test",
         channel="T1",
         value=4.2,
@@ -161,7 +157,7 @@ async def test_phase_detector_reset_between_experiments() -> None:
     warmup_temps = [4.2 + i * 1.0 for i in range(100)]
     warmup_readings = [
         Reading(
-            timestamp=datetime.fromtimestamp(1000 + i * 3.0, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(1000 + i * 3.0, tz=UTC),
             instrument_id="test", channel="T7", value=t, unit="K",
         )
         for i, t in enumerate(warmup_temps)
@@ -177,7 +173,7 @@ async def test_phase_detector_reset_between_experiments() -> None:
     # Exp2: room temp → should be "preparation"
     room_readings = [
         Reading(
-            timestamp=datetime.fromtimestamp(5000 + i * 3.0, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(5000 + i * 3.0, tz=UTC),
             instrument_id="test", channel="T7", value=295.0, unit="K",
         )
         for i in range(100)
@@ -217,7 +213,7 @@ async def test_sqlite_filters_inf(tmp_path) -> None:
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     readings = [
         Reading(timestamp=now, instrument_id="test", channel="T1", value=4.2, unit="K"),
         Reading(timestamp=now, instrument_id="test", channel="T2", value=float("inf"), unit="K"),

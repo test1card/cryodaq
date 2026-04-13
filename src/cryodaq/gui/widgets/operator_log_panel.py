@@ -16,7 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
-from cryodaq.gui.widgets.common import PanelHeader, StatusBanner, build_action_row, create_panel_root
+from cryodaq.gui.widgets.common import (
+    PanelHeader,
+    StatusBanner,
+    build_action_row,
+    create_panel_root,
+)
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +129,7 @@ class XLSXExporter:
             try:
                 dt = _parse_timestamp(ts_str)
                 # Excel не понимает offset-aware datetime — приводим к UTC naive
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                dt = dt.astimezone(UTC).replace(tzinfo=None)
             except (ValueError, TypeError, OSError):
                 dt = ts_str  # fallback: оставить как строку
 

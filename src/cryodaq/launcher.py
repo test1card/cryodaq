@@ -24,8 +24,8 @@ from pathlib import Path
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.main_window import MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
-from cryodaq.instance_lock import try_acquire_lock, release_lock
+from cryodaq.instance_lock import release_lock, try_acquire_lock
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -87,6 +87,7 @@ def _ping_engine() -> bool:
     """Check if a CryoDAQ engine is actually running on the command port."""
     try:
         import json
+
         import zmq
         ctx = zmq.Context()
         sock = ctx.socket(zmq.REQ)
@@ -242,7 +243,7 @@ class LauncherWindow(QMainWindow):
                     fcntl.flock(probe_fd, fcntl.LOCK_UN)
                 # Lock was free → stale file, proceed
                 logger.info("Stale lock file — proceeding with engine start")
-            except (IOError, OSError):
+            except OSError:
                 # Lock held → engine alive but port not ready yet
                 if probe_fd is not None:
                     try:

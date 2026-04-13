@@ -12,8 +12,9 @@ import errno
 import json
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import msgpack
 import zmq
@@ -92,7 +93,7 @@ def _unpack_reading(payload: bytes) -> Reading:
     """Десериализовать Reading из msgpack."""
     data = msgpack.unpackb(payload, raw=False)
     return Reading(
-        timestamp=datetime.fromtimestamp(data["ts"], tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(data["ts"], tz=UTC),
         instrument_id=data.get("iid", ""),
         channel=data["ch"],
         value=data["v"],

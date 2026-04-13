@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import logging
 import os
 import signal
 import sys
 import time
+from datetime import UTC, datetime
 
 # Windows: pyzmq требует SelectorEventLoop (не Proactor)
 if sys.platform == "win32":
@@ -29,40 +29,39 @@ from typing import Any
 import yaml
 
 from cryodaq.analytics.calibration import CalibrationStore
-from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
-from cryodaq.core.event_logger import EventLogger
-from cryodaq.core.alarm import AlarmEngine
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
-from cryodaq.core.alarm_config import load_alarm_config
-from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.channel_state import ChannelStateTracker
-from cryodaq.core.rate_estimator import RateEstimator
-from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
+from cryodaq.core.alarm import AlarmEngine
+from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
+from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
+from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.disk_monitor import DiskMonitor
+from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
-    load_critical_channels_from_alarms_v3,
     HousekeepingService,
+    load_critical_channels_from_alarms_v3,
     load_housekeeping_config,
     load_protected_channel_patterns,
 )
 from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
-from cryodaq.core.smu_channel import normalize_smu_channel
+from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.alarm_config import AlarmConfigError
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
-from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.drivers.base import Reading
-from cryodaq.notifications.periodic_report import PeriodicReporter
-from cryodaq.reporting.generator import ReportGenerator
-from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.notifications.escalation import EscalationService
+from cryodaq.notifications.periodic_report import PeriodicReporter
+from cryodaq.notifications.telegram_commands import TelegramCommandBot
+from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
@@ -70,7 +69,7 @@ logger = logging.getLogger("cryodaq.engine")
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
 # ---------------------------------------------------------------------------
-from cryodaq.paths import get_project_root, get_data_dir, get_config_dir
+from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 
 _PROJECT_ROOT = get_project_root()
 _CONFIG_DIR = get_config_dir()
@@ -124,7 +123,7 @@ def _parse_log_time(raw: Any) -> datetime | None:
     if raw in (None, ""):
         return None
     if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        return datetime.fromtimestamp(float(raw), tz=UTC)
     if isinstance(raw, str):
         value = raw.strip()
         if not value:
@@ -133,8 +132,8 @@ def _parse_log_time(raw: Any) -> datetime | None:
             value = f"{value[:-1]}+00:00"
         parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
     raise ValueError("Invalid log time filter.")
 
 
@@ -571,7 +570,7 @@ def _run_experiment_command(
             from datetime import datetime as _dt
             try:
                 started = _dt.fromisoformat(history[-1]["started_at"])
-                elapsed = (_dt.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+                elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
             except Exception:
                 pass
         return {
@@ -624,6 +623,7 @@ def _get_memory_mb() -> float:
     """
     try:
         import os
+
         import psutil  # type: ignore[import]
         return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
     except Exception:
@@ -1631,7 +1631,7 @@ def _acquire_engine_lock() -> int:
         else:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
+    except OSError:
         # Lock held by another process (flock/msvcrt is authoritative)
         os.close(fd)
         logger.error(

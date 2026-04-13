@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,6 @@ from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.replay import ReplaySource
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,7 +46,7 @@ def _make_db(tmp_path: Path, readings: list[Reading]) -> Path:
 
 
 def _fixed_ts(hour: int, minute: int = 0, second: int = 0) -> datetime:
-    return datetime(2026, 3, 14, hour, minute, second, tzinfo=timezone.utc)
+    return datetime(2026, 3, 14, hour, minute, second, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +115,7 @@ async def test_replay_count(tmp_path: Path) -> None:
     ts_base = _fixed_ts(10)
     readings = [
         _reading(f"CH{i % 8 + 1}", float(i), ts=datetime(
-            2026, 3, 14, 10, 0, i, tzinfo=timezone.utc
+            2026, 3, 14, 10, 0, i, tzinfo=UTC
         ))
         for i in range(n)
     ]
@@ -155,7 +154,7 @@ async def test_replay_stop(tmp_path: Path) -> None:
     n = 10
     readings = [
         _reading("CH1", float(i), ts=datetime(
-            2026, 3, 14, 10, 0, i, tzinfo=timezone.utc
+            2026, 3, 14, 10, 0, i, tzinfo=UTC
         ))
         for i in range(n)
     ]

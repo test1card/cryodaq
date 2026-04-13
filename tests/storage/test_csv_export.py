@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.csv_export import CSVExporter
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +58,7 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
 
 async def test_export_creates_csv(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     _populate_db(data_dir, [_reading(ts=ts)])
 
     output_path = tmp_path / "out.csv"
@@ -78,7 +75,7 @@ async def test_export_creates_csv(tmp_path: Path) -> None:
 
 async def test_correct_columns(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     _populate_db(data_dir, [_reading(ts=ts)])
 
     output_path = tmp_path / "out.csv"
@@ -95,9 +92,9 @@ async def test_correct_columns(tmp_path: Path) -> None:
 async def test_time_range_filter(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
 
-    early = datetime(2026, 3, 14, 8, 0, 0, tzinfo=timezone.utc)
-    inside = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
-    late = datetime(2026, 3, 14, 20, 0, 0, tzinfo=timezone.utc)
+    early = datetime(2026, 3, 14, 8, 0, 0, tzinfo=UTC)
+    inside = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    late = datetime(2026, 3, 14, 20, 0, 0, tzinfo=UTC)
 
     readings = [
         _reading("CH1", 1.0, "K", ts=early),
@@ -107,8 +104,8 @@ async def test_time_range_filter(tmp_path: Path) -> None:
     _populate_db(data_dir, readings)
 
     output_path = tmp_path / "out.csv"
-    start = datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)
-    end = datetime(2026, 3, 14, 15, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 14, 15, 0, 0, tzinfo=UTC)
 
     count = CSVExporter(data_dir).export(output_path, start=start, end=end)
 
@@ -124,7 +121,7 @@ async def test_time_range_filter(tmp_path: Path) -> None:
 
 async def test_channel_filter(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
 
     readings = [
         _reading("T_STAGE", 4.2, "K", ts=ts),
@@ -149,7 +146,7 @@ async def test_channel_filter(tmp_path: Path) -> None:
 
 async def test_empty_result(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     _populate_db(data_dir, [_reading("CH1", ts=ts)])
 
     output_path = tmp_path / "out.csv"

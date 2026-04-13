@@ -1,0 +1,95 @@
+2026-04-10 01:05:06 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 01:05:06 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 01:05:06 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=67192
+2026-04-10 01:05:07 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 01:05:07 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=67193)
+2026-04-10 01:05:07 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 01:06:03 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 1/5 in 3s.
+2026-04-10 01:06:08 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 01:06:08 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 01:06:08 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=67490
+2026-04-10 01:06:13 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 01:06:13 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=67490)...
+2026-04-10 01:06:13 │ INFO     │ cryodaq.launcher │ Engine остановлен
+2026-04-10 01:12:18 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 01:12:18 │ INFO     │ cryodaq.launcher │ Stale lock file — proceeding with engine start
+2026-04-10 01:12:18 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 01:12:18 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=69389
+2026-04-10 01:12:18 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 01:12:18 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=69390)
+2026-04-10 01:12:19 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 01:12:37 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 01:12:37 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=69389)...
+2026-04-10 01:12:37 │ INFO     │ cryodaq.launcher │ Engine остановлен
+2026-04-10 02:19:44 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 02:19:44 │ INFO     │ cryodaq.launcher │ Stale lock file — proceeding with engine start
+2026-04-10 02:19:44 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 02:19:44 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=76808
+2026-04-10 02:19:44 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 02:19:44 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=76809)
+2026-04-10 02:19:44 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 02:20:42 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 1/5 in 3s.
+2026-04-10 02:20:47 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 02:20:47 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 02:20:47 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=77102
+2026-04-10 02:21:18 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 02:21:18 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=77102)...
+2026-04-10 02:21:18 │ INFO     │ cryodaq.launcher │ Engine остановлен
+2026-04-10 11:47:20 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 11:47:20 │ INFO     │ cryodaq.launcher │ Stale lock file — proceeding with engine start
+2026-04-10 11:47:20 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 11:47:20 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=43839
+2026-04-10 11:47:20 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 11:47:20 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=43841)
+2026-04-10 11:47:20 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 11:48:19 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 1/5 in 3s.
+2026-04-10 11:48:24 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 11:48:24 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 11:48:24 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=44166
+2026-04-10 11:49:20 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 2/5 in 10s.
+2026-04-10 11:49:33 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 11:49:33 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 11:49:33 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=44503
+2026-04-10 11:50:29 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 3/5 in 30s.
+2026-04-10 11:51:02 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 11:51:02 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 11:51:02 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=44926
+2026-04-10 11:51:59 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 4/5 in 60s.
+2026-04-10 11:53:02 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 11:53:02 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 11:53:02 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=45527
+2026-04-10 11:53:12 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 11:53:12 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=45527)...
+2026-04-10 11:53:12 │ INFO     │ cryodaq.launcher │ Engine остановлен
+2026-04-10 12:33:24 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 12:33:24 │ INFO     │ cryodaq.launcher │ Stale lock file — proceeding with engine start
+2026-04-10 12:33:24 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 12:33:24 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=57509
+2026-04-10 12:33:24 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 12:33:24 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=57511)
+2026-04-10 12:33:24 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 12:34:22 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 1/5 in 3s.
+2026-04-10 12:34:27 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 12:34:27 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 12:34:27 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=57810
+2026-04-10 12:34:34 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 12:34:34 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=57810)...
+2026-04-10 12:34:34 │ INFO     │ cryodaq.launcher │ Engine остановлен
+2026-04-10 13:11:02 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 13:11:02 │ INFO     │ cryodaq.launcher │ Stale lock file — proceeding with engine start
+2026-04-10 13:11:02 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 13:11:02 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=69104
+2026-04-10 13:11:02 │ INFO     │ cryodaq.launcher │ Engine ready (attempt 1/10)
+2026-04-10 13:11:02 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess started (PID=69105)
+2026-04-10 13:11:02 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-10 13:12:00 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 1/5 in 3s.
+2026-04-10 13:12:05 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 13:12:05 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 13:12:05 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=69421
+2026-04-10 13:13:03 │ WARNING  │ cryodaq.launcher │ Engine crashed (code=1). Restart attempt 2/5 in 10s.
+2026-04-10 13:13:15 │ WARNING  │ cryodaq.launcher │ Порт 5555 занят, но CryoDAQ engine не отвечает — запускаем новый
+2026-04-10 13:13:15 │ INFO     │ cryodaq.launcher │ Запуск engine как подпроцесса...
+2026-04-10 13:13:15 │ INFO     │ cryodaq.launcher │ Engine запущен, PID=69760
+2026-04-10 13:13:18 │ INFO     │ cryodaq.gui.zmq_client │ ZMQ bridge subprocess stopped
+2026-04-10 13:13:18 │ INFO     │ cryodaq.launcher │ Остановка engine (PID=69760)...
+2026-04-10 13:13:18 │ INFO     │ cryodaq.launcher │ Engine остановлен

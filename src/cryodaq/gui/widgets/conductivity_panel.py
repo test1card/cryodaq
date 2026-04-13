@@ -14,7 +14,7 @@ import logging
 import math
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
@@ -937,7 +937,7 @@ class ConductivityPanel(QWidget):
             from cryodaq.paths import get_data_dir
             log_dir = get_data_dir() / "conductivity_logs"
             log_dir.mkdir(parents=True, exist_ok=True)
-            ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            ts_str = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
             log_path = log_dir / f"conductivity_{ts_str}.csv"
             self._flight_log = log_path.open("w", newline="", encoding="utf-8-sig")
             self._flight_log_writer = csv.writer(self._flight_log)
@@ -991,7 +991,7 @@ class ConductivityPanel(QWidget):
         elapsed = now - self._buffers[hot_ch][0][0] if self._buffers.get(hot_ch) else 0
 
         self._flight_log_writer.writerow([
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
             f"{elapsed:.1f}",
             f"{T_hot:.6f}", f"{T_cold:.6f}", f"{dT:.6f}", f"{P:.6g}",
             f"{R:.6g}", f"{G:.6g}",
@@ -1024,7 +1024,7 @@ class ConductivityPanel(QWidget):
         if not path:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         P = self._power
         preds = self._predictor.get_all_predictions()
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -74,7 +74,7 @@ def manager(tmp_path: Path, instruments_yaml: Path, templates_dir: Path) -> Expe
 
 
 def _open_db(data_dir: Path, day: str | None = None) -> sqlite3.Connection:
-    current_day = day or datetime.now(timezone.utc).date().isoformat()
+    current_day = day or datetime.now(UTC).date().isoformat()
     conn = sqlite3.connect(str(data_dir / f"data_{current_day}.db"))
     conn.row_factory = sqlite3.Row
     return conn
@@ -322,7 +322,7 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
         sample="Cu-archive",
         start_time="2026-03-16T12:00:00+00:00",
     )
-    ts = datetime(2026, 3, 16, 12, 1, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 16, 12, 1, tzinfo=UTC)
     writer._write_batch(
         [
             Reading(ts, "k1", "K1/smua/power", 1.5, "W", ChannelStatus.OK),

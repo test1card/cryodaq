@@ -8,17 +8,17 @@ import math
 import uuid
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from numpy.polynomial import chebyshev as cheb
 import yaml
+from numpy.polynomial import chebyshev as cheb
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _parse_time(raw: datetime | str | None) -> datetime | None:
@@ -26,8 +26,8 @@ def _parse_time(raw: datetime | str | None) -> datetime | None:
         return None
     if isinstance(raw, datetime):
         if raw.tzinfo is None:
-            return raw.replace(tzinfo=timezone.utc)
-        return raw.astimezone(timezone.utc)
+            return raw.replace(tzinfo=UTC)
+        return raw.astimezone(UTC)
     text = str(raw).strip()
     if not text:
         return None
@@ -35,8 +35,8 @@ def _parse_time(raw: datetime | str | None) -> datetime | None:
         text = f"{text[:-1]}+00:00"
     parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _json_dict(raw: Any) -> dict[str, Any]:

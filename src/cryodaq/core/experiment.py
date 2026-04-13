@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -245,7 +245,7 @@ class RunRecord:
             source_module=_clean_text(payload.get("source_module")),
             run_type=_clean_text(payload.get("run_type")),
             status=_clean_text(payload.get("status")) or "UNKNOWN",
-            started_at=_parse_time(payload.get("started_at")) or datetime.now(timezone.utc),
+            started_at=_parse_time(payload.get("started_at")) or datetime.now(UTC),
             finished_at=_parse_time(payload.get("finished_at")),
             parameters=dict(payload.get("parameters") or {}),
             result_summary=dict(payload.get("result_summary") or {}),
@@ -261,8 +261,8 @@ def _parse_time(raw: datetime | str | None) -> datetime | None:
         return None
     if isinstance(raw, datetime):
         if raw.tzinfo is None:
-            return raw.replace(tzinfo=timezone.utc)
-        return raw.astimezone(timezone.utc)
+            return raw.replace(tzinfo=UTC)
+        return raw.astimezone(UTC)
     text = str(raw).strip()
     if not text:
         return None
@@ -270,8 +270,8 @@ def _parse_time(raw: datetime | str | None) -> datetime | None:
         text = f"{text[:-1]}+00:00"
     parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _normalize_custom_fields(raw: dict[str, Any] | None) -> dict[str, str]:
@@ -408,7 +408,7 @@ class ExperimentManager:
                     operator=_clean_text(experiment.get("operator")),
                     sample=_clean_text(experiment.get("sample")),
                     status=_clean_text(experiment.get("status")),
-                    start_time=_parse_time(experiment.get("start_time")) or datetime.now(timezone.utc),
+                    start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
                     end_time=_parse_time(experiment.get("end_time")),
                     artifact_dir=artifact_dir,
                     metadata_path=metadata_path,
@@ -576,7 +576,7 @@ class ExperimentManager:
 
         template = self.get_template(template_id)
         experiment_id = uuid.uuid4().hex[:12]
-        now = _parse_time(start_time) or datetime.now(timezone.utc)
+        now = _parse_time(start_time) or datetime.now(UTC)
         config_snapshot = self._read_config_snapshot()
         normalized_custom_fields = _normalize_custom_fields(custom_fields)
 
@@ -705,7 +705,7 @@ class ExperimentManager:
             description=description if description is not None else active.description,
             notes=notes if notes is not None else active.notes,
             start_time=active.start_time,
-            end_time=_parse_time(end_time) or datetime.now(timezone.utc),
+            end_time=_parse_time(end_time) or datetime.now(UTC),
             status=status,
             config_snapshot=active.config_snapshot,
             custom_fields={
@@ -876,7 +876,7 @@ class ExperimentManager:
         payload = {
             "schema_version": 1,
             **self._state.to_payload(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         from cryodaq.core.atomic_write import atomic_write_text
 
@@ -898,7 +898,7 @@ class ExperimentManager:
             sample=_clean_text(experiment.get("sample")),
             description=_clean_text(experiment.get("description")),
             notes=_clean_text(experiment.get("notes")),
-            start_time=_parse_time(experiment.get("start_time")) or datetime.now(timezone.utc),
+            start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
             end_time=_parse_time(experiment.get("end_time")),
             status=ExperimentStatus(_clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value),
             config_snapshot=dict(experiment.get("config_snapshot") or {}),
@@ -976,11 +976,11 @@ class ExperimentManager:
         return names
 
     def _db_path_for_today(self) -> Path:
-        return self._db_path_for_day(datetime.now(timezone.utc))
+        return self._db_path_for_day(datetime.now(UTC))
 
     def _get_connection(self, when: datetime | None = None) -> sqlite3.Connection:
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        db_path = self._db_path_for_day(when or datetime.now(timezone.utc))
+        db_path = self._db_path_for_day(when or datetime.now(UTC))
         conn = sqlite3.connect(str(db_path), timeout=10)
         result = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
         actual_mode = (result[0] if result else "").lower()
@@ -1143,7 +1143,7 @@ class ExperimentManager:
             valid = [p.value for p in ExperimentPhase]
             raise ValueError(f"Unknown phase '{phase}'. Valid: {valid}")
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         payload = self._read_metadata_payload(self._active.experiment_id)
         phases = payload.get("phases", [])
 
@@ -1405,7 +1405,7 @@ class ExperimentManager:
                     for row in conn.execute(query, params).fetchall():
                         rows.append(
                             {
-                                "timestamp": datetime.fromtimestamp(float(row["timestamp"]), tz=timezone.utc),
+                                "timestamp": datetime.fromtimestamp(float(row["timestamp"]), tz=UTC),
                                 "instrument_id": str(row["instrument_id"] or ""),
                                 "channel": str(row["channel"] or ""),
                                 "value": float(row["value"]),

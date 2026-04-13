@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ def _make_samples(n: int = 7) -> list[CalibrationSample]:
     values = [90.0, 75.0, 62.0, 50.0, 39.0, 31.0, 25.0][:n]
     return [
         CalibrationSample(
-            timestamp=datetime(2026, 3, 17, 12, i, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 3, 17, 12, i, tzinfo=UTC),
             reference_channel="CH1",
             reference_temperature=1600.0 / (raw + 20.0),
             sensor_channel="CH2",

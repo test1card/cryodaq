@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -76,8 +76,8 @@ def test_all_preset_uses_experiment_start_when_active(app, monkeypatch):
     panel = _make_panel()
 
     # Active experiment that started 2 hours ago.
-    two_hours_ago = datetime.now(timezone.utc).replace(microsecond=0)
-    two_hours_ago = two_hours_ago.fromtimestamp(time.time() - 7200, tz=timezone.utc)
+    two_hours_ago = datetime.now(UTC).replace(microsecond=0)
+    two_hours_ago = two_hours_ago.fromtimestamp(time.time() - 7200, tz=UTC)
     panel._cached_active_experiment = {
         "name": "Test",
         "start_time": two_hours_ago.isoformat(),

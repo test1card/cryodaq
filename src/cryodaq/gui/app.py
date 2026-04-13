@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cryodaq.gui.main_window import MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
-from cryodaq.instance_lock import try_acquire_lock, release_lock
+from cryodaq.instance_lock import release_lock, try_acquire_lock
 
 logger = logging.getLogger("cryodaq.gui")
 

@@ -45,8 +45,8 @@ from cryodaq.gui.widgets.shift_handover import (
     ShiftEndDialog,
     ShiftPeriodicPrompt,
     ShiftStartDialog,
-    load_shift_config,
     _shift_id,
+    load_shift_config,
 )
 
 

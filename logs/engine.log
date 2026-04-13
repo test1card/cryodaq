@@ -1,0 +1,728 @@
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:07:30 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:07:30 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:07:30 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:07:30 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:07:31 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:07:31 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:07:31 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:07:31 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:07:31 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:07:31 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:07:31 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:07:32 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:07:34 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:07:38 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:07:46 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:07:56 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:08:06 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:08:16 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:08:26 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:08:33 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:08:33 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:08:33 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:08:33 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:08:33 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:08:34 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:08:35 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:08:37 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:08:41 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:08:49 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:08:59 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:09:09 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:09:19 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:09:29 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:09:42 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:09:42 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:09:42 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:09:42 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:09:43 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:09:43 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:09:43 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:09:43 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:09:43 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:09:43 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:09:43 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:09:44 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:09:46 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:09:50 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:09:58 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:10:08 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:10:18 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:10:28 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:10:38 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:11:11 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:11:11 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:11:11 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:11:11 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:11:12 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:11:12 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:11:12 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:11:12 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:11:12 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:11:12 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:11:12 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:14:09 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:14:09 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:14:09 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:14:09 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:14:10 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:14:10 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:14:10 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:14:10 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:14:10 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:14:10 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:14:11 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:14:12 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:14:14 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:14:18 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:14:26 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:14:36 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:14:46 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:14:56 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:15:06 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:15:12 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:15:12 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:15:12 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:15:12 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:15:13 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:15:13 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:15:13 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:15:13 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:15:13 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:15:13 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:15:13 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:15:14 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:15:16 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:15:20 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:15:28 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:15:38 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:15:48 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:15:58 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:16:08 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:16:22 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:16:22 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:16:22 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:16:22 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:16:23 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:16:23 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:16:23 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:16:23 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:16:23 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:16:23 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:16:23 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:16:24 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:16:26 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:16:30 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:16:38 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:16:48 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:16:58 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:17:08 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:17:18 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:17:51 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:17:51 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:17:51 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:17:51 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:17:52 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:17:52 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:17:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:17:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:17:52 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:17:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:17:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:17:53 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:17:55 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:17:59 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:18:07 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:18:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:18:27 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:18:37 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:18:47 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:19:51 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:19:51 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:19:51 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:19:51 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:19:52 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:19:52 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:19:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:19:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:19:52 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:19:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:19:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:19:53 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:19:55 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:19:59 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:20:07 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:20:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:20:27 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:20:37 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:20:47 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 01:22:51 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 01:22:51 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 01:22:51 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 01:22:51 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 01:22:52 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 01:22:52 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 01:22:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 01:22:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 01:22:52 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 01:22:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 01:22:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 01:22:53 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 01:22:55 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 01:22:59 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 01:23:07 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 01:23:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 01:23:27 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 01:23:37 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 01:23:47 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 15:54:28 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 15:54:28 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 15:54:28 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 15:54:28 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 15:54:29 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 15:54:29 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 15:54:29 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 15:54:29 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 15:54:29 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 15:54:29 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 15:54:29 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 15:54:30 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 15:54:32 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 15:54:36 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 15:54:44 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 15:54:54 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 15:55:04 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 15:55:14 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 15:55:24 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 15:55:31 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 15:55:31 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 15:55:31 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 15:55:31 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 15:55:32 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 15:55:32 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 15:55:32 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 15:55:32 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 15:55:32 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 15:55:32 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 15:55:32 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 15:55:33 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 15:55:35 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 15:55:39 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 15:55:47 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 15:55:57 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 15:56:07 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 15:56:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 15:56:27 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 18:14:09 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 18:14:09 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 18:14:09 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 18:14:09 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 18:14:09 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 18:14:10 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 18:14:11 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 18:14:13 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 18:14:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 18:14:25 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 18:14:35 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 18:14:45 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 18:14:55 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 18:15:05 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 18:15:12 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 18:15:12 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 18:15:12 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 18:15:12 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 18:15:12 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 18:15:13 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 18:15:14 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 18:15:16 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 18:15:20 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 18:15:28 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 18:15:38 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 18:15:48 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 18:15:58 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 18:16:08 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 18:16:22 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 18:16:22 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 18:16:22 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 18:16:22 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 18:16:23 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 18:16:23 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 18:16:23 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 18:16:23 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 18:16:23 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 18:16:23 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 18:16:23 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 18:16:24 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 18:16:26 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 18:16:30 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 18:16:38 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 18:16:48 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 18:16:58 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 18:17:08 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 18:17:18 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Режим MOCK: реальные приборы не используются
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ ═══ CryoDAQ Engine запускается ═══
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Конфигурация: instruments=instruments.yaml
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_1 (lakeshore_218s), ресурс=GPIB0::12::INSTR, интервал=2.00 с
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_2 (lakeshore_218s), ресурс=GPIB0::14::INSTR, интервал=2.00 с
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: LS218_3 (lakeshore_218s), ресурс=GPIB0::16::INSTR, интервал=2.00 с
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: Keithley_1 (keithley_2604b), ресурс=USB0::0x05E6::0x2604::04052028::INSTR, интервал=1.00 с
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Прибор сконфигурирован: VSP63D_1 (thyracont_vsp63d), ресурс=COM3, интервал=2.00 с
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Adaptive-throttle protection: 8 legacy + 22 v3 = 28 unique patterns
+2026-04-11 18:17:51 │ WARNING  │ cryodaq.storage.sqlite_writer │ SQLite 3.50.4 is affected by the March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu 22.04 this means building libsqlite3 from source or bundling a custom libsqlite3 in the PyInstaller build. See https://www.sqlite.org/wal.html
+2026-04-11 18:17:51 │ INFO     │ cryodaq.storage.sqlite_writer │ SQLiteWriter запущен (immediate mode)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_1' добавлен (интервал=2.0s)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_2' добавлен (интервал=2.0s)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'LS218_3' добавлен (интервал=2.0s)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'Keithley_1' добавлен (интервал=1.0s)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.scheduler │ Прибор 'VSP63D_1' добавлен (интервал=2.0s)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.broker │ Подписчик 'zmq_publisher' зарегистрирован (maxsize=10000)
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'overheat_sample' | канал: 'Т1 Криостат верх' | порог: > 100.0 | уровень: warning | гистерезис: 5.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'cryogenics_loss' | канал: 'Т1 Криостат верх' | порог: > 20.0 | уровень: critical | гистерезис: 2.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'keithley_overpower' | канал: '.*/smua/power' | порог: > 5.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_warning' | канал: 'system/disk_free_gb' | порог: < 10.0 | уровень: warning | гистерезис: 2.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Тревога добавлена: 'disk_space_critical' | канал: 'system/disk_free_gb' | порог: < 2.0 | уровень: critical | гистерезис: 0.5.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.alarm │ Конфигурация тревог загружена из '/Users/vladimir/Projects/cryodaq/config/alarms.yaml': 5 тревог.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_cryostat' | канал: 'Т[1-8] .*' | порог: > 350.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'overheat_compressor' | канал: 'Т(9|10|11|12) .*' | порог: > 320.0 | действие: 'emergency_off' | кулдаун: 10.0 с.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.interlock │ Блокировка добавлена: 'detector_warmup' | канал: 'Т12 .*' | порог: > 10.0 | действие: 'stop_source' | кулдаун: 5.0 с.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.interlock │ Конфигурация блокировок загружена из '/Users/vladimir/Projects/cryodaq/config/interlocks.yaml': 3 блокировок.
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ Alarm Engine v2: загружено 19 алармов
+2026-04-11 18:17:51 │ INFO     │ cryodaq.core.channel_manager │ Загружена конфигурация каналов: /Users/vladimir/Projects/cryodaq/config/channels.yaml
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ SensorDiagnostics: enabled, update_interval=10s, groups=3
+2026-04-11 18:17:51 │ INFO     │ cryodaq.engine │ VacuumTrendPredictor: enabled, window=3600s, targets=[0.0001, 1e-05, 1e-06]
+2026-04-11 18:17:52 │ INFO     │ cryodaq.engine │ CooldownService создан
+2026-04-11 18:17:52 │ INFO     │ cryodaq.engine │ Telegram-уведомления отключены (bot_token не настроен)
+2026-04-11 18:17:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker: подписчик 'safety_manager' зарегистрирован (maxsize=100)
+2026-04-11 18:17:52 │ INFO     │ cryodaq.core.safety_broker │ SafetyBroker заморожен: 1 подписчиков
+2026-04-11 18:17:52 │ INFO     │ cryodaq.engine │ SafetyManager запущен: состояние=safe_off
+2026-04-11 18:17:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 0.5s (attempt 1/10)
+2026-04-11 18:17:52 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 1.0s (attempt 2/10)
+2026-04-11 18:17:53 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 2.0s (attempt 3/10)
+2026-04-11 18:17:55 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 4.0s (attempt 4/10)
+2026-04-11 18:17:59 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 8.0s (attempt 5/10)
+2026-04-11 18:18:07 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 6/10)
+2026-04-11 18:18:17 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 7/10)
+2026-04-11 18:18:27 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 8/10)
+2026-04-11 18:18:37 │ WARNING  │ cryodaq.core.zmq_bridge │ ZMQ bind EADDRINUSE on tcp://127.0.0.1:5555, retry in 10.0s (attempt 9/10)
+2026-04-11 18:18:47 │ CRITICAL │ cryodaq.core.zmq_bridge │ ZMQ bind FAILED after 10 attempts: tcp://127.0.0.1:5555 still in use. Check for stale sockets via lsof/netstat.

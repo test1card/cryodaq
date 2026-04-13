@@ -8,11 +8,12 @@ import math
 import re
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
@@ -565,7 +566,7 @@ class SafetyManager:
         self._state = new_state
         self._events.append(
             SafetyEvent(
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 from_state=old_state,
                 to_state=new_state,
                 reason=reason,

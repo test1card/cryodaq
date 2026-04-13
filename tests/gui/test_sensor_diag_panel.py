@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QApplication
 from cryodaq.core.sensor_diagnostics import (
     ChannelDiagnostics,
     DiagnosticsSummary,
-    SensorDiagnosticsEngine,
 )
 from cryodaq.gui.widgets.sensor_diag_panel import SensorDiagPanel, _health_color
 

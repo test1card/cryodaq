@@ -479,7 +479,7 @@ class Scheduler:
                     timeout=self._DRAIN_TIMEOUT_S,
                 )
                 logger.info("Scheduler: graceful drain complete")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "Scheduler: drain timed out after %.1fs, force-cancelling",
                     self._DRAIN_TIMEOUT_S,

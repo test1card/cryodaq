@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from cryodaq.instance_lock import try_acquire_lock, release_lock
+from cryodaq.instance_lock import release_lock, try_acquire_lock
 
 
 @pytest.fixture()

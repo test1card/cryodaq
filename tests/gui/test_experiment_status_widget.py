@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -62,9 +64,9 @@ def test_error_response_shows_inactive(widget) -> None:
 
 def test_elapsed_time_computed_from_start_time(widget) -> None:
     """Elapsed time must be computed from active_experiment.start_time, not top-level."""
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
 
-    start = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=15)).isoformat()
+    start = (datetime.now(UTC) - timedelta(hours=2, minutes=15)).isoformat()
     payload = {
         "ok": True,
         "active_experiment": {

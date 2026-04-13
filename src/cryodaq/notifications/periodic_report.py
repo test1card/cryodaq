@@ -20,7 +20,7 @@ import logging
 import math
 import re
 from collections import deque
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -305,8 +305,9 @@ class PeriodicReporter:
         log_scale: bool = False,
     ) -> None:
         """Нанести кривые каналов на subplot."""
+        from datetime import datetime as dt
+
         import matplotlib.dates as mdates
-        from datetime import datetime as dt, timezone
 
         if not channels:
             ax.text(
@@ -340,7 +341,7 @@ class PeriodicReporter:
                 all_positive_values.extend(values)
 
             # Преобразовать unix timestamp в datetime для matplotlib
-            times_dt = [dt.fromtimestamp(t, tz=timezone.utc) for t in times_unix]
+            times_dt = [dt.fromtimestamp(t, tz=UTC) for t in times_unix]
 
             in_alarm = channel_in_alarm_fn(channel)
             color = "red" if in_alarm else None
@@ -400,7 +401,7 @@ class PeriodicReporter:
         lines: list[str] = []
 
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-        lines.append(f"<b>CryoDAQ | Периодический отчёт</b>")
+        lines.append("<b>CryoDAQ | Периодический отчёт</b>")
         lines.append(f"Время: {now_str}")
         lines.append("")
 

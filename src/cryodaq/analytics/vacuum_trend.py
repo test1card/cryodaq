@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 
@@ -45,7 +46,7 @@ class VacuumPrediction:
     fit_params: dict[str, Any]             # for debugging
     extrapolation_t: list[float] = field(default_factory=list)
     extrapolation_logP: list[float] = field(default_factory=list)
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 # ---------------------------------------------------------------------------

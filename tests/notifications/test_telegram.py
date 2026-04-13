@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
 from cryodaq.core.alarm import AlarmEvent, AlarmSeverity
 from cryodaq.notifications.telegram import TelegramNotifier
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,7 +27,7 @@ def _event(
     ts: datetime | None = None,
 ) -> AlarmEvent:
     return AlarmEvent(
-        timestamp=ts or datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=ts or datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC),
         alarm_name=alarm_name,
         channel=channel,
         value=value,
@@ -189,7 +187,7 @@ def test_from_config_missing_file(tmp_path: Path) -> None:
 
 def test_format_message_time_format() -> None:
     notifier = _notifier()
-    ts = datetime(2026, 3, 14, 9, 5, 3, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 9, 5, 3, tzinfo=UTC)
     event = _event(event_type="activated", ts=ts)
 
     msg = notifier._format_message(event)
@@ -206,6 +204,7 @@ def test_format_message_time_format() -> None:
 def _make_bot(**kwargs):
     """Создать TelegramCommandBot с заглушками."""
     from unittest.mock import MagicMock
+
     from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
     broker = MagicMock()

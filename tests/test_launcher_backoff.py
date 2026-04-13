@@ -1,7 +1,6 @@
 """Verify launcher exit-code handling and exponential backoff (Phase 2b H.3)."""
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from plugins.phase_detector import PhaseDetector, _PHASE_CODES
+from plugins.phase_detector import PhaseDetector
 
 
 def _make_temp_readings(
@@ -19,7 +16,7 @@ def _make_temp_readings(
 ) -> list[Reading]:
     return [
         Reading(
-            timestamp=datetime.fromtimestamp(start_ts + i * dt_s, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(start_ts + i * dt_s, tz=UTC),
             instrument_id="test",
             channel=channel,
             value=t,
@@ -39,7 +36,7 @@ def _make_pressure_readings(
 ) -> list[Reading]:
     return [
         Reading(
-            timestamp=datetime.fromtimestamp(start_ts + i * dt_s, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(start_ts + i * dt_s, tz=UTC),
             instrument_id="test",
             channel=channel,
             value=p,

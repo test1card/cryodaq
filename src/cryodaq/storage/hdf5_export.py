@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +86,7 @@ class HDF5Exporter:
                             hf.attrs[key] = val
 
                 hf.attrs["source_db"] = str(db_path)
-                hf.attrs["export_time"] = datetime.now(timezone.utc).isoformat()
+                hf.attrs["export_time"] = datetime.now(UTC).isoformat()
 
                 # --- Readings ---
                 total += self._export_readings(conn, hf)

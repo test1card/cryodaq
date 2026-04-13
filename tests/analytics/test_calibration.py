@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +15,7 @@ def _sample_series() -> list[CalibrationSample]:
         raw_value = (1500.0 / (temp_k + 18.0)) + (0.002 * temp_k)
         points.append(
             CalibrationSample(
-                timestamp=datetime(2026, 3, 16, 12, index, tzinfo=timezone.utc),
+                timestamp=datetime(2026, 3, 16, 12, index, tzinfo=UTC),
                 reference_channel="CH1",
                 reference_temperature=temp_k,
                 sensor_channel="CH2",
@@ -45,7 +44,7 @@ def _multi_zone_samples(count: int = 900, *, sensor_id: str = "CH2") -> list[Cal
     temperatures = np.linspace(4.0, 290.0, count, dtype=float)
     return [
         CalibrationSample(
-            timestamp=datetime(2026, 3, 16, 13, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 3, 16, 13, 0, tzinfo=UTC),
             reference_channel="REF",
             reference_temperature=float(temp_k),
             sensor_channel=sensor_id,
@@ -64,7 +63,7 @@ def _dense_nonuniform_samples(count: int = 9000) -> list[CalibrationSample]:
     temperatures = np.concatenate([low, high])
     return [
         CalibrationSample(
-            timestamp=datetime(2026, 3, 16, 14, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 3, 16, 14, 0, tzinfo=UTC),
             reference_channel="REF",
             reference_temperature=float(temp_k),
             sensor_channel="CH3",

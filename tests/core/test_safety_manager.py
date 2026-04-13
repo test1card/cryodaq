@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfig, SafetyConfigError, SafetyManager, SafetyState
+from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
 
 

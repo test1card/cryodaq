@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import h5py
-import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.hdf5_export import HDF5Exporter
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,7 +24,7 @@ def _reading(
     instrument_id: str = "ls218s",
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
-    timestamp = ts or datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    timestamp = ts or datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     return Reading(
         timestamp=timestamp,
         instrument_id=instrument_id,
@@ -65,10 +63,10 @@ async def test_export_creates_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 async def test_readings_in_hdf5(tmp_path: Path) -> None:
-    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
     readings = [
         _reading("T_STAGE", 4.235, "K", ts=ts),
-        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=timezone.utc)),
+        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
     ]
     db_path = _populate_db(tmp_path, readings)
     output_path = tmp_path / "out.h5"
@@ -91,7 +89,7 @@ async def test_readings_in_hdf5(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 async def test_instrument_groups(tmp_path: Path) -> None:
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     readings = [
         _reading("CH1", 4.5, "K", ts=ts, instrument_id="ls218s_a"),
         _reading("CH1", 77.0, "K", ts=ts, instrument_id="ls218s_b"),
@@ -151,7 +149,7 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
     # delete the data from the table.
     import sqlite3
 
-    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     writer = SQLiteWriter(tmp_path)
     writer._write_batch([_reading(ts=ts)])
     db_path = tmp_path / f"data_{ts.date().isoformat()}.db"
@@ -175,10 +173,10 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
-    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
     readings = [
         _reading("T_STAGE", 4.235, "K", ts=ts),
-        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=timezone.utc)),
+        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
     ]
     db_path = _populate_db(tmp_path, readings)
     output_path = tmp_path / "compressed.h5"

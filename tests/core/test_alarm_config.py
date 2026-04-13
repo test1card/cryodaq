@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import textwrap
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock
-from datetime import datetime, timezone, timedelta
+from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
-from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config, AlarmConfig, EngineConfig
+from cryodaq.core.alarm_config import AlarmConfigError, EngineConfig, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -211,7 +209,7 @@ def _make_mgr(phase: str | None = "cooldown", started_ago_s: float = 3700.0):
     mgr = MagicMock()
     mgr.get_current_phase.return_value = phase
     if phase:
-        dt = datetime.now(timezone.utc) - timedelta(seconds=started_ago_s)
+        dt = datetime.now(UTC) - timedelta(seconds=started_ago_s)
         mgr.get_phase_history.return_value = [
             {"phase": phase, "started_at": dt.isoformat(), "ended_at": None}
         ]

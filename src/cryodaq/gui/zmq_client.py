@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from PySide6.QtCore import QThread, Signal
@@ -33,7 +33,7 @@ _CMD_REPLY_TIMEOUT_S = 5.0
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
     """Reconstruct a Reading from a plain dict (received via mp.Queue)."""
     return Reading(
-        timestamp=datetime.fromtimestamp(d["timestamp"], tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(d["timestamp"], tz=UTC),
         instrument_id=d.get("instrument_id", ""),
         channel=d["channel"],
         value=d["value"],

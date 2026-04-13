@@ -18,11 +18,12 @@ import asyncio
 import logging
 import re
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
@@ -396,7 +397,7 @@ class AlarmEngine:
 
         record.state = AlarmState.ACKNOWLEDGED
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         event = AlarmEvent(
             timestamp=now,
             alarm_name=alarm_name,
@@ -523,7 +524,7 @@ class AlarmEngine:
             if not condition.matches_channel(reading.channel):
                 continue
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             if record.state == AlarmState.OK and condition.is_triggered(reading.value):
                 # Переход OK → ACTIVE

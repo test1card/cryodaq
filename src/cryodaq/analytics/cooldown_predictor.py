@@ -24,7 +24,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -74,15 +73,15 @@ class ReferenceCurve:
     phase2_hours: float
     T_cold_final: float
     T_warm_final: float
-    T_cold_smooth: Optional[np.ndarray] = field(default=None, repr=False)
-    T_warm_smooth: Optional[np.ndarray] = field(default=None, repr=False)
-    progress: Optional[np.ndarray] = field(default=None, repr=False)
+    T_cold_smooth: np.ndarray | None = field(default=None, repr=False)
+    T_warm_smooth: np.ndarray | None = field(default=None, repr=False)
+    progress: np.ndarray | None = field(default=None, repr=False)
     initial_rate_cold: float = 0.0    # K/h, avg dT_cold/dt over first RATE_WINDOW_H
     initial_rate_warm: float = 0.0    # K/h, avg dT_warm/dt over first RATE_WINDOW_H
-    _t_of_p: Optional[interp1d] = field(default=None, repr=False)
-    _p_of_t: Optional[interp1d] = field(default=None, repr=False)
-    _Tc_of_p: Optional[interp1d] = field(default=None, repr=False)
-    _Tw_of_p: Optional[interp1d] = field(default=None, repr=False)
+    _t_of_p: interp1d | None = field(default=None, repr=False)
+    _p_of_t: interp1d | None = field(default=None, repr=False)
+    _Tc_of_p: interp1d | None = field(default=None, repr=False)
+    _Tw_of_p: interp1d | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -99,13 +98,13 @@ class PredictionResult:
     T_warm_predicted_final: float
     n_references: int
     individual_estimates: list
-    future_t: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_cold_mean: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_warm_mean: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_cold_upper: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_cold_lower: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_warm_upper: Optional[np.ndarray] = field(default=None, repr=False)
-    future_T_warm_lower: Optional[np.ndarray] = field(default=None, repr=False)
+    future_t: np.ndarray | None = field(default=None, repr=False)
+    future_T_cold_mean: np.ndarray | None = field(default=None, repr=False)
+    future_T_warm_mean: np.ndarray | None = field(default=None, repr=False)
+    future_T_cold_upper: np.ndarray | None = field(default=None, repr=False)
+    future_T_cold_lower: np.ndarray | None = field(default=None, repr=False)
+    future_T_warm_upper: np.ndarray | None = field(default=None, repr=False)
+    future_T_warm_lower: np.ndarray | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -134,8 +133,8 @@ class EnsembleModel:
     Tc_std: np.ndarray
     Tw_mean: np.ndarray
     Tw_std: np.ndarray
-    _t_of_p_mean: Optional[interp1d] = field(default=None, repr=False)
-    _p_of_t_mean: Optional[interp1d] = field(default=None, repr=False)
+    _t_of_p_mean: interp1d | None = field(default=None, repr=False)
+    _p_of_t_mean: interp1d | None = field(default=None, repr=False)
     n_curves: int = 0
     duration_mean: float = 0.0
     duration_std: float = 0.0
@@ -371,8 +370,8 @@ def predict(
     T_warm_now: float,
     t_elapsed: float = 0.0,
     generate_trajectory: bool = True,
-    observed_rate_cold: Optional[float] = None,
-    observed_rate_warm: Optional[float] = None,
+    observed_rate_cold: float | None = None,
+    observed_rate_warm: float | None = None,
 ) -> PredictionResult:
     """Predict remaining cooldown time from current state.
 
@@ -532,9 +531,9 @@ def _progress_bar(p: float, width: int = 30) -> str:
 
 def compute_rate_from_history(
     t_hours: np.ndarray, T_cold: np.ndarray,
-    T_warm: Optional[np.ndarray] = None,
+    T_warm: np.ndarray | None = None,
     window_h: float = RATE_WINDOW_H,
-) -> tuple[Optional[float], Optional[float]]:
+) -> tuple[float | None, float | None]:
     """Compute initial cooling rates from observed history.
 
     Call this from CryoDAQ engine with the data buffer so far.
@@ -909,7 +908,7 @@ def ingest_curve(
     new_curve_json: Path,
     force: bool = False,
     max_curves: int = 50,
-) -> tuple[bool, str, Optional[EnsembleModel]]:
+) -> tuple[bool, str, EnsembleModel | None]:
     """Add a completed cooldown curve to an existing model.
 
     This is the programmatic API for CryoDAQ integration.
@@ -1061,7 +1060,7 @@ def ingest_from_raw_arrays(
     name: str = "",
     date: str = "",
     force: bool = False,
-) -> tuple[bool, str, Optional[EnsembleModel]]:
+) -> tuple[bool, str, EnsembleModel | None]:
     """Ingest directly from numpy arrays (for real-time CryoDAQ integration).
 
     Call this when a cooldown cycle completes and you have the data in memory.

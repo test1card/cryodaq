@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from PySide6.QtWidgets import (
-    QFrame,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,

@@ -15,7 +15,7 @@ import os
 import sqlite3
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_operator_log_experiment ON operator_log (experime
 def _parse_timestamp(raw) -> datetime:
     """Parse timestamp from REAL (float) or legacy TEXT (isoformat)."""
     if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(raw, tz=timezone.utc)
+        return datetime.fromtimestamp(raw, tz=UTC)
     return datetime.fromisoformat(str(raw))
 
 
@@ -585,7 +585,7 @@ class SQLiteWriter:
             raise ValueError("Operator log message must not be empty.")
 
         normalized_tags = normalize_operator_log_tags(tags)
-        entry_time = timestamp or datetime.now(timezone.utc)
+        entry_time = timestamp or datetime.now(UTC)
         loop = asyncio.get_running_loop()
         task = partial(
             self._write_operator_log_entry,
@@ -677,11 +677,11 @@ class SQLiteWriter:
 
         # Filter DB files by date range if possible
         if from_ts is not None:
-            from_day = datetime.fromtimestamp(from_ts, tz=timezone.utc).date()
+            from_day = datetime.fromtimestamp(from_ts, tz=UTC).date()
         else:
             from_day = None
         if to_ts is not None:
-            to_day = datetime.fromtimestamp(to_ts, tz=timezone.utc).date()
+            to_day = datetime.fromtimestamp(to_ts, tz=UTC).date()
         else:
             to_day = None
 

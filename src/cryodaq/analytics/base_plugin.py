@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from cryodaq.drivers.base import Reading
@@ -59,7 +59,7 @@ class DerivedMetric:
             Экземпляр :class:`DerivedMetric` с ``timestamp = datetime.now(UTC)``.
         """
         return DerivedMetric(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             plugin_id=plugin_id,
             metric=metric,
             value=value,

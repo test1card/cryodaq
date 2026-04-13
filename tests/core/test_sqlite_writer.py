@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,7 +24,7 @@ def _reading(
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
     """Construct a Reading with a fixed or provided timestamp."""
-    timestamp = ts or datetime.now(timezone.utc)
+    timestamp = ts or datetime.now(UTC)
     return Reading(
         timestamp=timestamp,
         instrument_id=instrument_id,
@@ -45,7 +41,7 @@ def _batch(
     ts: datetime | None = None,
     instrument_id: str = "ls218s",
 ) -> list[Reading]:
-    ts = ts or datetime.now(timezone.utc)
+    ts = ts or datetime.now(UTC)
     return [
         _reading(channel=f"CH{i % 8 + 1}", value=4.0 + i * 0.001, ts=ts,
                  instrument_id=instrument_id)
@@ -84,7 +80,7 @@ async def test_write_batch_creates_db(tmp_path: Path) -> None:
 
 async def test_readings_persisted(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
 
     batch = [
         _reading("T_STAGE", 4.235, "K", ts=ts, instrument_id="ls218s"),
@@ -133,8 +129,8 @@ async def test_wal_mode_enabled(tmp_path: Path) -> None:
 async def test_daily_rotation(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
 
-    day1 = datetime(2026, 3, 13, 12, 0, 0, tzinfo=timezone.utc)
-    day2 = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+    day1 = datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC)
+    day2 = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
 
     writer._write_batch(_batch(3, ts=day1))
     writer._write_batch(_batch(5, ts=day2))
@@ -181,7 +177,7 @@ async def test_wal_recovery_after_crash(tmp_path: Path) -> None:
     # without calling close() — the WAL file will ensure the committed data
     # is recoverable by the next writer.
     writer_a = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     pre_crash_batch = _batch(10, ts=ts)
     writer_a._write_batch(pre_crash_batch)
 
@@ -226,7 +222,7 @@ async def test_empty_batch_noop(tmp_path: Path) -> None:
 
 async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
 
     batch = [
         _reading(channel="CH1", value=4.5, ts=ts),
@@ -253,8 +249,8 @@ async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
 async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
 
-    before_midnight = datetime(2026, 3, 27, 23, 59, 59, tzinfo=timezone.utc)
-    after_midnight = datetime(2026, 3, 28, 0, 0, 1, tzinfo=timezone.utc)
+    before_midnight = datetime(2026, 3, 27, 23, 59, 59, tzinfo=UTC)
+    after_midnight = datetime(2026, 3, 28, 0, 0, 1, tzinfo=UTC)
 
     batch = [
         _reading("CH1", 4.5, ts=before_midnight),

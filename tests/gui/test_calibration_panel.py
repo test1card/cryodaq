@@ -8,7 +8,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import yaml
-from PySide6.QtWidgets import QApplication, QCheckBox
+from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui.widgets.calibration_panel import (
     CalibrationAcquisitionWidget,

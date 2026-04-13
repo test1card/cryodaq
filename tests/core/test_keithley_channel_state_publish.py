@@ -21,7 +21,7 @@ async def _drain(queue: asyncio.Queue, timeout: float = 0.2) -> list[Reading]:
     while True:
         try:
             readings.append(await asyncio.wait_for(queue.get(), timeout=timeout))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             break
     return readings
 

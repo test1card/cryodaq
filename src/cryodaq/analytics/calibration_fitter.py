@@ -6,7 +6,7 @@ import logging
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -337,7 +337,7 @@ class CalibrationFitter:
         )
 
         # 4. Chebyshev fit via CalibrationStore
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         samples = [
             CalibrationSample(
                 timestamp=now,

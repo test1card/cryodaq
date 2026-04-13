@@ -12,16 +12,14 @@ where RSS grew from ~100 MB to ~906 MB:
 from __future__ import annotations
 
 import asyncio
-import sys
 from collections import deque
-from unittest.mock import patch
+from datetime import UTC
 
 import pytest
 
 from cryodaq.core.alarm_v2 import AlarmEvent, AlarmStateManager
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
-
 
 # ---------------------------------------------------------------------------
 # 1. AlarmStateManager._history bounded
@@ -112,14 +110,14 @@ def test_rate_estimator_small_window_uses_floor() -> None:
 
 def _make_reading(channel: str, value: float, unit: str = "K"):
     """Create a minimal Reading-like object for ChannelStateTracker.update()."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from unittest.mock import MagicMock
 
     r = MagicMock()
     r.channel = channel
     r.value = value
     r.unit = unit
-    r.timestamp = datetime.now(timezone.utc)
+    r.timestamp = datetime.now(UTC)
     r.instrument_id = "test"
     r.status = MagicMock()
     return r

@@ -14,7 +14,7 @@ import time
 from collections import deque
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -70,9 +70,9 @@ class CooldownDetector:
         self._end_confirm_s = end_confirm_minutes * 60.0
 
         self._phase = CooldownPhase.IDLE
-        self._confirm_start_ts: Optional[float] = None
-        self._confirm_end_ts: Optional[float] = None
-        self._cooldown_start_ts: Optional[float] = None
+        self._confirm_start_ts: float | None = None
+        self._confirm_end_ts: float | None = None
+        self._cooldown_start_ts: float | None = None
 
         # Sliding window for dT/dt estimation (last 5 min)
         self._recent: deque[tuple[float, float]] = deque(maxlen=60)
@@ -82,7 +82,7 @@ class CooldownDetector:
         return self._phase
 
     @property
-    def cooldown_start_ts(self) -> Optional[float]:
+    def cooldown_start_ts(self) -> float | None:
         return self._cooldown_start_ts
 
     def reset(self) -> None:
@@ -147,7 +147,7 @@ class CooldownDetector:
 
         return self._phase
 
-    def _estimate_rate(self) -> Optional[float]:
+    def _estimate_rate(self) -> float | None:
         """Оценить dT/dt [K/ч] по скользящему окну."""
         if len(self._recent) < 5:
             return None
@@ -202,20 +202,20 @@ class CooldownService:
 
         # Ring buffer: (t_hours_from_start, T_cold, T_warm)
         self._buffer: deque[tuple[float, float, float]] = deque(maxlen=100_000)
-        self._cooldown_wall_start: Optional[float] = None
+        self._cooldown_wall_start: float | None = None
 
         # Model
-        self._model: Optional[EnsembleModel] = None
+        self._model: EnsembleModel | None = None
 
         # Queue & tasks
-        self._queue: Optional[asyncio.Queue] = None
-        self._consume_task: Optional[asyncio.Task] = None
-        self._predict_task: Optional[asyncio.Task] = None
+        self._queue: asyncio.Queue | None = None
+        self._consume_task: asyncio.Task | None = None
+        self._predict_task: asyncio.Task | None = None
         self._running = False
 
         # Latest T values for detector
-        self._last_T_cold: Optional[float] = None
-        self._last_T_warm: Optional[float] = None
+        self._last_T_cold: float | None = None
+        self._last_T_warm: float | None = None
 
     @property
     def phase(self) -> CooldownPhase:
@@ -291,7 +291,7 @@ class CooldownService:
                     reading: Reading = await asyncio.wait_for(
                         self._queue.get(), timeout=5.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
                 reading_ts = reading.timestamp.timestamp()
@@ -355,8 +355,8 @@ class CooldownService:
             t_elapsed = 0.0
 
         # Compute observed rates from buffer
-        rate_cold: Optional[float] = None
-        rate_warm: Optional[float] = None
+        rate_cold: float | None = None
+        rate_warm: float | None = None
         if len(self._buffer) >= 20:
             buf_arr = np.array(list(self._buffer))
             t_h = buf_arr[:, 0]
@@ -413,7 +413,7 @@ class CooldownService:
 
         # Publish via broker to all subscribers
         reading = Reading.now(
-            channel=f"analytics/cooldown_predictor/cooldown_eta",
+            channel="analytics/cooldown_predictor/cooldown_eta",
             value=pred.t_remaining_hours,
             unit="h",
             instrument_id="cooldown_predictor",

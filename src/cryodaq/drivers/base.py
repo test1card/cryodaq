@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -40,7 +40,7 @@ class Reading:
     def now(channel: str, value: float, unit: str, *, instrument_id: str = "", **kwargs: Any) -> Reading:
         """Создать Reading с текущим временем UTC."""
         return Reading(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             instrument_id=instrument_id,
             channel=channel,
             value=value,

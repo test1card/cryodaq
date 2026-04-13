@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,7 +26,7 @@ def writer_with_data(tmp_path: Path):
         ts = base_ts + i * 30  # every 30 seconds
         for ch_name in ["Т1 Камера", "Т2 Экран"]:
             r = Reading(
-                timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+                timestamp=datetime.fromtimestamp(ts, tz=UTC),
                 instrument_id="LS218_1",
                 channel=ch_name,
                 value=4.2 + i * 0.01,
@@ -39,7 +37,7 @@ def writer_with_data(tmp_path: Path):
         # Pressure channel
         readings.append(
             Reading(
-                timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+                timestamp=datetime.fromtimestamp(ts, tz=UTC),
                 instrument_id="VSP63D",
                 channel="P Камера",
                 value=1e-3 + i * 1e-5,

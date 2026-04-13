@@ -4,23 +4,13 @@ from __future__ import annotations
 
 import json
 import math
-import time
 from dataclasses import asdict
 
 import numpy as np
-import pytest
 
 from cryodaq.analytics.vacuum_trend import (
-    FitResult,
-    VacuumPrediction,
     VacuumTrendPredictor,
-    _compute_bic,
-    _compute_r_squared,
-    _exponential_model,
-    _power_law_model,
-    _combined_model,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

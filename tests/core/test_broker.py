@@ -9,7 +9,6 @@ import pytest
 from cryodaq.core.broker import DataBroker, OverflowPolicy
 from cryodaq.drivers.base import Reading
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

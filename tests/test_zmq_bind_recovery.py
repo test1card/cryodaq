@@ -4,7 +4,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 import zmq
 
 from cryodaq.core import zmq_bridge

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import multiprocessing as mp
-import queue
-import time
 
 import pytest
 
@@ -107,7 +105,7 @@ def test_gui_never_imports_zmq():
                 if node.module and (node.module == "zmq" or node.module.startswith("zmq.")):
                     violations.append(f"{py_file.name}:{node.lineno}: from {node.module}")
 
-    assert not violations, f"GUI modules must not import zmq:\n" + "\n".join(violations)
+    assert not violations, "GUI modules must not import zmq:\n" + "\n".join(violations)
 
 
 def test_heartbeat_interval_value():
@@ -122,6 +120,7 @@ def test_heartbeat_interval_value():
 def test_is_healthy_threshold_generous():
     """is_healthy() threshold must be >= 25s to survive GUI thread blocks."""
     import inspect
+
     from cryodaq.gui.zmq_client import ZmqBridge
     source = inspect.getsource(ZmqBridge.is_healthy)
     assert "30.0" in source, "is_healthy threshold must be 30s"
@@ -130,6 +129,7 @@ def test_is_healthy_threshold_generous():
 def test_launcher_poll_checks_is_healthy():
     """Launcher _poll_bridge_data must check is_healthy, not just is_alive."""
     import inspect
+
     from cryodaq.launcher import LauncherWindow
     source = inspect.getsource(LauncherWindow._poll_bridge_data)
     assert "is_healthy()" in source, (

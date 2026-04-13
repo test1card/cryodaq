@@ -10,8 +10,8 @@ from pathlib import Path
 import numpy as np
 
 from cryodaq.analytics.cooldown_predictor import (
-    ReferenceCurve,
     T_PHASE_BOUNDARY,
+    ReferenceCurve,
     build_ensemble,
     format_prediction,
     ingest_curve,
@@ -25,7 +25,6 @@ from cryodaq.analytics.cooldown_predictor import (
     save_model,
     validate_loo,
 )
-
 
 # ============================================================================
 # Synthetic curve generation (for demo/testing only)

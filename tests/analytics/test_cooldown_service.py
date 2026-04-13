@@ -18,8 +18,7 @@ async event-loop does not need to wait more than a few hundred milliseconds.
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +26,6 @@ import pytest
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
-
 
 # ---------------------------------------------------------------------------
 # Test configuration helpers
@@ -58,7 +56,7 @@ def _make_config(tmp_path: Path, **overrides) -> dict:
 def _reading(channel: str, value: float, ts: datetime | None = None) -> Reading:
     """Create a Reading with a specific timestamp (or now)."""
     return Reading(
-        timestamp=ts or datetime.now(timezone.utc),
+        timestamp=ts or datetime.now(UTC),
         instrument_id="test",
         channel=channel,
         value=value,
@@ -90,7 +88,7 @@ def _cooldown_readings(
             _reading(
                 channel,
                 T,
-                ts=datetime.fromtimestamp(t_abs, tz=timezone.utc),
+                ts=datetime.fromtimestamp(t_abs, tz=UTC),
             )
         )
     return readings
@@ -112,7 +110,7 @@ def _stable_readings(
             _reading(
                 channel,
                 T + np.random.normal(0, 0.01),
-                ts=datetime.fromtimestamp(t0 + i * 10.0, tz=timezone.utc),
+                ts=datetime.fromtimestamp(t0 + i * 10.0, tz=UTC),
             )
         )
     return readings
@@ -321,7 +319,7 @@ async def test_predict_publishes_derived_metric(
         # Wait for at least one prediction to be published
         try:
             metric_reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.fail(
                 "No analytics/cooldown_predictor reading appeared in broker within 2s"
             )
@@ -385,7 +383,7 @@ async def test_predict_metadata_contains_trajectory(
 
         try:
             reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.fail("No prediction metric within 2s")
 
         meta = reading.metadata

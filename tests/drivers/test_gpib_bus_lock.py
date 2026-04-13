@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 

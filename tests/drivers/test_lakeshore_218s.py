@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +11,6 @@ import pytest
 from cryodaq.analytics.calibration import CalibrationSample, CalibrationStore
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,7 +56,6 @@ def _make_mock_transport(response: str) -> MagicMock:
 
 def _wrap_query_with_idn(side_effect_or_fn):
     """Wrap a side_effect list or callable to also handle *IDN? correctly."""
-    import asyncio as _aio
     import inspect as _inspect
 
     if callable(side_effect_or_fn) and not isinstance(side_effect_or_fn, list):
@@ -311,7 +308,7 @@ async def test_timeout_handling() -> None:
     async def _query(cmd, **kw):
         if cmd.strip().upper() == "*IDN?":
             return _IDN
-        raise asyncio.TimeoutError
+        raise TimeoutError
 
     transport.query = _query
 
@@ -331,7 +328,7 @@ async def test_timeout_handling() -> None:
             assert r.status == ChannelStatus.TIMEOUT, (
                 f"Expected TIMEOUT status on timeout, got {r.status}"
             )
-    except (asyncio.TimeoutError, TimeoutError, OSError, RuntimeError):
+    except (TimeoutError, OSError, RuntimeError):
         # Raising a typed exception is also a valid design choice
         pass
 
@@ -374,7 +371,7 @@ def _calibration_samples(sensor_channel: str) -> list[CalibrationSample]:
     values = [82.98, 80.17, 60.0, 45.0, 30.0, 18.0, 10.0]
     return [
         CalibrationSample(
-            timestamp=datetime(2026, 3, 16, 12, index, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 3, 16, 12, index, tzinfo=UTC),
             reference_channel="CH1",
             reference_temperature=1500.0 / (raw_value + 18.0),
             sensor_channel=sensor_channel,

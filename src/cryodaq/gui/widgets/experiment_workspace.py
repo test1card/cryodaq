@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.user_preferences import UserPreferences, suggest_experiment_name
 from cryodaq.drivers.base import Reading
-from cryodaq.paths import get_data_dir
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -37,6 +36,7 @@ from cryodaq.gui.widgets.common import (
     build_action_row,
 )
 from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
+from cryodaq.paths import get_data_dir
 
 
 class ExperimentWorkspace(QWidget):
@@ -133,8 +133,9 @@ class ExperimentWorkspace(QWidget):
             return
 
         # Pre-flight checklist (только в режиме эксперимента)
-        from cryodaq.gui.widgets.preflight_dialog import PreFlightDialog
         from PySide6.QtWidgets import QDialog
+
+        from cryodaq.gui.widgets.preflight_dialog import PreFlightDialog
         preflight = PreFlightDialog(self)
         if preflight.exec() != QDialog.DialogCode.Accepted:
             return

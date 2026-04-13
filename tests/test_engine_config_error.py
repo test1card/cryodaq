@@ -5,8 +5,6 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 
 def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     """Engine main() must catch yaml.YAMLError and sys.exit(2) so launcher

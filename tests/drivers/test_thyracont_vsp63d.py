@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D, _FALLBACK_BAUDRATES
-
+from cryodaq.drivers.instruments.thyracont_vsp63d import _FALLBACK_BAUDRATES, ThyracontVSP63D
 
 # ---------------------------------------------------------------------------
 # 1. connect / disconnect lifecycle in mock mode

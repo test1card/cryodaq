@@ -15,7 +15,7 @@ TelegramNotifier — async-коллбэк для AlarmEngine.  Отправля�
 from __future__ import annotations
 
 import logging
-from datetime import timezone
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -153,7 +153,7 @@ class TelegramNotifier:
         # Время в московском часовом поясе (UTC+3) — стандарт для ФИАН
         ts = event.timestamp
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
         time_str = ts.strftime("%H:%M:%S %d.%m.%Y")
 
         if event.event_type == "activated":

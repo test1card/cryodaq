@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -92,7 +92,7 @@ def _reading(channel: str, value: float, unit: str, ts: datetime) -> Reading:
 
 async def _seed_experiment_data(tmp_path: Path, experiment_id: str) -> None:
     writer = SQLiteWriter(tmp_path)
-    ts = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
     writer._write_batch(
         [
             _reading("K1/smua/power", 1.2, "W", ts),
@@ -267,7 +267,7 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
         start_time="2026-03-16T12:00:00+00:00",
     )
     writer = SQLiteWriter(tmp_path)
-    ts = datetime(2026, 3, 16, 12, 1, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 16, 12, 1, tzinfo=UTC)
     writer._write_batch(
         [
             _reading("K1/smua/power", 1.2, "W", ts),

@@ -19,6 +19,7 @@ import math
 import shutil
 import time
 from collections import deque
+from datetime import UTC
 
 import pyqtgraph as pg
 from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
@@ -841,10 +842,10 @@ class ExperimentStatusWidget(QFrame):
         started = exp.get("start_time", "")
         if started:
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 start_dt = datetime.fromisoformat(str(started))
-                elapsed = datetime.now(timezone.utc) - start_dt.astimezone(timezone.utc)
+                elapsed = datetime.now(UTC) - start_dt.astimezone(UTC)
                 total_s = int(elapsed.total_seconds())
                 h, rem = divmod(max(0, total_s), 3600)
                 m, s = divmod(rem, 60)
@@ -1525,10 +1526,10 @@ class OverviewPanel(QWidget):
             raw_start = exp.get("start_time", "")
             if raw_start:
                 try:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
                     dt = datetime.fromisoformat(str(raw_start))
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        dt = dt.replace(tzinfo=UTC)
                     start_ts = dt.timestamp()
                     source = "experiment"
                 except Exception as exc:
@@ -1682,9 +1683,9 @@ class OverviewPanel(QWidget):
 
                 # Записать строки, отсортированные по времени
                 for ts in sorted(all_ts.keys()):
-                    from datetime import datetime as dt, timezone
+                    from datetime import datetime as dt
 
-                    time_str = dt.fromtimestamp(ts, tz=timezone.utc).strftime(
+                    time_str = dt.fromtimestamp(ts, tz=UTC).strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
                     row_data = all_ts[ts]

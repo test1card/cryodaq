@@ -18,11 +18,12 @@ import asyncio
 import logging
 import re
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
@@ -161,7 +162,7 @@ class InterlockEngine:
         broker: DataBroker,
         actions: dict[str, Callable[[], Any]],
         *,
-        trip_handler: Callable[["InterlockCondition", "Reading"], Any] | None = None,
+        trip_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
     ) -> None:
         """Initialize.
 
@@ -367,7 +368,7 @@ class InterlockEngine:
 
             # Проверяем кулдаун
             if condition.cooldown_s > 0 and record.last_trip_time is not None:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 elapsed = (now - record.last_trip_time).total_seconds()
                 if elapsed < condition.cooldown_s:
                     logger.debug(
@@ -390,7 +391,7 @@ class InterlockEngine:
         записывает событие и логирует CRITICAL.
         """
         condition = record.condition
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Смена состояния
         record.state = InterlockState.TRIPPED

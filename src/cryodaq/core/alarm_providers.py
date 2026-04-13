@@ -9,13 +9,14 @@ ExperimentSetpointProvider — читает setpoints из метаданных 
 from __future__ import annotations
 
 import time
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 from cryodaq.core.alarm_v2 import PhaseProvider, SetpointProvider
 
 if TYPE_CHECKING:
-    from cryodaq.core.experiment import ExperimentManager
     from cryodaq.core.alarm_config import SetpointDef
+    from cryodaq.core.experiment import ExperimentManager
 
 
 # ---------------------------------------------------------------------------
@@ -52,12 +53,12 @@ class ExperimentPhaseProvider(PhaseProvider):
         if not started_at_raw:
             return 0.0
         # started_at хранится как ISO string
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             if isinstance(started_at_raw, str):
                 dt = datetime.fromisoformat(started_at_raw)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return time.time() - dt.timestamp()
         except (ValueError, TypeError):
             return 0.0

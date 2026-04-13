@@ -10,8 +10,7 @@ import pytest
 
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.core.broker import DataBroker
-from cryodaq.drivers.base import ChannelStatus, Reading
-
+from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,7 +112,7 @@ async def _drain_for_analytics(
     queue: asyncio.Queue,
     expected_prefix: str,
     timeout: float = 2.0,
-) -> "Reading":
+) -> Reading:
     """Drain *queue* until a Reading whose channel starts with *expected_prefix* is found."""
     deadline = asyncio.get_event_loop().time() + timeout
     while True:
@@ -122,7 +121,7 @@ async def _drain_for_analytics(
             pytest.fail(f"No analytics reading with prefix '{expected_prefix}' within timeout")
         try:
             reading = await asyncio.wait_for(queue.get(), timeout=remaining)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.fail(f"No analytics reading with prefix '{expected_prefix}' within timeout")
         if reading.channel.startswith(expected_prefix):
             return reading
@@ -151,7 +150,7 @@ async def test_bad_plugin_isolated(tmp_path: Path, caplog):
 
     try:
         result = await asyncio.wait_for(results_queue.get(), timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.fail("No reading from good companion published within timeout")
     finally:
         await pipeline.stop()
@@ -188,7 +187,7 @@ async def test_derived_metric_published_to_broker(tmp_path: Path):
 
     try:
         reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.fail("Derived metric was not published to broker within timeout")
     finally:
         await pipeline.stop()

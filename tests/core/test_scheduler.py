@@ -10,7 +10,6 @@ from cryodaq.core.broker import DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import InstrumentDriver, Reading
 
-
 # ---------------------------------------------------------------------------
 # Concrete mock driver for use in all scheduler tests
 # ---------------------------------------------------------------------------

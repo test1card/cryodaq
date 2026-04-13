@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
-from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from plugins.cooldown_estimator import CooldownEstimator
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,7 +59,7 @@ def _exponential_readings(
     Timestamps are spread uniformly over [now - fit_window_s + 1, now + t_end_offset]
     so they all fall inside the plugin's sliding window.
     """
-    t_now = datetime.now(timezone.utc).timestamp()
+    t_now = datetime.now(UTC).timestamp()
     t_start = t_now - fit_window_s + 1.0  # just inside the window boundary
     t_end = t_now + t_end_offset
 
@@ -70,7 +69,7 @@ def _exponential_readings(
         t_abs = t_start + frac * (t_end - t_start)
         t_rel = t_abs - t_start  # seconds from first point
         T = T_base + A * math.exp(-t_rel / tau)
-        dt = datetime.fromtimestamp(t_abs, tz=timezone.utc)
+        dt = datetime.fromtimestamp(t_abs, tz=UTC)
         readings.append(_make_reading(TARGET_CH, T, dt))
 
     return readings
@@ -124,12 +123,12 @@ async def test_insufficient_data_returns_empty():
     """Fewer than 10 data points in the window → no metric produced."""
     plugin = _configured_plugin()
 
-    t_now = datetime.now(timezone.utc).timestamp()
+    t_now = datetime.now(UTC).timestamp()
     readings = [
         _make_reading(
             TARGET_CH,
             200.0 - i * 5.0,
-            datetime.fromtimestamp(t_now - 30 + i * 3, tz=timezone.utc),
+            datetime.fromtimestamp(t_now - 30 + i * 3, tz=UTC),
         )
         for i in range(5)  # only 5 points
     ]
@@ -143,13 +142,13 @@ async def test_warming_returns_empty():
     """Temperature increasing (last >= first) → no metric produced."""
     plugin = _configured_plugin()
 
-    t_now = datetime.now(timezone.utc).timestamp()
+    t_now = datetime.now(UTC).timestamp()
     # Monotonically increasing temperature
     readings = [
         _make_reading(
             TARGET_CH,
             10.0 + i * 2.0,
-            datetime.fromtimestamp(t_now - 150 + i * 10, tz=timezone.utc),
+            datetime.fromtimestamp(t_now - 150 + i * 10, tz=UTC),
         )
         for i in range(15)
     ]
@@ -164,13 +163,13 @@ async def test_target_already_reached():
     target_T = 50.0
     plugin = _configured_plugin(target_T=target_T, fit_window_s=300.0)
 
-    t_now = datetime.now(timezone.utc).timestamp()
+    t_now = datetime.now(UTC).timestamp()
     # Temperatures all below or at the target, decreasing
     readings = [
         _make_reading(
             TARGET_CH,
             target_T - i * 2.0,   # starts at target_T, goes below
-            datetime.fromtimestamp(t_now - 280 + i * 10, tz=timezone.utc),
+            datetime.fromtimestamp(t_now - 280 + i * 10, tz=UTC),
         )
         for i in range(15)
     ]
