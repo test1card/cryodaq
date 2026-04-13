@@ -632,16 +632,31 @@ class SafetyManager:
         except asyncio.CancelledError:
             raise
 
-        # H.6: emit machine event to operator_log for post-mortem analysis.
-        # Non-blocking, non-shielded — hardware shutdown already completed.
+        # H.6 + Jules review: shielded post-mortem log emission — outer
+        # cancellation after hardware shutdown must not swallow the event.
         if self._fault_log_callback is not None:
-            try:
-                await self._fault_log_callback(
+            log_task = asyncio.create_task(
+                self._fault_log_callback(
                     source="safety_manager",
                     message=f"Safety fault: {reason}",
                     channel=channel,
                     value=value,
                 )
+            )
+            try:
+                await asyncio.shield(log_task)
+            except asyncio.CancelledError:
+                logger.critical(
+                    "FAULT: _fault() cancelled after hardware shutdown; "
+                    "waiting for post-mortem log emission to complete"
+                )
+                try:
+                    await log_task
+                except Exception as exc:
+                    logger.error(
+                        "Failed to write safety fault to operator_log: %s", exc
+                    )
+                raise
             except Exception as exc:
                 logger.error("Failed to write safety fault to operator_log: %s", exc)
 
@@ -660,7 +675,25 @@ class SafetyManager:
 
     async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
         if self._state == SafetyState.FAULT_LATCHED:
-            await self._ensure_output_off()
+            # Jules review: shield emergency_off in fault-latched cleanup path
+            # so cancellation cannot interrupt the defensive hardware shutdown.
+            off_task = asyncio.create_task(self._ensure_output_off())
+            try:
+                await asyncio.shield(off_task)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "_safe_off cancelled while fault latched; "
+                    "waiting for hardware shutdown to complete"
+                )
+                try:
+                    await off_task
+                except Exception as exc:
+                    logger.critical(
+                        "_safe_off shielded emergency_off failed: %s", exc
+                    )
+                raise
+            except Exception as exc:
+                logger.error("_ensure_output_off in _safe_off failed: %s", exc)
             logger.warning("_safe_off rejected while fault latched")
             return
 

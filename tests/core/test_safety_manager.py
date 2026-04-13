@@ -558,3 +558,83 @@ async def test_keithley_heartbeat_monitored_in_run_permitted():
     assert sm._state == SafetyState.FAULT_LATCHED, (
         "RUN_PERMITTED did not detect stuck start_source() via heartbeat timeout"
     )
+
+
+# ---------------------------------------------------------------------------
+# Jules review: cancellation shielding on post-fault paths
+# ---------------------------------------------------------------------------
+
+
+async def test_fault_log_callback_survives_outer_cancellation():
+    """Jules: _fault_log_callback must complete even if outer _fault()
+    is cancelled after hardware shutdown."""
+    callback_started = asyncio.Event()
+    callback_completed = asyncio.Event()
+
+    async def slow_callback(*, source, message, channel, value):
+        callback_started.set()
+        await asyncio.sleep(0.1)
+        callback_completed.set()
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True, fault_log_callback=slow_callback)
+
+    fault_task = asyncio.create_task(
+        sm._fault("test cancellation", channel="smua", value=1.0)
+    )
+    await asyncio.wait_for(callback_started.wait(), timeout=2.0)
+    fault_task.cancel()
+
+    try:
+        await fault_task
+    except asyncio.CancelledError:
+        pass
+
+    await asyncio.sleep(0.2)  # allow shielded task to finish
+
+    assert callback_completed.is_set(), (
+        "Cancellation of _fault() swallowed the shielded post-mortem log callback"
+    )
+
+
+async def test_safe_off_fault_latched_shields_emergency_off():
+    """Jules: _safe_off's _ensure_output_off must complete even if
+    the outer task is cancelled while fault is latched."""
+    off_started = asyncio.Event()
+    off_completed = asyncio.Event()
+
+    async def slow_emergency_off(channel=None):
+        off_started.set()
+        await asyncio.sleep(0.1)
+        off_completed.set()
+
+    k = _mock_keithley()
+    k.emergency_off.side_effect = slow_emergency_off
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
+    sm._state = SafetyState.FAULT_LATCHED
+
+    task = asyncio.create_task(sm._safe_off("test", channels={"smua"}))
+    await asyncio.wait_for(off_started.wait(), timeout=2.0)
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    await asyncio.sleep(0.2)
+
+    assert off_completed.is_set(), (
+        "Cancellation of _safe_off swallowed shielded _ensure_output_off"
+    )
+
+
+def test_fault_callback_shielded_in_source():
+    """Regression lock: _fault_log_callback must be shielded in source."""
+    from pathlib import Path
+
+    src = Path("src/cryodaq/core/safety_manager.py").read_text(encoding="utf-8")
+    assert "log_task = asyncio.create_task" in src
+    assert "asyncio.shield(log_task)" in src
