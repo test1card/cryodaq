@@ -27,6 +27,15 @@ _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
 
 
+class SafetyConfigError(RuntimeError):
+    """Raised when safety.yaml cannot be loaded in a fail-closed manner.
+
+    Distinct class so engine startup and launcher can recognise it as a
+    config error (clean exit code, no auto-restart) rather than a generic
+    runtime crash (retryable).
+    """
+
+
 class SafetyState(Enum):
     SAFE_OFF = "safe_off"
     READY = "ready"
@@ -84,6 +93,7 @@ class SafetyManager:
         self._fault_time = 0.0
         self._recovery_reason = ""
         self._active_sources: set[SmuChannel] = set()
+        self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[str, tuple[float, float, str]] = {}
         # Phase 2c CC I.3: min_points raised from 10 to 60 to match
@@ -123,7 +133,7 @@ class SafetyManager:
 
     def load_config(self, path: Path) -> None:
         if not path.exists():
-            raise RuntimeError(
+            raise SafetyConfigError(
                 f"safety.yaml not found at {path} — refusing to start "
                 f"SafetyManager without safety configuration"
             )
@@ -132,14 +142,14 @@ class SafetyManager:
             raw = yaml.safe_load(fh) or {}
 
         if not isinstance(raw, dict):
-            raise RuntimeError(
+            raise SafetyConfigError(
                 f"safety.yaml at {path} is malformed (expected mapping, "
                 f"got {type(raw).__name__})"
             )
 
         raw_patterns = raw.get("critical_channels", [])
         if not raw_patterns:
-            raise RuntimeError(
+            raise SafetyConfigError(
                 f"safety.yaml at {path} has no critical_channels defined — "
                 f"refusing to start SafetyManager without critical channel monitoring"
             )
@@ -153,13 +163,13 @@ class SafetyManager:
                 errors.append(f"  - {pattern!r}: {exc}")
 
         if errors:
-            raise RuntimeError(
+            raise SafetyConfigError(
                 f"safety.yaml at {path} has invalid critical_channels regex:\n"
                 + "\n".join(errors)
             )
 
         if not patterns:
-            raise RuntimeError(
+            raise SafetyConfigError(
                 f"safety.yaml at {path} produced no valid critical_channels"
             )
 
@@ -248,6 +258,7 @@ class SafetyManager:
                 return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
 
             if self._state != SafetyState.RUNNING:
+                self._run_permitted_since = time.monotonic()
                 self._transition(
                     SafetyState.RUN_PERMITTED,
                     f"Start requested for {smu_channel}: P={p_target}W",
@@ -734,14 +745,27 @@ class SafetyManager:
                     await self._fault(f"Channel {ch}: NaN/Inf", channel=ch, value=value)
                     return
 
-        if self._keithley is not None and not self._mock and self._active_sources:
-            for smu_channel in sorted(self._active_sources):
-                if not self._has_fresh_keithley_data(now, smu_channel):
-                    await self._fault(
-                        f"Keithley heartbeat timeout {smu_channel}: no data {self._config.heartbeat_timeout_s}s",
-                        channel=smu_channel,
-                    )
-                    return
+        if self._keithley is not None and not self._mock:
+            if self._active_sources:
+                for smu_channel in sorted(self._active_sources):
+                    if not self._has_fresh_keithley_data(now, smu_channel):
+                        await self._fault(
+                            f"Keithley heartbeat timeout {smu_channel}: no data {self._config.heartbeat_timeout_s}s",
+                            channel=smu_channel,
+                        )
+                        return
+            elif (
+                self._state == SafetyState.RUN_PERMITTED
+                and self._run_permitted_since > 0
+                and now - self._run_permitted_since > self._config.heartbeat_timeout_s
+            ):
+                # Stuck start_source(): sitting in RUN_PERMITTED longer than
+                # heartbeat timeout without _active_sources being populated.
+                await self._fault(
+                    f"start_source() stuck: RUN_PERMITTED for "
+                    f">{self._config.heartbeat_timeout_s:.0f}s without source activation",
+                )
+                return
 
         for ch in self._rate_estimator.channels():
             if not any(pattern.match(ch) for pattern in self._config.critical_channels):

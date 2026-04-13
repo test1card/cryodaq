@@ -53,7 +53,7 @@ from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -1738,6 +1738,14 @@ def main() -> None:
             # error: same exit code.
             logger.critical(
                 "CONFIG ERROR (file not found): %s\n%s",
+                exc, traceback.format_exc(),
+            )
+            sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
+        except SafetyConfigError as exc:
+            # Phase 2d A.4.1: safety.yaml fail-closed raises
+            # SafetyConfigError — treat as config error, not retryable crash.
+            logger.critical(
+                "CONFIG ERROR (safety config): %s\n%s",
                 exc, traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfig, SafetyManager, SafetyState
+from cryodaq.core.safety_manager import SafetyConfig, SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
 
 
@@ -390,7 +390,7 @@ async def test_run_permitted_state_is_actively_monitored():
 def test_load_config_fails_on_missing_file(tmp_path):
     """C.2 regression: missing safety.yaml must be startup-fatal."""
     sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(RuntimeError, match="not found"):
+    with pytest.raises(SafetyConfigError, match="not found"):
         sm.load_config(tmp_path / "nonexistent.yaml")
 
 
@@ -399,7 +399,7 @@ def test_load_config_fails_on_empty_critical_channels(tmp_path):
     cfg = tmp_path / "safety.yaml"
     cfg.write_text("critical_channels: []\nstale_timeout_s: 10.0\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(RuntimeError, match="no critical_channels"):
+    with pytest.raises(SafetyConfigError, match="no critical_channels"):
         sm.load_config(cfg)
 
 
@@ -408,7 +408,7 @@ def test_load_config_fails_on_all_invalid_regex(tmp_path):
     cfg = tmp_path / "safety.yaml"
     cfg.write_text("critical_channels:\n  - '[invalid(regex'\nstale_timeout_s: 10.0\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(RuntimeError, match="invalid.*regex"):
+    with pytest.raises(SafetyConfigError, match="invalid.*regex"):
         sm.load_config(cfg)
 
 
@@ -425,3 +425,38 @@ def test_load_config_succeeds_with_valid_config(tmp_path):
     sm = SafetyManager(SafetyBroker(), mock=True)
     sm.load_config(cfg)
     assert len(sm._config.critical_channels) == 2
+
+
+def test_safety_config_error_is_runtime_error_subclass():
+    """A.4.1: SafetyConfigError must be catchable as RuntimeError."""
+    err = SafetyConfigError("test message")
+    assert isinstance(err, RuntimeError)
+    assert isinstance(err, SafetyConfigError)
+    assert str(err) == "test message"
+
+
+async def test_keithley_heartbeat_monitored_in_run_permitted():
+    """A.3.1: RUN_PERMITTED must detect stuck start_source() via
+    heartbeat timeout even when _active_sources is empty."""
+    import re
+
+    k = _mock_keithley()
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=k, mock=False)
+
+    sm._config.critical_channels = [re.compile(r"Т1 .*")]
+    sm._config.stale_timeout_s = 60.0
+    sm._config.heartbeat_timeout_s = 0.5
+
+    now = time.monotonic()
+    sm._latest["Т1 Криостат верх"] = (now, 77.0, "ok")
+
+    sm._state = SafetyState.RUN_PERMITTED
+    sm._run_permitted_since = now - 10.0  # 10s ago, well past 0.5s timeout
+    assert not sm._active_sources
+
+    await sm._run_checks()
+
+    assert sm._state == SafetyState.FAULT_LATCHED, (
+        "RUN_PERMITTED did not detect stuck start_source() via heartbeat timeout"
+    )
