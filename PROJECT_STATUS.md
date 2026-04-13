@@ -1,9 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-13
+**Дата:** 2026-04-14
 **Ветка:** master
-**Последний commit:** `21e9c40`
-**Тесты:** 880 passed, 6 skipped
+**Последний commit:** `89ed3c1`
+**Тесты:** 890 passed, 6 skipped
+**Phase 2d COMPLETE. Phase 2e IN PROGRESS.**
 
 ---
 
@@ -12,9 +13,9 @@
 | Метрика | Значение |
 |---|---|
 | Python файлы (src/cryodaq/) | 102 |
-| Строки кода (src/cryodaq/) | ~33,800 |
+| Строки кода (src/cryodaq/) | ~33,900 |
 | Тестовые файлы (tests/) | 113 |
-| Тесты | 880 passed, 6 skipped |
+| Тесты | 890 passed, 6 skipped |
 | Версия | 0.13.0 |
 | Python | 3.12+ (dev: 3.14.3) |
 
@@ -43,12 +44,13 @@
 ### Инварианты добавленные Phase 2d
 
 10. **OVERRANGE/UNDERRANGE** persist с status (±inf валидные REAL в SQLite). SENSOR_ERROR/TIMEOUT (NaN) отфильтровываются.
-11. **Cancellation shielding** на _fault() post-fault paths: emergency_off, fault_log_callback, _ensure_output_off в _safe_off.
-12. **Fail-closed config:** safety.yaml и alarms_v3.yaml → SafetyConfigError/AlarmConfigError → engine exit code 2 (без auto-restart).
+11. **Cancellation shielding** на _fault() post-fault paths: emergency_off, fault_log_callback (before publish), _ensure_output_off в _safe_off.
+12. **Fail-closed config:** safety.yaml, alarms_v3.yaml, interlocks.yaml, housekeeping.yaml, channels.yaml → subsystem-specific ConfigError → engine exit code 2 (без auto-restart).
 13. **Atomic file writes** для experiment sidecars и calibration index/curve через core/atomic_write.
 14. **WAL mode verification:** raises RuntimeError если PRAGMA journal_mode=WAL вернул не 'wal'.
-15. **Calibration KRDG+SRDG** persist в одной транзакции per poll cycle.
-16. **Scheduler.stop()** — graceful 5s drain перед forced cancel.
+15. **Calibration KRDG+SRDG** persist в одной транзакции per poll cycle. State mutation deferred to on_srdg_persisted.
+16. **Scheduler.stop()** — graceful drain (configurable via safety.yaml scheduler_drain_timeout_s, default 5s) перед forced cancel.
+17. **_fault() ordering:** post-mortem log callback BEFORE optional broker publish (Jules R2 fix).
 
 ---
 
@@ -67,93 +69,111 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI
 
 ---
 
-## Phase 2d — Block A + B COMPLETE
+## Phase 2d — COMPLETE (2026-04-13)
 
-9 commits on master, each с Codex (gpt-5.4) review.
+14 commits, +61 tests (829 → 890), zero regressions. Triple-reviewer pipeline (CC tactical + Codex second-opinion + Jules architectural) validated across Safety, Persistence, and Config Fail-Closed subsystems.
 
-### Block A.1 — Safety hardening
+### Commits (chronological)
 
-| Commit | Описание | Codex |
-|---|---|---|
-| `88feee5` | Web XSS escapeHtml + _fault() shield + RUN_PERMITTED stale/rate + safety.yaml fail-closed + Latin T | BLOCKING |
-| `1446f48` | Heartbeat gap in RUN_PERMITTED + SafetyConfigError class | SIGNIFICANT → MINOR |
-| `ebac719` | SafetyConfig coercion wrapper + critical_channels type validation | CLEAN |
+| # | Commit | Описание | Codex |
+|---|---|---|---|
+| 1 | `88feee5` | Block A.1: Web XSS + _fault() shield + RUN_PERMITTED + safety.yaml fail-closed + Latin T | BLOCKING |
+| 2 | `1446f48` | Block A.1 fix: heartbeat gap in RUN_PERMITTED + SafetyConfigError class | CLEAN |
+| 3 | `ebac719` | Block A.1 fix2: SafetyConfig coercion wrapper + critical_channels type validation | CLEAN |
+| 4 | `1b12b87` | Block A.2: phantom interlocks + AlarmConfigError + safety→operator_log + acknowledge | SIGNIFICANT |
+| 5 | `e068cbf` | Block A.2 fix: keithley_overpower restore + engine label + broker publish + re-ack guard | CLEAN |
+| 6 | `5cf369e` | Jules R1 followup: shield _fault_log_callback + _ensure_output_off in _safe_off | MINOR |
+| 7 | `d3abee7` | Block B-1: atomic file writes (experiment + calibration) + WAL verification | MINOR |
+| 8 | `104a268` | Block B-2: OVERRANGE persist + calibration KRDG/SRDG atomic + scheduler drain | BLOCKING |
+| 9 | `21e9c40` | Block B-2 fix: drop NaN-valued statuses from persist set | CLEAN |
+| 10 | `23929ca` | Checkpoint: PROJECT_STATUS update | — |
+| 11 | `efe6b49` | Chore: ruff --fix lint debt (830 → 445 errors) | — |
+| 12 | `f4c256f` | Chore: remove accidental logs/, add .gitignore | — |
+| 13 | `74f6d21` | Jules R2 fix: _fault() ordering + calibration state mutation deferral | CLEAN |
+| 14 | `89ed3c1` | Block C-1: interlocks/housekeeping/channels fail-closed + drain timeout config + on_readings deprecation | MINOR |
 
-### Block A.2 — Alarm config + safety bridge
+### Themes closed
 
-| Commit | Описание | Codex |
-|---|---|---|
-| `1b12b87` | Phantom interlocks removed + AlarmConfigError + safety→operator_log + acknowledge real impl | SIGNIFICANT |
-| `e068cbf` | Restore keithley_overpower + engine log label + None path msg + docstring + broker publish + re-ack guard | CLEAN |
+#### Safety hardening
+- Web stored XSS escape (escapeHtml helper)
+- _fault() hardware emergency_off shielded from cancellation
+- _fault() _fault_log_callback shielded (Jules R1)
+- _fault() ordering: callback BEFORE publish (Jules R2)
+- _safe_off() fault-latched branch shielded (Jules R1)
+- RUN_PERMITTED heartbeat monitoring (stuck start_source detection)
+- safety.yaml + alarms_v3.yaml + interlocks.yaml + housekeeping.yaml + channels.yaml fail-closed
+- Latin T / Cyrillic Т regression fix in housekeeping.yaml
+- safety→operator_log bridge with broker publish
+- AlarmStateManager.acknowledge real implementation with idempotent re-ack guard
+- SafetyConfigError / AlarmConfigError / InterlockConfigError / HousekeepingConfigError / ChannelConfigError hierarchy
 
-### Block A.8 followup — Jules architectural review
+#### Persistence integrity
+- Atomic file writes via core/atomic_write (experiment sidecars, calibration index/curve)
+- WAL mode verification (refuse startup if not enabled)
+- OVERRANGE/UNDERRANGE readings persist with status field
+- NaN-valued statuses (SENSOR_ERROR, TIMEOUT) dropped to avoid IntegrityError
+- Calibration KRDG+SRDG atomic per poll cycle (single write_immediate)
+- Calibration state mutation deferred to on_srdg_persisted (Jules R2)
+- Scheduler.stop() graceful drain (configurable, default 5s) before forced cancel
 
-| Commit | Описание | Codex |
-|---|---|---|
-| `5cf369e` | Shield _fault_log_callback + shield _ensure_output_off in _safe_off | MINOR |
-
-### Block B-1 — Atomic file writes
-
-| Commit | Описание | Codex |
-|---|---|---|
-| `d3abee7` | Experiment sidecars + calibration index/curve atomic write + WAL mode verification | MINOR |
-
-### Block B-2 — Persistence integrity
-
-| Commit | Описание | Codex |
-|---|---|---|
-| `104a268` | OVERRANGE persist + calibration KRDG/SRDG atomic + scheduler graceful drain | BLOCKING |
-| `21e9c40` | Drop NaN-valued statuses (SENSOR_ERROR, TIMEOUT) from persist set | CLEAN |
-
-### Итоги Phase 2d
-
-- **Тесты:** 829 → 880 (+51 regression tests)
-- **Codex review iterations:** 9 commits, 14 Codex reviews (several commits went through 2-3 iterations)
-- **Final verdicts:** 4 CLEAN, 3 MINOR, 0 outstanding BLOCKING/SIGNIFICANT
-- **Jules findings:** 2 cancellation shielding holes caught by architectural review that tactical CC+Codex missed
+#### Operational polish
+- _DRAIN_TIMEOUT_S exposed via SafetyConfig.scheduler_drain_timeout_s
+- Legacy on_readings converted to deprecation shim
+- Ruff lint debt reduced 830 → 445
+- Engine config error handler: unified label dispatch for all 5 config error types
 
 ---
 
-## Deferred items
+## Phase 2e — IN PROGRESS (started 2026-04-14)
 
-### From Phase 2d commit messages
+### Primary goal
 
-1. **A.7 semantic config errors** — alarm_v2.py `_expand_alarm` / `_parse_engine_config` don't validate unknown keys or semantic correctness. Medium-sized audit. Source: `e068cbf`.
-2. **A.9.1 consumer wiring** — engine command handler `alarm_v2_status` drops acknowledged/acknowledged_at/acknowledged_by fields. GUI/web/Telegram can't see acknowledgment state. Source: `e068cbf`.
-3. **B.1.2 NaN statuses via sentinel or schema migration** — SENSOR_ERROR/TIMEOUT readings (NaN value) currently dropped; full post-mortem requires nullable value column or sentinel value. Source: `21e9c40`.
-4. **C.1 Ubuntu SQLite version gating** — `sqlite_writer.py` warns about WAL-reset corruption bug in SQLite 3.7.0–3.51.2 but does not block. Needs hardware validation. Source: MASTER_TRIAGE.md.
-5. **C.3 synchronous=FULL decision** — currently NORMAL (loses ~1s on power loss). UPS-dependent. Source: MASTER_TRIAGE.md.
-6. **P2 DataBroker exception blocks SafetyBroker** — if DataBroker publish raises, SafetyBroker publish is skipped. Separate isolation fix. Source: `PERSISTENCE_INVARIANT_DEEP_DIVE.md`.
-7. **P3 day-boundary batch splitting** — batch spanning midnight can split across daily DB files mid-transaction. Source: `PERSISTENCE_INVARIANT_DEEP_DIVE.md`.
-8. **Test timeout bounding** — cancellation shield tests use `asyncio.sleep(0.2)` as proxy instead of `asyncio.wait_for(...)`. Codex flagged as MINOR. Source: `5cf369e` Codex review.
+Parquet experiment archive stage 1 — write readings.parquet in artifact_dir when experiment finalizes. Enables long-term archival, offline analytics, and reproducibility. First of 4 stages.
 
-### MASTER_TRIAGE.md Block C scope (potential next work)
+### Parallel track — operational hardening (deferred from Phase 2d Block C-2)
 
-- Enforce `requirements-lock.txt` hash verification and pin `hatchling`
-- Fix `post_build.py` to copy plugin sidecars + document POSIX symlink-preserving deployment
-- Move writable runtime state out of bundle directory
-- Remove executable runtime plugin loading from production bundles or mark as trusted/read-only
-- Bound web history/log queries + isolate heavy background executor consumers
+- K.1 — requirements-lock.txt hash verification in build path
+- K.2 — post_build.py copies plugin YAML sidecars alongside .py files
+- J.1 — Runtime root outside bundle directory (writable state separation)
+- H.1 — Runtime plugin loading trust boundary (read-only or disabled in production)
+- G.1 — Web dashboard auth or loopback-only default
+- G.2 — Web history/log query size bounds
+- F.1 — Telegram bot persist last update_id, discard backlog on restart
+- CONFIG_AUDIT C.1 — .local.yaml merge instead of replace
 
-**Effort:** ~12-20 CC hours. **Risk:** low to medium.
+### Other Phase 2e candidates
+
+- A.7.5 — Semantic config errors in _parse_engine_config / _expand_alarm
+- A.9.1 — Engine command handler serializes acknowledged state through ZMQ
+- A.8.1 + C-1 test gaps — batch cleanup for accumulated minor test findings
+- Structural tests → behavioral rewrite (for Phase 2d structural regression locks)
+- Jules Q2 — Pre-flight config check in launcher with operator-visible diagnostic
+- P2 — DataBroker exception isolation from SafetyBroker
+- P3 — Day-boundary batch splitting
+
+### Deferred to Phase 3 (hardware validation required)
+
+- B.1.2 — NaN statuses via sentinel or schema migration
+- C.1 — Ubuntu 22.04 SQLite version gating (WAL-reset bug on libsqlite3 < 3.51.3)
+- C.3 — synchronous=FULL decision with UPS deployment note
 
 ---
 
 ## Открытые дефекты (non-Phase-2d)
 
-See `DEEP_AUDIT_CC_POST_2C.md`, `HARDENING_PASS_CODEX.md`, `MASTER_TRIAGE.md` for full audit finding lists. Phase 2d closed ~15 of the highest-severity findings. Remaining findings are tracked in Block C/D scope or deferred to Phase 3.
+See `DEEP_AUDIT_CC_POST_2C.md`, `HARDENING_PASS_CODEX.md`, `MASTER_TRIAGE.md` for full audit finding lists. Phase 2d closed ~20 of the highest-severity findings. Remaining findings tracked in Phase 2e candidates or Phase 3 deferrals above.
 
 ---
 
 ## В работе
 
-**Phase 2d CHECKPOINT.** Block A + Block B complete. Awaiting Jules round 2 architectural review before deciding Block C vs Phase 2e.
+**Phase 2e IN PROGRESS.** Primary: Parquet archive. Parallel: operational hardening (Block C-2 items).
 
 ---
 
 ## Parallel track
 
-`feat/ui-phase-1-v2` continues independently on GUI rewrite (shell scaffold + dashboard). Not touched by Phase 2d master track. Will be merged to master after UI stabilization.
+`feat/ui-phase-1-v2` continues independently on GUI rewrite (shell scaffold + dashboard with real pyqtgraph plots). Not touched by Phase 2d master track. Will be merged to master after UI stabilization.
 
 ---
 
@@ -161,13 +181,14 @@ See `DEEP_AUDIT_CC_POST_2C.md`, `HARDENING_PASS_CODEX.md`, `MASTER_TRIAGE.md` fo
 
 1. **Dual-channel Keithley (smua + smub)** — confirmed operational model.
 2. **Persistence-first** — SQLite WAL commit BEFORE any subscriber sees data.
-3. **Fail-closed safety config** — missing/malformed safety.yaml or alarms_v3.yaml prevents engine start (exit code 2, no auto-restart).
-4. **Cancellation shielding** — hardware emergency_off AND post-mortem log emission AND _safe_off cleanup are all asyncio.shield'd against outer cancellation.
-5. **OVERRANGE/UNDERRANGE persist** — ±inf stored as REAL in SQLite. NaN-valued statuses dropped until Phase 3 schema/sentinel work.
-6. **Atomic sidecar writes** — experiment metadata, calibration index/curve use core/atomic_write (temp+fsync+os.replace).
+3. **Fail-closed config** — all 5 safety-adjacent configs (safety, alarm, interlock, housekeeping, channels) prevent engine start on missing/malformed files.
+4. **Cancellation shielding** — hardware emergency_off, post-mortem log emission, _safe_off cleanup all asyncio.shield'd. Log callback ordered BEFORE optional publish.
+5. **OVERRANGE/UNDERRANGE persist** — ±inf stored as REAL in SQLite. NaN-valued statuses dropped until Phase 3.
+6. **Atomic sidecar writes** — experiment metadata, calibration index/curve use core/atomic_write.
 7. **WAL mode verification** — engine refuses to start if SQLite can't enable WAL.
-8. **Graceful scheduler drain** — 5s window for in-flight polls to complete persist+publish before forced cancel.
-9. **Three-layer review** — CC tactical + Codex second-opinion + Jules architectural. See audit pipeline section.
+8. **Graceful scheduler drain** — configurable via safety.yaml scheduler_drain_timeout_s (default 5s).
+9. **Three-layer review** — CC tactical + Codex second-opinion + Jules architectural.
+10. **Calibration state deferral** — prepare_srdg_readings computes pending state, on_srdg_persisted applies atomically after successful write.
 
 ---
 
@@ -178,8 +199,8 @@ pip install -e ".[dev,web]"
 cryodaq                        # Operator launcher
 cryodaq-engine --mock          # Mock engine
 cryodaq-gui                    # GUI only
-pytest                         # 880 passed, 6 skipped
-ruff check src/ tests/
+pytest                         # 890 passed, 6 skipped
+ruff check src/ tests/         # 445 remaining (from 830)
 ruff format src/ tests/
 ```
 
@@ -195,10 +216,10 @@ Phase 2d established a **three-layer review pattern** for safety-critical change
    - `housekeeping.py` reads the alarms_v3 `interlocks:` section that CC deleted as "dead config"
    - NaN vs ±inf IEEE 754 distinction (SQLite treats NaN as NULL, violating NOT NULL)
    - Engine log label said "safety config" for alarm errors
-3. **Jules architectural review** — looks at the entire fault path holistically, not individual diffs. Found two cancellation holes that both tactical layers missed:
-   - `_fault_log_callback` not shielded (post-mortem evidence lost on cancellation)
-   - `_ensure_output_off` in `_safe_off` fault-latched branch not shielded
+3. **Jules architectural review** — looks at the entire fault path holistically, not individual diffs:
+   - **Round 1:** Found `_fault_log_callback` not shielded + `_ensure_output_off` in `_safe_off` not shielded
+   - **Round 2:** Found `_fault()` ordering vulnerability (callback after publish = escape path) + calibration state mutation before persistence (t_min/t_max divergence on write failure)
 
-**Key insight:** Codex excels at line-level semantic analysis (wrong type, wrong API, wrong filter). Jules excels at cross-cutting architectural analysis (cancellation propagation through multi-step fault paths). Neither replaces the other.
+**Key insight:** Codex excels at line-level semantic analysis (wrong type, wrong API, wrong filter). Jules excels at cross-cutting architectural analysis (cancellation propagation, ordering dependencies across multi-commit refactors). Neither replaces the other.
 
-**Block A.1 specifically** went through 3 iterations (initial + fix + micro-fix) before reaching CLEAN — this is normal for safety-critical code and the iterative pattern should be expected.
+**Phase 2d total:** 14 commits, 17 Codex reviews, 2 Jules rounds. Every review found at least one real issue. The iterative correction pattern (initial → Codex BLOCKING → fix → re-review → CLEAN) is the expected workflow for safety-critical code.
