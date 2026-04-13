@@ -276,3 +276,25 @@ async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
 
     assert abs(rows1[0]["value"] - 4.5) < 1e-6
     assert abs(rows2[0]["value"] - 4.6) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d B-1.3: WAL mode verification
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_writer_wal_mode_verified(tmp_path: Path) -> None:
+    """B-1.3: SQLiteWriter must verify WAL mode is active on new DB."""
+    source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")
+    assert "actual_mode" in source and '"wal"' in source, (
+        "sqlite_writer.py does not verify WAL mode"
+    )
+
+
+def test_sqlite_writer_wal_verification_in_source() -> None:
+    """B-1.3: sqlite_writer must raise RuntimeError if WAL mode fails."""
+    source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")
+    assert 'actual_mode != "wal"' in source or "actual_mode != 'wal'" in source, (
+        "sqlite_writer.py does not verify WAL mode result"
+    )
+    assert "RuntimeError" in source

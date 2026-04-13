@@ -249,3 +249,20 @@ def test_calibration_store_backward_compatible_load_rebuilds_index(tmp_path: Pat
     assert reloaded.get_curve_info("sensor-005")["curve_id"] == curve.curve_id
     assert index_path.exists()
     assert curve_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d B-1: atomic write for calibration index
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_index_uses_atomic_write():
+    """B-1.2: calibration.py index/curve writes must use atomic_write_text."""
+    source = Path("src/cryodaq/analytics/calibration.py").read_text(encoding="utf-8")
+    import re
+    raw_state_writes = re.findall(r"_index_path\.write_text|target\.write_text\(json", source)
+    assert len(raw_state_writes) == 0, (
+        f"Found {len(raw_state_writes)} raw write_text calls for state files — "
+        f"should all route through atomic_write_text"
+    )
+    assert "atomic_write_text" in source

@@ -245,7 +245,16 @@ class SQLiteWriter:
         # WAL with explicit checkpoint policy (DEEP_AUDIT_CC.md D.1).
         # Default autocheckpoint (1000 pages) can starve under concurrent
         # readers. See https://www.sqlite.org/wal.html
-        conn.execute("PRAGMA journal_mode=WAL;")
+        result = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+        actual_mode = (result[0] if result else "").lower()
+        if actual_mode != "wal":
+            raise RuntimeError(
+                f"SQLite WAL mode could not be enabled at {db_path}. "
+                f"PRAGMA journal_mode returned {actual_mode!r}. "
+                f"This may indicate an unsupported filesystem (network share, "
+                f"WSL with DrvFs, or read-only mount). CryoDAQ requires WAL "
+                f"for cross-process read concurrency. Refusing to start."
+            )
         # synchronous=NORMAL loses last ~1s on power loss but gives ~10x
         # throughput. Production deployments must be on a UPS. If no UPS,
         # set CRYODAQ_SQLITE_SYNC=FULL.

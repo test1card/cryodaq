@@ -339,7 +339,9 @@ class CalibrationStore:
     def save_curve(self, curve: CalibrationCurve, path: Path | None = None) -> Path:
         target = path or self._curve_path(curve.sensor_id, curve.curve_id)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(curve.to_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(target, json.dumps(curve.to_payload(), ensure_ascii=False, indent=2))
         self._curves[curve.sensor_id] = curve
         self._ensure_assignment(sensor_id=curve.sensor_id, curve_id=curve.curve_id)
         self._write_index()
@@ -756,7 +758,9 @@ class CalibrationStore:
             ],
             "assignments": [dict(item) for item in self.list_assignments()],
         }
-        self._index_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(self._index_path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
     def _ensure_assignment(self, *, sensor_id: str, curve_id: str) -> dict[str, Any]:
         existing = self._assignments.get(sensor_id)

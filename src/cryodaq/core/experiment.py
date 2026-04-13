@@ -878,7 +878,9 @@ class ExperimentManager:
             **self._state.to_payload(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(self._state_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _read_experiment_from_metadata(self, experiment_id: str) -> ExperimentInfo | None:
         metadata_path = self._metadata_path(experiment_id)
@@ -980,7 +982,14 @@ class ExperimentManager:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         db_path = self._db_path_for_day(when or datetime.now(timezone.utc))
         conn = sqlite3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        result = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+        actual_mode = (result[0] if result else "").lower()
+        if actual_mode != "wal":
+            raise RuntimeError(
+                f"SQLite WAL mode could not be enabled at {db_path}. "
+                f"PRAGMA journal_mode returned {actual_mode!r}. "
+                f"CryoDAQ requires WAL for cross-process read concurrency."
+            )
         conn.execute(SCHEMA_EXPERIMENTS)
         conn.commit()
         return conn
@@ -1115,7 +1124,9 @@ class ExperimentManager:
                 else dict(existing_payload.get("summary_metadata") or {})
             ),
         }
-        metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     # ------------------------------------------------------------------
     # Phase tracking
@@ -1147,7 +1158,9 @@ class ExperimentManager:
         payload["phases"] = phases
         payload["current_phase"] = phase
         metadata_path = self._metadata_path(self._active.experiment_id)
-        metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
         return entry
 
@@ -1353,7 +1366,9 @@ class ExperimentManager:
             "conductivity_rows": len(conductivity_rows),
         }
         summary_path = summaries_dir / "summary_metadata.json"
-        summary_path.write_text(json.dumps(summary_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(summary_path, json.dumps(summary_metadata, ensure_ascii=False, indent=2))
         artifact_index.append(
             self._artifact_entry(
                 category="summary",

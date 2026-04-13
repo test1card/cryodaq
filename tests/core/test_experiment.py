@@ -433,3 +433,28 @@ async def test_no_phases_backward_compat(manager: ExperimentManager) -> None:
     assert manager.get_current_phase() is None
     assert manager.get_phase_history() == []
     manager.finalize_experiment()  # should not crash
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d B-1: atomic write + WAL verification
+# ---------------------------------------------------------------------------
+
+
+def test_experiment_sidecars_use_atomic_write():
+    """B-1.1: experiment.py JSON sidecar writes must use atomic_write_text."""
+    source = Path("src/cryodaq/core/experiment.py").read_text(encoding="utf-8")
+    import re as _re
+    raw_json_writes = _re.findall(r"\.write_text\(json\.dumps", source)
+    assert len(raw_json_writes) == 0, (
+        f"Found {len(raw_json_writes)} raw write_text(json.dumps...) — "
+        f"should all route through atomic_write_text"
+    )
+    assert "atomic_write_text" in source
+
+
+def test_experiment_wal_verification():
+    """B-1.3: experiment.py metadata DB must verify WAL mode is active."""
+    source = Path("src/cryodaq/core/experiment.py").read_text(encoding="utf-8")
+    assert "actual_mode" in source and "wal" in source, (
+        "experiment.py metadata DB does not verify WAL mode"
+    )
