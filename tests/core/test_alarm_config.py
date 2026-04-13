@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 import yaml
 
-from cryodaq.core.alarm_config import load_alarm_config, AlarmConfig, EngineConfig
+from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config, AlarmConfig, EngineConfig
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 
 
@@ -139,18 +139,39 @@ def test_global_alarm_phase_filter_none(tmp_path: Path) -> None:
     assert stale.phase_filter is None
 
 
-def test_missing_file_returns_empty() -> None:
-    engine, alarms = load_alarm_config("/nonexistent/alarms.yaml")
-    assert isinstance(engine, EngineConfig)
-    assert alarms == []
+def test_missing_file_raises_alarm_config_error() -> None:
+    """A.7: missing alarms_v3.yaml must be startup-fatal."""
+    with pytest.raises(AlarmConfigError, match="not found"):
+        load_alarm_config("/nonexistent/alarms.yaml")
 
 
 def test_none_path_finds_default() -> None:
     """load_alarm_config(None) should find config/alarms_v3.yaml via traversal."""
     engine, alarms = load_alarm_config(None)
-    # If found, should have alarms; if not found in test env, should still return valid objects
     assert isinstance(engine, EngineConfig)
     assert isinstance(alarms, list)
+
+
+def test_malformed_yaml_raises_alarm_config_error(tmp_path: Path) -> None:
+    """A.7: malformed YAML must raise AlarmConfigError."""
+    p = tmp_path / "bad.yaml"
+    p.write_text("not: valid: yaml: [broken")
+    with pytest.raises(AlarmConfigError, match="YAML parse error"):
+        load_alarm_config(p)
+
+
+def test_non_mapping_raises_alarm_config_error(tmp_path: Path) -> None:
+    """A.7: non-mapping YAML must raise AlarmConfigError."""
+    p = tmp_path / "list.yaml"
+    p.write_text("- item1\n- item2\n")
+    with pytest.raises(AlarmConfigError, match="malformed"):
+        load_alarm_config(p)
+
+
+def test_alarm_config_error_is_runtime_error_subclass() -> None:
+    """A.7: AlarmConfigError must be catchable as RuntimeError."""
+    err = AlarmConfigError("test")
+    assert isinstance(err, RuntimeError)
 
 
 def test_composite_conditions_channel_group_expanded(tmp_path: Path) -> None:

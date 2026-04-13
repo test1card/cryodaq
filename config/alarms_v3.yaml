@@ -284,31 +284,7 @@ phase_alarms:
       notify: [gui, telegram]
 
 # ============================================================================
-# ИНТЕРЛОКИ
+# ИНТЕРЛОКИ — настраиваются в config/interlocks.yaml (не здесь).
+# Секция ниже была удалена в Phase 2d A.6: содержала фантомные определения
+# которые ни один модуль не читал, создавая иллюзию конфигурации.
 # ============================================================================
-interlocks:
-
-  overheat_cryostat:
-    channel_group: all_temp
-    check: any_above
-    threshold: 350
-    action: emergency_off
-    message: "АВАРИЙНЫЙ ПЕРЕГРЕВ > 350K"
-
-  keithley_overpower_interlock:
-    channels: [smua_power, smub_power]
-    check: any_above
-    threshold: 4.5               # W — жёстче аларма (4.0), мягче лимита (5.0)
-    action: stop_source
-
-  detector_warmup_interlock:
-    channel: Т12
-    check: above
-    threshold: 10
-    conditions:                  # фазозависимый!
-      - phase: measurement
-      - keithley_source: on
-    action: stop_source
-    message: "Т12 > 10K при активном нагревателе — source OFF"
-
-  # УДАЛЁН: undercool_shield (T5 < 50K) — ложное срабатывание при штатном cooldown

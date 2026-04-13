@@ -493,6 +493,46 @@ def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
         sm.load_config(cfg)
 
 
+async def test_fault_writes_machine_event_to_operator_log():
+    """H.6: _fault() must emit a machine event via fault_log_callback."""
+    log_calls = []
+
+    async def fake_log_callback(source, message, channel="", value=0.0):
+        log_calls.append({"source": source, "message": message, "channel": channel})
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True, fault_log_callback=fake_log_callback)
+
+    await sm._fault("test reason", channel="Т1 Криостат верх", value=999.0)
+
+    assert len(log_calls) == 1
+    assert log_calls[0]["source"] == "safety_manager"
+    assert "test reason" in log_calls[0]["message"]
+    assert log_calls[0]["channel"] == "Т1 Криостат верх"
+
+
+async def test_fault_continues_if_log_callback_raises():
+    """H.6: _fault() must not propagate if fault_log_callback fails."""
+
+    async def broken_callback(**kwargs):
+        raise RuntimeError("log write failed")
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True, fault_log_callback=broken_callback)
+
+    await sm._fault("test")  # must not raise
+    assert sm._state == SafetyState.FAULT_LATCHED
+
+
+async def test_fault_works_without_log_callback():
+    """H.6: _fault() must work when fault_log_callback is None (backward compat)."""
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True)  # no callback
+
+    await sm._fault("test")
+    assert sm._state == SafetyState.FAULT_LATCHED
+
+
 async def test_keithley_heartbeat_monitored_in_run_permitted():
     """A.3.1: RUN_PERMITTED must detect stuck start_source() via
     heartbeat timeout even when _active_sources is empty."""

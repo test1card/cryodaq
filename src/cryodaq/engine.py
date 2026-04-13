@@ -53,6 +53,7 @@ from cryodaq.core.interlock import InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.alarm_config import AlarmConfigError
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
@@ -843,6 +844,19 @@ async def _run_engine(*, mock: bool = False) -> None:
     writer.set_event_loop(asyncio.get_running_loop())
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
+
+    # H.6: wire safety fault → operator_log machine event
+    async def _safety_fault_log_callback(
+        source: str, message: str, channel: str = "", value: float = 0.0,
+    ) -> None:
+        await writer.append_operator_log(
+            message=message,
+            author=source,
+            source="machine",
+            tags=("safety_fault", channel) if channel else ("safety_fault",),
+        )
+
+    safety_manager._fault_log_callback = _safety_fault_log_callback
 
     # Calibration acquisition — continuous SRDG during calibration experiments
     calibration_acquisition = CalibrationAcquisitionService(writer)
@@ -1741,7 +1755,7 @@ def main() -> None:
                 exc, traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
-        except SafetyConfigError as exc:
+        except (SafetyConfigError, AlarmConfigError) as exc:
             # Phase 2d A.4.1: safety.yaml fail-closed raises
             # SafetyConfigError — treat as config error, not retryable crash.
             logger.critical(

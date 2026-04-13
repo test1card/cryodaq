@@ -15,6 +15,14 @@ from typing import Any
 import yaml
 
 
+class AlarmConfigError(RuntimeError):
+    """Raised when alarms_v3.yaml cannot be loaded in a fail-closed manner.
+
+    Distinct class so engine startup maps it to config exit code
+    instead of generic runtime crash.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -80,33 +88,51 @@ def load_alarm_config(
     """
     if path is None:
         path = _find_default_config()
-    if path is None or not Path(path).exists():
-        return EngineConfig(), []
+    path = Path(path) if path is not None else None
+    if path is None or not path.exists():
+        raise AlarmConfigError(
+            f"alarms_v3.yaml not found at {path} — refusing to start "
+            f"alarm engine without alarm configuration"
+        )
 
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise AlarmConfigError(
+            f"alarms_v3.yaml at {path}: YAML parse error — {exc}"
+        ) from exc
 
     if not isinstance(raw, dict):
-        return EngineConfig(), []
+        raise AlarmConfigError(
+            f"alarms_v3.yaml at {path} is malformed (expected mapping, "
+            f"got {type(raw).__name__})"
+        )
 
     channel_groups: dict[str, list[str]] = raw.get("channel_groups", {})
-    engine_cfg = _parse_engine_config(raw.get("engine", {}))
-    alarms: list[AlarmConfig] = []
+    try:
+        engine_cfg = _parse_engine_config(raw.get("engine", {}))
+        alarms: list[AlarmConfig] = []
 
-    # --- Global alarms ---
-    for alarm_id, alarm_raw in raw.get("global_alarms", {}).items():
-        cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups)
-        if cfg is not None:
-            alarms.append(cfg)
-
-    # --- Phase alarms ---
-    for phase_name, phase_dict in raw.get("phase_alarms", {}).items():
-        if not isinstance(phase_dict, dict):
-            continue
-        for alarm_id, alarm_raw in phase_dict.items():
-            cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name])
+        # --- Global alarms ---
+        for alarm_id, alarm_raw in raw.get("global_alarms", {}).items():
+            cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups)
             if cfg is not None:
                 alarms.append(cfg)
+
+        # --- Phase alarms ---
+        for phase_name, phase_dict in raw.get("phase_alarms", {}).items():
+            if not isinstance(phase_dict, dict):
+                continue
+            for alarm_id, alarm_raw in phase_dict.items():
+                cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name])
+                if cfg is not None:
+                    alarms.append(cfg)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise AlarmConfigError(
+            f"alarms_v3.yaml at {path}: invalid config value — "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
     return engine_cfg, alarms
 

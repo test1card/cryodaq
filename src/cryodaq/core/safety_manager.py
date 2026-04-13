@@ -81,11 +81,13 @@ class SafetyManager:
         keithley_driver: Any | None = None,
         mock: bool = False,
         data_broker: Any | None = None,
+        fault_log_callback: Any | None = None,
     ) -> None:
         self._broker = safety_broker
         self._keithley = keithley_driver
         self._mock = mock
         self._data_broker = data_broker
+        self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
@@ -629,6 +631,19 @@ class SafetyManager:
             await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
         except asyncio.CancelledError:
             raise
+
+        # H.6: emit machine event to operator_log for post-mortem analysis.
+        # Non-blocking, non-shielded — hardware shutdown already completed.
+        if self._fault_log_callback is not None:
+            try:
+                await self._fault_log_callback(
+                    source="safety_manager",
+                    message=f"Safety fault: {reason}",
+                    channel=channel,
+                    value=value,
+                )
+            except Exception as exc:
+                logger.error("Failed to write safety fault to operator_log: %s", exc)
 
     async def _ensure_output_off(self, channel: str | None = None) -> None:
         if self._keithley is None:

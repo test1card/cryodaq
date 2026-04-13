@@ -427,3 +427,75 @@ def test_threshold_alarm_with_full_channel_names() -> None:
     result = ev.evaluate("detector_warmup", cfg)
     assert result is not None
     assert result.level == "CRITICAL"
+
+
+# ---------------------------------------------------------------------------
+# Phase-2d A.9: AlarmStateManager.acknowledge real implementation
+# ---------------------------------------------------------------------------
+
+
+def test_acknowledge_transitions_active_alarm():
+    """A.9: acknowledge must record state, operator, reason on active alarm."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="test_alarm",
+        level="WARNING",
+        message="test",
+        triggered_at=time.time(),
+        channels=["Т1"],
+        values={"Т1": 300.0},
+    )
+    mgr._active["test_alarm"] = event
+
+    result = mgr.acknowledge("test_alarm", operator="vladimir", reason="investigating")
+
+    assert result is True
+    assert event.acknowledged is True
+    assert event.acknowledged_at > 0
+    assert event.acknowledged_by == "vladimir"
+
+
+def test_acknowledge_records_history():
+    """A.9: acknowledge must add ACKNOWLEDGED entry to history."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="test_alarm",
+        level="CRITICAL",
+        message="test",
+        triggered_at=time.time(),
+        channels=["Т7"],
+        values={"Т7": 350.0},
+    )
+    mgr._active["test_alarm"] = event
+
+    mgr.acknowledge("test_alarm", operator="op1", reason="seen")
+
+    history = mgr.get_history()
+    ack_entries = [h for h in history if h.get("transition") == "ACKNOWLEDGED"]
+    assert len(ack_entries) == 1
+    assert ack_entries[0]["alarm_id"] == "test_alarm"
+    assert ack_entries[0]["operator"] == "op1"
+
+
+def test_acknowledge_nonexistent_returns_false():
+    """A.9: acknowledging non-existent alarm must return False."""
+    mgr = AlarmStateManager()
+    assert mgr.acknowledge("no_such_alarm") is False
+
+
+def test_acknowledge_keeps_alarm_active():
+    """A.9: acknowledged alarm stays in _active until CLEARED by condition."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="test_alarm",
+        level="INFO",
+        message="test",
+        triggered_at=time.time(),
+        channels=[],
+        values={},
+    )
+    mgr._active["test_alarm"] = event
+
+    mgr.acknowledge("test_alarm")
+
+    assert "test_alarm" in mgr._active

@@ -39,6 +39,9 @@ class AlarmEvent:
     triggered_at: float               # unix timestamp
     channels: list[str]               # каналы-участники
     values: dict[str, float]          # channel → значение на момент срабатывания
+    acknowledged: bool = False
+    acknowledged_at: float = 0.0
+    acknowledged_by: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -502,9 +505,31 @@ class AlarmStateManager:
         items = list(self._history)
         return items[-limit:]
 
-    def acknowledge(self, alarm_id: str) -> bool:
-        """Подтвердить аларм (снять GUI-оповещение, оставить в логе)."""
-        if alarm_id in self._active:
-            logger.info("ALARM ACKNOWLEDGED: %s", alarm_id)
-            return True
-        return False
+    def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> bool:
+        """Подтвердить аларм — записать факт подтверждения в историю.
+
+        Аларм остаётся в _active до сброса по условию (CLEARED).
+        Acknowledged означает: оператор видел и принял к сведению.
+        """
+        if alarm_id not in self._active:
+            logger.warning("ALARM ACK IGNORED: %s not in active alarms", alarm_id)
+            return False
+
+        event = self._active[alarm_id]
+        event.acknowledged = True
+        event.acknowledged_at = time.time()
+        event.acknowledged_by = operator
+
+        self._history.append({
+            "alarm_id": alarm_id,
+            "transition": "ACKNOWLEDGED",
+            "at": event.acknowledged_at,
+            "level": event.level,
+            "operator": operator,
+            "reason": reason,
+        })
+        logger.info(
+            "ALARM ACKNOWLEDGED: %s by %s (reason: %s)",
+            alarm_id, operator or "—", reason or "—",
+        )
+        return True
