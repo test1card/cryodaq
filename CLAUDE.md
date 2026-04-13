@@ -184,12 +184,15 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `config/instruments.yaml`
 - `config/interlocks.yaml`
 - `config/alarms.yaml`
+- `config/alarms_v3.yaml`
 - `config/safety.yaml`
 - `config/notifications.yaml`
 - `config/channels.yaml`
 - `config/cooldown.yaml`
 - `config/experiment_templates/*.yaml`
 - `config/housekeeping.yaml`
+- `config/plugins.yaml`
+- `config/shifts.yaml`
 - `config/*.local.yaml.example`
 
 ## Приборы
