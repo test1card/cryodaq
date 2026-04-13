@@ -516,6 +516,13 @@ class AlarmStateManager:
             return False
 
         event = self._active[alarm_id]
+        if event.acknowledged:
+            logger.debug(
+                "ALARM ACK NOOP: %s already acknowledged by %s",
+                alarm_id, event.acknowledged_by or "—",
+            )
+            return True
+
         event.acknowledged = True
         event.acknowledged_at = time.time()
         event.acknowledged_by = operator

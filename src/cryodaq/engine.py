@@ -849,12 +849,20 @@ async def _run_engine(*, mock: bool = False) -> None:
     async def _safety_fault_log_callback(
         source: str, message: str, channel: str = "", value: float = 0.0,
     ) -> None:
-        await writer.append_operator_log(
+        entry = await writer.append_operator_log(
             message=message,
             author=source,
             source="machine",
             tags=("safety_fault", channel) if channel else ("safety_fault",),
         )
+        # Codex followup: publish to broker so live consumers (GUI, web)
+        # see safety faults without waiting for SQLite refresh.
+        try:
+            await _publish_operator_log_entry(broker, entry)
+        except Exception as exc:
+            logger.error(
+                "Failed to publish safety fault operator_log entry: %s", exc
+            )
 
     safety_manager._fault_log_callback = _safety_fault_log_callback
 
@@ -1756,11 +1764,10 @@ def main() -> None:
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except (SafetyConfigError, AlarmConfigError) as exc:
-            # Phase 2d A.4.1: safety.yaml fail-closed raises
-            # SafetyConfigError — treat as config error, not retryable crash.
+            label = "safety" if isinstance(exc, SafetyConfigError) else "alarm"
             logger.critical(
-                "CONFIG ERROR (safety config): %s\n%s",
-                exc, traceback.format_exc(),
+                "CONFIG ERROR (%s config): %s\n%s",
+                label, exc, traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:

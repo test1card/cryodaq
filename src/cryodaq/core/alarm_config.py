@@ -84,12 +84,19 @@ def load_alarm_config(
     Если path не задан, ищет config/alarms_v3.yaml рядом с этим модулем
     (поднимаясь до корня пакета).
 
-    Возвращает пустой список алармов если файл не найден.
+    Raises AlarmConfigError if file is missing, malformed, non-mapping,
+    or contains coercion errors in alarm definitions.
     """
     if path is None:
         path = _find_default_config()
-    path = Path(path) if path is not None else None
-    if path is None or not path.exists():
+        if path is None:
+            raise AlarmConfigError(
+                "alarms_v3.yaml not found: no path provided and no default "
+                "config located via standard search. Refusing to start alarm "
+                "engine without alarm configuration."
+            )
+    path = Path(path)
+    if not path.exists():
         raise AlarmConfigError(
             f"alarms_v3.yaml not found at {path} — refusing to start "
             f"alarm engine without alarm configuration"

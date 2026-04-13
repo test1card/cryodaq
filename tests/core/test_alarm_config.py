@@ -290,3 +290,17 @@ def test_setpoint_invalid_custom_field_fallback() -> None:
     mgr.get_active_experiment.return_value = active
     provider = ExperimentSetpointProvider(mgr, _make_setpoint_defs())
     assert provider.get("T12_setpoint") == 4.2
+
+
+def test_none_path_with_no_default_raises_with_clear_message(monkeypatch) -> None:
+    """A.7.3: error message must not contain literal 'None'."""
+    from cryodaq.core import alarm_config
+
+    monkeypatch.setattr(alarm_config, "_find_default_config", lambda: None)
+
+    with pytest.raises(AlarmConfigError) as exc_info:
+        load_alarm_config(None)
+
+    msg = str(exc_info.value)
+    assert "None" not in msg, f"Error contains literal 'None': {msg}"
+    assert "no path provided" in msg.lower() or "no default" in msg.lower()

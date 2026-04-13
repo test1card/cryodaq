@@ -483,6 +483,30 @@ def test_acknowledge_nonexistent_returns_false():
     assert mgr.acknowledge("no_such_alarm") is False
 
 
+def test_acknowledge_is_idempotent():
+    """A.9 Codex: double-ack must not duplicate history entries."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="test_alarm",
+        level="WARNING",
+        message="test",
+        triggered_at=time.time(),
+        channels=["Т1"],
+        values={"Т1": 300.0},
+    )
+    mgr._active["test_alarm"] = event
+
+    first = mgr.acknowledge("test_alarm", operator="op1", reason="first")
+    second = mgr.acknowledge("test_alarm", operator="op2", reason="second")
+
+    assert first is True
+    assert second is True
+    history = mgr.get_history()
+    ack_entries = [h for h in history if h.get("transition") == "ACKNOWLEDGED"]
+    assert len(ack_entries) == 1, f"Got {len(ack_entries)} ACK entries, expected 1"
+    assert event.acknowledged_by == "op1"
+
+
 def test_acknowledge_keeps_alarm_active():
     """A.9: acknowledged alarm stays in _active until CLEARED by condition."""
     mgr = AlarmStateManager()

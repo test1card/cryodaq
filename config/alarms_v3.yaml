@@ -284,7 +284,24 @@ phase_alarms:
       notify: [gui, telegram]
 
 # ============================================================================
-# ИНТЕРЛОКИ — настраиваются в config/interlocks.yaml (не здесь).
-# Секция ниже была удалена в Phase 2d A.6: содержала фантомные определения
-# которые ни один модуль не читал, создавая иллюзию конфигурации.
+# ИНТЕРЛОКИ — phantom-only entries для throttle protection.
+#
+# Большинство интерлоков живут в config/interlocks.yaml — это источник истины
+# для runtime interlock engine. Housekeeping (adaptive_throttle) читает оба
+# файла через load_protected_channel_patterns() и load_critical_channels_from_alarms_v3(),
+# объединяя patterns для защиты safety-critical каналов от throttling.
+#
+# Секция ниже содержит только те интерлоки, чьи каналы НЕ покрываются regex
+# patterns из config/interlocks.yaml — сейчас это только Keithley power каналы
+# (smua_power, smub_power), которые не матчатся temperature-regex из interlocks.yaml.
+#
+# НЕ добавлять сюда дубликаты config/interlocks.yaml. Каналы Т1–Т12 уже
+# защищены через regex patterns в interlocks.yaml.
 # ============================================================================
+interlocks:
+
+  keithley_overpower_interlock:
+    channels: [smua_power, smub_power]
+    check: any_above
+    threshold: 4.5               # W — жёстче аларма (4.0), мягче лимита (5.0)
+    action: stop_source
