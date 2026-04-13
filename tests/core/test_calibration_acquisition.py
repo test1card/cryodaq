@@ -151,8 +151,8 @@ async def test_reference_updates_temp_range(service, mock_writer) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_prepare_srdg_readings_returns_list_without_writing():
-    """H.10: prepare_srdg_readings must return readings, not write them."""
+def test_prepare_srdg_readings_returns_tuple_without_writing():
+    """H.10: prepare_srdg_readings must return (readings, pending_state)."""
     mock_writer = AsyncMock()
     service = CalibrationAcquisitionService(mock_writer)
     service.activate(reference_channel="Т1", target_channels=["Т2"])
@@ -160,20 +160,52 @@ def test_prepare_srdg_readings_returns_list_without_writing():
     krdg = [_reading("Т1", 77.0)]
     srdg = [_srdg_reading("Т2", 1234.5)]
 
-    result = service.prepare_srdg_readings(krdg, srdg)
+    result, pending = service.prepare_srdg_readings(krdg, srdg)
 
     assert len(result) == 1
     assert result[0].channel == "Т2_raw"
-    # Writer must NOT have been called — scheduler does the write
+    assert pending is not None
     mock_writer.write_immediate.assert_not_called()
 
 
-def test_on_srdg_persisted_updates_counter():
-    """H.10: on_srdg_persisted must update point count."""
+def test_on_srdg_persisted_updates_counter_and_state():
+    """H.10+Jules R2: on_srdg_persisted applies counter AND pending state."""
     mock_writer = AsyncMock()
     service = CalibrationAcquisitionService(mock_writer)
     service.activate(reference_channel="Т1", target_channels=["Т2"])
     assert service.stats["point_count"] == 0
 
-    service.on_srdg_persisted(5)
+    service.on_srdg_persisted(5, {"t_min": 77.0, "t_max": 77.0})
     assert service.stats["point_count"] == 5
+    assert service.stats["t_min"] == 77.0
+    assert service.stats["t_max"] == 77.0
+
+
+def test_prepare_does_not_mutate_state():
+    """Jules R2 Q3: prepare must NOT mutate t_min/t_max."""
+    mock_writer = AsyncMock()
+    service = CalibrationAcquisitionService(mock_writer)
+    service.activate(reference_channel="Т1", target_channels=["Т2"])
+
+    krdg = [_reading("Т1", 77.0)]
+    srdg = [_srdg_reading("Т2", 1234.5)]
+
+    service.prepare_srdg_readings(krdg, srdg)
+
+    assert service.stats["t_min"] is None, "prepare mutated t_min"
+    assert service.stats["t_max"] is None, "prepare mutated t_max"
+
+
+def test_prepare_then_discard_leaves_state_clean():
+    """Jules R2 Q3: if write fails, not calling on_srdg_persisted
+    leaves state unchanged."""
+    mock_writer = AsyncMock()
+    service = CalibrationAcquisitionService(mock_writer)
+    service.activate(reference_channel="Т1", target_channels=["Т2"])
+
+    service.prepare_srdg_readings([_reading("Т1", 77.0)], [_srdg_reading("Т2", 1234.5)])
+    # Simulate write failure — on_srdg_persisted NOT called
+
+    assert service.stats["t_min"] is None
+    assert service.stats["t_max"] is None
+    assert service.stats["point_count"] == 0

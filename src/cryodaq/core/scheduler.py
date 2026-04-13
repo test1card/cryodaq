@@ -338,6 +338,7 @@ class Scheduler:
         # Step 1a: If calibration acquisition active, read SRDG BEFORE persisting
         # so KRDG+SRDG can be written atomically in one transaction (H.10).
         srdg_to_persist: list = []
+        srdg_pending_state = None
         if (
             self._calibration_acquisition is not None
             and self._calibration_acquisition.is_active
@@ -345,8 +346,8 @@ class Scheduler:
         ):
             try:
                 srdg = await driver.read_srdg_channels()
-                srdg_to_persist = self._calibration_acquisition.prepare_srdg_readings(
-                    readings, srdg
+                srdg_to_persist, srdg_pending_state = (
+                    self._calibration_acquisition.prepare_srdg_readings(readings, srdg)
                 )
             except Exception:
                 logger.warning(
@@ -375,7 +376,9 @@ class Scheduler:
 
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
         if srdg_to_persist:
-            self._calibration_acquisition.on_srdg_persisted(len(srdg_to_persist))
+            self._calibration_acquisition.on_srdg_persisted(
+                len(srdg_to_persist), srdg_pending_state
+            )
 
         # Step 2: Publish to brokers
         if persisted_readings:

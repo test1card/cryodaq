@@ -638,3 +638,55 @@ def test_fault_callback_shielded_in_source():
     src = Path("src/cryodaq/core/safety_manager.py").read_text(encoding="utf-8")
     assert "log_task = asyncio.create_task" in src
     assert "asyncio.shield(log_task)" in src
+
+
+async def test_fault_log_callback_runs_even_if_publish_fails():
+    """Jules R2 Q1: callback must execute even if publish raises."""
+    callback_invoked = asyncio.Event()
+
+    async def log_callback(*, source, message, channel, value):
+        callback_invoked.set()
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True, fault_log_callback=log_callback)
+    # Make _publish_keithley_channel_states raise
+    sm._data_broker = MagicMock()
+    sm._data_broker.publish = AsyncMock(side_effect=RuntimeError("broker exploded"))
+
+    await sm._fault("test publish failure", channel="smua", value=1.0)
+
+    assert callback_invoked.is_set(), (
+        "Fault log callback NOT invoked — publish failure swallowed it"
+    )
+
+
+async def test_fault_log_callback_runs_before_publish():
+    """Jules R2 Q1: callback must complete before publish starts.
+    If we cancel during publish, callback should have already fired."""
+    callback_invoked = asyncio.Event()
+
+    async def log_callback(*, source, message, channel, value):
+        callback_invoked.set()
+
+    async def slow_publish(*args, **kwargs):
+        await asyncio.sleep(1.0)
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, mock=True, fault_log_callback=log_callback)
+    sm._data_broker = MagicMock()
+    sm._data_broker.publish = AsyncMock(side_effect=slow_publish)
+
+    fault_task = asyncio.create_task(
+        sm._fault("test cancel during publish", channel="smua", value=1.0)
+    )
+    await asyncio.sleep(0.2)  # let it reach publish
+    fault_task.cancel()
+
+    try:
+        await fault_task
+    except asyncio.CancelledError:
+        pass
+
+    assert callback_invoked.is_set(), (
+        "Log callback not invoked before publish — ordering wrong"
+    )

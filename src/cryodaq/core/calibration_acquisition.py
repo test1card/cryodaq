@@ -72,26 +72,34 @@ class CalibrationAcquisitionService:
         self,
         krdg: list[Reading],
         srdg: list[Reading],
-    ) -> list[Reading]:
+    ) -> tuple[list[Reading], dict[str, float] | None]:
         """Prepare SRDG readings for persistence (H.10: atomic with KRDG).
 
-        Updates temperature range from reference KRDG channel and returns
-        the list of SRDG readings to persist. The caller (Scheduler)
-        persists them in the same transaction as KRDG readings.
+        Computes (but does NOT apply) pending temperature range updates.
+        The scheduler must call on_srdg_persisted with the returned
+        pending_state AFTER write_immediate succeeds. State mutation is
+        deferred so that a write failure does not leave t_min/t_max
+        diverged from actual persisted data (Jules Round 2 Q3).
+
+        Returns:
+            (readings_to_persist, pending_state)
         """
         if not self._active:
-            return []
+            return ([], None)
 
-        # Update t_min / t_max from reference KRDG
+        # Compute pending t_min/t_max WITHOUT applying yet
+        pending: dict[str, float] = {}
         for r in krdg:
             if r.channel == self._reference_channel and r.status == ChannelStatus.OK:
                 t = r.value
                 if not math.isfinite(t) or t < 1.0:
                     continue
-                if self._t_min is None or t < self._t_min:
-                    self._t_min = t
-                if self._t_max is None or t > self._t_max:
-                    self._t_max = t
+                cur_min = self._t_min if "t_min" not in pending else pending["t_min"]
+                if cur_min is None or t < cur_min:
+                    pending["t_min"] = t
+                cur_max = self._t_max if "t_max" not in pending else pending["t_max"]
+                if cur_max is None or t > cur_max:
+                    pending["t_max"] = t
 
         # Build SRDG readings for target channels
         to_write: list[Reading] = []
@@ -118,27 +126,33 @@ class CalibrationAcquisitionService:
                 )
             )
 
-        return to_write
+        return (to_write, pending if pending else None)
 
-    def on_srdg_persisted(self, count: int) -> None:
-        """Update point counter after SRDG readings are persisted by scheduler."""
+    def on_srdg_persisted(
+        self, count: int, pending_state: dict[str, float] | None = None,
+    ) -> None:
+        """Update counter and apply pending state after successful persistence."""
         self._point_count += count
+        if pending_state:
+            if "t_min" in pending_state:
+                new = pending_state["t_min"]
+                if self._t_min is None or new < self._t_min:
+                    self._t_min = new
+            if "t_max" in pending_state:
+                new = pending_state["t_max"]
+                if self._t_max is None or new > self._t_max:
+                    self._t_max = new
 
     async def on_readings(
         self,
         krdg: list[Reading],
         srdg: list[Reading],
     ) -> None:
-        """Legacy method — kept for backward compatibility.
-
-        In the new H.10 flow, scheduler calls prepare_srdg_readings +
-        on_srdg_persisted instead. This method still works but writes
-        SRDG in a separate transaction (not atomic with KRDG).
-        """
+        """Legacy method — kept for backward compatibility."""
         if not self._active:
             return
 
-        to_write = self.prepare_srdg_readings(krdg, srdg)
+        to_write, pending_state = self.prepare_srdg_readings(krdg, srdg)
         if to_write:
             await self._writer.write_immediate(to_write)
-            self._point_count += len(to_write)
+            self.on_srdg_persisted(len(to_write), pending_state)

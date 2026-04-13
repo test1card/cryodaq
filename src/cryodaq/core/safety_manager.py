@@ -627,14 +627,10 @@ class SafetyManager:
             except Exception as exc:
                 logger.critical("FAULT: emergency_off failed: %s", exc)
 
-        fault_channel = channel if channel in {"smua", "smub"} else None
-        try:
-            await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
-        except asyncio.CancelledError:
-            raise
-
-        # H.6 + Jules review: shielded post-mortem log emission — outer
-        # cancellation after hardware shutdown must not swallow the event.
+        # 4. Post-mortem log emission — shielded — MUST happen after hardware
+        #    shutdown but BEFORE optional broker publish. Previously this came
+        #    after publish, creating an escape path if publish was cancelled
+        #    (Jules Round 2 Q1).
         if self._fault_log_callback is not None:
             log_task = asyncio.create_task(
                 self._fault_log_callback(
@@ -660,6 +656,17 @@ class SafetyManager:
                 raise
             except Exception as exc:
                 logger.error("Failed to write safety fault to operator_log: %s", exc)
+
+        # 5. Broadcast Keithley channel states — best-effort, non-critical.
+        #    Publish failure does NOT prevent fault latching or post-mortem
+        #    logging because those already completed above.
+        fault_channel = channel if channel in {"smua", "smub"} else None
+        try:
+            await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Failed to publish Keithley channel states: %s", exc)
 
     async def _ensure_output_off(self, channel: str | None = None) -> None:
         if self._keithley is None:
