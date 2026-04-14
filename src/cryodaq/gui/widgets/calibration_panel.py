@@ -51,6 +51,19 @@ _INSTRUMENTS_DEFAULT = _get_config_dir() / "instruments.yaml"
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _strip_instrument_prefix(channel_ref: str) -> str:
+    """Strip 'instrument_id:' prefix from a channel reference.
+
+    Calibration panel combobox stores channels as 'LS218_1:Т1 Криостат верх'
+    to help operators identify which instrument owns each channel. Engine
+    commands work on canonical Reading.channel values which never include
+    an instrument prefix.
+    """
+    if ":" in channel_ref:
+        return channel_ref.split(":", 1)[1]
+    return channel_ref
+
+
 def _load_lakeshore_channels(config_path: Path) -> list[dict[str, Any]]:
     """Load LakeShore channels grouped by instrument from instruments.yaml."""
     try:
@@ -236,8 +249,10 @@ class CalibrationSetupWidget(QWidget):
             "title": name,
             "operator": "",
             "custom_fields": {
-                "reference_channel": ref,
-                "target_channels": ", ".join(targets),
+                "reference_channel": _strip_instrument_prefix(ref),
+                "target_channels": ", ".join(
+                    _strip_instrument_prefix(t) for t in targets
+                ),
             },
         })
         self._start_worker.finished.connect(self._on_start_result)

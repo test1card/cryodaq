@@ -38,7 +38,6 @@ from cryodaq.gui.widgets.common import (
     build_action_row,
 )
 from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
-from cryodaq.paths import get_data_dir
 
 
 class ExperimentWorkspace(QWidget):

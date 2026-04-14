@@ -45,8 +45,6 @@ from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
-from cryodaq.gui.zmq_client import ZmqBridge
-from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
