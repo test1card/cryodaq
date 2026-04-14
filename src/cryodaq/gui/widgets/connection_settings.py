@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger(__name__)
 
+from cryodaq.gui import theme
+from cryodaq.gui.widgets.common import apply_button_style
 from cryodaq.paths import get_config_dir as _get_config_dir
 
 _CONFIG_DIR = _get_config_dir()
@@ -68,14 +70,14 @@ class ConnectionSettingsDialog(QDialog):
 
         title = QLabel("Настройка подключения приборов")
         title.setFont(QFont("", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #58a6ff;")
+        title.setStyleSheet(f"color: {theme.TEXT_ACCENT};")
         layout.addWidget(title)
 
         hint = QLabel(
             "Изменения сохраняются в instruments.local.yaml (не затрагивают шаблон).\n"
             "После изменений перезапустите Engine."
         )
-        hint.setStyleSheet("color: #8b949e;")
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(hint)
 
         # Таблица
@@ -99,21 +101,14 @@ class ConnectionSettingsDialog(QDialog):
         btns = QHBoxLayout()
 
         add_btn = QPushButton("Добавить прибор")
-        add_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "padding: 6px 14px; border-radius: 4px; }"
-        )
+        apply_button_style(add_btn, "primary")
         add_btn.clicked.connect(self._on_add)
         btns.addWidget(add_btn)
 
         btns.addStretch()
 
         apply_btn = QPushButton("Применить")
-        apply_btn.setStyleSheet(
-            "QPushButton { background: #1f6feb; color: white; border: none; "
-            "padding: 6px 16px; border-radius: 4px; }"
-            "QPushButton:hover { background: #388bfd; }"
-        )
+        apply_button_style(apply_btn, "primary")
         apply_btn.clicked.connect(self._on_apply)
         btns.addWidget(apply_btn)
 
@@ -173,10 +168,7 @@ class ConnectionSettingsDialog(QDialog):
         al.setSpacing(4)
 
         del_btn = QPushButton("Удалить")
-        del_btn.setStyleSheet(
-            "QPushButton { background: #da3633; color: white; border: none; "
-            "padding: 3px 8px; border-radius: 3px; font-size: 11px; }"
-        )
+        apply_button_style(del_btn, "danger", compact=True)
         del_btn.clicked.connect(lambda checked=False, r=row: self._on_delete(r))
         al.addWidget(del_btn)
 

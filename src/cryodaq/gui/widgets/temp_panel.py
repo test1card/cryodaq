@@ -30,16 +30,17 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui import theme
 
 # ---------------------------------------------------------------------------
 # Цвета статуса
 # ---------------------------------------------------------------------------
 _STATUS_COLORS: dict[ChannelStatus, str] = {
-    ChannelStatus.OK: "#2ECC40",
-    ChannelStatus.OVERRANGE: "#FFDC00",
-    ChannelStatus.UNDERRANGE: "#FFDC00",
-    ChannelStatus.SENSOR_ERROR: "#FF4136",
-    ChannelStatus.TIMEOUT: "#FF4136",
+    ChannelStatus.OK: theme.STATUS_OK,
+    ChannelStatus.OVERRANGE: theme.STATUS_CAUTION,
+    ChannelStatus.UNDERRANGE: theme.STATUS_CAUTION,
+    ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
+    ChannelStatus.TIMEOUT: theme.STATUS_FAULT,
 }
 
 # Набор различимых цветов для линий графика (до 24 каналов)
@@ -89,7 +90,7 @@ class ChannelCard(QFrame):
         lbl_font = QFont()
         lbl_font.setPointSize(8)
         self._label.setFont(lbl_font)
-        self._label.setStyleSheet("color: #CCCCCC;")
+        self._label.setStyleSheet(f"color: {theme.TEXT_SECONDARY};")
         self._label.setWordWrap(True)
         layout.addWidget(self._label)
 
@@ -100,7 +101,7 @@ class ChannelCard(QFrame):
         val_font.setPointSize(14)
         val_font.setBold(True)
         self._value_label.setFont(val_font)
-        self._value_label.setStyleSheet("color: #FFFFFF;")
+        self._value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
         layout.addWidget(self._value_label)
 
         self.setStyleSheet(self._build_stylesheet(ChannelStatus.OK, selected=False))
@@ -131,14 +132,14 @@ class ChannelCard(QFrame):
         self.setStyleSheet(self._build_stylesheet(status, selected))
 
     def _build_stylesheet(self, status: ChannelStatus, selected: bool) -> str:
-        border_color = _STATUS_COLORS.get(status, "#2ECC40")
+        border_color = _STATUS_COLORS.get(status, theme.STATUS_OK)
         border_width = 3 if selected else 1
-        bg_color = "#2A2A2A" if not selected else "#3A3A3A"
+        bg_color = theme.SURFACE_CARD if not selected else theme.SURFACE_ELEVATED
         return (
             f"ChannelCard {{"
             f"  background-color: {bg_color};"
             f"  border: {border_width}px solid {border_color};"
-            f"  border-radius: 4px;"
+            f"  border-radius: {theme.RADIUS_MD}px;"
             f"}}"
         )
 
@@ -172,7 +173,6 @@ class TemperaturePanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Температурные каналы — CryoDAQ")
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         self._configs = channel_configs
         # channel_id -> ChannelCard
@@ -242,7 +242,7 @@ class TemperaturePanel(QWidget):
         # --- Правая панель: график ---
         plot_frame = QFrame()
         plot_frame.setStyleSheet(
-            "QFrame { background-color: #111111; border: 1px solid #333333; border-radius: 4px; }"
+            f"QFrame {{ background-color: {theme.SURFACE_SUNKEN}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; }}"
         )
         plot_layout = QVBoxLayout(plot_frame)
         plot_layout.setContentsMargins(4, 4, 4, 4)
@@ -253,7 +253,7 @@ class TemperaturePanel(QWidget):
         title_font.setPointSize(10)
         title_font.setBold(True)
         title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #AAAAAA; background: transparent; border: none;")
+        title_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
         plot_layout.addWidget(title_label)
 
         self._plot_widget = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
@@ -264,7 +264,7 @@ class TemperaturePanel(QWidget):
     def _init_plot(self) -> None:
         """Настроить внешний вид графика."""
         pw = self._plot_widget
-        pw.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         plot_item = pw.getPlotItem()
         plot_item.setLabel("left", "Температура", units="К", color="#AAAAAA")

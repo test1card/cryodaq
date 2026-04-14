@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 
@@ -34,7 +35,7 @@ class PreFlightCheck:
 
 
 _STATUS_ICON = {"ok": "✅", "warning": "⚠️", "error": "❌"}
-_STATUS_COLOR = {"ok": "#3fb950", "warning": "#d29922", "error": "#f85149"}
+_STATUS_COLOR = {"ok": theme.STATUS_OK, "warning": theme.STATUS_WARNING, "error": theme.STATUS_FAULT}
 
 # Пороги
 _DISK_WARN_GB = 10
@@ -205,7 +206,7 @@ class PreFlightDialog(QDialog):
 
         # Loading indicator
         self._loading_label = QLabel("Загрузка проверок...")
-        self._loading_label.setStyleSheet("color: #888888;")
+        self._loading_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._loading_label)
 
         # Список проверок (populated after async checks complete)

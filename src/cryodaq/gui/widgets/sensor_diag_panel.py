@@ -25,14 +25,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import apply_panel_frame_style
 
 logger = logging.getLogger(__name__)
 
-_COLOR_GREEN = "#2ECC40"
-_COLOR_YELLOW = "#FFDC00"
-_COLOR_RED = "#FF4136"
-_COLOR_MUTED = "#8b949e"
+_COLOR_GREEN = theme.STATUS_OK
+_COLOR_YELLOW = theme.STATUS_CAUTION
+_COLOR_RED = theme.STATUS_FAULT
+_COLOR_MUTED = theme.TEXT_MUTED
 
 _HEADERS = ["Канал", "T (K)", "Шум (мК)", "Дрейф (мК/мин)", "Выбросы", "Корр.", "Здоровье"]
 
@@ -81,7 +82,7 @@ class SensorDiagPanel(QWidget):
 
         title = QLabel("ДИАГНОСТИКА ДАТЧИКОВ")
         title.setFont(QFont("", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f0f6fc;")
+        title.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
         header_layout.addWidget(title)
         header_layout.addStretch()
 
@@ -99,13 +100,6 @@ class SensorDiagPanel(QWidget):
         self._table.setSortingEnabled(True)
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
-        self._table.setStyleSheet(
-            "QTableWidget { background-color: #0d1117; gridline-color: #21262d; "
-            "color: #c9d1d9; } "
-            "QTableWidget::item { padding: 4px; } "
-            "QHeaderView::section { background-color: #161b22; color: #8b949e; "
-            "border: 1px solid #21262d; padding: 4px; }"
-        )
         h = self._table.horizontalHeader()
         h.setStretchLastSection(True)
         h.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)

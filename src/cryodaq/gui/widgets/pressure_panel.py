@@ -21,14 +21,15 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 
 _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
 
 # Цвета по уровню давления
-_COLOR_GOOD = "#2ECC40"    # < 1e-3 мбар
-_COLOR_WARN = "#FFDC00"    # 1e-3 ... 1e-1 мбар
-_COLOR_BAD = "#FF4136"     # > 1e-1 мбар
+_COLOR_GOOD = theme.STATUS_OK       # < 1e-3 мбар
+_COLOR_WARN = theme.STATUS_CAUTION  # 1e-3 ... 1e-1 мбар
+_COLOR_BAD = theme.STATUS_FAULT     # > 1e-1 мбар
 
 
 def _pressure_color(value: float) -> str:
@@ -49,7 +50,6 @@ class PressurePanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1A1A1A;")
 
         # channel → deque[(ts, value)]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
@@ -72,7 +72,7 @@ class PressurePanel(QWidget):
         # --- Верх: карточка с текущим давлением ---
         self._card = QFrame()
         self._card.setStyleSheet(
-            f"background-color: #2A2A2A; border: 2px solid {_COLOR_GOOD}; border-radius: 8px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {_COLOR_GOOD}; border-radius: {theme.RADIUS_LG}px;"
         )
         cl = QVBoxLayout(self._card)
         cl.setContentsMargins(16, 12, 16, 12)
@@ -82,7 +82,7 @@ class PressurePanel(QWidget):
 
         title = QLabel("Давление в криостате")
         title.setFont(title_font)
-        title.setStyleSheet("color: #AAAAAA; border: none;")
+        title.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         title.setAlignment(Qt.AlignCenter)
         cl.addWidget(title)
 
@@ -92,7 +92,7 @@ class PressurePanel(QWidget):
 
         self._value_label = QLabel("—")
         self._value_label.setFont(big_font)
-        self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        self._value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         self._value_label.setAlignment(Qt.AlignCenter)
         cl.addWidget(self._value_label)
 
@@ -101,7 +101,7 @@ class PressurePanel(QWidget):
 
         self._unit_label = QLabel("мбар")
         self._unit_label.setFont(unit_font)
-        self._unit_label.setStyleSheet("color: #888888; border: none;")
+        self._unit_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         self._unit_label.setAlignment(Qt.AlignCenter)
         cl.addWidget(self._unit_label)
 
@@ -109,7 +109,7 @@ class PressurePanel(QWidget):
 
         # --- Низ: логарифмический график ---
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        self._plot.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Давление", units="мбар", color="#AAAAAA")
         pi.setLabel("bottom", "Время", color="#AAAAAA")
@@ -155,7 +155,7 @@ class PressurePanel(QWidget):
         color = _pressure_color(value)
         self._value_label.setStyleSheet(f"color: {color}; border: none;")
         self._card.setStyleSheet(
-            f"background-color: #2A2A2A; border: 2px solid {color}; border-radius: 8px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {color}; border-radius: {theme.RADIUS_LG}px;"
         )
 
     @Slot()

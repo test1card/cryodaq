@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.gui import theme
+from cryodaq.gui.widgets.common import apply_button_style
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +51,14 @@ class ChannelEditorDialog(QDialog):
 
         title = QLabel("Настройка имён и видимости температурных каналов")
         title.setFont(QFont("", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #58a6ff;")
+        title.setStyleSheet(f"color: {theme.TEXT_ACCENT};")
         layout.addWidget(title)
 
         hint = QLabel(
             "Отключите видимость для неиспользуемых каналов.\n"
             "Имена отображаются на всех панелях и в Telegram."
         )
-        hint.setStyleSheet("color: #8b949e;")
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(hint)
 
         # Таблица
@@ -74,19 +76,12 @@ class ChannelEditorDialog(QDialog):
         btns.addStretch()
 
         reset_btn = QPushButton("Сбросить")
-        reset_btn.setStyleSheet(
-            "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; "
-            "padding: 6px 16px; border-radius: 4px; }"
-        )
+        apply_button_style(reset_btn, "neutral")
         reset_btn.clicked.connect(self._on_reset)
         btns.addWidget(reset_btn)
 
         apply_btn = QPushButton("Применить")
-        apply_btn.setStyleSheet(
-            "QPushButton { background: #238636; color: white; border: none; "
-            "padding: 6px 16px; border-radius: 4px; }"
-            "QPushButton:hover { background: #2ea043; }"
-        )
+        apply_button_style(apply_btn, "primary")
         apply_btn.clicked.connect(self._on_apply)
         btns.addWidget(apply_btn)
 

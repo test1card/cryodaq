@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -113,7 +114,7 @@ class OperatorLogPanel(QWidget):
         for entry in self._entries:
             item = QListWidgetItem(self._format_entry(entry))
             if str(entry.get("author", "")).strip() == "system":
-                item.setForeground(QColor("#666666"))
+                item.setForeground(QColor(theme.TEXT_DISABLED))
             self._entries_list.addItem(item)
         self._status_label.show_info(f"Показано записей: {len(self._entries)}")
 

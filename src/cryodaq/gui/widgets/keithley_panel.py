@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -45,8 +46,18 @@ _MEASUREMENTS = {
 }
 
 _SMU_COLORS = {
-    "smua": {"voltage": "#58a6ff", "current": "#3fb950", "resistance": "#f0883e", "power": "#f85149"},
-    "smub": {"voltage": "#79c0ff", "current": "#56d364", "resistance": "#ffa657", "power": "#ffa198"},
+    "smua": {
+        "voltage": theme.QUANTITY_VOLTAGE,
+        "current": theme.QUANTITY_CURRENT,
+        "resistance": theme.QUANTITY_RESISTANCE,
+        "power": theme.QUANTITY_POWER,
+    },
+    "smub": {
+        "voltage": theme.QUANTITY_VOLTAGE,
+        "current": theme.QUANTITY_CURRENT,
+        "resistance": theme.QUANTITY_RESISTANCE,
+        "power": theme.QUANTITY_POWER,
+    },
 }
 
 
@@ -92,7 +103,7 @@ class _SmuPanel(QFrame):
         header = QHBoxLayout()
         title = QLabel(f"Канал {self._smu[-1].upper()} ({self._smu})")
         title.setFont(QFont("", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #f0f6fc; border: none;")
+        title.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         header.addWidget(title)
         header.addStretch()
 
@@ -162,7 +173,7 @@ class _SmuPanel(QFrame):
         for key, (title_text, unit) in _MEASUREMENTS.items():
             card = QWidget()
             card.setStyleSheet(
-                f"background-color: #2A2A2A; border: 1px solid {colors[key]}; border-radius: 6px;"
+                f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px;"
             )
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(10, 6, 10, 6)
@@ -175,13 +186,13 @@ class _SmuPanel(QFrame):
 
             value_label = QLabel("--")
             value_label.setFont(big_font)
-            value_label.setStyleSheet("color: #ffffff; border: none;")
+            value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
             value_label.setAlignment(Qt.AlignCenter)
             card_layout.addWidget(value_label)
 
             unit_label = QLabel(unit)
             unit_label.setFont(label_font)
-            unit_label.setStyleSheet("color: #8b949e; border: none;")
+            unit_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
             unit_label.setAlignment(Qt.AlignCenter)
             card_layout.addWidget(unit_label)
 
@@ -194,7 +205,7 @@ class _SmuPanel(QFrame):
         for idx, (key, (title_text, unit)) in enumerate(_MEASUREMENTS.items()):
             time_axis = pg.DateAxisItem(orientation="bottom")
             plot = pg.PlotWidget(axisItems={"bottom": time_axis})
-            plot.setBackground("#111111")
+            # Background provided by gui.theme global pyqtgraph config.
             item = plot.getPlotItem()
             item.setLabel("left", title_text, units=unit, color="#AAAAAA")
             item.showGrid(x=True, y=True, alpha=0.2)
@@ -217,7 +228,7 @@ class _SmuPanel(QFrame):
     def _caption(text: str, font: QFont) -> QLabel:
         label = QLabel(text)
         label.setFont(font)
-        label.setStyleSheet("color: #c9d1d9; border: none;")
+        label.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; border: none;")
         return label
 
     @staticmethod

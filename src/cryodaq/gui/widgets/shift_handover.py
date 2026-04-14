@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     apply_button_style,
     apply_panel_frame_style,
@@ -185,7 +186,7 @@ class ShiftStartDialog(QDialog):
         for check in self._checks:
             row = QLabel(f"{'✓' if check['ok'] else '✗'} {check['name']} — {check['detail']}")
             row.setStyleSheet(
-                f"color: {'#2ECC40' if check['ok'] else '#FF4136'}; padding: 2px;"
+                f"color: {theme.STATUS_OK if check['ok'] else theme.STATUS_FAULT}; padding: 2px;"
             )
             self._checks_frame.addWidget(row)
 
@@ -248,7 +249,7 @@ class ShiftPeriodicPrompt(QDialog):
         layout.setSpacing(8)
 
         info = QLabel(f"Оператор: {operator} | Смена: {shift_id}")
-        info.setStyleSheet("color: #888888;")
+        info.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(info)
 
         # Status dropdown
@@ -264,7 +265,7 @@ class ShiftPeriodicPrompt(QDialog):
 
         # Auto-filled readings
         self._readings_label = QLabel("Показания загружаются...")
-        self._readings_label.setStyleSheet("color: #58a6ff;")
+        self._readings_label.setStyleSheet(f"color: {theme.TEXT_ACCENT};")
         layout.addWidget(self._readings_label)
 
         # Notes
@@ -355,7 +356,7 @@ class ShiftEndDialog(QDialog):
             f"Пропущенных проверок: {missed_count}",
         ]
         summary_text = QLabel("\n".join(summary_lines))
-        summary_text.setStyleSheet("color: #c9d1d9; padding: 4px;")
+        summary_text.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; padding: {theme.SPACE_1}px;")
         layout.addWidget(summary_text)
 
         # Final comment
@@ -437,12 +438,12 @@ class ShiftBar(QFrame):
 
         self._status_label = QLabel("Смена: не активна")
         self._status_label.setFont(lbl_font)
-        self._status_label.setStyleSheet("color: #888888; border: none;")
+        self._status_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         layout.addWidget(self._status_label)
 
         self._elapsed_label = QLabel("")
         self._elapsed_label.setFont(lbl_font)
-        self._elapsed_label.setStyleSheet("color: #58a6ff; border: none;")
+        self._elapsed_label.setStyleSheet(f"color: {theme.TEXT_ACCENT}; border: none;")
         layout.addWidget(self._elapsed_label)
 
         layout.addStretch()
@@ -511,7 +512,7 @@ class ShiftBar(QFrame):
         self._missed_count = 0
 
         self._status_label.setText(f"Смена: {operator}")
-        self._status_label.setStyleSheet("color: #2ECC40; border: none;")
+        self._status_label.setStyleSheet(f"color: {theme.STATUS_OK}; border: none;")
         self._start_btn.setVisible(False)
         self._end_btn.setVisible(True)
 
@@ -543,7 +544,7 @@ class ShiftBar(QFrame):
         self._missed_timer.stop()
 
         self._status_label.setText("Смена: не активна")
-        self._status_label.setStyleSheet("color: #888888; border: none;")
+        self._status_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         self._elapsed_label.setText("")
         self._start_btn.setVisible(True)
         self._end_btn.setVisible(False)

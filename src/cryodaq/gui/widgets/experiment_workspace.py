@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.user_preferences import UserPreferences, suggest_experiment_name
 from cryodaq.drivers.base import Reading
+from cryodaq.paths import get_data_dir
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
     StatusBanner,
@@ -324,7 +326,7 @@ class ExperimentWorkspace(QWidget):
         mode_layout.setSpacing(10)
 
         self._mode_title = QLabel("Режим")
-        self._mode_title.setStyleSheet("color: #8b949e; font-size: 12px;")
+        self._mode_title.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
         mode_layout.addWidget(self._mode_title)
 
         self._mode_label = QLabel("ЭКСПЕРИМЕНТ")
@@ -370,10 +372,10 @@ class ExperimentWorkspace(QWidget):
         for i, (key, label) in enumerate(_phase_names):
             if i > 0:
                 arrow = QLabel("→")
-                arrow.setStyleSheet("color: #555555; border: none; font-size: 11px;")
+                arrow.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none; font-size: 11px;")
                 phase_layout.addWidget(arrow)
             lbl = QLabel(f"○ {label}")
-            lbl.setStyleSheet("color: #555555; border: none; font-size: 11px;")
+            lbl.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none; font-size: 11px;")
             phase_layout.addWidget(lbl)
             self._phase_labels[key] = lbl
         phase_layout.addStretch()
@@ -393,7 +395,7 @@ class ExperimentWorkspace(QWidget):
             "Карточка эксперимента не открывается. Архивные записи и автоматические отчёты по эксперименту сейчас не формируются."
         )
         self._debug_message.setWordWrap(True)
-        self._debug_message.setStyleSheet("color: #c9d1d9;")
+        self._debug_message.setStyleSheet(f"color: {theme.TEXT_SECONDARY};")
         debug_layout.addWidget(self._debug_message)
         root.addWidget(self._debug_panel)
 
@@ -826,14 +828,14 @@ class ExperimentWorkspace(QWidget):
         for key, lbl in self._phase_labels.items():
             if key == current:
                 lbl.setText(f"● {lbl.text().split(' ', 1)[-1]}")
-                lbl.setStyleSheet("color: #2ECC40; font-weight: bold; border: none; font-size: 11px;")
+                lbl.setStyleSheet(f"color: {theme.STATUS_OK}; font-weight: bold; border: none; font-size: 11px;")
             elif key in completed:
                 lbl.setText(f"✓ {lbl.text().split(' ', 1)[-1]}")
-                lbl.setStyleSheet("color: #58a6ff; border: none; font-size: 11px;")
+                lbl.setStyleSheet(f"color: {theme.TEXT_ACCENT}; border: none; font-size: 11px;")
             else:
                 name = lbl.text().split(" ", 1)[-1]
                 lbl.setText(f"○ {name}")
-                lbl.setStyleSheet("color: #555555; border: none; font-size: 11px;")
+                lbl.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none; font-size: 11px;")
 
     @Slot()
     def _on_advance_phase(self) -> None:

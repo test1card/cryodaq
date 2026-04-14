@@ -15,6 +15,7 @@ from cryodaq.core.sensor_diagnostics import (
     ChannelDiagnostics,
     DiagnosticsSummary,
 )
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.sensor_diag_panel import SensorDiagPanel, _health_color
 
 
@@ -124,9 +125,9 @@ def test_color_coding_health() -> None:
     assert row2_health.text() == "95"
 
     # Verify color helper
-    assert _health_color(95) == "#2ECC40"
-    assert _health_color(65) == "#FFDC00"
-    assert _health_color(20) == "#FF4136"
+    assert _health_color(95) == theme.STATUS_OK
+    assert _health_color(65) == theme.STATUS_CAUTION
+    assert _health_color(20) == theme.STATUS_FAULT
 
 
 # ---------------------------------------------------------------------------

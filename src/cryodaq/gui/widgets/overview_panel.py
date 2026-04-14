@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     apply_button_style,
     apply_panel_frame_style,
@@ -82,6 +83,48 @@ def _disk_free_gb() -> float:
         return usage.free / (1024 ** 3)
     except Exception:
         return -1.0
+
+
+class _NullValue:
+    """Falsy callable that also supports .get() for dict-like access."""
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, *args, **kwargs):
+        return None
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def __iter__(self):
+        return iter(())
+
+    def __getattr__(self, name):
+        return self
+
+
+_NOOP = _NullValue()
+
+
+class _OrphanedStub:
+    """Phase UI-1 v2: no-op replacement for widgets removed during shell
+    transition.
+
+    OverviewPanel still has many code paths (_dispatch_reading,
+    set_safety_state, on_reading, set_alarm_count, set_keithley_status,
+    set_cooldown_eta) that call methods on widgets which were removed
+    from layout. Constructing the real widgets and hiding them is
+    fragile because some of them call setVisible(True) on data arrival,
+    re-introducing visible orphan rendering at (0, 0).
+
+    This stub absorbs every attribute/method access as no-op via
+    __getattr__, returning a _NullValue that is falsy, callable, and
+    supports .get(). Removed completely in Block B.
+    """
+
+    def __getattr__(self, name):
+        return _NOOP
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +270,7 @@ class StatusStrip(QFrame):
     @staticmethod
     def _separator() -> QLabel:
         sep = QLabel(" | ")
-        sep.setStyleSheet("color: #555555; border: none;")
+        sep.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none;")
         return sep
 
 
@@ -274,7 +317,7 @@ class CompactTempCard(QFrame):
         name_font = QFont()
         name_font.setPointSize(8)
         self._name_label.setFont(name_font)
-        self._name_label.setStyleSheet("color: #BBBBBB; border: none;")
+        self._name_label.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; border: none;")
         self._name_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._name_label)
 
@@ -284,7 +327,7 @@ class CompactTempCard(QFrame):
         val_font.setPointSize(12)
         val_font.setBold(True)
         self._value_label.setFont(val_font)
-        self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        self._value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         self._value_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._value_label)
 
@@ -293,7 +336,7 @@ class CompactTempCard(QFrame):
         trend_font = QFont()
         trend_font.setPointSize(8)
         self._trend_label.setFont(trend_font)
-        self._trend_label.setStyleSheet("color: #888888; border: none;")
+        self._trend_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         self._trend_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._trend_label)
 
@@ -348,15 +391,15 @@ class CompactTempCard(QFrame):
             if not self._has_error:
                 self._has_error = True
                 self._value_label.setText("ОТКЛ")
-                self._value_label.setStyleSheet("color: #888888; border: none;")
+                self._value_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none;")
                 self._trend_label.setText("")
-                self._set_bg("#3A3A3A")
+                self._set_bg(theme.SURFACE_ELEVATED)
             return
 
         if self._has_error:
             self._has_error = False
 
-        value_color = "#555555" if self._stale else "#FFFFFF"
+        value_color = theme.TEXT_DISABLED if self._stale else theme.TEXT_PRIMARY
         self._value_label.setStyleSheet(f"color: {value_color}; border: none;")
 
         if value is not None:
@@ -412,7 +455,7 @@ class CompactTempCard(QFrame):
         self._current_bg = color
         self.setStyleSheet(
             f"CompactTempCard {{ background-color: {color}; "
-            f"border: 1px solid #444; border-radius: 4px; }}"
+            f"border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; }}"
         )
 
     def mousePressEvent(self, event: object) -> None:  # noqa: ANN001
@@ -438,7 +481,7 @@ class _PlaceholderCard(QFrame):
         self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet(
-            "background: #1a1a2e; border: 1px dashed #333; border-radius: 4px;"
+            f"background: {theme.SURFACE_PANEL}; border: 1px dashed {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px;"
         )
 
 
@@ -533,7 +576,7 @@ class PressureCard(QFrame):
         title_font = QFont()
         title_font.setPointSize(8)
         self._title.setFont(title_font)
-        self._title.setStyleSheet("color: #BBBBBB; border: none;")
+        self._title.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; border: none;")
         self._title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._title)
 
@@ -543,7 +586,7 @@ class PressureCard(QFrame):
         val_font.setPointSize(14)
         val_font.setBold(True)
         self._value_label.setFont(val_font)
-        self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        self._value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
         self._value_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._value_label)
 
@@ -568,8 +611,8 @@ class PressureCard(QFrame):
 
         if reading.status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
             self._value_label.setText("ОТКЛ")
-            self._value_label.setStyleSheet("color: #888888; border: none;")
-            self._set_bg("#3A3A3A")
+            self._value_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none;")
+            self._set_bg(theme.SURFACE_ELEVATED)
             return
 
         self._last_value = value
@@ -584,19 +627,19 @@ class PressureCard(QFrame):
         # Color by vacuum quality
         if value > 1.0:
             # Atmosphere
-            self._value_label.setStyleSheet("color: #FF4444; border: none;")
+            self._value_label.setStyleSheet(f"color: {theme.TEXT_FAULT}; border: none;")
             self._set_bg("#4A2020")
         elif value > 1e-2:
             # Bad vacuum
-            self._value_label.setStyleSheet("color: #FF8C00; border: none;")
+            self._value_label.setStyleSheet(f"color: {theme.TEXT_WARNING}; border: none;")
             self._set_bg("#3A2A1A")
         elif value > 1e-4:
             # Transitional
-            self._value_label.setStyleSheet("color: #FFD700; border: none;")
+            self._value_label.setStyleSheet(f"color: {theme.TEXT_CAUTION}; border: none;")
             self._set_bg("#2A2A1A")
         else:
             # Good vacuum
-            self._value_label.setStyleSheet("color: #2ECC40; border: none;")
+            self._value_label.setStyleSheet(f"color: {theme.TEXT_OK}; border: none;")
             self._set_bg("#1A2A1A")
 
     def check_staleness(self) -> None:
@@ -614,11 +657,11 @@ class PressureCard(QFrame):
         self._stale = elapsed > timeout
         if self._stale != was_stale:
             if self._stale:
-                self._value_label.setStyleSheet("color: #555555; border: none;")
+                self._value_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none;")
             elif self._last_value is not None:
                 # Re-apply normal color by re-running the color logic
                 # Trigger a minimal refresh — just restore white, next real reading fixes color
-                self._value_label.setStyleSheet("color: #FFFFFF; border: none;")
+                self._value_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY}; border: none;")
 
     def _set_bg(self, color: str) -> None:
         if color == self._current_bg:
@@ -626,7 +669,7 @@ class PressureCard(QFrame):
         self._current_bg = color
         self.setStyleSheet(
             f"PressureCard {{ background-color: {color}; "
-            f"border: 1px solid #444; border-radius: 4px; }}"
+            f"border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; }}"
         )
 
 
@@ -778,14 +821,14 @@ class ExperimentStatusWidget(QFrame):
         lbl_font = QFont()
         lbl_font.setPointSize(10)
         self._status_label.setFont(lbl_font)
-        self._status_label.setStyleSheet("color: #888888; border: none;")
+        self._status_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         layout.addWidget(self._status_label)
 
         layout.addStretch()
 
         self._elapsed_label = QLabel("")
         self._elapsed_label.setFont(lbl_font)
-        self._elapsed_label.setStyleSheet("color: #58a6ff; border: none;")
+        self._elapsed_label.setStyleSheet(f"color: {theme.TEXT_ACCENT}; border: none;")
         layout.addWidget(self._elapsed_label)
 
         self._worker = None
@@ -819,7 +862,7 @@ class ExperimentStatusWidget(QFrame):
         self._cached_active_experiment = exp if (result.get("ok") and exp) else None
         if not result.get("ok") or not exp:
             self._status_label.setText("Нет активного эксперимента")
-            self._status_label.setStyleSheet("color: #888888; border: none;")
+            self._status_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
             self._elapsed_label.setText("")
             return
 
@@ -837,7 +880,7 @@ class ExperimentStatusWidget(QFrame):
             }
             parts.append(_phase_labels.get(phase, phase))
         self._status_label.setText(" ".join(parts))
-        self._status_label.setStyleSheet("color: #2ECC40; border: none;")
+        self._status_label.setStyleSheet(f"color: {theme.STATUS_OK}; border: none;")
 
         started = exp.get("start_time", "")
         if started:
@@ -877,14 +920,14 @@ class QuickLogWidget(QFrame):
         input_row.setSpacing(6)
 
         input_label = QLabel("Журнал:")
-        input_label.setStyleSheet("color: #888888; border: none;")
+        input_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; border: none;")
         input_row.addWidget(input_label)
 
         self._input = QLineEdit()
         self._input.setPlaceholderText("Заметка оператора...")
         self._input.setStyleSheet(
-            "QLineEdit { background: #21262d; color: #c9d1d9; "
-            "border: 1px solid #30363d; border-radius: 3px; padding: 2px 6px; }"
+            f"QLineEdit {{ background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; "
+            f"border: 1px solid {theme.BORDER_STRONG}; border-radius: {theme.RADIUS_SM}px; padding: 2px 6px; }}"
         )
         self._input.returnPressed.connect(self._on_submit)
         input_row.addWidget(self._input, stretch=1)
@@ -899,7 +942,7 @@ class QuickLogWidget(QFrame):
 
         # Recent entries
         self._recent_label = QLabel("")
-        self._recent_label.setStyleSheet("color: #666666; border: none; font-size: 9pt;")
+        self._recent_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none; font-size: 9pt;")
         self._recent_label.setWordWrap(True)
         layout.addWidget(self._recent_label, stretch=1)
 
@@ -1031,17 +1074,14 @@ class OverviewPanel(QWidget):
         root.setSpacing(2)
 
         # ============ 1. STATUS BARS (full width, compact) ============
-        self._status_strip = StatusStrip()
-        root.addWidget(self._status_strip)
+        # Phase UI-1 v2 (A.9): orphan widgets replaced with no-op stubs.
+        # Real widgets caused visible rendering at (0,0) when their internal
+        # logic called setVisible(True) on data arrival. See Block A.9 spec.
+        self._status_strip = _OrphanedStub()
 
-        # Experiment status + Shift bar in one row
-        exp_shift_row = QHBoxLayout()
-        exp_shift_row.setSpacing(4)
-        self._experiment_status = ExperimentStatusWidget()
-        exp_shift_row.addWidget(self._experiment_status, stretch=1)
-        self._shift_bar = ShiftBar()
-        exp_shift_row.addWidget(self._shift_bar, stretch=1)
-        root.addLayout(exp_shift_row)
+        self._experiment_status = _OrphanedStub()
+        self._shift_bar = ShiftBar(self)
+        self._shift_bar.hide()
 
         # ============ 2. TEMPERATURE CARDS + PRESSURE CARD ============
         self._card_grid = TempCardGrid(self._channel_mgr)
@@ -1111,7 +1151,7 @@ class OverviewPanel(QWidget):
         # ============ 4. GRAPHS — vertical splitter (temp ~70%, pressure ~30%) ============
         graph_splitter = QSplitter(Qt.Orientation.Vertical)
         graph_splitter.setHandleWidth(3)
-        graph_splitter.setStyleSheet("QSplitter::handle { background-color: #333333; }")
+        graph_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {theme.BORDER_SUBTLE}; }}")
 
         # Temperature plot
         temp_axis = pg.DateAxisItem(orientation="bottom")
@@ -1129,24 +1169,14 @@ class OverviewPanel(QWidget):
 
         root.addWidget(graph_splitter, stretch=1)
 
-        # ============ 5. BOTTOM BAR: Keithley left, QuickLog right ============
-        bottom_bar = QHBoxLayout()
-        bottom_bar.setSpacing(4)
-
-        self._keithley_strip = KeithleyStrip()
-        bottom_bar.addWidget(self._keithley_strip, stretch=55)
-
-        self._quick_log = QuickLogWidget()
-        self._quick_log.setFixedHeight(40)
-        bottom_bar.addWidget(self._quick_log, stretch=45)
-
-        root.addLayout(bottom_bar)
+        self._keithley_strip = _OrphanedStub()
+        self._quick_log = _OrphanedStub()
 
     def _init_plot(self) -> None:
         """Настроить внешний вид основного графика и графика давления."""
         # --- Temperature plot ---
         pw = self._plot
-        pw.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         pi = pw.getPlotItem()
         pi.setLabel("left", "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u0430", units="\u041a", color="#AAAAAA")
@@ -1175,7 +1205,7 @@ class OverviewPanel(QWidget):
 
         # --- Pressure plot ---
         pp = self._pressure_plot
-        pp.setBackground("#111111")
+        # Background provided by gui.theme global pyqtgraph config.
 
         ppi = pp.getPlotItem()
         ppi.setLabel("left", "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435", units="mbar", color="#AAAAAA")
@@ -1220,8 +1250,8 @@ class OverviewPanel(QWidget):
         from PySide6.QtWidgets import QLabel as _Label
         self._eta_overlay = _Label("", self._plot)
         self._eta_overlay.setStyleSheet(
-            "color: #ff7b72; font-size: 12pt; font-weight: bold; "
-            "background: rgba(17,17,17,200); padding: 4px 8px; border-radius: 4px;"
+            f"color: {theme.TEXT_FAULT}; font-size: 12pt; font-weight: bold; "
+            f"background: {theme.SURFACE_PANEL}; padding: 4px 8px; border-radius: {theme.RADIUS_MD}px;"
         )
         self._eta_overlay.setVisible(False)
 
@@ -1656,10 +1686,10 @@ class OverviewPanel(QWidget):
         default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
         path, _ = QFileDialog.getSaveFileName(self, "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c PNG", default_name, "PNG (*.png)")
         if path:
-            # Белый фон для печати
+            # Print mode override — intentionally light background for report export.
             self._plot.setBackground("white")
             self._plot.grab().save(path, "PNG")
-            self._plot.setBackground("#111111")
+            self._plot.setBackground(theme.PLOT_BG)
 
     @Slot()
     def _on_export_csv(self) -> None:
