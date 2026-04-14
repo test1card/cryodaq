@@ -174,7 +174,28 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/notifications/periodic_report.py` — scheduled Telegram reports with charts
 - `src/cryodaq/notifications/_secrets.py` — SecretStr wrapper for token leak prevention
 
-**GUI**
+**GUI shell (Phase UI-1 v2)**
+
+- `src/cryodaq/gui/shell/main_window_v2.py` — primary shell, replaces tab-based MainWindow
+- `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: engine indicator, experiment status, time window echo
+- `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation
+- `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety state indicator
+- `src/cryodaq/gui/shell/overlay_container.py` — central content container
+- `src/cryodaq/gui/shell/new_experiment_dialog.py` — experiment creation dialog
+
+**GUI dashboard (Phase UI-1 v2, Block B.1-B.2)**
+
+- `src/cryodaq/gui/dashboard/dashboard_view.py` — 5-zone dashboard container
+- `src/cryodaq/gui/dashboard/channel_buffer.py` — shared per-channel rolling history store
+- `src/cryodaq/gui/dashboard/time_window.py` — TimeWindow enum for time-range selection
+- `src/cryodaq/gui/dashboard/temp_plot_widget.py` — multi-channel temperature plot with clickable legend
+- `src/cryodaq/gui/dashboard/pressure_plot_widget.py` — compact log-Y pressure plot
+
+**GUI theming**
+
+- `src/cryodaq/gui/theme.py` — foundation design tokens (colors, fonts, spacing)
+
+**Legacy GUI (kept alive until Block B.7)**
 
 - `src/cryodaq/gui/main_window.py` — горячие клавиши (Ctrl+L/E/1-9, F5, Ctrl+Shift+X)
 - `src/cryodaq/gui/tray_status.py`

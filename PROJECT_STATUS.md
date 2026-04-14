@@ -2,9 +2,9 @@
 
 **Дата:** 2026-04-14
 **Ветка:** master
-**Последний commit:** `6535c9a`
-**Тесты:** 895 passed, 1 skipped
-**Phase 2d COMPLETE. Phase 2e IN PROGRESS.**
+**Последний commit:** `7b453d5` (merge: Phase UI-1 v2)
+**Тесты:** 934 passed, 2 skipped
+**Phase 2d COMPLETE. Tier 1 COMPLETE. Phase UI-1 v2 MERGED through B.2.**
 
 ---
 
@@ -15,8 +15,8 @@
 | Python файлы (src/cryodaq/) | 102 |
 | Строки кода (src/cryodaq/) | ~33,900 |
 | Тестовые файлы (tests/) | 113 |
-| Тесты | 895 passed, 1 skipped |
-| Версия | 0.13.0 |
+| Тесты | 934 passed, 2 skipped |
+| Версия | 0.33.0 |
 | Python | 3.12+ (dev: 3.14.3) |
 
 ---
@@ -63,7 +63,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI
 ```
 
 - **Engine** (headless asyncio): drivers, scheduler, persistence, safety, alarms, interlocks, plugins
-- **GUI** (PySide6): owned by `feat/ui-phase-1-v2`, out of scope for master track
+- **GUI** (PySide6): MainWindowV2 shell + dashboard merged (Phase UI-1 v2 through B.2)
 - **Web** (FastAPI): optional monitoring dashboard
 - **IPC:** ZeroMQ PUB/SUB :5555 (data, msgpack) + REP/REQ :5556 (commands, JSON)
 
@@ -144,11 +144,11 @@ Parquet experiment archive stage 1 — write readings.parquet in artifact_dir wh
 ### Other Phase 2e candidates
 
 - A.7.5 — Semantic config errors in _parse_engine_config / _expand_alarm
-- A.9.1 — Engine command handler serializes acknowledged state through ZMQ
+- ~~A.9.1~~ — DONE (tier1-c: alarm acknowledged state serialization)
 - A.8.1 + C-1 test gaps — batch cleanup for accumulated minor test findings
 - Structural tests → behavioral rewrite (for Phase 2d structural regression locks)
 - Jules Q2 — Pre-flight config check in launcher with operator-visible diagnostic
-- P2 — DataBroker exception isolation from SafetyBroker
+- ~~P2~~ — DONE (tier1-b: DataBroker subscriber exception isolation)
 - P3 — Day-boundary batch splitting
 
 ### Deferred to Phase 3 (hardware validation required)
@@ -167,13 +167,11 @@ See `DEEP_AUDIT_CC_POST_2C.md`, `HARDENING_PASS_CODEX.md`, `MASTER_TRIAGE.md` fo
 
 ## В работе
 
-**Phase 2e IN PROGRESS.** Primary: Parquet archive. Parallel: operational hardening (Block C-2 items).
+**Phase UI-1 v2 MERGED** through Block B.2 via merge commit `7b453d5`.
+**Tier 1 contract fixes COMPLETE** (tier1-a calibration canon, tier1-b broker isolation, tier1-c ack serialization).
+**Current focus:** Block B.3 DynamicSensorGrid (next GUI block on master).
 
----
-
-## Parallel track
-
-`feat/ui-phase-1-v2` continues independently on GUI rewrite (shell scaffold + dashboard with real pyqtgraph plots). Not touched by Phase 2d master track. Will be merged to master after UI stabilization.
+Remaining GUI blocks: B.3 sensor grid, B.4-B.5 phase widget, B.6 quick log, B.7 legacy cleanup.
 
 ---
 
@@ -199,8 +197,8 @@ pip install -e ".[dev,web]"
 cryodaq                        # Operator launcher
 cryodaq-engine --mock          # Mock engine
 cryodaq-gui                    # GUI only
-pytest                         # 895 passed, 1 skipped
-ruff check src/ tests/         # 445 remaining (from 830)
+pytest                         # 934 passed, 2 skipped
+ruff check src/ tests/         # ~499 (445 master + ~54 from v2 GUI)
 ruff format src/ tests/
 ```
 
