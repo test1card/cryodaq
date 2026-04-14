@@ -48,4 +48,5 @@ htmlcov/
 # Local audit artifacts (not committed)
 DEEP_AUDIT_*.md
 graphify-out/
+graphify-out.stale-pre-merge/
 logs/

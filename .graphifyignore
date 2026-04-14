@@ -1,0 +1,44 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Git internals
+.git/
+
+# Graphify output itself (don't self-reference)
+graphify-out/
+graphify-out.stale-pre-merge/
+graphify-out.*/
+
+# Node / build artifacts
+node_modules/
+dist/
+build/
+
+# Large retrospective analysis documents (7000+ lines, not structural)
+docs/changelog/RETRO_ANALYSIS_V1.md
+docs/changelog/RETRO_ANALYSIS_V2.md
+docs/changelog/RETRO_ANALYSIS_V3.md
+
+# Round 2 audit documents (superseded by committed round 1)
+docs/audits/CODEX_ROUND_2_AUDIT.md
+docs/audits/BRANCH_INTEGRATION_VERIFICATION.md
+docs/audits/CONFIG_CROSS_REFERENCE.md
+docs/audits/DOCUMENTATION_AUDIT.md
+docs/audits/GIT_HISTORY_ARCHAEOLOGY.md
+docs/audits/REPO_INVENTORY.md
+docs/audits/BRANCH_INVENTORY.md
+
+# Session artifacts
+.claude/backups/
+.DS_Store
+
+# Lock files
+requirements-lock.txt
