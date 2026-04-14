@@ -2,8 +2,8 @@
 
 **Дата:** 2026-04-14
 **Ветка:** master
-**Последний commit:** `89ed3c1`
-**Тесты:** 890 passed, 6 skipped
+**Последний commit:** `6535c9a`
+**Тесты:** 895 passed, 1 skipped
 **Phase 2d COMPLETE. Phase 2e IN PROGRESS.**
 
 ---
@@ -15,7 +15,7 @@
 | Python файлы (src/cryodaq/) | 102 |
 | Строки кода (src/cryodaq/) | ~33,900 |
 | Тестовые файлы (tests/) | 113 |
-| Тесты | 890 passed, 6 skipped |
+| Тесты | 895 passed, 1 skipped |
 | Версия | 0.13.0 |
 | Python | 3.12+ (dev: 3.14.3) |
 
@@ -199,7 +199,7 @@ pip install -e ".[dev,web]"
 cryodaq                        # Operator launcher
 cryodaq-engine --mock          # Mock engine
 cryodaq-gui                    # GUI only
-pytest                         # 890 passed, 6 skipped
+pytest                         # 895 passed, 1 skipped
 ruff check src/ tests/         # 445 remaining (from 830)
 ruff format src/ tests/
 ```
