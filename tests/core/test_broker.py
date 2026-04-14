@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -227,3 +228,62 @@ async def test_duplicate_subscriber_rejected() -> None:
 
     with pytest.raises(ValueError, match="уже зарегистрирован"):
         await broker.subscribe("unique_name", maxsize=10)
+
+
+# ---------------------------------------------------------------------------
+# 11-14. Subscriber exception isolation (Tier 1 Fix B)
+# ---------------------------------------------------------------------------
+
+
+async def test_exception_isolation_one_bad_subscriber() -> None:
+    """A subscriber whose filter raises does not prevent delivery to siblings."""
+    broker = DataBroker()
+    q_bad = await broker.subscribe(
+        "bad_filter", maxsize=10, filter_fn=lambda r: 1 / 0,
+    )
+    q_good = await broker.subscribe("good", maxsize=10)
+
+    r = _reading("T1", 77.0)
+    await broker.publish(r)
+
+    assert q_good.qsize() == 1
+    assert q_good.get_nowait() is r
+    assert q_bad.qsize() == 0
+
+
+async def test_exception_isolation_cancelled_error_propagates() -> None:
+    """CancelledError from a subscriber filter must propagate, not be swallowed."""
+    broker = DataBroker()
+
+    def cancelling_filter(r: Reading) -> bool:
+        raise asyncio.CancelledError()
+
+    await broker.subscribe("canceller", maxsize=10, filter_fn=cancelling_filter)
+
+    with pytest.raises(asyncio.CancelledError):
+        await broker.publish(_reading())
+
+
+async def test_exception_isolation_logs_subscriber_name(caplog: pytest.LogCaptureFixture) -> None:
+    """Exception log mentions which subscriber failed for debuggability."""
+    broker = DataBroker()
+    await broker.subscribe(
+        "misbehaving_widget", maxsize=10, filter_fn=lambda r: 1 / 0,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await broker.publish(_reading())
+
+    assert any("misbehaving_widget" in rec.message for rec in caplog.records)
+
+
+async def test_exception_isolation_publish_batch() -> None:
+    """publish_batch() honors the same isolation via delegation to publish()."""
+    broker = DataBroker()
+    await broker.subscribe("bad", maxsize=100, filter_fn=lambda r: 1 / 0)
+    q_good = await broker.subscribe("good", maxsize=100)
+
+    readings = [_reading("T1", float(i)) for i in range(5)]
+    await broker.publish_batch(readings)
+
+    assert q_good.qsize() == 5

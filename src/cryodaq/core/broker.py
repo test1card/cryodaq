@@ -86,22 +86,31 @@ class DataBroker:
         """Разослать Reading всем подписчикам."""
         self._total_published += 1
         for sub in tuple(self._subscribers.values()):
-            if sub.filter_fn and not sub.filter_fn(reading):
-                continue
-            if sub.queue.full():
-                if sub.policy == OverflowPolicy.DROP_OLDEST:
-                    try:
-                        sub.queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    sub.dropped += 1
-                elif sub.policy == OverflowPolicy.DROP_NEWEST:
-                    sub.dropped += 1
-                    continue
             try:
-                sub.queue.put_nowait(reading)
-            except asyncio.QueueFull:
-                sub.dropped += 1
+                if sub.filter_fn and not sub.filter_fn(reading):
+                    continue
+                if sub.queue.full():
+                    if sub.policy == OverflowPolicy.DROP_OLDEST:
+                        try:
+                            sub.queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        sub.dropped += 1
+                    elif sub.policy == OverflowPolicy.DROP_NEWEST:
+                        sub.dropped += 1
+                        continue
+                try:
+                    sub.queue.put_nowait(reading)
+                except asyncio.QueueFull:
+                    sub.dropped += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "DataBroker subscriber '%s' raised during publish; "
+                    "continuing fan-out",
+                    sub.name,
+                )
 
     async def publish_batch(self, readings: list[Reading]) -> None:
         """Опубликовать пакет показаний."""
