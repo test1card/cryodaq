@@ -228,5 +228,5 @@ def test_alarm_v2_ack() -> None:
         values={"T12": 10.0},
     )
     sm.process("ack_test", event, {})
-    assert sm.acknowledge("ack_test") is True
-    assert sm.acknowledge("nonexistent") is False
+    assert sm.acknowledge("ack_test") is not None
+    assert sm.acknowledge("nonexistent") is None

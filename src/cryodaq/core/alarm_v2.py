@@ -505,15 +505,18 @@ class AlarmStateManager:
         items = list(self._history)
         return items[-limit:]
 
-    def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> bool:
+    def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> dict | None:
         """Подтвердить аларм — записать факт подтверждения в историю.
 
         Аларм остаётся в _active до сброса по условию (CLEARED).
         Acknowledged означает: оператор видел и принял к сведению.
+
+        Returns event dict on new acknowledgement (caller should publish),
+        or None if alarm unknown or already acknowledged (idempotent no-op).
         """
         if alarm_id not in self._active:
             logger.warning("ALARM ACK IGNORED: %s not in active alarms", alarm_id)
-            return False
+            return None
 
         event = self._active[alarm_id]
         if event.acknowledged:
@@ -521,7 +524,7 @@ class AlarmStateManager:
                 "ALARM ACK NOOP: %s already acknowledged by %s",
                 alarm_id, event.acknowledged_by or "—",
             )
-            return True
+            return None
 
         event.acknowledged = True
         event.acknowledged_at = time.time()
@@ -539,4 +542,9 @@ class AlarmStateManager:
             "ALARM ACKNOWLEDGED: %s by %s (reason: %s)",
             alarm_id, operator or "—", reason or "—",
         )
-        return True
+        return {
+            "alarm_id": alarm_id,
+            "acknowledged_at": event.acknowledged_at,
+            "operator": operator,
+            "reason": reason,
+        }

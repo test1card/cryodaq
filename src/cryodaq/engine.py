@@ -1195,6 +1195,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                             "message": v.message,
                             "triggered_at": v.triggered_at,
                             "channels": v.channels,
+                            "acknowledged": v.acknowledged,
+                            "acknowledged_at": v.acknowledged_at,
+                            "acknowledged_by": v.acknowledged_by,
                         }
                         for k, v in active.items()
                     },
@@ -1202,7 +1205,26 @@ async def _run_engine(*, mock: bool = False) -> None:
                 }
             if action == "alarm_v2_ack":
                 name = cmd.get("alarm_name", "")
-                return {"ok": alarm_v2_state_mgr.acknowledge(name), "alarm_name": name}
+                operator = cmd.get("operator", "")
+                reason = cmd.get("reason", "")
+                ack_event = alarm_v2_state_mgr.acknowledge(
+                    name, operator=operator, reason=reason,
+                )
+                if ack_event is not None:
+                    await broker.publish(Reading(
+                        timestamp=datetime.now(UTC),
+                        instrument_id="alarm_v2",
+                        channel="alarm_v2/acknowledged",
+                        value=ack_event["acknowledged_at"],
+                        unit="",
+                        metadata=ack_event,
+                    ))
+                return {
+                    "ok": ack_event is not None
+                    or name in alarm_v2_state_mgr.get_active(),
+                    "alarm_name": name,
+                    "event_emitted": ack_event is not None,
+                }
             if action in {
                 "get_app_mode",
                 "set_app_mode",

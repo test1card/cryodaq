@@ -385,8 +385,8 @@ def test_state_manager_sustained_not_yet() -> None:
 def test_state_manager_acknowledge() -> None:
     mgr = AlarmStateManager()
     mgr.process("a1", _event(), {})
-    assert mgr.acknowledge("a1") is True
-    assert mgr.acknowledge("nonexistent") is False
+    assert mgr.acknowledge("a1") is not None
+    assert mgr.acknowledge("nonexistent") is None
 
 
 def test_state_manager_history() -> None:
@@ -446,7 +446,11 @@ def test_acknowledge_transitions_active_alarm():
 
     result = mgr.acknowledge("test_alarm", operator="vladimir", reason="investigating")
 
-    assert result is True
+    assert result is not None
+    assert result["alarm_id"] == "test_alarm"
+    assert result["operator"] == "vladimir"
+    assert result["reason"] == "investigating"
+    assert result["acknowledged_at"] > 0
     assert event.acknowledged is True
     assert event.acknowledged_at > 0
     assert event.acknowledged_by == "vladimir"
@@ -474,10 +478,10 @@ def test_acknowledge_records_history():
     assert ack_entries[0]["operator"] == "op1"
 
 
-def test_acknowledge_nonexistent_returns_false():
-    """A.9: acknowledging non-existent alarm must return False."""
+def test_acknowledge_nonexistent_returns_none():
+    """A.9: acknowledging non-existent alarm must return None (no event)."""
     mgr = AlarmStateManager()
-    assert mgr.acknowledge("no_such_alarm") is False
+    assert mgr.acknowledge("no_such_alarm") is None
 
 
 def test_acknowledge_is_idempotent():
@@ -496,8 +500,8 @@ def test_acknowledge_is_idempotent():
     first = mgr.acknowledge("test_alarm", operator="op1", reason="first")
     second = mgr.acknowledge("test_alarm", operator="op2", reason="second")
 
-    assert first is True
-    assert second is True
+    assert first is not None   # newly acknowledged → event dict
+    assert second is None      # already acknowledged → no event (idempotent)
     history = mgr.get_history()
     ack_entries = [h for h in history if h.get("transition") == "ACKNOWLEDGED"]
     assert len(ack_entries) == 1, f"Got {len(ack_entries)} ACK entries, expected 1"
@@ -520,3 +524,47 @@ def test_acknowledge_keeps_alarm_active():
     mgr.acknowledge("test_alarm")
 
     assert "test_alarm" in mgr._active
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 Fix C: Acknowledge event serialization tests
+# ---------------------------------------------------------------------------
+
+
+def test_acknowledge_event_fields_match_alarm_state():
+    """A.9.1: returned event dict's acknowledged_at matches the alarm's state."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="sync_check",
+        level="WARNING",
+        message="test",
+        triggered_at=time.time(),
+        channels=["Т1"],
+        values={"Т1": 300.0},
+    )
+    mgr._active["sync_check"] = event
+
+    result = mgr.acknowledge("sync_check", operator="op1", reason="ok")
+
+    assert result is not None
+    assert result["acknowledged_at"] == event.acknowledged_at
+    assert event.acknowledged_by == "op1"
+
+
+def test_acknowledge_no_event_on_unknown_or_reack():
+    """A.9.1: neither unknown alarm nor re-ack should produce an event."""
+    mgr = AlarmStateManager()
+    event = AlarmEvent(
+        alarm_id="dup",
+        level="INFO",
+        message="test",
+        triggered_at=time.time(),
+        channels=[],
+        values={},
+    )
+    mgr._active["dup"] = event
+
+    assert mgr.acknowledge("nonexistent") is None
+    first = mgr.acknowledge("dup")
+    assert first is not None
+    assert mgr.acknowledge("dup") is None  # idempotent, no event
