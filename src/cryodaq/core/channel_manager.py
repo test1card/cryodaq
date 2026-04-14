@@ -177,6 +177,32 @@ class ChannelManager:
         short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
         return self._channels.get(short_id, {}).get("group", "")
 
+    def resolve_channel_reference(self, reference: str) -> str:
+        """Resolve a channel reference to its canonical runtime label.
+
+        Accepts short IDs (e.g. ``'Т1'``) or full labels
+        (e.g. ``'Т1 Криостат верх'``).  Returns the canonical full label
+        that matches ``Reading.channel`` values at runtime.
+
+        Raises:
+            ChannelConfigError: if *reference* is empty or doesn't match
+                any known channel.
+        """
+        reference = reference.strip()
+        if not reference:
+            raise ChannelConfigError("empty channel reference")
+
+        short_id = reference.split(" ")[0] if " " in reference else reference
+        info = self._channels.get(short_id)
+        if info is None:
+            known = sorted(self._channels.keys())
+            raise ChannelConfigError(
+                f"unknown channel reference '{reference}' — "
+                f"known channels: {', '.join(known)}"
+            )
+        name = info.get("name", "")
+        return f"{short_id} {name}" if name else short_id
+
     def get_channels_by_group(self) -> dict[str, list[str]]:
         """Получить каналы, сгруппированные по полю 'group'.
 

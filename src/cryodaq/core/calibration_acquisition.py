@@ -6,9 +6,14 @@ import logging
 import math
 from typing import Any
 
+from cryodaq.core.channel_manager import ChannelConfigError
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
+
+
+class CalibrationCommandError(ValueError):
+    """Raised when a calibration command cannot be executed due to invalid parameters."""
 
 
 class CalibrationAcquisitionService:
@@ -19,8 +24,9 @@ class CalibrationAcquisitionService:
     :meth:`on_readings` after each LakeShore poll cycle.
     """
 
-    def __init__(self, writer: Any) -> None:
+    def __init__(self, writer: Any, channel_manager: Any = None) -> None:
         self._writer = writer
+        self._channel_manager = channel_manager
         self._active = False
         self._reference_channel: str | None = None
         self._target_channels: list[str] = []
@@ -28,8 +34,20 @@ class CalibrationAcquisitionService:
         self._t_min: float | None = None
         self._t_max: float | None = None
 
+    def _resolve(self, reference: str) -> str:
+        """Canonicalize a channel reference via ChannelManager."""
+        try:
+            return self._channel_manager.resolve_channel_reference(reference)
+        except ChannelConfigError as e:
+            raise CalibrationCommandError(
+                f"cannot resolve channel reference: {e}"
+            ) from e
+
     def activate(self, reference_channel: str, target_channels: list[str]) -> None:
         """Start recording SRDG for *target_channels*."""
+        if self._channel_manager is not None:
+            reference_channel = self._resolve(reference_channel)
+            target_channels = [self._resolve(t) for t in target_channels]
         self._active = True
         self._reference_channel = reference_channel
         self._target_channels = list(target_channels)

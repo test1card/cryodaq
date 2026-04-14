@@ -33,13 +33,16 @@ from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError
-from cryodaq.core.channel_manager import ChannelConfigError
+from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.housekeeping import HousekeepingConfigError
 from cryodaq.core.interlock import InterlockConfigError
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
+from cryodaq.core.calibration_acquisition import (
+    CalibrationAcquisitionService,
+    CalibrationCommandError,
+)
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_logger import EventLogger
@@ -377,6 +380,8 @@ def _try_activate_calibration_acquisition(
             logger.warning(
                 "Calibration experiment missing reference_channel/target_channels in custom_fields"
             )
+    except CalibrationCommandError as e:
+        logger.error("Calibration activation rejected: %s", e)
     except Exception:
         logger.warning("Failed to activate calibration acquisition", exc_info=True)
 
@@ -870,7 +875,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     safety_manager._fault_log_callback = _safety_fault_log_callback
 
     # Calibration acquisition — continuous SRDG during calibration experiments
-    calibration_acquisition = CalibrationAcquisitionService(writer)
+    calibration_acquisition = CalibrationAcquisitionService(
+        writer, channel_manager=get_channel_manager(),
+    )
 
     # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации
     scheduler = Scheduler(
@@ -991,7 +998,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     _sd_enabled = _sd_cfg.get("enabled", False)
     sensor_diag: SensorDiagnosticsEngine | None = None
     if _sd_enabled:
-        from cryodaq.core.channel_manager import get_channel_manager
         _ch_mgr = get_channel_manager()
         # Build correlation groups from config; channel ids use display prefix (Т1→T1)
         sensor_diag = SensorDiagnosticsEngine(config=_sd_cfg)

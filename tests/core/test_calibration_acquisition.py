@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cryodaq.core.calibration_acquisition import CalibrationAcquisitionService
+from cryodaq.core.calibration_acquisition import (
+    CalibrationAcquisitionService,
+    CalibrationCommandError,
+)
+from cryodaq.core.channel_manager import ChannelConfigError
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 
@@ -209,3 +213,76 @@ def test_prepare_then_discard_leaves_state_clean():
     assert service.stats["t_min"] is None
     assert service.stats["t_max"] is None
     assert service.stats["point_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 Fix A: Channel canonicalization tests
+# ---------------------------------------------------------------------------
+
+
+class _MockChannelManager:
+    """Mock ChannelManager with resolve_channel_reference for tests."""
+
+    _channels = {
+        "Т1": {"name": "Криостат верх"},
+        "Т2": {"name": "Криостат низ"},
+        "Т3": {"name": "Радиатор 1"},
+        "Т5": {"name": "Экран 77К"},
+    }
+
+    def resolve_channel_reference(self, reference: str) -> str:
+        reference = reference.strip()
+        if not reference:
+            raise ChannelConfigError("empty channel reference")
+        short_id = reference.split(" ")[0] if " " in reference else reference
+        info = self._channels.get(short_id)
+        if info is None:
+            known = sorted(self._channels.keys())
+            raise ChannelConfigError(
+                f"unknown channel reference '{reference}' — "
+                f"known channels: {', '.join(known)}"
+            )
+        name = info.get("name", "")
+        return f"{short_id} {name}" if name else short_id
+
+
+def test_activate_canonicalizes_short_reference_id():
+    """Short ID like 'Т1' resolves to full label 'Т1 Криостат верх'."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
+    service.activate("Т1", ["Т2"])
+    assert service.stats["reference_channel"] == "Т1 Криостат верх"
+    assert service.stats["target_channels"] == ["Т2 Криостат низ"]
+
+
+def test_activate_accepts_full_label_passthrough():
+    """Full label passes through unchanged."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
+    service.activate("Т1 Криостат верх", ["Т2 Криостат низ"])
+    assert service.stats["reference_channel"] == "Т1 Криостат верх"
+    assert service.stats["target_channels"] == ["Т2 Криостат низ"]
+
+
+def test_activate_rejects_unknown_reference():
+    """Unknown reference raises CalibrationCommandError with known channels."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
+    with pytest.raises(CalibrationCommandError, match="unknown channel"):
+        service.activate("Т99", ["Т2"])
+
+
+def test_activate_rejects_unknown_target():
+    """Unknown target raises CalibrationCommandError."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
+    with pytest.raises(CalibrationCommandError, match="unknown channel"):
+        service.activate("Т1", ["Т99"])
+
+
+def test_activate_rejects_empty_reference():
+    """Empty reference raises CalibrationCommandError."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
+    with pytest.raises(CalibrationCommandError, match="empty"):
+        service.activate("", ["Т2"])
