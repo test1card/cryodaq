@@ -32,7 +32,7 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
-from cryodaq.core.alarm_config import AlarmConfigError
+from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.housekeeping import HousekeepingConfigError
 from cryodaq.core.interlock import InterlockConfigError
