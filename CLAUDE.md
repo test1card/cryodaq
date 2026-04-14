@@ -270,6 +270,42 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
 
+## Дисциплина релизов
+
+Документация курируется на границах релизов, не перезаписывается
+автоматически на каждый commit. При создании нового tag `vX.Y.Z`:
+
+1. **Обновить `CHANGELOG.md`** — добавить новую запись сверху:
+   - Заголовок с датой: `## [X.Y.Z] — YYYY-MM-DD`
+   - Краткий параграф, описывающий релиз
+   - `### Added` — новые features и capabilities
+   - `### Changed` — изменённые contracts и поведение (с commit hashes)
+   - `### Fixed` — исправления багов (с commit hashes)
+   - `### Infrastructure` — tooling, build, hooks, external integrations
+   - `### Known Issues` — унаследованные или release-time caveats
+   - `### Test baseline` — passed/skipped count, delta от предыдущего
+   - `### Tags` — имена тегов и commits на которые они указывают
+   - `### Selected commits in this release` — ключевые commits
+
+2. **Обновить `README.md`** — только если изменились user-facing facts:
+   - Новые commands или entry points
+   - Новые обязательные зависимости
+   - Version badge в заголовке
+
+3. **Обновить этот файл (`CLAUDE.md`)** — только если изменились
+   архитектура или workflow: новые модули, инварианты, constraints.
+
+4. **Источники правды для CHANGELOG-записи:**
+   - Audit documents в `docs/audits/` (Codex findings per-commit)
+   - Phase specs в `docs/phase-ui-1/` и similar directories
+   - Git log как secondary confirmation
+   - Operator memory — последний fallback, не primary source
+
+5. **Commit discipline:**
+   - НЕ re-tag для включения post-tag docs updates.
+   - НЕ использовать auto-update hooks для README / CHANGELOG /
+     CLAUDE.md. Это curated документация, не mechanical output.
+
 ## Известные ограничения
 
 - Best-effort PDF generation по-прежнему зависит от внешнего `soffice` / `LibreOffice`; отсутствие этого инструмента является ограничением окружения, а не code regression.
