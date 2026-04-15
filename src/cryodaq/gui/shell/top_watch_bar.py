@@ -137,10 +137,13 @@ class TopWatchBar(QWidget):
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
 
-        # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА)
-        self._mode_badge = QLabel()
+        # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА) — clickable (B.6.2)
+        self._mode_badge = _ClickableLabel()
         self._mode_badge.setObjectName("modeBadge")
         self._mode_badge.setVisible(False)  # hidden until backend confirms
+        self._mode_badge.clicked.connect(self._on_mode_badge_clicked)
+        self._app_mode: str | None = None
+        self._mode_switch_worker = None
         layout.addWidget(self._mode_badge)
 
         self._time_window_echo_label = QLabel("▸ окно 1ч")
@@ -521,6 +524,7 @@ class TopWatchBar(QWidget):
 
     def _update_mode_badge(self, app_mode: str | None) -> None:
         """Update mode badge from app_mode field in /status response."""
+        self._app_mode = app_mode
         if app_mode is None:
             self._mode_badge.setVisible(False)
             return
@@ -561,6 +565,74 @@ class TopWatchBar(QWidget):
         else:
             logger.warning("Unknown app_mode value: %s", app_mode)
             self._mode_badge.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Mode badge click → confirmation → ZMQ command (B.6.2)
+    # ------------------------------------------------------------------
+
+    def _on_mode_badge_clicked(self) -> None:
+        if self._app_mode not in ("experiment", "debug"):
+            logger.warning("Mode badge clicked but app_mode unknown: %s", self._app_mode)
+            return
+        if self._mode_switch_worker is not None and not self._mode_switch_worker.isFinished():
+            return  # command in flight
+
+        from PySide6.QtWidgets import QMessageBox
+
+        if self._app_mode == "experiment":
+            target = "debug"
+            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u041e\u0442\u043b\u0430\u0434\u043a\u0430?"
+            body = (
+                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u041e\u0442\u043b\u0430\u0434\u043a\u0430 "
+                "\u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "
+                "\u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f, "
+                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "
+                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "
+                "\u043e\u0442\u0447\u0451\u0442\u044b \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u044e\u0442\u0441\u044f."
+            )
+        else:
+            target = "experiment"
+            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"
+            body = (
+                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 "
+                "\u0441\u043e\u0437\u0434\u0430\u044e\u0442\u0441\u044f \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0438, "
+                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "
+                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "
+                "\u043e\u0442\u0447\u0451\u0442\u044b."
+            )
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(title)
+        dlg.setText(body)
+        btn_cancel = dlg.addButton(
+            "\u041e\u0442\u043c\u0435\u043d\u0430",  # Отмена
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        dlg.addButton(
+            "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c",  # Переключить
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        dlg.setDefaultButton(btn_cancel)
+        dlg.exec()
+        if dlg.clickedButton() == btn_cancel:
+            return
+
+        self._mode_badge.setCursor(Qt.CursorShape.WaitCursor)
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._mode_switch_worker = ZmqCommandWorker(
+            {"cmd": "set_app_mode", "app_mode": target}, parent=self
+        )
+        self._mode_switch_worker.finished.connect(self._on_mode_switch_result)
+        self._mode_switch_worker.start()
+
+    def _on_mode_switch_result(self, result: dict) -> None:
+        self._mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        if not result.get("ok"):
+            from PySide6.QtWidgets import QMessageBox
+
+            error = result.get("error", "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043c\u0435\u043d\u0438\u0442\u044c \u0440\u0435\u0436\u0438\u043c.")
+            QMessageBox.warning(self, "\u041e\u0448\u0438\u0431\u043a\u0430", str(error))
 
     def closeEvent(self, event):  # noqa: ANN001
         """Clean up ChannelManager subscription on close."""

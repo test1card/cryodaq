@@ -138,3 +138,34 @@ def test_mode_badge_updates_on_change() -> None:
     assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
     bar._update_mode_badge("experiment")
     assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+
+
+# --- B.6.2 Clickable badge tests ---
+
+
+def test_mode_badge_click_does_nothing_when_hidden() -> None:
+    """Click on hidden badge (no mode known) should not trigger anything."""
+    bar = _make_bar()
+    assert bar._mode_badge.isHidden()
+    bar._on_mode_badge_clicked()  # Should not raise, not show dialog
+    assert bar._mode_badge.isHidden()
+
+
+def test_mode_badge_stores_current_mode() -> None:
+    """After update, current mode should be queryable for click handler."""
+    bar = _make_bar()
+    bar._update_mode_badge("debug")
+    assert bar._app_mode == "debug"
+    bar._update_mode_badge("experiment")
+    assert bar._app_mode == "experiment"
+    bar._update_mode_badge(None)
+    assert bar._app_mode is None
+
+
+def test_mode_badge_cursor_is_pointing_hand() -> None:
+    """Badge should indicate clickability via cursor."""
+    bar = _make_bar()
+    bar._update_mode_badge("debug")
+    from PySide6.QtCore import Qt
+
+    assert bar._mode_badge.cursor().shape() == Qt.CursorShape.PointingHandCursor

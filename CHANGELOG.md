@@ -22,6 +22,10 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.6.2 — ModeBadge clickable.** Click на badge → confirmation
+  dialog → set_app_mode ZMQ command. EXPERIMENT → DEBUG требует
+  явного подтверждения (destructive: отключает архив и отчёты).
+  Default button = Отмена для обоих направлений переключения.
 - **Phase UI-1 v2 Block B.4.5** — Adoption design system из UI UX Pro
   Max skill v2.5.0 (MIT, Next Level Builder). Гибрид Real-Time
   Monitoring + Data-Dense Dashboard. Палитра Smart Home/IoT Dashboard

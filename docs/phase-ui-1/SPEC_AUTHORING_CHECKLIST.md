@@ -371,6 +371,10 @@ Do not modify any files. This is read-only audit."
   passed because `_update_mode_badge` was tested directly. Add at
   least one integration-style test that feeds realistic ZMQ responses
   through the full handler (`_on_experiment_result`).
+- L9: Destructive actions never default to confirm. QMessageBox
+  default button = Отмена для любых переключений которые меняют
+  системное состояние (mode switch, experiment finalize, etc.).
+  Pattern: click → confirm dialog (default Cancel) → action.
 
 ## Living document
 
