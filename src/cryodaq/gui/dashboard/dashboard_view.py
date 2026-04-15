@@ -19,6 +19,7 @@ from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
 from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
 from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
+from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ class DashboardView(QWidget):
         self._pressure_plot: PressurePlotWidget | None = None
         self._sensor_grid: DynamicSensorGrid | None = None
         self._phase_widget: PhaseAwareWidget | None = None
+        self._quick_log: QuickLogBlock | None = None
+        self._log_submit_worker = None
+        self._log_poll_worker = None
         self._build_ui()
         self._wire_x_link()
         self._start_refresh_timer()
@@ -96,6 +100,13 @@ class DashboardView(QWidget):
                     self._on_history_requested
                 )
                 zone.layout().addWidget(self._sensor_grid)
+            elif obj_name == "quickLogZone":
+                zone = self._make_zone(obj_name, None)
+                self._quick_log = QuickLogBlock(parent=self)
+                self._quick_log.entry_submitted.connect(
+                    self._on_log_entry_submitted
+                )
+                zone.layout().addWidget(self._quick_log)
             else:
                 zone = self._make_zone(obj_name, label_text)
             root.addWidget(zone, stretch=stretch)
@@ -132,6 +143,12 @@ class DashboardView(QWidget):
         self._refresh_timer.setInterval(1000)  # 1 Hz
         self._refresh_timer.timeout.connect(self._refresh_plots)
         self._refresh_timer.start()
+
+        # B.7: slower poll for log entries (10s)
+        self._log_poll_timer = QTimer(self)
+        self._log_poll_timer.setInterval(10000)
+        self._log_poll_timer.timeout.connect(self._poll_log_entries)
+        self._log_poll_timer.start()
 
     def _refresh_plots(self) -> None:
         if self._temp_plot is not None:
@@ -215,3 +232,44 @@ class DashboardView(QWidget):
         """Forward experiment_status response to phase widget."""
         if self._phase_widget is not None:
             self._phase_widget.on_status_update(status)
+
+    # ------------------------------------------------------------------
+    # Quick log handlers (B.7)
+    # ------------------------------------------------------------------
+
+    def _on_log_entry_submitted(self, message: str) -> None:
+        """Send log entry via ZMQ and refresh visible entries."""
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._log_submit_worker = ZmqCommandWorker(
+            {"cmd": "log_entry", "message": message, "source": "dashboard"},
+            parent=self,
+        )
+        self._log_submit_worker.finished.connect(self._on_log_entry_result)
+        self._log_submit_worker.start()
+
+    def _on_log_entry_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            logger.warning("log_entry failed: %s", result.get("error"))
+            return
+        # Refresh entries
+        self._poll_log_entries()
+
+    def _poll_log_entries(self) -> None:
+        """Fetch latest log entries for QuickLogBlock."""
+        if self._log_poll_worker is not None and not self._log_poll_worker.isFinished():
+            return  # previous poll still in flight
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._log_poll_worker = ZmqCommandWorker(
+            {"cmd": "log_get", "limit": 2},
+            parent=self,
+        )
+        self._log_poll_worker.finished.connect(self._on_log_entries_received)
+        self._log_poll_worker.start()
+
+    def _on_log_entries_received(self, result: dict) -> None:
+        if not result.get("ok") or self._quick_log is None:
+            return
+        entries = result.get("entries", [])
+        self._quick_log.set_entries(entries)

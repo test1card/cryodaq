@@ -22,6 +22,12 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **Phase UI-1 v2 Block B.7 — QuickLogBlock dashboard widget.**
+  Закрывает последний placeholder `[ЖУРНАЛ — будет в B.6]`. Compact
+  peripheral awareness ~55-65px: inline composer + последние 1-2
+  entries. Не reading surface — для чтения OperatorLogPanel через
+  tray rail. Empty state мотивирует первую запись. 10-second poll
+  cycle для обновления + immediate refresh после отправки.
 - **B.5.7.3 — Fira fonts load from launcher entry point.** B.5.7.2
   wired font loading only in `cryodaq-gui` entry (`gui/app.py:main`).
   The `cryodaq` launcher creates QApplication + MainWindowV2 directly
