@@ -22,6 +22,16 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **Phase UI-1 v2 Block B.5.5 — 7-mode PhaseAwareWidget extension.**
+  PhaseAwareWidget переходит от generic stepper к phase-specific
+  content. Cherry-pick scope: cooldown (ETA + R_thermal hero),
+  preparation (hint text), measurement (R_thermal hero) с реальным
+  content. Vacuum/warmup/teardown показывают placeholder с ссылкой на
+  Аналитика overlay. Reason: 5 NEEDS_WIRING + 1 MISSING (warmup
+  predictor не существует). PhaseStepper извлечён как отдельный widget.
+  Новый package `phase_content/` с HeroReadout, EtaDisplay, MilestoneList.
+  Analytics readings (cooldown_eta, R_thermal) роутятся через
+  DashboardView в PhaseAwareWidget.
 - **B.6.2 — ModeBadge clickable.** Click на badge → confirmation
   dialog → set_app_mode ZMQ command. EXPERIMENT → DEBUG требует
   явного подтверждения (destructive: отключает архив и отчёты).

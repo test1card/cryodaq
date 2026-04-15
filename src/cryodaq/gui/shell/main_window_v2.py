@@ -265,6 +265,8 @@ class MainWindowV2(QMainWindow):
             if channel.endswith("/power") and self._conductivity_panel is not None:
                 self._conductivity_panel.on_reading(reading)
         if channel.startswith("analytics/"):
+            # Note: _overview_panel.on_reading already called above in
+            # eager sinks — no need to call again here (Codex B.5.5 F3)
             if self._analytics_panel is not None:
                 self._analytics_panel.on_reading(reading)
             if self._operator_log_panel is not None:

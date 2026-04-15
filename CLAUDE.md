@@ -190,6 +190,8 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/dashboard/channel_buffer.py` — shared per-channel rolling history store
 - `src/cryodaq/gui/dashboard/time_window.py` — TimeWindow enum for time-range selection
 - `src/cryodaq/gui/dashboard/temp_plot_widget.py` — multi-channel temperature plot with clickable legend
+- `src/cryodaq/gui/dashboard/phase_stepper.py` — phase progression stepper (extracted from PhaseAwareWidget B.5.5)
+- `src/cryodaq/gui/dashboard/phase_content/` — per-phase content widgets (HeroReadout, EtaDisplay, MilestoneList)
 - `src/cryodaq/gui/dashboard/pressure_plot_widget.py` — compact log-Y pressure plot
 
 **GUI theming**

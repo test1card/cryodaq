@@ -339,6 +339,7 @@ class ExperimentManager:
             "active_experiment": self._active.to_payload() if self._active else None,
             "current_phase": self.get_current_phase(),
             "phase_started_at": phase_started_at,
+            "phases": self.get_phase_history(),
             "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }

@@ -146,7 +146,7 @@ class DashboardView(QWidget):
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        """Route reading into buffer store and to grid cells."""
+        """Route reading into buffer store, grid cells, and phase widget."""
         channel = reading.channel
         value = reading.value
         if not isinstance(value, (int, float)):
@@ -160,6 +160,10 @@ class DashboardView(QWidget):
                 self._sensor_grid.dispatch_reading(reading)
         elif channel.endswith("/pressure"):
             self._buffer_store.append(channel, timestamp_epoch, float(value))
+
+        # B.5.5: route analytics readings to phase widget
+        if channel.startswith("analytics/") and self._phase_widget is not None:
+            self._phase_widget.on_reading(reading)
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers

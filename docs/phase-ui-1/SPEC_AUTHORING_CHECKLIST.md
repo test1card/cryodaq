@@ -486,6 +486,10 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L11: For widget rewrites spanning multiple modes/states, extract
+  reusable primitives FIRST (HeroReadout, EtaDisplay etc), then
+  compose. B.5.5 created 3 reusable primitives serving 6 modes —
+  cleaner than 6 standalone implementations, reusable in B.10.
 - L10: Codex audit is non-negotiable per block, regardless of size or
   confidence. B.6.2 Small block: 14 unit tests passed, Codex (gpt-5.4,
   reasoning_effort=high via config.toml) caught 1 HIGH worker leak +
