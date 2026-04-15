@@ -75,6 +75,7 @@ class TopWatchBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
         self.setObjectName("TopWatchBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
             f"#TopWatchBar {{ background-color: {theme.SURFACE_PANEL}; "
@@ -178,8 +179,7 @@ class TopWatchBar(QWidget):
         self._context_frame.setObjectName("topWatchBarContext")
         self._context_frame.setStyleSheet(
             f"#topWatchBarContext {{ "
-            f"background-color: {theme.SURFACE_PANEL}; "
-            f"border-radius: {theme.RADIUS_SM}px; "
+            f"background-color: transparent; "
             f"padding: 2px 8px; "
             f"}}"
         )

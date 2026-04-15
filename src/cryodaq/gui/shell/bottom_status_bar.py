@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from cryodaq.gui import theme
@@ -33,6 +33,7 @@ class BottomStatusBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
         self.setObjectName("BottomStatusBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
             f"#BottomStatusBar {{ background-color: {theme.SURFACE_PANEL}; "

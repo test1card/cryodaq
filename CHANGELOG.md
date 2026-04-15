@@ -24,6 +24,11 @@
   оригинальному indigo `#7c8cff` accent. Architecture B.4.5 (aliases,
   Fira fonts, документация) полностью сохранены — изменены только
   конкретные hex значения в `theme.py`.
+- **Phase UI-1 v2 Block B.4.5.2** — Shell chrome consistency fix.
+  Три chrome widgets (TopWatchBar, BottomStatusBar, ToolRail) теперь
+  рендерятся как cohesive frame: `WA_StyledBackground` атрибут,
+  удалён bubble эффект `_context_frame`, ToolRail мигрирован на
+  `#ToolRail` object selector (A.7 compliance), видимый hover state.
 - **Phase UI-1 v2 Block B.4** — Persistent context strip в
   TopWatchBar. Четыре ключевых значения (давление, T мин, T макс
   холодных каналов, мощность нагревателя) видны постоянно — даже

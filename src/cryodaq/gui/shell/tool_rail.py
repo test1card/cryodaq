@@ -141,14 +141,12 @@ class ToolRailButton(QToolButton):
     def _apply_style(self) -> None:
         if self._active:
             border = f"3px solid {theme.ACCENT_400}"
-            bg = theme.SURFACE_CARD
         else:
             border = "3px solid transparent"
-            bg = "transparent"
         self.setStyleSheet(
-            f"QToolButton {{ background: {bg}; border: none; "
+            f"QToolButton {{ background: transparent; border: none; "
             f"border-left: {border}; padding: 0px; }}"
-            f"QToolButton:hover {{ background: {theme.SURFACE_CARD}; }}"
+            f"QToolButton:hover {{ background: {theme.SECONDARY}; }}"
         )
 
 
@@ -160,9 +158,11 @@ class ToolRail(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(_RAIL_WIDTH)
+        self.setObjectName("ToolRail")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
-            f"QFrame {{ background-color: {theme.SURFACE_PANEL}; "
+            f"#ToolRail {{ background-color: {theme.SURFACE_PANEL}; "
             f"border-right: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 
