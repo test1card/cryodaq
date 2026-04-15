@@ -27,9 +27,10 @@ constraint из §3 (что сохраняет). Никаких abstract "best p
 | Теплопроводность (Conductivity) | ✓ DONE | `docs/legacy-inventory/conductivity.md` |
 | Алармы | ✓ DONE | `docs/legacy-inventory/alarms.md` |
 | Служебный лог | ✓ DONE | `docs/legacy-inventory/operator_log.md` |
-| Архив | ⏳ pending | `docs/legacy-inventory/archive.md` |
-| Калибровка | ⏳ pending | `docs/legacy-inventory/calibration.md` |
-| Приборы | ⏳ pending | `docs/legacy-inventory/instruments.md` |
+| Архив | ✓ DONE | `docs/legacy-inventory/archive.md` |
+| Калибровка | ✓ DONE | `docs/legacy-inventory/calibration.md` |
+| Приборы | ✓ DONE | `docs/legacy-inventory/instruments.md` |
+| Датчики (диагностика) | ✓ DONE | `docs/legacy-inventory/sensor_diag.md` |
 
 Spec для Legacy Inventory audit — см. отдельный Block в roadmap (Phase 0).
 

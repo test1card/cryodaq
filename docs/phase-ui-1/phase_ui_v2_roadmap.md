@@ -283,6 +283,45 @@ Spread over realistic calendar: 4-6 weeks at current cadence (1-3 blocks per wee
 - **2026-04-15** Vladimir validated all 7 pain points (P1-P7) and all 7 preserve features (K1-K7). All entries in context doc are real, not architect speculation.
 - **2026-04-16** Phase 0.1 — Legacy Inventory batch 1 completed. Tabs: Обзор (1729 LOC), Источник мощности (586 LOC), Аналитика (934 LOC). Reports at docs/legacy-inventory/. Total 3249 LOC inventoried. Key findings: (1) Overview almost entirely superseded by new dashboard — only ML prediction curve overlay unique. (2) Keithley functionally complete, rebuild is visual-only. (3) Analytics is LEAST covered by new surfaces — highest priority rebuild for Phase II.
 - **2026-04-16** Phase 0.2 — Legacy Inventory batch 2 completed. Tabs: Теплопроводность (1068 LOC), Алармы (378 LOC), Служебный лог (171 LOC). Reports at docs/legacy-inventory/. Total 1617 LOC inventoried. Key findings: (1) Conductivity has embedded auto-measurement state machine with min_wait safety guard — must preserve timing logic carefully. (2) Alarms panel is structurally simple (two tables + ACK buttons) but P2 only partially solved by TopWatchBar badge. (3) Operator Log is K1-critical for shift handovers — QuickLogBlock covers only quick entry, full overlay needed.
+- **2026-04-16** Phase 0.3 — Legacy Inventory batch 3 completed (FINAL). Tabs: Архив (529 LOC), Калибровка (499 LOC), Приборы (308 LOC), Датчики-диагностика (211 LOC). Phase 0 complete: 10 files inventoried, 6413 LOC total. Key findings: (1) Archive has rich filtering + detail pane + report regeneration — full rebuild needed for K2. (2) Calibration has clean 3-mode QStackedWidget architecture — Wrap approach viable. (3) Instruments + SensorDiag are low-priority (operators check only on problems).
+
+---
+
+## Phase 0 Summary
+
+All 10 legacy components inventoried (9 tabs + 1 embedded diagnostic panel).
+Total LOC documented: 6413.
+ZMQ commands cataloged: 24.
+Reports at: docs/legacy-inventory/ (10 files).
+
+### Coverage assessment by Phase II priority
+
+**HIGH priority rebuild** (operator value, currently uncovered or critical):
+- Analytics (934 LOC) — LEAST covered by new surfaces, highest daily usage
+- Archive (529 LOC) — K2-critical, zero coverage in new UI
+- Operator Log (171 LOC) — K1-critical for shift handovers, QuickLogBlock partial only
+- Alarms (378 LOC) — P2 partially solved (badge), acknowledge workflow uncovered
+
+**MEDIUM priority rebuild** (functional, embedded complexity):
+- Conductivity (1068 LOC) — auto-measurement state machine, K6 export
+- Keithley (586 LOC) — functionally complete, visual-only modernization
+- Calibration (499 LOC) — K3-critical but 1-2x/year, clean Wrap target
+
+**LOW priority rebuild** (mostly superseded by new dashboard):
+- Overview (1729 LOC) — almost entirely covered by B.1-B.7 dashboard
+- Instruments (308 LOC) — checked only on problems
+- Sensor Diagnostics (211 LOC) — fold into sensor grid popover (Q4 resolution)
+
+### Pain point coverage status
+
+After Phase 0 + B.8.0.2:
+- P1 ambient awareness: SOLVED by dashboard (B.1-B.7)
+- P2 alarm visibility: PARTIAL — badge shows count, ack workflow needs overlay
+- P3 shift handover: NOT SOLVED — needs Operator Log overlay + Phase III.1
+- P4 form repetition: SOLVED for experiment create (B.8.0.2 autocomplete)
+- P5 phase elapsed: SOLVED in TopWatchBar + B.8.0.2 phase pills
+- P6 plot co-location: PARTIAL — temp+pressure on dashboard, Analytics overlay needed
+- P7 notifications: PARTIAL — Telegram exists, audit needed Phase III.2
 
 ---
 
