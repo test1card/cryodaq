@@ -494,6 +494,9 @@ Do not modify any files. This is read-only audit."
   cryodaq (launcher), cryodaq-gui (gui/app.py), cryodaq-engine,
   cryodaq-cooldown. Startup setup must be called from each entry
   point or extracted into shared init. B.5.7.3 chose explicit calls.
+- L21: Visual rebuild = legacy inventory FIRST, then design. B.8.0.2
+  read 893-line inventory, arrived at completely different layout than
+  initial concept. Workflow constrained design choices.
 - L20: Rebuilds of legacy panels MUST inventory legacy features
   before scoping. B.8 silently lost phase transition controls.
   Phase 1 = inventory ALL legacy features, Phase 2 = classify

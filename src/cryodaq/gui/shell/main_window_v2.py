@@ -238,6 +238,9 @@ class MainWindowV2(QMainWindow):
                     exp = dict(exp)
                     exp["current_phase"] = self._latest_experiment_status.get("current_phase")
                     exp["app_mode"] = self._latest_experiment_status.get("app_mode")
+                widget.set_templates(
+                    self._latest_experiment_status.get("templates", [])
+                )
                 widget.set_experiment(
                     exp,
                     self._latest_experiment_status.get("phases", []),
@@ -266,8 +269,10 @@ class MainWindowV2(QMainWindow):
         self._alarm_panel.on_reading(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
-        # ExperimentOverlay does not need per-reading updates
-        # (reads via /status poll, not on_reading)
+        # B.8.0.2: route log entries to overlay for live timeline
+        if (channel == "analytics/operator_log_entry"
+                and self._experiment_overlay is not None):
+            self._experiment_overlay.on_reading(reading)
         if reading.unit == "K" and self._calibration_panel is not None:
             self._calibration_panel.on_reading(reading)
         if (
@@ -363,9 +368,11 @@ class MainWindowV2(QMainWindow):
 
     def _show_new_experiment_dialog(self) -> None:
         from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        dialog = NewExperimentDialog(self)
+        templates = []
+        if self._latest_experiment_status:
+            templates = self._latest_experiment_status.get("templates", [])
+        dialog = NewExperimentDialog(self, available_templates=templates)
         dialog.experiment_create_requested.connect(self._on_create_experiment)
         dialog.exec()
 

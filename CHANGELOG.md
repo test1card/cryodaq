@@ -22,6 +22,16 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.8.0.2 — ExperimentOverlay + NewExperimentDialog full rebuild.**
+  NewExperimentDialog: templates dropdown from backend, operator/sample/
+  cryostat autocomplete from QSettings, dynamic custom fields per
+  template, name auto-suggest, full legacy payload (template_id, sample,
+  cryostat, description, notes, custom_fields). ExperimentOverlay:
+  phase pills с past durations + current 2px STATUS_OK highlight,
+  prev/next navigation buttons, КАРТОЧКА column (editable sample/
+  описание/заметки/custom fields + Сохранить), ХРОНИКА column (last 50
+  log entries filtered by experiment, live updates), footer Завершить +
+  ⋯ menu с Прервать. Finalize saves card fields first (legacy parity).
 - **B.8.0.1 — ExperimentOverlay critical hotfix.** Phase transition
   controls (Назад / Перейти к / Вперёд) добавлены в overlay. Phase
   stepper (reuse PhaseStepper) показывает текущую фазу. Current phase
