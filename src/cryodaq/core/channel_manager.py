@@ -172,6 +172,22 @@ class ChannelManager:
             if info.get("visible", True)
         ]
 
+    def get_cold_channels(self) -> list[str]:
+        """Return list of channel IDs marked as cold (cryogenic).
+
+        Channels without an explicit ``is_cold`` field default to True
+        (sensible default for a cryogenic system).
+        """
+        return [
+            ch_id for ch_id, info in self._channels.items()
+            if info.get("is_cold", True)
+        ]
+
+    def get_visible_cold_channels(self) -> list[str]:
+        """Convenience: intersection of visible AND cold channels."""
+        cold = set(self.get_cold_channels())
+        return [ch for ch in self.get_all_visible() if ch in cold]
+
     def get_group(self, channel_id: str) -> str:
         """Получить группу канала (из channels.yaml)."""
         short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id

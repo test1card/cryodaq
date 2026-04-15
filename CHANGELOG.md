@@ -7,6 +7,43 @@
 
 ---
 
+## [Unreleased]
+
+### Добавлено
+
+- **Phase UI-1 v2 Block B.4** — Persistent context strip в
+  TopWatchBar. Четыре ключевых значения (давление, T мин, T макс
+  холодных каналов, мощность нагревателя) видны постоянно — даже
+  когда дашборд закрыт overlay-панелью. T мин и T макс рассчитываются
+  только по холодным каналам (новый флаг `is_cold` в channels.yaml),
+  чтобы корпусные датчики (вакуумный кожух, фланец, зеркала) не
+  загрязняли индикатор. Stale-индикация через 30 секунд.
+- **Phase UI-1 v2 Block B.3** — DynamicSensorGrid. Адаптивная сетка
+  ячеек датчиков заменяет placeholder в zone дашборда. Inline rename
+  по двойному клику, контекстное меню по правому клику, цветной
+  border по статусу канала, обновления через ChannelBufferStore +
+  push path от DashboardView. ChannelManager получил симметричный
+  off_change() для корректной отписки callback'ов.
+- **`ChannelManager.get_cold_channels()`** и
+  **`get_visible_cold_channels()`** — публичный API для запроса
+  cryogenic-classified каналов из конфигурации.
+- **Поле `is_cold`** в `config/channels.yaml` для всех 24 каналов.
+  Default: `true` (sensible для cryosystem).
+
+### Исправлено
+
+- **`engine.py:35`** — отсутствовал импорт `load_alarm_config`,
+  использовался на строке 969. Регрессия от `8070b2db`. Engine падал
+  с `NameError` при каждом запуске почти месяц, маскировалось циклом
+  перезапуска launcher.
+
+### Selected commits
+
+- `ae7d8d4` fix(engine): add missing load_alarm_config import
+- `c4396a8` ui(phase-1-v2): block B.3 — DynamicSensorGrid
+
+---
+
 ## [0.33.0] — 2026-04-14
 
 Первый tagged release. Hardened backend и Phase UI-1 v2 shell с dashboard

@@ -231,7 +231,12 @@ class MainWindowV2(QMainWindow):
 
         # Eager sinks
         self._overview_panel.on_reading(reading)
-        self._top_bar.on_reading(reading)
+        try:
+            self._top_bar.on_reading(reading)
+        except Exception:
+            logger.warning(
+                "TopWatchBar reading dispatch failed", exc_info=True
+            )
         self._alarm_panel.on_reading(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once

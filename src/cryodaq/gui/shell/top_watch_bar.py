@@ -8,11 +8,12 @@ docs/PHASE_UI1_V2_WIREFRAME.md section 3 — calibrate on lab PC later.
 """
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -86,6 +87,7 @@ class TopWatchBar(QWidget):
         self._alarm_count: int = 0
 
         self._build_ui()
+        self._build_persistent_context()
 
         # 1 Hz polling for zones 1, 2, 3
         self._fast_timer = QTimer(self)
@@ -104,6 +106,12 @@ class TopWatchBar(QWidget):
         self._slow_timer.setInterval(2000)
         self._slow_timer.timeout.connect(self._poll_alarms)
         self._slow_timer.start()
+
+        # B.4: 1 Hz stale check for persistent context strip
+        self._stale_timer = QTimer(self)
+        self._stale_timer.setInterval(1000)
+        self._stale_timer.timeout.connect(self._stale_check_tick)
+        self._stale_timer.start()
 
         # One in-flight worker per poll stream — skip tick if previous
         # request still running (Codex Finding 2, Block A.9).
@@ -150,14 +158,225 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._alarms_label)
 
     # ------------------------------------------------------------------
+    # B.4: Persistent context strip
+    # ------------------------------------------------------------------
+
+    def _build_persistent_context(self) -> None:
+        """Add 4-value persistent context strip to the watch bar."""
+        label_style = (
+            f"color: {theme.TEXT_MUTED}; "
+            f"font-size: 11px;"
+        )
+        value_style = (
+            f"color: {theme.TEXT_PRIMARY}; "
+            f"font-size: 12px; "
+            f"font-weight: 600; "
+            f"font-family: '{theme.FONT_MONO}', monospace;"
+        )
+
+        self._context_frame = QFrame(self)
+        self._context_frame.setObjectName("topWatchBarContext")
+        self._context_frame.setStyleSheet(
+            f"#topWatchBarContext {{ "
+            f"background-color: {theme.SURFACE_PANEL}; "
+            f"border-radius: {theme.RADIUS_SM}px; "
+            f"padding: 2px 8px; "
+            f"}}"
+        )
+        ctx = QHBoxLayout(self._context_frame)
+        ctx.setContentsMargins(8, 2, 8, 2)
+        ctx.setSpacing(theme.SPACE_3)
+
+        # Pressure
+        self._ctx_pressure_label = QLabel("\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435")  # Давление
+        self._ctx_pressure_label.setStyleSheet(label_style)
+        self._ctx_pressure_value = QLabel("\u2014")
+        self._ctx_pressure_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_pressure_label)
+        ctx.addWidget(self._ctx_pressure_value)
+
+        ctx.addWidget(self._make_separator())
+
+        # T_min
+        self._ctx_tmin_label = QLabel("\u0422 \u043c\u0438\u043d")  # Т мин
+        self._ctx_tmin_label.setStyleSheet(label_style)
+        self._ctx_tmin_value = QLabel("\u2014")
+        self._ctx_tmin_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_tmin_label)
+        ctx.addWidget(self._ctx_tmin_value)
+
+        ctx.addWidget(self._make_separator())
+
+        # T_max
+        self._ctx_tmax_label = QLabel("\u0422 \u043c\u0430\u043a\u0441")  # Т макс
+        self._ctx_tmax_label.setStyleSheet(label_style)
+        self._ctx_tmax_value = QLabel("\u2014")
+        self._ctx_tmax_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_tmax_label)
+        ctx.addWidget(self._ctx_tmax_value)
+
+        ctx.addWidget(self._make_separator())
+
+        # Heater
+        self._ctx_heater_label = QLabel("\u041d\u0430\u0433\u0440\u0435\u0432\u0430\u0442\u0435\u043b\u044c")  # Нагреватель
+        self._ctx_heater_label.setStyleSheet(label_style)
+        self._ctx_heater_value = QLabel("\u2014")
+        self._ctx_heater_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_heater_label)
+        ctx.addWidget(self._ctx_heater_value)
+
+        # Insert after exp_label (index 2), before time_window_echo (index 3)
+        self.layout().insertWidget(3, self._context_frame)
+
+        # Cold channel tracking
+        self._cold_channel_set: set[str] = set()
+        self._latest_cold_temps: dict[str, tuple[float, float]] = {}
+        self._latest_pressure: tuple[float, float] | None = None
+        self._latest_heater_power: tuple[float, float] | None = None
+
+        if self._channel_mgr is not None:
+            self._refresh_cold_set()
+            self._channel_mgr.on_change(self._refresh_cold_set)
+            mgr = self._channel_mgr
+            cb = self._refresh_cold_set
+            self.destroyed.connect(lambda: mgr.off_change(cb))
+
+    @staticmethod
+    def _make_separator() -> QFrame:
+        sep = QFrame()
+        sep.setFixedWidth(1)
+        sep.setFixedHeight(24)
+        sep.setStyleSheet(f"background-color: {theme.BORDER_SUBTLE};")
+        return sep
+
+    def _refresh_cold_set(self) -> None:
+        if self._channel_mgr is None:
+            self._cold_channel_set = set()
+            return
+        self._cold_channel_set = set(
+            self._channel_mgr.get_visible_cold_channels()
+        )
+        self._latest_cold_temps = {
+            ch: data
+            for ch, data in self._latest_cold_temps.items()
+            if ch in self._cold_channel_set
+        }
+        self._update_temp_display()
+
+    # ------------------------------------------------------------------
+    # Persistent context display updates
+    # ------------------------------------------------------------------
+
+    def _update_pressure_display(self) -> None:
+        if self._latest_pressure is None:
+            self._ctx_pressure_value.setText("\u2014")
+            return
+        ts, value = self._latest_pressure
+        age = time.time() - ts
+        if value <= 0:
+            text = "\u2014"
+        else:
+            text = f"{value:.2e} mbar"
+        if age > _STALE_TIMEOUT_S:
+            text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"  # (устар.)
+            self._ctx_pressure_value.setStyleSheet(
+                f"color: {theme.TEXT_MUTED};"
+            )
+        else:
+            self._ctx_pressure_value.setStyleSheet(
+                f"color: {theme.TEXT_PRIMARY}; "
+                f"font-size: 12px; font-weight: 600; "
+                f"font-family: '{theme.FONT_MONO}', monospace;"
+            )
+        self._ctx_pressure_value.setText(text)
+
+    def _update_temp_display(self) -> None:
+        if not self._latest_cold_temps:
+            self._ctx_tmin_value.setText("\u2014")
+            self._ctx_tmax_value.setText("\u2014")
+            return
+        now = time.time()
+        fresh = [
+            val for ch, (ts, val) in self._latest_cold_temps.items()
+            if now - ts <= _STALE_TIMEOUT_S
+        ]
+        if not fresh:
+            self._ctx_tmin_value.setText("\u2014 (\u0443\u0441\u0442\u0430\u0440.)")
+            self._ctx_tmax_value.setText("\u2014 (\u0443\u0441\u0442\u0430\u0440.)")
+            self._ctx_tmin_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            self._ctx_tmax_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            return
+        val_style = (
+            f"color: {theme.TEXT_PRIMARY}; "
+            f"font-size: 12px; font-weight: 600; "
+            f"font-family: '{theme.FONT_MONO}', monospace;"
+        )
+        self._ctx_tmin_value.setText(f"{min(fresh):.2f} K")
+        self._ctx_tmax_value.setText(f"{max(fresh):.2f} K")
+        self._ctx_tmin_value.setStyleSheet(val_style)
+        self._ctx_tmax_value.setStyleSheet(val_style)
+
+    def _update_heater_display(self) -> None:
+        if self._latest_heater_power is None:
+            self._ctx_heater_value.setText("\u2014")
+            return
+        ts, value = self._latest_heater_power
+        age = time.time() - ts
+        if value <= 1e-6:  # sub-microwatt treated as off
+            self._ctx_heater_value.setText("\u2014")
+            self._ctx_heater_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            return
+        if value < 0.001:
+            text = f"{value * 1e6:.0f} \u043c\u043a\u0412\u0442"  # мкВт
+        elif value < 1.0:
+            text = f"{value * 1000:.1f} \u043c\u0412\u0442"  # мВт
+        else:
+            text = f"{value:.2f} \u0412\u0442"  # Вт
+        if age > _STALE_TIMEOUT_S:
+            text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"
+            self._ctx_heater_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        else:
+            self._ctx_heater_value.setStyleSheet(
+                f"color: {theme.TEXT_PRIMARY}; "
+                f"font-size: 12px; font-weight: 600; "
+                f"font-family: '{theme.FONT_MONO}', monospace;"
+            )
+        self._ctx_heater_value.setText(text)
+
+    def _stale_check_tick(self) -> None:
+        """Re-run display updates to refresh stale markers."""
+        self._update_pressure_display()
+        self._update_temp_display()
+        self._update_heater_display()
+
+    # ------------------------------------------------------------------
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        """Update per-channel last-seen cache for zone 3."""
+        """Update per-channel last-seen cache and persistent context."""
         ch = reading.channel
-        if ch.startswith("Т") and reading.unit == "K":
+        value = reading.value
+
+        if ch.startswith("\u0422") and reading.unit == "K":
             self._channel_last_seen[ch] = (time.monotonic(), reading.status)
+            # B.4: cold channel temp tracking for persistent context
+            if isinstance(value, (int, float)) and not math.isnan(value):
+                short_id = ch.split(" ")[0]
+                if short_id in self._cold_channel_set:
+                    ts = reading.timestamp.timestamp()
+                    self._latest_cold_temps[short_id] = (ts, float(value))
+                    self._update_temp_display()
+        elif ch.endswith("/pressure"):
+            if isinstance(value, (int, float)) and not math.isnan(value):
+                ts = reading.timestamp.timestamp()
+                self._latest_pressure = (ts, float(value))
+                self._update_pressure_display()
+        elif ch.endswith("/smua/power"):
+            if isinstance(value, (int, float)) and not math.isnan(value):
+                ts = reading.timestamp.timestamp()
+                self._latest_heater_power = (ts, float(value))
+                self._update_heater_display()
 
     # ------------------------------------------------------------------
     # Zone refresh
@@ -292,6 +511,15 @@ class TopWatchBar(QWidget):
         else:
             self._engine_label.setText("● Engine: нет связи")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+
+    def closeEvent(self, event):  # noqa: ANN001
+        """Clean up ChannelManager subscription on close."""
+        if self._channel_mgr is not None:
+            try:
+                self._channel_mgr.off_change(self._refresh_cold_set)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def set_alarm_count(self, n: int) -> None:
         self._alarm_count = max(0, int(n))
