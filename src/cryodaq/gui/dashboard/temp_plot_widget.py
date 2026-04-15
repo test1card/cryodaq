@@ -199,3 +199,15 @@ class TempPlotWidget(QWidget):
         self._plot.getPlotItem().setLogMode(x=False, y=checked)
         self._log_button.setText("Log Y" if checked else "Lin Y")
         self._style_time_button(self._log_button, checked)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):  # noqa: ANN001
+        """Clean up ChannelManager subscription on widget close."""
+        try:
+            self._channel_mgr.off_change(self._on_channels_changed)
+        except Exception:
+            pass
+        super().closeEvent(event)

@@ -235,6 +235,17 @@ class ChannelManager:
         """Зарегистрировать callback для оповещения об изменениях."""
         self._callbacks.append(callback)
 
+    def off_change(self, callback: Any) -> None:
+        """Unregister a previously-registered change callback.
+
+        Symmetric to on_change. Idempotent: silently no-op if callback
+        was not registered.
+        """
+        try:
+            self._callbacks.remove(callback)
+        except ValueError:
+            pass
+
     def _notify(self) -> None:
         """Оповестить всех подписчиков об изменении."""
         for cb in self._callbacks:

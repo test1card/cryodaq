@@ -1,10 +1,13 @@
 """Phase UI-1 v2 dashboard — replaces legacy OverviewPanel.
 
 Five vertically stacked zones. B.2 fills tempPlotZone and
-pressurePlotZone with real pyqtgraph widgets. Other zones remain
-placeholder until B.3-B.6.
+pressurePlotZone with real pyqtgraph widgets. B.3 fills
+sensorGridZone with DynamicSensorGrid. Other zones remain
+placeholder until B.4-B.6.
 """
 from __future__ import annotations
+
+import logging
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
@@ -13,8 +16,11 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
 from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
+
+logger = logging.getLogger(__name__)
 
 # Zone definitions: (objectName, label_or_None, stretch)
 # label_or_None=None means the zone is filled by a real widget, not placeholder.
@@ -40,6 +46,7 @@ class DashboardView(QWidget):
         self._buffer_store = ChannelBufferStore()
         self._temp_plot: TempPlotWidget | None = None
         self._pressure_plot: PressurePlotWidget | None = None
+        self._sensor_grid: DynamicSensorGrid | None = None
         self._build_ui()
         self._wire_x_link()
         self._start_refresh_timer()
@@ -62,6 +69,24 @@ class DashboardView(QWidget):
                 zone = self._make_zone(obj_name, None)
                 self._pressure_plot = PressurePlotWidget(self._buffer_store)
                 zone.layout().addWidget(self._pressure_plot)
+            elif obj_name == "sensorGridZone":
+                zone = self._make_zone(obj_name, None)
+                self._sensor_grid = DynamicSensorGrid(
+                    self._channel_mgr, self._buffer_store, parent=self,
+                )
+                self._sensor_grid.rename_requested.connect(
+                    self._on_rename_requested
+                )
+                self._sensor_grid.hide_requested.connect(
+                    self._on_hide_requested
+                )
+                self._sensor_grid.show_on_plot_requested.connect(
+                    self._on_show_on_plot_requested
+                )
+                self._sensor_grid.history_requested.connect(
+                    self._on_history_requested
+                )
+                zone.layout().addWidget(self._sensor_grid)
             else:
                 zone = self._make_zone(obj_name, label_text)
             root.addWidget(zone, stretch=stretch)
@@ -104,13 +129,15 @@ class DashboardView(QWidget):
             self._temp_plot.refresh()
         if self._pressure_plot is not None:
             self._pressure_plot.refresh()
+        if self._sensor_grid is not None:
+            self._sensor_grid.refresh()
 
     # ------------------------------------------------------------------
     # Reading ingestion
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        """Route reading into buffer store. Plots refresh from buffer."""
+        """Route reading into buffer store and to grid cells."""
         channel = reading.channel
         value = reading.value
         if not isinstance(value, (int, float)):
@@ -120,5 +147,29 @@ class DashboardView(QWidget):
         if channel.startswith("\u0422"):  # cyrillic Т
             short_id = channel.split(" ")[0]
             self._buffer_store.append(short_id, timestamp_epoch, float(value))
+            if self._sensor_grid is not None:
+                self._sensor_grid.dispatch_reading(reading)
         elif channel.endswith("/pressure"):
             self._buffer_store.append(channel, timestamp_epoch, float(value))
+
+    # ------------------------------------------------------------------
+    # Sensor grid signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
+        """Operator renamed a channel via inline rename or context menu."""
+        self._channel_mgr.set_name(channel_id, new_name)
+        self._channel_mgr.save()
+
+    def _on_hide_requested(self, channel_id: str) -> None:
+        """Operator wants to hide a channel from the dashboard."""
+        self._channel_mgr.set_visible(channel_id, False)
+        self._channel_mgr.save()
+
+    def _on_show_on_plot_requested(self, channel_id: str) -> None:
+        """Stub: plot focus deferred to later block."""
+        logger.info("Show on plot requested: %s (stub)", channel_id)
+
+    def _on_history_requested(self, channel_id: str) -> None:
+        """Stub: history overlay deferred to later block."""
+        logger.info("History requested: %s (stub)", channel_id)
