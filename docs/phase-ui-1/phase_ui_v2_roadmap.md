@@ -281,6 +281,7 @@ Spread over realistic calendar: 4-6 weeks at current cadence (1-3 blocks per wee
 - **2026-04-15** B.8.0.2 commit `968e995` — feature parity ExperimentOverlay completed despite layout still being ugly. Layout fix deferred to Phase II.1.
 - **2026-04-15** Strategic shift to "build system once" approach after skill deep-dive identified composable patterns.
 - **2026-04-15** Vladimir validated all 7 pain points (P1-P7) and all 7 preserve features (K1-K7). All entries in context doc are real, not architect speculation.
+- **2026-04-16** Phase 0.1 — Legacy Inventory batch 1 completed. Tabs: Обзор (1729 LOC), Источник мощности (586 LOC), Аналитика (934 LOC). Reports at docs/legacy-inventory/. Total 3249 LOC inventoried. Key findings: (1) Overview almost entirely superseded by new dashboard — only ML prediction curve overlay unique. (2) Keithley functionally complete, rebuild is visual-only. (3) Analytics is LEAST covered by new surfaces — highest priority rebuild for Phase II.
 
 ---
 

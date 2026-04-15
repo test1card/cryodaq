@@ -21,9 +21,9 @@ constraint из §3 (что сохраняет). Никаких abstract "best p
 | Tab | Inventory status | Report path |
 |-----|------------------|-------------|
 | Эксперимент (ExperimentWorkspace) | ✓ DONE | `/tmp/legacy_experiment_workspace_inventory.md` |
-| Обзор (Overview) | ⏳ pending | `docs/legacy-inventory/overview.md` |
-| Источник мощности (Keithley) | ⏳ pending | `docs/legacy-inventory/keithley.md` |
-| Аналитика | ⏳ pending | `docs/legacy-inventory/analytics.md` |
+| Обзор (Overview) | ✓ DONE | `docs/legacy-inventory/overview.md` |
+| Источник мощности (Keithley) | ✓ DONE | `docs/legacy-inventory/keithley.md` |
+| Аналитика | ✓ DONE | `docs/legacy-inventory/analytics.md` |
 | Теплопроводность (Conductivity) | ⏳ pending | `docs/legacy-inventory/conductivity.md` |
 | Алармы | ⏳ pending | `docs/legacy-inventory/alarms.md` |
 | Служебный лог | ⏳ pending | `docs/legacy-inventory/operator_log.md` |
