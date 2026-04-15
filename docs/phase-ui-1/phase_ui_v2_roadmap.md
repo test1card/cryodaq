@@ -132,12 +132,20 @@ B.5.5 primitives (HeroReadout, EtaDisplay, MilestoneList) finally
 applied as designed.
 Solves: P6 plot co-location.
 Preserves: K5 plot zoom/pan.
+Additional scope (Phase 0 K7 decision): include "Detected phase" tile showing
+phase_detector output (`detected_phase` + `phase_confidence` from
+`analytics/phase_detector/*`). Tile uses `LiveTile` primitive (live indicator
+without pulse).
 Estimate: 1 medium block.
 
 #### Block II.2 — ArchiveOverlay
 Skill patterns: Drill-Down + Bento (experiment cards) + DataDense (details).
 Zero coverage in new UI. K2-critical.
-Preserves: K2 archive functionality. Global K6 File-menu exports need a separate migration decision.
+Preserves: K2 archive functionality. Per Phase 0 K6 decision: this overlay also hosts
+the 3 global export buttons (CSV / HDF5 / Excel) migrated from legacy MainWindow File menu.
+Each button exports current archive selection or active experiment data.
+Estimate impact: +1 small task within block (button wiring to existing
+`storage/csv_export.py`, `hdf5_export.py`, `xlsx_export.py`).
 Estimate: 1 medium block.
 
 #### Block II.3 — OperatorLog Overlay
@@ -169,6 +177,15 @@ Functionally complete in legacy for structured control; this is primarily
 visual modernization of per-channel and A+B control surfaces. A visible
 custom-command console was not found in current GUI code.
 Preserves: direct Keithley control (targets, limits, per-channel and A+B actions).
+Additional scope (Phase 0 K4 decision): include "Custom command" popup as NEW feature.
+Popup contents:
+- Catalog list of common Keithley TSP/SCPI commands (curated, ~10-20 entries with descriptions)
+- Free-text QLineEdit for arbitrary command input
+- Send button → `ZmqCommandWorker` with new `keithley_raw_command` payload (engine command
+  to be added; verify backend support before Phase II.6 starts)
+- Response display area (read-only `QPlainTextEdit`, scrollable, last N responses)
+- Accessible from a small "Команды..." button in KeithleyOverlay header
+This is NEW feature, not preserve. Estimate impact: +1 medium task within block.
 Estimate: 1 medium block.
 
 #### Block II.7 — CalibrationOverlay
@@ -196,6 +213,12 @@ Apply Phase I primitives to existing B.8.0.2 functional code.
 Functional logic preserved, visual rebuild only.
 Position deferred to last block of Phase II — primitives are mature
 by then, applied to most-iterated overlay.
+Additional scope (Phase 0 K7 decision): subtle highlight on suggested-next-phase pill
+in `PhaseStepper` when phase_detector confidence exceeds threshold (threshold TBD in spec).
+Visual: outline color shift on the pill matching the detected phase, no animation.
+Tooltip explains "Detected phase based on temperature/pressure trends".
+Source data: `analytics/phase_detector/detected_phase` +
+`analytics/phase_detector/phase_confidence`.
 Estimate: 1 medium block.
 
 **Phase II deliverable:**
@@ -287,6 +310,11 @@ Phase 0 status: COMPLETE.
 - **2026-04-16** Phase 0 Codex audit completed. Verdict: FIX FIRST. 7 HIGH + 9 MEDIUM issues. Report: docs/phase-ui-1/phase_0_audit_report.md.
 - **2026-04-16** Phase II reordered: HIGH (Analytics/Archive/OperatorLog) first, MEDIUM (Alarm/Conductivity/Keithley/Calibration) middle, LOW (Instruments+SensorDiag combined) last. ExperimentOverlay v3 visual rebuild moved to II.9 (after primitives mature).
 - **2026-04-16** Preserve features verified. K7 = EXISTS+ENGINE-ONLY (root plugin present, no GUI consumer found). K6 HDF5/Excel = EXISTS+LOCATED in legacy File menu. K4 custom commands = NOT FOUND IN GUI. AlarmOverlay (II.4) demoted from HIGH to MEDIUM because badge already routes into existing AlarmPanel. Calibration overlay (II.7) scope clarified: export/apply buttons exist but are unwired, so real work includes connecting them, not only visual wrap.
+- **2026-04-16** Phase 0 product decisions applied:
+  - K4: NEW feature popup (custom-command catalog + input + send + response) added to Phase II.6 KeithleyOverlay scope
+  - K7: phase detector hints wired to Phase II.1 Analytics overlay (tile) + Phase II.9 ExperimentOverlay v3 (suggested-next-phase pill highlight)
+  - K6: global CSV/HDF5/Excel exports migrated to Phase II.2 Archive overlay buttons; legacy File menu can be removed in Phase III.3 cleanup
+  - Bell emoji removed from operator-facing GUI text (UX polish)
 
 ---
 
