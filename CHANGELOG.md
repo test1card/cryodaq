@@ -22,6 +22,11 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.5.7.1 — TopWatchBar separator normalization.** Унифицирован
+  separator mechanism: zone VLine wrappers с consistent spacing
+  (contentsMargins), context strip QFrame separators заменены на
+  middle dot `·` text labels. Layout spacing = 0, all gaps via
+  separator wrapper margins.
 - **B.5.7 — Visual polish pass on dashboard.** Plot Y-axis alignment
   (fixed 60px left axis width), pressure plot height ratio tuned (18
   vs 50 stretch), TopWatchBar zone separators (VLines), PhaseStepper

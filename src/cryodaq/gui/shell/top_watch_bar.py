@@ -122,7 +122,7 @@ class TopWatchBar(QWidget):
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
         layout.setContentsMargins(theme.SPACE_4, theme.SPACE_2, theme.SPACE_4, theme.SPACE_2)
-        layout.setSpacing(theme.SPACE_4)
+        layout.setSpacing(0)  # B.5.7.1: all gaps via _make_zone_sep wrapper
 
         # Zone 1: engine
         self._engine_label = QLabel("● Engine: —")
@@ -173,12 +173,18 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_zone_sep() -> QFrame:
+    def _make_zone_sep() -> QWidget:
+        """Zone separator: VLine in wrapper for consistent spacing."""
+        container = QWidget()
+        lay = QHBoxLayout(container)
+        lay.setContentsMargins(theme.SPACE_2, 0, theme.SPACE_2, 0)
+        lay.setSpacing(0)
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFixedHeight(20)
         sep.setStyleSheet(f"color: {theme.BORDER}; max-width: 1px;")
-        return sep
+        lay.addWidget(sep)
+        return container
 
     def _set_experiment_text(self, full_text: str) -> None:
         """Set experiment label with elide + tooltip for long names."""
@@ -223,7 +229,7 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._ctx_pressure_label)
         ctx.addWidget(self._ctx_pressure_value)
 
-        ctx.addWidget(self._make_separator())
+        ctx.addWidget(self._make_ctx_dot())
 
         # T_min
         self._ctx_tmin_label = QLabel("\u0422 \u043c\u0438\u043d")  # Т мин
@@ -233,7 +239,7 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._ctx_tmin_label)
         ctx.addWidget(self._ctx_tmin_value)
 
-        ctx.addWidget(self._make_separator())
+        ctx.addWidget(self._make_ctx_dot())
 
         # T_max
         self._ctx_tmax_label = QLabel("\u0422 \u043c\u0430\u043a\u0441")  # Т макс
@@ -243,7 +249,7 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._ctx_tmax_label)
         ctx.addWidget(self._ctx_tmax_value)
 
-        ctx.addWidget(self._make_separator())
+        ctx.addWidget(self._make_ctx_dot())
 
         # Heater
         self._ctx_heater_label = QLabel("\u041d\u0430\u0433\u0440\u0435\u0432\u0430\u0442\u0435\u043b\u044c")  # Нагреватель
@@ -253,8 +259,12 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._ctx_heater_label)
         ctx.addWidget(self._ctx_heater_value)
 
-        # Insert after exp_label (index 2), before time_window_echo (index 3)
-        self.layout().insertWidget(3, self._context_frame)
+        # Insert after exp_label, before mode_badge
+        # exp_label is at index 2, mode_badge at index 3
+        main = self.layout()
+        main.insertWidget(3, self._make_zone_sep())  # sep before context
+        main.insertWidget(4, self._context_frame)
+        main.insertWidget(5, self._make_zone_sep())  # sep after context
 
         # Cold channel tracking
         self._cold_channel_set: set[str] = set()
@@ -270,12 +280,13 @@ class TopWatchBar(QWidget):
             self.destroyed.connect(lambda: mgr.off_change(cb))
 
     @staticmethod
-    def _make_separator() -> QFrame:
-        sep = QFrame()
-        sep.setFixedWidth(1)
-        sep.setFixedHeight(24)
-        sep.setStyleSheet(f"background-color: {theme.BORDER_SUBTLE};")
-        return sep
+    def _make_ctx_dot() -> QLabel:
+        """Middle dot separator for items within persistent context strip."""
+        dot = QLabel(" \u00b7 ")  # · middle dot
+        dot.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; font-size: 11px;"
+        )
+        return dot
 
     def _refresh_cold_set(self) -> None:
         if self._channel_mgr is None:

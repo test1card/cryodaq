@@ -486,6 +486,12 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L15: Visual debt sometimes = implementation drift across blocks
+  using different mechanisms for same job. B.4 used QFrame rectangles
+  for context separators; B.5.7 added VLine widgets for zone
+  separators. Two mechanisms = inconsistent visual rhythm. Fix: one
+  mechanism per surface. B.5.7.1 consolidated to VLine wrapper +
+  middle dot.
 - L13: Visual debt accumulates per block and never gets paid by
   itself. After 2-3 UI blocks, run explicit polish pass enforcing
   skill rules. B.5.7 closed 6 issues accumulated over B.5.5+B.5.6.
