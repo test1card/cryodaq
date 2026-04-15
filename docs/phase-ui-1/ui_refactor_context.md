@@ -24,9 +24,9 @@ constraint из §3 (что сохраняет). Никаких abstract "best p
 | Обзор (Overview) | ✓ DONE | `docs/legacy-inventory/overview.md` |
 | Источник мощности (Keithley) | ✓ DONE | `docs/legacy-inventory/keithley.md` |
 | Аналитика | ✓ DONE | `docs/legacy-inventory/analytics.md` |
-| Теплопроводность (Conductivity) | ⏳ pending | `docs/legacy-inventory/conductivity.md` |
-| Алармы | ⏳ pending | `docs/legacy-inventory/alarms.md` |
-| Служебный лог | ⏳ pending | `docs/legacy-inventory/operator_log.md` |
+| Теплопроводность (Conductivity) | ✓ DONE | `docs/legacy-inventory/conductivity.md` |
+| Алармы | ✓ DONE | `docs/legacy-inventory/alarms.md` |
+| Служебный лог | ✓ DONE | `docs/legacy-inventory/operator_log.md` |
 | Архив | ⏳ pending | `docs/legacy-inventory/archive.md` |
 | Калибровка | ⏳ pending | `docs/legacy-inventory/calibration.md` |
 | Приборы | ⏳ pending | `docs/legacy-inventory/instruments.md` |
