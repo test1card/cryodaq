@@ -230,10 +230,16 @@ class MainWindowV2(QMainWindow):
         if name == "experiment" and hasattr(widget, "closed"):
             widget.closed.connect(lambda: self._on_tool_clicked("home"))
             widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
+            # B.8.0.1: overlay handles phase transitions via own ZMQ calls
             # Populate with latest state
             if self._latest_experiment_status:
+                exp = self._latest_experiment_status.get("active_experiment")
+                if exp is not None:
+                    exp = dict(exp)
+                    exp["current_phase"] = self._latest_experiment_status.get("current_phase")
+                    exp["app_mode"] = self._latest_experiment_status.get("app_mode")
                 widget.set_experiment(
-                    self._latest_experiment_status.get("active_experiment"),
+                    exp,
                     self._latest_experiment_status.get("phases", []),
                 )
 
@@ -336,6 +342,11 @@ class MainWindowV2(QMainWindow):
         # Forward to overlay if it exists and is visible
         if self._experiment_overlay is not None:
             exp = status.get("active_experiment")
+            if exp is not None:
+                # Inject top-level fields into experiment dict for overlay
+                exp = dict(exp)
+                exp["current_phase"] = status.get("current_phase")
+                exp["app_mode"] = status.get("app_mode")
             phases = status.get("phases", [])
             self._experiment_overlay.set_experiment(exp, phases)
 

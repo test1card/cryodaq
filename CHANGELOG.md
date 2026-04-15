@@ -22,6 +22,12 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.8.0.1 — ExperimentOverlay critical hotfix.** Phase transition
+  controls (Назад / Перейти к / Вперёд) добавлены в overlay. Phase
+  stepper (reuse PhaseStepper) показывает текущую фазу. Current phase
+  indicator в header info line. Status forwarding injects current_phase
+  и app_mode в experiment dict для overlay. Operators can now advance
+  phase, go back, jump to any phase from overlay.
 - **Phase UI-1 v2 Block B.8 — ExperimentWorkspace rebuild as overlay.**
   NewExperimentDialog (modal) с полями name, operator, template,
   description, target_T_cold, tags + validation. ExperimentOverlay

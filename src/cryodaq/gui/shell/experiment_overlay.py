@@ -22,9 +22,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.phase_labels import PHASE_LABELS_RU, label_for
+from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER, label_for
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_content.milestone_list import MilestoneList
+from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class ExperimentOverlay(QWidget):
 
     experiment_finalized = Signal()
     experiment_updated = Signal()
+    phase_transition_requested = Signal(str)  # B.8.0.1: advance phase
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +47,7 @@ class ExperimentOverlay(QWidget):
         self._is_editing_name = False
         self._finalize_worker = None
         self._update_worker = None
+        self._phase_worker = None
 
         self._build_ui()
 
@@ -121,6 +124,56 @@ class ExperimentOverlay(QWidget):
         self._milestone_list = MilestoneList()
         root.addWidget(self._milestone_list)
 
+        # B.8.0.1: Phase transition controls
+        phase_controls_header = QLabel(
+            "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0444\u0430\u0437\u043e\u0439"
+        )  # Управление фазой
+        phase_controls_header.setStyleSheet(
+            f"color: {theme.FOREGROUND}; "
+            f"font-family: '{theme.FONT_BODY}'; "
+            f"font-size: {theme.FONT_SIZE_LG}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        root.addWidget(phase_controls_header)
+
+        self._stepper = PhaseStepper(self)
+        root.addWidget(self._stepper)
+
+        phase_btns = QHBoxLayout()
+        phase_btns.setSpacing(theme.SPACE_2)
+
+        self._phase_back_btn = QPushButton(
+            "\u2190 \u041d\u0430\u0437\u0430\u0434"  # ← Назад
+        )
+        self._phase_back_btn.setObjectName("expPhaseBackBtn")
+        self._phase_back_btn.setFixedHeight(28)
+        self._phase_back_btn.clicked.connect(self._on_phase_back)
+        phase_btns.addWidget(self._phase_back_btn)
+
+        from PySide6.QtWidgets import QComboBox
+
+        self._phase_jump = QComboBox()
+        self._phase_jump.setObjectName("expPhaseJump")
+        self._phase_jump.setFixedHeight(28)
+        self._phase_jump.addItem(
+            "\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a...", ""
+        )
+        for p in PHASE_ORDER:
+            self._phase_jump.addItem(PHASE_LABELS_RU[p], p)
+        self._phase_jump.currentIndexChanged.connect(self._on_phase_jump)
+        phase_btns.addWidget(self._phase_jump)
+
+        self._phase_fwd_btn = QPushButton(
+            "\u0412\u043f\u0435\u0440\u0451\u0434 \u2192"  # Вперёд →
+        )
+        self._phase_fwd_btn.setObjectName("expPhaseFwdBtn")
+        self._phase_fwd_btn.setFixedHeight(28)
+        self._phase_fwd_btn.clicked.connect(self._on_phase_fwd)
+        phase_btns.addWidget(self._phase_fwd_btn)
+
+        phase_btns.addStretch()
+        root.addLayout(phase_btns)
+
         root.addStretch()
 
         # Actions
@@ -178,7 +231,10 @@ class ExperimentOverlay(QWidget):
             )
             self._info_label.setText("")
             self._milestone_list.set_milestones([])
+            self._stepper.set_current_phase(None)
             self._finalize_btn.setEnabled(False)
+            self._phase_back_btn.setEnabled(False)
+            self._phase_fwd_btn.setEnabled(False)
             return
 
         exp = self._experiment
@@ -204,6 +260,21 @@ class ExperimentOverlay(QWidget):
         if mode_text:
             parts.append(mode_text)
         self._info_label.setText(" \u00b7 ".join(parts))
+
+        # Phase stepper + controls
+        current_phase = exp.get("current_phase")
+        self._stepper.set_current_phase(current_phase)
+        if current_phase:
+            try:
+                idx = PHASE_ORDER.index(current_phase)
+                self._phase_back_btn.setEnabled(idx > 0)
+                self._phase_fwd_btn.setEnabled(idx < len(PHASE_ORDER) - 1)
+            except ValueError:
+                self._phase_back_btn.setEnabled(False)
+                self._phase_fwd_btn.setEnabled(False)
+        else:
+            self._phase_back_btn.setEnabled(False)
+            self._phase_fwd_btn.setEnabled(True)  # can advance to first phase
 
         # Milestones
         milestones = []
@@ -313,6 +384,57 @@ class ExperimentOverlay(QWidget):
             logger.warning("experiment_update failed: %s", result.get("error"))
         else:
             self.experiment_updated.emit()
+
+    # ------------------------------------------------------------------
+    # Phase transitions (B.8.0.1)
+    # ------------------------------------------------------------------
+
+    def _on_phase_back(self) -> None:
+        phase = self._experiment.get("current_phase") if self._experiment else None
+        if phase is None:
+            return
+        try:
+            idx = PHASE_ORDER.index(phase)
+            if idx > 0:
+                self._send_advance_phase(PHASE_ORDER[idx - 1])
+        except ValueError:
+            pass
+
+    def _on_phase_fwd(self) -> None:
+        phase = self._experiment.get("current_phase") if self._experiment else None
+        if phase is None:
+            return
+        try:
+            idx = PHASE_ORDER.index(phase)
+            if idx < len(PHASE_ORDER) - 1:
+                self._send_advance_phase(PHASE_ORDER[idx + 1])
+        except ValueError:
+            pass
+
+    def _on_phase_jump(self, combo_idx: int) -> None:
+        if combo_idx <= 0:
+            return
+        target = self._phase_jump.itemData(combo_idx)
+        current = self._experiment.get("current_phase") if self._experiment else None
+        if target and target != current:
+            self._send_advance_phase(target)
+        self._phase_jump.blockSignals(True)
+        self._phase_jump.setCurrentIndex(0)
+        self._phase_jump.blockSignals(False)
+
+    def _send_advance_phase(self, target_phase: str) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._phase_worker = ZmqCommandWorker(
+            {"cmd": "experiment_advance_phase", "phase": target_phase},
+            parent=self,
+        )
+        self._phase_worker.finished.connect(self._on_phase_advance_result)
+        self._phase_worker.start()
+
+    def _on_phase_advance_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            logger.warning("advance_phase failed: %s", result.get("error"))
 
     # ------------------------------------------------------------------
     # Finalize
