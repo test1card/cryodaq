@@ -52,6 +52,12 @@ def _load_bundled_fonts() -> None:
         "JetBrainsMono-Regular.ttf",
         "JetBrainsMono-Medium.ttf",
         "JetBrainsMono-SemiBold.ttf",
+        "FiraCode-Regular.ttf",
+        "FiraCode-Medium.ttf",
+        "FiraCode-SemiBold.ttf",
+        "FiraSans-Regular.ttf",
+        "FiraSans-Medium.ttf",
+        "FiraSans-SemiBold.ttf",
     ]
 
     loaded = 0

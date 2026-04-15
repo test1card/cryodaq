@@ -11,6 +11,13 @@
 
 ### Добавлено
 
+- **Phase UI-1 v2 Block B.4.5** — Adoption design system из UI UX Pro
+  Max skill v2.5.0 (MIT, Next Level Builder). Гибрид Real-Time
+  Monitoring + Data-Dense Dashboard. Палитра Smart Home/IoT Dashboard
+  расширенная пятью status-тирами. Шрифты Fira Code (display, цифры)
+  и Fira Sans (prose, меню) заменяют Inter и JetBrains Mono. 8px grid
+  spacing, 4px sharp radius. Backwards-compatible alias'ы в theme.py.
+  Документация в docs/design-system/MASTER.md и FINDINGS.md.
 - **Phase UI-1 v2 Block B.4** — Persistent context strip в
   TopWatchBar. Четыре ключевых значения (давление, T мин, T макс
   холодных каналов, мощность нагревателя) видны постоянно — даже
@@ -36,6 +43,19 @@
   использовался на строке 969. Регрессия от `8070b2db`. Engine падал
   с `NameError` при каждом запуске почти месяц, маскировалось циклом
   перезапуска launcher.
+
+### Изменено
+
+- **Шрифты** — Inter заменён на Fira Sans, JetBrains Mono заменён на
+  Fira Code. Старые файлы остаются в `resources/fonts/` до B.7 cleanup.
+- **theme.py** — полностью переработан под новые design tokens.
+  Backwards-compatible alias'ы сохранены для постепенной миграции.
+
+### Adopted from
+
+- **UI UX Pro Max skill** v2.5.0 — design tokens, typography pairings,
+  UX guidelines. MIT licensed by Next Level Builder.
+  https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
 
 ### Selected commits
 

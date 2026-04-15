@@ -1,247 +1,273 @@
-"""Centralized visual theme for CryoDAQ GUI.
+"""CryoDAQ design system tokens.
 
-This module is the single source of truth for all visual constants in the
-GUI: colors, typography, spacing, radius, elevation, plot styling. All
-widget code MUST reference tokens from this module rather than hardcoding
-hex values, pixel sizes, or font names.
+Adopted from UI UX Pro Max skill v2.5.0 (MIT, Next Level Builder).
+Source: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
+
+Style direction: hybrid Real-Time Monitoring + Data-Dense Dashboard
+Palette base: Smart Home/IoT Dashboard (extended with status tiers)
+Typography: Dashboard Data pairing (Fira Code + Fira Sans)
+
+Full design system reference: docs/design-system/MASTER.md
+Findings and rationale: docs/design-system/FINDINGS.md
 
 IMPORTANT: This module MUST be imported BEFORE any other module that creates
 pyqtgraph PlotWidget or GraphicsLayoutWidget instances. The pyqtgraph
 setConfigOption calls at the end of this module take effect at module load
 time and apply only to widgets created AFTER this module is imported.
-
-The canonical import location is the very top of cryodaq.gui.app, before
-any other cryodaq.gui submodule import. See app.py for the import order
-contract.
-
-Source of truth: docs/DESIGN_SYSTEM.md v0.3. Every value here corresponds
-to a documented token in the design system. Changes to values must also
-update the design system document.
-
-Pixel values marked [calibrate] are first-pass defaults that will be tuned
-on the real laboratory Linux PC during Phase UI-1 Block 8 calibration.
 """
 from __future__ import annotations
 
 import pyqtgraph as pg
 
-# ═══════════════════════════════════════════════════════════════════════════
-# REFERENCE TOKENS — raw values, referenced by semantic tokens below
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# COLORS — Base palette (Smart Home/IoT Dashboard)
+# =============================================================================
 
-# ─── Neutral scale — warm stone (12 steps) ─────────────────────────────────
-# Warm: R slightly greater than G and B. See D-021 in design system.
-STONE_0    = "#0a0a0c"   # pure base, deeper than typical dark
-STONE_50   = "#0f1014"   # primary surface (window background)
-STONE_100  = "#14151a"   # raised surface (panels, plot containers)
-STONE_150  = "#191b21"   # elevated surface (cards inside panels)
-STONE_200  = "#1f2128"   # modal/popup base
-STONE_300  = "#292c34"   # subtle borders, separators
-STONE_400  = "#3a3e48"   # hard borders, disabled outlines
-STONE_500  = "#555a66"   # disabled text, very muted icons
-STONE_600  = "#767c88"   # muted text (units, hints, secondary labels)
-STONE_700  = "#9aa0ac"   # secondary text (body, descriptions)
-STONE_800  = "#c8ccd4"   # primary text (values, labels in cards)
-STONE_900  = "#e8eaf0"   # high-contrast text (large numbers, headlines)
-STONE_1000 = "#f7f8fb"   # pure highlight (rare, hover-on-text only)
+PRIMARY = "#1E293B"
+ON_PRIMARY = "#FFFFFF"
+SECONDARY = "#334155"
+ON_SECONDARY = "#FFFFFF"
+ACCENT = "#22C55E"
+ON_ACCENT = "#0F172A"
+BACKGROUND = "#0F172A"
+FOREGROUND = "#F8FAFC"
+CARD = "#1B2336"
+CARD_FOREGROUND = "#F8FAFC"
+MUTED = "#272F42"
+MUTED_FOREGROUND = "#94A3B8"
+BORDER = "#475569"
+DESTRUCTIVE = "#EF4444"
+ON_DESTRUCTIVE = "#FFFFFF"
+RING = "#1E293B"
 
-# ─── Accent — cool indigo (warm base + cool accent contrast) ───────────────
-# See D-002 in design system.
-ACCENT_300 = "#6470d9"   # muted indigo (idle, inactive states)
-ACCENT_400 = "#7c8cff"   # primary indigo — DEFAULT
-ACCENT_500 = "#95a3ff"   # bright indigo (hover, active press)
-ACCENT_600 = "#b8c0ff"   # pale indigo (focus ring glow at 30% opacity)
+# =============================================================================
+# COLORS — Status tiers (CryoDAQ cryogenic semantics)
+# =============================================================================
 
-# ─── Semantic status palette ───────────────────────────────────────────────
-# Used ONLY for state indication, never for UI chrome, never decoratively.
-# See D-003, D-018 in design system.
-STATUS_FAULT   = "#ff3344"   # red — serious fault, immediate reaction needed
-STATUS_WARNING = "#ff9d3f"   # orange — warning, attention required
-STATUS_CAUTION = "#f5c542"   # yellow — attention without urgency
-STATUS_OK      = "#4ade80"   # green — normal operation
-STATUS_INFO    = "#60a5fa"   # blue — informational, neutral state
-STATUS_STALE   = "#6b7280"   # gray — stale data, not current
+STATUS_OK = "#22C55E"
+STATUS_WARNING = "#F59E0B"
+STATUS_CAUTION = "#FB923C"
+STATUS_FAULT = "#EF4444"
+STATUS_INFO = "#38BDF8"
+STATUS_STALE = "#64748B"
+COLD_HIGHLIGHT = "#38BDF8"
 
-# ─── Plot line palette ─────────────────────────────────────────────────────
-# 8 colors, cycled for multi-line plots. Separate from semantic palette
-# to avoid cognitive conflict. See D-005 in design system.
+# =============================================================================
+# COLORS — Plot line palette
+# =============================================================================
+
 PLOT_LINE_PALETTE = [
-    "#6cc4f5",  # 0: sky blue
-    "#c490e0",  # 1: soft violet
-    "#80deea",  # 2: pale teal
-    "#a3e635",  # 3: lime
-    "#ff8a80",  # 4: pale coral
-    "#ffd866",  # 5: pale yellow
-    "#f48fb1",  # 6: pale pink
-    "#b8c0ff",  # 7: pale indigo
+    "#38BDF8",  # sky blue
+    "#A78BFA",  # soft violet
+    "#34D399",  # teal
+    "#A3E635",  # lime
+    "#FB923C",  # coral
+    "#FBBF24",  # yellow
+    "#F472B6",  # pink
+    "#818CF8",  # indigo
 ]
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SEMANTIC TOKENS — mapped from reference, used directly by widgets
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# COLORS — Quantity coding (V/I/R/P electronics convention)
+# =============================================================================
 
-# ─── Surface tokens ────────────────────────────────────────────────────────
-SURFACE_WINDOW   = STONE_50    # main window background
-SURFACE_PANEL    = STONE_100   # tab content panels
-SURFACE_CARD     = STONE_150   # sensor cards, info tiles inside panels
-SURFACE_ELEVATED = STONE_200   # modals, popups, dropdowns
-SURFACE_SUNKEN   = STONE_0     # plot containers, "deep" recess
+QUANTITY_VOLTAGE = "#38BDF8"     # sky blue
+QUANTITY_CURRENT = STATUS_OK    # green
+QUANTITY_RESISTANCE = STATUS_WARNING  # orange
+QUANTITY_POWER = "#EF4444"      # red
 
-# Overlay uses rgba for transparency (60% opacity of STONE_0)
-SURFACE_OVERLAY_RGBA = "rgba(10, 10, 12, 0.6)"
-
-# ─── Border tokens ─────────────────────────────────────────────────────────
-BORDER_SUBTLE = STONE_300    # decorative dividers, card outlines
-BORDER_STRONG = STONE_400    # actionable borders (input fields, buttons)
-BORDER_FOCUS  = ACCENT_400   # focus ring (1.5px outset)
-
-# ─── Text tokens ───────────────────────────────────────────────────────────
-TEXT_PRIMARY   = STONE_900       # main labels, large numbers
-TEXT_SECONDARY = STONE_800       # body text
-TEXT_MUTED     = STONE_700       # units (К, mbar), descriptions
-TEXT_DISABLED  = STONE_500       # disabled controls, "no data"
-TEXT_INVERSE   = STONE_50        # text on accent buttons
-
-# Semantic text colors — for status indication only
-TEXT_FAULT   = STATUS_FAULT      # fault values
-TEXT_OK      = STATUS_OK         # confirmed-safe values
-TEXT_INFO    = STATUS_INFO       # informational values
-TEXT_WARNING = STATUS_WARNING    # warning values
-TEXT_CAUTION = STATUS_CAUTION    # caution values
-TEXT_ACCENT  = ACCENT_400        # links, primary action labels
-
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # TYPOGRAPHY
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ─── Font families ─────────────────────────────────────────────────────────
-# These are loaded via QFontDatabase in gui/app.py at startup from bundled
-# .ttf files in gui/resources/fonts/. See D-001.
-FONT_UI   = "Inter"             # all UI text
-FONT_MONO = "JetBrains Mono"    # numeric values, timestamps, logs
+FONT_DISPLAY = "Fira Code"
+FONT_BODY = "Fira Sans"
+FONT_MONO = "Fira Code"
 
-# ─── Type scale — modular ratio 1.2 ────────────────────────────────────────
-# 6 steps (plus 2 mono variants). See D-007 in design system.
-# Format: (size_px, line_height_px, weight)
-# Pixel values are [calibrate on lab PC] — first-pass defaults.
+# Type scale
+FONT_SIZE_XS = 11
+FONT_SIZE_SM = 12
+FONT_SIZE_BASE = 14
+FONT_SIZE_LG = 16
+FONT_SIZE_XL = 20
+FONT_SIZE_2XL = 28
+FONT_SIZE_3XL = 40
 
-# Display — hero readouts (T11, T12 big numbers)
-FONT_DISPLAY_SIZE   = 32
-FONT_DISPLAY_HEIGHT = 40
-FONT_DISPLAY_WEIGHT = 600
+# Weights
+FONT_WEIGHT_REGULAR = 400
+FONT_WEIGHT_MEDIUM = 500
+FONT_WEIGHT_SEMIBOLD = 600
+FONT_WEIGHT_BOLD = 700
 
-# Title — tab titles, modal headers
-FONT_TITLE_SIZE   = 22
-FONT_TITLE_HEIGHT = 28
-FONT_TITLE_WEIGHT = 600
+# =============================================================================
+# SPACING — 8px grid rhythm
+# =============================================================================
 
-# Heading — panel headers, group headers (KRIOSTAT, KOMPRESSOR)
-FONT_HEADING_SIZE   = 18
-FONT_HEADING_HEIGHT = 24
-FONT_HEADING_WEIGHT = 600
+SPACE_0 = 0
+SPACE_1 = 4
+SPACE_2 = 8
+SPACE_3 = 12
+SPACE_4 = 16
+SPACE_5 = 24
+SPACE_6 = 32
 
-# Body — primary UI text, labels, buttons
-FONT_BODY_SIZE   = 14
-FONT_BODY_HEIGHT = 20
-FONT_BODY_WEIGHT = 400
+# =============================================================================
+# LAYOUT
+# =============================================================================
 
-# Label — units, hints, metadata, tab labels
-FONT_LABEL_SIZE   = 12
-FONT_LABEL_HEIGHT = 16
-FONT_LABEL_WEIGHT = 500
+HEADER_HEIGHT = 56
+TOOL_RAIL_WIDTH = 56
+BOTTOM_BAR_HEIGHT = 28
+ROW_HEIGHT = 36
+CARD_PADDING = 12
+GRID_GAP = 8
 
-# Mono value — JetBrains Mono for sensor values (most common mono)
-FONT_MONO_VALUE_SIZE   = 15
-FONT_MONO_VALUE_HEIGHT = 20
-FONT_MONO_VALUE_WEIGHT = 500
+# =============================================================================
+# RADIUS
+# =============================================================================
 
-# Mono small — JetBrains Mono for timestamps, log entries
-FONT_MONO_SMALL_SIZE   = 12
-FONT_MONO_SMALL_HEIGHT = 16
-FONT_MONO_SMALL_WEIGHT = 500
+RADIUS_NONE = 0
+RADIUS_SM = 4
+RADIUS_MD = 6
+RADIUS_LG = 8
+RADIUS_FULL = 9999
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SPACING SCALE — 6 steps, base unit 4px
-# See D-022 in design system. Values are [calibrate on lab PC].
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# MOTION
+# =============================================================================
 
-SPACE_0 = 0     # no gap
-SPACE_1 = 4     # intra-element (icon <-> label)
-SPACE_2 = 8     # tight (label <-> value, inside small components)
-SPACE_3 = 12    # cosy (within a card, between related rows)
-SPACE_4 = 16    # standard (between cards, between sections)
-SPACE_5 = 24    # section separator within a tab
-SPACE_6 = 32    # major section break, modal padding
+TRANSITION_FAST_MS = 150
+TRANSITION_BASE_MS = 200
+TRANSITION_SLOW_MS = 300
 
-# ═══════════════════════════════════════════════════════════════════════════
-# RADIUS SCALE — 3 steps. See D-023.
-# ═══════════════════════════════════════════════════════════════════════════
-
-RADIUS_SM = 3   # inputs, small buttons, status pills
-RADIUS_MD = 5   # cards, panels, primary buttons
-RADIUS_LG = 6   # modals, large containers
-
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # PLOT TOKENS
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-PLOT_BG          = STONE_0         # plot background, deeper than panel
-PLOT_FG          = STONE_700       # axes, ticks (foreground)
-PLOT_GRID_COLOR  = STONE_300       # gridlines
-PLOT_GRID_ALPHA  = 0.35            # gridlines opacity
-PLOT_LABEL_COLOR = STONE_700       # axis labels
-PLOT_TICK_COLOR  = STONE_800       # tick numbers
-PLOT_LINE_WIDTH  = 1.5             # default line width
-PLOT_LINE_WIDTH_HIGHLIGHTED = 2.5  # selected/highlighted line
+PLOT_BG = BACKGROUND
+PLOT_FG = MUTED_FOREGROUND
+PLOT_GRID_COLOR = BORDER
+PLOT_GRID_ALPHA = 0.35
+PLOT_LABEL_COLOR = MUTED_FOREGROUND
+PLOT_TICK_COLOR = FOREGROUND
+PLOT_LINE_WIDTH = 1.5
+PLOT_LINE_WIDTH_HIGHLIGHTED = 2.5
+PLOT_REGION_FAULT_ALPHA = 0.12
+PLOT_REGION_WARN_ALPHA = 0.10
 
-# Plot region overlays (with alpha)
-PLOT_REGION_FAULT_ALPHA = 0.12     # fault region overlay
-PLOT_REGION_WARN_ALPHA  = 0.10     # warning region overlay
+# =============================================================================
+# QDARKTHEME CONFIGURATION
+# =============================================================================
 
-# ═══════════════════════════════════════════════════════════════════════════
-# QUANTITY TOKENS (V/I/R/P) — Source panel color coding
-# See D-014 in design system. These intentionally reuse plot/status colors
-# because V/I/R/P coding is universal electronics convention.
-# ═══════════════════════════════════════════════════════════════════════════
+QDARKTHEME_ACCENT = ACCENT
+QDARKTHEME_CORNER_SHAPE = "rounded"
 
-QUANTITY_VOLTAGE    = "#6cc4f5"   # sky blue (= PLOT_LINE_PALETTE[0])
-QUANTITY_CURRENT    = "#4ade80"   # green (= STATUS_OK)
-QUANTITY_RESISTANCE = "#ff9d3f"   # warm orange (= STATUS_WARNING)
-QUANTITY_POWER      = "#ff5252"   # red-coral (slightly warmer than STATUS_FAULT)
+# =============================================================================
+# BACKWARDS COMPATIBILITY ALIASES
+# =============================================================================
+# These map old token names from B.1 v1 theming to the new design system.
+# Every callsite that uses an old alias should be migrated as touched, then
+# aliases removed in B.7 cleanup.
 
-# ═══════════════════════════════════════════════════════════════════════════
+# --- Surface tokens ---
+SURFACE_WINDOW = BACKGROUND
+SURFACE_PANEL = CARD
+SURFACE_CARD = CARD
+SURFACE_ELEVATED = SECONDARY
+SURFACE_SUNKEN = PRIMARY
+SURFACE_BG = BACKGROUND
+SURFACE_OVERLAY_RGBA = "rgba(15, 23, 42, 0.6)"
+
+# --- Border tokens ---
+BORDER_SUBTLE = BORDER
+BORDER_STRONG = BORDER
+BORDER_FOCUS = ACCENT
+
+# --- Text tokens ---
+TEXT_PRIMARY = FOREGROUND
+TEXT_SECONDARY = MUTED_FOREGROUND
+TEXT_MUTED = MUTED_FOREGROUND
+TEXT_DISABLED = "#475569"
+TEXT_INVERSE = ON_PRIMARY
+
+# --- Semantic text colors ---
+TEXT_FAULT = STATUS_FAULT
+TEXT_OK = STATUS_OK
+TEXT_INFO = STATUS_INFO
+TEXT_WARNING = STATUS_WARNING
+TEXT_CAUTION = STATUS_CAUTION
+TEXT_ACCENT = ACCENT
+
+# --- Accent scale ---
+ACCENT_300 = "#6470d9"
+ACCENT_400 = ACCENT
+ACCENT_500 = "#34D399"
+ACCENT_600 = "#86EFAC"
+
+# --- Legacy raw stone colors ---
+STONE_0 = BACKGROUND
+STONE_50 = BACKGROUND
+STONE_100 = CARD
+STONE_150 = CARD
+STONE_200 = SECONDARY
+STONE_300 = BORDER
+STONE_400 = "#475569"
+STONE_500 = TEXT_DISABLED
+STONE_600 = MUTED_FOREGROUND
+STONE_700 = MUTED_FOREGROUND
+STONE_800 = MUTED_FOREGROUND
+STONE_900 = FOREGROUND
+STONE_1000 = FOREGROUND
+
+# --- Legacy status aliases ---
+SUCCESS_400 = STATUS_OK
+WARNING_400 = STATUS_WARNING
+DANGER_400 = STATUS_FAULT
+
+# --- Typography aliases ---
+FONT_UI = FONT_BODY
+
+FONT_DISPLAY_SIZE = 32
+FONT_DISPLAY_HEIGHT = 40
+FONT_DISPLAY_WEIGHT = FONT_WEIGHT_SEMIBOLD
+
+FONT_TITLE_SIZE = 22
+FONT_TITLE_HEIGHT = 28
+FONT_TITLE_WEIGHT = FONT_WEIGHT_SEMIBOLD
+
+FONT_HEADING_SIZE = 18
+FONT_HEADING_HEIGHT = 24
+FONT_HEADING_WEIGHT = FONT_WEIGHT_SEMIBOLD
+
+FONT_BODY_SIZE = FONT_SIZE_BASE
+FONT_BODY_HEIGHT = 20
+FONT_BODY_WEIGHT = FONT_WEIGHT_REGULAR
+
+FONT_LABEL_SIZE = FONT_SIZE_SM
+FONT_LABEL_HEIGHT = 16
+FONT_LABEL_WEIGHT = FONT_WEIGHT_MEDIUM
+
+FONT_MONO_VALUE_SIZE = 15
+FONT_MONO_VALUE_HEIGHT = 20
+FONT_MONO_VALUE_WEIGHT = FONT_WEIGHT_MEDIUM
+
+FONT_MONO_SMALL_SIZE = FONT_SIZE_SM
+FONT_MONO_SMALL_HEIGHT = 16
+FONT_MONO_SMALL_WEIGHT = FONT_WEIGHT_MEDIUM
+
+# =============================================================================
 # HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+
 
 def line_color(index: int) -> str:
-    """Get a plot line color by index, cycling through PLOT_LINE_PALETTE.
-
-    Used for multi-line plots where each line represents a different channel.
-    Cycles through 8 colors in fixed order.
-    """
+    """Get a plot line color by index, cycling through PLOT_LINE_PALETTE."""
     return PLOT_LINE_PALETTE[index % len(PLOT_LINE_PALETTE)]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# QDARKTHEME CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Accent color passed to qdarktheme.setup_theme(custom_colors={"primary": ...})
-QDARKTHEME_ACCENT = ACCENT_400
-
-# Corner shape. "rounded" for modern friendly look, "sharp" for austere lab.
-# Default is "rounded" — can be changed in one place.
-QDARKTHEME_CORNER_SHAPE = "rounded"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # PYQTGRAPH GLOBAL CONFIGURATION — applied at module import time
-# ═══════════════════════════════════════════════════════════════════════════
-
-# CRITICAL: These calls MUST happen before any PlotWidget or
-# GraphicsLayoutWidget is constructed anywhere in the application. The
-# setConfigOption calls below apply only to widgets created AFTER this
-# module is imported. See module docstring for the import order contract.
+# =============================================================================
 
 pg.setConfigOption("background", PLOT_BG)
 pg.setConfigOption("foreground", PLOT_FG)
