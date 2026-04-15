@@ -27,13 +27,13 @@ New plan: Phase 0 Legacy Inventory → Phase I Design System → Phase II Apply 
 
 **Goal:** Завершить понимание "что есть в legacy" до design work.
 
-### Block: Legacy Inventory Audit (9 tabs)
+### Block: Legacy Inventory Audit (10 legacy surfaces)
 
 Read-only CC block, аналог того что был сделан для ExperimentWorkspace.
 Cuts uncertainty в design decisions. Без этого следующие overlay rebuilds
 будут blind.
 
-**Output:** 9 markdown reports в `docs/legacy-inventory/`.
+**Output:** 10 markdown reports в `docs/legacy-inventory/`.
 
 **Estimate:** ~6h CC work (single large block, или 3 medium blocks по 3 tabs).
 
@@ -41,7 +41,7 @@ Cuts uncertainty в design decisions. Без этого следующие overl
 готов — copy structure from `/tmp/legacy_experiment_workspace_inventory.md`.
 
 **Success criteria:**
-- All 9 inventories produced
+- All 10 inventories produced
 - Each lists: layout, fields, ZMQ commands, signals, comparison к B.8 patterns
 - Updated §1 of `ui_refactor_context.md`
 
@@ -137,7 +137,7 @@ Estimate: 1 medium block.
 #### Block II.2 — ArchiveOverlay
 Skill patterns: Drill-Down + Bento (experiment cards) + DataDense (details).
 Zero coverage in new UI. K2-critical.
-Preserves: K2 archive functionality, K6 export (CSV/HDF5/Excel).
+Preserves: K2 archive functionality. Global K6 File-menu exports need a separate migration decision.
 Estimate: 1 medium block.
 
 #### Block II.3 — OperatorLog Overlay
@@ -147,14 +147,15 @@ Preserves: K1 service log with chronology.
 Solves: P3 shift handover (partial — Phase III.1 completes).
 Estimate: 1 small block.
 
+### MEDIUM priority — functional rebuild
+
 #### Block II.4 — AlarmOverlay (with badge popover)
 Skill patterns: Drill-Down + DataDense (alarm rules table).
-Badge in TopWatchBar gives count; click opens overlay with full
-alarm tables + ack workflow + acknowledgment history.
-Solves: P2 alarm visibility (currently only badge — ack workflow uncovered).
+Badge in TopWatchBar already routes into the registered AlarmPanel overlay;
+this block rebuilds that surface with visual modernization and verifies
+acknowledge workflow polish / acknowledgment history presentation.
+Solves: P2 alarm visibility (already partially solved via badge → existing panel).
 Estimate: 1 small block.
-
-### MEDIUM priority — functional rebuild
 
 #### Block II.5 — ConductivityOverlay
 Skill patterns: Drill-Down (auto-measurement workflow) + ChartTile + DataDense.
@@ -164,14 +165,19 @@ Estimate: 1 medium block.
 
 #### Block II.6 — KeithleyOverlay
 Skill patterns: Bento + Executive (smua/smub readouts) + DataDense (controls).
-Functionally complete in legacy, this is visual-only modernization.
-Preserves: K4 Keithley control with custom commands.
+Functionally complete in legacy for structured control; this is primarily
+visual modernization of per-channel and A+B control surfaces. A visible
+custom-command console was not found in current GUI code.
+Preserves: direct Keithley control (targets, limits, per-channel and A+B actions).
 Estimate: 1 medium block.
 
 #### Block II.7 — CalibrationOverlay
 Skill patterns: Drill-Down (Setup → Acquisition → Results) + DataDense.
-Clean three-mode QStackedWidget — wrap target with theme tokens.
-Preserves: K3 CalibrationFitter pipeline, K6 .330/.340/JSON/CSV export.
+Three-mode QStackedWidget remains the right structural target, but this is
+not wrap-only work: the visible export/apply controls in legacy source are
+currently unwired and Phase II.7 must connect them to real export/apply
+backends as part of the rebuild.
+Preserves: K3 CalibrationFitter pipeline and the visible export/apply workflow surface.
 Estimate: 1 medium block.
 
 ### LOW priority — combined or folded
@@ -274,12 +280,13 @@ Phase 0 status: COMPLETE.
 
 - **2026-04-15** B.8.0.2 commit `968e995` — feature parity ExperimentOverlay completed despite layout still being ugly. Layout fix deferred to Phase II.1.
 - **2026-04-15** Strategic shift to "build system once" approach after skill deep-dive identified composable patterns.
-- **2026-04-15** Vladimir validated all 7 pain points (P1-P7) and all 7 preserve features (K1-K7). All entries in context doc are real, not architect speculation.
+- **2026-04-15** Vladimir validated all 7 pain points (P1-P7) and the preserve list as planning input. Later code verification narrowed two preserve claims: K4 custom-command surface was not found in GUI, and K7 currently exists as background analytics without a verified GUI suggestion surface.
 - **2026-04-16** Phase 0.1 — Legacy Inventory batch 1 completed. Tabs: Обзор (1729 LOC), Источник мощности (586 LOC), Аналитика (934 LOC). Reports at docs/legacy-inventory/. Total 3249 LOC inventoried. Key findings: (1) Overview almost entirely superseded by new dashboard — only ML prediction curve overlay unique. (2) Keithley functionally complete, rebuild is visual-only. (3) Analytics is LEAST covered by new surfaces — highest priority rebuild for Phase II.
 - **2026-04-16** Phase 0.2 — Legacy Inventory batch 2 completed. Tabs: Теплопроводность (1068 LOC), Алармы (378 LOC), Служебный лог (171 LOC). Reports at docs/legacy-inventory/. Total 1617 LOC inventoried. Key findings: (1) Conductivity has embedded auto-measurement state machine with min_wait safety guard — must preserve timing logic carefully. (2) Alarms panel is structurally simple (two tables + ACK buttons) but P2 only partially solved by TopWatchBar badge. (3) Operator Log is K1-critical for shift handovers — QuickLogBlock covers only quick entry, full overlay needed.
 - **2026-04-16** Phase 0.3 — Legacy Inventory batch 3 completed (FINAL). Tabs: Архив (529 LOC), Калибровка (499 LOC), Приборы (308 LOC), Датчики-диагностика (211 LOC). Phase 0 complete: 10 files inventoried, 6413 LOC total. Key findings: (1) Archive has rich filtering + detail pane + report regeneration — full rebuild needed for K2. (2) Calibration has clean 3-mode QStackedWidget architecture — Wrap approach viable. (3) Instruments + SensorDiag are low-priority (operators check only on problems).
-- **2026-04-16** Phase 0 Codex audit completed. Verdict: PROCEED. 0 critical, 4 medium issues (documentation nits, not design-misleading). Report: docs/phase-ui-1/phase_0_audit_report.md.
-- **2026-04-16** Phase II reordered: HIGH (Analytics/Archive/OperatorLog/Alarm) first, MEDIUM (Conductivity/Keithley/Calibration) middle, LOW (Instruments+SensorDiag combined) last. ExperimentOverlay v3 visual rebuild moved to II.9 (after primitives mature).
+- **2026-04-16** Phase 0 Codex audit completed. Verdict: FIX FIRST. 7 HIGH + 9 MEDIUM issues. Report: docs/phase-ui-1/phase_0_audit_report.md.
+- **2026-04-16** Phase II reordered: HIGH (Analytics/Archive/OperatorLog) first, MEDIUM (Alarm/Conductivity/Keithley/Calibration) middle, LOW (Instruments+SensorDiag combined) last. ExperimentOverlay v3 visual rebuild moved to II.9 (after primitives mature).
+- **2026-04-16** Preserve features verified. K7 = EXISTS+ENGINE-ONLY (root plugin present, no GUI consumer found). K6 HDF5/Excel = EXISTS+LOCATED in legacy File menu. K4 custom commands = NOT FOUND IN GUI. AlarmOverlay (II.4) demoted from HIGH to MEDIUM because badge already routes into existing AlarmPanel. Calibration overlay (II.7) scope clarified: export/apply buttons exist but are unwired, so real work includes connecting them, not only visual wrap.
 
 ---
 
@@ -296,12 +303,12 @@ Reports at: docs/legacy-inventory/ (10 files).
 - Analytics (934 LOC) — LEAST covered by new surfaces, highest daily usage
 - Archive (529 LOC) — K2-critical, zero coverage in new UI
 - Operator Log (171 LOC) — K1-critical for shift handovers, QuickLogBlock partial only
-- Alarms (378 LOC) — P2 partially solved (badge), acknowledge workflow uncovered
 
 **MEDIUM priority rebuild** (functional, embedded complexity):
+- Alarms (378 LOC) — P2 already solved for badge→panel routing; rebuild is visual modernization + acknowledge-workflow polish
 - Conductivity (1068 LOC) — auto-measurement state machine, K6 export
-- Keithley (586 LOC) — functionally complete, visual-only modernization
-- Calibration (499 LOC) — K3-critical but 1-2x/year, clean Wrap target
+- Keithley (586 LOC) — direct control complete; custom-command surface not found in current GUI
+- Calibration (499 LOC) — K3-critical but 1-2x/year; visible export/apply controls exist but wiring is incomplete
 
 **LOW priority rebuild** (mostly superseded by new dashboard):
 - Overview (1729 LOC) — almost entirely covered by B.1-B.7 dashboard
@@ -312,12 +319,27 @@ Reports at: docs/legacy-inventory/ (10 files).
 
 After Phase 0 + B.8.0.2:
 - P1 ambient awareness: SOLVED by dashboard (B.1-B.7)
-- P2 alarm visibility: PARTIAL — badge shows count, ack workflow needs overlay
+- P2 alarm visibility: PARTIAL — badge already opens AlarmPanel overlay, but visual modernization and ack-workflow polish remain
 - P3 shift handover: NOT SOLVED — needs Operator Log overlay + Phase III.1
 - P4 form repetition: SOLVED for experiment create (B.8.0.2 autocomplete)
 - P5 phase elapsed: SOLVED in TopWatchBar + B.8.0.2 phase pills
 - P6 plot co-location: PARTIAL — temp+pressure on dashboard, Analytics overlay needed
 - P7 notifications: PARTIAL — Telegram exists, audit needed Phase III.2
+
+### Preserve features verified status
+
+After Phase 0 audit + fix + verification:
+- K1 (service log): ANCHORED in `operator_log.md` (full surface)
+- K2 (archive): ANCHORED in `archive.md` (full surface)
+- K3 (calibration): ANCHORED in `calibration.md` (3-mode workflow); export/apply buttons exist but are unwired (Phase II.7 must connect them)
+- K4 (Keithley custom commands): NOT FOUND IN GUI. Direct Keithley control is anchored, but custom-command input was not located in legacy GUI source.
+- K5 (plot zoom/pan): ANCHORED in `overview.md`, `analytics.md`, `conductivity.md`, `keithley.md`
+- K6 (export CSV/HDF5/Excel): CSV anchored in `conductivity.md`; HDF5 + Excel exist in legacy `MainWindow` File menu, outside the 10 audited tab inventories
+- K7 (phase detector): EXISTS+ENGINE-ONLY. Root-level plugin exists and publishes analytics metrics, but no GUI consumer / suggestion surface is currently wired.
+
+Preserve features at risk of being lost:
+- K4 custom-command surface — current preserve claim is not backed by GUI code
+- K7 GUI suggestion surface — analytics plugin exists, but visible UI integration is not present
 
 ---
 
