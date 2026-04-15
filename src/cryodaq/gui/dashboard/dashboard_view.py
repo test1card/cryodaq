@@ -17,6 +17,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
+from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
 from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
 
@@ -47,6 +48,7 @@ class DashboardView(QWidget):
         self._temp_plot: TempPlotWidget | None = None
         self._pressure_plot: PressurePlotWidget | None = None
         self._sensor_grid: DynamicSensorGrid | None = None
+        self._phase_widget: PhaseAwareWidget | None = None
         self._build_ui()
         self._wire_x_link()
         self._start_refresh_timer()
@@ -69,6 +71,13 @@ class DashboardView(QWidget):
                 zone = self._make_zone(obj_name, None)
                 self._pressure_plot = PressurePlotWidget(self._buffer_store)
                 zone.layout().addWidget(self._pressure_plot)
+            elif obj_name == "phaseZone":
+                zone = self._make_zone(obj_name, None)
+                self._phase_widget = PhaseAwareWidget(parent=self)
+                self._phase_widget.phase_transition_requested.connect(
+                    self._on_phase_transition_requested
+                )
+                zone.layout().addWidget(self._phase_widget)
             elif obj_name == "sensorGridZone":
                 zone = self._make_zone(obj_name, None)
                 self._sensor_grid = DynamicSensorGrid(
@@ -173,3 +182,32 @@ class DashboardView(QWidget):
     def _on_history_requested(self, channel_id: str) -> None:
         """Stub: history overlay deferred to later block."""
         logger.info("History requested: %s (stub)", channel_id)
+
+    # ------------------------------------------------------------------
+    # Phase widget signal handlers (B.5)
+    # ------------------------------------------------------------------
+
+    def _on_phase_transition_requested(self, phase: str) -> None:
+        """Forward phase transition request to engine via ZMQ."""
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker(
+            {"cmd": "experiment_advance_phase", "phase": phase, "operator": ""},
+            parent=self,
+        )
+        worker.finished.connect(self._on_phase_advance_result)
+        worker.start()
+
+    def _on_phase_advance_result(self, result: dict) -> None:
+        if not result.get("ok", False):
+            error = result.get("error", "unknown error")
+            logger.warning("advance_phase failed: %s", error)
+
+    # ------------------------------------------------------------------
+    # Experiment status forwarding (B.5)
+    # ------------------------------------------------------------------
+
+    def on_experiment_status(self, status: dict) -> None:
+        """Forward experiment_status response to phase widget."""
+        if self._phase_widget is not None:
+            self._phase_widget.on_status_update(status)

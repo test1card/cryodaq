@@ -332,14 +332,31 @@ class ExperimentManager:
         return templates[template_id]
 
     def get_status_payload(self) -> dict[str, Any]:
+        phase_started_at = self._get_phase_started_at()
         return {
             "ok": True,
             "app_mode": self.app_mode.value,
             "active_experiment": self._active.to_payload() if self._active else None,
             "current_phase": self.get_current_phase(),
+            "phase_started_at": phase_started_at,
             "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
+
+    def _get_phase_started_at(self) -> float | None:
+        """Unix timestamp of when the current phase started, or None."""
+        history = self.get_phase_history()
+        if not history:
+            return None
+        last = history[-1]
+        if last.get("ended_at") is not None:
+            return None
+        started = last.get("started_at")
+        if started is None:
+            return None
+        if isinstance(started, str):
+            return datetime.fromisoformat(started).timestamp()
+        return float(started)
 
     def get_app_mode(self) -> AppMode:
         return self.app_mode

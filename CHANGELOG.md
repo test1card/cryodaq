@@ -29,6 +29,14 @@
   рендерятся как cohesive frame: `WA_StyledBackground` атрибут,
   удалён bubble эффект `_context_frame`, ToolRail мигрирован на
   `#ToolRail` object selector (A.7 compliance), видимый hover state.
+- **Phase UI-1 v2 Block B.5** — PhaseAwareWidget. Заменён placeholder
+  фазы эксперимента на реальный widget с stepper UI (6 фаз: Подготовка
+  / Вакуум / Охлаждение / Измерение / Нагрев / Завершение). Текущая
+  фаза подсвечена `theme.ACCENT`, прошедшие muted, будущие dim. Hero
+  display с large current phase name + duration counter. Manual
+  transition controls: кнопки Назад / Вперёд + dropdown. Backend:
+  расширение `/status` payload с `phase_started_at`. Widget получает
+  данные через TopWatchBar → MainWindowV2 → DashboardView forwarding.
 - **Phase UI-1 v2 Block B.4** — Persistent context strip в
   TopWatchBar. Четыре ключевых значения (давление, T мин, T макс
   холодных каналов, мощность нагревателя) видны постоянно — даже

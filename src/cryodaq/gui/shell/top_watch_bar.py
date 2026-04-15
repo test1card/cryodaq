@@ -70,6 +70,7 @@ class TopWatchBar(QWidget):
 
     experiment_clicked = Signal()
     alarms_clicked = Signal()
+    experiment_status_received = Signal(dict)  # B.5: forward /status to dashboard
 
     def __init__(self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -394,6 +395,9 @@ class TopWatchBar(QWidget):
 
     def _on_experiment_result(self, result: dict) -> None:
         ok = bool(result.get("ok"))
+        # B.5: forward full result to dashboard phase widget
+        if ok:
+            self.experiment_status_received.emit(result)
         # Zone 2 — experiment (zone 1 engine state is driven externally
         # via set_engine_state() so it stays consistent with the launcher
         # and the reading data flow).

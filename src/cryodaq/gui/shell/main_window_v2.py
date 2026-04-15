@@ -149,6 +149,11 @@ class MainWindowV2(QMainWindow):
         # Forward alarm count from AlarmPanel directly to top bar
         self._alarm_panel.v2_alarm_count_changed.connect(self._top_bar.set_alarm_count)
 
+        # B.5: forward experiment status from top bar to dashboard phase widget
+        self._top_bar.experiment_status_received.connect(
+            self._overview_panel.on_experiment_status
+        )
+
         # Wire dashboard time window picker → top bar echo
         if hasattr(self._overview_panel, '_temp_plot') and \
            self._overview_panel._temp_plot is not None:
