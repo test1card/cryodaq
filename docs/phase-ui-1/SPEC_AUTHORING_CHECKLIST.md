@@ -258,10 +258,23 @@ Always use the exact CLI form:
 codex exec -c 'sandbox_permissions=["disk-full-read-access"]' "<audit prompt>"
 ```
 
+Model and reasoning effort come from `~/.codex/config.toml`:
+
+```toml
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+```
+
+As of 2026-04-15 this is the strongest available Codex model on dev
+machine. If config is missing or points to a weaker model — fix
+config first. Do not run audits on default `gpt-5`.
+
 NOT:
 - `codex exec` without sandbox permissions (cannot read project files)
+- `codex exec` on a machine without config.toml model override
+  (default gpt-5 is weaker)
 - `/codex` (slash command does not exist in CC)
-- `codex --model=...` (wrong flag form)
+- `codex --model=...` (wrong flag form, use `-c model="..."` if needed)
 
 #### Required audit prompt template
 
@@ -474,10 +487,11 @@ Do not modify any files. This is read-only audit."
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
 - L10: Codex audit is non-negotiable per block, regardless of size or
-  confidence. B.6.2 Small block: 14 unit tests passed, Codex caught 1
-  HIGH worker leak + 2 MEDIUM (race + undefined behavior). Empirical
-  base rate of catches is too high to skip on any block. Always run,
-  always block commit on CRITICAL/HIGH.
+  confidence. B.6.2 Small block: 14 unit tests passed, Codex (gpt-5.4,
+  reasoning_effort=high via config.toml) caught 1 HIGH worker leak +
+  2 MEDIUM (race + undefined behavior). Empirical base rate of catches
+  is too high to skip on any block. Always run with strongest model
+  (verify config.toml), always block commit on CRITICAL/HIGH.
 
 ## Living document
 
