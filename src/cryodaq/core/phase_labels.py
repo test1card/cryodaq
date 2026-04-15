@@ -28,6 +28,16 @@ PHASE_LABELS_RU_SHORT: dict[str, str] = {
     ExperimentPhase.TEARDOWN.value: "\u0420\u0430\u0437\u0431\u043e\u0440\u043a\u0430",
 }
 
+# Ultra-short labels for dashboard stepper pills (B.5.7).
+PHASE_LABELS_PILL: dict[str, str] = {
+    ExperimentPhase.PREPARATION.value: "\u041f\u043e\u0434",
+    ExperimentPhase.VACUUM.value: "\u0412\u0430\u043a",
+    ExperimentPhase.COOLDOWN.value: "\u0417\u0430\u0445",
+    ExperimentPhase.MEASUREMENT.value: "\u0418\u0437\u043c",
+    ExperimentPhase.WARMUP.value: "\u0420\u0430\u0441\u0442",
+    ExperimentPhase.TEARDOWN.value: "\u0420\u0430\u0437",
+}
+
 # Ordered tuple of phase string values — stepper sequence.
 PHASE_ORDER: tuple[str, ...] = tuple(p.value for p in ExperimentPhase)
 

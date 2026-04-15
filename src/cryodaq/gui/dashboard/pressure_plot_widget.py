@@ -53,6 +53,7 @@ class PressurePlotWidget(QWidget):
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Давление", units="mbar",
                      color=theme.TEXT_SECONDARY)
+        pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
         pi.setLabel("bottom", "Время", color=theme.TEXT_SECONDARY)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})

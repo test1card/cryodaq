@@ -129,33 +129,38 @@ class TopWatchBar(QWidget):
         self._engine_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._engine_label)
 
-        layout.addSpacing(theme.SPACE_3)
+        layout.addWidget(self._make_zone_sep())
 
         # Zone 2: experiment + phase + elapsed (clickable) + time window echo
         self._exp_label = _ClickableLabel("○ Нет активного эксперимента")
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._exp_label.setMaximumWidth(220)
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
 
         # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА) — clickable (B.6.2)
         self._mode_badge = _ClickableLabel()
         self._mode_badge.setObjectName("modeBadge")
-        self._mode_badge.setVisible(False)  # hidden until backend confirms
+        self._mode_badge.setVisible(False)
         self._mode_badge.clicked.connect(self._on_mode_badge_clicked)
         self._app_mode: str | None = None
         self._mode_switch_worker = None
         layout.addWidget(self._mode_badge)
 
+        layout.addWidget(self._make_zone_sep())
+
         self._time_window_echo_label = QLabel("▸ окно 1ч")
         self._time_window_echo_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._time_window_echo_label)
+
+        layout.addWidget(self._make_zone_sep())
 
         # Zone 3: channel summary
         self._channel_label = QLabel("● —/— норма")
         self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._channel_label)
 
-        layout.addSpacing(theme.SPACE_3)
+        layout.addWidget(self._make_zone_sep())
 
         # Zone 4: alarms (clickable)
         self._alarms_label = _ClickableLabel("🛎 0")
@@ -166,6 +171,24 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
     # B.4: Persistent context strip
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_zone_sep() -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedHeight(20)
+        sep.setStyleSheet(f"color: {theme.BORDER}; max-width: 1px;")
+        return sep
+
+    def _set_experiment_text(self, full_text: str) -> None:
+        """Set experiment label with elide + tooltip for long names."""
+        metrics = self._exp_label.fontMetrics()
+        max_w = self._exp_label.maximumWidth()
+        elided = metrics.elidedText(
+            full_text, Qt.TextElideMode.ElideRight, max_w
+        )
+        self._exp_label.setText(elided)
+        self._exp_label.setToolTip(full_text)
 
     def _build_persistent_context(self) -> None:
         """Add 4-value persistent context strip to the watch bar."""
@@ -409,7 +432,7 @@ class TopWatchBar(QWidget):
         # and the reading data flow).
         exp = result.get("active_experiment") if ok else None
         if not exp:
-            self._exp_label.setText("○ Нет активного эксперимента")
+            self._set_experiment_text("○ Нет активного эксперимента")
             self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
         name = exp.get("name", "—")
@@ -421,7 +444,7 @@ class TopWatchBar(QWidget):
             parts.append(phase_label)
         if elapsed:
             parts.append(elapsed)
-        self._exp_label.setText(" · ".join(parts))
+        self._set_experiment_text(" · ".join(parts))
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
 
     def _refresh_channels(self) -> None:

@@ -223,9 +223,9 @@ class PhaseAwareWidget(QWidget):
                 "</span>"
             )
         elif self._current_phase is None:
-            text = self._styled_phase(
-                "\u041e\u0416\u0418\u0414\u0410\u041d\u0418\u0415 \u0424\u0410\u0417\u042b"
-            )
+            text = self._styled_transient(
+                "\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0444\u0430\u0437\u044b\u2026"
+            )  # Ожидание фазы…
         else:
             phase_name = PHASE_LABELS_RU.get(
                 self._current_phase, self._current_phase
@@ -284,6 +284,14 @@ class PhaseAwareWidget(QWidget):
             f'<span style="color:{theme.FOREGROUND}; '
             f"font-family:'{theme.FONT_DISPLAY}'; "
             f'font-size:{theme.FONT_SIZE_BASE}px;">{value}</span>'
+        )
+
+    def _styled_transient(self, text: str) -> str:
+        return (
+            f'<span style="color:{theme.MUTED_FOREGROUND}; '
+            f"font-family:'{theme.FONT_BODY}'; "
+            f"font-size:{theme.FONT_SIZE_BASE}px; "
+            f'font-style:italic;">{text}</span>'
         )
 
     def _styled_dim(self, text: str) -> str:

@@ -486,6 +486,13 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L13: Visual debt accumulates per block and never gets paid by
+  itself. After 2-3 UI blocks, run explicit polish pass enforcing
+  skill rules. B.5.7 closed 6 issues accumulated over B.5.5+B.5.6.
+- L14: Tooltip is for extra info, not primary identification. When
+  width permits, prefer inline text over numbers+tooltip. B.5.6
+  number-only stepper pills failed glanceability test (operator must
+  hover for tooltip = not glanceable). B.5.7 returned short labels.
 - L12: Wireframe height estimates are ESTIMATES until visual review.
   B.5.5 followed wireframe literally and produced ~210px widget that
   dominated dashboard. B.5.6 cut to ~55px after seeing actual render.

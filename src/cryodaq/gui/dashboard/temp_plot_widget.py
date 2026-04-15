@@ -123,6 +123,7 @@ class TempPlotWidget(QWidget):
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Температура", units="K",
                      color=theme.TEXT_SECONDARY)
+        pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.getAxis("bottom").setStyle(showValues=False)

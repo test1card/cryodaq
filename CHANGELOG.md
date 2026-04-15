@@ -22,6 +22,12 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.5.7 — Visual polish pass on dashboard.** Plot Y-axis alignment
+  (fixed 60px left axis width), pressure plot height ratio tuned (18
+  vs 50 stretch), TopWatchBar zone separators (VLines), PhaseStepper
+  short Russian labels return (Под/Вак/Зах/Изм/Раст/Раз inline),
+  transient state «Ожидание фазы» subdued to italic Body, experiment
+  name elide + tooltip.
 - **B.5.6 — Compact PhaseAwareWidget.** Phase widget сжат с ~210px
   до ~55px (одна строка). HeroReadout / EtaDisplay / MilestoneList
   primitives сохранены для B.10 Analytics overlay. Stepper pills

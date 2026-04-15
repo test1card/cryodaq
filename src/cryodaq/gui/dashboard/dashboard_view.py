@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 # Zone definitions: (objectName, label_or_None, stretch)
 # label_or_None=None means the zone is filled by a real widget, not placeholder.
 _ZONES = [
-    ("phaseZone", "[ФАЗА ЭКСПЕРИМЕНТА — будет в B.4]", 10),
+    ("phaseZone", "[ФАЗА ЭКСПЕРИМЕНТА — будет в B.4]", 4),
     ("sensorGridZone", "[ДАТЧИКИ — будет в B.3]", 22),
-    ("tempPlotZone", None, 44),
-    ("pressurePlotZone", None, 20),
+    ("tempPlotZone", None, 50),
+    ("pressurePlotZone", None, 18),
     ("quickLogZone", "[ЖУРНАЛ — будет в B.6]", 4),
 ]
 

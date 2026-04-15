@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
+from cryodaq.core.phase_labels import PHASE_LABELS_PILL, PHASE_LABELS_RU, PHASE_ORDER
 from cryodaq.gui import theme
 
 PHASE_NUMBERS: dict[str, int] = {
@@ -62,10 +62,13 @@ class PhaseStepper(QWidget):
         pill.setToolTip(PHASE_LABELS_RU[phase])
         inner = QHBoxLayout(pill)
         inner.setContentsMargins(_PILL_PADDING_PX, 1, _PILL_PADDING_PX, 1)
-        inner.setSpacing(0)
+        inner.setSpacing(4)
         num = QLabel(str(PHASE_NUMBERS[phase]))
         num.setObjectName(f"stepperPillNum_{phase}")
         inner.addWidget(num)
+        short = QLabel(PHASE_LABELS_PILL[phase])
+        short.setObjectName(f"stepperPillShort_{phase}")
+        inner.addWidget(short)
         self._style_pill(pill, "future")
         return pill
 
