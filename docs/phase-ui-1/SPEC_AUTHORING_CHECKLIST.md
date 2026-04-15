@@ -234,15 +234,113 @@
 - [ ] Указал ли что НЕ трогать?
 - [ ] Указал ли stop condition?
 
-### Codex audit (часть workflow с Block A.8)
+### Codex audit (mandatory gate, every block, no exceptions)
 
-- [ ] После того как CC complete — запускается `codex exec` audit с
-      checklist из специфических вещей которые надо проверить
-- [ ] Codex output → ко мне → triage → или fix block, или backlog
-- [ ] Audit findings которые повторяются — добавляются в этот checklist
-- [ ] **Codex CLI команда правильная:** `codex exec -c model="gpt-5.4" "..."`
-      Не `/codex` (slash command в CC не существует), не `codex
-      --model="..."` (без `exec`).
+Codex audit runs on every block before commit. Not optional. Not
+"only for large blocks". Not "skip if confident". Every block.
+
+Why: Codex catches what tests miss — lifecycle leaks (workers, signals,
+timers), race conditions, undefined behavior in error paths, defense
+gaps in input validation. Tests verify happy path. Codex audits the
+non-happy paths.
+
+Empirical evidence: B.6.2 Codex found 1 HIGH (worker memory leak via
+unretained ZmqCommandWorker) + 2 MEDIUM (no in-flight guard for
+double-click, no validation that stored app_mode is a known value)
+that all 14 unit tests passed without catching. Block was Small. Audit
+took 2 minutes. Findings shipped clean.
+
+#### Required Codex command
+
+Always use the exact CLI form:
+
+```bash
+codex exec -c 'sandbox_permissions=["disk-full-read-access"]' "<audit prompt>"
+```
+
+NOT:
+- `codex exec` without sandbox permissions (cannot read project files)
+- `/codex` (slash command does not exist in CC)
+- `codex --model=...` (wrong flag form)
+
+#### Required audit prompt template
+
+Every audit prompt must include:
+
+1. **Scope:** "Audit unstaged/staged changes for Block X.Y against the
+   spec at <path>."
+2. **Specific look-fors** for the block category (UI / safety / config
+   / etc) — pick from below
+3. **Severity scale:** "Report findings in numbered list with severity
+   CRITICAL/HIGH/MEDIUM/LOW."
+4. **Scope discipline:** "Do not suggest stylistic improvements, only
+   correctness defects. Do not modify any files."
+
+#### Universal look-fors (every block)
+
+Include these in every audit prompt regardless of block type:
+
+- Worker / signal / timer lifetime: are new ZmqCommandWorker, QTimer,
+  signal connections retained on the parent and cleaned in closeEvent
+  or finished handler? (B.6.2 lesson)
+- In-flight guards: do periodic or click-triggered async operations
+  check whether the previous operation is still in flight before
+  starting a new one? (A.8 worker stacking lesson)
+- Defense in depth: do validation checks cover unexpected values, not
+  just expected ones? (B.6.2 unknown-mode lesson)
+- QSS selectors: `#objectName` not Python class name (A.7 lesson)
+- Child widget backgrounds: parent QSS does not cascade onto children
+  causing seams (A.8 lesson)
+- setVisible self-call: hidden orphan widgets do not call
+  setVisible(True) themselves on data arrival (A.9 lesson)
+- Russian text everywhere user-visible
+- Cyrillic Т/А/С vs Latin homoglyphs in any new constants
+
+#### Block-category-specific look-fors
+
+For UI blocks add:
+- Color-only state conveyance (must have text label too)
+- Cursor change on clickable elements (PointingHandCursor)
+- WA_StyledBackground on composite QWidget (B.4.5.2)
+- Theme tokens used, no hardcoded hex
+- Status meaning: backend truth as source, hidden when unknown
+
+For safety/backend blocks add:
+- Async paths shielded from cancellation where appropriate
+- Atomic file writes for state persistence
+- Error path test coverage
+- Logging at appropriate levels
+
+For config/data blocks add:
+- Fail-closed defaults
+- Schema validation
+- Cyrillic homoglyph charset checks
+
+#### Iteration on findings
+
+After Codex output:
+
+- **CRITICAL:** STOP, fix inline, re-run Codex, repeat until 0 CRITICAL
+- **HIGH:** fix inline, re-run Codex once to confirm fix is correct, no
+  need for full re-audit if no other changes
+- **MEDIUM:** fix inline if scoped to the same files, otherwise log to
+  block backlog with explicit deferral note in commit message
+- **LOW:** log to backlog, no inline fix unless trivial
+
+Block does not commit until 0 CRITICAL and 0 HIGH unaddressed. MEDIUM
+deferral must be explicit in commit body, not silent.
+
+#### Backlog format for deferred findings
+
+In commit message body include section:
+
+```
+Codex findings deferred:
+- MEDIUM: <description> — deferred to <block ID or "backlog general">
+- LOW: <description> — deferred to <block ID or "backlog general">
+```
+
+If no deferrals — omit section entirely.
 
 ---
 
@@ -338,7 +436,7 @@ grep -A 5 '\[project.scripts\]' pyproject.toml
 ### После Block — Codex audit prompt template
 
 ```bash
-codex exec -c model="gpt-5.4" "Audit recent commits on feat/ui-phase-1-v2 against the spec at docs/phase-ui-1-v2/PHASE_UI1_V2_BLOCK_X_SPEC.md.
+codex exec -c 'sandbox_permissions=["disk-full-read-access"]' "Audit recent commits on master against the spec.
 
 Look specifically for:
 - QSS selectors using Python class names instead of Qt base class names (use #objectName instead)
@@ -375,6 +473,11 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L10: Codex audit is non-negotiable per block, regardless of size or
+  confidence. B.6.2 Small block: 14 unit tests passed, Codex caught 1
+  HIGH worker leak + 2 MEDIUM (race + undefined behavior). Empirical
+  base rate of catches is too high to skip on any block. Always run,
+  always block commit on CRITICAL/HIGH.
 
 ## Living document
 
