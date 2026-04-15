@@ -367,6 +367,10 @@ Do not modify any files. This is read-only audit."
 - L7: Phase labels must match across surfaces (TopWatchBar,
   PhaseAwareWidget, ExperimentWorkspace). Resolved permanently by
   extracting `core/phase_labels.py` as canonical source.
+- L8: Test the actual call flow, not just the unit. B.6 unit tests
+  passed because `_update_mode_badge` was tested directly. Add at
+  least one integration-style test that feeds realistic ZMQ responses
+  through the full handler (`_on_experiment_result`).
 
 ## Living document
 

@@ -20,6 +20,8 @@
 - **`src/cryodaq/core/phase_labels.py`** — канонические русские метки
   для ExperimentPhase enum. Единый source of truth для TopWatchBar,
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
+- **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
+  path `_on_experiment_result` (с и без active_experiment). L8 lesson.
 - **Phase UI-1 v2 Block B.4.5** — Adoption design system из UI UX Pro
   Max skill v2.5.0 (MIT, Next Level Builder). Гибрид Real-Time
   Monitoring + Data-Dense Dashboard. Палитра Smart Home/IoT Dashboard

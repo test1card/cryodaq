@@ -101,6 +101,35 @@ def test_mode_badge_hides_on_unknown_value() -> None:
     assert bar._mode_badge.isHidden()
 
 
+def test_mode_badge_updates_when_no_active_experiment() -> None:
+    """Regression for B.6.1: badge must update on /status response
+    even when there is no active experiment."""
+    bar = _make_bar()
+    result = {
+        "ok": True,
+        "active_experiment": None,
+        "current_phase": None,
+        "app_mode": "debug",
+    }
+    bar._on_experiment_result(result)
+    assert not bar._mode_badge.isHidden()
+    assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
+
+
+def test_mode_badge_updates_when_experiment_active() -> None:
+    """Same path but with active experiment."""
+    bar = _make_bar()
+    result = {
+        "ok": True,
+        "active_experiment": {"name": "test", "start_time": "2026-04-15T10:00:00+00:00"},
+        "current_phase": "preparation",
+        "app_mode": "experiment",
+    }
+    bar._on_experiment_result(result)
+    assert not bar._mode_badge.isHidden()
+    assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+
+
 def test_mode_badge_updates_on_change() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
