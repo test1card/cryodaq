@@ -11,6 +11,15 @@
 
 ### Добавлено
 
+- **Phase I.1 — Overlay Design System primitives (foundational shell).**
+  ModalCard (centered card + backdrop dim + 3 close mechanisms),
+  DrillDownBreadcrumb (sticky top bar with back navigation),
+  BentoGrid (12-column container for Bento tile layout).
+  Located at `src/cryodaq/gui/shell/overlays/_design_system/`.
+  No application to existing overlays in this block — Phase II applies these
+  primitives systematically. Visual showcase at
+  `_design_system/_showcase.py` for review before Phase I.2
+  (BentoTile + ExecutiveKpi + DataDenseTile + LiveTile).
 - **Phase UI-1 v2 Block B.6** — ModeBadge widget в TopWatchBar zone 2.
   Показывает текущий AppMode (ЭКСПЕРИМЕНТ / ОТЛАДКА). DEBUG state
   использует amber attention styling потому что режим отключает

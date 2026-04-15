@@ -182,6 +182,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation
 - `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety state indicator
 - `src/cryodaq/gui/shell/overlay_container.py` — central content container
+- `src/cryodaq/gui/shell/overlays/_design_system/` — Phase I primitives (ModalCard, DrillDownBreadcrumb, BentoGrid, future tiles)
 - `src/cryodaq/gui/shell/new_experiment_dialog.py` — experiment creation dialog (B.8 rebuild)
 - `src/cryodaq/gui/shell/experiment_overlay.py` — experiment management overlay (B.8)
 

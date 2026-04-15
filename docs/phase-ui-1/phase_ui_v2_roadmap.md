@@ -315,6 +315,10 @@ Phase 0 status: COMPLETE.
   - K7: phase detector hints wired to Phase II.1 Analytics overlay (tile) + Phase II.9 ExperimentOverlay v3 (suggested-next-phase pill highlight)
   - K6: global CSV/HDF5/Excel exports migrated to Phase II.2 Archive overlay buttons; legacy File menu can be removed in Phase III.3 cleanup
   - Bell emoji removed from operator-facing GUI text (UX polish)
+- **2026-04-16** Phase I.1 — Overlay Design System primitives implemented.
+  ModalCard + DrillDownBreadcrumb + BentoGrid + visual showcase.
+  Located at `src/cryodaq/gui/shell/overlays/_design_system/`.
+  Tests: 1063 → 1085. Ready for Phase I.2 (content tiles).
 
 ---
 
