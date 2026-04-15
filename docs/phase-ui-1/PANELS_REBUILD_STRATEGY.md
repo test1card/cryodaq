@@ -111,7 +111,7 @@ experiment card → keithley → analytics + plots → conductivity → log
 |-------|------|-------|---------------|----------|---------------|--------|--------|-------------|---------------|---------------|
 | ExperimentWorkspace | experiment_workspace.py | 897 | 8 | Critical | Heavy (7 ZMQ cmds, mode toggle, card view, phases) | Rebuild | XL | Центральный workflow, 8 QGroupBox, дублирует phase display с B.5, содержит mode toggle | Forms: Submit Feedback HIGH; Forms: Labels HIGH | — |
 | KeithleyPanel | keithley_panel.py | 586 | 6 | Critical | Heavy (5 ZMQ cmds, dual-channel, start/stop/emergency) | Rebuild | Large | Dual-SMU control, operator_manual §4.2, wireframe §8.3 | Loading States HIGH (command feedback); Navigation: context preservation | — |
-| AnalyticsPanel | analytics_panel.py | 521 | 12 | High | Light (passive, on_reading only, 0 commands) | Restyle | Medium | 12 hardcoded styles — наибольшая стилистическая задолженность, но layout рабочий | — | Time series: Line Chart; Anomaly: Line with Highlights; Forecast: Line with Confidence Band |
+| AnalyticsPanel | analytics_panel.py | 521 | 12 | High | Light (passive, on_reading only, 0 commands) | Rebuild | Large | 12 hardcoded styles, hero metric cards с цветными borders, vacuum prognosis нуждается в consolidation. Workflow centrality High (Vladimir priority order: графики 3-я позиция). Restyle недостаточно. | — | Time series: Line Chart; Anomaly: Line with Highlights; Forecast: Line with Confidence Band |
 | ConductivityPanel | conductivity_panel.py | 1068 | 4 | High | Heavy (auto-measurement FSM, Keithley cmds) | Wrap | XL | Самая большая панель, 2 QGroupBox, сложная FSM — wrap сохраняет логику, обновляет chrome | Forms: Submit Feedback HIGH; Loading States HIGH | — |
 | AlarmPanel | alarm_panel.py | 378 | 3 | High | Medium (3 cmds: ack/status) | Wrap | Medium | Рабочая логика ack/clear, нужны empty states и design tokens | Loading Indicators HIGH | — |
 | OperatorLogPanel | operator_log_panel.py | 171 | 0 | Medium | Light (2 cmds, простая форма) | Restyle | Small | Самая простая панель, 0 setStyleSheet, только form + list | Forms: Labels HIGH | — |
@@ -156,41 +156,65 @@ mode при отображении. DashboardView не знает о mode.
 
 ## 6. Обновлённая последовательность блоков
 
-Продолжение от B.5 (текущий HEAD).
+Продолжение от B.5 (текущий HEAD). Решения по gap'ам приняты Владимиром
+2026-04-15 — см. §11.5.
 
-### B.6 — QuickLogBlock (Small, 1 сессия)
+### B.6 — Mode badge + canonical PHASE_LABELS_RU (Small, 0.5-1 сессия)
+
+**Подход:** badge в TopWatchBar + extract PHASE_LABELS_RU в shared
+`src/cryodaq/core/phase_labels.py`. Update 3 callsites (TopWatchBar,
+PhaseAwareWidget, ExperimentWorkspace) на shared import.
+
+**Workflow gaps:** safety gap R1 (mode visibility) + R9 (canonical labels).
+
+**Зависимости:** нет.
+
+**Skill queries для спеки:** `"status badge indicator state" --domain ux`.
+
+### B.5.5 — 7-mode phase widget extension (Large, 1-2 сессии)
+
+**Подход:** расширение PhaseAwareWidget с generic stepper до
+phase-specific content по wireframe §7. Каждая из 6 фаз получает свой
+content (preparation = probe view, vacuum = pressure ETA, cooldown =
+ETA + R_thermal hero, measurement = R_thermal trend, warmup = ETA до
+комнатной, teardown = history summary).
+
+**Workflow gaps:** core dashboard innovation из wireframe §7. Без неё
+phase widget = декоративный stepper.
+
+**Зависимости:** B.6 (PHASE_LABELS_RU shared module).
+
+**Fallback:** если scope окажется неподъёмным — cherry-pick: только
+cooldown ETA (longest-running phase, predictor уже есть в analytics)
++ preparation probe view (manual прозванивание датчиков). Остальные 4
+фазы остаются generic. Decision point после Phase 1 pre-investigation.
+
+**Skill queries:** `"hero metric card primary value" --domain ux`,
+`"forecast prediction confidence band" --domain chart`,
+`"real-time gauge meter live value" --domain chart`.
+
+### B.7 — QuickLogBlock (Small, 1 сессия)
 
 **Подход:** новый виджет, заменяет placeholder quickLogZone в
 DashboardView.
 
-**Workflow gaps:** запись заметки оператора прямо с дашборда (без
-перехода в overlay).
+**Workflow gaps:** запись заметки оператора прямо с дашборда.
 
 **Зависимости:** нет (ZMQ endpoint log_entry существует).
 
-**Skill queries для спеки:** `"form input submit inline compact"
---domain ux`, `"collapsible expand collapse toggle" --domain ux`.
-
-### B.7 — Mode Toggle Badge (Small, 0.5 сессии)
-
-**Подход:** расширение TopWatchBar — badge из `app_mode` в `/status`.
-
-**Workflow gaps:** safety gap §5 мануала.
-
-**Зависимости:** нет.
-
-**Skill queries:** `"status badge indicator state" --domain ux`.
+**Skill queries:** `"form input submit inline compact" --domain ux`,
+`"collapsible expand collapse toggle" --domain ux`.
 
 ### B.8 — ExperimentWorkspace Rebuild (XL, 3-4 сессии)
 
 **Подход:** Rebuild. Новый ExperimentOverlay по wireframe §8.1.
 Metadata card + phase timeline + notes + artifacts + «Завершить».
+Создание эксперимента остаётся в NewExperimentDialog (modal).
 
-**Workflow gaps:** создание/управление/финализация эксперимента в новом
-дизайне.
+**Workflow gaps:** управление активным экспериментом + finalization.
 
-**Зависимости:** B.7 (mode toggle видимый оператору), B.6 (quick log
-для notes interplay).
+**Зависимости:** B.6 (mode badge видим), B.5.5 (phase widget owns
+phase display, ExperimentOverlay не дублирует).
 
 **Skill queries:** `"form card metadata edit save" --domain ux`,
 `"timeline vertical progress history" --domain ux`.
@@ -208,71 +232,84 @@ Metadata card + phase timeline + notes + artifacts + «Завершить».
 `"real-time value readout" --domain ux`. Chart: `"real-time gauge
 meter" --domain chart`.
 
-### B.10 — Restyle batch (Medium, 1-2 сессии)
+### B.10 — AnalyticsPanel Rebuild (Large, 2-3 сессии)
 
-**Подход:** Restyle. Один блок для всех Restyle-панелей:
-AnalyticsPanel, OperatorLogPanel, CalibrationPanel, SensorDiagPanel,
-InstrumentStatus.
+**Подход:** Rebuild. Hero metric cards (R_thermal + Cooldown predict)
+с нейтральными borders по wireframe §8.4. R_thermal plot с empty
+state. Vacuum prognosis card consolidated (two-column inside).
+
+**Workflow gaps:** аналитика в новом дизайне. Vladimir priority order:
+3-я позиция, Rebuild не Restyle.
+
+**Зависимости:** нет.
+
+**Skill queries:** `"hero metric card primary value" --domain ux`,
+`"empty state no data placeholder" --domain ux`. Chart: `"time series
+multiple series" --domain chart`, `"forecast prediction confidence" --domain chart`.
+
+### B.11 — Restyle batch без Analytics (Medium, 1-2 сессии)
+
+**Подход:** Restyle. Один блок для четырёх Restyle-панелей:
+OperatorLogPanel, CalibrationPanel, SensorDiagPanel, InstrumentStatus.
 
 **Scope:** замена hardcoded цветов на theme.* токены, замена
 hardcoded шрифтов, WA_StyledBackground, #objectName selectors. Без
 изменения layout или логики.
 
+**Дополнительный scope:** SensorDiagPanel переезжает из overlay в
+right-click sensor cell → inline popover (per Q4 resolution).
+
 **Workflow gaps:** визуальная консистентность.
 
 **Зависимости:** нет.
 
-**Skill queries:** `"consistency design system tokens" --domain ux`.
+**Skill queries:** `"consistency design system tokens" --domain ux`,
+`"context menu right click action" --domain ux`.
 
-### B.11 — ConductivityPanel Wrap (XL, 2-3 сессии)
+### B.12 — ConductivityPanel Wrap (XL, 2-3 сессии)
 
 **Подход:** Wrap. Существующая FSM логика остаётся, обёртка с
-group headers, design system chrome, по wireframe §8.5.
-
-**Workflow gaps:** теплопроводность в новом дизайне.
+group headers, design system chrome, по wireframe §8.5. Wrapper
+владеет header (per Q2 resolution).
 
 **Зависимости:** B.9 (Keithley cmds shared).
 
-**Skill queries:** `"form wizard multi-step state machine"
---domain ux`, `"group section header divider" --domain ux`.
+**Skill queries:** `"form wizard multi-step state machine" --domain ux`,
+`"group section header divider" --domain ux`.
 
-### B.12 — AlarmPanel Wrap (Medium, 1-2 сессии)
+### B.13 — AlarmPanel Wrap (Medium, 1-2 сессии)
 
 **Подход:** Wrap. Empty states, active/history sections по
-wireframe §8.6.
-
-**Workflow gaps:** управление тревогами в новом дизайне.
+wireframe §8.6. Wrapper владеет header.
 
 **Зависимости:** нет.
 
 **Skill queries:** `"empty state no data placeholder" --domain ux`,
 `"alert notification priority" --domain ux`.
 
-### B.13 — ArchivePanel Wrap (Large, 2 сессии)
+### B.14 — ArchivePanel Wrap (Large, 2 сессии)
 
 **Подход:** Wrap. Filter card + two-column results по wireframe §8.9.
-
-**Workflow gaps:** поиск и просмотр архивных экспериментов.
 
 **Зависимости:** B.8 (experiment card format compatibility).
 
 **Skill queries:** `"search filter results list card" --domain ux`,
 `"data table sortable" --domain ux`.
 
-### B.14 — Legacy cleanup (Medium, 1-2 сессии)
+### B.15 — Legacy cleanup (Medium, 1-2 сессии)
 
-**Подход:** удаление. Убрать старые Inter/JetBrainsMono шрифты,
-backwards-compatible aliases из theme.py, autosweep_panel.py,
-_ZONES stale labels, dead code after all panels migrated.
+**Подход:** удаление. Inter/JetBrainsMono шрифты, backwards-compatible
+aliases из theme.py, autosweep_panel.py, _ZONES stale labels, dead
+code after all panels migrated.
 
 **Зависимости:** все предыдущие блоки.
 
-### B.15 — Lab PC calibration (Medium, 1-2 сессии)
+### B.16 — Lab PC calibration (Medium, 1-2 сессии)
 
 **Подход:** deploy на лаб PC, визуальная калибровка pixel values,
 type scale, spacing. Итеративно.
 
-**Зависимости:** B.14 (чистый codebase).
+**Зависимости:** B.15 (чистый codebase).
 
 ---
 
@@ -375,7 +412,7 @@ python3 /Users/vladimir/Downloads/ui-ux-pro-max-skill-2.5.0/src/ui-ux-pro-max/sc
 | R6 | Legacy widget removal: grep для всех import paths | Low | Grep scan в B.14, не ранее |
 | R7 | Plot widget coupling: temp_plot + pressure_plot share X-link | Low | Не трогаем — coupling рабочий |
 | R8 | Hardcoded hex colors в legacy widgets (12 в analytics, 8 в experiment) | Medium | Restyle batch (B.10) закрывает |
-| R9 | Phase labels inconsistency: 3 разных набора русских названий фаз | Medium | Единый PHASE_LABELS_RU в shared module до B.8 |
+| R9 | Phase labels inconsistency: 3 разных набора русских названий фаз | Medium | Закрыто в B.6 (extract в src/cryodaq/core/phase_labels.py) |
 | R10 | _ZONES stale labels в dashboard_view.py | Low | Cleanup в B.14 |
 
 ---
@@ -418,3 +455,37 @@ python3 /Users/vladimir/Downloads/ui-ux-pro-max-skill-2.5.0/src/ui-ux-pro-max/sc
 8. **Lab PC calibration (B.15): нужен ли remote access?** Если lab PC
    недоступен удалённо, calibration требует физического присутствия
    с CryoDAQ запущенным в mock mode на lab monitor.
+
+---
+
+## 11.5. Resolved questions and gaps (2026-04-15)
+
+Решения Владимира по open questions §11 и трём gap'ам зафиксированы
+ниже. Этот раздел заморожен — изменения только через явный override.
+
+### Gap resolutions
+
+**Gap 1 — 7-mode phase widget:** chosen approach (a) — full B.5.5
+extension. Fallback (c) cherry-pick (только cooldown ETA + preparation
+probe view) если scope окажется неподъёмным после Phase 1
+pre-investigation B.5.5.
+
+**Gap 2 — Analytics priority:** Rebuild, не Restyle. Vladimir priority
+order ставит «графики» 3-й позицией. Выведен из restyle batch в
+отдельный B.10.
+
+**Gap 3 — Phase labels canonical:** OK. Extract в
+`src/cryodaq/core/phase_labels.py` в составе B.6.
+
+### Open questions answers
+
+| Q | Resolution |
+|---|------------|
+| 1 | Modal dialog (NewExperimentDialog) для создания + overlay для управления активным. Per wireframe §8.1+§8.2. |
+| 2 | Wrapper владеет header (consistent close button, breadcrumb, design tokens). Legacy panel content внутри. |
+| 3 | CalibrationPanel Restyle сейчас. Upgrade до Wrap отдельным блоком если visual review покажет «чужую» панель. |
+| 4 | SensorDiagPanel fold в right-click sensor cell → inline popover. Освобождает overlay slot, диагностика в контексте. |
+| 5 | B.6 (mode badge) первым. Закрывает safety gap R1 + R9 одним блоком. Quick log не блокирующий. |
+| 6 | TopWatchBar set canonical. Вынести в `core/phase_labels.py` в B.6. |
+| 7 | Restyle batch одним блоком. Codex audit scope «only restyle changes, no logic». |
+| 8 | Lab PC calibration deferred до B.16. Сейчас Mac calibration достаточна. |
