@@ -8,6 +8,7 @@ docs/PHASE_UI1_V2_WIREFRAME.md section 3 — calibrate on lab PC later.
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from datetime import datetime, timezone
@@ -16,21 +17,15 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+
+logger = logging.getLogger(__name__)
 
 _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
 
 _HEIGHT_PX = 48  # [calibrate]
-
-_PHASE_LABELS = {
-    "preparation": "Подготовка",
-    "vacuum": "Откачка",
-    "cooldown": "Захолаживание",
-    "measurement": "Измерение",
-    "warmup": "Растепление",
-    "teardown": "Разборка",
-}
 
 
 def _fmt_elapsed(start_iso: str) -> str:
@@ -141,6 +136,12 @@ class TopWatchBar(QWidget):
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
+
+        # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА)
+        self._mode_badge = QLabel()
+        self._mode_badge.setObjectName("modeBadge")
+        self._mode_badge.setVisible(False)  # hidden until backend confirms
+        layout.addWidget(self._mode_badge)
 
         self._time_window_echo_label = QLabel("▸ окно 1ч")
         self._time_window_echo_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
@@ -398,6 +399,8 @@ class TopWatchBar(QWidget):
         # B.5: forward full result to dashboard phase widget
         if ok:
             self.experiment_status_received.emit(result)
+        # B.6: update mode badge
+        self._update_mode_badge(result.get("app_mode") if ok else None)
         # Zone 2 — experiment (zone 1 engine state is driven externally
         # via set_engine_state() so it stays consistent with the launcher
         # and the reading data flow).
@@ -408,7 +411,7 @@ class TopWatchBar(QWidget):
             return
         name = exp.get("name", "—")
         phase = result.get("current_phase") or ""
-        phase_label = _PHASE_LABELS.get(phase, phase)
+        phase_label = PHASE_LABELS_RU.get(phase, phase)
         elapsed = _fmt_elapsed(str(exp.get("start_time", "")))
         parts = [f"● {name}"]
         if phase_label:
@@ -515,6 +518,49 @@ class TopWatchBar(QWidget):
         else:
             self._engine_label.setText("● Engine: нет связи")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+
+    def _update_mode_badge(self, app_mode: str | None) -> None:
+        """Update mode badge from app_mode field in /status response."""
+        if app_mode is None:
+            self._mode_badge.setVisible(False)
+            return
+        if app_mode == "experiment":
+            self._mode_badge.setText(
+                "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
+            )  # ЭКСПЕРИМЕНТ
+            self._mode_badge.setStyleSheet(
+                f"#modeBadge {{ "
+                f"background-color: {theme.MUTED}; "
+                f"color: {theme.MUTED_FOREGROUND}; "
+                f"border: 1px solid {theme.BORDER}; "
+                f"border-radius: {theme.RADIUS_SM}px; "
+                f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
+                f"font-family: '{theme.FONT_BODY}'; "
+                f"font-size: {theme.FONT_SIZE_SM}px; "
+                f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+                f"}}"
+            )
+            self._mode_badge.setVisible(True)
+        elif app_mode == "debug":
+            self._mode_badge.setText(
+                "\u041e\u0422\u041b\u0410\u0414\u041a\u0410"
+            )  # ОТЛАДКА
+            self._mode_badge.setStyleSheet(
+                f"#modeBadge {{ "
+                f"background-color: rgba(196, 134, 46, 0.2); "
+                f"color: {theme.STATUS_WARNING}; "
+                f"border: 1px solid {theme.STATUS_WARNING}; "
+                f"border-radius: {theme.RADIUS_SM}px; "
+                f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
+                f"font-family: '{theme.FONT_BODY}'; "
+                f"font-size: {theme.FONT_SIZE_SM}px; "
+                f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+                f"}}"
+            )
+            self._mode_badge.setVisible(True)
+        else:
+            logger.warning("Unknown app_mode value: %s", app_mode)
+            self._mode_badge.setVisible(False)
 
     def closeEvent(self, event):  # noqa: ANN001
         """Clean up ChannelManager subscription on close."""

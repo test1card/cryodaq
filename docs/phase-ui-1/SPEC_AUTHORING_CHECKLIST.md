@@ -359,6 +359,15 @@ Do not modify any files. This is read-only audit."
 
 ---
 
+### Block B.6
+
+- L6: Status forwarding pattern — when adding a new field to /status
+  payload, reuse existing widget polling/signal mechanism rather than
+  creating a new ZMQ command. Found in Block B.5 (Codex audit).
+- L7: Phase labels must match across surfaces (TopWatchBar,
+  PhaseAwareWidget, ExperimentWorkspace). Resolved permanently by
+  extracting `core/phase_labels.py` as canonical source.
+
 ## Living document
 
 Каждый новый промах добавляет строку в «Хроника поправок» и, если это

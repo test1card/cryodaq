@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.phase_labels import PHASE_LABELS_RU_SHORT, PHASE_ORDER
 from cryodaq.core.user_preferences import UserPreferences, suggest_experiment_name
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
@@ -360,14 +361,7 @@ class ExperimentWorkspace(QWidget):
         phase_layout.setContentsMargins(12, 6, 12, 6)
         phase_layout.setSpacing(4)
         self._phase_labels: dict[str, QLabel] = {}
-        _phase_names = [
-            ("preparation", "Подгот."),
-            ("vacuum", "Откачка"),
-            ("cooldown", "Захолаж."),
-            ("measurement", "Измерен."),
-            ("warmup", "Растепл."),
-            ("teardown", "Разборка"),
-        ]
+        _phase_names = [(p, PHASE_LABELS_RU_SHORT[p]) for p in PHASE_ORDER]
         for i, (key, label) in enumerate(_phase_names):
             if i > 0:
                 arrow = QLabel("→")
@@ -839,8 +833,9 @@ class ExperimentWorkspace(QWidget):
     @Slot()
     def _on_advance_phase(self) -> None:
         from PySide6.QtWidgets import QInputDialog
-        phases = ["preparation", "vacuum", "cooldown", "measurement", "warmup", "teardown"]
-        labels = ["Подготовка", "Откачка", "Захолаживание", "Измерение", "Растепление", "Разборка"]
+        from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
+        phases = list(PHASE_ORDER)
+        labels = [PHASE_LABELS_RU[p] for p in phases]
         item, ok = QInputDialog.getItem(self, "Следующая фаза", "Выберите фазу:", labels, 0, False)
         if not ok:
             return

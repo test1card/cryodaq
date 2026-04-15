@@ -137,6 +137,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/housekeeping.py`
 - `src/cryodaq/core/interlock.py` — threshold detection, delegates actions to SafetyManager
 - `src/cryodaq/core/operator_log.py`
+- `src/cryodaq/core/phase_labels.py` — canonical Russian phase labels (shared)
 - `src/cryodaq/core/rate_estimator.py` — rolling dT/dt estimator with min_points gate
 - `src/cryodaq/core/safety_broker.py` — dedicated safety channel (overflow=FAULT)
 - `src/cryodaq/core/safety_manager.py` — 6-state FSM, fail-on-silence, rate limiting
@@ -177,7 +178,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 **GUI shell (Phase UI-1 v2)**
 
 - `src/cryodaq/gui/shell/main_window_v2.py` — primary shell, replaces tab-based MainWindow
-- `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: engine indicator, experiment status, time window echo
+- `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: engine indicator, experiment status, time window echo, app_mode badge
 - `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation
 - `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety state indicator
 - `src/cryodaq/gui/shell/overlay_container.py` — central content container

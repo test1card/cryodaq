@@ -11,6 +11,15 @@
 
 ### Добавлено
 
+- **Phase UI-1 v2 Block B.6** — ModeBadge widget в TopWatchBar zone 2.
+  Показывает текущий AppMode (ЭКСПЕРИМЕНТ / ОТЛАДКА). DEBUG state
+  использует amber attention styling потому что режим отключает
+  создание архивных записей и отчётов. Badge скрыт пока нет backend
+  status (per product rule R1). Закрывает Strategy R1 mode visibility
+  safety gap.
+- **`src/cryodaq/core/phase_labels.py`** — канонические русские метки
+  для ExperimentPhase enum. Единый source of truth для TopWatchBar,
+  PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **Phase UI-1 v2 Block B.4.5** — Adoption design system из UI UX Pro
   Max skill v2.5.0 (MIT, Next Level Builder). Гибрид Real-Time
   Monitoring + Data-Dense Dashboard. Палитра Smart Home/IoT Dashboard

@@ -24,30 +24,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
 from cryodaq.gui import theme
 
 logger = logging.getLogger(__name__)
-
-# Phase order — defines stepper sequence and Back/Forward navigation
-PHASE_ORDER = (
-    "preparation",
-    "vacuum",
-    "cooldown",
-    "measurement",
-    "warmup",
-    "teardown",
-)
-
-# Russian labels — single source of truth
-# Russian labels — aligned with TopWatchBar._PHASE_LABELS convention
-PHASE_LABELS_RU: dict[str, str] = {
-    "preparation": "\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430",
-    "vacuum": "\u041e\u0442\u043a\u0430\u0447\u043a\u0430",
-    "cooldown": "\u0417\u0430\u0445\u043e\u043b\u0430\u0436\u0438\u0432\u0430\u043d\u0438\u0435",
-    "measurement": "\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
-    "warmup": "\u0420\u0430\u0441\u0442\u0435\u043f\u043b\u0435\u043d\u0438\u0435",
-    "teardown": "\u0420\u0430\u0437\u0431\u043e\u0440\u043a\u0430",
-}
 
 PHASE_NUMBERS: dict[str, int] = {
     phase: idx + 1 for idx, phase in enumerate(PHASE_ORDER)
