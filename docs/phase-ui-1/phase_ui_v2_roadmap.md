@@ -118,90 +118,84 @@ HTML artifact или Qt-based "storybook" page демонстрирующий в
 
 **Goal:** Каждый existing overlay/panel → thin layer над primitives.
 
-Order chosen для max value early: experiment first (already broken visually),
-then highest-traffic, then specialized.
+Order revised based on Phase 0 inventory findings (Phase 0 Summary above).
+HIGH priority first (max user value, currently uncovered), then MEDIUM,
+then LOW. Sensor Diag and Instruments combined; Sensor Diag becomes
+popover not standalone overlay.
 
-### Block II.1 — ExperimentOverlay v3 (visual rebuild on primitives)
+### HIGH priority — uncovered, daily-use
 
-Functional code from B.8.0.2 preserved. Layout reшается через BentoGrid с Executive KPI row + dominant Phase tile + Card+Хроника tiles + footer.
-
-**Solves:** P1 (better hierarchy), validates Phase I design system.
-
-**Estimate:** 1 medium block (~2h).
-
-### Block II.2 — KeithleyOverlay rebuild
-
-Skill patterns: Bento + Executive (smua/smub readouts) + DataDense (controls).
-
-Bento: smua readout tile + smub readout tile + controls tile + safety tile + custom command tile (preserves K4).
-
-**Estimate:** 1 medium block.
-
-### Block II.3 — AnalyticsOverlay rebuild
-
+#### Block II.1 — AnalyticsOverlay
 Skill patterns: Bento + ChartTile + DataDense.
+Uncovered by current dashboard. Highest user value.
+B.5.5 primitives (HeroReadout, EtaDisplay, MilestoneList) finally
+applied as designed.
+Solves: P6 plot co-location.
+Preserves: K5 plot zoom/pan.
+Estimate: 1 medium block.
 
-Bento: cooldown predictor tile + conductivity panel + calibration panel + correlated trends.
-
-Preserves K5 (zoom/pan plots).
-
-**Estimate:** 1 medium block.
-
-### Block II.4 — Operator Log Overlay rebuild
-
-Standalone log overlay (отдельно от ХРОНИКА column в ExperimentOverlay).
-
-Skill patterns: Drill-Down + DataDense + filter sidebar.
-
-Preserves K1 (full log access, filter, search, export).
-
-**Estimate:** 1 small block.
-
-### Block II.5 — Archive Overlay rebuild
-
+#### Block II.2 — ArchiveOverlay
 Skill patterns: Drill-Down + Bento (experiment cards) + DataDense (details).
+Zero coverage in new UI. K2-critical.
+Preserves: K2 archive functionality, K6 export (CSV/HDF5/Excel).
+Estimate: 1 medium block.
 
-Preserves K2 (full archive functionality, K6 export). Browse list → detail card → export button.
+#### Block II.3 — OperatorLog Overlay
+Skill patterns: Drill-Down + DataDense + filter sidebar.
+QuickLogBlock covers only quick entry, full overlay needed.
+Preserves: K1 service log with chronology.
+Solves: P3 shift handover (partial — Phase III.1 completes).
+Estimate: 1 small block.
 
-**Estimate:** 1 medium block.
-
-### Block II.6 — Calibration Overlay rebuild
-
-Skill patterns: Drill-Down (Setup → Acquisition → Results steps) + DataDense.
-
-Preserves K3 (CalibrationFitter pipeline, three modes).
-
-**Estimate:** 1 medium block.
-
-### Block II.7 — Sensor Diagnostics + Instrument Status Overlays
-
-Two related overlays. Bento with sensor health tiles + instrument status tiles.
-
-Real-Time Monitoring pattern (live indicators no pulse).
-
-**Estimate:** 1 medium block (combined).
-
-### Block II.8 — Conductivity Overlay rebuild
-
-Skill patterns: Drill-Down (auto-measurement workflow) + ChartTile + DataDense.
-
-Preserves K7 phase detector integration.
-
-**Estimate:** 1 medium block.
-
-### Block II.9 — Alarm Overlay rebuild
-
+#### Block II.4 — AlarmOverlay (with badge popover)
 Skill patterns: Drill-Down + DataDense (alarm rules table).
+Badge in TopWatchBar gives count; click opens overlay with full
+alarm tables + ack workflow + acknowledgment history.
+Solves: P2 alarm visibility (currently only badge — ack workflow uncovered).
+Estimate: 1 small block.
 
-Preserves alarm rule editing, history. **Critical**: alarm visibility (P2) уже
-solved через persistent badge in TopWatchBar — overlay = drill-down details.
+### MEDIUM priority — functional rebuild
 
-**Estimate:** 1 small block.
+#### Block II.5 — ConductivityOverlay
+Skill patterns: Drill-Down (auto-measurement workflow) + ChartTile + DataDense.
+Auto-measurement state machine with min_wait safety guard preserved exactly.
+Preserves: K6 export (CSV auto-measurement results).
+Estimate: 1 medium block.
+
+#### Block II.6 — KeithleyOverlay
+Skill patterns: Bento + Executive (smua/smub readouts) + DataDense (controls).
+Functionally complete in legacy, this is visual-only modernization.
+Preserves: K4 Keithley control with custom commands.
+Estimate: 1 medium block.
+
+#### Block II.7 — CalibrationOverlay
+Skill patterns: Drill-Down (Setup → Acquisition → Results) + DataDense.
+Clean three-mode QStackedWidget — wrap target with theme tokens.
+Preserves: K3 CalibrationFitter pipeline, K6 .330/.340/JSON/CSV export.
+Estimate: 1 medium block.
+
+### LOW priority — combined or folded
+
+#### Block II.8 — InstrumentsOverlay + SensorDiag popover
+Combined block:
+- InstrumentsOverlay: per-instrument status cards (theme tokens wrap)
+- SensorDiag: folded into right-click popover on dashboard sensor cell
+  (per Strategy Q4 resolution — eliminates separate tab, solves P1 for diag)
+Estimate: 1 medium block (combined).
+
+### ExperimentOverlay v3 visual rebuild
+
+#### Block II.9 — ExperimentOverlay v3
+Apply Phase I primitives to existing B.8.0.2 functional code.
+Functional logic preserved, visual rebuild only.
+Position deferred to last block of Phase II — primitives are mature
+by then, applied to most-iterated overlay.
+Estimate: 1 medium block.
 
 **Phase II deliverable:**
-- All 9 overlays built on primitives
+- 9 overlays + 1 popover built on primitives
 - Visual consistency across all surfaces
-- Each overlay ~150-300 lines (vs current 500-900)
+- Each overlay ~150-300 lines (vs current 500-1700)
 - Test coverage maintained or improved
 
 ---
@@ -266,13 +260,13 @@ Out-of-scope для chat work. Vladimir does on lab Ubuntu 22.04:
 
 | Phase | Blocks | Total architect+CC time |
 |-------|--------|-------------------------|
-| Phase 0 (Inventory) | 1 large block | ~6h CC + 1h architect |
+| Phase 0 (Inventory + Audit) | DONE — 4 commits | ~9h CC + 3h architect |
 | Phase I (Primitives) | 4 blocks | ~6h CC + 3h architect |
 | Phase II (Apply ×9) | 9 blocks | ~14h CC + 9h architect |
 | Phase III (Polish) | 4 blocks | ~6h CC + 3h architect + lab time |
-| **Total** | **18 blocks** | **~32h CC + ~16h architect** |
+| **Remaining** | **17 blocks** | **~26h CC + ~15h architect** |
 
-Spread over realistic calendar: 4-6 weeks at current cadence (1-3 blocks per week).
+Phase 0 status: COMPLETE.
 
 ---
 
@@ -284,6 +278,8 @@ Spread over realistic calendar: 4-6 weeks at current cadence (1-3 blocks per wee
 - **2026-04-16** Phase 0.1 — Legacy Inventory batch 1 completed. Tabs: Обзор (1729 LOC), Источник мощности (586 LOC), Аналитика (934 LOC). Reports at docs/legacy-inventory/. Total 3249 LOC inventoried. Key findings: (1) Overview almost entirely superseded by new dashboard — only ML prediction curve overlay unique. (2) Keithley functionally complete, rebuild is visual-only. (3) Analytics is LEAST covered by new surfaces — highest priority rebuild for Phase II.
 - **2026-04-16** Phase 0.2 — Legacy Inventory batch 2 completed. Tabs: Теплопроводность (1068 LOC), Алармы (378 LOC), Служебный лог (171 LOC). Reports at docs/legacy-inventory/. Total 1617 LOC inventoried. Key findings: (1) Conductivity has embedded auto-measurement state machine with min_wait safety guard — must preserve timing logic carefully. (2) Alarms panel is structurally simple (two tables + ACK buttons) but P2 only partially solved by TopWatchBar badge. (3) Operator Log is K1-critical for shift handovers — QuickLogBlock covers only quick entry, full overlay needed.
 - **2026-04-16** Phase 0.3 — Legacy Inventory batch 3 completed (FINAL). Tabs: Архив (529 LOC), Калибровка (499 LOC), Приборы (308 LOC), Датчики-диагностика (211 LOC). Phase 0 complete: 10 files inventoried, 6413 LOC total. Key findings: (1) Archive has rich filtering + detail pane + report regeneration — full rebuild needed for K2. (2) Calibration has clean 3-mode QStackedWidget architecture — Wrap approach viable. (3) Instruments + SensorDiag are low-priority (operators check only on problems).
+- **2026-04-16** Phase 0 Codex audit completed. Verdict: PROCEED. 0 critical, 4 medium issues (documentation nits, not design-misleading). Report: docs/phase-ui-1/phase_0_audit_report.md.
+- **2026-04-16** Phase II reordered: HIGH (Analytics/Archive/OperatorLog/Alarm) first, MEDIUM (Conductivity/Keithley/Calibration) middle, LOW (Instruments+SensorDiag combined) last. ExperimentOverlay v3 visual rebuild moved to II.9 (after primitives mature).
 
 ---
 
