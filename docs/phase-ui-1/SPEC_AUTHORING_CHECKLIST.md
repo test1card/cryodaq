@@ -486,6 +486,11 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L16: Design system font tokens fail silently if fonts not actually
+  loaded. Qt does font substitution and renders with wrong font.
+  B.5.7.2: `addApplicationFont(path)` fails on macOS PySide6, use
+  `addApplicationFontFromData(bytes)` instead. Always verify
+  QFontDatabase.families() at startup.
 - L15: Visual debt sometimes = implementation drift across blocks
   using different mechanisms for same job. B.4 used QFrame rectangles
   for context separators; B.5.7 added VLine widgets for zone

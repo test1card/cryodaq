@@ -33,10 +33,11 @@ logger = logging.getLogger("cryodaq.gui")
 
 
 def _load_bundled_fonts() -> None:
-    """Load Inter and JetBrains Mono fonts from bundled resources.
+    """Load bundled fonts (Fira Sans, Fira Code, Inter, JetBrains Mono).
 
     Must be called AFTER QApplication is created but BEFORE any widget
-    that uses these fonts is constructed.
+    that uses these fonts is constructed. Uses addApplicationFontFromData
+    because addApplicationFont(path) fails on macOS PySide6/Qt6.
     """
     from pathlib import Path
 
@@ -66,7 +67,12 @@ def _load_bundled_fonts() -> None:
         if not font_path.exists():
             logger.warning(f"Font file missing: {font_path}")
             continue
-        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        # B.5.7.2: use addApplicationFontFromData because
+        # addApplicationFont(path) fails on macOS PySide6/Qt6
+        from PySide6.QtCore import QByteArray
+
+        data = font_path.read_bytes()
+        font_id = QFontDatabase.addApplicationFontFromData(QByteArray(data))
         if font_id == -1:
             logger.warning(f"Failed to load font: {font_file}")
         else:
@@ -75,6 +81,16 @@ def _load_bundled_fonts() -> None:
             logger.debug(f"Loaded {font_file}: families={families}")
 
     logger.info(f"Loaded {loaded}/{len(font_files)} bundled fonts")
+
+    # Verify required families are now available (use theme tokens)
+    all_families = QFontDatabase.families()
+    for required in (theme.FONT_BODY, theme.FONT_DISPLAY):
+        if required not in all_families:
+            logger.warning(
+                "Required font '%s' not found after registration. "
+                "Design system will use system fallback.",
+                required,
+            )
 
 
 def _enable_tabular_figures(font: QFont) -> None:

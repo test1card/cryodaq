@@ -22,6 +22,11 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.5.7.2 — Fira font loading fix.** `addApplicationFont(path)`
+  fails на macOS PySide6/Qt6. Заменён на `addApplicationFontFromData`
+  который работает. Fira Sans + Fira Code теперь реально загружены
+  в QFontDatabase. До этого Qt делал silent font substitution на
+  system default при каждом запуске GUI.
 - **B.5.7.1 — TopWatchBar separator normalization.** Унифицирован
   separator mechanism: zone VLine wrappers с consistent spacing
   (contentsMargins), context strip QFrame separators заменены на
