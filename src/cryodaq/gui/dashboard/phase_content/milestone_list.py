@@ -1,4 +1,9 @@
-"""Milestone list — compact list of completed phase milestones."""
+"""Milestone list — compact list of completed phase milestones.
+
+Status: dashboard usage removed in B.5.6 (compact phase strip).
+Reserved for B.10 Analytics overlay where hero treatment fits the
+context (full screen real estate, drill-down view).
+"""
 from __future__ import annotations
 
 from datetime import datetime

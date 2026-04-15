@@ -1,7 +1,7 @@
-"""Phase progression stepper — extracted from PhaseAwareWidget (B.5.5).
+"""Compact phase progression stepper (B.5.6).
 
-Horizontal stepper showing 6 experiment phases as pills with arrows.
-Current phase highlighted, past phases muted, future phases dim.
+Horizontal pills showing phase numbers 1-6. Current highlighted,
+past muted, future dim. Hover tooltip shows full Russian phase name.
 """
 from __future__ import annotations
 
@@ -20,12 +20,12 @@ PHASE_NUMBERS: dict[str, int] = {
     phase: idx + 1 for idx, phase in enumerate(PHASE_ORDER)
 }
 
-_PILL_HEIGHT_PX = 28
-_PILL_PADDING_PX = 8
+_PILL_HEIGHT_PX = 24
+_PILL_PADDING_PX = 6
 
 
 class PhaseStepper(QWidget):
-    """Horizontal phase progression stepper."""
+    """Compact horizontal phase stepper — numbers only, tooltip names."""
 
     phase_clicked = Signal(str)
 
@@ -39,37 +39,33 @@ class PhaseStepper(QWidget):
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_1)
-        layout.addStretch(1)
+        layout.setSpacing(2)
         for phase in PHASE_ORDER:
             pill = self._make_pill(phase)
             self._pills[phase] = pill
             layout.addWidget(pill)
             if phase != PHASE_ORDER[-1]:
-                arrow = QLabel("\u2192")
+                arrow = QLabel("\u203a")  # › (smaller than →)
                 arrow.setObjectName(f"stepperArrow_{phase}")
                 arrow.setStyleSheet(
                     f"#{arrow.objectName()} {{ "
                     f"color: {theme.MUTED_FOREGROUND}; "
-                    f"font-size: {theme.FONT_SIZE_BASE}px; "
+                    f"font-size: {theme.FONT_SIZE_XS}px; "
                     f"}}"
                 )
                 layout.addWidget(arrow)
-        layout.addStretch(1)
 
     def _make_pill(self, phase: str) -> QFrame:
         pill = QFrame()
         pill.setObjectName(f"stepperPill_{phase}")
         pill.setFixedHeight(_PILL_HEIGHT_PX)
+        pill.setToolTip(PHASE_LABELS_RU[phase])
         inner = QHBoxLayout(pill)
-        inner.setContentsMargins(_PILL_PADDING_PX, 2, _PILL_PADDING_PX, 2)
-        inner.setSpacing(theme.SPACE_1)
+        inner.setContentsMargins(_PILL_PADDING_PX, 1, _PILL_PADDING_PX, 1)
+        inner.setSpacing(0)
         num = QLabel(str(PHASE_NUMBERS[phase]))
         num.setObjectName(f"stepperPillNum_{phase}")
         inner.addWidget(num)
-        text = QLabel(PHASE_LABELS_RU[phase])
-        text.setObjectName(f"stepperPillText_{phase}")
-        inner.addWidget(text)
         self._style_pill(pill, "future")
         return pill
 
@@ -90,7 +86,7 @@ class PhaseStepper(QWidget):
             f"#{pid} QLabel {{ "
             f"color: {fg}; "
             f"font-family: '{theme.FONT_BODY}'; "
-            f"font-size: {theme.FONT_SIZE_SM}px; "
+            f"font-size: {theme.FONT_SIZE_XS}px; "
             f"background: transparent; border: none; "
             f"}}"
         )

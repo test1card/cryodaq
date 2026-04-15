@@ -22,6 +22,11 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.5.6 — Compact PhaseAwareWidget.** Phase widget сжат с ~210px
+  до ~55px (одна строка). HeroReadout / EtaDisplay / MilestoneList
+  primitives сохранены для B.10 Analytics overlay. Stepper pills
+  24px, только номер фазы, Russian name в tooltip. Освобождает ~150px
+  для графиков (95% операторского внимания).
 - **Phase UI-1 v2 Block B.5.5 — 7-mode PhaseAwareWidget extension.**
   PhaseAwareWidget переходит от generic stepper к phase-specific
   content. Cherry-pick scope: cooldown (ETA + R_thermal hero),

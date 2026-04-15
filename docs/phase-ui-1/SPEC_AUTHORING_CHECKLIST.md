@@ -486,6 +486,10 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L12: Wireframe height estimates are ESTIMATES until visual review.
+  B.5.5 followed wireframe literally and produced ~210px widget that
+  dominated dashboard. B.5.6 cut to ~55px after seeing actual render.
+  Override wireframe density estimates with explicit max-height caps.
 - L11: For widget rewrites spanning multiple modes/states, extract
   reusable primitives FIRST (HeroReadout, EtaDisplay etc), then
   compose. B.5.5 created 3 reusable primitives serving 6 modes —

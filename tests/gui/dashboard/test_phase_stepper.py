@@ -26,3 +26,17 @@ def test_phase_stepper_none_resets_all(app):
     s.set_current_phase("cooldown")
     s.set_current_phase(None)
     assert s._current_phase is None
+
+
+def test_pill_tooltip_shows_phase_name(app):
+    from cryodaq.core.phase_labels import PHASE_LABELS_RU
+
+    s = PhaseStepper()
+    for phase, pill in s._pills.items():
+        assert pill.toolTip() == PHASE_LABELS_RU[phase]
+
+
+def test_pill_height_compact(app):
+    s = PhaseStepper()
+    for pill in s._pills.values():
+        assert pill.maximumHeight() == 24

@@ -1,4 +1,9 @@
-"""Hero readout — large primary numeric value with unit and annotation."""
+"""Hero readout — large primary numeric value with unit and annotation.
+
+Status: dashboard usage removed in B.5.6 (compact phase strip).
+Reserved for B.10 Analytics overlay where hero treatment fits the
+context (full screen real estate, drill-down view).
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt

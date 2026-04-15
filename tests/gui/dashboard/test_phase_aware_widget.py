@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 
 from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
 from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
-from cryodaq.gui.dashboard.phase_content.eta_display import (
-    _format_duration_ru as _format_duration,
-)
+from cryodaq.gui.dashboard.phase_content.eta_display import _format_duration_ru
+
+
+def _format_duration(s):
+    return _format_duration_ru(s)
 
 
 def test_phase_order_matches_enum():
@@ -183,54 +185,26 @@ def test_widget_cleanup_on_close(app):
     assert not w._duration_timer.isActive()
 
 
-# --- B.5.5 QStackedWidget tests ---
+# --- B.5.6 Compact widget tests ---
 
 
-def test_widget_switches_pages_on_phase_change(app):
-    """Stack page index changes when phase changes."""
+def test_widget_height_capped(app):
     w = PhaseAwareWidget()
-    w.on_status_update({
-        "active_experiment": {"name": "Test"},
-        "current_phase": "preparation",
-        "phase_started_at": 1000.0,
-    })
-    assert w._stack.currentIndex() == 1  # _PAGE_PREPARATION
-
-    w.on_status_update({
-        "active_experiment": {"name": "Test"},
-        "current_phase": "cooldown",
-        "phase_started_at": 2000.0,
-    })
-    assert w._stack.currentIndex() == 3  # _PAGE_COOLDOWN
-
-    w.on_status_update({
-        "active_experiment": {"name": "Test"},
-        "current_phase": "teardown",
-        "phase_started_at": 3000.0,
-    })
-    assert w._stack.currentIndex() == 6  # _PAGE_TEARDOWN
+    assert w.maximumHeight() <= 60
 
 
-def test_widget_no_experiment_shows_page_0(app):
+def test_context_label_shows_phase_name_uppercase(app):
     w = PhaseAwareWidget()
-    assert w._stack.currentIndex() == 0
-
     w.on_status_update({
         "active_experiment": {"name": "Test"},
         "current_phase": "cooldown",
         "phase_started_at": 1000.0,
     })
-    assert w._stack.currentIndex() == 3
-
-    w.on_status_update({
-        "current_phase": None,
-        "phase_started_at": None,
-    })
-    assert w._stack.currentIndex() == 0
+    text = w._context_label.text()
+    assert "\u0417\u0410\u0425\u041e\u041b\u0410\u0416\u0418\u0412\u0410\u041d\u0418\u0415" in text
 
 
-def test_widget_cooldown_eta_update(app):
-    """Cooldown ETA widget receives analytics data."""
+def test_context_label_shows_eta_when_cooldown_eta_received(app):
     from cryodaq.drivers.base import ChannelStatus, Reading
     from datetime import datetime, timezone
 
@@ -242,7 +216,7 @@ def test_widget_cooldown_eta_update(app):
     })
     reading = Reading(
         channel="analytics/cooldown_predictor/cooldown_eta",
-        value=12.5,  # hours
+        value=12.5,
         unit="h",
         timestamp=datetime.now(timezone.utc),
         status=ChannelStatus.OK,
@@ -250,5 +224,30 @@ def test_widget_cooldown_eta_update(app):
         metadata={},
     )
     w.on_reading(reading)
-    # ETA should show ~12h 30min
-    assert w._cooldown_eta._value_label.text() != "\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e"
+    assert "ETA" in w._context_label.text()
+
+
+def test_context_label_omits_eta_when_not_received(app):
+    w = PhaseAwareWidget()
+    w.on_status_update({
+        "active_experiment": {"name": "Test"},
+        "current_phase": "cooldown",
+        "phase_started_at": 1000.0,
+    })
+    assert "ETA" not in w._context_label.text()
+
+
+def test_cached_values_reset_on_experiment_end(app):
+    w = PhaseAwareWidget()
+    w.on_status_update({
+        "active_experiment": {"name": "Test"},
+        "current_phase": "cooldown",
+        "phase_started_at": 1000.0,
+    })
+    w._cached_r_thermal = 3.14
+    w.on_status_update({
+        "current_phase": None,
+        "phase_started_at": None,
+    })
+    assert w._cached_r_thermal is None
+    assert w._cached_eta_s is None
