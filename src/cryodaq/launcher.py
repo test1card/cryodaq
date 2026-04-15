@@ -814,6 +814,13 @@ def main() -> None:
     app.setOrganizationName("АКЦ ФИАН")
     app.setQuitOnLastWindowClosed(False)  # Не выходить при закрытии окна (трей)
 
+    # B.5.7.3: load bundled fonts BEFORE any widget construction.
+    # Must be here (launcher process), not only in gui/app.py (cryodaq-gui
+    # entry), because `cryodaq` launcher creates QApplication + MainWindow
+    # directly without going through gui/app.py.
+    from cryodaq.gui.app import _load_bundled_fonts
+    _load_bundled_fonts()
+
     # Single-instance guard
     lock_fd = try_acquire_lock(".launcher.lock")
     if lock_fd is None:

@@ -22,6 +22,12 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **B.5.7.3 — Fira fonts load from launcher entry point.** B.5.7.2
+  wired font loading only in `cryodaq-gui` entry (`gui/app.py:main`).
+  The `cryodaq` launcher creates QApplication + MainWindowV2 directly
+  без gui/app.py — font registration bypassed. Fix: call
+  `_load_bundled_fonts()` в `launcher.py:main` after QApplication.
+  Verified by real launch + QFontInfo resolution check.
 - **B.5.7.2 — Fira font loading fix.** `addApplicationFont(path)`
   fails на macOS PySide6/Qt6. Заменён на `addApplicationFontFromData`
   который работает. Fira Sans + Fira Code теперь реально загружены

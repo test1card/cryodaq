@@ -486,6 +486,14 @@ Do not modify any files. This is read-only audit."
   default button = Отмена для любых переключений которые меняют
   системное состояние (mode switch, experiment finalize, etc.).
   Pattern: click → confirm dialog (default Cancel) → action.
+- L17: Test passing != runtime working. B.5.7.2 had passing unit
+  tests but real launch still failed because launcher entry point
+  bypassed font loading. Foundational fixes need real-launch grep
+  verification, not just unit tests.
+- L18: Multiple entry points each need startup init. CryoDAQ has
+  cryodaq (launcher), cryodaq-gui (gui/app.py), cryodaq-engine,
+  cryodaq-cooldown. Startup setup must be called from each entry
+  point or extracted into shared init. B.5.7.3 chose explicit calls.
 - L16: Design system font tokens fail silently if fonts not actually
   loaded. Qt does font substitution and renders with wrong font.
   B.5.7.2: `addApplicationFont(path)` fails on macOS PySide6, use
