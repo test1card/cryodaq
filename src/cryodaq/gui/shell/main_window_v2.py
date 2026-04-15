@@ -39,7 +39,7 @@ from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
-from cryodaq.gui.widgets.experiment_workspace import ExperimentWorkspace
+from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
@@ -96,7 +96,7 @@ class MainWindowV2(QMainWindow):
     # front (~10 panels with their own poll timers) which is wasteful and
     # leaks pending QTimer.singleShot callbacks across the test boundary.
     _OVERLAY_FACTORIES = {
-        "experiment": ("_experiment_workspace", lambda self: ExperimentWorkspace()),
+        "experiment": ("_experiment_overlay", lambda self: ExperimentOverlay()),
         "source": ("_keithley_panel", lambda self: KeithleyPanel()),
         "analytics": ("_analytics_panel", lambda self: AnalyticsPanel()),
         "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
@@ -115,7 +115,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel = DashboardView(self._channel_mgr)
         self._alarm_panel = AlarmPanel()
         # Lazy panel slots — populated on first overlay open
-        self._experiment_workspace: ExperimentWorkspace | None = None
+        self._experiment_overlay: ExperimentOverlay | None = None
         self._keithley_panel: KeithleyPanel | None = None
         self._analytics_panel: AnalyticsPanel | None = None
         self._conductivity_panel: ConductivityPanel | None = None
@@ -139,9 +139,7 @@ class MainWindowV2(QMainWindow):
 
         # Wire signals
         self._tool_rail.tool_clicked.connect(self._on_tool_clicked)
-        self._top_bar.experiment_clicked.connect(
-            lambda: self._on_tool_clicked("experiment")
-        )
+        self._top_bar.experiment_clicked.connect(self._on_experiment_clicked)
         self._top_bar.alarms_clicked.connect(
             lambda: self._on_tool_clicked("alarms")
         )
@@ -151,8 +149,16 @@ class MainWindowV2(QMainWindow):
 
         # B.5: forward experiment status from top bar to dashboard phase widget
         self._top_bar.experiment_status_received.connect(
-            self._overview_panel.on_experiment_status
+            self._on_experiment_status_received
         )
+        self._latest_experiment_status: dict | None = None
+
+        # B.8: wire dashboard «+ Создать» button to new experiment dialog
+        if hasattr(self._overview_panel, '_phase_widget') and \
+           self._overview_panel._phase_widget is not None:
+            self._overview_panel._phase_widget.create_experiment_requested.connect(
+                self._show_new_experiment_dialog
+            )
 
         # Wire dashboard time window picker → top bar echo
         if hasattr(self._overview_panel, '_temp_plot') and \
@@ -187,8 +193,7 @@ class MainWindowV2(QMainWindow):
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
         if name == "new_experiment":
-            dlg = NewExperimentDialog(self)
-            dlg.exec()
+            self._show_new_experiment_dialog()
             return
         if name == "web_panel":
             self._open_web_panel()
@@ -221,6 +226,16 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
+        # B.8: wire overlay signals
+        if name == "experiment" and hasattr(widget, "closed"):
+            widget.closed.connect(lambda: self._on_tool_clicked("home"))
+            widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
+            # Populate with latest state
+            if self._latest_experiment_status:
+                widget.set_experiment(
+                    self._latest_experiment_status.get("active_experiment"),
+                    self._latest_experiment_status.get("phases", []),
+                )
 
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
@@ -245,8 +260,8 @@ class MainWindowV2(QMainWindow):
         self._alarm_panel.on_reading(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
-        if self._experiment_workspace is not None:
-            self._experiment_workspace.on_reading(reading)
+        # ExperimentOverlay does not need per-reading updates
+        # (reads via /status poll, not on_reading)
         if reading.unit == "K" and self._calibration_panel is not None:
             self._calibration_panel.on_reading(reading)
         if (
@@ -308,6 +323,58 @@ class MainWindowV2(QMainWindow):
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Experiment lifecycle (B.8)
+    # ------------------------------------------------------------------
+
+    def _on_experiment_status_received(self, status: dict) -> None:
+        """Forward status to dashboard + overlay, cache for routing."""
+        self._latest_experiment_status = status
+        self._overview_panel.on_experiment_status(status)
+        # Forward to overlay if it exists and is visible
+        if self._experiment_overlay is not None:
+            exp = status.get("active_experiment")
+            phases = status.get("phases", [])
+            self._experiment_overlay.set_experiment(exp, phases)
+
+    def _on_experiment_clicked(self) -> None:
+        """TopWatchBar experiment label click — open overlay or dialog."""
+        has_active = (
+            self._latest_experiment_status is not None
+            and self._latest_experiment_status.get("active_experiment") is not None
+        )
+        if has_active:
+            self._on_tool_clicked("experiment")
+        else:
+            self._show_new_experiment_dialog()
+
+    def _show_new_experiment_dialog(self) -> None:
+        from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        dialog = NewExperimentDialog(self)
+        dialog.experiment_create_requested.connect(self._on_create_experiment)
+        dialog.exec()
+
+    def _on_create_experiment(self, payload: dict) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        cmd = {"cmd": "experiment_create", **payload}
+        self._create_exp_worker = ZmqCommandWorker(cmd, parent=self)
+        self._create_exp_worker.finished.connect(self._on_create_exp_result)
+        self._create_exp_worker.start()
+
+    def _on_create_exp_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            logger.warning("experiment_create failed: %s", result.get("error"))
+            return
+        # Status poll will pick up new experiment, dashboard updates automatically
+        logger.info("Experiment created: %s", result.get("experiment_id", "?"))
+
+    # ------------------------------------------------------------------
+    # Other tool actions
     # ------------------------------------------------------------------
 
     def _open_web_panel(self) -> None:

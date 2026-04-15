@@ -22,6 +22,14 @@
   PhaseAwareWidget и ExperimentWorkspace. Закрывает Strategy R9.
 - **B.6.1 hotfix:** Regression-тесты для ModeBadge через full handler
   path `_on_experiment_result` (с и без active_experiment). L8 lesson.
+- **Phase UI-1 v2 Block B.8 — ExperimentWorkspace rebuild as overlay.**
+  NewExperimentDialog (modal) с полями name, operator, template,
+  description, target_T_cold, tags + validation. ExperimentOverlay
+  (full-screen drill-down) с editable inline name, header
+  (elapsed/phase/operator/mode), MilestoneList (reuse B.5.5),
+  Finalize с destructive confirmation (L9). Triggers: exp_label
+  click, tray flask icon, + Создать button; ESC closes overlay.
+  Legacy ExperimentWorkspace removed from MainWindowV2.
 - **Phase UI-1 v2 Block B.7 — QuickLogBlock dashboard widget.**
   Закрывает последний placeholder `[ЖУРНАЛ — будет в B.6]`. Compact
   peripheral awareness ~55-65px: inline composer + последние 1-2
