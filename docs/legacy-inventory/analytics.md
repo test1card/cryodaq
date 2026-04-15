@@ -14,7 +14,7 @@
 - Lines 500-521: helper functions
 
 ### vacuum_trend_panel.py sections:
-- Lines 1-50: imports, VacuumTrendPrediction dataclass
+- Lines 1-80: imports, trend/format helper functions
 - Lines 51-230: VacuumTrendPanel._build_ui (3 ETA targets, chart, model info)
 - Lines 231-413: polling (10s via ZmqCommandWorker), chart rendering, extrapolation
 
@@ -44,10 +44,9 @@ AnalyticsPanel: QVBoxLayout
     Empty state overlay: "R_thermal и cooldown данные появятся..."
   
   Row 3: VacuumTrendPanel (stretch=1)
-    3 target rows: [1×10⁻⁴] [1×10⁻⁵] [1×10⁻⁶]
-      Each: ETA text + confidence text
+    ETA target rows built dynamically from backend payload
     Vacuum chart: pressure log-scale + extrapolation curve
-    Model info: [samples, BIC, R², model type]
+    Model info: [trend, P_предельное, model type, confidence bar]
 ```
 
 ## ZMQ commands used
@@ -89,20 +88,19 @@ Mode switching is automatic based on `cooldown_active` flag in cooldown_eta meta
 
 ## Vacuum trend panel details
 
-Three target pressure thresholds: 1×10⁻⁴, 1×10⁻⁵, 1×10⁻⁶ mbar
-Each shows:
-- ETA text: "~2ч 14мин" or "достигнуто" or "—"
-- Confidence: "±30мин" or "—"
-- Status dot (green if reached, amber if approaching, gray if unknown)
+ETA labels are built dynamically from `eta_targets` in the polling result.
+The current backend commonly returns 3 pressure targets, but the GUI code
+does not hardcode the count in the data contract.
 
 Vacuum chart:
 - Log-Y pressure vs time
-- Observed data (blue line)
-- Extrapolation curve (orange dashed, extending 2x window)
-- Model info: sample count, BIC score, R² fit, selected model name
+- Observed data (white line)
+- Extrapolation curve (white dashed, extending 2x window)
+- Sidebar model info: trend label/icon, P_предельное, model type, confidence bar
 
-10-second polling: `get_vacuum_trend` returns `VacuumTrendPrediction` dataclass
-with observed data, extrapolation data, target ETAs, model parameters.
+10-second polling: `get_vacuum_trend` returns a plain `dict` consumed by
+`VacuumTrendPanel._on_result()` / `set_prediction()`. GUI code does not
+define a dedicated prediction dataclass as of `cf72942`.
 
 ## External dependencies
 - pyqtgraph (PlotWidget, PlotDataItem, FillBetweenItem, DateAxisItem)
@@ -156,3 +154,17 @@ operators depend on daily during week-long experiments.
 B.5.5 primitives (HeroReadout, EtaDisplay) are designed for this overlay.
 VacuumTrendPanel can potentially be wrapped with theme tokens and used
 as-is inside the new overlay.
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K5: R_thermal plot with rolling history and zoom/pan semantics (`analytics_panel.py:92-104`, `analytics_panel.py:363-500`)
+- K5: cooldown prediction curve + confidence band on the temperature plot (`analytics_panel.py:315-357`, `analytics_panel.py:408-489`)
+- K5: vacuum trend plot with extrapolation and ETA display (`vacuum_trend_panel.py:81-220`, `vacuum_trend_panel.py:231-413`)
+
+Verified anchors: K5
+NOT anchored by this inventory: K1, K2, K3, K4, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

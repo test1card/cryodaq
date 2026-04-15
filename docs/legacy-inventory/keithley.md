@@ -12,6 +12,8 @@
 
 ```
 KeithleyPanel: QVBoxLayout
+  Header action row:
+    [Старт A+B] [Стоп A+B] [АВАР. ОТКЛ. A+B]
   QHBoxLayout (two equal columns):
     _SmuPanel("smua")
     _SmuPanel("smub")
@@ -85,8 +87,13 @@ Two independent `_SmuPanel` instances side-by-side. Each has:
 - Own ZMQ commands scoped to "smua" or "smub"
 - Own state tracking (off/on/fault) from analytics channel
 
-No combined A+B actions at panel level — each channel fully independent.
-Emergency off in legacy MainWindow has global emergency (both channels).
+Panel-level combined actions also exist in `KeithleyPanel` itself:
+- `Старт A+B` → dispatches `_on_start()` to both `_SmuPanel` instances
+- `Стоп A+B` → dispatches `_on_stop()` to both `_SmuPanel` instances
+- `АВАР. ОТКЛ. A+B` → dispatches `_on_emergency()` to both `_SmuPanel` instances
+
+FYI: a previous version of this inventory documented the panel as per-channel
+only. That claim does not match source as of `cf72942`.
 
 ## Operator workflows
 
@@ -95,11 +102,13 @@ Emergency off in legacy MainWindow has global emergency (both channels).
 3. **Monitor V/I/R/P** — watch 4 rolling plots for stability
 4. **Emergency off** — click АВАР. ОТКЛ., immediate backend response
 5. **Compare A vs B** — both panels visible simultaneously, visual comparison
+6. **Drive both channels together** — use Старт A+B / Стоп A+B / АВАР. ОТКЛ. A+B from the panel header
 
 ## Recommendations for Phase II overlay rebuild
 
 **MUST preserve (K4 — direct Keithley control):**
 - Dual-channel layout (smua + smub side-by-side)
+- Panel-level A+B controls in addition to per-channel controls
 - P target spinbox with live adjustment (debounced)
 - V and I limit spinboxes
 - Start / Stop / Emergency Off buttons per channel
@@ -119,3 +128,17 @@ Emergency off in legacy MainWindow has global emergency (both channels).
 
 This panel is functionally complete and has no missing features.
 Rebuild is purely a visual modernization pass with theme tokens.
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K4: direct Keithley control via per-channel `Старт` / `Стоп` / `АВАР. ОТКЛ.` controls and live `keithley_set_target` / `keithley_set_limits` updates (`keithley_panel.py:117-160`, `keithley_panel.py:322-434`)
+- K4: combined A+B control surface in `KeithleyPanel` header (`keithley_panel.py:489-555`)
+- K5: per-channel rolling V/I/R/P plots (`keithley_panel.py:162-277`, `keithley_panel.py:457-476`)
+
+Verified anchors: K4, K5
+NOT anchored by this inventory: K1, K2, K3, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

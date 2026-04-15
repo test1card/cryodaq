@@ -21,7 +21,7 @@
 ```
 Top level: QVBoxLayout
   StatusStrip: HBox (~40px)
-    [Safety] [Alarm count] [Keithley status] [Cooldown ETA] [Disk] [Time]
+    [Safety] [Аптайм] [Alarm count] [Keithley status] [Cooldown ETA] [Disk]
   
   ExperimentStatusWidget: HBox
     [Experiment name + phase + elapsed]
@@ -46,22 +46,23 @@ Top level: QVBoxLayout
       KeithleyStrip: HBox
         [smua: ВКЛ 0.5W | smub: ВЫКЛ]
       QuickLogWidget: HBox
-        [QLineEdit "Запись..."] [QPushButton "↵"]
+        [QLabel "Журнал:"] [QLineEdit "Заметка оператора..."] [QPushButton "Записать"]
+        [Recent entries label, up to 5 current-experiment lines]
 ```
 
 ## ZMQ commands used
 
 | Command | Payload | Trigger |
 |---------|---------|---------|
-| `experiment_status` | `{cmd}` | 2Hz poll via QTimer (StatusStrip) |
+| `experiment_status` | `{cmd}` | 5-second poll via `ExperimentStatusWidget` QTimer |
 | `log_entry` | `{cmd, message, source: "overview", current_experiment: true}` | Quick log submit |
 | `log_get` | `{cmd, limit: 5, current_experiment: true}` | Log widget refresh |
-| `readings_history` | `{cmd, channels: [...], start_time, end_time}` | "Все" time window on 24h+ |
+| `readings_history` | `{cmd, from_ts, to_ts, channels: [...], limit_per_channel}` | "Все" time window / history load |
 
 ## Live data subscriptions (on_reading channels)
 
 - `Т*` (temperature, unit=K) → card update + plot buffer
-- `*/pressure` (unit=mbar) → pressure card + pressure plot buffer
+- any reading with `unit == "mbar"` → pressure card + pressure plot buffer
 - `/smua/*`, `/smub/*` → KeithleyStrip values
 - `analytics/keithley_channel_state/*` → KeithleyStrip state
 - `analytics/cooldown_eta` → prediction curve on temp plot
@@ -87,7 +88,7 @@ Top level: QVBoxLayout
 | Pressure plot | Embedded in panel | PressurePlotWidget (B.2) | ✓ COVERED |
 | Cooldown ETA overlay | On temp plot | Inline in PhaseAwareWidget | ⚠ PARTIAL (no ML curve) |
 | KeithleyStrip | In sidebar | TopWatchBar context strip (B.4) | ✓ COVERED |
-| QuickLogWidget | In sidebar | QuickLogBlock (B.7) | ✓ COVERED |
+| QuickLogWidget | In sidebar | QuickLogBlock (B.7) | ⚠ PARTIAL (legacy shows 5 current-experiment entries; dashboard shows 2 global entries, no author/tags) |
 | ExperimentStatus | In panel | TopWatchBar zone 2 | ✓ COVERED |
 | Card toggle → plot line | Click card | Not implemented | ✗ DROPPED |
 | Pressure card | Sidebar widget | TopWatchBar context strip | ✓ COVERED |
@@ -112,3 +113,16 @@ Top level: QVBoxLayout
 Legacy Overview is almost entirely superseded by the new dashboard.
 Only the ML prediction curve overlay and card-click toggle are unique
 features not yet in new surfaces.
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K5: plot history with zoom/pan via the embedded temperature/pressure plots, time-window presets, and history loading path (`overview_panel.py:1548-1668`)
+- K1: partial operator note chronology via `QuickLogWidget` current-experiment submit + 5-entry refresh (`overview_panel.py:906-990`)
+
+Verified anchors: K5
+NOT anchored by this inventory: K2, K3, K4, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

@@ -13,14 +13,14 @@
 
 ```
 SensorDiagPanel: QVBoxLayout
-  QLabel "Диагностика датчиков"
+  Header frame "ДИАГНОСТИКА ДАТЧИКОВ" + summary badge
   
   QTableWidget
-    Columns: Канал | Здоровье | Шум (σ) | Дрифт | Последнее
+    Columns: Канал | T (K) | Шум (мК) | Дрейф (мК/мин) | Выбросы | Корр. | Здоровье
     Per-channel row with color-coded health score
   
-  Summary row:
-    [Средний балл: X/100] [Каналов: N] [Нездоровых: M]
+  Summary badge:
+    [healthy✓] [warning⚠] [critical✘]
 ```
 
 ## ZMQ commands used
@@ -29,15 +29,18 @@ SensorDiagPanel: QVBoxLayout
 |---------|---------|---------|
 | `get_sensor_diagnostics` | `{cmd}` | 10-second poll timer |
 
-Response fields: `{ok, channels: {ch_id: {health, noise_sigma, drift, last_value}}, summary: {mean_health, total, unhealthy}}`
+Response fields consumed by this widget:
+`{ok, channels: {ch_id: {channel_name, health_score, current_T, noise_mK, drift_mK_per_min, outlier_count, correlation}}, summary: {healthy, warning, critical}}`
 
 ## Health scoring
 
 - Health score: 0-100 per channel
 - Color: green (≥80), yellow (50-79), red (<50)
-- Noise (σ): standard deviation of recent readings
-- Drift: rate of change trend
-- Last: last known reading value
+- Current T: current temperature value in K
+- Noise: `noise_mK`
+- Drift: `drift_mK_per_min`
+- Outliers: count of detected outliers
+- Correlation: optional correlation score
 
 ## Operator workflows
 
@@ -53,14 +56,14 @@ Response fields: `{ok, channels: {ch_id: {health, noise_sigma, drift, last_value
 | Health score table | Full table, all channels | Not in dashboard | ✗ NOT COVERED |
 | Noise (σ) display | Per-channel | Not available | ✗ NOT COVERED |
 | Drift display | Per-channel | Not available | ✗ NOT COVERED |
-| Summary stats | Mean health, unhealthy count | Not available | ✗ NOT COVERED |
+| Summary badge | healthy / warning / critical counts | Not available | ✗ NOT COVERED |
 
 ## Recommendations for Phase II overlay rebuild
 
 **MUST preserve:**
 - Health score per channel with color coding
-- Noise and drift columns (diagnostic value for sensor troubleshooting)
-- Summary statistics (mean health, unhealthy count)
+- Noise / drift / outlier / correlation columns (diagnostic value for sensor troubleshooting)
+- Summary badge (healthy / warning / critical counts)
 - 10-second polling interval (sensor health changes slowly)
 
 **COULD defer:**
@@ -75,3 +78,15 @@ Per Strategy §11.5 Q4 resolution: SensorDiagPanel should fold into
 right-click sensor cell → inline popover. This moves diagnostics
 from a separate tab to context-relevant display, reducing tab-switching
 (solves P1 for diagnostics).
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- No direct K1-K7 preserve features. This panel is a diagnostics surface, not a preserve-list owner.
+
+Verified anchors: none of K1-K7
+NOT anchored by this inventory: K1, K2, K3, K4, K5, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

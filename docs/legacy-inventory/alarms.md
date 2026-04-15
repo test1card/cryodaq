@@ -53,7 +53,8 @@ AlarmPanel: QVBoxLayout
 ## Live data subscriptions
 
 - Any reading with `metadata.alarm_name` set → v1 alarm table update
-- Channel pattern: `alarm/*` (implicit — AlarmEngine sends on matching channels)
+- No strict channel-prefix filter in the panel itself; v1 rows are accepted
+  whenever `reading.metadata.alarm_name` is present
 
 ## Signals / slots
 
@@ -72,10 +73,10 @@ AlarmPanel: QVBoxLayout
 | Feature | Legacy | New | Status |
 |---------|--------|-----|--------|
 | Alarm count badge | Not in tab (user must switch to see) | TopWatchBar zone 4 alarm badge | ✓ COVERED (P2 solved) |
-| v1 alarm table | Full table with all columns | Not in new overlay | ✗ NOT COVERED |
-| v2 alarm table | Full table with ACK buttons | Not in new overlay | ✗ NOT COVERED |
-| Acknowledge v1 | "Подтвердить" button per alarm | Not accessible from dashboard | ✗ NOT COVERED |
-| Acknowledge v2 | "ACK" button per alarm | Not accessible from dashboard | ✗ NOT COVERED |
+| v1 alarm table | Full table with all columns | AlarmPanel registered as shell overlay | ✓ COVERED |
+| v2 alarm table | Full table with ACK buttons | AlarmPanel registered as shell overlay | ✓ COVERED |
+| Acknowledge v1 | "Подтвердить" button per alarm | Available in AlarmPanel overlay | ✓ COVERED |
+| Acknowledge v2 | "ACK" button per alarm | Available in AlarmPanel overlay | ✓ COVERED |
 | Severity sorting | CRITICAL → WARNING → INFO | TopWatchBar shows count only | ⚠ PARTIAL |
 
 ## Recommendations for Phase II overlay rebuild
@@ -98,8 +99,20 @@ AlarmPanel: QVBoxLayout
 - Hardcoded severity colors (use theme.STATUS_* tokens)
 - 200px max height on v2 table (use proportional sizing)
 
-P2 (alarms could be missed) is already PARTIALLY solved by TopWatchBar
-badge. Full solution requires this alarm overlay to be accessible via
-badge click for acknowledge workflow. Panel itself is structurally
-simple — two tables with acknowledge buttons. Rebuild is primarily
-visual modernization + badge click → overlay integration.
+P2 (alarms could be missed) is solved in two layers in the new shell:
+TopWatchBar exposes the persistent badge, and `MainWindowV2` routes
+badge click to the registered `AlarmPanel` overlay for acknowledge
+workflow. Rebuild focus is now visual modernization + preserving the
+dual-engine table semantics, not inventing first-time drill-down access.
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K1: partial service chronology through v1 alarm trigger count + elapsed state, but this is not the primary service-log surface (`alarm_panel.py:175-278`)
+
+Verified anchors: none of K1-K7 as a primary preserve surface; this panel is primarily tied to P2
+NOT anchored by this inventory: K2, K3, K4, K5, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

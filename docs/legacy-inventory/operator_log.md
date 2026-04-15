@@ -90,7 +90,7 @@ OperatorLogPanel: QVBoxLayout
 | Tags display | Shown in brackets | Not shown | ✗ NOT COVERED |
 | Multi-line message | QPlainTextEdit | QLineEdit (single line) | ⚠ PARTIAL |
 | System entries styling | Grayed out | Not distinguished | ✗ NOT COVERED |
-| Live refresh | on analytics/operator_log_entry | QuickLogBlock 10s poll | ✓ COVERED |
+| Live refresh | on analytics/operator_log_entry | QuickLogBlock 10s poll | ⚠ PARTIAL (polling is not parity with push-triggered refresh) |
 
 ## Recommendations for Phase II overlay rebuild
 
@@ -118,3 +118,15 @@ note entry (2 entries visible). Full Operator Log overlay must provide
 the complete reading + writing experience. Difference from ХРОНИКА
 in ExperimentOverlay: ХРОНИКА is filtered by current experiment,
 OperatorLog shows ALL entries across experiments.
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K1: full service log chronology across experiments with author field, filtering, and formatted entry list (`operator_log_panel.py:29-153`)
+
+Verified anchors: K1
+NOT anchored by this inventory: K2, K3, K4, K5, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*

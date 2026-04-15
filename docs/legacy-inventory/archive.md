@@ -81,7 +81,7 @@ ArchivePanel: QVBoxLayout
 - Multi-field filter system (template, operator, sample, date range, report presence)
 - Sort options (date, operator, sample)
 - Detail pane with metadata, notes, runs, artifacts, results sections
-- Open PDF / DOCX via system viewer (K6 partial)
+- Open PDF / DOCX via system viewer
 - Open artifact folder
 - Report regeneration capability
 
@@ -92,3 +92,15 @@ ArchivePanel: QVBoxLayout
 **SHOULD cut:**
 - Hardcoded QGroupBox styling (use theme tokens)
 - 5 separate QGroupBox sections in details (consolidate to simpler layout)
+
+## Preserve-feature appendix
+
+This inventory anchors the following K# preserve features (per `docs/phase-ui-1/ui_refactor_context.md` §3):
+
+- K2: archive of completed experiments with filterable list + detail pane + artifact/report actions (`archive_panel.py:39-529`)
+
+Verified anchors: K2
+NOT anchored by this inventory: K1, K3, K4, K5, K6, K7
+
+---
+*Coverage claims in this inventory verified against new-shell code at commit `cf72942` (date 2026-04-16). Re-verify before treating as authoritative for Phase II rebuilds.*
