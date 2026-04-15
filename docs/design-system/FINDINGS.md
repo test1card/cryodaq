@@ -53,3 +53,46 @@ From the skill's 99 UX guidelines, explicitly rejected for CryoDAQ:
 - ElideRight + tooltip for long labels
 - 8px grid for spacing consistency
 - Sharp radius (4px) for technical aesthetic
+
+## Tone-down revision (B.4.5.1)
+
+After initial B.4.5 adoption commit `550119e`, visual review with 14
+sensor cells rendering simultaneously revealed the literal Smart
+Home/IoT Dashboard palette was too saturated for laboratory monitoring
+context. The Tailwind-flavored status colors (`#22C55E` green,
+`#EF4444` red, `#F59E0B` amber) are designed for digital marketing
+accent use, not for always-on monitoring with many simultaneous
+indicators.
+
+### Lesson learned
+
+Design adoption decisions cannot be made by reading CSV descriptions
+alone. The palette looked correct in isolation (2-3 elements) but
+caused visual fatigue when applied to a 14+ sensor cell grid with
+borders, labels, and additional status accents in TopWatchBar. Future
+design adoption work must include a micro-prototype with target widget
+density before commit.
+
+### What changed in B.4.5.1
+
+- Status tier colors desaturated 30-40% — saturation reduced, hue
+  preserved (still distinguishable for color-blind operators)
+- Background warmed: `#0F172A` cool slate -> `#0d0e12` warm near-black
+- Card elevation increased: was ~7% lightness diff, now ~15%
+- Border subtler: `#475569` -> `#2d3038` (less harsh against new BG)
+- Accent returned to original B.1 v1 indigo `#7c8cff` — classic
+  scientific instrument convention (LabVIEW, MATLAB, Cadence)
+- Plot line palette desaturated to match status tier philosophy
+- All token names preserved — only values changed
+
+### What did NOT change
+
+- Architecture (alias system) preserved
+- Fira Code + Fira Sans typography preserved
+- Spacing 8px grid preserved
+- 4px sharp radius preserved
+- Documentation structure preserved
+- License attribution still valid — we use skill **philosophy**
+  (16-token semantic model, status tier system, anti-pattern rules,
+  spacing discipline, typography pairing) but adjust **specific hex
+  values** for our domain

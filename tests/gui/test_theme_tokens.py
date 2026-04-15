@@ -9,24 +9,26 @@ from cryodaq.gui import theme
 
 
 def test_base_palette_tokens_exist():
-    """All Smart Home/IoT Dashboard base tokens are defined."""
-    assert theme.PRIMARY == "#1E293B"
-    assert theme.BACKGROUND == "#0F172A"
-    assert theme.FOREGROUND == "#F8FAFC"
-    assert theme.CARD == "#1B2336"
-    assert theme.MUTED_FOREGROUND == "#94A3B8"
-    assert theme.BORDER == "#475569"
-    assert theme.DESTRUCTIVE == "#EF4444"
+    """Base palette has tone-down (B.4.5.1) values."""
+    assert theme.PRIMARY == "#181a22"
+    assert theme.BACKGROUND == "#0d0e12"
+    assert theme.FOREGROUND == "#e8eaf0"
+    assert theme.CARD == "#181a22"
+    assert theme.MUTED_FOREGROUND == "#8a8f9b"
+    assert theme.BORDER == "#2d3038"
+    assert theme.DESTRUCTIVE == "#c44545"
+    assert theme.ACCENT == "#7c8cff"
 
 
 def test_status_tier_tokens_exist():
-    """Five status tier extensions are defined."""
-    assert theme.STATUS_OK == "#22C55E"
-    assert theme.STATUS_WARNING == "#F59E0B"
-    assert theme.STATUS_CAUTION == "#FB923C"
-    assert theme.STATUS_FAULT == "#EF4444"
-    assert theme.STATUS_STALE == "#64748B"
-    assert theme.COLD_HIGHLIGHT == "#38BDF8"
+    """Status tiers are desaturated (B.4.5.1)."""
+    assert theme.STATUS_OK == "#4a8a5e"
+    assert theme.STATUS_WARNING == "#c4862e"
+    assert theme.STATUS_CAUTION == "#c47a30"
+    assert theme.STATUS_FAULT == "#c44545"
+    assert theme.STATUS_INFO == "#4a7ba8"
+    assert theme.STATUS_STALE == "#5a5d68"
+    assert theme.COLD_HIGHLIGHT == "#5b8db8"
 
 
 def test_backwards_compatible_aliases_exist():

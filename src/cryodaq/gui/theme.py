@@ -20,61 +20,69 @@ from __future__ import annotations
 import pyqtgraph as pg
 
 # =============================================================================
-# COLORS — Base palette (Smart Home/IoT Dashboard)
+# COLORS — Base palette (warm-leaning instrument dark theme)
 # =============================================================================
+# Tone-down revision (B.4.5.1) of original Smart Home/IoT Dashboard palette.
+# Skill philosophy preserved (16 semantic tokens, status tier model) but
+# specific hex values adjusted for laboratory instrument context where
+# 14+ simultaneous status indicators must coexist without visual fatigue.
+# See docs/design-system/FINDINGS.md "Tone-down revision" section.
 
-PRIMARY = "#1E293B"
-ON_PRIMARY = "#FFFFFF"
-SECONDARY = "#334155"
-ON_SECONDARY = "#FFFFFF"
-ACCENT = "#22C55E"
-ON_ACCENT = "#0F172A"
-BACKGROUND = "#0F172A"
-FOREGROUND = "#F8FAFC"
-CARD = "#1B2336"
-CARD_FOREGROUND = "#F8FAFC"
-MUTED = "#272F42"
-MUTED_FOREGROUND = "#94A3B8"
-BORDER = "#475569"
-DESTRUCTIVE = "#EF4444"
-ON_DESTRUCTIVE = "#FFFFFF"
-RING = "#1E293B"
-
-# =============================================================================
-# COLORS — Status tiers (CryoDAQ cryogenic semantics)
-# =============================================================================
-
-STATUS_OK = "#22C55E"
-STATUS_WARNING = "#F59E0B"
-STATUS_CAUTION = "#FB923C"
-STATUS_FAULT = "#EF4444"
-STATUS_INFO = "#38BDF8"
-STATUS_STALE = "#64748B"
-COLD_HIGHLIGHT = "#38BDF8"
+PRIMARY = "#181a22"
+ON_PRIMARY = "#e8eaf0"
+SECONDARY = "#22252f"
+ON_SECONDARY = "#e8eaf0"
+ACCENT = "#7c8cff"
+ON_ACCENT = "#0d0e12"
+BACKGROUND = "#0d0e12"
+FOREGROUND = "#e8eaf0"
+CARD = "#181a22"
+CARD_FOREGROUND = "#e8eaf0"
+MUTED = "#1d2028"
+MUTED_FOREGROUND = "#8a8f9b"
+BORDER = "#2d3038"
+DESTRUCTIVE = "#c44545"
+ON_DESTRUCTIVE = "#e8eaf0"
+RING = "#7c8cff"
 
 # =============================================================================
-# COLORS — Plot line palette
+# COLORS — Status tiers (desaturated for monitoring density)
+# =============================================================================
+# These colors must work with 14+ simultaneous instances on screen
+# without causing visual fatigue. Saturation reduced 30-40% from
+# Tailwind defaults. Hue preserved for color-blind compatibility.
+
+STATUS_OK = "#4a8a5e"
+STATUS_WARNING = "#c4862e"
+STATUS_CAUTION = "#c47a30"
+STATUS_FAULT = "#c44545"
+STATUS_INFO = "#4a7ba8"
+STATUS_STALE = "#5a5d68"
+COLD_HIGHLIGHT = "#5b8db8"
+
+# =============================================================================
+# COLORS — Plot line palette (desaturated for multi-line plots)
 # =============================================================================
 
 PLOT_LINE_PALETTE = [
-    "#38BDF8",  # sky blue
-    "#A78BFA",  # soft violet
-    "#34D399",  # teal
-    "#A3E635",  # lime
-    "#FB923C",  # coral
-    "#FBBF24",  # yellow
-    "#F472B6",  # pink
-    "#818CF8",  # indigo
+    "#5b8db8",  # 0: muted steel blue
+    "#9b7bb8",  # 1: muted violet
+    "#5fa090",  # 2: muted teal
+    "#a3b85b",  # 3: muted lime
+    "#c4862e",  # 4: amber (= STATUS_WARNING)
+    "#b88a5b",  # 5: warm tan
+    "#b87b9b",  # 6: muted rose
+    "#7c8cff",  # 7: indigo (= ACCENT)
 ]
 
 # =============================================================================
-# COLORS — Quantity coding (V/I/R/P electronics convention)
+# COLORS — Quantity coding (V/I/R/P electronics convention, desaturated)
 # =============================================================================
 
-QUANTITY_VOLTAGE = "#38BDF8"     # sky blue
-QUANTITY_CURRENT = STATUS_OK    # green
-QUANTITY_RESISTANCE = STATUS_WARNING  # orange
-QUANTITY_POWER = "#EF4444"      # red
+QUANTITY_VOLTAGE = "#5b8db8"     # steel blue
+QUANTITY_CURRENT = STATUS_OK    # forest green
+QUANTITY_RESISTANCE = STATUS_WARNING  # amber
+QUANTITY_POWER = "#c44545"      # brick red
 
 # =============================================================================
 # TYPOGRAPHY
@@ -152,8 +160,8 @@ PLOT_LABEL_COLOR = MUTED_FOREGROUND
 PLOT_TICK_COLOR = FOREGROUND
 PLOT_LINE_WIDTH = 1.5
 PLOT_LINE_WIDTH_HIGHLIGHTED = 2.5
-PLOT_REGION_FAULT_ALPHA = 0.12
-PLOT_REGION_WARN_ALPHA = 0.10
+PLOT_REGION_FAULT_ALPHA = 0.15
+PLOT_REGION_WARN_ALPHA = 0.12
 
 # =============================================================================
 # QDARKTHEME CONFIGURATION
@@ -176,7 +184,7 @@ SURFACE_CARD = CARD
 SURFACE_ELEVATED = SECONDARY
 SURFACE_SUNKEN = PRIMARY
 SURFACE_BG = BACKGROUND
-SURFACE_OVERLAY_RGBA = "rgba(15, 23, 42, 0.6)"
+SURFACE_OVERLAY_RGBA = "rgba(13, 14, 18, 0.6)"
 
 # --- Border tokens ---
 BORDER_SUBTLE = BORDER
@@ -187,7 +195,7 @@ BORDER_FOCUS = ACCENT
 TEXT_PRIMARY = FOREGROUND
 TEXT_SECONDARY = MUTED_FOREGROUND
 TEXT_MUTED = MUTED_FOREGROUND
-TEXT_DISABLED = "#475569"
+TEXT_DISABLED = "#555a66"
 TEXT_INVERSE = ON_PRIMARY
 
 # --- Semantic text colors ---
@@ -198,11 +206,11 @@ TEXT_WARNING = STATUS_WARNING
 TEXT_CAUTION = STATUS_CAUTION
 TEXT_ACCENT = ACCENT
 
-# --- Accent scale ---
+# --- Accent scale (indigo) ---
 ACCENT_300 = "#6470d9"
 ACCENT_400 = ACCENT
-ACCENT_500 = "#34D399"
-ACCENT_600 = "#86EFAC"
+ACCENT_500 = "#95a3ff"
+ACCENT_600 = "#b8c0ff"
 
 # --- Legacy raw stone colors ---
 STONE_0 = BACKGROUND
@@ -211,13 +219,13 @@ STONE_100 = CARD
 STONE_150 = CARD
 STONE_200 = SECONDARY
 STONE_300 = BORDER
-STONE_400 = "#475569"
+STONE_400 = "#3a3e48"
 STONE_500 = TEXT_DISABLED
 STONE_600 = MUTED_FOREGROUND
 STONE_700 = MUTED_FOREGROUND
-STONE_800 = MUTED_FOREGROUND
+STONE_800 = "#c8ccd4"
 STONE_900 = FOREGROUND
-STONE_1000 = FOREGROUND
+STONE_1000 = "#f7f8fb"
 
 # --- Legacy status aliases ---
 SUCCESS_400 = STATUS_OK

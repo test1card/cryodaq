@@ -18,6 +18,12 @@
   и Fira Sans (prose, меню) заменяют Inter и JetBrains Mono. 8px grid
   spacing, 4px sharp radius. Backwards-compatible alias'ы в theme.py.
   Документация в docs/design-system/MASTER.md и FINDINGS.md.
+- **Phase UI-1 v2 Block B.4.5.1** — Tone-down фикс цветов после
+  визуальной оценки B.4.5. Desaturation status tier цветов на 30-40%,
+  warmer background `#0d0e12`, видимая card elevation, возврат к
+  оригинальному indigo `#7c8cff` accent. Architecture B.4.5 (aliases,
+  Fira fonts, документация) полностью сохранены — изменены только
+  конкретные hex значения в `theme.py`.
 - **Phase UI-1 v2 Block B.4** — Persistent context strip в
   TopWatchBar. Четыре ключевых значения (давление, T мин, T макс
   холодных каналов, мощность нагревателя) видны постоянно — даже
