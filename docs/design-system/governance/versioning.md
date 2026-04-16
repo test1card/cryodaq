@@ -20,12 +20,13 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `1.0.0` — this is the initial release of the formalized design system (the one these docs describe).
+**Current version:** `1.0.1` — audit fix pass against the v1.0.0 baseline (see `CHANGELOG.md`).
 
 Version tracked in:
-- `design-system/VERSION` (plain text, single-line) — committed alongside docs
-- Top of `design-system/README.md`
-- Tagged in git as `design-system-v1.0.0`
+- `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
+- `docs/design-system/CHANGELOG.md` — human-readable release notes
+- Top of `docs/design-system/README.md`
+- Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
 
 ## What's in MAJOR
 
@@ -247,3 +248,4 @@ Anticipated versions:
 ## Changelog
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
+- 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.

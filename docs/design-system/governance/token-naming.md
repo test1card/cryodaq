@@ -90,21 +90,19 @@ Per RULE-COLOR-007: DESTRUCTIVE and STATUS_FAULT share hex (`#c44545`) but are n
 
 ### Spacing scale (integers, px)
 
-Pattern: `SPACE_<N>` where N is the step in the 4px scale:
+Pattern: `SPACE_<N>` where N is the step in the 4px-base scale. Current theme.py ships **7 steps** (`SPACE_0` through `SPACE_6`):
 
 ```python
+SPACE_0 = 0      # zero spacing (explicit)
 SPACE_1 = 4
 SPACE_2 = 8
 SPACE_3 = 12
 SPACE_4 = 16
 SPACE_5 = 24
 SPACE_6 = 32
-SPACE_7 = 48
-SPACE_8 = 64
-SPACE_9 = 96
 ```
 
-Scale is deliberate: not every multiple of 4 is tokenized. Adding a new size requires governance approval (see `governance/contribution.md`). Current 9 steps are sufficient for the current product.
+Scale is deliberate: not every multiple of 4 is tokenized. Adding a new size (e.g., `SPACE_7 = 48`) requires governance approval (see `governance/contribution.md`). Current 7 steps cover all present layout needs; values larger than 32 are handled case-by-case with explicit literals until a recurring use case justifies a new step.
 
 ### Radius scale
 
@@ -170,39 +168,89 @@ GRID_GAP = 8               # BentoGrid inter-tile gap
 
 ### Icons and UI sizing
 
-Pattern: `ICON_SIZE_<SIZE>`:
-
-```python
-ICON_SIZE_XS = 12
-ICON_SIZE_SM = 16
-ICON_SIZE_MD = 24
-ICON_SIZE_LG = 32
-```
+> **Proposed.** `ICON_SIZE_*` tokens are referenced by some component docs but not yet in `theme.py`. Widgets currently pass literal sizes. Proposed pattern: `ICON_SIZE_<SIZE>` with values `12 / 16 / 24 / 32` for XS/SM/MD/LG. Promotion to theme.py requires governance approval — see `governance/contribution.md`.
 
 ## Category prefix registry
 
-Current registered prefixes — every token belongs to one:
+Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped state of `src/cryodaq/gui/theme.py` as of v1.0.1 (verify via the audit script in `governance/testing-strategy.md`).
 
-| Prefix | Domain | Count |
+### Root color / role tokens (no prefix)
+
+10 tokens describing base roles used throughout the UI.
+
+| Prefix | Tokens | Domain |
 |---|---|---|
-| (no prefix) | Root colors (BACKGROUND, FOREGROUND, ACCENT, CARD, BORDER, etc.) | 14 |
-| `STATUS_` | Status semantic colors | 6 |
-| `ON_` | Paired text-on-fill colors | 2 |
-| `DESTRUCTIVE` | Button role (distinct from STATUS_FAULT) | 2 |
-| `COLD_` | Cold channel indicator | 1 |
-| `PLOT_` | Plot-specific colors + dimensions | ~8 |
-| `SPACE_` | Spacing scale | 9 |
-| `RADIUS_` | Radius scale | 5 |
-| `FONT_` | Typography | 36 |
-| `ICON_SIZE_` | Icon dimensions | 4 |
-| `HEADER_`, `TOOL_RAIL_`, `BOTTOM_BAR_`, `ROW_`, `GRID_` | Layout constants | 5 |
-| `OVERLAY_` | Overlay dimensions (OVERLAY_MAX_WIDTH) | ~2 |
+| *(no prefix)* | `PRIMARY`, `SECONDARY`, `ACCENT`, `BACKGROUND`, `FOREGROUND`, `CARD`, `MUTED`, `BORDER`, `DESTRUCTIVE`, `RING` | Root semantic colors |
+
+### Color family prefixes
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `STATUS_` | 6 | Status semantic colors (`OK`, `WARNING`, `CAUTION`, `FAULT`, `INFO`, `STALE`) |
+| `TEXT_` | 11 | Text-color variants (`PRIMARY`, `SECONDARY`, `MUTED`, `DISABLED`, `INVERSE`, `FAULT`, `OK`, `INFO`, `WARNING`, `CAUTION`, `ACCENT`) |
+| `SURFACE_` | 7 | Surface elevation tokens (`WINDOW`, `PANEL`, `CARD`, `ELEVATED`, `SUNKEN`, `BG`, `OVERLAY_RGBA`) |
+| `ON_` | 4 | Paired text-on-fill colors (`PRIMARY`, `SECONDARY`, `ACCENT`, `DESTRUCTIVE`) |
+| `ACCENT_` | 4 | Accent scale (`300`, `400`, `500`, `600`) |
+| `BORDER_` | 3 | Border variants (`SUBTLE`, `STRONG`, `FOCUS`) |
+| `CARD_` | 2 | Card-specific tokens (`FOREGROUND`, `PADDING`) |
+| `MUTED_` | 1 | `MUTED_FOREGROUND` |
+| `COLD_` | 1 | `COLD_HIGHLIGHT` (cold-channel indicator) |
+| `QUANTITY_` | 4 | Quantity coding (`VOLTAGE`, `CURRENT`, `RESISTANCE`, `POWER`) |
+| `SUCCESS_` / `WARNING_` / `DANGER_` | 1 each | Legacy status aliases (`*_400`) — kept for compat, prefer `STATUS_*` |
+| `STONE_` | 13 | **Deprecated.** Legacy stone palette aliases (`STONE_0`, `STONE_50`…`STONE_1000`). No new uses. |
+
+### Typography
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `FONT_` | 36 | Typography (families, sizes, weights, per-role scale) |
+
+### Dimension / layout
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `SPACE_` | 7 | Spacing scale (`SPACE_0`…`SPACE_6`) |
+| `RADIUS_` | 5 | Radius scale (`NONE`, `SM`, `MD`, `LG`, `FULL`) |
+| `HEADER_` | 1 | `HEADER_HEIGHT` |
+| `TOOL_` | 1 | `TOOL_RAIL_WIDTH` |
+| `BOTTOM_` | 1 | `BOTTOM_BAR_HEIGHT` |
+| `ROW_` | 1 | `ROW_HEIGHT` |
+| `GRID_` | 1 | `GRID_GAP` |
+
+### Plot tokens
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `PLOT_` | 12 | Plot-specific colors, line widths, region alphas, axis width (`PLOT_LINE_PALETTE`, `PLOT_AXIS_WIDTH_PX`, `PLOT_BG`, `PLOT_FG`, `PLOT_GRID_COLOR`, `PLOT_GRID_ALPHA`, `PLOT_LABEL_COLOR`, `PLOT_TICK_COLOR`, `PLOT_LINE_WIDTH`, `PLOT_LINE_WIDTH_HIGHLIGHTED`, `PLOT_REGION_FAULT_ALPHA`, `PLOT_REGION_WARN_ALPHA`) |
+
+### Motion
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `TRANSITION_` | 3 | Animation durations (`TRANSITION_FAST_MS`, `TRANSITION_BASE_MS`, `TRANSITION_SLOW_MS`) |
+
+### Theme integration
+
+| Prefix | Count | Domain |
+|---|---|---|
+| `QDARKTHEME_` | 2 | qdarktheme configuration (`QDARKTHEME_ACCENT`, `QDARKTHEME_CORNER_SHAPE`) |
+
+### Proposed / not yet in theme.py
+
+Referenced by documentation but **not yet materialized** as tokens. Use literals in widget code until governance approves promotion (see `governance/contribution.md`).
+
+| Prefix | Status | Note |
+|---|---|---|
+| `ICON_SIZE_` | Proposed | Referenced by `tool-rail.md` and other component docs. Values (12/16/24/32) are stable; not yet added to theme.py. |
+| `OVERLAY_` | Proposed | Overlay dimension family (`OVERLAY_MAX_WIDTH`, etc.). No tokens currently exist. See `governance/contribution.md`. |
+| `DURATION_` / `EASING_` | Proposed | Future motion tokens beyond `TRANSITION_*_MS`. See `tokens/motion.md`. |
+| `SHORTCUT_` | Proposed | Future constants for the keyboard shortcut registry (`tokens/keyboard-shortcuts.md`). |
 
 New prefix proposals go through `governance/contribution.md` review.
 
 ## Legacy aliases (STONE_*)
 
-During Phase 0 rename from the older "stone" palette to the current forest-green palette, the old names were kept as aliases for one version cycle:
+During Phase 0 rename from the older "stone" palette to the current forest-green palette, the old names were kept as aliases for one version cycle. Current theme.py still ships 13 STONE_* aliases (`STONE_0`, `STONE_50`, `STONE_100`, `STONE_150`, `STONE_200`, `STONE_300`, `STONE_400`, `STONE_500`, `STONE_600`, `STONE_700`, `STONE_800`, `STONE_900`, `STONE_1000`):
 
 ```python
 # Backward-compat aliases — DEPRECATED, will be removed in v2.0
@@ -371,3 +419,4 @@ Minimum requirements for adding a new token (reviewed per `governance/contributi
 ## Changelog
 
 - 2026-04-17: Initial version. Closes RULE-GOV-001. Documents current flat-architecture state + target three-layer architecture for future v2.0. Prefix registry. STONE_* legacy alias policy. W3C DTCG alignment (future).
+- 2026-04-17 (v1.0.1): Rebuilt prefix registry from actual `theme.py` reality (FR-012). Added `SURFACE_`, `TEXT_`, `TRANSITION_`, `QUANTITY_`, `QDARKTHEME_`, `ACCENT_`, `BORDER_`, `CARD_`, `MUTED_`, `SUCCESS_`, `WARNING_`, `DANGER_` prefixes that were previously undocumented. Corrected spacing scale to `SPACE_0`…`SPACE_6` (7 steps shipped, not 9). Moved `OVERLAY_` and `ICON_SIZE_` to the proposed-prefixes table — neither is in theme.py yet. Updated STONE_* count to actual 13 aliases.

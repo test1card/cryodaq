@@ -23,21 +23,23 @@ Thin vertical icon-only navigation strip along the left edge of every screen. Pr
 
 ## Confirmed icons
 
-Per Phase 0 audit, these icons open functional panels:
+Per Phase 0 audit, these icons open functional panels. **Canonical shortcut = mnemonic** per AD-002 (`tokens/keyboard-shortcuts.md`). The numeric `Ctrl+[N]` column is a transitional fallback — it remains active but is being phased out when rail slot ordering stabilizes.
 
-| Slot | Icon | Panel | Keyboard shortcut |
-|---|---|---|---|
-| 1 | `home` or `layout-dashboard` | Дашборд (overview) | Ctrl+1 |
-| 2 | `plus-circle` | Создать эксперимент | Ctrl+2 |
-| 3 | `flask-conical` | Карточка эксперимента | Ctrl+3 |
-| 4 | `zap` | Keithley (источник мощности) | Ctrl+4 |
-| 5 | `chart-line` | Аналитика / графики | Ctrl+5 |
-| 6 | `activity` or `thermometer` | Теплопроводность | Ctrl+6 |
-| 7 | `bell` | Алармы | Ctrl+7 |
-| 8 | `file-text` | Журнал оператора | Ctrl+L (also) |
-| 9 | `sliders` | Диагностика датчиков | Ctrl+9 |
+| Slot | Icon | Panel | Canonical shortcut | Numeric fallback |
+|---|---|---|---|---|
+| 1 | `home` or `layout-dashboard` | Дашборд (overview) | *(no mnemonic yet — propose `Ctrl+H` for "home" in a future release)* | Ctrl+1 |
+| 2 | `plus-circle` | Создать эксперимент | *(no mnemonic yet — Ctrl+E is taken by slot 3; candidate: `Ctrl+N` for "new experiment")* | Ctrl+2 |
+| 3 | `flask-conical` | Карточка эксперимента | `Ctrl+E` | Ctrl+3 |
+| 4 | `zap` | Keithley (источник мощности) | `Ctrl+K` | Ctrl+4 |
+| 5 | `chart-line` | Аналитика / графики | `Ctrl+A` | Ctrl+5 |
+| 6 | `activity` or `thermometer` | Теплопроводность | `Ctrl+C` | Ctrl+6 |
+| 7 | `bell` | Алармы | `Ctrl+M` (М — «Модуль сигнализации») | Ctrl+7 |
+| 8 | `file-text` | Журнал оператора | `Ctrl+L` | Ctrl+8 |
+| 9 | `sliders` | Диагностика датчиков | `Ctrl+D` | Ctrl+9 |
 
-Per Phase 0 product decision: «Создать эксперимент» (slot 2) and «Карточка эксперимента» (slot 3) may be merged into a single slot in Phase II.
+Per Phase 0 product decision: «Создать эксперимент» (slot 2) and «Карточка эксперимента» (slot 3) may be merged into a single slot in Phase II — mnemonic for slot 2 will be settled at that point.
+
+When both a canonical mnemonic and a numeric fallback exist, the tooltip shows the **canonical** shortcut: `«Дашборд (Ctrl+1)»` today, migrating to the mnemonic as slot mnemonics are finalized. Do not display both in one tooltip — pick the canonical one.
 
 ## Anatomy
 
@@ -86,7 +88,7 @@ Per Phase 0 product decision: «Создать эксперимент» (slot 2)
 3. **Active slot uses ACCENT.** This is legitimate ACCENT use — selection affordance per RULE-COLOR-004.
 4. **Inactive slots MUTED_FOREGROUND icons.** Active slot FOREGROUND icon + 3px ACCENT bar on left edge.
 5. **Click selects.** Hover does not select — hover only changes icon color to FOREGROUND (RULE-COLOR-006).
-6. **Keyboard navigation.** Down/Up Arrow to navigate; Enter selects. Or use Ctrl+[1-9] shortcuts.
+6. **Keyboard navigation.** Down/Up Arrow to navigate; Enter selects. Or use the canonical mnemonic shortcuts (`Ctrl+L`, `Ctrl+E`, etc. per `tokens/keyboard-shortcuts.md`); numeric `Ctrl+[1-9]` remains as transitional fallback.
 7. **No emoji icons.** (RULE-COPY-005) — Lucide SVG only.
 8. **Icon color inherits from slot's text color.** Recolor via `load_colored_icon`. (RULE-COLOR-005)
 9. **Icon size 24×24** centered in 56×56 slot — even padding all around (16px).
@@ -285,14 +287,14 @@ class ToolRail(QWidget):
 
 ## Keyboard shortcut policy
 
-Per `tokens/keyboard-shortcuts.md` (proposed):
+Per `tokens/keyboard-shortcuts.md` (canonical registry, AD-002):
 
-- `Ctrl+1` ... `Ctrl+9` — rail slots 1–9
-- `Ctrl+L` — operator log (same as rail slot 8 alias)
-- `F11` — toggle fullscreen
-- `Ctrl+Shift+X` — emergency stop
+- **Canonical (mnemonic):** `Ctrl+L`, `Ctrl+E`, `Ctrl+A`, `Ctrl+K`, `Ctrl+M`, `Ctrl+C`, `Ctrl+D` (and others in the registry) route to their respective rail slots by panel identity, independent of slot position.
+- **Transitional fallback:** `Ctrl+1` … `Ctrl+9` route to rail slots 1–9 by position. Being phased out — do not extend.
+- `F11` — toggle fullscreen.
+- `Ctrl+Shift+X` — emergency stop (hold-to-confirm).
 
-ToolRail registers `Ctrl+[1-9]` at application level (not rail-local) so shortcuts work from anywhere.
+ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut at application level (not rail-local) so shortcuts work from anywhere. When mnemonics are finalized for all nine slots, the numeric registrations will be removed per deprecation policy.
 
 ## Common mistakes
 
@@ -327,3 +329,4 @@ ToolRail registers `Ctrl+[1-9]` at application level (not rail-local) so shortcu
 ## Changelog
 
 - 2026-04-17: Initial version. Documents Phase 0 implementation. 9 slot definitions confirmed. Slot 2+3 merge pending product decision. Ctrl+[1-9] shortcuts + Ctrl+L alias for Operator Log.
+- 2026-04-17 (v1.0.1): Aligned with canonical mnemonic shortcut registry per AD-002 (FR-011). Added canonical-shortcut column to the slot table (Ctrl+E / Ctrl+K / Ctrl+A / Ctrl+C / Ctrl+M / Ctrl+L / Ctrl+D). Demoted Ctrl+[1-9] to "numeric fallback" column. Clarified that slots 1 and 2 do not yet have approved mnemonics and still rely on the fallback. Keyboard-shortcut-policy section rewritten to match.

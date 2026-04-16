@@ -1,18 +1,36 @@
 ---
 title: Motion Tokens
-keywords: motion, animation, duration, easing, transition, reduced-motion, proposed
+keywords: motion, animation, duration, easing, transition, reduced-motion
 applies_to: all transitions and state changes
 enforcement: recommended
 priority: medium
-status: proposed
+status: partially-shipped
 last_updated: 2026-04-17
 ---
 
 # Motion Tokens
 
-**Status: PROPOSED.** These tokens are NOT yet in `src/cryodaq/gui/theme.py`. All motion timing in current widgets is hardcoded. This document specifies the proposed set to be added when motion system is formalized.
+**Status: partially shipped.** Three duration tokens (`TRANSITION_FAST_MS`, `TRANSITION_BASE_MS`, `TRANSITION_SLOW_MS`) are live in `src/cryodaq/gui/theme.py` and are the canonical durations for the current UI. Easing tokens, a richer duration scale, and reduced-motion helpers are still proposed — see the sections below.
 
-Until tokens land in theme.py, widget code SHOULD use the proposed values as literals (documented below) and update to tokens when they are added.
+Widget code MUST reference the shipped tokens for duration (no literals for the three canonical values). Easing and additional durations remain inline literals with a `DESIGN:` comment until they are promoted.
+
+## Current tokens (shipped in theme.py)
+
+| Token | Value (ms) | Use |
+|---|---|---|
+| `TRANSITION_FAST_MS` | `150` | Hover, focus, toggle transitions; quick micro-interactions |
+| `TRANSITION_BASE_MS` | `200` | Default for state transitions — modal/drawer open, dropdown, tab switch, toast enter |
+| `TRANSITION_SLOW_MS` | `300` | Complex multi-element transitions; success-echo window; large overlay reveal |
+
+```python
+# Canonical usage — RULE-COLOR-010-style rule: reference theme, not literals
+from cryodaq.gui import theme
+
+animation = QPropertyAnimation(widget, b"opacity")
+animation.setDuration(theme.TRANSITION_BASE_MS)
+```
+
+New code introducing a duration that matches one of these three values MUST use the token, not a `150` / `200` / `300` literal. Durations outside this set remain case-by-case until the expanded scale below lands.
 
 ## Core motion philosophy
 
@@ -35,19 +53,23 @@ Until tokens land in theme.py, widget code SHOULD use the proposed values as lit
 - "Delight"
 - Hiding latency (use skeleton placeholder, not progress bar animation)
 
-## Duration scale (proposed)
+## Duration scale — proposed future expansion
 
-| Token (proposed) | Value (ms) | Use |
-|---|---|---|
-| `DURATION_INSTANT` | `75` | Barely-perceptible acknowledgment — pressed button state, tooltip appearance |
-| `DURATION_FAST` | `150` | Quick micro-interactions — hover state, small popover |
-| `DURATION_BASE` | `200` | Default for state transitions — dropdown open, tab switch |
-| `DURATION_SLOW` | `300` | Overlay slide-in, modal backdrop fade |
-| `DURATION_DELIBERATE` | `400` | Multi-step transition, large overlay with content reveal |
+The three shipped `TRANSITION_*_MS` tokens cover the common cases. A richer `DURATION_*` family is proposed to add the extremes (a shorter acknowledgement tier and a longer deliberate tier). Until the governance review approves and theme.py adds them, the non-shipped tiers below are **not** available as tokens.
+
+| Token | Status | Value (ms) | Use |
+|---|---|---|---|
+| `DURATION_INSTANT` | Proposed | `75` | Barely-perceptible acknowledgment — pressed button state, tooltip appearance |
+| `TRANSITION_FAST_MS` | **Shipped** | `150` | Quick micro-interactions — hover, focus, toggle |
+| `TRANSITION_BASE_MS` | **Shipped** | `200` | Default state transitions — dropdown, tab switch, modal open |
+| `TRANSITION_SLOW_MS` | **Shipped** | `300` | Overlay slide-in, modal backdrop fade, success echo |
+| `DURATION_DELIBERATE` | Proposed | `400` | Multi-step transition, large overlay with content reveal |
 
 **Maximum duration ceiling: 400ms.** Anything longer feels sluggish on desktop operator UI. If a transition genuinely needs >400ms, it should probably be decomposed into staged animations (each <400ms).
 
 **No `DURATION_DELAYED`.** Intentional omission — delayed animation is rare and should be commented inline if needed.
+
+**Proposed rename.** When the scale is expanded, a governance decision is required on whether to rename `TRANSITION_*_MS` → `DURATION_*` for naming consistency. Until then, keep the `TRANSITION_*_MS` names — no silent renames.
 
 ## Easing curves (proposed)
 
@@ -69,10 +91,10 @@ Qt supports `QEasingCurve` types. The proposed mapping:
 ```python
 # DESIGN: RULE-INTER-005 (asymmetric open/close)
 def open_modal(self):
-    self._animate(duration=DURATION_SLOW, easing=EASING_ENTER)  # 300ms in
+    self._animate(duration=theme.TRANSITION_SLOW_MS, easing=EASING_ENTER)  # 300ms in
 
 def close_modal(self):
-    self._animate(duration=DURATION_BASE, easing=EASING_EXIT)   # 200ms out (~66%)
+    self._animate(duration=theme.TRANSITION_BASE_MS, easing=EASING_EXIT)   # 200ms out (~66%)
 ```
 
 ## Reduced motion
@@ -91,7 +113,7 @@ def should_animate(self) -> bool:
 
 def open_modal(self):
     if self.should_animate():
-        self._animate(duration=DURATION_SLOW, easing=EASING_ENTER)
+        self._animate(duration=theme.TRANSITION_SLOW_MS, easing=EASING_ENTER)
     else:
         # Instant appearance — no animation
         self._set_opacity(1.0)
@@ -129,8 +151,8 @@ def _success_echo(self, widget):
     # Flash on
     widget.setStyleSheet(f"background: {theme.STATUS_OK};")
 
-    # Revert after DURATION_SLOW
-    QTimer.singleShot(DURATION_SLOW, lambda: widget.setStyleSheet(original_style))
+    # Revert after TRANSITION_SLOW_MS
+    QTimer.singleShot(theme.TRANSITION_SLOW_MS, lambda: widget.setStyleSheet(original_style))
 ```
 
 Echo is brief (300ms) and non-blocking — operator can immediately trigger next action.
@@ -145,20 +167,20 @@ Echo is brief (300ms) and non-blocking — operator can immediately trigger next
 - **Transition on sensor reading updates** — data should snap to new value instantly
 - **Animated progress bars for known-duration operations** — use determinate progress (percentage updates), not animation
 
-## Current widget implementations (pre-tokens)
+## Current widget implementations
 
-Until tokens are added to `theme.py`, widgets hardcode values. Expected pattern:
+Durations come from `theme.py`; easing curves are still inline until `EASING_*` tokens are promoted:
 
 ```python
-# Temporary pattern (pre-token)
-FADE_DURATION_MS = 200  # DESIGN: replace with theme.DURATION_BASE when added
+from cryodaq.gui import theme
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve
 
 animation = QPropertyAnimation(widget, b"opacity")
-animation.setDuration(FADE_DURATION_MS)
-animation.setEasingCurve(QEasingCurve.Type.InOutQuad)  # DESIGN: replace with theme.EASING_STANDARD
+animation.setDuration(theme.TRANSITION_BASE_MS)
+animation.setEasingCurve(QEasingCurve.Type.InOutQuad)  # DESIGN: replace with theme.EASING_STANDARD when promoted
 ```
 
-When motion tokens land, migration is a `find/replace` task across widget code.
+When `EASING_*` tokens land, migration is a `find/replace` task across widget code. Audit for any remaining `150` / `200` / `300` literals used as animation durations and replace with the corresponding `TRANSITION_*_MS` token.
 
 ## Rule references
 
@@ -178,3 +200,4 @@ When motion tokens land, migration is a `find/replace` task across widget code.
 ## Changelog
 
 - 2026-04-17: Initial proposal. Motion tokens NOT yet in `theme.py` — pending product decision to formalize.
+- 2026-04-17 (v1.0.1): Acknowledged that `TRANSITION_FAST_MS` / `TRANSITION_BASE_MS` / `TRANSITION_SLOW_MS` are shipped in `theme.py` (FR-003). Removed the "NOT yet in theme.py" claim; replaced duration-literal examples with token references; moved the richer `DURATION_*` family to an explicitly "proposed future expansion" section. Easing tokens remain proposed.
