@@ -3,7 +3,7 @@ title: SensorCell
 keywords: sensor, cell, channel, temperature, pressure, reading, kelvin, tile, grid-item, cold, warm
 applies_to: single-channel data cell widget
 status: active
-implements: src/cryodaq/gui/shell/overlays/_design_system/dynamic_sensor_grid.py (Phase B.3)
+implements: src/cryodaq/gui/dashboard/sensor_cell.py; src/cryodaq/gui/dashboard/dynamic_sensor_grid.py (Phase B.3)
 last_updated: 2026-04-17
 ---
 
@@ -38,7 +38,7 @@ Smallest atom of the sensor grid. Displays one channel: channel ID (Cyrillic Т#
   ◀── background: varies by state
 ```
 
-Minimum cell size: ~120×64px. Maximum: grid-determined. At 8 cells per row, ~240px wide each.
+Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_HEIGHT`). Maximum: grid-determined by available width; columns recompute on resize.
 
 ## Parts
 
@@ -73,6 +73,9 @@ Minimum cell size: ~120×64px. Maximum: grid-determined. At 8 cells per row, ~24
 | **Fault** (hard limit exceeded) | 2px STATUS_FAULT | SURFACE_CARD | FOREGROUND* | MUTED_FOREGROUND |
 | **Stale** (not updating) | 1px BORDER | SURFACE_CARD | STATUS_STALE | STATUS_STALE |
 | **Disconnected** | 1px dashed BORDER | MUTED | TEXT_DISABLED | TEXT_DISABLED |
+| **Hover** (pointer over interactive cell) | inherits domain border | SECONDARY overlay | inherits | inherits (cursor: pointer) |
+| **Focus** (keyboard) | 2px ACCENT (per RULE-A11Y-001) | inherits | inherits | inherits |
+| **Pressed** (mouseDown before release) | inherits domain border | SECONDARY darkened (or transform scale 0.98) | inherits | inherits |
 | **Cold channel (is_cold=true)** | same border + 3px left edge COLD_HIGHLIGHT | — | — | — |
 
 \* For fault state, value stays FOREGROUND and border becomes 2px STATUS_FAULT — two-channel redundancy (border + icon prefix). Making value text STATUS_FAULT would fail body contrast (3.94:1 per RULE-A11Y-003).
@@ -80,7 +83,7 @@ Minimum cell size: ~120×64px. Maximum: grid-determined. At 8 cells per row, ~24
 ## API (proposed)
 
 ```python
-# src/cryodaq/gui/widgets/sensor_cell.py
+# src/cryodaq/gui/dashboard/sensor_cell.py
 
 @dataclass
 class SensorReading:
@@ -264,10 +267,26 @@ class SensorCell(QFrame):
 
 Phase B.3 implementation details to preserve:
 
-- **Responsive 8-column grid** at default viewport
-- **Hidden channels** (channels.yaml `visible: false`) not rendered
-- **Double-click rename** inline edit of friendly name (updates channels.yaml via engine roundtrip)
-- **Right-click context menu** with «Скрыть», «Переименовать», «Диагностика»
+- **Width-driven dynamic column count.** Columns are computed as
+  `max(1, available_width // (MIN_CELL_WIDTH + grid_spacing))`, clamped
+  to the number of visible cells. `_MIN_CELL_WIDTH = 160`, `_CELL_HEIGHT = 80`.
+  Grid reflows on every `resizeEvent`. When width is unavailable at first
+  layout, falls back to `min(7, n_cells)` columns.
+- **Visible-channel filter.** Only channels from
+  `ChannelManager.get_all_visible()` whose id starts with Cyrillic Т
+  (U+0422) are rendered; hidden channels (channels.yaml `visible: false`)
+  are excluded at rebuild time, not hidden post-layout.
+- **Runtime rebuild on channel set change.** The grid subscribes to
+  `ChannelManager.on_change` and rebuilds cells when the visible set
+  changes; subscription is torn down via `off_change` on `closeEvent` and
+  `destroyed` (double-guard cleanup).
+- **Per-cell dispatch.** `dispatch_reading(Reading)` routes an incoming
+  reading to the matching `SensorCell.update_value()` by short channel id;
+  `refresh()` is called at ~1 Hz to repaint all cells from the shared
+  `ChannelBufferStore`.
+- **Context-menu signals propagated from cells.** `rename_requested`,
+  `hide_requested`, `show_on_plot_requested`, `history_requested` —
+  emitted by cells, forwarded by the grid to the dashboard.
 
 These are properties of the parent grid, not SensorCell itself; they call back into SensorCell's interface.
 
@@ -323,4 +342,4 @@ if r.status == "fault":
 
 ## Changelog
 
-- 2026-04-17: Initial version. Documents Phase B.3 implementation (DynamicSensorGrid with responsive 8-column). Cold/warm distinction via COLD_HIGHLIGHT left edge. Positionally fixed reference status surfaced in tooltip for Т11 / Т12 («Неподвижный опорный канал»). Fault state uses border + icon + color redundancy.
+- 2026-04-17: Initial version. Documents Phase B.3 implementation (DynamicSensorGrid with width-driven dynamic column count: `cols = available_width // (MIN_CELL_WIDTH + spacing)`, `MIN_CELL_WIDTH = 160`, `CELL_HEIGHT = 80`). Cold/warm distinction via COLD_HIGHLIGHT left edge. Positionally fixed reference status surfaced in tooltip for Т11 / Т12 («Неподвижный опорный канал»). Fault state uses border + icon + color redundancy. Hover / keyboard-focus / pressed interaction states added to the visual state matrix (FR-021).

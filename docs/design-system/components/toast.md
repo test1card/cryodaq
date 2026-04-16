@@ -262,7 +262,17 @@ icon.setPixmap(
 
 ```python
 class Toast(QWidget):
-    def __init__(self, ..., duration_ms: int | None = None, ...):
+    def __init__(
+        self,
+        parent: QWidget,
+        title: str,
+        body: str = "",
+        *,
+        level: str = "info",
+        duration_ms: int | None = None,
+        action_label: str | None = None,
+        # Additional parameters omitted for brevity.
+    ):
         super().__init__(parent)
         self._total_duration = duration_ms or self.DURATION_SHORT
         self._remaining = self._total_duration

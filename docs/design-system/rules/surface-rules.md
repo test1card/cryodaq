@@ -445,7 +445,7 @@ Nesting more than 3 levels of painted surfaces creates either:
 
 **Example (good):**
 
-```python
+```text
 # DESIGN: RULE-SURF-008
 # 3 levels:
 # 1. Viewport BACKGROUND
@@ -461,7 +461,7 @@ modal     # Level 2: SURFACE_ELEVATED
 
 **Example (bad):**
 
-```python
+```text
 # 4+ nesting levels — visually incomprehensible
 viewport    # BACKGROUND
   modal     # SURFACE_ELEVATED
@@ -472,7 +472,7 @@ viewport    # BACKGROUND
 
 **Fix pattern:** Flatten via grouping, or use popover:
 
-```python
+```text
 # Option A: Flatten — subpanel becomes a section within tile, transparent
 tile
   ├─ section_header (transparent)

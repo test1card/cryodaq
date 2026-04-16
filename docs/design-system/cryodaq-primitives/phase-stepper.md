@@ -3,7 +3,7 @@ title: PhaseStepper
 keywords: phase, stepper, progression, experiment, cooldown, warmup, sequence, active-phase, next-phase
 applies_to: sequential phase progression display + manual advance controls
 status: active
-implements: src/cryodaq/gui/shell/overlays/_design_system/phase_aware_widget.py (Phase B.5 + B.5.5 + B.5.6)
+implements: src/cryodaq/gui/dashboard/phase_stepper.py (extracted Phase B.5.5); src/cryodaq/gui/dashboard/phase_aware_widget.py (parent; Phase B.5 + B.5.6)
 last_updated: 2026-04-17
 ---
 
@@ -91,7 +91,7 @@ Phase count is parameterizable (typically 6 for canonical experiment, 7 for exte
 ## API
 
 ```python
-# src/cryodaq/gui/shell/overlays/_design_system/phase_aware_widget.py
+# src/cryodaq/gui/dashboard/phase_stepper.py  (extracted from phase_aware_widget.py)
 
 @dataclass
 class PhaseDef:

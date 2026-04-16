@@ -243,7 +243,7 @@ Length: 1–3 sentences. Too short lacks context; too long gets skipped under st
 
 **Example (bad):**
 
-```python
+```text
 # Generic, non-actionable
 "Ошибка."                                 # WRONG — no context, no next step
 
@@ -253,9 +253,9 @@ Length: 1–3 sentences. Too short lacks context; too long gets skipped under st
 
 "Сенсор фолт."                             # WRONG — anglicism (RULE-COPY-002), vague
 
-# Too long
-"В процессе циклического опроса температурных датчиков канала Т11 контроллером LakeShore 218S " +
-"#2 через интерфейс GPIB по адресу 14 была обнаружена ситуация отсутствия обновления значения " +
+# Too long — one message split across three concatenated strings
+"В процессе циклического опроса температурных датчиков канала Т11 контроллером LakeShore 218S "
+"#2 через интерфейс GPIB по адресу 14 была обнаружена ситуация отсутствия обновления значения "
 "в течение временного интервала, превышающего установленный порог в 10 секунд..."
 # WRONG — operator skips this under stress
 ```

@@ -3,13 +3,15 @@ title: Card
 keywords: card, panel, container, surface, tile, primitive
 applies_to: generic container widget with one surface
 status: partial
-implements: src/cryodaq/gui/shell/overlays/_design_system/modal_card.py (specialized variant)
+implements: src/cryodaq/gui/shell/overlays/_design_system/modal_card.py (current; PanelCard is a proposed future extraction)
 last_updated: 2026-04-17
 ---
 
 # Card
 
 Generic rounded container with one visible surface. The foundational composition primitive for CryoDAQ UI.
+
+> **Proposed:** `PanelCard` is a future extraction target — a generic card base factored out of `ModalCard`. The current implementation uses `ModalCard` at `src/cryodaq/gui/shell/overlays/_design_system/modal_card.py`. `panel_card.py` does not yet exist. See `governance/contribution.md` for the extraction process. Every mention of `PanelCard` below (including the API, variants, and implementation sketch) describes the proposed generic primitive, not shipped code.
 
 **When to use:**
 - Grouping related content into a visually distinct unit on a dashboard or panel
@@ -185,10 +187,16 @@ emphasized_card = PanelCard(surface="elevated")
 - "Expanded / collapsed" — a card is not a disclosure control; use a separate widget
 - "Selected" — cards are not list items; if selection semantics are needed, build a tile that handles it explicitly
 
-## Reference implementation
+## Proposed implementation sketch
+
+> **Not yet implemented.** The snippet below is a proposed sketch for the
+> `PanelCard` extraction. The path `panel_card.py` does not exist today;
+> the live card surface is `modal_card.py` (a specialized variant).
+> Retained here as a target for future extraction per governance process.
 
 ```python
-# src/cryodaq/gui/shell/overlays/_design_system/panel_card.py
+# Proposed file (NOT yet present on disk — see callout above):
+# src/cryodaq/gui/shell/overlays/_design_system/  →  panel_card.py
 """Generic rounded card container with one visible surface.
 
 Implements RULE-SURF-001 (single surface), RULE-SURF-003 (symmetric padding),
@@ -337,4 +345,4 @@ class PanelCard(QWidget):
 
 ## Changelog
 
-- 2026-04-17: Initial version. Base primitive for all card-shape compositions. Anatomy and invariants derived from Phase I.1 ModalCard implementation lessons (commits `e25bbd9`, `d87c24b`, `cf72942`). `PanelCard` class proposed as generic extraction — modal_card.py currently owns the pattern but PanelCard could be extracted as shared base.
+- 2026-04-17: Initial version. Base primitive for all card-shape compositions. Anatomy and invariants derived from Phase I.1 ModalCard implementation lessons (commits `e25bbd9`, `d87c24b`, `cf72942`). `PanelCard` is explicitly proposed / not yet implemented — `modal_card.py` currently owns the pattern, and extraction of a generic `PanelCard` base is a future governance item. Doc body clearly flags every `PanelCard` reference as proposed.
