@@ -13,6 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QRect, Signal
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -84,6 +85,11 @@ class ModalCard(QWidget):
         )
         card_layout.setSpacing(theme.SPACE_3)
 
+        chrome_row = QHBoxLayout()
+        chrome_row.setContentsMargins(0, 0, 0, 0)
+        chrome_row.setSpacing(theme.SPACE_2)
+        chrome_row.addStretch()
+
         self._close_button = QPushButton("\u2715", self._card)
         self._close_button.setObjectName("modalCardCloseButton")
         self._close_button.setFixedSize(32, 32)
@@ -103,12 +109,15 @@ class ModalCard(QWidget):
             f"}}"
         )
         self._close_button.clicked.connect(self.closed.emit)
-        self._close_button.raise_()
+        chrome_row.addWidget(self._close_button)
+        card_layout.addLayout(chrome_row)
 
         self._content_host = QWidget(self._card)
         self._content_host.setObjectName("modalCardContentHost")
         self._content_layout = QVBoxLayout(self._content_host)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setContentsMargins(
+            theme.SPACE_3, 0, theme.SPACE_3, theme.SPACE_3
+        )
         self._content_layout.setSpacing(theme.SPACE_3)
         card_layout.addWidget(self._content_host, 1)
 
@@ -156,15 +165,8 @@ class ModalCard(QWidget):
         max_height = max(
             0, min(available_height, (self.height() * self._max_height_vh_pct) // 100)
         )
-        size_hint = self._card.sizeHint()
         card_width = min(self._max_width, available_width)
-        card_height = min(max_height, size_hint.height())
-        if card_height <= 0:
-            card_height = max_height
+        card_height = max_height
         x = (self.width() - card_width) // 2
         y = (self.height() - card_height) // 2
         self._card.setGeometry(QRect(x, y, card_width, card_height))
-        self._close_button.move(
-            self._card.width() - self._close_button.width() - theme.SPACE_3,
-            theme.SPACE_3,
-        )

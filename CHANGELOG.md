@@ -21,6 +21,15 @@
   `_design_system/_showcase.py` for review before Phase I.2
   (BentoTile + ExecutiveKpi + DataDenseTile + LiveTile).
 
+### Исправлено
+
+- **Phase I.1 modal layout regression after visual fix round.**
+  ModalCard again uses an in-layout chrome row instead of absolute close-button
+  positioning, card height once more respects `max_height_vh_pct`, side
+  backdrop margins remain visible, and inner content padding is explicit so
+  breadcrumb and tiles do not touch the card border. Added regression tests
+  for side margins and max-height clamping.
+
 - **Phase UI-1 v2 Block B.6** — ModeBadge widget в TopWatchBar zone 2.
   Показывает текущий AppMode (ЭКСПЕРИМЕНТ / ОТЛАДКА). DEBUG state
   использует amber attention styling потому что режим отключает

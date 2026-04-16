@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
+from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._design_system import ModalCard
 
 
@@ -105,6 +106,28 @@ def test_modal_card_default_max_width_is_spacious(app):
 
     assert card.card_widget().width() <= 1280
     assert card.card_widget().width() > 1100
+
+
+def test_modal_card_leaves_backdrop_visible_on_sides(app):
+    card = ModalCard()
+    card.resize(1600, 900)
+    card.set_content(QLabel("content"))
+    card.show()
+    app.processEvents()
+
+    card_rect = card.card_widget().geometry()
+    assert card_rect.left() >= theme.SPACE_5
+    assert card_rect.right() <= card.width() - theme.SPACE_5
+
+
+def test_modal_card_respects_max_height_vh_pct_default(app):
+    card = ModalCard(max_height_vh_pct=80)
+    card.resize(1600, 1000)
+    card.set_content(QLabel("content"))
+    card.show()
+    app.processEvents()
+
+    assert card.card_widget().height() <= 800
 
 
 def test_modal_card_set_content_swaps_widget(app):
