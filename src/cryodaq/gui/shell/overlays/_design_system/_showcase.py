@@ -3,14 +3,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QLabel,
-    QMainWindow,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._design_system import (
@@ -20,7 +13,7 @@ from cryodaq.gui.shell.overlays._design_system import (
 )
 
 
-def _placeholder_tile(title: str) -> QFrame:
+def _placeholder_tile(title: str, description: str) -> QFrame:
     tile = QFrame()
     tile.setObjectName("showcaseTile")
     tile.setMinimumHeight(120)
@@ -30,6 +23,10 @@ def _placeholder_tile(title: str) -> QFrame:
         f"border: 1px solid {theme.BORDER};"
         f"border-radius: {theme.RADIUS_MD}px;"
         f"}}"
+        f"#showcaseTile QLabel {{"
+        f"background: transparent;"
+        f"border: none;"
+        f"}}"
     )
     layout = QVBoxLayout(tile)
     layout.setContentsMargins(theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4)
@@ -37,13 +34,15 @@ def _placeholder_tile(title: str) -> QFrame:
 
     title_label = QLabel(title)
     title_label.setStyleSheet(
+        f"background: transparent;"
         f"color: {theme.FOREGROUND};"
         f"font-family: '{theme.FONT_BODY}';"
         f"font-size: {theme.FONT_SIZE_BASE}px;"
         f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
     )
-    body_label = QLabel("Sample overlay content")
+    body_label = QLabel(description)
     body_label.setStyleSheet(
+        f"background: transparent;"
         f"color: {theme.MUTED_FOREGROUND};"
         f"font-family: '{theme.FONT_BODY}';"
         f"font-size: {theme.FONT_SIZE_SM}px;"
@@ -78,22 +77,77 @@ def build_showcase() -> QMainWindow:
     breadcrumb = DrillDownBreadcrumb("\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430", show_close_button=False)
     content_layout.addWidget(breadcrumb)
 
-    intro = QLabel("Sample overlay content")
-    intro.setStyleSheet(
-        f"color: {theme.MUTED_FOREGROUND};"
-        f"font-family: '{theme.FONT_BODY}';"
-        f"font-size: {theme.FONT_SIZE_SM}px;"
-    )
-    content_layout.addWidget(intro)
-
     grid = BentoGrid()
-    grid.add_tile(_placeholder_tile("Executive tile"), col=0, row=0, col_span=4, row_span=1)
-    grid.add_tile(_placeholder_tile("Live tile"), col=4, row=0, col_span=4, row_span=1)
-    grid.add_tile(_placeholder_tile("Dense tile"), col=8, row=0, col_span=4, row_span=1)
-    grid.add_tile(_placeholder_tile("Wide tile"), col=0, row=1, col_span=8, row_span=1)
-    grid.add_tile(_placeholder_tile("Tall tile"), col=8, row=1, col_span=4, row_span=2)
-    grid.add_tile(_placeholder_tile("Support tile"), col=0, row=2, col_span=4, row_span=1)
-    grid.add_tile(_placeholder_tile("Telemetry tile"), col=4, row=2, col_span=4, row_span=1)
+    grid.add_tile(
+        _placeholder_tile(
+            "Executive tile",
+            "Executive KPI: large numeric readout with delta.",
+        ),
+        col=0,
+        row=0,
+        col_span=4,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Live tile",
+            "Real-time indicator without pulse.",
+        ),
+        col=4,
+        row=0,
+        col_span=4,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Dense tile",
+            "Compressed multi-value table.",
+        ),
+        col=8,
+        row=0,
+        col_span=4,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Wide tile",
+            "Time-series chart, 8-column span.",
+        ),
+        col=0,
+        row=1,
+        col_span=8,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Tall tile",
+            "Vertical scroll content, 2-row span.",
+        ),
+        col=8,
+        row=1,
+        col_span=4,
+        row_span=2,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Support tile",
+            "Secondary context info.",
+        ),
+        col=0,
+        row=2,
+        col_span=4,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Telemetry tile",
+            "Multi-channel live readout.",
+        ),
+        col=4,
+        row=2,
+        col_span=4,
+        row_span=1,
+    )
     content_layout.addWidget(grid, 1)
 
     modal.set_content(content)

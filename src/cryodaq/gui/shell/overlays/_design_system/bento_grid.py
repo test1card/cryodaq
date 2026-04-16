@@ -1,7 +1,7 @@
 """BentoGrid — 12-column grid container for Bento tile layout."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import QGridLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget
 
 from cryodaq.gui import theme
 
@@ -46,14 +46,19 @@ class BentoGrid(QWidget):
         if col + col_span > self.columns:
             raise ValueError("col + col_span must be <= columns")
 
+        tile.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._layout.addWidget(tile, row, col, row_span, col_span)
+        for row_index in range(row, row + row_span):
+            self._layout.setRowStretch(row_index, 1)
 
     def clear_tiles(self) -> None:
         """Remove all tiles from the grid."""
+        row_count = self._layout.rowCount()
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
         self._auto_index = 0
-
+        for row_index in range(row_count):
+            self._layout.setRowStretch(row_index, 0)

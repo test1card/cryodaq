@@ -13,7 +13,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QRect, Signal
 from PySide6.QtWidgets import (
     QFrame,
-    QHBoxLayout,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -53,7 +52,7 @@ class ModalCard(QWidget):
         self,
         parent: QWidget | None = None,
         *,
-        max_width: int = 1100,
+        max_width: int = 1280,
         max_height_vh_pct: int = 80,
     ) -> None:
         super().__init__(parent)
@@ -81,14 +80,9 @@ class ModalCard(QWidget):
 
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_4, theme.SPACE_5, theme.SPACE_5
+            theme.SPACE_5, theme.SPACE_3, theme.SPACE_5, theme.SPACE_5
         )
         card_layout.setSpacing(theme.SPACE_3)
-
-        chrome_row = QHBoxLayout()
-        chrome_row.setContentsMargins(0, 0, 0, 0)
-        chrome_row.setSpacing(theme.SPACE_2)
-        chrome_row.addStretch()
 
         self._close_button = QPushButton("\u2715", self._card)
         self._close_button.setObjectName("modalCardCloseButton")
@@ -109,8 +103,7 @@ class ModalCard(QWidget):
             f"}}"
         )
         self._close_button.clicked.connect(self.closed.emit)
-        chrome_row.addWidget(self._close_button)
-        card_layout.addLayout(chrome_row)
+        self._close_button.raise_()
 
         self._content_host = QWidget(self._card)
         self._content_host.setObjectName("modalCardContentHost")
@@ -164,13 +157,14 @@ class ModalCard(QWidget):
             0, min(available_height, (self.height() * self._max_height_vh_pct) // 100)
         )
         size_hint = self._card.sizeHint()
-        card_width = min(self._max_width, available_width, size_hint.width())
+        card_width = min(self._max_width, available_width)
         card_height = min(max_height, size_hint.height())
-        if card_width <= 0:
-            card_width = min(self._max_width, available_width)
         if card_height <= 0:
             card_height = max_height
         x = (self.width() - card_width) // 2
         y = (self.height() - card_height) // 2
         self._card.setGeometry(QRect(x, y, card_width, card_height))
-
+        self._close_button.move(
+            self._card.width() - self._close_button.width() - theme.SPACE_3,
+            theme.SPACE_3,
+        )

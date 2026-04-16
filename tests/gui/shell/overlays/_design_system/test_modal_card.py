@@ -94,6 +94,19 @@ def test_modal_card_max_height_percentage_respected(app):
     assert card.card_widget().height() <= 540
 
 
+def test_modal_card_default_max_width_is_spacious(app):
+    card = ModalCard()
+    wide = QWidget()
+    wide.setMinimumWidth(2000)
+    card.resize(1600, 900)
+    card.set_content(wide)
+    card.show()
+    app.processEvents()
+
+    assert card.card_widget().width() <= 1280
+    assert card.card_widget().width() > 1100
+
+
 def test_modal_card_set_content_swaps_widget(app):
     card = ModalCard()
     first = QLabel("first")
@@ -106,4 +119,3 @@ def test_modal_card_set_content_swaps_widget(app):
     assert first.parent() is None
     assert second.parent() is not None
     assert card._content_widget is second
-

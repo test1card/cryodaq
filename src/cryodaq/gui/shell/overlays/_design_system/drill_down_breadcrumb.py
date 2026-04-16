@@ -8,6 +8,26 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 from cryodaq.gui import theme
 
 
+class _ClickableLabel(QLabel):
+    """Minimal clickable label with button-like semantics for tests."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def click(self) -> None:
+        self.clicked.emit()
+
+
 class DrillDownBreadcrumb(QWidget):
     """Compact breadcrumb bar for overlay drill-down surfaces."""
 
@@ -30,19 +50,16 @@ class DrillDownBreadcrumb(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.SPACE_2)
 
-        self._back_button = QPushButton(self)
+        self._back_button = _ClickableLabel(self)
         self._back_button.setObjectName("drillDownBackButton")
-        self._back_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._back_button.setFlat(True)
         self._back_button.setStyleSheet(
             f"#drillDownBackButton {{"
             f"background: transparent;"
             f"color: {theme.MUTED_FOREGROUND};"
-            f"border: none;"
             f"font-family: '{theme.FONT_BODY}';"
             f"font-size: {theme.FONT_SIZE_SM}px;"
             f"padding: 0px;"
-            f"text-align: left;"
+            f"margin: 0px;"
             f"}}"
             f"#drillDownBackButton:hover {{"
             f"color: {theme.FOREGROUND};"
@@ -133,4 +150,3 @@ class DrillDownBreadcrumb(QWidget):
             fm.elidedText(self._overlay_name, Qt.TextElideMode.ElideRight, available)
         )
         self._overlay_label.setToolTip(self._overlay_name)
-

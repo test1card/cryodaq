@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._design_system import BentoGrid
@@ -74,3 +74,25 @@ def test_bento_grid_gap_override_respected(app):
     grid = BentoGrid(gap=20)
     assert grid._layout.horizontalSpacing() == 20
     assert grid._layout.verticalSpacing() == 20
+
+
+def test_bento_grid_row_span_affects_rendered_height(app):
+    host = QWidget()
+    host.resize(900, 600)
+    grid = BentoGrid(parent=host, columns=4)
+    grid.setGeometry(host.rect())
+
+    wide = QLabel("wide")
+    tall = QLabel("tall")
+    support = QLabel("support")
+    for tile in (wide, tall, support):
+        tile.setMinimumHeight(100)
+
+    grid.add_tile(wide, col=0, row=0, col_span=3, row_span=1)
+    grid.add_tile(tall, col=3, row=0, col_span=1, row_span=2)
+    grid.add_tile(support, col=0, row=1, col_span=3, row_span=1)
+
+    host.show()
+    app.processEvents()
+
+    assert tall.height() > wide.height() * 1.7

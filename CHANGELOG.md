@@ -20,6 +20,7 @@
   primitives systematically. Visual showcase at
   `_design_system/_showcase.py` for review before Phase I.2
   (BentoTile + ExecutiveKpi + DataDenseTile + LiveTile).
+
 - **Phase UI-1 v2 Block B.6** — ModeBadge widget в TopWatchBar zone 2.
   Показывает текущий AppMode (ЭКСПЕРИМЕНТ / ОТЛАДКА). DEBUG state
   использует amber attention styling потому что режим отключает
@@ -156,6 +157,11 @@
 
 ### Изменено
 
+- **Phase I.1 visual polish after Vladimir review.** Showcase placeholder
+  labels now render without dark background artifacts, card chrome reduced to
+  a single header band, `ModalCard` default max width widened from 1100 to
+  1280, `BentoGrid` row-span now affects rendered height (with geometry test),
+  breadcrumb back link tightened, and placeholder copy made content-specific.
 - **Шрифты** — Inter заменён на Fira Sans, JetBrains Mono заменён на
   Fira Code. Старые файлы остаются в `resources/fonts/` до B.7 cleanup.
 - **theme.py** — полностью переработан под новые design tokens.
