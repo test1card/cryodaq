@@ -4,6 +4,37 @@
 
 # CryoDAQ
 
+## Источник истины по UI/визуальному дизайну
+
+Единый источник правды для всего operator-facing UI — `docs/design-system/`.
+66 файлов, v1.0.0, покрывают токены, правила, компоненты, паттерны,
+доступность и governance.
+
+**Перед любой работой с GUI-кодом** (создание виджетов, стилизация,
+QSS, layout, цвета, шрифты) — читай релевантные файлы:
+
+- `docs/design-system/README.md` — точка входа, навигация
+- `docs/design-system/MANIFEST.md` — полный индекс + 65 encoded decisions
+- `docs/design-system/rules/<category>-rules.md` — 79 enforcement rules
+- `docs/design-system/components/<widget>.md` — generic primitives
+- `docs/design-system/cryodaq-primitives/<widget>.md` — domain widgets
+- `docs/design-system/patterns/<pattern>.md` — композиция правил для типовых задач
+- `docs/design-system/accessibility/*.md` — WCAG 2.2 AA commitment
+- `docs/design-system/governance/*.md` — как правила/токены эволюционируют
+
+**Правило:** каждое GUI-изменение, затрагивающее визуальное представление,
+должно начинаться с чтения релевантных файлов design-system. Значения
+цветов, размеров, отступов, радиусов, шрифтов берутся ТОЛЬКО из
+theme.py (который определён через docs/design-system/tokens/*.md).
+Hardcoded hex / px / font-size — нарушение RULE-COLOR-010 / RULE-TYPO-007 /
+RULE-SPACE-001 соответственно.
+
+**Deprecated tokens:** STONE_* семейство (ref `docs/design-system/governance/deprecation-policy.md`).
+Новый код использует канонические имена (FOREGROUND, BACKGROUND, MUTED_FOREGROUND etc.).
+
+Governance: Architect = Vladimir; все изменения дизайн-системы идут через
+`docs/design-system/governance/contribution.md`.
+
 ## Снимок сверки
 
 - Источник истины по продуктовой модели: один эксперимент равен одной experiment card, и во время активного эксперимента открыта ровно одна карточка.
