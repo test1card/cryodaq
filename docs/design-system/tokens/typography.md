@@ -125,7 +125,7 @@ For TopWatchBar temperature/pressure headers, dashboard hero readouts.
 | Weight | `FONT_DISPLAY_WEIGHT` | `600` (SEMIBOLD) |
 | Line-height | `FONT_DISPLAY_HEIGHT` | `40` |
 
-**Use for:** Temperature and pressure values in TopWatchBar («3.90 K», «1.23e-06 mbar»). Hero readout in experiment status.
+**Use for:** Temperature and pressure values in TopWatchBar («3.90 K», «1.23e-06 мбар»). Hero readout in experiment status.
 **Don't use for:** Body text, section titles, buttons.
 
 ### `FONT_TITLE_*` — Page / modal title

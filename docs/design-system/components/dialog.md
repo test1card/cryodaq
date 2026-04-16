@@ -86,6 +86,18 @@ A Dialog is a specialized Modal with opinionated structure. Use Dialog when the 
 7. **Max 2 buttons.** 3+ buttons = this should be a Modal with richer choice presentation, or a dropdown.
 8. **One dialog at a time.** Don't stack dialogs. If action opens another dialog, close first one first.
 
+## States
+
+| State | Visual treatment |
+|---|---|
+| Default (open) | Backdrop dimmed, card centered, focus trapped inside |
+| Focus on Cancel (default) | 2px ACCENT ring on Cancel button (RULE-A11Y-001) |
+| Focus on Primary | 2px ACCENT ring on Primary button (operator Tabbed to it) |
+| Hover on button | Button hover state per `components/button.md` |
+| Disabled action | Primary button dimmed (TEXT_DISABLED), not focusable |
+| Destructive variant | Primary button uses DESTRUCTIVE chrome; default focus on Cancel (RULE-INTER-004) |
+| Dismiss (Escape) | Overlay closes; focus returns to opener (RULE-INTER-002) |
+
 ## API (proposed)
 
 ```python
@@ -295,3 +307,4 @@ header_layout.addStretch()
 ## Changelog
 
 - 2026-04-17: Initial version. 4 variants (safe confirm, destructive confirm, alert, info status). `Dialog` class proposed — current code uses QMessageBox ad-hoc; consolidation to typed Dialog class tracked as Phase II.
+- 2026-04-17 (v1.0.1): Added explicit States matrix (FR-015 / FR-020) — default-open, Cancel-focus, Primary-focus, hover, disabled, destructive variant, Escape dismiss.

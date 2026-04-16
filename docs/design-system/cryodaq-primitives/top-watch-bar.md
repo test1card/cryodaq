@@ -50,7 +50,7 @@ Width of each vital slot: `(available_width - mode_badge_width) / 4` minus gap.
 
 1. **Height = HEADER_HEIGHT (56).** Coupled to TOOL_RAIL_WIDTH per RULE-SPACE-006 (corner square).
 2. **Exactly 4 vital cells.** Order is fixed: Pressure → T min → T max → Heater. Changing count or order requires product decision; operator muscle memory forms here.
-3. **Pressure always in mбар, scientific notation.** (RULE-COPY-006, RULE-DATA-005)
+3. **Pressure always in мбар, scientific notation.** (RULE-COPY-006, RULE-DATA-005)
 4. **T min / T max use Т11 and Т12.** These are the positionally fixed reference channels — physically immovable on the second stage (nitrogen plate); cannot be relocated without dismantling the rheostat. All temperature channels are metrologically calibrated, but other channels may change position between experiments, making them unsuitable as fixed quantitative reference points. Using other channels for T min / T max thresholds is a domain violation (architect-level rule, see channels.yaml).
 5. **Mode badge always visible.** Even during fault states. Operator must always know whether actions have real-world consequences.
 6. **Instant fault rendering.** If a vital goes into fault, color changes immediately — no fade. (RULE-INTER-006)
@@ -347,3 +347,4 @@ Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10
 ## Changelog
 
 - 2026-04-17: Initial version. Documents B.4 / B.4.5.2 implementation. 4 fixed vitals (Pressure / T min / T max / Heater) + mode badge. T-min / T-max locked to Т11 / Т12 — positionally fixed reference channels on the second stage (nitrogen plate), not relocatable without dismantling the rheostat. Mode badge distinguishes Experiment from Debug.
+- 2026-04-17 (v1.0.1): Fixed `mбар` → `мбар` in pressure invariant (FR-016) — was a typo mixing Latin `m` with Cyrillic `бар`. Code identifier `mbar:` in `set_pressure` API stays Latin (parameter name).

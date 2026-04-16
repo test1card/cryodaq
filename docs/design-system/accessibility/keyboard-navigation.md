@@ -43,26 +43,31 @@ Specifically:
 
 ## Keyboard shortcut registry
 
-Registered globally at application level (QShortcut on the QMainWindow):
+> **Canonical source:** `tokens/keyboard-shortcuts.md` is the single source
+> of truth per architect decision **AD-002**. The table below mirrors that
+> registry — if it disagrees, the registry wins.
+
+Registered globally at application level (QShortcut on the QMainWindow). Mnemonic scheme — Ctrl + first letter of the panel's Russian / English name:
 
 | Shortcut | Action |
 |---|---|
-| **Ctrl+1** | Open Dashboard (ToolRail slot 1) |
-| **Ctrl+2** | Open «Создать эксперимент» (ToolRail slot 2) |
-| **Ctrl+3** | Open «Карточка эксперимента» (ToolRail slot 3) |
-| **Ctrl+4** | Open Keithley panel (ToolRail slot 4) |
-| **Ctrl+5** | Open Analytics (ToolRail slot 5) |
-| **Ctrl+6** | Open «Теплопроводность» (ToolRail slot 6) |
-| **Ctrl+7** | Open Alarms (ToolRail slot 7) |
-| **Ctrl+8** | Open Journal (ToolRail slot 8) |
-| **Ctrl+L** | Open Journal (alias for Ctrl+8) |
-| **Ctrl+9** | Open «Диагностика датчиков» (ToolRail slot 9) |
-| **Ctrl+A** | Open Alarms panel (from AlarmBadge) |
+| **Ctrl+L** | Open operator log («**Л**ог» / **L**og) |
+| **Ctrl+E** | Open experiment card («**Э**ксперимент» / **E**xperiment) |
+| **Ctrl+A** | Open analytics («**А**налитика» / **A**nalytics) |
+| **Ctrl+K** | Open Keithley panel (**K**eithley) |
+| **Ctrl+M** | Open alarms («**М**одуль сигнализации») |
+| **Ctrl+R** | Open archive / records (**R**ecords) |
+| **Ctrl+C** | Open conductivity panel (**C**onductivity) |
+| **Ctrl+D** | Open sensor diagnostics (**D**iagnostics) |
+| **Ctrl+Shift+M** | Toggle experiment / debug mode |
 | **Ctrl+Shift+X** | **Emergency stop (АВАР. ОТКЛ.)** |
-| **F11** | Toggle fullscreen |
+| **F1** | Open help / shortcut reference |
 | **F5** | Refresh (reload current panel data from engine) |
-| **Escape** | Dismiss overlay (Modal / Drawer / Popover) |
+| **F11** | Toggle fullscreen |
+| **Escape** | Dismiss overlay (Modal / Drawer / Popover) — innermost first |
 | **Ctrl+W** | Close current overlay |
+
+**Transitional fallback (do not extend):** `Ctrl+1` … `Ctrl+9` map to the nine ToolRail slots and remain active during the rail-ordering stabilization period. They are NOT canonical — operators should learn the mnemonics. New code MUST NOT add `Ctrl+0` or any new numeric slot binding. See `tokens/keyboard-shortcuts.md` for removal timeline.
 
 Per Qt convention:
 | Shortcut | Action |
@@ -156,11 +161,11 @@ Alternative for keyboard users on hold-confirm: **Shift+Enter on a focused HoldC
 
 ## The "type while focus is elsewhere" problem
 
-Operator types an experiment name — QLineEdit has focus. Presses Ctrl+1 expecting to go to Dashboard → Ctrl+1 fires (global shortcut) → panel changes → name text possibly lost.
+Operator types an experiment name — QLineEdit has focus. Presses Ctrl+E expecting to go to the experiment card → Ctrl+E fires (global shortcut) → panel changes → name text possibly lost.
 
 Protection:
 - **Warn on dirty-form panel switch.** If operator has unsaved text in an input and triggers a panel-change shortcut, show Dialog «Закрыть без сохранения?» (copy-voice.md).
-- **Ctrl+1..9 routes through navigation handler** that checks dirty state, not directly bypassing.
+- **All global navigation shortcuts route through the navigation handler** that checks dirty state, not directly bypassing. Applies to mnemonic shortcuts (Ctrl+L, Ctrl+E, …) and the transitional Ctrl+1..9 fallback alike.
 
 ## Screen-reader compatibility
 
@@ -231,3 +236,4 @@ Before shipping any panel:
 ## Changelog
 
 - 2026-04-17: Initial version. Tab order rules + F-pattern alignment. Shortcut registry table. No single-key policy. Ctrl+Shift+X exception rationale. Focus trap spec for overlays. Per-widget keyboard behavior. Screen-reader throttling guidance.
+- 2026-04-17 (v1.0.1): Aligned shortcut registry with mnemonic scheme per architect decision AD-002 (FR-011). Canonical bindings are Ctrl+L/E/A/K/M/R/C/D + Ctrl+Shift+X; numeric Ctrl+1..9 demoted to transitional fallback. Updated "type while focus elsewhere" example to use Ctrl+E. `tokens/keyboard-shortcuts.md` is the canonical registry — this file mirrors it.

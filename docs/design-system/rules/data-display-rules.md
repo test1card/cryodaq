@@ -171,7 +171,7 @@ value_label.setFont(value_font)
 
 ## RULE-DATA-004: Fixed numeric precision per quantity
 
-**TL;DR:** Temperature = 2 decimals ("3.90 K"). Pressure = scientific with 2 mantissa digits ("1.23e-06 mbar"). Voltage = 3 decimals ("1.234 V"). Precision is per-quantity, constant.
+**TL;DR:** Temperature = 2 decimals ("3.90 K"). Pressure = scientific with 2 mantissa digits ("1.23e-06 мбар"). Voltage = 3 decimals ("1.234 V"). Precision is per-quantity, constant.
 
 **Statement:** Each measured quantity has a fixed display precision that does NOT change based on value magnitude. CryoDAQ convention:
 
@@ -179,7 +179,7 @@ value_label.setFont(value_font)
 |---|---|---|
 | Temperature (K) | `{:.2f}` | `3.90`, `77.35`, `292.15`, `4.20` |
 | Temperature (mK) for ultra-cold | `{:.1f}` | `15.3`, `4.2` |
-| Pressure (mbar) | scientific 2 mantissa | `1.23e-06`, `8.75e-03` |
+| Pressure (мбар) | scientific 2 mantissa | `1.23e-06`, `8.75e-03` |
 | Voltage (V) | `{:.3f}` | `0.125`, `12.300`, `-1.523` |
 | Current (A) | `{:.6f}` for small, `{:.3f}` for large | `0.000123`, `1.234` |
 | Power (W) | `{:.3f}` | `0.025`, `12.500` |
@@ -317,7 +317,7 @@ value_label.setText("4.20")  # WRONG — no unit, ambiguous quantity
 
 ## RULE-DATA-006: Units always displayed next to values
 
-**TL;DR:** Every numeric value shown to operator MUST include its unit (K, mbar, V, A, W, Ω). No implicit units. No unit in header/column alone.
+**TL;DR:** Every numeric value shown to operator MUST include its unit (K, мбар, V, A, W, Ω). No implicit units. No unit in header/column alone.
 
 **Statement:** A number on screen without its unit is ambiguous. "4.20" means what? Kelvin? Volts? Amperes? CryoDAQ convention: always render unit inline with value.
 
@@ -328,7 +328,7 @@ Accepted simplification: one shared unit label per consistent column/row if visu
 
 **Rationale:** Operator under stress scans columns looking for anomalies. Reading "4.20" in isolation requires memory lookup: "what's the unit for this column?" That lookup takes ~200ms under cognitive load — unacceptable for safety-critical scanning.
 
-SI mandatory: K (not Kelvin or °K), mbar, V, A, W, Ω (not Ohm).
+SI mandatory: K (not Kelvin or °K), мбар (not `mbar` — operator-facing canonical per RULE-COPY-006), V, A, W, Ω (not Ohm).
 
 **Applies to:** all numeric displays — cells, tables, plots (axis labels), exports
 
@@ -443,7 +443,7 @@ import pyqtgraph as pg
 
 plot = pg.PlotWidget()
 plot.setLogMode(x=False, y=True)  # Y log, X linear time axis
-plot.getAxis('left').setLabel("Давление", units="mbar")
+plot.getAxis('left').setLabel("Давление", units="мбар")
 plot.plot(timestamps, pressures_mbar, pen=pg.mkPen(theme.COLD_HIGHLIGHT))
 ```
 
@@ -593,3 +593,4 @@ plot2.getAxis('left').setTextPen(pg.mkPen(color="#808080"))  # ad-hoc hex
 ## Changelog
 
 - 2026-04-17: Initial version. 10 rules covering atomic updates, rate throttling, no jitter, fixed precision, standard sensor format, mandatory units, palette discipline, log-scale for pressure, no-animation policy, plot setup helper.
+- 2026-04-17 (v1.0.1): Switched operator-facing pressure unit examples from `mbar` to `мбар` (RULE-DATA-004 TL;DR, table row, RULE-DATA-006 TL;DR + SI line, RULE-DATA-008 axis-label code example). Code identifiers (`pressures_mbar`, `value_mbar` parameter) and English-prose explanations of the magnitude-span rationale stay as-is. (FR-016)

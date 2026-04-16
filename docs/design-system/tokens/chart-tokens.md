@@ -11,7 +11,7 @@ last_updated: 2026-04-17
 
 Tokens for pyqtgraph-based plots. These are chart-specific and should NOT be used outside plot contexts. Using `PLOT_BG` as a tile background is wrong — use `SURFACE_CARD` instead (they resolve to different values, but semantic mismatch is the issue).
 
-Total: **9 color tokens + 1 layout token = 10 tokens**.
+Total: **12 PLOT_* tokens** — 5 color tokens (`PLOT_BG`, `PLOT_FG`, `PLOT_TICK_COLOR`, `PLOT_LABEL_COLOR`, `PLOT_GRID_COLOR`) + 1 line palette (`PLOT_LINE_PALETTE`, 8 hues) + 3 alpha tokens (`PLOT_GRID_ALPHA`, `PLOT_REGION_WARN_ALPHA`, `PLOT_REGION_FAULT_ALPHA`) + 2 line-width tokens (`PLOT_LINE_WIDTH`, `PLOT_LINE_WIDTH_HIGHLIGHTED`) + 1 layout token (`PLOT_AXIS_WIDTH_PX`). Counted from `src/cryodaq/gui/theme.py`.
 
 ## Plot surfaces
 
@@ -123,7 +123,7 @@ See `rules/data-display-rules.md` RULE-DATA-007 for multi-series color/style rul
 Width accommodates:
 - 4-digit temperature (`293.15` — 6 chars + tick padding)
 - Scientific notation pressure (`1.2e-6` — 6 chars + tick padding)
-- Unit suffix if present (`K`, `mbar`)
+- Unit suffix if present (`K`, `мбар`)
 
 Do not reduce below 60px — labels will clip. Do not expand — wastes plot area.
 
@@ -137,7 +137,7 @@ Required pyqtgraph configuration for any pressure plot:
 # DESIGN: RULE-DATA-008 (pressure log scale)
 pressure_plot = pg.PlotWidget()
 pressure_plot.setLogMode(x=False, y=True)  # Y axis log
-pressure_plot.setLabel('left', 'Давление', units='mbar')
+pressure_plot.setLabel('left', 'Давление', units='мбар')
 
 # When plotting, pass raw pressure values — pyqtgraph handles log conversion
 pressure_plot.plot(time_x, pressure_y, ...)  # NOT log10(pressure_y)
@@ -212,4 +212,5 @@ See `ANTI_PATTERNS.md#charts`.
 
 ## Changelog
 
-- 2026-04-17: Initial version from theme.py inventory (9 color + 1 layout = 10 plot tokens)
+- 2026-04-17: Initial version from theme.py inventory.
+- 2026-04-17 (v1.0.1): Recounted PLOT_* tokens against theme.py — total is 12 (5 color + 1 palette + 3 alpha + 2 line-width + 1 layout). Earlier "9 + 1 = 10" undercounted line-width tokens and conflated the line palette with the color set (FR-019). Switched operator-facing axis-label example from `mbar` to `мбар` (FR-016).

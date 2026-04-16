@@ -548,3 +548,4 @@ QLabel("0.5 K")  # UI readout, point decimal
 ## Changelog
 
 - 2026-04-17: Initial version. 8 rules covering Cyrillic Т, Russian vocabulary, sentence case, error style, emoji prohibition, SI units, imperative/descriptive, decimal convention. RULE-COPY-004 fills the previously-reserved gap.
+- 2026-04-17 (v1.0.1): Verified canonical operator-facing pressure unit is `мбар` per RULE-COPY-006 (FR-016). No content change here — this file already states the canonical unit; downstream files (typography.md, chart-tokens.md, top-watch-bar.md, data-display-rules.md) updated to match.

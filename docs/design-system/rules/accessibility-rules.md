@@ -11,7 +11,17 @@ last_updated: 2026-04-17
 
 Rules aligning CryoDAQ with WCAG 2.1 AA where practical given the desktop-operator context. These rules override aesthetic preferences when they conflict.
 
-CryoDAQ is not currently screen-reader accessible (no blind operators assumed). These rules focus on: keyboard navigation, color-independent information, reduced-motion, readability, and click-target sizing — all of which benefit all operators, not just those with disabilities.
+CryoDAQ provides basic screen-reader support (per architect decision **AD-003**, screen reader is in scope for v1.0):
+
+- Every interactive widget sets `accessibleName`
+- Custom widgets set `accessibleDescription` matching tooltip text
+- State changes fire `QAccessible.Event.ValueChanged` (throttled to avoid flooding — see `accessibility/keyboard-navigation.md`)
+- Fault transitions announced immediately via `QAccessible` notification
+- Live data updates throttled to ~1/min for SR users (routine updates), immediate for fault transitions
+
+Full SR narration of chart data points is out of scope (data is complex numeric; operators read values directly).
+
+Beyond SR support, these rules focus on: keyboard navigation, color-independent information, reduced-motion, readability, and click-target sizing — all of which benefit all operators, not just those with disabilities.
 
 Enforce in code via `# DESIGN: RULE-A11Y-XXX` comment marker.
 
@@ -492,3 +502,4 @@ def show_fault(self, fault_info):
 ## Changelog
 
 - 2026-04-17: Initial version. 8 rules covering tab order, color-independent status, contrast constraints on status colors, reduced-motion respect, lab-conditions readability, universal Escape, 32px minimum click target, static-not-motion critical info.
+- 2026-04-17 (v1.0.1): Replaced screen-reader scope-out language with positive AD-003 commitment. CryoDAQ provides basic SR support (accessibleName / accessibleDescription / throttled QAccessible events / immediate fault announcements); only full SR narration of chart data points remains out of scope.
