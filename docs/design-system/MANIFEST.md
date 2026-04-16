@@ -1,3 +1,9 @@
+---
+title: Design System Manifest
+status: canonical
+last_updated: 2026-04-17
+---
+
 # CryoDAQ Design System — Manifest
 
 **Generated:** 2026-04-17
@@ -92,7 +98,7 @@ design-system/
 
 ## Statistics
 
-- **66 files, ~20 459 lines, ~878 KB markdown**
+- **71 files, ~21 577 lines, ~972 KB markdown**
 - **79 rule IDs** across 9 rule categories (Batches 1+2+6)
 - **14 generic components** specified (Batch 3)
 - **9 CryoDAQ domain primitives** specified (Batch 4)
@@ -182,7 +188,7 @@ Batch 6 — accessibility + governance:
 
 ## Status
 
-**Design system v1.0.0 — complete.** All 66 files, 79 rules, 126 tokens, 6 batches.
+**Design system v1.0.0 — complete.** All 71 files, 79 rules, 126 tokens, 6 batches.
 
 ## Deployment to repo
 

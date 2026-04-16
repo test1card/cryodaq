@@ -5,6 +5,7 @@ applies_to: non-blocking transient notifications
 status: proposed
 implements: not yet — currently log messages and inline banners substitute
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/color-rules.md, tokens/colors.md
 ---
 
 # Toast

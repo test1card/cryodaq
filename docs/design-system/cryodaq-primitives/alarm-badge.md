@@ -5,6 +5,7 @@ applies_to: header-area alarm count indicator
 status: partial
 implements: legacy inline bell indicator (recently cleaned of emoji per Phase 0 decision)
 last_updated: 2026-04-17
+references: rules/color-rules.md, rules/data-display-rules.md, tokens/icons.md
 ---
 
 # AlarmBadge

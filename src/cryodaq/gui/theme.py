@@ -1,19 +1,8 @@
-"""CryoDAQ design system tokens.
+"""CryoDAQ GUI theme tokens.
 
-Adopted from UI UX Pro Max skill v2.5.0 (MIT, Next Level Builder).
-Source: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
-
-Style direction: hybrid Real-Time Monitoring + Data-Dense Dashboard
-Palette base: Smart Home/IoT Dashboard (extended with status tiers)
-Typography: Dashboard Data pairing (Fira Code + Fira Sans)
-
-Full design system reference: docs/design-system/MASTER.md
-Findings and rationale: docs/design-system/FINDINGS.md
-
-IMPORTANT: This module MUST be imported BEFORE any other module that creates
-pyqtgraph PlotWidget or GraphicsLayoutWidget instances. The pyqtgraph
-setConfigOption calls at the end of this module take effect at module load
-time and apply only to widgets created AFTER this module is imported.
+Canonical source: docs/design-system/README.md
+Full token inventory: docs/design-system/MANIFEST.md
+Token naming convention: docs/design-system/governance/token-naming.md
 """
 from __future__ import annotations
 
@@ -26,7 +15,6 @@ import pyqtgraph as pg
 # Skill philosophy preserved (16 semantic tokens, status tier model) but
 # specific hex values adjusted for laboratory instrument context where
 # 14+ simultaneous status indicators must coexist without visual fatigue.
-# See docs/design-system/FINDINGS.md "Tone-down revision" section.
 
 PRIMARY = "#181a22"
 ON_PRIMARY = "#e8eaf0"

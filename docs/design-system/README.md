@@ -4,6 +4,7 @@ keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # CryoDAQ Design Language
@@ -80,7 +81,8 @@ docs/design-system/
 │   ├── interaction-rules.md
 │   ├── data-display-rules.md
 │   ├── accessibility-rules.md
-│   └── content-voice-rules.md
+│   ├── content-voice-rules.md
+│   └── governance-rules.md             # GOV-001..003
 │
 ├── components/                      # generic UI primitives
 │   ├── card.md

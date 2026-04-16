@@ -5,6 +5,7 @@ applies_to: all widgets with border-radius
 enforcement: strict
 priority: high
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Radius Tokens

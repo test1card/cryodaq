@@ -5,6 +5,7 @@ applies_to: inline log entry composition + recent-entries display
 status: proposed
 implements: legacy OperatorLogPanel exists; compact inline block pending
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/typography-rules.md, rules/content-voice-rules.md
 ---
 
 # QuickLogBlock

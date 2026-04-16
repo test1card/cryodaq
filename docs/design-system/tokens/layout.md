@@ -5,6 +5,7 @@ applies_to: app shell chrome, main containers
 enforcement: strict
 priority: high
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Layout Tokens

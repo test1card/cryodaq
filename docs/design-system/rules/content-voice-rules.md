@@ -5,6 +5,7 @@ applies_to: all operator-facing text
 enforcement: strict
 priority: high
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Content and Voice Rules

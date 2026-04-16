@@ -5,6 +5,7 @@ applies_to: text and numeric input widgets
 status: partial
 implements: ad-hoc QLineEdit usage in legacy dialogs (formalization pending)
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
 # Input Field

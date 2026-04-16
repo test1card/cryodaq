@@ -5,6 +5,7 @@ applies_to: all layouts and containers
 enforcement: strict
 priority: high
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Spacing Tokens

@@ -5,6 +5,7 @@ applies_to: all widgets with text
 enforcement: strict
 priority: critical
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Typography Tokens

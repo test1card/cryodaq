@@ -5,6 +5,7 @@ applies_to: all widget code
 enforcement: strict
 priority: critical
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Anti-Patterns Catalog
@@ -111,6 +112,8 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 **Fix:** Use `RADIUS_LG` (8) for max. If genuinely need larger, discuss with Vladimir before creating new token.
 
+**Related rules:** RULE-SURF-006 (radius hierarchy cascade).
+
 ### case: radius-none-on-interactive
 
 **Pattern:** Button or input with `RADIUS_NONE` (0) in an otherwise rounded UI.
@@ -118,6 +121,8 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 **Why forbidden:** Creates unexpected sharp controls among rounded siblings. Visual inconsistency.
 
 **Fix:** Buttons/inputs use `RADIUS_SM` (4). RADIUS_NONE is for separators, plot axes, full-width banners only.
+
+**Related rules:** RULE-SURF-006 (radius hierarchy cascade).
 
 ---
 
@@ -149,6 +154,8 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 **Fix:** Use CryoDAQ tokens. See `tokens/colors.md`.
 
+**Related rules:** RULE-COLOR-010 (canonical token registry; non-sanctioned palettes forbidden).
+
 ### case: bright-primary-color
 
 **Pattern:** `#FF0000`, `#00FF00`, `#0000FF` or near-primary saturated colors.
@@ -157,6 +164,8 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 **Fix:** Use `STATUS_*` tokens (all desaturated) or appropriate `PLOT_LINE_PALETTE` entries.
 
+**Related rules:** RULE-COLOR-010 (canonical token registry; saturated primaries are not sanctioned tokens).
+
 ### case: gradient-anything
 
 **Pattern:** `background: linear-gradient(...)` anywhere.
@@ -164,6 +173,8 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 **Why forbidden:** Not in CryoDAQ aesthetic. We use solid colors only.
 
 **Fix:** Solid token. If trying to indicate progress, use a determinate percentage label, not gradient fill.
+
+**Related rules:** None currently — advisory guidance.
 
 ---
 
@@ -261,6 +272,8 @@ font.setFeature("liga", 0)
 
 **Fix:** Snap to new value instantly. Value update is atomic.
 
+**Related rules:** None currently — advisory guidance.
+
 ### case: fade-in-fault
 
 **Pattern:** Fault alarm appears via `QPropertyAnimation` fade-in over 300ms.
@@ -277,6 +290,8 @@ font.setFeature("liga", 0)
 
 **Fix:** Use `QEasingCurve.InOutQuad` for symmetric, `OutQuad` for enter, `InQuad` for exit.
 
+**Related rules:** None currently — advisory guidance.
+
 ---
 
 ## Elevation
@@ -291,6 +306,8 @@ font.setFeature("liga", 0)
 
 **Exception:** modal cards MAY have the single permitted shadow (see `tokens/elevation.md`).
 
+**Related rules:** RULE-SURF-010 (elevation via surface tokens only; zero-shadow policy).
+
 ### case: hover-lift
 
 **Pattern:** Button or tile moves up on hover via transform or margin change.
@@ -299,6 +316,8 @@ font.setFeature("liga", 0)
 
 **Fix:** Hover state uses `MUTED` background, no transform.
 
+**Related rules:** RULE-SURF-010 (elevation via surface tokens only).
+
 ### case: z-index-magic-number
 
 **Pattern:** `widget.setZValue(42)` with no semantic comment.
@@ -306,6 +325,8 @@ font.setFeature("liga", 0)
 **Why forbidden:** Unclear what layer 42 means. Future developers don't know whether new widgets should be above or below.
 
 **Fix:** Use semantic Z constants (see `tokens/elevation.md` — `Z_MODAL`, `Z_TOAST`, etc.).
+
+**Related rules:** None currently — advisory guidance.
 
 ---
 
@@ -318,6 +339,8 @@ font.setFeature("liga", 0)
 **Why forbidden:** Cultural/OS inconsistency, wrong aesthetic, accessibility issues. See `tokens/icons.md` for full rationale.
 
 **Fix:** Use Lucide SVG icons (`bell.svg`, `alert-triangle.svg`, `check-circle.svg`).
+
+**Related rules:** RULE-COPY-005 (no emoji in UI chrome).
 
 ### case: hardcoded-icon-color
 
@@ -350,6 +373,8 @@ button.setToolTip("Закрыть (Esc)")
 **Why forbidden:** Violates discoverability principle. Operator under stress cannot hover to find options.
 
 **Fix:** Affordance visible by default. Hover adds emphasis, not reveals function.
+
+**Related rules:** RULE-INTER-012 (affordance visible by default, not hover-only).
 
 ### case: single-click-destructive-action
 
@@ -428,6 +453,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 **Fix:** Standard pattern: pass raw values, `setLogMode(y=True)`. Document clearly.
 
+**Related rules:** None currently — advisory guidance.
+
 ---
 
 ## Charts
@@ -440,6 +467,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 **Fix:** Chart tile has CARD background for container, but chart itself uses PLOT_BG (same as BACKGROUND) so it blends into dashboard.
 
+**Related rules:** RULE-SURF-010 (elevation via surface tokens only).
+
 ### case: status-colors-as-line-colors
 
 **Pattern:** `STATUS_OK` or `STATUS_FAULT` used for data series line color in chart.
@@ -448,6 +477,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 **Fix:** Use `PLOT_LINE_PALETTE` entries for data series.
 
+**Related rules:** RULE-COLOR-002 (status color semantic lock).
+
 ### case: too-saturated-grid
 
 **Pattern:** Grid lines at `PLOT_GRID_ALPHA > 0.5` dominate the plot.
@@ -455,6 +486,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 **Why forbidden:** Grid is reference, not data. Should support reading, not demand attention.
 
 **Fix:** Use default `PLOT_GRID_ALPHA = 0.35` or lower.
+
+**Related rules:** None currently — advisory guidance.
 
 ---
 
@@ -468,6 +501,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 **Fix:** Change together.
 
+**Related rules:** None currently — advisory guidance.
+
 ### case: horizontal-scroll
 
 **Pattern:** Content wider than viewport, activating horizontal scrollbar.
@@ -476,6 +511,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 **Fix:** Responsive tile sizing, truncation with tooltips, or reduce information density.
 
+**Related rules:** None currently — advisory guidance.
+
 ### case: window-too-small-silently
 
 **Pattern:** CryoDAQ renders broken layout at 1024×768 without warning.
@@ -483,6 +520,8 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 **Why forbidden:** Operator doesn't know the UI is outside supported range. Reports "bug" which is "unsupported resolution."
 
 **Fix:** Check viewport at startup; if < 1280×720, display warning dialog requesting larger window.
+
+**Related rules:** None currently — advisory guidance.
 
 ---
 

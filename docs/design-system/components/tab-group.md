@@ -5,6 +5,7 @@ applies_to: tab-style navigation for sibling views
 status: partial
 implements: legacy QTabWidget usage in settings and instruments panels
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/color-rules.md, tokens/colors.md
 ---
 
 # TabGroup

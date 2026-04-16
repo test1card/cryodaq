@@ -5,6 +5,7 @@ applies_to: BentoTile variant displaying pyqtgraph plot content
 status: partial
 implements: ad-hoc plot widgets in legacy dashboard and experiment overlay
 last_updated: 2026-04-17
+references: rules/data-display-rules.md, tokens/chart-tokens.md, components/bento-tile.md
 ---
 
 # ChartTile

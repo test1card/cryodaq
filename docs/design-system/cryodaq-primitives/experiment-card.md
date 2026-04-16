@@ -5,6 +5,7 @@ applies_to: compound widget showing active experiment metadata + phase progressi
 status: partial
 implements: legacy ExperimentWorkspace widget; compact variant per Phase B.6 pending
 last_updated: 2026-04-17
+references: rules/data-display-rules.md, rules/surface-rules.md, patterns/real-time-data.md
 ---
 
 # ExperimentCard

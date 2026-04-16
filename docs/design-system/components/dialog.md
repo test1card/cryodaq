@@ -5,6 +5,7 @@ applies_to: simple Q&A overlays with fixed title / body / actions structure
 status: partial
 implements: QMessageBox usage in legacy dialogs; purpose-built replacement proposed
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/color-rules.md, components/modal.md
 ---
 
 # Dialog

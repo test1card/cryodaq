@@ -5,6 +5,7 @@ applies_to: generic container widget with one surface
 status: partial
 implements: src/cryodaq/gui/shell/overlays/_design_system/modal_card.py (current; PanelCard is a proposed future extraction)
 last_updated: 2026-04-17
+references: rules/surface-rules.md, tokens/spacing.md, tokens/radius.md
 ---
 
 # Card

@@ -5,6 +5,7 @@ applies_to: all widgets displaying real-time numeric data
 enforcement: strict
 priority: critical
 last_updated: 2026-04-17
+status: canonical
 ---
 
 # Data Display Rules
@@ -247,7 +248,15 @@ Variants for status:
 - Cold-domain channel: value in COLD_HIGHLIGHT
 - Warning: value in FOREGROUND, add border-left in STATUS_WARNING
 - Fault: value in FOREGROUND, border-left in STATUS_FAULT
-- Stale: value + unit in STATUS_STALE (deliberately low contrast)
+- Stale sensor cells render:
+  - Value text stays **FOREGROUND** (preserves contrast per RULE-A11Y-003)
+  - Left border or subtle background tint in STATUS_STALE (shape channel)
+  - Tooltip: «Данные не обновляются NN секунд» (text channel)
+  - Unit text in MUTED_FOREGROUND (secondary text, AA-safe)
+
+  Do NOT color the value itself in STATUS_STALE — it fails WCAG AA body
+  contrast (2.94:1). The stale signal is carried by border + tooltip,
+  not by value color.
 
 **Rationale:** Consistent layout across 20+ sensor cells allows operator scanning. Eye locks into pattern: "label on top, value in middle, unit suffix." Breaking pattern (value-first, or unit-above-value) forces re-parsing per cell.
 

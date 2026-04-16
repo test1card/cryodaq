@@ -5,6 +5,7 @@ applies_to: child widgets sitting inside BentoGrid
 status: partial
 implements: generic tiles scattered across legacy; Phase I.2 will formalize BentoTile class hierarchy
 last_updated: 2026-04-17
+references: rules/surface-rules.md, tokens/spacing.md, components/bento-grid.md
 ---
 
 # BentoTile

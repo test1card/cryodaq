@@ -5,6 +5,7 @@ applies_to: Keithley 2604B source-measure unit control panel
 status: partial
 implements: legacy power source panel (ToolRail slot 4)
 last_updated: 2026-04-17
+references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
 # KeithleyPanel

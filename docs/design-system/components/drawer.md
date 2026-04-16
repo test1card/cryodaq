@@ -5,6 +5,7 @@ applies_to: side-sliding overlay panels
 status: proposed
 implements: not yet — currently embedded panels substitute
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/surface-rules.md, components/modal.md
 ---
 
 # Drawer

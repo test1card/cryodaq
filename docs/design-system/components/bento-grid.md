@@ -5,6 +5,7 @@ applies_to: modular dashboard layouts with heterogeneous tile sizes
 status: active
 implements: src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py
 last_updated: 2026-04-17
+references: rules/spacing-rules.md, tokens/spacing.md, tokens/layout.md
 ---
 
 # BentoGrid

@@ -5,6 +5,7 @@ applies_to: static status and count indicators
 status: partial
 implements: inline status labels in dashboard and experiment overlay (formalization pending)
 last_updated: 2026-04-17
+references: rules/color-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
 # Badge

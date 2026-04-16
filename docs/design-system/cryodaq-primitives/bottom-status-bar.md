@@ -5,6 +5,7 @@ applies_to: bottom chrome strip showing system-level status
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
 last_updated: 2026-04-17
+references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md
 ---
 
 # BottomStatusBar

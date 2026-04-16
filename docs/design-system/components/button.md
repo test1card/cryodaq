@@ -5,6 +5,7 @@ applies_to: interactive button widgets
 status: partial
 implements: legacy widgets in src/cryodaq/gui/widgets/* (variants scattered; formalization pending)
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/color-rules.md, tokens/colors.md
 ---
 
 # Button

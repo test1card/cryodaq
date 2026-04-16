@@ -5,6 +5,7 @@ applies_to: left vertical icon-only navigation strip
 status: active
 implements: src/cryodaq/gui/shell/tool_rail.py (Phase 0)
 last_updated: 2026-04-17
+references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 ---
 
 # ToolRail

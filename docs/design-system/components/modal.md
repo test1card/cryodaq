@@ -5,6 +5,7 @@ applies_to: full-viewport overlay with centered card and dimmed backdrop
 status: active
 implements: src/cryodaq/gui/shell/overlays/_design_system/modal_card.py
 last_updated: 2026-04-17
+references: rules/surface-rules.md, rules/interaction-rules.md, tokens/elevation.md
 ---
 
 # Modal

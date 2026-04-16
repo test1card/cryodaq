@@ -5,6 +5,7 @@ applies_to: small contextual overlays anchored to a trigger element
 status: proposed
 implements: not yet — currently ad-hoc QToolTip and inline panels substitute
 last_updated: 2026-04-17
+references: rules/surface-rules.md, rules/interaction-rules.md, components/modal.md
 ---
 
 # Popover

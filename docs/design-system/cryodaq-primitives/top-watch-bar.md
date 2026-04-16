@@ -5,6 +5,7 @@ applies_to: top chrome strip showing global vitals + mode badge
 status: active
 implements: src/cryodaq/gui/shell/top_watch_bar.py (Phase B.4/B.4.5.2)
 last_updated: 2026-04-17
+references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voice-rules.md
 ---
 
 # TopWatchBar

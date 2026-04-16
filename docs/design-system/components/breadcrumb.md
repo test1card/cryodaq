@@ -5,6 +5,7 @@ applies_to: hierarchical navigation trail indicating current location
 status: active
 implements: src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py
 last_updated: 2026-04-17
+references: rules/typography-rules.md, rules/interaction-rules.md, tokens/colors.md
 ---
 
 # Breadcrumb

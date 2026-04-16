@@ -5,6 +5,7 @@ applies_to: single-channel data cell widget
 status: active
 implements: src/cryodaq/gui/dashboard/sensor_cell.py; src/cryodaq/gui/dashboard/dynamic_sensor_grid.py (Phase B.3)
 last_updated: 2026-04-17
+references: rules/data-display-rules.md, rules/accessibility-rules.md, patterns/numeric-formatting.md
 ---
 
 # SensorCell

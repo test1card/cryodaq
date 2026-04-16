@@ -5,6 +5,7 @@ applies_to: sequential phase progression display + manual advance controls
 status: active
 implements: src/cryodaq/gui/dashboard/phase_stepper.py (extracted Phase B.5.5); src/cryodaq/gui/dashboard/phase_aware_widget.py (parent; Phase B.5 + B.5.6)
 last_updated: 2026-04-17
+references: rules/color-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
 # PhaseStepper
