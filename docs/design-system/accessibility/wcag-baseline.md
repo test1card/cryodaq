@@ -59,7 +59,7 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
 | **1.4.5 Images of Text** (AA) | Met | No images of text; all text is actual text |
 | **1.4.10 Reflow** (AA) | Partial | Desktop-only; reflow at 320px viewport not targeted |
-| **1.4.11 Non-text Contrast** (AA) | Met | UI component borders ≥ 3:1 against adjacent (BORDER `#2d3038` vs BACKGROUND `#0d0e12` = 3.1:1 ✓) |
+| **1.4.11 Non-text Contrast** (AA) | Partial | BORDER token fails 3:1 against BACKGROUND (actual: 1.46:1). Card shapes provide visual grouping; focus rings use ACCENT (6.48:1, passes). Functional boundaries use ACCENT or STATUS_* with proven higher ratios. See `contrast-matrix.md`. |
 | **1.4.12 Text Spacing** (AA) | Met | Line-height 1.5 default; letter-spacing adjustable via QSS |
 | **1.4.13 Content on Hover / Focus** (AA) | Met | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
 
@@ -115,7 +115,7 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 
 ## AAA aspirations (opportunistic, not committed)
 
-- **1.4.6 Contrast (Enhanced)** — 7:1 for body text. FOREGROUND (16:1) and MUTED_FOREGROUND (5.95:1) miss AAA on body; intentional for dense data display
+- **1.4.6 Contrast (Enhanced)** — 7:1 for body text. FOREGROUND (16.04:1) meets AAA; MUTED_FOREGROUND (5.95:1), ACCENT (6.48:1), COLD_HIGHLIGHT (5.46:1), and every STATUS_* token miss AAA on body; intentional for dense data display
 - **2.4.8 Location** — breadcrumb provides location within drill-downs, but top-level nav doesn't
 - **3.3.5 Help** — tooltips provide contextual help; not a full help system
 - **2.2.4 Interruptions** — alarms use Toast (dismissable) + persistent state; critical faults require ack (blocking Dialog) by design
@@ -146,7 +146,8 @@ When conformance is claimed externally (e.g., procurement doc, accessibility rep
 > CryoDAQ operator UI conforms to WCAG 2.2 Level AA with the following documented exceptions:
 > - Resize Text (1.4.4): supported via OS-level DPI scaling; manual in-app text zoom not provided
 > - Reflow (1.4.10): desktop-only product; reflow at 320px not targeted
-> - Status color contrast: STATUS_FAULT and STATUS_INFO used as chrome accents only, not for body text; body text uses FOREGROUND (16:1 contrast)
+> - Non-text Contrast (1.4.11): BORDER token falls below 3:1 against BACKGROUND (1.46:1) — treated as visual grouping only; functional boundaries (focus, active, fault) use ACCENT or STATUS_* tokens that meet or exceed 3:1
+> - Status color contrast: STATUS_FAULT and STATUS_INFO used as chrome accents only, not for body text; body text uses FOREGROUND (16.04:1 contrast)
 
 ## Rules applied
 
@@ -180,3 +181,4 @@ When conformance is claimed externally (e.g., procurement doc, accessibility rep
 ## Changelog
 
 - 2026-04-17: Initial version. WCAG 2.2 Level AA target committed. Scope boundaries explicit (desktop-only, no audio/video). Criterion-by-criterion commitment table with CryoDAQ mapping. AAA aspirations opportunistic not committed.
+- 2026-04-17: v1.0.1 — Downgraded 1.4.11 Non-text Contrast from Met to Partial after recomputing BORDER contrast (1.46:1 actual vs 3.1:1 claimed). Corrected 1.4.6 AAA note (FOREGROUND meets AAA; MUTED_FOREGROUND misses). Added 1.4.11 exception to external conformance statement.
