@@ -434,10 +434,10 @@ warning_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)  # MANDATORY
 warning_row.setContentsMargins(0, 0, 0, 0)
 
 icon = QLabel()
-icon.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # 16×16 for body
+icon.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # 16×16 for body  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 icon.setPixmap(
     load_colored_icon("alert-triangle", color=theme.STATUS_WARNING)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 warning_row.addWidget(icon)
 
@@ -458,7 +458,7 @@ warning_row.addWidget(label)
 # Visual: icon appears above text baseline on Qt/macOS
 
 # Icon size mismatched to text — 32px icon next to 14px text looks like badge
-icon.setFixedSize(theme.ICON_SIZE_XL, theme.ICON_SIZE_XL)  # WRONG for body text
+icon.setFixedSize(theme.ICON_SIZE_XL, theme.ICON_SIZE_XL)  # WRONG for body text  # proposed: theme.ICON_SIZE_XL — not yet in theme.py
 ```
 
 **Alternative alignment (valid):**

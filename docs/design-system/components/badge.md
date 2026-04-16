@@ -289,7 +289,7 @@ row.setSpacing(theme.SPACE_1)
 icon = QLabel()
 icon.setPixmap(
     load_colored_icon("alert-triangle", color=theme.STATUS_WARNING)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 row.addWidget(icon)
 

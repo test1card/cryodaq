@@ -44,7 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v1.0.0 (initial release, these docs).
+**Current version:** v1.0.1 (post-deep-audit cleanup of v1.0.0 initial release).
 
 ## RULE-GOV-003
 
@@ -75,7 +75,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v1.0.0 state: all three Active, no pending changes.
+These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v1.0.1 state: all three Active, no pending changes.
 
 ## Related rules and patterns
 

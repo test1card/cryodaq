@@ -67,7 +67,7 @@ Not Russian comma-decimal. Not comma thousands separator. Rationale: technical c
 
 ## Scientific notation (for pressure)
 
-Pressure values span ~10 orders of magnitude in a cryogenic system (atmospheric 1e3 mbar → ultra-high vacuum 1e-10 mbar). Always scientific notation with 2 decimals in the mantissa:
+Pressure values span ~10 orders of magnitude in a cryogenic system (atmospheric 1e3 мбар → ultra-high vacuum 1e-10 мбар). Always scientific notation with 2 decimals in the mantissa:
 
 ```
 1.23e-06 мбар   ← canonical form

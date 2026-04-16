@@ -59,7 +59,7 @@ Icons MUST inherit their color from surrounding text, not carry their own hue.
 icon_label = QLabel()
 icon_label.setPixmap(
     load_icon("alert-triangle").pixmap(
-        theme.ICON_SIZE_MD, theme.ICON_SIZE_MD,
+        theme.ICON_SIZE_MD, theme.ICON_SIZE_MD,  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
         QIcon.Mode.Normal,
         QIcon.State.Off,
     )
@@ -122,8 +122,8 @@ row.setSpacing(theme.SPACE_1)  # 4px between icon and text
 row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
 icon = QLabel()
-icon.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
-icon.setPixmap(load_colored_icon("alert-triangle").pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM))
+icon.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
+icon.setPixmap(load_colored_icon("alert-triangle").pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM))  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 
 label = QLabel("Внимание: температура выше 77K")
 label.setFont(body_font)
@@ -143,7 +143,7 @@ Buttons with only icon (no text) MUST have tooltip (see RULE-INTER-008). Minimum
 close_button = QPushButton()
 close_button.setFixedSize(32, 32)
 close_button.setIcon(load_colored_icon("x", color=theme.MUTED_FOREGROUND))
-close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))
+close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 close_button.setToolTip("Закрыть (Esc)")  # MANDATORY
 ```
 

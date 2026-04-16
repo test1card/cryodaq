@@ -255,7 +255,7 @@ icon_name = level_icons[self._level]
 icon = QLabel()
 icon.setPixmap(
     load_colored_icon(icon_name, color=accent_color)
-      .pixmap(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)
+      .pixmap(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 )
 ```
 

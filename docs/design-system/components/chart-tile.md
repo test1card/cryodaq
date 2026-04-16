@@ -154,7 +154,7 @@ tile = ChartTile(
     time_window_s=300,  # 5 min
 )
 
-tile.register_series(PlotSeries(key="pressure_main", label="Основной", color=theme.PLOT_LINE_INFO))
+tile.register_series(PlotSeries(key="pressure_main", label="Основной", color=theme.PLOT_LINE_PALETTE[0]))
 ```
 
 ### Variant 3: Single-channel sparkline
@@ -172,7 +172,7 @@ tile = ChartTile(
 tile.register_series(PlotSeries(
     key="t11",
     label="Т11",
-    color=theme.PLOT_LINE_INFO,
+    color=theme.PLOT_LINE_PALETTE[0],
 ))
 
 # In sparkline mode, hide axes entirely for minimal chrome
@@ -213,7 +213,7 @@ def configure_plot_widget(plot: pg.PlotWidget) -> None:
     """Apply CryoDAQ design-language styling to a pyqtgraph PlotWidget."""
     
     # Background — slightly darker than tile surface for visual depth
-    plot.setBackground(theme.PLOT_BACKGROUND)  # typically theme.BACKGROUND or specific PLOT_BG token
+    plot.setBackground(theme.PLOT_BG)  # PLOT_BG aliases BACKGROUND in theme.py
     
     # Grid — subtle, MUTED_FOREGROUND with low alpha
     plot.showGrid(x=True, y=True, alpha=0.15)

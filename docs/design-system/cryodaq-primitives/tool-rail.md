@@ -157,7 +157,7 @@ class ToolRailSlotWidget(QWidget):
         
         # DESIGN: RULE-COLOR-005 — icon color inherits from text context
         self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)
+        self._icon_label.setFixedSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._update_icon(color=theme.MUTED_FOREGROUND)
         
@@ -170,7 +170,7 @@ class ToolRailSlotWidget(QWidget):
     
     def _update_icon(self, color: str) -> None:
         pixmap = load_colored_icon(self._slot.icon_name, color=color).pixmap(
-            theme.ICON_SIZE_MD, theme.ICON_SIZE_MD
+            theme.ICON_SIZE_MD, theme.ICON_SIZE_MD  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
         )
         self._icon_label.setPixmap(pixmap)
     

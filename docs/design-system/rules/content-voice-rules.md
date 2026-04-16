@@ -28,7 +28,7 @@ Enforce in code and copy review via `# DESIGN: RULE-COPY-XXX` comment marker (fo
 
 ## RULE-COPY-001: Cyrillic Т (U+0422) for temperature channels
 
-**TL;DR:** Temperature channel labels use Cyrillic `Т` (U+0422), never Latin `T` (U+0054). Applies to T1–T24 channel IDs in user-facing strings.
+**TL;DR:** Temperature channel labels use Cyrillic `Т` (U+0422), never Latin `T` (U+0054). Applies to Т1–Т24 channel IDs in user-facing strings.
 
 **Statement:** All temperature channel identifiers displayed to operators MUST use Cyrillic letter `Т` (U+0422). Latin `T` (U+0054) is visually identical but distinct at code-point level and breaks consistency. Applies to:
 
@@ -323,7 +323,7 @@ alarm_badge.setSpacing(theme.SPACE_1)
 icon = QLabel()
 icon.setPixmap(
     load_colored_icon("bell", color=theme.STATUS_WARNING)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 alarm_badge.addWidget(icon)
 

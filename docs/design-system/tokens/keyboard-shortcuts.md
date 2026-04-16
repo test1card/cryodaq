@@ -93,8 +93,9 @@ Universal dismissal shortcut:
 | Constant (proposed) | Binding | Action |
 |---|---|---|
 | `SHORTCUT_ESCAPE` | `Escape` | Close current overlay / popover / dialog (innermost first) |
+| `SHORTCUT_CLOSE_OVERLAY` | `Ctrl+W` | Close current overlay (alias for Escape; matches browser/IDE muscle memory) |
 
-Escape works only on open overlays. No global function when nothing is open.
+Escape works only on open overlays. No global function when nothing is open. `Ctrl+W` mirrors Escape for operators with browser/IDE muscle memory; both are accepted, both close the innermost overlay only.
 
 ## Focus navigation
 

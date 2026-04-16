@@ -168,7 +168,7 @@ Text input with search icon prefix.
 search_icon = QLabel()
 search_icon.setPixmap(
     load_colored_icon("search", color=theme.MUTED_FOREGROUND)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 search_icon.setFixedSize(theme.ROW_HEIGHT, theme.ROW_HEIGHT)
 search_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)

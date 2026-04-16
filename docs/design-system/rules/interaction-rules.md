@@ -388,7 +388,7 @@ def _success_echo(self, widget):
 # DESIGN: RULE-INTER-008
 close_button = QPushButton()
 close_button.setIcon(load_colored_icon("x", color=theme.MUTED_FOREGROUND))
-close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))
+close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 close_button.setFixedSize(32, 32)
 close_button.setToolTip("Закрыть (Esc)")  # MANDATORY
 

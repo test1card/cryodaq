@@ -78,10 +78,10 @@ When a Modal / Drawer / Popover closes, focus returns to the element that opened
 Implementation pattern:
 ```python
 class Modal(QDialog):
-    def __init__(self, parent, opener_widget=None, ...):
+    def __init__(self, parent: QWidget | None = None, opener_widget: QWidget | None = None):
         super().__init__(parent)
         self._opener = opener_widget or QApplication.focusWidget()
-    
+
     def closeEvent(self, event):
         super().closeEvent(event)
         if self._opener is not None:

@@ -239,7 +239,7 @@ close_button.setCursor(Qt.CursorShape.PointingHandCursor)
 close_button.setIcon(
     load_colored_icon("x", color=theme.MUTED_FOREGROUND)  # DESIGN: RULE-COLOR-005
 )
-close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))
+close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 close_button.setToolTip("Закрыть (Esc)")  # MANDATORY description + shortcut
 close_button.setStyleSheet(f"""
     QPushButton {{
@@ -268,7 +268,7 @@ button.setCursor(Qt.CursorShape.PointingHandCursor)
 
 icon = load_colored_icon("play", color=theme.FOREGROUND)
 button.setIcon(icon)
-button.setIconSize(QSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM))
+button.setIconSize(QSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM))  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 button.setText("Начать")
 
 button.setStyleSheet(f"""

@@ -115,7 +115,7 @@ back.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 arrow = QLabel()
 arrow.setPixmap(
     load_colored_icon("arrow-left", color=theme.MUTED_FOREGROUND)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 back.addWidget(arrow)
 

@@ -277,7 +277,7 @@ row.setSpacing(theme.SPACE_1)
 icon = QLabel()
 icon.setPixmap(
     load_colored_icon("alert-triangle", color=theme.STATUS_WARNING)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 
 label = QLabel("Внимание: калибровка устарела")
@@ -497,7 +497,7 @@ tab.setStyleSheet(
 
 - **`COLD_HIGHLIGHT`** — domain-specific indicator that something is cold or cryogenic. Used for:
   - Chart series for cold-channel temperature traces
-  - Highlighting T5 (Экран 77К) or T6 (Экран 4К) in sensor grid
+  - Highlighting Т5 (Экран 77К) or Т6 (Экран 4К) in sensor grid
   - Pressure-temperature phase diagram cold region
   
 - **`STATUS_INFO`** — generic informational emphasis. Used for:

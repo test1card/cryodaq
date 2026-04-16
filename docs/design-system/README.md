@@ -215,15 +215,18 @@ When in doubt: **read the rule, not my code**. If my code contradicts a rule, co
 
 ## Token count summary
 
-From `src/cryodaq/gui/theme.py` inventory (commit 53e258c):
+From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
 
 | Category | Count | File |
 |---|---:|---|
-| Colors | 71 | `tokens/colors.md` |
+| Colors | 74 | `tokens/colors.md` |
 | Typography | 36 | `tokens/typography.md` |
 | Spacing | 9 | `tokens/spacing.md` |
 | Radius | 5 | `tokens/radius.md` |
-| Layout | 5 | `tokens/layout.md` |
+| Layout | 7 | `tokens/layout.md` |
+| Motion (transitions) | 3 | `tokens/motion.md` |
+| Quantity codes | 4 | `tokens/chart-tokens.md` |
+| Corner shape | 1 | `tokens/radius.md` |
 | Chart-specific | (subset of colors) | `tokens/chart-tokens.md` |
 
 ## Related project docs
@@ -236,4 +239,4 @@ From `src/cryodaq/gui/theme.py` inventory (commit 53e258c):
 
 ## Changelog
 
-- 2026-04-17: Initial version. Written during Phase I.1 after Vladimir visual review revealed cross-surface inconsistency. Based on real `theme.py` token inventory (126 tokens across 5 categories).
+- 2026-04-17: Initial version. Written during Phase I.1 after Vladimir visual review revealed cross-surface inconsistency. Based on real `theme.py` token inventory (126 tokens across 5 categories at v1.0.0; expanded to 139 tokens in v1.0.1).

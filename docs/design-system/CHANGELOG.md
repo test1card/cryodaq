@@ -1,3 +1,9 @@
+---
+title: Design System Changelog
+status: canonical
+last_updated: 2026-04-17
+---
+
 # Design System Changelog
 
 All notable changes to the CryoDAQ design system are recorded here.

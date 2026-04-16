@@ -266,9 +266,9 @@ if icon_status:
     icon = QLabel()
     icon.setPixmap(
         load_colored_icon("alert-triangle", color=icon_color)
-          .pixmap(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)
+          .pixmap(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
     )
-    icon.setFixedSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)
+    icon.setFixedSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD)  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
     header_layout.addWidget(icon)
 
 title_widget = QLabel(title)

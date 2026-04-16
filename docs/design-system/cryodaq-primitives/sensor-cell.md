@@ -304,7 +304,7 @@ if r.status == "fault":
     fault_icon = QLabel()
     fault_icon.setPixmap(
         load_colored_icon("alert-triangle", color=theme.STATUS_FAULT)
-          .pixmap(theme.ICON_SIZE_XS, theme.ICON_SIZE_XS)
+          .pixmap(theme.ICON_SIZE_XS, theme.ICON_SIZE_XS)  # proposed: theme.ICON_SIZE_XS — not yet in theme.py
     )
     id_row.addWidget(fault_icon)
     id_row.addWidget(self._id_label)

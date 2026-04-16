@@ -123,7 +123,8 @@ Catch placeholder-as-label antipatterns (RULE-COPY violations):
 INSTRUCTION_PLACEHOLDER_PATTERN = re.compile(r'setPlaceholderText\("Введите')
 
 def check_placeholders(path: Path) -> list[str]:
-    # ... flag "Введите Y" placeholders
+    text = path.read_text(encoding="utf-8")
+    return [match.group(0) for match in INSTRUCTION_PLACEHOLDER_PATTERN.finditer(text)]
 ```
 
 ### Cyrillic Т vs Latin T lint
@@ -135,7 +136,8 @@ Catch Latin T in channel IDs:
 LATIN_T_CHANNEL = re.compile(r'"T\d+[ "]')
 
 def check_channel_t(path: Path) -> list[str]:
-    # ... flag "T1", "T11" etc. in string literals
+    text = path.read_text(encoding="utf-8")
+    return [match.group(0) for match in LATIN_T_CHANNEL.finditer(text)]
 ```
 
 ### Contrast lint (via contrast-matrix)

@@ -120,7 +120,7 @@ status_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 icon = QLabel()
 icon.setPixmap(
     load_colored_icon("check-circle", color=theme.STATUS_OK)
-      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+      .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 label = QLabel("НОРМА")
 label.setStyleSheet(f"color: {theme.STATUS_OK};")
@@ -410,13 +410,13 @@ Icon-only buttons are common pitfall: icon is 16px, designer sizes button to 16p
 close_button = QPushButton()
 close_button.setFixedSize(32, 32)  # satisfies minimum
 close_button.setIcon(load_colored_icon("x"))
-close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # 20px icon
+close_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # 20px icon  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 
 # Tool rail icon — 48×48 (emergency-action safety)
 tool_rail_button = QPushButton()
 tool_rail_button.setFixedSize(48, 48)
 tool_rail_button.setIcon(load_colored_icon("bell"))
-tool_rail_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))
+tool_rail_button.setIconSize(QSize(theme.ICON_SIZE_MD, theme.ICON_SIZE_MD))  # proposed: theme.ICON_SIZE_MD — not yet in theme.py
 
 # Row button — ROW_HEIGHT = 36 by default
 button = QPushButton("Применить")

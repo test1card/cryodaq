@@ -8,7 +8,7 @@ last_updated: 2026-04-17
 
 **Generated:** 2026-04-17
 **Session:** Phase UI-1 v2 design system creation
-**Scope:** Batches 1-6 complete. Full design system v1.0.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Scope:** Batches 1-6 complete. Full design system v1.0.1 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -98,15 +98,15 @@ design-system/
 
 ## Statistics
 
-- **71 files, ~21 577 lines, ~972 KB markdown**
+- **67 files, ~20 906 lines, ~1064 KB markdown**
 - **79 rule IDs** across 9 rule categories (Batches 1+2+6)
 - **14 generic components** specified (Batch 3)
 - **9 CryoDAQ domain primitives** specified (Batch 4)
 - **9 cross-surface patterns** specified (Batch 5)
 - **5 accessibility documents** (Batch 6)
 - **6 governance documents** (Batch 6)
-- **71 color tokens** inventoried from theme.py
-- **126 tokens total** (colors 71 + spacing 9 + radius 5 + typography 36 + layout 5)
+- **74 color tokens** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions)
+- **139 tokens total** (colors 74 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
 
 ## Cross-reference health
 
@@ -181,14 +181,14 @@ Batch 6 — accessibility + governance:
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
 60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system is flat tokens in v1.0.0** — three-layer (primitive→semantic→component) is v2.0 target per UXPM recommendation, not current.
+62. **Design system stays flat tokens through v1.x** — three-layer (primitive→semantic→component) is v2.0 target per UXPM recommendation, not current.
 63. **STONE_* deprecated in v1.0.0, removed in v2.0.0** — ~15 call sites being migrated at each panel's next refactor.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate for v1.x** — Claude drafts + Codex audits + Vladimir approves + Claude Code implements. No self-approval.
 
 ## Status
 
-**Design system v1.0.0 — complete.** All 71 files, 79 rules, 126 tokens, 6 batches.
+**Design system v1.0.1 — complete.** All 67 files, 79 rules, 139 tokens, 6 batches.
 
 ## Deployment to repo
 

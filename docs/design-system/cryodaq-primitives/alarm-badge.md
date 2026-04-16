@@ -122,7 +122,7 @@ class AlarmBadge(QWidget):
         # DESIGN: RULE-COPY-005 — Lucide bell SVG, not emoji
         # DESIGN: RULE-COLOR-005 — icon color inherits (recolored per severity)
         self._icon_label = QLabel()
-        self._icon_label.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)
+        self._icon_label.setFixedSize(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self._icon_label)
         
@@ -169,7 +169,7 @@ class AlarmBadge(QWidget):
         
         # Update icon color
         pixmap = load_colored_icon("bell", color=icon_color).pixmap(
-            theme.ICON_SIZE_SM, theme.ICON_SIZE_SM
+            theme.ICON_SIZE_SM, theme.ICON_SIZE_SM  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
         )
         self._icon_label.setPixmap(pixmap)
         

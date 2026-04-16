@@ -86,7 +86,7 @@ Semantic colors with locked meaning. Cross-use is a specification violation.
 | `STATUS_FAULT` | `#c44545` | Out of spec, interlock, fault_latched | Red alarm badge, "АВАР. ОТКЛ." text, safety fault | Any non-fault red, generic error display text |
 | `STATUS_INFO` | `#4a7ba8` | Informational, neutral notice | Info badge, neutral notification | Status meaning (use OK for healthy); primary action (no primary action color) |
 | `STATUS_STALE` | `#5a5d68` | No data, disconnected, unknown | Stale sensor badge, disconnected instrument indicator | Muted-but-active text (use `MUTED_FOREGROUND`) |
-| `COLD_HIGHLIGHT` | `#5b8db8` | Cryogenic temperature emphasis | Cold channel highlighting, low-temp series in plots, T5 Экран 77К badge | General informational use (use INFO) |
+| `COLD_HIGHLIGHT` | `#5b8db8` | Cryogenic temperature emphasis | Cold channel highlighting, low-temp series in plots, Т5 Экран 77К badge | General informational use (use INFO) |
 
 **Contrast matrix vs `BACKGROUND #0d0e12`** (measured, not estimated):
 
