@@ -12,6 +12,8 @@ references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voi
 
 Horizontal chrome strip at the top of every screen. Shows 4 global vital readings + current mode badge. Visible from every overlay, acts as persistent operator situational awareness surface.
 
+> **Implementation status.** This spec defines the canonical target. The shipped code at `src/cryodaq/gui/shell/top_watch_bar.py` currently renders a 48px-tall zone-based header with engine, experiment, mode, time-window, channel-summary, and alarms sections, plus an inserted persistent-context strip. In that shipped code, pressure is formatted as ASCII `mbar`, `Т мин` / `Т макс` are computed from the current visible cold-channel set from `ChannelManager` rather than being locked to `Т11` / `Т12`, and the alarms cell uses the `🛎` emoji. Code alignment is tracked as Phase II work. New development should follow this spec even where the shipped code diverges.
+
 **When to use:**
 - Single instance in `MainWindow`, always visible at the top
 - Any overlay should NOT hide the TopWatchBar — it's global chrome

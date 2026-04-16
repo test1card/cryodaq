@@ -112,7 +112,7 @@ def check_font_sizes(path: Path) -> list[str]:
 
 ### Spacing lint
 
-Enforce RULE-SPACE-001: only approved spacing values (SPACE_1..9). Catches `margin: 18px` (not 16 or 24).
+Enforce RULE-SPACE-001: only approved spacing values (`SPACE_0..SPACE_6`). Catches `margin: 18px` (not 16 or 24).
 
 ### Russian-text lint
 

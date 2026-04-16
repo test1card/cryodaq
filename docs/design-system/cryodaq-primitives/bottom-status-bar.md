@@ -12,6 +12,8 @@ references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voi
 
 Thin chrome strip at the bottom of every screen. Shows system-level status: engine connection, safety FSM state, ZMQ heartbeat, timestamp. Low-priority information; operator rarely looks at it unless something is wrong.
 
+> **Implementation status.** This spec defines the canonical target. The shipped code at `src/cryodaq/gui/shell/bottom_status_bar.py` currently renders a 24px bar with safety, uptime, disk, data-rate, connection, and local clock fields. The shipped widget uppercases the safety FSM label via `state.upper()`, does not implement this spec's engine / safety / ZMQ-heartbeat information model, and shows a local `HH:MM:SS` clock without UTC offset while connection state is derived in `src/cryodaq/gui/shell/main_window_v2.py` from recent-reading silence rather than a heartbeat interval. Code alignment is tracked as Phase II work. New development should follow this spec even where the shipped code diverges.
+
 **When to use:**
 - Singleton in `MainWindow`, always visible at bottom
 - Any system-level info that should be reachable at a glance but doesn't warrant top-bar prominence

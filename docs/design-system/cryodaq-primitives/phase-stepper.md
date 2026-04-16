@@ -12,6 +12,8 @@ references: rules/color-rules.md, rules/typography-rules.md, tokens/colors.md
 
 Horizontal sequential phase indicator with optional manual-advance controls. Shows the experiment's current phase, preceding completed phases, and upcoming phases in a single timeline.
 
+> **Implementation status.** The shipped phase stepper at `src/cryodaq/gui/dashboard/phase_stepper.py` currently uses `ACCENT` for the active phase highlight. This spec defines `STATUS_OK` as canonical (active phase IS a running status, not a selection). Code alignment is tracked as Phase II work.
+
 **When to use:**
 - Experiment card / experiment overlay — showing progression through phases
 - Compact inline use in dashboard tile (`compact=True` variant per B.5.6)

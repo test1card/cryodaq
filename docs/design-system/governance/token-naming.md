@@ -254,8 +254,8 @@ During Phase 0 rename from the older "stone" palette to the current forest-green
 
 ```python
 # Backward-compat aliases — DEPRECATED, will be removed in v2.0
-STONE_50  = FOREGROUND       # alias for backward compat
-STONE_900 = BACKGROUND        # alias
+STONE_50  = BACKGROUND       # alias for backward compat
+STONE_900 = FOREGROUND       # alias
 # ... etc
 ```
 

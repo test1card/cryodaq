@@ -12,6 +12,8 @@ references: rules/surface-rules.md, rules/interaction-rules.md, tokens/elevation
 
 Centered overlay card with dimmed backdrop. Blocks interaction with content beneath. Dismissible via close button or Escape.
 
+> **Implementation status.** This spec defines the canonical target. The shipped code at `src/cryodaq/gui/shell/overlays/_design_system/modal_card.py` currently implements a low-level `ModalCard` container with backdrop click, close button, Escape-to-close, and a single `set_content()` insertion API. It does not implement the richer API shape used in this spec's examples (`set_header`, `set_footer`, `open()`), does not trap focus within the card, and does not restore focus to the previously focused control on close. `showEvent()` only focuses the wrapper widget itself. Code alignment is tracked as Phase II work. New development should follow this spec even where the shipped code diverges.
+
 **When to use:**
 - Drilling into detail from dashboard (drill-down pattern — breadcrumb back to parent)
 - Multi-field workflows that don't fit as inline panel (create experiment, bulk action)
