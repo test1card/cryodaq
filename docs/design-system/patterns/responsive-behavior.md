@@ -11,6 +11,17 @@ last_updated: 2026-04-17
 
 Rules for layout adaptation across viewport dimensions. CryoDAQ is a desktop industrial tool — operator's display is typically 1920×1080 or 2560×1440. Phone and tablet layouts are out of scope. But even within desktop range, viewports vary (1280 laptop → 1920 standard → 4K wide), and the layout must handle all of them gracefully.
 
+> **Note:** This document references two names that are not yet shipped
+> tokens/primitives. **Panel maximum width** is clamped at roughly
+> 1400px to prevent line-length readability problems on wide monitors —
+> this value is **not yet a formal token**; see
+> `governance/contribution.md` for proposing it as `OVERLAY_MAX_WIDTH`.
+> **`PanelCard`** mentioned in downstream specs is a proposed extraction
+> of the generic card base; current code uses `ModalCard` (the shipped
+> `Card` variant). BentoGrid references below use the canonical
+> 8-column target per AD-001; current code runs at 12 columns — see
+> `components/bento-grid.md` for implementation status.
+
 ## Scope boundaries
 
 **CryoDAQ targets:**
@@ -58,7 +69,7 @@ If operator tries to run CryoDAQ at <1280 width, the shell stays as-is with hori
 ### Adapts only at extreme viewports
 
 - **Below 1280:** chrome stays, main content gets horizontal scroll (no responsive collapse).
-- **Above 3840 (rare):** BentoGrid still 8 columns, but single-pane Scaffold 2 panels clamp to `OVERLAY_MAX_WIDTH` (~1400px) to avoid "line-stretched-across-4K" readability problem.
+- **Above 3840 (rare):** BentoGrid still 8 columns, but single-pane Scaffold 2 panels clamp to roughly 1400px (the proposed `OVERLAY_MAX_WIDTH`, not yet a formal token) to avoid "line-stretched-across-4K" readability problem.
 
 ## BentoGrid responsive behavior
 
@@ -74,7 +85,7 @@ BentoGrid is the primary layout primitive. Its rules:
 
 Single-panel screens (Keithley, Alarms, Journal) in Scaffold 2:
 
-1. **Panel fills available width** up to a maximum of `OVERLAY_MAX_WIDTH` (~1400px).
+1. **Panel fills available width** up to a maximum of roughly 1400px (the proposed `OVERLAY_MAX_WIDTH`, not yet a formal token — see `governance/contribution.md`).
 2. **On viewports >1400 content pixels, panel is centered** with blank space on sides (not stretched).
 3. **Panel height fills viewport height** minus chrome minus `SPACE_5` padding.
 4. **Scroll handling:** panel content exceeding height → internal `QScrollArea`, never page-level scroll.
@@ -91,7 +102,7 @@ Split-view (Analytics, Conductivity):
 
 Modals:
 
-1. **Max width clamped** to `OVERLAY_MAX_WIDTH` (~1400px).
+1. **Max width clamped** to roughly 1400px (proposed `OVERLAY_MAX_WIDTH` — not yet a formal token).
 2. **Min margin** from viewport edge = `SPACE_5` (24).
 3. **Max height** = 90% of viewport height.
 4. **Content overflow** → `QScrollArea` inside modal card, not modal growing past viewport.
@@ -128,7 +139,7 @@ These are "best effort" fallbacks, not design targets.
 Unlike web UI design, there are no media queries per se. Breakpoints are implicit in the min/max constraints:
 
 - Panel min widths (e.g., split-view primary ≥ 600px)
-- Modal max width (OVERLAY_MAX_WIDTH)
+- Modal max width (~1400px; proposed `OVERLAY_MAX_WIDTH`, not yet a formal token)
 - Column min widths inside BentoGrid (implicit ~100px per column)
 - Chart minimum heights (~120px sparkline, ~240px full chart)
 
@@ -152,7 +163,7 @@ When constraints collide with small viewports, the response is:
 
 3. **Mobile-first thinking.** Designing for phone first then scaling up. CryoDAQ never runs on phone; designing for it wastes effort and distorts desktop priorities.
 
-4. **Stretching Scaffold 2 panel to full 4K width.** A form at 3800px wide has lines too long to read comfortably. Clamp to OVERLAY_MAX_WIDTH.
+4. **Stretching Scaffold 2 panel to full 4K width.** A form at 3800px wide has lines too long to read comfortably. Clamp to roughly 1400px (the proposed `OVERLAY_MAX_WIDTH` — not yet a formal token).
 
 5. **Letting modal grow to match content.** Modal becomes taller than viewport, some content invisible. Clamp max_height to viewport and scroll inside.
 

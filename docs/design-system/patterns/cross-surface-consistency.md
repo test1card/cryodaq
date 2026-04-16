@@ -84,7 +84,7 @@ Before shipping any new panel, perform the **two-surface test**:
 Panels that do similar work should look similar:
 
 - **Dashboard Scaffold 1 screens** (Dashboard, Archive) feel like siblings: BentoGrid, same tile densities, same padding.
-- **Single-panel Scaffold 2 screens** (Keithley, Alarms, Journal, Settings) feel like siblings: PanelCard, same title treatment, same padding, same scroll behavior.
+- **Single-panel Scaffold 2 screens** (Keithley, Alarms, Journal, Settings) feel like siblings: same `Card` base, same title treatment, same padding, same scroll behavior. (Current implementation uses `ModalCard`; `PanelCard` is a proposed future extraction of the generic card base — see `components/card.md`.)
 - **Split-view Scaffold 3 screens** (Analytics, Conductivity) feel like siblings: 70/30 split (or matching ratio), same gap between panes.
 
 Within a family, first look at adjacent siblings before making new decisions.

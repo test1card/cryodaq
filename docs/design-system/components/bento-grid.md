@@ -11,6 +11,16 @@ last_updated: 2026-04-17
 
 Modular grid layout for arranging heterogeneous tiles in a dashboard composition. Named after the Japanese bento box metaphor: compartments of varying sizes forming a coherent whole.
 
+> **Implementation status (AD-001).** This spec defines the **canonical
+> 8-column, explicit-placement, overlap-validated** model. The current
+> Phase I.1 code at `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py`
+> uses **12 columns with auto-flow and no overlap detection**. The code
+> will be aligned with this spec in a future Phase II block. Until then,
+> **new dashboard layouts should be designed for 8 columns and explicit
+> placement** even though the runtime grid currently has more flexibility.
+> The invariants, API, patterns, and visual model below describe the
+> canonical target, not the shipped code.
+
 **When to use:**
 - Dashboard layouts with mixed tile sizes (big chart + small KPIs + medium status panel)
 - Any page where content cells have different widths or heights
@@ -58,9 +68,12 @@ The grid is **8 columns wide** by default — narrow enough to maintain readable
 5. **Tile placement validated.** `col + col_span <= num_columns`, no overlapping placements.
 6. **Row heights follow content.** Row heights not fixed; tiles size to content with minimum. For fixed-height regions use `QGridLayout.setRowMinimumHeight()`.
 
-## API
+## API (canonical target — not yet shipped)
 
-Reference implementation in `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py`:
+The signature below is the canonical target. Phase I.1
+`src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` presently
+implements a 12-column auto-flow variant without bounds/overlap checks;
+treat the snippet as the extraction target.
 
 ```python
 class BentoGrid(QWidget):
@@ -210,11 +223,12 @@ grid.add_tile(small_b, col=6, row=1, col_span=2)
 
 ## Reference implementation notes
 
-Phase I.1 implementation (`bento_grid.py`) is functional but has these deliberate limitations documented here:
+Canonical-target behavior (documented here for the post-alignment state;
+see the implementation-status callout at the top for the current code):
 
 - **No drag-to-reorder.** Tile layout is declarative at construction time. Operators cannot rearrange tiles by dragging. If dashboard customization becomes a requirement, that's a separate feature requiring state persistence.
 - **No responsive column reduction.** At narrow viewport widths, tiles with large `col_span` remain their assigned width — grid does not collapse to fewer columns. Because CryoDAQ is desktop-only (1280+ min viewport per `tokens/breakpoints.md`), this is acceptable.
-- **No auto-placement.** All tiles require explicit `col, row, col_span, row_span`. There is no "auto-flow" mode that finds next free cell. Explicit placement prevents surprise layouts.
+- **No auto-placement.** All tiles require explicit `col, row, col_span, row_span`. There is no "auto-flow" mode that finds next free cell. Explicit placement prevents surprise layouts. *(Phase I.1 code permits auto-flow; Phase II alignment removes it.)*
 
 ## Common mistakes
 
@@ -239,4 +253,4 @@ Phase I.1 implementation (`bento_grid.py`) is functional but has these deliberat
 
 ## Changelog
 
-- 2026-04-17: Initial version documenting the Phase I.1 implementation. 8-column default, GRID_GAP spacing, explicit placement, no auto-flow. Limitations around drag-reorder and responsive collapse documented as accepted trade-offs for desktop-only industrial context.
+- 2026-04-17: Initial version. Defines the **8-column, explicit-placement, overlap-validated** model as the **canonical target** (AD-001). Phase I.1 code currently ships a 12-column auto-flow variant; the implementation-status callout at the top of this doc flags the divergence. GRID_GAP spacing, the limitations around drag-reorder and responsive collapse, and the accepted trade-offs for desktop-only industrial context are all specified against the canonical target, not the shipped code.

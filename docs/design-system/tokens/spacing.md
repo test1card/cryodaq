@@ -129,7 +129,7 @@ However, **minimum spacing between adjacent interactive elements is `SPACE_1` (4
 
 ## Dashboard grid
 
-12-column BentoGrid uses GRID_GAP (8px) by default. Tile internal padding uses CARD_PADDING (12px). This yields visual rhythm:
+BentoGrid (8-column canonical per AD-001; current code 12-column — see `components/bento-grid.md`) uses GRID_GAP (8px) by default. Tile internal padding uses CARD_PADDING (12px). This yields visual rhythm:
 
 ```
 [ outer dashboard margin 24 ]

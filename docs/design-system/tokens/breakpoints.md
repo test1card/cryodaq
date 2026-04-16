@@ -38,7 +38,7 @@ Breakpoint tokens are PROPOSED. Currently most widgets hardcode minimum widths o
 | `VIEWPORT_TARGET_HEIGHT` | `1080` | Design optimization target |
 | `OVERLAY_MAX_WIDTH` | `1400` | Max width for modal overlays — keeps backdrop visible on all sides |
 | `OVERLAY_MAX_HEIGHT` | `900` | Max height for modal overlays |
-| `DASHBOARD_GRID_COLUMNS` | `12` | Logical grid column count for BentoGrid layout |
+| `DASHBOARD_GRID_COLUMNS` | `8` | Logical grid column count for BentoGrid layout (canonical per AD-001) |
 
 ## Design target vs minimum
 
@@ -93,21 +93,28 @@ See `components/modal.md` for overlay positioning.
 
 ## BentoGrid columns
 
-Dashboard uses 12-column logical grid (`DASHBOARD_GRID_COLUMNS = 12`). Tiles span 1-12 columns:
+Dashboard uses an **8-column logical grid** (`DASHBOARD_GRID_COLUMNS = 8`) as the canonical target per AD-001. Tiles span 1–8 columns:
 
 | Tile type | Columns | Visual |
 |---|---|---|
 | SensorCell | 1 | Single sensor channel |
-| SensorGroup | 2-3 | Group of related sensors |
-| Chart tile (small) | 4 | Compact chart |
-| Chart tile (medium) | 6 | Half-width chart |
-| Chart tile (large) | 8 | Dominant chart |
-| Full-width banner | 12 | Fault banner, emergency alert |
+| SensorGroup | 2 | Group of related sensors |
+| Chart tile (small) | 2 | Compact chart |
+| Chart tile (medium) | 4 | Half-width chart |
+| Chart tile (large) | 6 | Dominant chart |
+| Full-width banner | 8 | Fault banner, emergency alert |
 
 Column gap: `GRID_GAP = 8px`.
-Grid width at 1920 viewport: (1920 − 56 toolrail − 48 margin) = 1816 / 12 ≈ 151px per column + 8 gap.
+Grid width at 1920 viewport: (1920 − 56 toolrail − 48 margin) = 1816 / 8 ≈ 227px per column + 8 gap.
 
-At 1280 viewport, columns become narrower (~95px + 8 gap). Dense content may clip — use responsive tile logic (future work, see `patterns/responsive-behavior.md`).
+At 1280 viewport, columns become narrower (~142px + 8 gap). Dense content may clip — use responsive tile logic (future work, see `patterns/responsive-behavior.md`).
+
+> **Implementation status (AD-001).** The Phase I.1 code at
+> `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` currently
+> runs at 12 columns with auto-flow. This doc and `components/bento-grid.md`
+> define the canonical 8-column target; alignment of the runtime grid is
+> tracked as a future Phase II block. Design new dashboard layouts against
+> the 8-column model.
 
 ## Font scaling at non-standard DPI
 
@@ -135,7 +142,7 @@ All tokens (spacing, radius, font sizes) scale proportionally — no additional 
 
 - `tokens/layout.md` — chrome dimensions subtract from viewport
 - `tokens/spacing.md` — grid gap
-- `components/bento-grid.md` — 12-column grid implementation
+- `components/bento-grid.md` — 8-column canonical grid (Phase I.1 code currently 12-column; see callout)
 - `components/modal.md` — overlay sizing
 - `patterns/responsive-behavior.md` — responsive strategy
 

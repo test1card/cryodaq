@@ -11,6 +11,20 @@ last_updated: 2026-04-17
 
 How to compose a full CryoDAQ screen from chrome (TopWatchBar + ToolRail + BottomStatusBar) and main content area. All operator-facing screens follow one of three scaffolds.
 
+> **Note:** Scaffolds below describe the main-area content as a `Card`
+> (the generic rounded-surface primitive — see `components/card.md`).
+> `PanelCard` is a proposed future extraction of `Card`'s generic
+> base; it does not yet exist on disk. Current implementations use
+> `ModalCard` (the shipped variant of `Card`) with a full-width layout
+> for Scaffold 2 and Scaffold 3 panels. The Scaffold 1 BentoGrid is
+> described at its canonical 8-column target (AD-001); see
+> `components/bento-grid.md` for implementation status.
+>
+> Panel maximum width is clamped at roughly 1400px to prevent
+> line-length readability problems on wide monitors. This value is
+> the proposed `OVERLAY_MAX_WIDTH` — **not yet a formal token**. See
+> `governance/contribution.md` to propose it.
+
 ## The three-zone shell
 
 Every screen has the same three chrome zones, always in the same positions:
@@ -93,10 +107,12 @@ One panel filling main-area. Used when a single task owns the whole screen — o
 │   ╚══════════════════════════════════════════════════════════╝  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
- ◀── single PanelCard filling main area
+ ◀── single Card (surface="card") filling main area
 ```
 
-Components: `PanelCard` (surface="card") at full available width/height.
+Components: `Card` with `surface="card"` at full available width/height.
+(Current implementation uses `ModalCard`; `PanelCard` is proposed — see
+`components/card.md`.)
 
 Padding: panel itself uses `SPACE_5` internally. Exterior gap from chrome: `SPACE_5`.
 
@@ -123,7 +139,8 @@ Two coupled regions — typically primary large content + secondary narrower con
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Components: two `PanelCard` instances side by side. Typical split 60/40 or 70/30.
+Components: two `Card` instances side by side. Typical split 60/40 or 70/30.
+(Current implementation uses `ModalCard`; a generic `PanelCard` base is a proposed future extraction — see `components/card.md`.)
 
 Gap between cards: `GRID_GAP` (8) or `SPACE_5` (24) for more visual separation. Choose per panel — document choice in panel's spec.
 
@@ -147,7 +164,7 @@ If drill-down has its own substantial content with multiple regions — it still
 
 ## Rules applied
 
-- **RULE-SURF-001..010** — surface invariants apply to each PanelCard / BentoTile in the main area
+- **RULE-SURF-001..010** — surface invariants apply to each Card / BentoTile in the main area
 - **RULE-SPACE-002** — outer margins come from the main-area container, not the chrome
 - **RULE-SPACE-006** — chrome dimensions coupled (HEADER_HEIGHT / TOOL_RAIL_WIDTH / BOTTOM_BAR_HEIGHT)
 - **RULE-SURF-009** — overlay max width clamped for modals that open from scaffolds
