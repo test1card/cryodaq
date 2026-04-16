@@ -19,7 +19,7 @@ Compound widget showing the currently-active experiment's metadata, phase progre
 **When NOT to use:**
 - Historical experiment review — use Archive panel with list
 - Multiple concurrent experiments — CryoDAQ product model is one-at-a-time, this card reflects that invariant
-- Generic card for other domains — use `PanelCard`
+- Generic card for other domains — use `Card`
 
 ## Domain invariant (architect-level)
 
@@ -31,7 +31,7 @@ Per CryoDAQ product model: **one experiment = one ExperimentCard**, and during a
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ◀── PanelCard frame (RADIUS_LG, SPACE_5 padding, SURFACE_CARD)     │
+│  ◀── Card frame (RADIUS_LG, SPACE_5 padding, SURFACE_CARD)          │
 │                                                                      │
 │  ЭКСПЕРИМЕНТ                               ● Эксперимент  ● 47 мин  │
 │  calibration_run_042                       ▲               ▲         │
@@ -61,7 +61,7 @@ Per CryoDAQ product model: **one experiment = one ExperimentCard**, and during a
 
 | Part | Required | Description |
 |---|---|---|
-| **Card frame** | Yes | PanelCard base with standard chrome |
+| **Card frame** | Yes | Card base with standard chrome |
 | **Header row** | Yes | Category label («ЭКСПЕРИМЕНТ») + mode badge + elapsed time |
 | **Experiment name** | Yes | operator-assigned name (calibration_run_042) |
 | **PhaseStepper (compact)** | Yes | Compact stepper showing current phase |
@@ -71,7 +71,7 @@ Per CryoDAQ product model: **one experiment = one ExperimentCard**, and during a
 
 ## Invariants
 
-1. **Inherits PanelCard invariants.** Single surface, symmetric padding, RADIUS_LG, transparent children. (RULE-SURF-001..007)
+1. **Inherits Card invariants.** Single surface, symmetric padding, RADIUS_LG, transparent children. (RULE-SURF-001..007)
 2. **Mode badge mirrors TopWatchBar.** Don't invent new mode colors; defer to the same source of truth.
 3. **Elapsed time uses tabular mono.** Prevents jitter as seconds tick. (RULE-TYPO-003)
 4. **Target channel is a positionally fixed reference channel** (Т11 or Т12) — physically immovable on the second stage (nitrogen plate). Required for quantitative decisions because thresholds based on relocatable channels lose meaning between experiments. Other channels can be shown as context but not as target for alarm thresholds.
@@ -100,7 +100,7 @@ class ExperimentSnapshot:
     faulted: bool
 
 
-class ExperimentCard(PanelCard):
+class ExperimentCard(Card):
     """Compound widget — active experiment overview."""
     
     open_requested = Signal()    # dashboard variant: user wants overlay
@@ -123,7 +123,7 @@ class ExperimentCard(PanelCard):
 ## Reference implementation (dashboard variant)
 
 ```python
-class ExperimentCard(PanelCard):
+class ExperimentCard(Card):
     open_requested = Signal()
     advance_requested = Signal()
     abort_requested = Signal()

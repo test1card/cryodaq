@@ -214,4 +214,4 @@ See `ANTI_PATTERNS.md#charts`.
 ## Changelog
 
 - 2026-04-17: Initial version from theme.py inventory.
-- 2026-04-17 (v1.0.1): Recounted PLOT_* tokens against theme.py — total is 12 (5 color + 1 palette + 3 alpha + 2 line-width + 1 layout). Earlier "9 + 1 = 10" undercounted line-width tokens and conflated the line palette with the color set (FR-019). Switched operator-facing axis-label example from `mbar` to `мбар` (FR-016).
+- 2026-04-17 (v1.0.1): Recounted PLOT_* tokens against theme.py — total is 12 (5 color + 1 palette + 3 alpha + 2 line-width + 1 layout). Earlier "9 + 1 = 10" undercounted line-width tokens and conflated the line palette with the color set (FR-019). Switched the operator-facing axis-label example from the Latin pressure-unit spelling to `мбар` (FR-016).

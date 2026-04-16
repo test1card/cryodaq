@@ -57,7 +57,7 @@ self._content_host.setStyleSheet(
 
 ### case: card-inside-card-same-category
 
-**Pattern:** `ModalCard` containing another `ModalCard`, or `PanelCard` containing `PanelCard`.
+**Pattern:** `ModalCard` containing another `ModalCard`, or proposed `PanelCard` containing proposed `PanelCard`.
 
 **Why forbidden:** Violates RULE-SURF-005. No semantic nesting of same-category containers. Creates "Russian doll" visual pattern.
 

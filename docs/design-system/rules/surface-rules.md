@@ -40,7 +40,7 @@ Enforce in code via `# DESIGN: RULE-SURF-XXX` comment marker.
 
 **Phase I.1 regression:** ModalCard's `_content_host` had implicit painted background (inherited from QWidget default), creating visible "inner sharp rectangle" nested inside "outer rounded card." Fixed in `cf72942` by adding explicit transparent stylesheet.
 
-**Applies to:** ModalCard, PanelCard, any card-like container with child QWidgets
+**Applies to:** ModalCard, proposed PanelCard extractions, any card-like container with child QWidgets
 
 **Example (good):**
 
@@ -213,7 +213,7 @@ Exceptions require:
 - Commit `d87c24b` attempted fix via absolute positioning `self._close_button.move(...)` — broke geometry on resize, button disappeared when card stretched.
 - Fixed in `cf72942` via single HBox header pattern.
 
-**Applies to:** ModalCard, PanelCard, any card with close affordance. Also applies to drawers and multi-step dialogs.
+**Applies to:** ModalCard, proposed PanelCard extractions, any card with close affordance. Also applies to drawers and multi-step dialogs.
 
 **Example (good):**
 
@@ -282,10 +282,10 @@ def _reposition_card(self):
 
 ## RULE-SURF-005: No nested cards of same category
 
-**TL;DR:** ModalCard cannot contain another ModalCard. PanelCard cannot contain PanelCard. Sub-components inside a card must be a different semantic category (Tile, SensorCell, Chart, etc.).
+**TL;DR:** ModalCard cannot contain another ModalCard. Proposed PanelCard extractions cannot contain other proposed PanelCard extractions. Sub-components inside a card must be a different semantic category (Tile, SensorCell, Chart, etc.).
 
 **Statement:** Composition hierarchy is semantic. Categories:
-- **Card** — top-level container with own surface (ModalCard, PanelCard)
+- **Card** — top-level container with own surface (ModalCard, generic Card, proposed PanelCard extraction)
 - **Tile** — mid-level subdivision inside card (BentoTile, ExecutiveKpiTile)
 - **Primitive** — lowest-level display element (SensorCell, StatusBadge, Button)
 
@@ -302,7 +302,7 @@ A card contains tiles (or primitives directly). A tile contains primitives. Nest
 # Modal → Grid → Tile — three distinct semantic categories
 modal = ModalCard()
 grid = BentoGrid()
-tile = ExecutiveKpiTile(label="Давление", value="1.23e-06 mbar")
+tile = ExecutiveKpiTile(label="Давление", value="1.23e-06 мбар")
 grid.add_tile(tile, row=0, col=0, col_span=4)
 modal.set_content(grid)
 ```
@@ -491,11 +491,11 @@ tile
 
 ## RULE-SURF-009: Overlay max width constraint
 
-**TL;DR:** Modal overlays have max width `theme.OVERLAY_MAX_WIDTH = 1400`. Overlays must leave visible backdrop margin on all sides, never extend edge-to-edge.
+**TL;DR:** Modal overlays have max width ~1400px (the proposed `OVERLAY_MAX_WIDTH`, not yet a formal token). Overlays must leave visible backdrop margin on all sides, never extend edge-to-edge.
 
 **Statement:** ModalCard, drill-down overlays, and full-screen panels MUST respect:
-- Max width: `min(viewport_width * 0.9, theme.OVERLAY_MAX_WIDTH)` (proposed token, see `tokens/breakpoints.md`)
-- Max height: `min(viewport_height * 0.9, theme.OVERLAY_MAX_HEIGHT)` (proposed)
+- Max width: `min(viewport_width * 0.9, 1400)` (proposed `OVERLAY_MAX_WIDTH`, see `tokens/breakpoints.md`)
+- Max height: `min(viewport_height * 0.9, 900)` (proposed `OVERLAY_MAX_HEIGHT`)
 - Visible backdrop margin: at least `theme.SPACE_5` (24px) on all sides
 
 Extending overlay edge-to-edge eliminates backdrop visibility and breaks the "floating modal" visual metaphor — user sees a fullscreen replacement, not an overlay.

@@ -30,7 +30,7 @@ Small overlay with title + body + 1-2 action buttons. The Q&A primitive — use 
 | Property | Dialog | Modal |
 |---|---|---|
 | Structure | Fixed: title + body + actions | Flexible: any content |
-| Size | Small (typically 400-560px wide) | Up to OVERLAY_MAX_WIDTH (1400px) |
+| Size | Small (typically 400-560px wide) | Up to ~1400px (proposed `OVERLAY_MAX_WIDTH`) |
 | Typical content | Short message + 1-2 buttons | Forms, drill-down detail, bento grids |
 | Backdrop dismisses? | No (protects against accidental dismiss of question) | Often yes (configurable) |
 | Use frequency | Many — one per question | Fewer — drill-down navigation |

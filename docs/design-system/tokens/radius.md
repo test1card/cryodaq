@@ -60,7 +60,7 @@ Either:
 
 | Widget type | Radius token | Rationale |
 |---|---|---|
-| ModalCard, PanelCard, TileCard | `RADIUS_LG` (8) | Top-level containers, max allowed |
+| ModalCard, Card, TileCard (and proposed PanelCard extractions) | `RADIUS_LG` (8) | Top-level containers, max allowed |
 | BentoTile, sub-panel, section | `RADIUS_MD` (6) | Inside top-level containers |
 | Input field, text area, select | `RADIUS_SM` (4) | Small interactive controls |
 | Button (default shape) | `RADIUS_SM` (4) | Matches input for form rhythm |

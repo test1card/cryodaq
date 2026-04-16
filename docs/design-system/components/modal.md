@@ -73,7 +73,7 @@ Centered overlay card with dimmed backdrop. Blocks interaction with content bene
 2. **Single header baseline.** Breadcrumb/title and close button on one HBox row, AlignVCenter. NOT two stacked rows, NOT absolute-positioned close. (RULE-SURF-004)
 3. **Symmetric card padding.** `SPACE_5` all sides. (RULE-SURF-003)
 4. **Radius cascade.** Modal card `RADIUS_LG`; children use smaller. (RULE-SURF-006)
-5. **Max width clamped.** Respect `OVERLAY_MAX_WIDTH` and leave minimum `SPACE_5` backdrop margin on all sides. (RULE-SURF-009)
+5. **Max width clamped.** Respect the proposed `OVERLAY_MAX_WIDTH` cap (~1400px) and leave minimum `SPACE_5` backdrop margin on all sides. (RULE-SURF-009)
 6. **Modal shadow permitted.** The one exception to zero-shadow policy. (RULE-SURF-010)
 7. **Escape dismisses.** `keyPressEvent` handles `Qt::Key_Escape` → close. (RULE-INTER-002)
 8. **Focus trap while open.** Keyboard focus stays within modal until dismissed. Implementation: install event filter or use `setWindowModality`.
@@ -90,7 +90,7 @@ class ModalCard(QWidget):
     
     closed = Signal()
     
-    DEFAULT_MAX_WIDTH = theme.OVERLAY_MAX_WIDTH  # 1400 proposed
+    DEFAULT_MAX_WIDTH = 1400  # proposed OVERLAY_MAX_WIDTH; not yet a formal token
     DEFAULT_MAX_HEIGHT_VH = 0.9
     
     def __init__(

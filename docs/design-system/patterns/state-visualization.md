@@ -96,7 +96,7 @@ Label stays MUTED_FOREGROUND; dot carries color. Avoids RULE-A11Y-003 body contr
 
 Filled pill context passes contrast because the ON_* paired token is contrast-tested with its background.
 
-### Large containers (Card, BentoTile, PanelCard)
+### Large containers (Card, BentoTile, proposed PanelCard)
 
 Cards generally **stay neutral** even when their contents are about a faulted thing. The fault signal lives on the content (values, SensorCells), not on the card chrome.
 

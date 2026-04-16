@@ -291,7 +291,7 @@ Use underscore `_` separator:
 # YES
 COLD_HIGHLIGHT
 FONT_MONO_VALUE_SIZE
-OVERLAY_MAX_WIDTH
+HEADER_HEIGHT
 
 # NO
 COLDHIGHLIGHT            # unreadable

@@ -36,8 +36,8 @@ Breakpoint tokens are PROPOSED. Currently most widgets hardcode minimum widths o
 | `VIEWPORT_MIN_HEIGHT` | `720` | Hard minimum |
 | `VIEWPORT_TARGET_WIDTH` | `1920` | Design optimization target |
 | `VIEWPORT_TARGET_HEIGHT` | `1080` | Design optimization target |
-| `OVERLAY_MAX_WIDTH` | `1400` | Max width for modal overlays — keeps backdrop visible on all sides |
-| `OVERLAY_MAX_HEIGHT` | `900` | Max height for modal overlays |
+| `OVERLAY_MAX_WIDTH` (proposed) | `1400` | Max width for modal overlays — keeps backdrop visible on all sides |
+| `OVERLAY_MAX_HEIGHT` (proposed) | `900` | Max height for modal overlays |
 | `DASHBOARD_GRID_COLUMNS` | `8` | Logical grid column count for BentoGrid layout (canonical per AD-001) |
 
 ## Design target vs minimum
@@ -79,11 +79,11 @@ Modal overlays and drill-downs have max dimensions to keep backdrop visible:
 # DESIGN: RULE-SURF-009 (overlay max size)
 overlay_width = min(
     viewport_width * 0.9,      # 90% viewport
-    theme.OVERLAY_MAX_WIDTH,   # or 1400px, whichever smaller
+    1400,                      # proposed OVERLAY_MAX_WIDTH; not yet in theme.py
 )
 overlay_height = min(
     viewport_height * 0.9,
-    theme.OVERLAY_MAX_HEIGHT,
+    900,                       # proposed OVERLAY_MAX_HEIGHT; not yet in theme.py
 )
 ```
 

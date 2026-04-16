@@ -369,7 +369,7 @@ rg -n '[\x{1F000}-\x{1FFFF}]|[\x{2600}-\x{26FF}]|[\x{2700}-\x{27BF}]' src/cryoda
 2. **Standard symbols.** Temperature: `K` (Kelvin). Pressure: `мбар` (millibar) or `Па` (Pascal). Power: `Вт` (Watt). Current: `А` (Ampere). Voltage: `В` (Volt). Resistance: `Ом` (Ohm).
 3. **Scientific notation for small/large values.** Pressure in vacuum ranges uses `1.23 × 10⁻⁶ мбар` or `1.23e-6 мбар`. Don't write `0.00000123 мбар`.
 4. **No Imperial units.** No Fahrenheit, no psi, no inches. CryoDAQ is metric-only.
-5. **Units in Russian where established.** `мбар` not `mbar`, `Вт` not `W`, `Ом` not `Ohm`. Kelvin stays `K` (international convention for temperature).
+5. **Units in Russian where established.** Use `мбар`, `Вт`, `Ом` in operator-facing text; avoid Latin pressure/power/resistance spellings. Kelvin stays `K` (international convention for temperature).
 
 **Rationale:** Russian scientific convention. Metric SI is the standard; deviating confuses operators and makes the UI look amateurish. Proper spacing makes values easier to read and parse.
 

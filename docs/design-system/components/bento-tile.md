@@ -340,7 +340,7 @@ class BentoTile(QWidget):
 
 1. **Using a Card inside a BentoGrid.** Card has `RADIUS_LG` (8) + `SPACE_5` padding (24); that breaks the tile hierarchy. Use `BentoTile` (`RADIUS_MD` + `CARD_PADDING`). Or use the raw `BentoTile` and put chart/content inside.
 
-2. **Using a BentoTile outside BentoGrid.** Standalone BentoTile on dashboard looks like an under-padded Card. If you need "a rectangle with content" outside a grid, use `PanelCard`.
+2. **Using a BentoTile outside BentoGrid.** Standalone BentoTile on dashboard looks like an under-padded Card. If you need "a rectangle with content" outside a grid, use `Card`.
 
 3. **Title as sentence case.** "Давление" as tile title — use UPPERCASE "ДАВЛЕНИЕ" per RULE-TYPO-008. (Exception: very long titles that don't work uppercase.)
 

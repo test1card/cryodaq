@@ -73,7 +73,7 @@ Generic rounded container with one visible surface. The foundational composition
 ## API (proposed `PanelCard` class)
 
 ```python
-class PanelCard(QWidget):
+class PanelCard(QWidget):  # proposed
     """Generic rounded container with one visible surface.
     
     Slot-based composition: consumers populate header_slot, content_host,
@@ -105,7 +105,7 @@ class PanelCard(QWidget):
 Consumers compose:
 
 ```python
-card = PanelCard(surface="card")
+card = PanelCard(surface="card")  # proposed
 card.set_header(header_row_widget)
 card.set_content(chart_widget)
 card.set_footer(actions_widget)
@@ -119,7 +119,7 @@ Plain card with just content host. Default use case.
 
 ```python
 # DESIGN: RULE-SURF-001, RULE-SURF-003
-card = PanelCard(surface="card")
+card = PanelCard(surface="card")  # proposed
 card.set_content(sensor_grid_widget)
 ```
 
@@ -169,7 +169,7 @@ card.set_footer(footer)
 Use `surface="elevated"` for cards that must visually separate from dashboard context (e.g., floating preview, emphasized region).
 
 ```python
-emphasized_card = PanelCard(surface="elevated")
+emphasized_card = PanelCard(surface="elevated")  # proposed
 # background becomes SURFACE_ELEVATED (SECONDARY = #22252f), one shade lighter
 ```
 
@@ -211,7 +211,7 @@ from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 from cryodaq.gui import theme
 
 
-class PanelCard(QWidget):
+class PanelCard(QWidget):  # proposed
     """Generic rounded card. Slot-based composition."""
     
     def __init__(
@@ -328,7 +328,7 @@ class PanelCard(QWidget):
 
 2. **Asymmetric padding to fix spacing issues.** When content "feels too close to top", the fix is NOT `(SPACE_5, SPACE_3, SPACE_5, SPACE_5)` — it's restructuring header, adjusting intra-section spacing, or reviewing content composition. Asymmetric card padding is the wrong tool. RULE-SURF-003.
 
-3. **Nesting cards.** Creating a `PanelCard` inside another `PanelCard` violates RULE-SURF-005. If the nested region is meant to be visually distinct, use a `BentoTile` (different semantic category). If it's just layout grouping, use a transparent `QWidget`.
+3. **Nesting cards.** Creating a proposed `PanelCard` inside another proposed `PanelCard` violates RULE-SURF-005. If the nested region is meant to be visually distinct, use a `BentoTile` (different semantic category). If it's just layout grouping, use a transparent `QWidget`.
 
 4. **Applying drop shadow for "depth."** Dark-mode shadows are imperceptible and expensive. Depth on dark mode comes from surface brightness delta. RULE-SURF-010.
 

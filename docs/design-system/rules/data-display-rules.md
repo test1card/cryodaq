@@ -337,7 +337,7 @@ Accepted simplification: one shared unit label per consistent column/row if visu
 
 **Rationale:** Operator under stress scans columns looking for anomalies. Reading "4.20" in isolation requires memory lookup: "what's the unit for this column?" That lookup takes ~200ms under cognitive load — unacceptable for safety-critical scanning.
 
-SI mandatory: K (not Kelvin or °K), мбар (not `mbar` — operator-facing canonical per RULE-COPY-006), V, A, W, Ω (not Ohm).
+SI mandatory: K (not Kelvin or °K), мбар (avoid Latin pressure-unit spelling in operator-facing text per RULE-COPY-006), V, A, W, Ω (not Ohm).
 
 **Applies to:** all numeric displays — cells, tables, plots (axis labels), exports
 
@@ -431,12 +431,12 @@ for i, trace in enumerate(traces):
 
 **TL;DR:** Vacuum pressure plots MUST use logarithmic Y-axis (`log_y=True`). Raw linear scale makes low-pressure spans invisible.
 
-**Statement:** Pressure measurements in CryoDAQ span 10+ orders of magnitude (atmospheric ~1000 mbar down to ultra-vacuum ~1e-9 mbar). On linear Y-axis, everything below 1 mbar compresses into a single pixel — entire vacuum regime invisible.
+**Statement:** Pressure measurements in CryoDAQ span 10+ orders of magnitude (atmospheric ~1000 millibar down to ultra-vacuum ~1e-9 millibar). On linear Y-axis, everything below 1 millibar compresses into a single pixel — entire vacuum regime invisible.
 
 All pressure visualizations MUST:
 1. Use pyqtgraph `setLogMode(y=True)` on the plot
 2. Display Y-axis tick labels in scientific notation (`1e-6`, `1e-3`, etc.)
-3. Store underlying data in raw mbar; conversion to log is display-only
+3. Store underlying data in raw millibar values; conversion to log is display-only
 
 Rationale embedded in `tokens/chart-tokens.md`. Vladimir's explicit memory: "Pressure always displayed and fitted in log scale (log₁₀(P), never raw P)."
 
@@ -462,7 +462,7 @@ plot.plot(timestamps, pressures_mbar, pen=pg.mkPen(theme.COLD_HIGHLIGHT))
 # Linear Y — vacuum regime invisible
 plot.setLogMode(x=False, y=False)  # WRONG — default linear
 plot.plot(timestamps, pressures_mbar)
-# Result: 1000 mbar plotted at top, 1e-6 mbar indistinguishable from 0
+# Result: 1000 millibar plotted at top, 1e-6 millibar indistinguishable from 0
 
 # Pre-converting data to log in storage — wrong layer
 pressures_log = [math.log10(p) for p in pressures_mbar]

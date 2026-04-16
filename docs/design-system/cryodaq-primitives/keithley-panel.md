@@ -146,8 +146,8 @@ class SmuChannelBlock(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         
-        # Each channel block is a PanelCard (inner)
-        self._card = PanelCard(surface="elevated")
+        # Each channel block uses Card semantics here; PanelCard remains proposed.
+        self._card = Card(surface="elevated")  # PanelCard proposed
         outer.addWidget(self._card)
         
         content = QWidget()
@@ -343,7 +343,7 @@ class SmuChannelBlock(QWidget):
         
         # Fault treatment
         if state.faulted:
-            # Apply fault-chrome via PanelCard style override or an inline banner
+            # Apply fault-chrome via Card style override or an inline banner
             pass
 ```
 
