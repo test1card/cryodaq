@@ -38,36 +38,41 @@ def _make_channel_data(
     flags: list[str] | None = None,
 ) -> dict:
     """Build a channel diagnostics dict as returned by engine."""
-    return asdict(ChannelDiagnostics(
-        channel_id=channel_id,
-        channel_name=name,
-        current_T=T,
-        noise_std=noise_mK / 1000.0,
-        noise_mK=noise_mK,
-        drift_rate=drift_mK / 1000.0,
-        drift_mK_per_min=drift_mK,
-        outlier_count=outliers,
-        correlation=corr,
-        health_score=health,
-        fault_flags=flags or [],
-    ))
+    return asdict(
+        ChannelDiagnostics(
+            channel_id=channel_id,
+            channel_name=name,
+            current_T=T,
+            noise_std=noise_mK / 1000.0,
+            noise_mK=noise_mK,
+            drift_rate=drift_mK / 1000.0,
+            drift_mK_per_min=drift_mK,
+            outlier_count=outliers,
+            correlation=corr,
+            health_score=health,
+            fault_flags=flags or [],
+        )
+    )
 
 
 def _make_summary(healthy: int, warning: int, critical: int) -> dict:
-    return asdict(DiagnosticsSummary(
-        total_channels=healthy + warning + critical,
-        healthy=healthy,
-        warning=warning,
-        critical=critical,
-        worst_channel="T20" if critical else ("T19" if warning else "T1"),
-        worst_score=0 if critical else (55 if warning else 100),
-        worst_flags=["disconnected"] if critical else [],
-    ))
+    return asdict(
+        DiagnosticsSummary(
+            total_channels=healthy + warning + critical,
+            healthy=healthy,
+            warning=warning,
+            critical=critical,
+            worst_channel="T20" if critical else ("T19" if warning else "T1"),
+            worst_score=0 if critical else (55 if warning else 100),
+            worst_flags=["disconnected"] if critical else [],
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
 # 1. test_panel_creates — widget creates without crash
 # ---------------------------------------------------------------------------
+
 
 def test_panel_creates() -> None:
     _app()
@@ -80,6 +85,7 @@ def test_panel_creates() -> None:
 # ---------------------------------------------------------------------------
 # 2. test_table_populated — 20 rows for 20 channels
 # ---------------------------------------------------------------------------
+
 
 def test_table_populated() -> None:
     _app()
@@ -99,6 +105,7 @@ def test_table_populated() -> None:
 # ---------------------------------------------------------------------------
 # 3. test_color_coding_health — green/yellow/red by health score
 # ---------------------------------------------------------------------------
+
 
 def test_color_coding_health() -> None:
     _app()
@@ -134,6 +141,7 @@ def test_color_coding_health() -> None:
 # 4. test_summary_badge — "18✓ 1⚠ 1✘" text correct
 # ---------------------------------------------------------------------------
 
+
 def test_summary_badge() -> None:
     _app()
     panel = SensorDiagPanel()
@@ -153,6 +161,7 @@ def test_summary_badge() -> None:
 # ---------------------------------------------------------------------------
 # 5. test_sort_by_health — worst first after sort
 # ---------------------------------------------------------------------------
+
 
 def test_sort_by_health() -> None:
     _app()

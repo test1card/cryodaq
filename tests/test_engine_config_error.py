@@ -1,4 +1,5 @@
 """Verify engine exits with code 2 on YAML startup parse errors (Phase 2b H.3)."""
+
 from __future__ import annotations
 
 import os
@@ -46,11 +47,11 @@ def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     )
 
     assert result.returncode == 2, (
-        f"Expected exit 2, got {result.returncode}\n"
-        f"stderr: {result.stderr[-2000:]}"
+        f"Expected exit 2, got {result.returncode}\nstderr: {result.stderr[-2000:]}"
     )
 
 
 def test_engine_exit_code_constant_exposed():
     from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
+
     assert ENGINE_CONFIG_ERROR_EXIT_CODE == 2

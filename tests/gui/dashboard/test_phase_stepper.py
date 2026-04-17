@@ -1,4 +1,5 @@
 """Tests for PhaseStepper widget (B.5.5)."""
+
 from __future__ import annotations
 
 import os

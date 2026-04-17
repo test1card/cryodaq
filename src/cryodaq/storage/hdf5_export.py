@@ -102,7 +102,9 @@ class HDF5Exporter:
 
         logger.info(
             "HDF5-экспорт завершён: %s → %s (%d записей)",
-            db_path.name, output_path.name, total,
+            db_path.name,
+            output_path.name,
+            total,
         )
         return total
 
@@ -124,13 +126,17 @@ class HDF5Exporter:
         data: dict[str, dict[str, _ChannelData]] = {}
         for row in rows:
             ts_str, inst_id, channel, value, unit, _status = (
-                row["timestamp"], row["instrument_id"], row["channel"],
-                row["value"], row["unit"], row["status"],
+                row["timestamp"],
+                row["instrument_id"],
+                row["channel"],
+                row["value"],
+                row["unit"],
+                row["status"],
             )
             ts = _parse_timestamp(ts_str).timestamp()
-            data.setdefault(inst_id, {}).setdefault(
-                channel, _ChannelData(unit=unit)
-            ).append(ts, value)
+            data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(
+                ts, value
+            )
 
         # Запись в HDF5
         count = 0
@@ -138,8 +144,20 @@ class HDF5Exporter:
             inst_group = hf.require_group(_sanitize_name(inst_id))
             for ch_name, ch_data in channels.items():
                 ch_group = inst_group.require_group(_sanitize_name(ch_name))
-                ch_group.create_dataset("timestamp", data=ch_data.timestamps, chunks=True, compression="gzip", compression_opts=4)
-                ch_group.create_dataset("value", data=ch_data.values, chunks=True, compression="gzip", compression_opts=4)
+                ch_group.create_dataset(
+                    "timestamp",
+                    data=ch_data.timestamps,
+                    chunks=True,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                ch_group.create_dataset(
+                    "value",
+                    data=ch_data.values,
+                    chunks=True,
+                    compression="gzip",
+                    compression_opts=4,
+                )
                 ch_group.attrs["unit"] = ch_data.unit
                 ch_group.attrs["count"] = len(ch_data.timestamps)
                 count += len(ch_data.timestamps)
@@ -168,20 +186,30 @@ class HDF5Exporter:
             channels.append(row["channel"] or "")
             voltages.append(row["voltage"] if row["voltage"] is not None else float("nan"))
             currents.append(row["current"] if row["current"] is not None else float("nan"))
-            resistances.append(
-                row["resistance"] if row["resistance"] is not None else float("nan")
-            )
+            resistances.append(row["resistance"] if row["resistance"] is not None else float("nan"))
             powers.append(row["power"] if row["power"] is not None else float("nan"))
 
         grp = hf.require_group("source_data")
-        grp.create_dataset("timestamp", data=timestamps, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset(
+            "timestamp", data=timestamps, chunks=True, compression="gzip", compression_opts=4
+        )
         # h5py не поддерживает list[str] напрямую — используем variable-length
         dt = h5py.string_dtype()
-        grp.create_dataset("channel", data=channels, dtype=dt, chunks=True, compression="gzip", compression_opts=4)
-        grp.create_dataset("voltage", data=voltages, chunks=True, compression="gzip", compression_opts=4)
-        grp.create_dataset("current", data=currents, chunks=True, compression="gzip", compression_opts=4)
-        grp.create_dataset("resistance", data=resistances, chunks=True, compression="gzip", compression_opts=4)
-        grp.create_dataset("power", data=powers, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset(
+            "channel", data=channels, dtype=dt, chunks=True, compression="gzip", compression_opts=4
+        )
+        grp.create_dataset(
+            "voltage", data=voltages, chunks=True, compression="gzip", compression_opts=4
+        )
+        grp.create_dataset(
+            "current", data=currents, chunks=True, compression="gzip", compression_opts=4
+        )
+        grp.create_dataset(
+            "resistance", data=resistances, chunks=True, compression="gzip", compression_opts=4
+        )
+        grp.create_dataset(
+            "power", data=powers, chunks=True, compression="gzip", compression_opts=4
+        )
 
         return len(rows)
 
@@ -204,8 +232,16 @@ class HDF5Exporter:
         grp = hf.require_group("experiments")
         for i, row in enumerate(rows):
             exp_grp = grp.require_group(row["experiment_id"] or f"exp_{i}")
-            for key in ("name", "operator", "cryostat", "sample", "description",
-                        "start_time", "end_time", "status"):
+            for key in (
+                "name",
+                "operator",
+                "cryostat",
+                "sample",
+                "description",
+                "start_time",
+                "end_time",
+                "status",
+            ):
                 val = row[key]
                 if val is not None:
                     exp_grp.attrs[key] = str(val)
@@ -214,6 +250,7 @@ class HDF5Exporter:
 # ---------------------------------------------------------------------------
 # Вспомогательные классы и функции
 # ---------------------------------------------------------------------------
+
 
 class _ChannelData:
     """Накопитель данных одного канала для экспорта."""

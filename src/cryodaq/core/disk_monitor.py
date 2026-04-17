@@ -110,5 +110,6 @@ class DiskMonitor:
             logger.warning(
                 "Disk recovered (%.1f GB free >= %.1f GB threshold). "
                 "Operator must acknowledge_fault to resume polling.",
-                free_gb, self._warn_gb,
+                free_gb,
+                self._warn_gb,
             )

@@ -11,6 +11,7 @@ from cryodaq.drivers.instruments.thyracont_vsp63d import _FALLBACK_BAUDRATES, Th
 # 1. connect / disconnect lifecycle in mock mode
 # ---------------------------------------------------------------------------
 
+
 async def test_mock_connect_disconnect() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
 
@@ -26,6 +27,7 @@ async def test_mock_connect_disconnect() -> None:
 # ---------------------------------------------------------------------------
 # 2. Mock mode returns 1 pressure reading
 # ---------------------------------------------------------------------------
+
 
 async def test_mock_returns_pressure() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
@@ -47,6 +49,7 @@ async def test_mock_returns_pressure() -> None:
 # 3. Mock pressure is in realistic range
 # ---------------------------------------------------------------------------
 
+
 async def test_mock_pressure_range() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
     await driver.connect()
@@ -64,6 +67,7 @@ async def test_mock_pressure_range() -> None:
 # 4. Parse OK response
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_ok_response() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
 
@@ -78,6 +82,7 @@ async def test_parse_ok_response() -> None:
 # 5. Parse overrange response
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_overrange() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
 
@@ -90,6 +95,7 @@ async def test_parse_overrange() -> None:
 # ---------------------------------------------------------------------------
 # 6. Parse underrange response
 # ---------------------------------------------------------------------------
+
 
 async def test_parse_underrange() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
@@ -104,6 +110,7 @@ async def test_parse_underrange() -> None:
 # 7. Parse sensor error response
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_sensor_error() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
 
@@ -115,6 +122,7 @@ async def test_parse_sensor_error() -> None:
 # ---------------------------------------------------------------------------
 # 8. Reconnect after disconnect
 # ---------------------------------------------------------------------------
+
 
 async def test_reconnect_after_disconnect() -> None:
     driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
@@ -138,6 +146,7 @@ async def test_reconnect_after_disconnect() -> None:
 # 9. Parse Protocol V1 — vacuum: "001M260017N" → (2600/1000)*10^(17-20) = 2.6e-3 mbar
 # ---------------------------------------------------------------------------
 
+
 async def test_thyracont_parse_pressure() -> None:
     """Protocol V1: '001M260017N' → mantissa=2600, exp=17 → 2.6e-3 mbar.
 
@@ -145,7 +154,9 @@ async def test_thyracont_parse_pressure() -> None:
     of validate_checksum to True). They test the *parser*, not the
     checksum validator, so explicit opt-out is correct.
     """
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False)
+    driver = ThyracontVSP63D(
+        "vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False
+    )
 
     reading = driver._parse_v1_response("001M260017N\r")
 
@@ -157,6 +168,7 @@ async def test_thyracont_parse_pressure() -> None:
 # ---------------------------------------------------------------------------
 # 10. Parse Protocol V1 — atmosphere: "001M100023D" → (1000/1000)*10^(23-20) = 1000 mbar
 # ---------------------------------------------------------------------------
+
 
 async def test_thyracont_parse_high_pressure() -> None:
     """Protocol V1: '001M100023D' → mantissa=1000, exp=23 → 1000 mbar."""
@@ -172,6 +184,7 @@ async def test_thyracont_parse_high_pressure() -> None:
 # 11. Parse Protocol V1 — "001M400016O" → (4000/1000)*10^(16-20) = 4.0e-4 mbar
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_v1_response_very_high_pressure() -> None:
     """Protocol V1: '001M400016O' → mantissa=4000, exp=16 → 4.0e-4 mbar."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001", validate_checksum=False)
@@ -185,6 +198,7 @@ async def test_parse_v1_response_very_high_pressure() -> None:
 # ---------------------------------------------------------------------------
 # 14. Parse Protocol V1 — good vacuum: "001M100014X" → (1000/1000)*10^(14-20) = 1e-6 mbar
 # ---------------------------------------------------------------------------
+
 
 async def test_parse_v1_good_vacuum() -> None:
     """Protocol V1: '001M100014X' → mantissa=1000, exp=14 → 1e-6 mbar."""
@@ -200,6 +214,7 @@ async def test_parse_v1_good_vacuum() -> None:
 # 12. Parse Protocol V1 — invalid response
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_v1_response_invalid() -> None:
     """Protocol V1: garbage response → SENSOR_ERROR + NaN."""
     driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
@@ -213,6 +228,7 @@ async def test_parse_v1_response_invalid() -> None:
 # ---------------------------------------------------------------------------
 # 13. Connect via V1 protocol probe (mock transport)
 # ---------------------------------------------------------------------------
+
 
 async def test_thyracont_connect_v1() -> None:
     """connect() sends '001M^' and gets '001M100023D\\r' → connected via V1."""
@@ -231,6 +247,7 @@ async def test_thyracont_connect_v1() -> None:
 # 15. Fallback baudrate mapping
 # ---------------------------------------------------------------------------
 
+
 def test_fallback_baudrates_mapping() -> None:
     """Verify known fallback baudrate pairs."""
     assert _FALLBACK_BAUDRATES[9600] == 115200
@@ -241,6 +258,7 @@ def test_fallback_baudrates_mapping() -> None:
 # ---------------------------------------------------------------------------
 # 16. Connect with fallback baudrate (mock)
 # ---------------------------------------------------------------------------
+
 
 async def test_connect_fallback_baudrate() -> None:
     """When primary baudrate is 9600 in mock mode, connection still succeeds."""
@@ -253,6 +271,7 @@ async def test_connect_fallback_baudrate() -> None:
 # ---------------------------------------------------------------------------
 # 17. Connect preserves original baudrate on success
 # ---------------------------------------------------------------------------
+
 
 async def test_connect_preserves_original_baudrate_on_success() -> None:
     """When primary baudrate probe succeeds, no fallback is attempted."""

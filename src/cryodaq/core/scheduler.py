@@ -127,9 +127,7 @@ class Scheduler:
                     continue
 
             try:
-                readings = await asyncio.wait_for(
-                    driver.safe_read(), timeout=cfg.read_timeout_s
-                )
+                readings = await asyncio.wait_for(driver.safe_read(), timeout=cfg.read_timeout_s)
                 state.consecutive_errors = 0
                 state.backoff_s = INITIAL_BACKOFF_S
                 await self._process_readings(state, readings)
@@ -138,12 +136,15 @@ class Scheduler:
                 state.total_errors += 1
                 logger.warning(
                     "Таймаут опроса '%s' (%.1fs), ошибок подряд: %d",
-                    name, cfg.read_timeout_s, state.consecutive_errors,
+                    name,
+                    cfg.read_timeout_s,
+                    state.consecutive_errors,
                 )
                 if state.consecutive_errors >= 3:
                     logger.warning(
                         "'%s': %d consecutive errors, disconnect + backoff",
-                        name, state.consecutive_errors,
+                        name,
+                        state.consecutive_errors,
                     )
                     try:
                         await driver.disconnect()
@@ -155,11 +156,14 @@ class Scheduler:
             except Exception:
                 state.consecutive_errors += 1
                 state.total_errors += 1
-                logger.warning("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
+                logger.warning(
+                    "Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors
+                )
                 if state.consecutive_errors >= 3:
                     logger.warning(
                         "'%s': %d consecutive errors, disconnect + backoff",
-                        name, state.consecutive_errors,
+                        name,
+                        state.consecutive_errors,
                     )
                     try:
                         await driver.disconnect()
@@ -201,7 +205,9 @@ class Scheduler:
                 state.consecutive_errors = 0
                 logger.info("Прибор '%s' подключён (GPIB bus %s)", driver.name, bus_prefix)
             except Exception:
-                logger.warning("Не удалось подключить '%s' на %s — skipping", driver.name, bus_prefix)
+                logger.warning(
+                    "Не удалось подключить '%s' на %s — skipping", driver.name, bus_prefix
+                )
                 driver._connected = False
 
         loop = asyncio.get_event_loop()
@@ -232,8 +238,8 @@ class Scheduler:
                 # Preventive clear — every 5 minutes per device
                 last_clear = last_preventive_clear.get(name, 0.0)
                 if now - last_clear > _PREVENTIVE_CLEAR_INTERVAL_S:
-                    transport = getattr(driver, '_transport', None)
-                    if transport is not None and hasattr(transport, 'clear_bus'):
+                    transport = getattr(driver, "_transport", None)
+                    if transport is not None and hasattr(transport, "clear_bus"):
                         try:
                             await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
                             last_preventive_clear[name] = now
@@ -242,9 +248,7 @@ class Scheduler:
 
                 # Poll
                 try:
-                    readings = await asyncio.wait_for(
-                        driver.safe_read(), timeout=_POLL_TIMEOUT_S
-                    )
+                    readings = await asyncio.wait_for(driver.safe_read(), timeout=_POLL_TIMEOUT_S)
                     await self._process_readings(state, readings)
                     bus_error_count = 0  # reset on success
                 except Exception as exc:
@@ -253,21 +257,24 @@ class Scheduler:
                     bus_error_count += 1
                     logger.warning(
                         "Ошибка опроса '%s': %s (device: %d, bus: %d)",
-                        name, exc, state.consecutive_errors, bus_error_count,
+                        name,
+                        exc,
+                        state.consecutive_errors,
+                        bus_error_count,
                     )
 
-                    transport = getattr(driver, '_transport', None)
+                    transport = getattr(driver, "_transport", None)
 
                     if bus_error_count <= 2:
                         # Level 1: SDC on the specific device
-                        if transport is not None and hasattr(transport, 'clear_bus'):
+                        if transport is not None and hasattr(transport, "clear_bus"):
                             try:
                                 await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
                             except Exception:
                                 logger.warning("SDC failed after '%s' error", name)
                     elif bus_error_count <= 5:
                         # Level 2: IFC — reset entire bus
-                        if transport is not None and hasattr(transport, 'send_ifc'):
+                        if transport is not None and hasattr(transport, "send_ifc"):
                             try:
                                 await asyncio.wait_for(transport.send_ifc(), timeout=3.0)
                             except Exception:
@@ -285,9 +292,11 @@ class Scheduler:
                         # Level 3: Close and reopen ResourceManager
                         logger.error(
                             "GPIB bus %s: %d consecutive errors, resetting ResourceManager",
-                            bus_prefix, bus_error_count,
+                            bus_prefix,
+                            bus_error_count,
                         )
                         from cryodaq.drivers.transport.gpib import GPIBTransport
+
                         GPIBTransport.close_all_managers()
                         for s in states:
                             s.config.driver._connected = False
@@ -310,9 +319,7 @@ class Scheduler:
             sleep_remaining = max(0, next_deadline - loop.time())
             await asyncio.sleep(sleep_remaining)
 
-    async def _process_readings(
-        self, state: _InstrumentState, readings: list[Any]
-    ) -> None:
+    async def _process_readings(self, state: _InstrumentState, readings: list[Any]) -> None:
         """Persist, calibrate, and publish readings — shared by both loop types."""
         driver = state.config.driver
         name = driver.name
@@ -324,10 +331,7 @@ class Scheduler:
         # callback. Returning here keeps the loop alive (so when disk
         # recovers and the operator acknowledges, polling resumes cleanly)
         # without spamming CRITICAL logs.
-        if (
-            self._sqlite_writer is not None
-            and getattr(self._sqlite_writer, "is_disk_full", False)
-        ):
+        if self._sqlite_writer is not None and getattr(self._sqlite_writer, "is_disk_full", False):
             return
 
         persisted_readings = list(readings)
@@ -392,7 +396,9 @@ class Scheduler:
         """При 3+ ошибках подряд — переподключение с backoff."""
         if state.consecutive_errors >= 3:
             driver = state.config.driver
-            logger.warning("Переподключение '%s' после %d ошибок", driver.name, state.consecutive_errors)
+            logger.warning(
+                "Переподключение '%s' после %d ошибок", driver.name, state.consecutive_errors
+            )
             try:
                 await driver.disconnect()
             except Exception:
@@ -432,7 +438,9 @@ class Scheduler:
             names = [s.config.driver.name for s in states]
             logger.info(
                 "GPIB bus %s: последовательный опрос %d приборов %s",
-                bus_prefix, len(states), names,
+                bus_prefix,
+                len(states),
+                names,
             )
             task = asyncio.create_task(
                 self._gpib_poll_loop(bus_prefix, states),
@@ -452,7 +460,9 @@ class Scheduler:
         total = sum(len(g) for g in gpib_groups.values()) + len(standalone)
         logger.info(
             "Scheduler запущен (%d приборов, %d GPIB bus, %d standalone)",
-            total, len(gpib_groups), len(standalone),
+            total,
+            len(gpib_groups),
+            len(standalone),
         )
 
     async def stop(self) -> None:

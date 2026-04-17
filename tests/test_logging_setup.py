@@ -1,4 +1,5 @@
 """Verify logging_setup creates rotating files and redacts Telegram tokens."""
+
 from __future__ import annotations
 
 import importlib
@@ -10,6 +11,7 @@ def test_setup_logging_creates_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
 
     from cryodaq import logging_setup, paths
+
     importlib.reload(paths)
     importlib.reload(logging_setup)
 
@@ -73,6 +75,7 @@ def test_telegram_token_redacted_in_args():
 def test_setup_logging_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
     from cryodaq import logging_setup, paths
+
     importlib.reload(paths)
     importlib.reload(logging_setup)
 
@@ -104,9 +107,7 @@ def test_bare_token_without_bot_prefix_redacted():
     # Bare token form: 10-digit ID + 35-char secret
     logger.info("Loaded token: 7701234567:AAEhBP0av8XyZabc-defGHIJklmnopqrstuv")
     output = stream.getvalue()
-    assert "AAEhBP0av8XyZabc-defGHIJklmnopqrstuv" not in output, (
-        f"Bare token leaked: {output}"
-    )
+    assert "AAEhBP0av8XyZabc-defGHIJklmnopqrstuv" not in output, f"Bare token leaked: {output}"
     assert "***" in output
 
 
@@ -132,8 +133,12 @@ def test_redact_filter_handles_non_string_args():
 
     f = logging_setup._TokenRedactFilter()
     record = logging.LogRecord(
-        name="test", level=logging.INFO, pathname="", lineno=0,
-        msg="x=%d y=%s", args=(42, "bot1234567:AAA-bbb_CCC-ddd-eee-fff_ggg"),
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="x=%d y=%s",
+        args=(42, "bot1234567:AAA-bbb_CCC-ddd-eee-fff_ggg"),
         exc_info=None,
     )
     assert f.filter(record) is True

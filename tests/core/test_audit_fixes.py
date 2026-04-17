@@ -118,6 +118,7 @@ async def test_sqlite_stop_after_write(tmp_path) -> None:
 
     # Verify data persists
     import glob
+
     db_files = glob.glob(str(tmp_path / "data_*.db"))
     assert len(db_files) >= 1
     conn = sqlite3.connect(db_files[0])
@@ -146,19 +147,24 @@ async def test_phase_detector_reset_between_experiments() -> None:
     from plugins.phase_detector import PhaseDetector
 
     d = PhaseDetector()
-    d.configure({
-        "temperature_channel": "T7",
-        "target_T_K": 4.2,
-        "rate_window_s": 60,
-        "room_temp_K": 280,
-    })
+    d.configure(
+        {
+            "temperature_channel": "T7",
+            "target_T_K": 4.2,
+            "rate_window_s": 60,
+            "room_temp_K": 280,
+        }
+    )
 
     # Exp1: warmup
     warmup_temps = [4.2 + i * 1.0 for i in range(100)]
     warmup_readings = [
         Reading(
             timestamp=datetime.fromtimestamp(1000 + i * 3.0, tz=UTC),
-            instrument_id="test", channel="T7", value=t, unit="K",
+            instrument_id="test",
+            channel="T7",
+            value=t,
+            unit="K",
         )
         for i, t in enumerate(warmup_temps)
     ]
@@ -174,7 +180,10 @@ async def test_phase_detector_reset_between_experiments() -> None:
     room_readings = [
         Reading(
             timestamp=datetime.fromtimestamp(5000 + i * 3.0, tz=UTC),
-            instrument_id="test", channel="T7", value=295.0, unit="K",
+            instrument_id="test",
+            channel="T7",
+            value=295.0,
+            unit="K",
         )
         for i in range(100)
     ]
@@ -225,6 +234,7 @@ async def test_sqlite_filters_inf(tmp_path) -> None:
     await writer.stop()
 
     import glob
+
     db_files = glob.glob(str(tmp_path / "data_*.db"))
     conn = sqlite3.connect(db_files[0])
     count = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]

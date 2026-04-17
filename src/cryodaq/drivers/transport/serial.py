@@ -1,4 +1,5 @@
-"""Асинхронная обёртка над pyserial-asyncio для последовательной коммуникации (RS-232/USB-Serial)."""
+"""Асинхронная обёртка над pyserial-asyncio для последовательной коммуникации (RS-232/USB-Serial)."""  # noqa: E501
+
 from __future__ import annotations
 
 import asyncio
@@ -39,7 +40,7 @@ class SerialTransport:
     # Публичный API
     # ------------------------------------------------------------------
 
-    async def open(self, port: str, baudrate: int = 9600, timeout: float = 2.0) -> None:
+    async def open(self, port: str, baudrate: int = 9600, timeout: float = 2.0) -> None:  # noqa: ASYNC109
         """Открыть последовательный порт.
 
         Parameters
@@ -133,7 +134,7 @@ class SerialTransport:
         await self._writer.drain()
         log.debug("Serial write → %s: %s", self._resource_str, data)
 
-    async def read_line(self, *, terminator: str = "\r", timeout: float | None = None) -> str:
+    async def read_line(self, *, terminator: str = "\r", timeout: float | None = None) -> str:  # noqa: ASYNC109
         """Читать байты из порта до терминатора.
 
         Parameters

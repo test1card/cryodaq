@@ -35,9 +35,13 @@ def test_api_status_returns_json(client) -> None:
 
 
 def test_api_log_returns_entries(client) -> None:
-    with patch("cryodaq.gui.zmq_client.send_command", return_value={
-        "ok": True, "entries": [{"message": "test", "timestamp": "2026-03-17T10:00:00Z"}]
-    }):
+    with patch(
+        "cryodaq.gui.zmq_client.send_command",
+        return_value={
+            "ok": True,
+            "entries": [{"message": "test", "timestamp": "2026-03-17T10:00:00Z"}],
+        },
+    ):
         resp = client.get("/api/log?limit=5")
     assert resp.status_code == 200
     data = resp.json()

@@ -83,9 +83,7 @@ class PeriodicReporter:
         self._broker = broker
         self._alarm_engine = alarm_engine
         # Phase 2b K.1: SecretStr wrapper.
-        self._bot_token = (
-            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
-        )
+        self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._chat_id = chat_id
         self._report_interval_s = report_interval_s
         self._chart_hours = chart_hours
@@ -208,9 +206,7 @@ class PeriodicReporter:
             return
 
         try:
-            png_data = await asyncio.get_running_loop().run_in_executor(
-                None, self._generate_chart
-            )
+            png_data = await asyncio.get_running_loop().run_in_executor(None, self._generate_chart)
         except Exception as exc:
             logger.error("Ошибка генерации графика: %s", exc)
             return
@@ -232,6 +228,7 @@ class PeriodicReporter:
         Возвращает PNG как bytes.
         """
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -249,6 +246,7 @@ class PeriodicReporter:
         def _channel_in_alarm(channel: str) -> bool:
             """Проверить, находится ли канал под активной тревогой."""
             from cryodaq.core.alarm import AlarmState
+
             for alarm_name, state in alarm_states.items():
                 if state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED):
                     # Используем имя канала для грубого совпадения
@@ -259,7 +257,10 @@ class PeriodicReporter:
         # Создать фигуру
         if has_pressure:
             fig, (ax_temp, ax_pres) = plt.subplots(
-                2, 1, figsize=(12, 8), sharex=False,
+                2,
+                1,
+                figsize=(12, 8),
+                sharex=False,
                 gridspec_kw={"height_ratios": [2, 1]},
             )
         else:
@@ -311,10 +312,14 @@ class PeriodicReporter:
 
         if not channels:
             ax.text(
-                0.5, 0.5, "Нет данных",
+                0.5,
+                0.5,
+                "Нет данных",
                 transform=ax.transAxes,
-                ha="center", va="center",
-                fontsize=11, color="gray",
+                ha="center",
+                va="center",
+                fontsize=11,
+                color="gray",
             )
             ax.set_ylabel(ylabel)
             return
@@ -331,8 +336,7 @@ class PeriodicReporter:
 
             # For log scale: filter out non-positive/non-finite values
             if log_scale:
-                pairs = [(t, v) for t, v in zip(times_unix, values)
-                         if v > 0 and math.isfinite(v)]
+                pairs = [(t, v) for t, v in zip(times_unix, values) if v > 0 and math.isfinite(v)]
                 if not pairs:
                     continue
                 times_unix, values = zip(*pairs)
@@ -349,8 +353,9 @@ class PeriodicReporter:
             zorder = 3 if in_alarm else 2
 
             label = channel.split("/")[-1] if "/" in channel else channel
-            line, = ax.plot(
-                times_dt, values,
+            (line,) = ax.plot(
+                times_dt,
+                values,
                 label=label,
                 color=color,
                 linewidth=linewidth,
@@ -379,6 +384,7 @@ class PeriodicReporter:
         if log_scale and all_positive_values:
             ax.set_yscale("log")
             import numpy as np
+
             p5, p95 = np.percentile(all_positive_values, [5, 95])
             if p5 > 0 and p95 > p5:
                 log_margin = (p95 / p5) ** 0.15
@@ -406,7 +412,9 @@ class PeriodicReporter:
         lines.append("")
 
         # --- Температурные каналы ---
-        temp_channels = sorted((ch for ch, u in self._units.items() if u == "K"), key=_natural_sort_key)
+        temp_channels = sorted(
+            (ch for ch, u in self._units.items() if u == "K"), key=_natural_sort_key
+        )
         if temp_channels:
             lines.append("<b>Температуры:</b>")
             for ch in temp_channels:
@@ -418,7 +426,9 @@ class PeriodicReporter:
                 lines.append(f"  {label}: {cur:.4g} К")
 
         # --- Каналы давления ---
-        pres_channels = sorted((ch for ch, u in self._units.items() if u == "mbar"), key=_natural_sort_key)
+        pres_channels = sorted(
+            (ch for ch, u in self._units.items() if u == "mbar"), key=_natural_sort_key
+        )
         if pres_channels:
             lines.append("")
             lines.append("<b>Давление:</b>")
@@ -432,8 +442,7 @@ class PeriodicReporter:
 
         # --- Прочие каналы (мощность, ток и т.д.) ---
         other_channels = sorted(
-            (ch for ch, u in self._units.items()
-             if u not in ("K", "mbar")),
+            (ch for ch, u in self._units.items() if u not in ("K", "mbar")),
             key=_natural_sort_key,
         )
         if other_channels:
@@ -494,8 +503,7 @@ class PeriodicReporter:
                     )
                 else:
                     logger.info(
-                        "Периодический отчёт отправлен в Telegram "
-                        "(каналов: %d, PNG: %d байт)",
+                        "Периодический отчёт отправлен в Telegram (каналов: %d, PNG: %d байт)",
                         len(self._buffers),
                         len(png_data),
                     )

@@ -24,8 +24,7 @@ def test_subprocess_sends_heartbeat() -> None:
     # but should still send heartbeats
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -62,8 +61,7 @@ def test_heartbeat_has_timestamp() -> None:
 
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59992", "tcp://127.0.0.1:59993",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:59992", "tcp://127.0.0.1:59993", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -101,6 +99,7 @@ def test_overflow_counter_exists_in_subprocess() -> None:
     import inspect
 
     from cryodaq.core import zmq_subprocess
+
     source = inspect.getsource(zmq_subprocess.zmq_bridge_main)
     assert "dropped_count" in source
     assert "__type" in source
@@ -120,6 +119,7 @@ def test_serve_loop_sends_reply_on_serialization_error() -> None:
     import inspect
 
     from cryodaq.core import zmq_bridge
+
     source = inspect.getsource(zmq_bridge.ZMQCommandServer._serve_loop)
     # Must use default=str to handle datetime etc.
     assert "default=str" in source
@@ -132,6 +132,7 @@ def test_serve_loop_handles_cancelled_error() -> None:
     import inspect
 
     from cryodaq.core import zmq_bridge
+
     source = inspect.getsource(zmq_bridge.ZMQCommandServer._serve_loop)
     # Must catch CancelledError and send reply
     assert "CancelledError" in source
@@ -147,6 +148,7 @@ def test_serve_loop_handles_cancelled_error() -> None:
 def test_zmq_bridge_is_healthy_initial() -> None:
     """is_healthy returns True right after start (grace period)."""
     from cryodaq.gui.zmq_client import ZmqBridge
+
     bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59994", cmd_addr="tcp://127.0.0.1:59995")
     # Not started → not alive → not healthy
     assert not bridge.is_healthy()
@@ -162,6 +164,7 @@ def test_zmq_bridge_poll_handles_heartbeat() -> None:
     visible before polling.
     """
     from cryodaq.gui.zmq_client import ZmqBridge
+
     bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59996", cmd_addr="tcp://127.0.0.1:59997")
     bridge._data_queue.put({"__type": "heartbeat", "ts": time.monotonic()}, timeout=1.0)
     # Tiny yield so the feeder thread definitely flushes before get_nowait().
@@ -174,6 +177,7 @@ def test_zmq_bridge_poll_handles_heartbeat() -> None:
 def test_zmq_bridge_poll_handles_warning() -> None:
     """poll_readings recognizes warning messages and doesn't return them as readings."""
     from cryodaq.gui.zmq_client import ZmqBridge
+
     bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59998", cmd_addr="tcp://127.0.0.1:59999")
     bridge._data_queue.put_nowait({"__type": "warning", "message": "test overflow"})
     readings = bridge.poll_readings()

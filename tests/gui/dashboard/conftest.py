@@ -1,4 +1,5 @@
 """Shared fixtures for dashboard tests."""
+
 from __future__ import annotations
 
 import os
@@ -22,9 +23,21 @@ def mock_channel_mgr():
     """ChannelManager with only Т1, Т2, Т3 visible for fast tests."""
     mgr = ChannelManager()
     mgr._channels = {
-        "\u04221": {"name": "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445", "visible": True, "group": "test"},
-        "\u04222": {"name": "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u043d\u0438\u0437", "visible": True, "group": "test"},
-        "\u04223": {"name": "\u0420\u0430\u0434\u0438\u0430\u0442\u043e\u0440 1", "visible": True, "group": "test"},
+        "\u04221": {
+            "name": "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+            "visible": True,
+            "group": "test",
+        },
+        "\u04222": {
+            "name": "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u043d\u0438\u0437",
+            "visible": True,
+            "group": "test",
+        },
+        "\u04223": {
+            "name": "\u0420\u0430\u0434\u0438\u0430\u0442\u043e\u0440 1",
+            "visible": True,
+            "group": "test",
+        },
     }
     return mgr
 

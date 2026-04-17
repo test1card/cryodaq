@@ -1,4 +1,5 @@
 """Verify LakeShore 218S IDN validation + retry (Phase 2c Codex F.1)."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -53,9 +54,7 @@ async def test_connect_retries_once_after_clear():
     transport.open = AsyncMock()
     transport.close = AsyncMock()
     # First query returns garbage, second returns valid IDN
-    transport.query = AsyncMock(
-        side_effect=["garbage_response", "LSCI,MODEL218S,12345,1.5"]
-    )
+    transport.query = AsyncMock(side_effect=["garbage_response", "LSCI,MODEL218S,12345,1.5"])
     transport.write = AsyncMock()
     transport.clear_bus = AsyncMock(return_value=True)
 

@@ -1,4 +1,5 @@
 """Tests for canonical phase labels module (B.6)."""
+
 from __future__ import annotations
 
 from cryodaq.core.experiment import ExperimentPhase
@@ -31,9 +32,7 @@ def test_label_for_returns_dash_for_unknown_string():
 
 def test_phase_labels_ru_covers_all_enum_members():
     for phase in ExperimentPhase:
-        assert phase.value in PHASE_LABELS_RU, (
-            f"Missing label for {phase.value}"
-        )
+        assert phase.value in PHASE_LABELS_RU, f"Missing label for {phase.value}"
         assert PHASE_LABELS_RU[phase.value]  # non-empty
 
 

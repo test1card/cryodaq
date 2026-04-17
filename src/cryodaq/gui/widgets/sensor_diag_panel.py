@@ -137,10 +137,12 @@ class SensorDiagPanel(QWidget):
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(self._channel_data))
 
-        for row, (ch_id, data) in enumerate(sorted(
-            self._channel_data.items(),
-            key=lambda item: item[1].get("health_score", 100),
-        )):
+        for row, (ch_id, data) in enumerate(
+            sorted(
+                self._channel_data.items(),
+                key=lambda item: item[1].get("health_score", 100),
+            )
+        ):
             health = int(data.get("health_score", 100))
             color = _health_color(health)
             name = data.get("channel_name", ch_id)

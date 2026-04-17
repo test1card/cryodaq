@@ -51,6 +51,7 @@ def _make_prediction(
 # 1. test_panel_creates — widget creates without crash
 # ---------------------------------------------------------------------------
 
+
 def test_panel_creates() -> None:
     _app()
     panel = VacuumTrendPanel()
@@ -63,6 +64,7 @@ def test_panel_creates() -> None:
 # 2. test_empty_state_shown — None prediction shows empty state
 # ---------------------------------------------------------------------------
 
+
 def test_empty_state_shown() -> None:
     _app()
     panel = VacuumTrendPanel()
@@ -74,6 +76,7 @@ def test_empty_state_shown() -> None:
 # ---------------------------------------------------------------------------
 # 3. test_trend_icon_colors — pumping_down=green, rising=red, etc
 # ---------------------------------------------------------------------------
+
 
 def test_trend_icon_colors() -> None:
     _app()
@@ -100,6 +103,7 @@ def test_trend_icon_colors() -> None:
 # 4. test_eta_display_format — "2ч 15мин", "—", "✓"
 # ---------------------------------------------------------------------------
 
+
 def test_eta_display_format() -> None:
     # Test the formatting function directly
     assert _fmt_eta(None) == "—"
@@ -111,9 +115,11 @@ def test_eta_display_format() -> None:
     # Test in panel context
     _app()
     panel = VacuumTrendPanel()
-    panel.set_prediction(_make_prediction(
-        eta_targets={"0.001": 0.0, "1e-05": 3600.0, "1e-08": None},
-    ))
+    panel.set_prediction(
+        _make_prediction(
+            eta_targets={"0.001": 0.0, "1e-05": 3600.0, "1e-08": None},
+        )
+    )
     # Check labels were created
     assert len(panel._eta_labels) == 3
 
@@ -122,13 +128,16 @@ def test_eta_display_format() -> None:
 # 5. test_graph_log_scale — Y-axis is log₁₀(P)
 # ---------------------------------------------------------------------------
 
+
 def test_graph_log_scale() -> None:
     _app()
     panel = VacuumTrendPanel()
-    panel.set_prediction(_make_prediction(
-        extrap_t=[100, 200, 300, 400, 500],
-        extrap_logP=[-4.0, -4.5, -5.0, -5.5, -6.0],
-    ))
+    panel.set_prediction(
+        _make_prediction(
+            extrap_t=[100, 200, 300, 400, 500],
+            extrap_logP=[-4.0, -4.5, -5.0, -5.5, -6.0],
+        )
+    )
 
     # Verify Y-axis label contains log₁₀
     pi = panel._plot.getPlotItem()

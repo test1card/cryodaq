@@ -4,14 +4,14 @@ Registered as overlay page in OverlayContainer. Shows experiment header,
 phase stepper with durations, editable card fields, experiment timeline,
 finalize/abort actions. Replaces B.8 + B.8.0.1 minimal overlays.
 """
+
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -31,7 +30,6 @@ from cryodaq.core.phase_labels import (
     PHASE_LABELS_PILL,
     PHASE_LABELS_RU,
     PHASE_ORDER,
-    label_for,
 )
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_content.eta_display import _format_duration_ru
@@ -71,9 +69,7 @@ class ExperimentOverlay(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_4, theme.SPACE_5, theme.SPACE_4
-        )
+        root.setContentsMargins(theme.SPACE_5, theme.SPACE_4, theme.SPACE_5, theme.SPACE_4)
         root.setSpacing(theme.SPACE_3)
 
         # Identity: name (editable) + passport line
@@ -163,9 +159,7 @@ class ExperimentOverlay(QWidget):
             pills_row.addWidget(pill)
             if phase != PHASE_ORDER[-1]:
                 arrow = QLabel("\u203a")
-                arrow.setStyleSheet(
-                    f"color: {theme.MUTED_FOREGROUND}; font-size: 14px;"
-                )
+                arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: 14px;")
                 pills_row.addWidget(arrow)
         pills_row.addStretch()
         phase_layout.addLayout(pills_row)
@@ -244,7 +238,7 @@ class ExperimentOverlay(QWidget):
         card_col.addLayout(self._card_custom_layout)
 
         self._save_btn = QPushButton(
-            "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0443"
+            "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0443"  # noqa: E501
         )
         self._save_btn.setObjectName("expSaveBtn")
         self._save_btn.clicked.connect(self._on_save_card)
@@ -284,7 +278,7 @@ class ExperimentOverlay(QWidget):
         footer = QHBoxLayout()
         footer.addStretch()
         self._finalize_btn = QPushButton(
-            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"
+            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
         )
         self._finalize_btn.setObjectName("expFinalizeBtn")
         self._finalize_btn.setStyleSheet(
@@ -305,8 +299,7 @@ class ExperimentOverlay(QWidget):
         root.addLayout(footer)
 
         self.setStyleSheet(
-            self.styleSheet()
-            + f"#ExperimentOverlay {{ background-color: {theme.BACKGROUND}; }}"
+            self.styleSheet() + f"#ExperimentOverlay {{ background-color: {theme.BACKGROUND}; }}"
         )
 
     @staticmethod
@@ -357,7 +350,7 @@ class ExperimentOverlay(QWidget):
             fg = theme.BORDER
         pill.setStyleSheet(
             f"#{pid} {{ border: {border}; border-radius: {theme.RADIUS_SM}px; }} "
-            f"#{pid} QLabel {{ color: {fg}; font-size: 11px; background: transparent; border: none; }}"
+            f"#{pid} QLabel {{ color: {fg}; font-size: 11px; background: transparent; border: none; }}"  # noqa: E501
         )
         self._phase_pill_dur_labels[phase].setText(duration_text)
 
@@ -375,9 +368,7 @@ class ExperimentOverlay(QWidget):
         self._refresh_display()
 
     def set_templates(self, templates: list[dict]) -> None:
-        self._templates_by_id = {
-            str(t.get("id", "")): t for t in templates if t.get("id")
-        }
+        self._templates_by_id = {str(t.get("id", "")): t for t in templates if t.get("id")}
 
     def on_reading(self, reading) -> None:
         """Handle analytics/operator_log_entry for live timeline updates."""
@@ -401,7 +392,7 @@ class ExperimentOverlay(QWidget):
     def _refresh_display(self) -> None:
         if self._experiment is None:
             self._name_label.setText(
-                "\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430"
+                "\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430"  # noqa: E501
             )
             self._passport_label.setText("")
             self._finalize_btn.setEnabled(False)
@@ -437,7 +428,9 @@ class ExperimentOverlay(QWidget):
         if current_phase:
             phase_name = PHASE_LABELS_RU.get(current_phase, current_phase)
             dur = phase_durations.get(current_phase, "")
-            dur_suffix = f" \u00b7 {dur} \u0432 \u0444\u0430\u0437\u0435" if dur and dur != "\u00b7" else ""
+            dur_suffix = (
+                f" \u00b7 {dur} \u0432 \u0444\u0430\u0437\u0435" if dur and dur != "\u00b7" else ""
+            )
             self._phase_status.setText(f"{phase_name}{dur_suffix}")
         else:
             self._phase_status.setText(
@@ -495,7 +488,7 @@ class ExperimentOverlay(QWidget):
                     e = datetime.fromisoformat(ended)
                     dur_s = (e - s).total_seconds()
                 else:
-                    dur_s = (datetime.now(timezone.utc) - s.astimezone(timezone.utc)).total_seconds()
+                    dur_s = (datetime.now(UTC) - s.astimezone(UTC)).total_seconds()
                 durations[phase] = _format_duration_ru(max(0, dur_s))
             except Exception:
                 pass
@@ -549,7 +542,7 @@ class ExperimentOverlay(QWidget):
         if not entries:
             self._timeline_list.addItem(
                 QListWidgetItem(
-                    "\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442"
+                    "\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442"  # noqa: E501
                 )
             )
             return
@@ -571,9 +564,7 @@ class ExperimentOverlay(QWidget):
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         self._save_btn.setEnabled(False)
-        self._save_status.setText(
-            "\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u044e..."
-        )
+        self._save_status.setText("\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u044e...")
         self._update_worker = ZmqCommandWorker(payload, parent=self)
         self._update_worker.finished.connect(self._on_save_result)
         self._update_worker.start()
@@ -658,11 +649,11 @@ class ExperimentOverlay(QWidget):
         name = self._experiment.get("name", "")
         dlg = QMessageBox(self)
         dlg.setWindowTitle(
-            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"
+            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"  # noqa: E501
         )
         dlg.setText(
-            f"\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u00ab{name}\u00bb "
-            "\u0431\u0443\u0434\u0435\u0442 \u043f\u043e\u043c\u0435\u0447\u0435\u043d \u043a\u0430\u043a "
+            f"\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u00ab{name}\u00bb "  # noqa: E501
+            "\u0431\u0443\u0434\u0435\u0442 \u043f\u043e\u043c\u0435\u0447\u0435\u043d \u043a\u0430\u043a "  # noqa: E501
             "\u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u044b\u0439. "
             "\u0410\u0440\u0445\u0438\u0432\u043d\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c "
             "\u0431\u0443\u0434\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u043d\u0430 "
@@ -672,7 +663,8 @@ class ExperimentOverlay(QWidget):
             "\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole
         )
         dlg.addButton(
-            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c", QMessageBox.ButtonRole.AcceptRole
+            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c",
+            QMessageBox.ButtonRole.AcceptRole,
         )
         dlg.setDefaultButton(btn_cancel)
         dlg.exec()
@@ -686,13 +678,13 @@ class ExperimentOverlay(QWidget):
         name = self._experiment.get("name", "")
         dlg = QMessageBox(self)
         dlg.setWindowTitle(
-            "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"
+            "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"  # noqa: E501
         )
         dlg.setText(
-            f"\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u00ab{name}\u00bb "
-            "\u0431\u0443\u0434\u0435\u0442 \u043f\u043e\u043c\u0435\u0447\u0435\u043d \u043a\u0430\u043a \u043f\u0440\u0435\u0440\u0432\u0430\u043d\u043d\u044b\u0439. "
-            "\u041e\u0442\u0447\u0451\u0442 \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0435\u0442\u0441\u044f. "
-            "\u042d\u0442\u043e \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043d\u0435\u043b\u044c\u0437\u044f \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c."
+            f"\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u00ab{name}\u00bb "  # noqa: E501
+            "\u0431\u0443\u0434\u0435\u0442 \u043f\u043e\u043c\u0435\u0447\u0435\u043d \u043a\u0430\u043a \u043f\u0440\u0435\u0440\u0432\u0430\u043d\u043d\u044b\u0439. "  # noqa: E501
+            "\u041e\u0442\u0447\u0451\u0442 \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0435\u0442\u0441\u044f. "  # noqa: E501
+            "\u042d\u0442\u043e \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043d\u0435\u043b\u044c\u0437\u044f \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c."  # noqa: E501
         )
         btn_cancel = dlg.addButton(
             "\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole
@@ -743,7 +735,7 @@ class ExperimentOverlay(QWidget):
     def _show_more_menu(self) -> None:
         menu = QMenu(self)
         abort_action = menu.addAction(
-            "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"
+            "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
         )
         abort_action.triggered.connect(self._on_abort_clicked)
         menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))

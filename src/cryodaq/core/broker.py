@@ -78,9 +78,7 @@ class DataBroker:
         async with self._lock:
             sub = self._subscribers.pop(name, None)
             if sub:
-                logger.info(
-                    "Подписчик '%s' удалён (потеряно сообщений: %d)", name, sub.dropped
-                )
+                logger.info("Подписчик '%s' удалён (потеряно сообщений: %d)", name, sub.dropped)
 
     async def publish(self, reading: Reading) -> None:
         """Разослать Reading всем подписчикам."""
@@ -107,8 +105,7 @@ class DataBroker:
                 raise
             except Exception:
                 logger.exception(
-                    "DataBroker subscriber '%s' raised during publish; "
-                    "continuing fan-out",
+                    "DataBroker subscriber '%s' raised during publish; continuing fan-out",
                     sub.name,
                 )
 

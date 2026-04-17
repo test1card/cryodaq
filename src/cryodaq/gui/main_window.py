@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QTimer, Signal, Slot
@@ -27,10 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
-from cryodaq.paths import get_data_dir
-from cryodaq.gui import theme
-from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.tray_status import TrayController, resolve_tray_status
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
@@ -45,6 +44,8 @@ from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel
+from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -294,9 +295,7 @@ class MainWindow(QMainWindow):
         # Prune finished workers (Qt parent ownership keeps them alive
         # until then, but pruning avoids unbounded list growth across uses).
         if hasattr(self, "_emergency_workers"):
-            self._emergency_workers = [
-                w for w in self._emergency_workers if w.isRunning()
-            ]
+            self._emergency_workers = [w for w in self._emergency_workers if w.isRunning()]
 
     def _build_status_bar(self) -> None:
         """Создать статусную строку."""
@@ -347,7 +346,11 @@ class MainWindow(QMainWindow):
             self._calibration_panel.on_reading(reading)
 
         # Keithley каналы → KeithleyPanel + ConductivityPanel (power)
-        if "/smua/" in channel or "/smub/" in channel or channel.startswith("analytics/keithley_channel_state/"):
+        if (
+            "/smua/" in channel
+            or "/smub/" in channel
+            or channel.startswith("analytics/keithley_channel_state/")
+        ):
             self._keithley_panel.on_reading(reading)
             if channel.endswith("/power"):
                 self._conductivity_panel.on_reading(reading)
@@ -431,7 +434,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт в CSV", "", "CSV файлы (*.csv)",
+            self,
+            "Экспорт в CSV",
+            "",
+            "CSV файлы (*.csv)",
         )
         if path:
             try:
@@ -440,12 +446,16 @@ class MainWindow(QMainWindow):
                 exporter = CSVExporter(data_dir=get_data_dir())
                 count = exporter.export(Path(path))
                 QMessageBox.information(
-                    self, "Экспорт CSV", f"Экспортировано {count} записей",
+                    self,
+                    "Экспорт CSV",
+                    f"Экспортировано {count} записей",
                 )
             except Exception as exc:
                 logger.error("Ошибка экспорта CSV: %s", exc)
                 QMessageBox.warning(
-                    self, "Ошибка экспорта", f"Не удалось экспортировать CSV:\n{exc}",
+                    self,
+                    "Ошибка экспорта",
+                    f"Не удалось экспортировать CSV:\n{exc}",
                 )
 
     @Slot()
@@ -454,6 +464,7 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         from cryodaq.storage.hdf5_export import HDF5Exporter
+
         data_dir = get_data_dir()
         exporter = HDF5Exporter()
         total = 0
@@ -468,6 +479,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         from cryodaq.storage.xlsx_export import XLSXExporter
+
         exporter = XLSXExporter(get_data_dir())
         try:
             count = exporter.export(Path(path))
@@ -482,7 +494,9 @@ class MainWindow(QMainWindow):
             return
         workspace = self._experiment_workspace
         if workspace.app_mode != "experiment":
-            self._show_shell_message("Создание эксперимента доступно только в режиме «Эксперимент».")
+            self._show_shell_message(
+                "Создание эксперимента доступно только в режиме «Эксперимент»."
+            )
             return
         if workspace.active_experiment is not None:
             self._show_shell_message("Нельзя открыть новый эксперимент поверх активной карточки.")

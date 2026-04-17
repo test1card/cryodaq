@@ -1,11 +1,10 @@
 """Tests for experiment_advance_phase and phase_started_at in status (B.5)."""
+
 from __future__ import annotations
 
-import json
-import tempfile
 from pathlib import Path
 
-from cryodaq.core.experiment import ExperimentManager, ExperimentPhase
+from cryodaq.core.experiment import ExperimentManager
 
 
 def _make_manager(tmp_path: Path) -> ExperimentManager:

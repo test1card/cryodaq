@@ -96,6 +96,7 @@ def test_backend_state_off_controls_visual_off_even_with_nonzero_telemetry() -> 
 # KeithleyStrip quick-action buttons
 # ---------------------------------------------------------------------------
 
+
 def test_keithley_strip_is_monitoring_only() -> None:
     """KeithleyStrip is for monitoring — no start/stop buttons (removed in v0.13)."""
     _app()
@@ -110,6 +111,7 @@ def test_keithley_strip_is_monitoring_only() -> None:
 # ExperimentStatusWidget
 # ---------------------------------------------------------------------------
 
+
 def test_experiment_status_widget_initializes() -> None:
     _app()
     from cryodaq.gui.widgets.overview_panel import ExperimentStatusWidget
@@ -123,6 +125,7 @@ def test_experiment_status_widget_initializes() -> None:
 # QuickLogWidget
 # ---------------------------------------------------------------------------
 
+
 def test_quick_log_widget_initializes() -> None:
     _app()
     from cryodaq.gui.widgets.overview_panel import QuickLogWidget
@@ -135,6 +138,7 @@ def test_quick_log_widget_initializes() -> None:
 # ---------------------------------------------------------------------------
 # CompactTempCard click-toggle
 # ---------------------------------------------------------------------------
+
 
 def test_compact_temp_card_emits_toggled_signal() -> None:
     _app()

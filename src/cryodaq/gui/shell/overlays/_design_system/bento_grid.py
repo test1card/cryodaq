@@ -1,4 +1,5 @@
 """BentoGrid — 12-column grid container for Bento tile layout."""
+
 from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget

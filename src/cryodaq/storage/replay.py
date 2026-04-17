@@ -74,7 +74,7 @@ class ReplaySource:
         ----------
         int:  Количество воспроизведённых записей.
         """
-        if not db_path.exists():
+        if not db_path.exists():  # noqa: ASYNC240
             raise FileNotFoundError(f"Файл БД не найден: {db_path}")
 
         rows = self._load_rows(db_path, start=start, end=end, channels=channels)
@@ -84,7 +84,9 @@ class ReplaySource:
 
         logger.info(
             "Начало воспроизведения: %s, записей=%d, скорость=%.1fx",
-            db_path.name, len(rows), self._speed,
+            db_path.name,
+            len(rows),
+            self._speed,
         )
 
         self._running = True
@@ -145,10 +147,10 @@ class ReplaySource:
         ----------
         int:  Суммарное количество воспроизведённых записей.
         """
-        if not data_dir.exists():
+        if not data_dir.exists():  # noqa: ASYNC240
             raise FileNotFoundError(f"Директория не найдена: {data_dir}")
 
-        db_files = sorted(data_dir.glob("data_*.db"))
+        db_files = sorted(data_dir.glob("data_*.db"))  # noqa: ASYNC240
         total = 0
         for db_path in db_files:
             total += await self.play(db_path, start=start, end=end, channels=channels)
@@ -173,10 +175,7 @@ class ReplaySource:
         """Загрузить строки из readings, отсортированные по timestamp."""
         conn = sqlite3.connect(str(db_path), timeout=10)
         try:
-            query = (
-                "SELECT timestamp, channel, value, unit, status, instrument_id "
-                "FROM readings"
-            )
+            query = "SELECT timestamp, channel, value, unit, status, instrument_id FROM readings"
             conditions: list[str] = []
             params: list[Any] = []
 

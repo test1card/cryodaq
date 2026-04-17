@@ -1,4 +1,5 @@
 """Verify ``_emergency_off_shortcut`` retains its QThread workers (CC B.1)."""
+
 from __future__ import annotations
 
 import ast
@@ -28,8 +29,10 @@ def test_emergency_off_retains_workers():
         if isinstance(sub, ast.Call):
             func = sub.func
             name = (
-                func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute)
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
                 else None
             )
             if name == "ZmqCommandWorker":

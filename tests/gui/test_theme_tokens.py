@@ -1,4 +1,5 @@
 """Smoke tests for theme.py design system tokens (B.4.5)."""
+
 from __future__ import annotations
 
 import os

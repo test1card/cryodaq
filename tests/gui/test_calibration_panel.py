@@ -55,6 +55,7 @@ def _write_instruments(path: Path) -> Path:
 # CalibrationPanel — mode switching
 # ---------------------------------------------------------------------------
 
+
 def test_panel_starts_in_setup_mode(tmp_path: Path) -> None:
     _app()
     panel = CalibrationPanel(instruments_config=_write_instruments(tmp_path / "inst.yaml"))
@@ -65,6 +66,7 @@ def test_panel_starts_in_setup_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # CalibrationSetupWidget
 # ---------------------------------------------------------------------------
+
 
 def test_setup_shows_grouped_channels(tmp_path: Path) -> None:
     _app()
@@ -116,15 +118,18 @@ def test_setup_start_validates_targets(tmp_path: Path) -> None:
 # CalibrationAcquisitionWidget
 # ---------------------------------------------------------------------------
 
+
 def test_acquisition_shows_stats() -> None:
     _app()
     widget = CalibrationAcquisitionWidget()
 
-    widget.update_stats({
-        "point_count": 9142,
-        "t_min": 4.5,
-        "t_max": 185.0,
-    })
+    widget.update_stats(
+        {
+            "point_count": 9142,
+            "t_min": 4.5,
+            "t_max": 185.0,
+        }
+    )
 
     assert "9,142" in widget._point_count_label.text()
     assert "4.5" in widget._temp_range_label.text()
@@ -135,20 +140,23 @@ def test_acquisition_shows_stats() -> None:
 # CalibrationResultsWidget
 # ---------------------------------------------------------------------------
 
+
 def test_results_shows_metrics() -> None:
     _app()
     widget = CalibrationResultsWidget()
 
-    widget.update_metrics({
-        "raw_count": 28400,
-        "downsampled_count": 480,
-        "breakpoint_count": 156,
-        "metrics": {
-            "zone_count": 4,
-            "rmse_k": 0.012,
-            "max_abs_error_k": 0.048,
-        },
-    })
+    widget.update_metrics(
+        {
+            "raw_count": 28400,
+            "downsampled_count": 480,
+            "breakpoint_count": 156,
+            "metrics": {
+                "zone_count": 4,
+                "rmse_k": 0.012,
+                "max_abs_error_k": 0.048,
+            },
+        }
+    )
 
     assert "28,400" in widget._raw_count_label.text()
     assert "480" in widget._downsampled_label.text()
@@ -180,15 +188,18 @@ def test_results_before_after_shows_delta() -> None:
 # CoverageBar
 # ---------------------------------------------------------------------------
 
+
 def test_coverage_bar_renders() -> None:
     _app()
     bar = CoverageBar()
-    bar.set_coverage([
-        {"status": "dense", "temp_min": 4.0, "temp_max": 50.0, "point_count": 100},
-        {"status": "medium", "temp_min": 50.0, "temp_max": 100.0, "point_count": 30},
-        {"status": "empty", "temp_min": 100.0, "temp_max": 200.0, "point_count": 0},
-        {"status": "sparse", "temp_min": 200.0, "temp_max": 300.0, "point_count": 5},
-    ])
+    bar.set_coverage(
+        [
+            {"status": "dense", "temp_min": 4.0, "temp_max": 50.0, "point_count": 100},
+            {"status": "medium", "temp_min": 50.0, "temp_max": 100.0, "point_count": 30},
+            {"status": "empty", "temp_min": 100.0, "temp_max": 200.0, "point_count": 0},
+            {"status": "sparse", "temp_min": 200.0, "temp_max": 300.0, "point_count": 5},
+        ]
+    )
 
     assert len(bar._bins) == 4
     # Verify paintEvent doesn't crash

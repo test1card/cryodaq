@@ -1,4 +1,5 @@
 """Standalone visual showcase for Phase I.1 overlay primitives."""
+
 from __future__ import annotations
 
 import sys
@@ -74,7 +75,9 @@ def build_showcase() -> QMainWindow:
     content_layout.setContentsMargins(0, 0, 0, 0)
     content_layout.setSpacing(theme.SPACE_4)
 
-    breadcrumb = DrillDownBreadcrumb("\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430", show_close_button=False)
+    breadcrumb = DrillDownBreadcrumb(
+        "\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430", show_close_button=False
+    )
     content_layout.addWidget(breadcrumb)
 
     grid = BentoGrid()

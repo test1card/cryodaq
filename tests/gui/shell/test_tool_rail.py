@@ -1,4 +1,5 @@
 """Smoke tests for ToolRail (Phase UI-1 v2 Block A)."""
+
 from __future__ import annotations
 
 import os
@@ -18,8 +19,16 @@ def test_tool_rail_constructs() -> None:
     _app()
     rail = ToolRail()
     expected = {
-        "home", "new_experiment", "experiment", "source", "analytics",
-        "conductivity", "alarms", "log", "instruments", "more",
+        "home",
+        "new_experiment",
+        "experiment",
+        "source",
+        "analytics",
+        "conductivity",
+        "alarms",
+        "log",
+        "instruments",
+        "more",
     }
     assert expected.issubset(rail._buttons.keys())
 

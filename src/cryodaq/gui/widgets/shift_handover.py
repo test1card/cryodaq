@@ -34,10 +34,9 @@ from cryodaq.gui.widgets.common import (
     apply_button_style,
     apply_panel_frame_style,
 )
+from cryodaq.paths import get_config_dir as _get_config_dir
 
 logger = logging.getLogger(__name__)
-
-from cryodaq.paths import get_config_dir as _get_config_dir
 
 _CONFIG_PATH = _get_config_dir() / "shifts.yaml"
 
@@ -45,6 +44,7 @@ _CONFIG_PATH = _get_config_dir() / "shifts.yaml"
 # ---------------------------------------------------------------------------
 # Config loader
 # ---------------------------------------------------------------------------
+
 
 def load_shift_config() -> dict[str, Any]:
     """Load shift config; returns empty dict if file absent."""
@@ -84,6 +84,7 @@ def _shift_id() -> str:
 # Auto-checks for shift start
 # ---------------------------------------------------------------------------
 
+
 def _send_log_fire_and_forget(payload: dict[str, Any], parent: QWidget) -> None:
     """Fire-and-forget log entry via background worker."""
     from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -96,6 +97,7 @@ def _send_log_fire_and_forget(payload: dict[str, Any], parent: QWidget) -> None:
 # ---------------------------------------------------------------------------
 # ShiftStartDialog
 # ---------------------------------------------------------------------------
+
 
 class ShiftStartDialog(QDialog):
     """Dialog for starting a shift — operator selection + auto-checks."""
@@ -142,7 +144,8 @@ class ShiftStartDialog(QDialog):
         # Buttons
         self._btn_box = QDialogButtonBox()
         self._start_btn = self._btn_box.addButton(
-            "Заступить", QDialogButtonBox.ButtonRole.AcceptRole,
+            "Заступить",
+            QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self._start_btn.setEnabled(False)
         self._btn_box.addButton(QDialogButtonBox.StandardButton.Cancel)
@@ -204,22 +207,26 @@ class ShiftStartDialog(QDialog):
 
         sid = _shift_id()
         checks_summary = [
-            {"name": c["name"], "ok": c["ok"], "detail": c["detail"]}
-            for c in self._checks
+            {"name": c["name"], "ok": c["ok"], "detail": c["detail"]} for c in self._checks
         ]
 
-        _send_log_fire_and_forget({
-            "cmd": "log_entry",
-            "message": f"Заступление на смену: {operator}",
-            "author": operator,
-            "source": "shift_handover",
-            "tags": ["shift_start"],
-            "metadata": json.dumps({
-                "shift_id": sid,
-                "operator": operator,
-                "checks": checks_summary,
-            }),
-        }, parent=self)
+        _send_log_fire_and_forget(
+            {
+                "cmd": "log_entry",
+                "message": f"Заступление на смену: {operator}",
+                "author": operator,
+                "source": "shift_handover",
+                "tags": ["shift_start"],
+                "metadata": json.dumps(
+                    {
+                        "shift_id": sid,
+                        "operator": operator,
+                        "checks": checks_summary,
+                    }
+                ),
+            },
+            parent=self,
+        )
 
         self.shift_started.emit(operator, sid)
         self.accept()
@@ -228,6 +235,7 @@ class ShiftStartDialog(QDialog):
 # ---------------------------------------------------------------------------
 # ShiftPeriodicPrompt
 # ---------------------------------------------------------------------------
+
 
 class ShiftPeriodicPrompt(QDialog):
     """Periodic status check dialog during a shift."""
@@ -297,24 +305,30 @@ class ShiftPeriodicPrompt(QDialog):
         if notes:
             message_parts.append(notes)
 
-        _send_log_fire_and_forget({
-            "cmd": "log_entry",
-            "message": " | ".join(message_parts),
-            "author": self._operator,
-            "source": "shift_handover",
-            "tags": ["shift_periodic"],
-            "metadata": json.dumps({
-                "shift_id": self._shift_id,
-                "status": status,
-                "readings": self._readings_label.text(),
-            }),
-        }, parent=self)
+        _send_log_fire_and_forget(
+            {
+                "cmd": "log_entry",
+                "message": " | ".join(message_parts),
+                "author": self._operator,
+                "source": "shift_handover",
+                "tags": ["shift_periodic"],
+                "metadata": json.dumps(
+                    {
+                        "shift_id": self._shift_id,
+                        "status": status,
+                        "readings": self._readings_label.text(),
+                    }
+                ),
+            },
+            parent=self,
+        )
         self.accept()
 
 
 # ---------------------------------------------------------------------------
 # ShiftEndDialog
 # ---------------------------------------------------------------------------
+
 
 class ShiftEndDialog(QDialog):
     """Dialog for ending a shift — auto-summary + final comment."""
@@ -385,22 +399,27 @@ class ShiftEndDialog(QDialog):
     def _on_end(self) -> None:
         comment = self._comment.toPlainText().strip()
 
-        _send_log_fire_and_forget({
-            "cmd": "log_entry",
-            "message": f"Сдача смены: {self._operator}" + (f" | {comment}" if comment else ""),
-            "author": self._operator,
-            "source": "shift_handover",
-            "tags": ["shift_end"],
-            "metadata": json.dumps({
-                "shift_id": self._shift_id,
-                "operator": self._operator,
-                "duration_h": self._elapsed_h,
-                "duration_m": self._elapsed_m,
-                "periodic_count": self._periodic_count,
-                "missed_count": self._missed_count,
-                "comment": comment,
-            }),
-        }, parent=self)
+        _send_log_fire_and_forget(
+            {
+                "cmd": "log_entry",
+                "message": f"Сдача смены: {self._operator}" + (f" | {comment}" if comment else ""),
+                "author": self._operator,
+                "source": "shift_handover",
+                "tags": ["shift_end"],
+                "metadata": json.dumps(
+                    {
+                        "shift_id": self._shift_id,
+                        "operator": self._operator,
+                        "duration_h": self._elapsed_h,
+                        "duration_m": self._elapsed_m,
+                        "periodic_count": self._periodic_count,
+                        "missed_count": self._missed_count,
+                        "comment": comment,
+                    }
+                ),
+            },
+            parent=self,
+        )
 
         self.shift_ended.emit()
         self.accept()
@@ -409,6 +428,7 @@ class ShiftEndDialog(QDialog):
 # ---------------------------------------------------------------------------
 # ShiftBar — compact widget embedded in Overview
 # ---------------------------------------------------------------------------
+
 
 class ShiftBar(QFrame):
     """Compact shift status bar: start/end buttons + operator + elapsed time.
@@ -597,17 +617,21 @@ class ShiftBar(QFrame):
 
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        worker = ZmqCommandWorker({
-            "cmd": "log_entry",
-            "message": f"Пропущена периодическая проверка (оператор: {self._operator})",
-            "author": self._operator,
-            "source": "shift_handover",
-            "tags": ["shift_periodic_missed"],
-            "metadata": json.dumps({
-                "shift_id": self._shift_id,
-                "missed_count": self._missed_count,
-            }),
-        })
+        worker = ZmqCommandWorker(
+            {
+                "cmd": "log_entry",
+                "message": f"Пропущена периодическая проверка (оператор: {self._operator})",
+                "author": self._operator,
+                "source": "shift_handover",
+                "tags": ["shift_periodic_missed"],
+                "metadata": json.dumps(
+                    {
+                        "shift_id": self._shift_id,
+                        "missed_count": self._missed_count,
+                    }
+                ),
+            }
+        )
         worker.finished.connect(lambda r: None)
         self._workers.append(worker)
         worker.start()

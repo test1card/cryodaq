@@ -91,9 +91,7 @@ async def test_fault_latched_not_cleared_by_stop():
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"Expected FAULT_LATCHED after request_stop, got {mgr.state}"
         )
-        assert result["ok"] is False, (
-            "request_stop() from FAULT_LATCHED should report ok=False"
-        )
+        assert result["ok"] is False, "request_stop() from FAULT_LATCHED should report ok=False"
     finally:
         await mgr.stop()
 
@@ -177,9 +175,7 @@ async def test_error_status_blocks_run():
 
         result = await mgr.request_run(0.5, 40.0, 1.0)
 
-        assert result["ok"] is False, (
-            "request_run must fail when critical channel has SENSOR_ERROR"
-        )
+        assert result["ok"] is False, "request_run must fail when critical channel has SENSOR_ERROR"
         # The error message should mention the channel status or the channel name
         error_text = result.get("error", "")
         assert error_text, "Should provide an error message"
@@ -270,7 +266,7 @@ async def test_rate_limit_ignores_non_temperature():
 
 
 async def test_rate_limit_catches_critical_temperature():
-    """Temperature readings on a CRITICAL channel rising faster than max_dT_dt_K_per_min must FAULT."""
+    """Temperature readings on a CRITICAL channel rising faster than max_dT_dt_K_per_min must FAULT."""  # noqa: E501
     mgr, broker = await _make_manager(stale=30.0)
     mgr._config.critical_channels = [re.compile("Т1.*")]
     mgr._config.max_dT_dt_K_per_min = 5.0
@@ -306,7 +302,7 @@ async def test_rate_limit_catches_critical_temperature():
         await asyncio.sleep(1.5)
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"Rapid temperature rise on critical channel must trigger FAULT_LATCHED, got {mgr.state}"
+            f"Rapid temperature rise on critical channel must trigger FAULT_LATCHED, got {mgr.state}"  # noqa: E501
         )
     finally:
         await mgr.stop()
@@ -364,12 +360,8 @@ async def test_fault_event_has_channel_and_value():
         assert fault_events, "No FAULT_LATCHED event found in event history"
 
         ev = fault_events[-1]
-        assert ev.channel == "T7", (
-            f"Event channel must be 'T7', got '{ev.channel}'"
-        )
-        assert ev.value == pytest.approx(350.0), (
-            f"Event value must be 350.0, got {ev.value}"
-        )
+        assert ev.channel == "T7", f"Event channel must be 'T7', got '{ev.channel}'"
+        assert ev.value == pytest.approx(350.0), f"Event value must be 350.0, got {ev.value}"
     finally:
         await mgr.stop()
 
@@ -383,9 +375,11 @@ async def test_rate_limit_uses_rate_estimator():
     """SafetyManager uses RateEstimator instead of raw _rate_buffers."""
     mgr, broker = await _make_manager(stale=30.0)
     try:
-        assert not hasattr(mgr, "_rate_buffers"), \
+        assert not hasattr(mgr, "_rate_buffers"), (
             "SafetyManager should use RateEstimator, not raw _rate_buffers"
-        assert hasattr(mgr, "_rate_estimator"), \
+        )
+        assert hasattr(mgr, "_rate_estimator"), (
             "SafetyManager should have _rate_estimator attribute"
+        )
     finally:
         await mgr.stop()

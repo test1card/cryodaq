@@ -13,13 +13,14 @@ from typing import Any
 
 import yaml
 
+from cryodaq.paths import get_config_dir as _get_config_dir
+
 logger = logging.getLogger(__name__)
 
 
 class ChannelConfigError(RuntimeError):
     """Raised when channels.yaml cannot be loaded in a fail-closed manner."""
 
-from cryodaq.paths import get_config_dir as _get_config_dir
 
 _DEFAULT_CONFIG = _get_config_dir() / "channels.yaml"
 
@@ -98,14 +99,12 @@ class ChannelManager:
 
         if not isinstance(raw, dict):
             raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: expected mapping, "
-                f"got {type(raw).__name__}"
+                f"channels.yaml at {self._config_path}: expected mapping, got {type(raw).__name__}"
             )
         channels = raw.get("channels")
         if not isinstance(channels, dict):
             raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: missing or invalid "
-                f"'channels' key"
+                f"channels.yaml at {self._config_path}: missing or invalid 'channels' key"
             )
         self._channels = channels
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
@@ -167,10 +166,7 @@ class ChannelManager:
 
     def get_all_visible(self) -> list[str]:
         """Получить список видимых channel_id."""
-        return [
-            ch_id for ch_id, info in self._channels.items()
-            if info.get("visible", True)
-        ]
+        return [ch_id for ch_id, info in self._channels.items() if info.get("visible", True)]
 
     def get_cold_channels(self) -> list[str]:
         """Return list of channel IDs marked as cold (cryogenic).
@@ -178,10 +174,7 @@ class ChannelManager:
         Channels without an explicit ``is_cold`` field default to True
         (sensible default for a cryogenic system).
         """
-        return [
-            ch_id for ch_id, info in self._channels.items()
-            if info.get("is_cold", True)
-        ]
+        return [ch_id for ch_id, info in self._channels.items() if info.get("is_cold", True)]
 
     def get_visible_cold_channels(self) -> list[str]:
         """Convenience: intersection of visible AND cold channels."""
@@ -213,8 +206,7 @@ class ChannelManager:
         if info is None:
             known = sorted(self._channels.keys())
             raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — "
-                f"known channels: {', '.join(known)}"
+                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
             )
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
@@ -226,6 +218,7 @@ class ChannelManager:
         Каналы без группы попадают в '' (пустая строка).
         """
         from collections import OrderedDict
+
         groups: dict[str, list[str]] = OrderedDict()
         for ch_id, info in self._channels.items():
             group = info.get("group", "")

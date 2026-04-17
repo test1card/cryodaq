@@ -116,7 +116,9 @@ def _check_sqlite_version() -> None:
             "22.04 this means building libsqlite3 from source or bundling a "
             "custom libsqlite3 in the PyInstaller build. "
             "See https://www.sqlite.org/wal.html",
-            version[0], version[1], version[2],
+            version[0],
+            version[1],
+            version[2],
         )
 
 
@@ -160,9 +162,7 @@ class SQLiteWriter:
         # actually resume polling.
         self._disk_full = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._persistence_failure_callback: (
-            Callable[[str], Awaitable[None]] | None
-        ) = None
+        self._persistence_failure_callback: Callable[[str], Awaitable[None]] | None = None
 
         _check_sqlite_version()
 
@@ -197,9 +197,7 @@ class SQLiteWriter:
         schedule the persistence-failure callback on it."""
         self._loop = loop
 
-    def set_persistence_failure_callback(
-        self, callback: Callable[[str], Awaitable[None]]
-    ) -> None:
+    def set_persistence_failure_callback(self, callback: Callable[[str], Awaitable[None]]) -> None:
         """Register an async callback for persistence failures (disk full etc).
 
         The callback is awaited via :func:`asyncio.run_coroutine_threadsafe`
@@ -313,8 +311,8 @@ class SQLiteWriter:
     # schema migration (nullable value column) or sentinel substitution.
     # Deferred to Phase 3 item B.1.2.
     _STATE_CARRYING_STATUSES = {
-        ChannelStatus.OVERRANGE,    # +OVL → +inf (stored as REAL)
-        ChannelStatus.UNDERRANGE,   # -OVL → -inf or finite (stored as REAL)
+        ChannelStatus.OVERRANGE,  # +OVL → +inf (stored as REAL)
+        ChannelStatus.UNDERRANGE,  # -OVL → -inf or finite (stored as REAL)
     }
 
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:
@@ -342,7 +340,9 @@ class SQLiteWriter:
             )
         if skipped:
             logger.warning(
-                "Пропущено %d readings с value=None/NaN (из батча %d)", skipped, len(batch),
+                "Пропущено %d readings с value=None/NaN (из батча %d)",
+                skipped,
+                len(batch),
             )
         if not rows:
             return
@@ -630,7 +630,9 @@ class SQLiteWriter:
         """Запустить цикл записи (legacy, обратная совместимость)."""
         self._running = True
         self._task = asyncio.create_task(self._consume_loop(queue), name="sqlite_writer")
-        logger.info("SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size)
+        logger.info(
+            "SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size
+        )
 
     async def stop(self) -> None:
         """Остановить цикл, дождаться завершения, закрыть БД."""

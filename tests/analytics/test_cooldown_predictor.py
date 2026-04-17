@@ -77,9 +77,7 @@ async def test_compute_progress_monotone():
 
     # p must be non-decreasing
     diffs = np.diff(p)
-    assert np.all(diffs >= -1e-9), (
-        f"Progress not monotone: diffs={diffs}"
-    )
+    assert np.all(diffs >= -1e-9), f"Progress not monotone: diffs={diffs}"
     # First value near 0, last near 1
     assert p[0] < 0.05
     assert p[-1] > 0.95
@@ -385,10 +383,11 @@ async def test_no_print_in_module():
     whose function is the builtin `print`.
     """
     import cryodaq.analytics.cooldown_predictor as _mod
-    src_path = Path(_mod.__file__)
-    assert src_path.exists(), f"Source file not found: {src_path}"
 
-    source = src_path.read_text(encoding="utf-8")
+    src_path = Path(_mod.__file__)
+    assert src_path.exists(), f"Source file not found: {src_path}"  # noqa: ASYNC240
+
+    source = src_path.read_text(encoding="utf-8")  # noqa: ASYNC240
     tree = ast.parse(source, filename=str(src_path))
 
     bare_prints: list[int] = []

@@ -82,14 +82,19 @@ class CSVExporter:
 
             for db_path in db_files:
                 total += self._export_from_db(
-                    db_path, writer,
-                    start=start, end=end,
-                    channels=channels, instrument_ids=instrument_ids,
+                    db_path,
+                    writer,
+                    start=start,
+                    end=end,
+                    channels=channels,
+                    instrument_ids=instrument_ids,
                 )
 
         logger.info(
             "CSV-экспорт завершён: %s (%d записей из %d файлов БД)",
-            output_path, total, len(db_files),
+            output_path,
+            total,
+            len(db_files),
         )
         return total
 
@@ -98,7 +103,9 @@ class CSVExporter:
     # ------------------------------------------------------------------
 
     def _find_db_files(
-        self, start: datetime | None, end: datetime | None,
+        self,
+        start: datetime | None,
+        end: datetime | None,
     ) -> list[Path]:
         """Найти daily-файлы SQLite, покрывающие указанный диапазон."""
         if not self._data_dir.exists():
@@ -168,14 +175,16 @@ class CSVExporter:
             count = 0
             for row in cursor:
                 ts = _parse_timestamp(row["timestamp"])
-                writer.writerow([
-                    ts.isoformat(),
-                    row["instrument_id"],
-                    row["channel"],
-                    row["value"],
-                    row["unit"],
-                    row["status"],
-                ])
+                writer.writerow(
+                    [
+                        ts.isoformat(),
+                        row["instrument_id"],
+                        row["channel"],
+                        row["value"],
+                        row["unit"],
+                        row["status"],
+                    ]
+                )
                 count += 1
 
             return count

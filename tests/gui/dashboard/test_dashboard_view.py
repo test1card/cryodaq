@@ -1,9 +1,12 @@
 """Smoke tests for DashboardView skeleton (Phase UI-1 v2 Block B.1)."""
+
 from __future__ import annotations
 
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from datetime import UTC
 
 import pytest
 from PySide6.QtWidgets import QApplication, QFrame
@@ -29,18 +32,14 @@ def test_dashboard_view_has_five_zones(app):
     """All five placeholder zones are present with expected object names."""
     mgr = ChannelManager()
     view = DashboardView(mgr)
-    expected = {"phaseZone", "tempPlotZone", "pressurePlotZone",
-                "sensorGridZone", "quickLogZone"}
-    actual = {
-        c.objectName() for c in view.findChildren(QFrame)
-        if c.objectName() in expected
-    }
+    expected = {"phaseZone", "tempPlotZone", "pressurePlotZone", "sensorGridZone", "quickLogZone"}
+    actual = {c.objectName() for c in view.findChildren(QFrame) if c.objectName() in expected}
     assert expected == actual, f"Missing: {expected - actual}"
 
 
 def test_dashboard_view_on_reading_accepts(app):
     """on_reading() accepts a reading without raising."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from cryodaq.drivers.base import ChannelStatus, Reading
 
@@ -50,7 +49,7 @@ def test_dashboard_view_on_reading_accepts(app):
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=4.2,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
@@ -59,7 +58,7 @@ def test_dashboard_view_on_reading_accepts(app):
 
 def test_on_reading_temperature_stores_short_id(app):
     """Temperature reading stored under short ID (Т1) in buffer."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from cryodaq.drivers.base import ChannelStatus, Reading
 
@@ -69,7 +68,7 @@ def test_on_reading_temperature_stores_short_id(app):
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=77.5,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
@@ -81,7 +80,7 @@ def test_on_reading_temperature_stores_short_id(app):
 
 def test_on_reading_pressure_stores_full_id(app):
     """Pressure reading stored under full channel ID."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from cryodaq.drivers.base import ChannelStatus, Reading
 
@@ -91,7 +90,7 @@ def test_on_reading_pressure_stores_full_id(app):
         channel="VSP63D_1/pressure",
         value=1e-4,
         unit="mbar",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="thyracont_vsp63d",
     )

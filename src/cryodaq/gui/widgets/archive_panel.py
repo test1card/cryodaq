@@ -37,7 +37,17 @@ from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 
 class ArchivePanel(QWidget):
-    _COLUMNS = ["Начало", "Конец", "Эксперимент", "Шаблон", "Оператор", "Образец", "Статус", "Отчёт", "Данные"]
+    _COLUMNS = [
+        "Начало",
+        "Конец",
+        "Эксперимент",
+        "Шаблон",
+        "Оператор",
+        "Образец",
+        "Статус",
+        "Отчёт",
+        "Данные",
+    ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -275,6 +285,7 @@ class ArchivePanel(QWidget):
             data_item = self._table.item(row, 8)
             if data_item:
                 from PySide6.QtGui import QColor
+
                 if data_item.text() == "✓":
                     data_item.setForeground(QColor(theme.STATUS_OK))
                 else:
@@ -309,13 +320,13 @@ class ArchivePanel(QWidget):
         self._operator_label.setText(str(entry.get("operator", "")))
         self._sample_label.setText(str(entry.get("sample", "")) or "—")
         self._date_label.setText(
-            f"{self._format_datetime(entry.get('start_time'))} → {self._format_datetime(entry.get('end_time'))}"
+            f"{self._format_datetime(entry.get('start_time'))} → {self._format_datetime(entry.get('end_time'))}"  # noqa: E501
         )
-        self._artifact_label.setText(str(folder_path) if folder_path else "Папка артефактов не найдена")
+        self._artifact_label.setText(
+            str(folder_path) if folder_path else "Папка артефактов не найдена"
+        )
         if pdf_path or docx_path:
-            self._report_label.setText(
-                f"PDF: {pdf_path or 'нет'}\nDOCX: {docx_path or 'нет'}"
-            )
+            self._report_label.setText(f"PDF: {pdf_path or 'нет'}\nDOCX: {docx_path or 'нет'}")
         elif report_enabled:
             self._report_label.setText("Файлы отчёта отсутствуют")
         else:
@@ -368,7 +379,7 @@ class ArchivePanel(QWidget):
                 f"{str(item.get('status', '')).strip() or 'UNKNOWN'} | "
                 f"start={str(item.get('started_at', '')).strip() or '—'} | "
                 f"finish={str(item.get('finished_at', '')).strip() or '—'} | "
-                f"artifacts={len([path for path in item.get('artifact_paths', []) if str(path).strip()])}"
+                f"artifacts={len([path for path in item.get('artifact_paths', []) if str(path).strip()])}"  # noqa: E501
             )
             for item in records
         )
@@ -389,12 +400,17 @@ class ArchivePanel(QWidget):
                 channels = summary.get("channels", [])
                 ch_count = len(channels) if isinstance(channels, list) else "?"
                 from pathlib import Path
+
                 p = Path(str(item.get("path", "")))
                 size_str = ""
                 if p.exists():
                     size_kb = p.stat().st_size / 1024
-                    size_str = f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
-                lines.append(f"📊 Данные | {fmt} | {row_count} строк | {ch_count} каналов{size_str}")
+                    size_str = (
+                        f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
+                    )
+                lines.append(
+                    f"📊 Данные | {fmt} | {row_count} строк | {ch_count} каналов{size_str}"
+                )
             elif role == "measured_values":
                 lines.append(f"📋 Измерения | {summary.get('rows', '?')} строк | CSV")
             elif role == "setpoint_values":
@@ -412,11 +428,13 @@ class ArchivePanel(QWidget):
         if not results and not summary:
             return "Таблиц результатов нет."
         lines = [
-            f"{str(item.get('table_id', '')).strip() or 'table'} | rows={item.get('row_count', 0)} | {str(item.get('path', '')).strip() or '—'}"
+            f"{str(item.get('table_id', '')).strip() or 'table'} | rows={item.get('row_count', 0)} | {str(item.get('path', '')).strip() or '—'}"  # noqa: E501
             for item in results
         ]
         if summary:
-            lines.append("summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items())))
+            lines.append(
+                "summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items()))
+            )
         return "\n".join(lines)
 
     @staticmethod
@@ -441,7 +459,9 @@ class ArchivePanel(QWidget):
 
     @classmethod
     def resolve_docx_path(cls, entry: dict[str, Any]) -> Path | None:
-        for path in cls._report_candidate_paths(entry, "docx_path", "report_editable.docx", "report.docx"):
+        for path in cls._report_candidate_paths(
+            entry, "docx_path", "report_editable.docx", "report.docx"
+        ):
             if path.exists():
                 return path
         return None
@@ -465,7 +485,9 @@ class ArchivePanel(QWidget):
             return
         folder = self.resolve_folder_path(entry)
         if folder is None or not self._open_path(folder):
-            QMessageBox.warning(self, "Архив экспериментов", "Папка артефактов отсутствует или не открывается.")
+            QMessageBox.warning(
+                self, "Архив экспериментов", "Папка артефактов отсутствует или не открывается."
+            )
 
     @Slot()
     def _open_selected_pdf(self) -> None:
@@ -474,7 +496,9 @@ class ArchivePanel(QWidget):
             return
         path = self.resolve_pdf_path(entry)
         if path is None or not self._open_path(path):
-            QMessageBox.warning(self, "Архив экспериментов", "Сырой PDF отсутствует или не открывается.")
+            QMessageBox.warning(
+                self, "Архив экспериментов", "Сырой PDF отсутствует или не открывается."
+            )
 
     @Slot()
     def _open_selected_docx(self) -> None:
@@ -483,7 +507,9 @@ class ArchivePanel(QWidget):
             return
         path = self.resolve_docx_path(entry)
         if path is None or not self._open_path(path):
-            QMessageBox.warning(self, "Архив экспериментов", "Редактируемый DOCX отсутствует или не открывается.")
+            QMessageBox.warning(
+                self, "Архив экспериментов", "Редактируемый DOCX отсутствует или не открывается."
+            )
 
     @Slot()
     def _regenerate_selected_report(self) -> None:
@@ -495,7 +521,9 @@ class ArchivePanel(QWidget):
             return
         self._regenerate_button.setEnabled(False)
         self._status_label.show_info("Генерация отчёта...")
-        worker = ZmqCommandWorker({"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")})
+        worker = ZmqCommandWorker(
+            {"cmd": "experiment_generate_report", "experiment_id": entry.get("experiment_id", "")}
+        )
         worker.finished.connect(self._on_regenerate_result)
         self._workers.append(worker)
         worker.start()
@@ -504,7 +532,9 @@ class ArchivePanel(QWidget):
         self._regenerate_button.setEnabled(True)
         self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok"):
-            self._status_label.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
+            self._status_label.show_error(
+                str(result.get("error", "Не удалось сформировать отчёт."))
+            )
             return
         report = result.get("report", {})
         if report.get("skipped"):
@@ -512,7 +542,7 @@ class ArchivePanel(QWidget):
             self.refresh_archive()
             self._status_label.show_warning(message)
         else:
-            message = f"Отчёты обновлены: PDF={report.get('pdf_path') or 'нет'}, DOCX={report.get('docx_path') or 'нет'}"
+            message = f"Отчёты обновлены: PDF={report.get('pdf_path') or 'нет'}, DOCX={report.get('docx_path') or 'нет'}"  # noqa: E501
             self.refresh_archive()
             self._status_label.show_success(message)
 

@@ -1,4 +1,5 @@
 """Tests for single-instance lock mechanism."""
+
 from __future__ import annotations
 
 import multiprocessing as mp
@@ -20,6 +21,7 @@ def cleanup_lock(lock_name):
     """Remove test lock file after each test."""
     yield
     from cryodaq.paths import get_data_dir
+
     lock_path = get_data_dir() / lock_name
     lock_path.unlink(missing_ok=True)
 

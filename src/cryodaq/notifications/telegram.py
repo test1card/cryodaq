@@ -71,9 +71,7 @@ class TelegramNotifier:
     ) -> None:
         # Phase 2b K.1: store the token in a SecretStr wrapper so accidental
         # repr/str/f-string never leaks it. The API URL is computed on demand.
-        self._bot_token = (
-            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
-        )
+        self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._chat_id = chat_id
         self._send_cleared = send_cleared
         self._timeout_s = timeout_s
@@ -106,9 +104,7 @@ class TelegramNotifier:
         KeyError:           Отсутствуют обязательные поля.
         """
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"Файл конфигурации уведомлений не найден: {config_path}"
-            )
+            raise FileNotFoundError(f"Файл конфигурации уведомлений не найден: {config_path}")
 
         with config_path.open(encoding="utf-8") as fh:
             raw: dict[str, Any] = yaml.safe_load(fh)
@@ -146,7 +142,9 @@ class TelegramNotifier:
 
     def _format_message(self, event: Any) -> str:
         """Сформировать текст уведомления."""
-        severity_str = event.severity.value if hasattr(event.severity, "value") else str(event.severity)
+        severity_str = (
+            event.severity.value if hasattr(event.severity, "value") else str(event.severity)
+        )
         severity_emoji = _SEVERITY_EMOJI.get(severity_str, "❓")
         event_emoji = _EVENT_EMOJI.get(event.event_type, "")
 
@@ -228,7 +226,9 @@ class TelegramNotifier:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error(
-                        "Telegram API ответил %d: %s", resp.status, body[:200],
+                        "Telegram API ответил %d: %s",
+                        resp.status,
+                        body[:200],
                     )
                 else:
                     logger.debug("Telegram-уведомление отправлено: %s", text[:80])

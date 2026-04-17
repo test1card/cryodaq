@@ -27,9 +27,9 @@ _BUFFER_MAXLEN = 3600
 _WINDOW_S = 600.0
 
 # Цвета по уровню давления
-_COLOR_GOOD = theme.STATUS_OK       # < 1e-3 мбар
+_COLOR_GOOD = theme.STATUS_OK  # < 1e-3 мбар
 _COLOR_WARN = theme.STATUS_CAUTION  # 1e-3 ... 1e-1 мбар
-_COLOR_BAD = theme.STATUS_FAULT     # > 1e-1 мбар
+_COLOR_BAD = theme.STATUS_FAULT  # > 1e-1 мбар
 
 
 def _pressure_color(value: float) -> str:
@@ -72,7 +72,7 @@ class PressurePanel(QWidget):
         # --- Верх: карточка с текущим давлением ---
         self._card = QFrame()
         self._card.setStyleSheet(
-            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {_COLOR_GOOD}; border-radius: {theme.RADIUS_LG}px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {_COLOR_GOOD}; border-radius: {theme.RADIUS_LG}px;"  # noqa: E501
         )
         cl = QVBoxLayout(self._card)
         cl.setContentsMargins(16, 12, 16, 12)
@@ -147,7 +147,7 @@ class PressurePanel(QWidget):
         value = reading.value
         if value > 0 and math.isfinite(value):
             exp = math.floor(math.log10(value))
-            mantissa = value / (10 ** exp)
+            mantissa = value / (10**exp)
             self._value_label.setText(f"{mantissa:.2f}e{exp}")
         else:
             self._value_label.setText(f"{value:.2e}")
@@ -155,7 +155,7 @@ class PressurePanel(QWidget):
         color = _pressure_color(value)
         self._value_label.setStyleSheet(f"color: {color}; border: none;")
         self._card.setStyleSheet(
-            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {color}; border-radius: {theme.RADIUS_LG}px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 2px solid {color}; border-radius: {theme.RADIUS_LG}px;"  # noqa: E501
         )
 
     @Slot()

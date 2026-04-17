@@ -10,6 +10,7 @@ would be detected by downstream parsers.
 
 See DEEP_AUDIT_CC.md D.3 (and Codex D.4).
 """
+
 from __future__ import annotations
 
 import os

@@ -111,7 +111,7 @@ async def test_yaml_config_applied(tmp_path: Path):
 async def _drain_for_analytics(
     queue: asyncio.Queue,
     expected_prefix: str,
-    timeout: float = 2.0,
+    timeout: float = 2.0,  # noqa: ASYNC109
 ) -> Reading:
     """Drain *queue* until a Reading whose channel starts with *expected_prefix* is found."""
     deadline = asyncio.get_event_loop().time() + timeout
@@ -128,7 +128,7 @@ async def _drain_for_analytics(
 
 
 async def test_bad_plugin_isolated(tmp_path: Path, caplog):
-    """A plugin that raises in process() is isolated — error is logged and the pipeline continues."""
+    """A plugin that raises in process() is isolated — error is logged and the pipeline continues."""  # noqa: E501
     bad_file = tmp_path / "bad_plugin.py"
     bad_file.write_text(_BAD_PLUGIN_SRC, encoding="utf-8")
 
@@ -161,8 +161,7 @@ async def test_bad_plugin_isolated(tmp_path: Path, caplog):
 
     # The bad plugin's error was logged
     error_records = [
-        r for r in caplog.records
-        if r.levelno >= logging.ERROR and "bad_plugin" in r.message
+        r for r in caplog.records if r.levelno >= logging.ERROR and "bad_plugin" in r.message
     ]
     assert error_records, "Expected an error log entry for bad_plugin"
 

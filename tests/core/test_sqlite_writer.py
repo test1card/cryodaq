@@ -14,6 +14,7 @@ from cryodaq.storage.sqlite_writer import SQLiteWriter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _reading(
     channel: str = "CH1",
     value: float = 4.5,
@@ -43,8 +44,9 @@ def _batch(
 ) -> list[Reading]:
     ts = ts or datetime.now(UTC)
     return [
-        _reading(channel=f"CH{i % 8 + 1}", value=4.0 + i * 0.001, ts=ts,
-                 instrument_id=instrument_id)
+        _reading(
+            channel=f"CH{i % 8 + 1}", value=4.0 + i * 0.001, ts=ts, instrument_id=instrument_id
+        )
         for i in range(n)
     ]
 
@@ -62,6 +64,7 @@ def _read_db(db_path: Path) -> list[dict]:
 # 1. Writing a batch creates a DB file with the expected name
 # ---------------------------------------------------------------------------
 
+
 async def test_write_batch_creates_db(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
     batch = _batch(5)
@@ -77,6 +80,7 @@ async def test_write_batch_creates_db(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 2. Readings survive a round-trip through the DB
 # ---------------------------------------------------------------------------
+
 
 async def test_readings_persisted(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
@@ -107,13 +111,14 @@ async def test_readings_persisted(tmp_path: Path) -> None:
 # 3. WAL journal mode is configured on new databases
 # ---------------------------------------------------------------------------
 
+
 async def test_wal_mode_enabled(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
     batch = _batch(1)
     writer._write_batch(batch)
 
     utc_date = batch[0].timestamp.date()
-    db_path = tmp_path / f"data_{utc_date.isoformat()}.db"
+    tmp_path / f"data_{utc_date.isoformat()}.db"
     # The writer's own connection has WAL set; a fresh connection inherits it
     # only if WAL was fully checkpointed. Check via the writer's connection instead.
     assert writer._conn is not None, "Writer connection should be open after write"
@@ -125,6 +130,7 @@ async def test_wal_mode_enabled(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 4. Daily rotation — two dates → two separate DB files
 # ---------------------------------------------------------------------------
+
 
 async def test_daily_rotation(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
@@ -152,6 +158,7 @@ async def test_daily_rotation(tmp_path: Path) -> None:
 # 5. Batch-insert performance — 1000 readings complete in reasonable time
 # ---------------------------------------------------------------------------
 
+
 async def test_batch_insert_performance(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
     big_batch = _batch(1000)
@@ -172,6 +179,7 @@ async def test_batch_insert_performance(tmp_path: Path) -> None:
 # 6. WAL recovery after crash — data written before crash is readable
 # ---------------------------------------------------------------------------
 
+
 async def test_wal_recovery_after_crash(tmp_path: Path) -> None:
     # Write some readings and then simulate a crash by nulling the connection
     # without calling close() — the WAL file will ensure the committed data
@@ -189,9 +197,7 @@ async def test_wal_recovery_after_crash(tmp_path: Path) -> None:
     db_path = tmp_path / f"data_{ts.date().isoformat()}.db"
 
     rows = _read_db(db_path)
-    assert len(rows) == 10, (
-        f"Expected 10 rows to survive simulated crash, found {len(rows)}"
-    )
+    assert len(rows) == 10, f"Expected 10 rows to survive simulated crash, found {len(rows)}"
 
     # The new writer must also be able to append without corruption
     writer_b._write_batch(_batch(3, ts=ts))
@@ -203,6 +209,7 @@ async def test_wal_recovery_after_crash(tmp_path: Path) -> None:
 # 7. _write_batch with empty list is a no-op (no error, no rows written)
 # ---------------------------------------------------------------------------
 
+
 async def test_empty_batch_noop(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
 
@@ -210,15 +217,14 @@ async def test_empty_batch_noop(tmp_path: Path) -> None:
     writer._write_batch([])
 
     # No DB file should have been created (nothing to write)
-    db_files = list(tmp_path.glob("data_*.db"))
-    assert len(db_files) == 0, (
-        f"Empty batch should not create DB files, found: {db_files}"
-    )
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
+    assert len(db_files) == 0, f"Empty batch should not create DB files, found: {db_files}"
 
 
 # ---------------------------------------------------------------------------
 # 8. _write_batch skips readings with NaN value (sqlite3 maps NaN to NULL)
 # ---------------------------------------------------------------------------
+
 
 async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
@@ -245,6 +251,7 @@ async def test_write_batch_skips_nan_values(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 9. Batch spanning midnight is split into two separate daily DBs
 # ---------------------------------------------------------------------------
+
 
 async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
@@ -299,7 +306,7 @@ async def test_overrange_reading_persists(tmp_path: Path) -> None:
     await writer.write_immediate([r])
 
     # Query SQLite directly
-    db_files = list(tmp_path.glob("data_*.db"))
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files, "No DB file created"
     conn = sqlite3.connect(str(db_files[0]))
     rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т7 Детектор'").fetchall()
@@ -323,7 +330,7 @@ async def test_garbage_nan_ok_still_dropped(tmp_path: Path) -> None:
     )
     await writer.write_immediate([r])
 
-    db_files = list(tmp_path.glob("data_*.db"))
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     if not db_files:
         return  # No DB created = correctly dropped
     conn = sqlite3.connect(str(db_files[0]))
@@ -346,7 +353,7 @@ async def test_sensor_error_nan_dropped_not_raised(tmp_path: Path) -> None:
     )
     await writer.write_immediate([r])  # must NOT raise
 
-    db_files = list(tmp_path.glob("data_*.db"))
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     if not db_files:
         return
     conn = sqlite3.connect(str(db_files[0]))
@@ -369,7 +376,7 @@ async def test_timeout_nan_dropped_not_raised(tmp_path: Path) -> None:
     )
     await writer.write_immediate([r])  # must NOT raise
 
-    db_files = list(tmp_path.glob("data_*.db"))
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     if not db_files:
         return
     conn = sqlite3.connect(str(db_files[0]))
@@ -392,10 +399,12 @@ async def test_underrange_negative_inf_persists(tmp_path: Path) -> None:
     )
     await writer.write_immediate([r])
 
-    db_files = list(tmp_path.glob("data_*.db"))
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т5 Экран 77К'").fetchall()
+    rows = conn.execute(
+        "SELECT value, status FROM readings WHERE channel='Т5 Экран 77К'"
+    ).fetchall()
     conn.close()
     assert len(rows) == 1
     assert rows[0][0] == float("-inf")

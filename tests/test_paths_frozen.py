@@ -1,4 +1,5 @@
 """Test ``paths.py`` behaviour in frozen and dev modes."""
+
 from __future__ import annotations
 
 import sys
@@ -43,8 +44,7 @@ def test_frozen_mode_uses_sys_executable_parent(tmp_path, monkeypatch):
 
     root = paths.get_project_root()
     assert root == tmp_path.resolve(), (
-        f"Frozen root must be next to exe ({tmp_path}), "
-        f"NOT _MEIPASS ({meipass}). Got: {root}"
+        f"Frozen root must be next to exe ({tmp_path}), NOT _MEIPASS ({meipass}). Got: {root}"
     )
     assert paths.is_frozen() is True
 

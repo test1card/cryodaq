@@ -22,6 +22,7 @@ from cryodaq.drivers.base import Reading
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _condition(
     name: str = "test_alarm",
     channel_pattern: str = "sensor/temp",
@@ -71,6 +72,7 @@ async def _publish_and_wait(
 # 1. OK → ACTIVE transition
 # ---------------------------------------------------------------------------
 
+
 async def test_ok_to_active_transition() -> None:
     engine, broker = await _make_engine(_condition(threshold=100.0, comparison=">"))
     try:
@@ -84,6 +86,7 @@ async def test_ok_to_active_transition() -> None:
 # ---------------------------------------------------------------------------
 # 2. ACTIVE → ACKNOWLEDGED
 # ---------------------------------------------------------------------------
+
 
 async def test_active_to_acknowledged() -> None:
     engine, broker = await _make_engine(_condition(threshold=100.0, comparison=">"))
@@ -100,6 +103,7 @@ async def test_active_to_acknowledged() -> None:
 # ---------------------------------------------------------------------------
 # 3. ACTIVE → OK requires clearing hysteresis band
 # ---------------------------------------------------------------------------
+
 
 async def test_active_cleared_with_hysteresis() -> None:
     # threshold=100, hysteresis_k=5 → clears only when value < 95
@@ -125,6 +129,7 @@ async def test_active_cleared_with_hysteresis() -> None:
 # 4. ACKNOWLEDGED → OK when value clears with hysteresis
 # ---------------------------------------------------------------------------
 
+
 async def test_acknowledged_cleared() -> None:
     engine, broker = await _make_engine(
         _condition(threshold=100.0, comparison=">", hysteresis_k=5.0)
@@ -144,6 +149,7 @@ async def test_acknowledged_cleared() -> None:
 # ---------------------------------------------------------------------------
 # 5. Value between threshold and threshold-hysteresis stays ACTIVE
 # ---------------------------------------------------------------------------
+
 
 async def test_no_clear_within_hysteresis() -> None:
     engine, broker = await _make_engine(
@@ -168,14 +174,16 @@ async def test_no_clear_within_hysteresis() -> None:
 # 6. All severity levels work correctly
 # ---------------------------------------------------------------------------
 
+
 async def test_severity_levels() -> None:
     conditions = [
-        _condition(name="info_alarm", threshold=10.0, comparison=">",
-                   severity=AlarmSeverity.INFO),
-        _condition(name="warning_alarm", threshold=20.0, comparison=">",
-                   severity=AlarmSeverity.WARNING),
-        _condition(name="critical_alarm", threshold=30.0, comparison=">",
-                   severity=AlarmSeverity.CRITICAL),
+        _condition(name="info_alarm", threshold=10.0, comparison=">", severity=AlarmSeverity.INFO),
+        _condition(
+            name="warning_alarm", threshold=20.0, comparison=">", severity=AlarmSeverity.WARNING
+        ),
+        _condition(
+            name="critical_alarm", threshold=30.0, comparison=">", severity=AlarmSeverity.CRITICAL
+        ),
     ]
     engine, broker = await _make_engine(*conditions)
     try:
@@ -199,6 +207,7 @@ async def test_severity_levels() -> None:
 # ---------------------------------------------------------------------------
 # 7. Notifier is called on alarm activation
 # ---------------------------------------------------------------------------
+
 
 async def test_notifier_called_on_activate() -> None:
     captured: list[AlarmEvent] = []
@@ -229,6 +238,7 @@ async def test_notifier_called_on_activate() -> None:
 # 8. Notifier is called on alarm clear
 # ---------------------------------------------------------------------------
 
+
 async def test_notifier_called_on_clear() -> None:
     captured: list[AlarmEvent] = []
 
@@ -257,6 +267,7 @@ async def test_notifier_called_on_clear() -> None:
 # 9. Failing notifier doesn't block others
 # ---------------------------------------------------------------------------
 
+
 async def test_notifier_error_isolated() -> None:
     good_calls: list[AlarmEvent] = []
 
@@ -283,6 +294,7 @@ async def test_notifier_error_isolated() -> None:
 # ---------------------------------------------------------------------------
 # 10. Load config from YAML
 # ---------------------------------------------------------------------------
+
 
 async def test_load_config_from_yaml(tmp_path: Path) -> None:
     config = {
@@ -337,6 +349,7 @@ async def test_load_config_from_yaml(tmp_path: Path) -> None:
 # 11. Event history is bounded at 1000 entries
 # ---------------------------------------------------------------------------
 
+
 async def test_event_history_bounded() -> None:
     # Each activate+clear cycle produces 2 events; 600 cycles → 1200 events,
     # but deque(maxlen=1000) caps it at 1000.
@@ -360,6 +373,7 @@ async def test_event_history_bounded() -> None:
 # ---------------------------------------------------------------------------
 # 12. Multiple alarms on same channel, different thresholds
 # ---------------------------------------------------------------------------
+
 
 async def test_multiple_alarms_simultaneous() -> None:
     cond_low = _condition(
@@ -385,7 +399,7 @@ async def test_multiple_alarms_simultaneous() -> None:
         # Value crosses both thresholds
         await _publish_and_wait(broker, "sensor/temp", 120.0)
         state = engine.get_state()
-        assert state["alarm_low"] == AlarmState.ACTIVE   # still ACTIVE (already was)
+        assert state["alarm_low"] == AlarmState.ACTIVE  # still ACTIVE (already was)
         assert state["alarm_high"] == AlarmState.ACTIVE
 
         # Value drops well below both thresholds
@@ -400,6 +414,7 @@ async def test_multiple_alarms_simultaneous() -> None:
 # ---------------------------------------------------------------------------
 # 13. Rapid oscillation across threshold produces correct transitions
 # ---------------------------------------------------------------------------
+
 
 async def test_rapid_oscillation() -> None:
     engine, broker = await _make_engine(
@@ -425,6 +440,7 @@ async def test_rapid_oscillation() -> None:
 # ---------------------------------------------------------------------------
 # 14. comparison="<" — alarm when value drops below threshold
 # ---------------------------------------------------------------------------
+
 
 async def test_less_than_comparison() -> None:
     # Alarm fires when value < 10.0, clears when value > 10.0 + hysteresis_k
@@ -460,10 +476,9 @@ async def test_less_than_comparison() -> None:
 # 15. Disabled alarm is never triggered
 # ---------------------------------------------------------------------------
 
+
 async def test_disabled_alarm_ignored() -> None:
-    engine, broker = await _make_engine(
-        _condition(threshold=50.0, comparison=">", enabled=False)
-    )
+    engine, broker = await _make_engine(_condition(threshold=50.0, comparison=">", enabled=False))
     try:
         await _publish_and_wait(broker, "sensor/temp", 200.0)
         assert engine.get_state()["test_alarm"] == AlarmState.OK
@@ -477,6 +492,7 @@ async def test_disabled_alarm_ignored() -> None:
 # ---------------------------------------------------------------------------
 # 16. Acknowledging an alarm not in ACTIVE state is a no-op
 # ---------------------------------------------------------------------------
+
 
 async def test_acknowledge_wrong_state() -> None:
     engine, broker = await _make_engine(_condition(threshold=50.0, comparison=">"))
@@ -500,6 +516,7 @@ async def test_acknowledge_wrong_state() -> None:
 # ---------------------------------------------------------------------------
 # 17. Duplicate alarm name raises ValueError
 # ---------------------------------------------------------------------------
+
 
 async def test_duplicate_alarm_name_rejected() -> None:
     broker = DataBroker()

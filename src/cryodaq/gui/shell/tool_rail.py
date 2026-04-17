@@ -8,6 +8,7 @@ Pixel sizes (rail width, button height) are first-pass guesses; calibrate
 on lab PC. Icons are loaded from src/cryodaq/gui/resources/icons/ as
 Lucide SVGs.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -47,6 +48,7 @@ def _colored_icon(svg_path_str: str, color: str, size: int) -> QIcon:
     renderer.render(painter)
     painter.end()
     return QIcon(pixmap)
+
 
 _RAIL_WIDTH = 50  # [calibrate]
 _BUTTON_SIZE = 40  # [calibrate]
@@ -185,9 +187,7 @@ class ToolRail(QFrame):
         layout.addStretch()
 
         # More menu — bypass tool_clicked signal, open popup directly
-        self._more_btn = ToolRailButton(
-            _MORE_NAME, _ICONS_DIR / _MORE_ICON, "Ещё", self
-        )
+        self._more_btn = ToolRailButton(_MORE_NAME, _ICONS_DIR / _MORE_ICON, "Ещё", self)
         self._more_btn.clicked.connect(self._show_more_menu)
         self._buttons[_MORE_NAME] = self._more_btn
         layout.addWidget(self._more_btn, alignment=Qt.AlignmentFlag.AlignHCenter)

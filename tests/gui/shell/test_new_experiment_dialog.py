@@ -1,4 +1,5 @@
 """Tests for NewExperimentDialog (B.8.0.2 rebuild)."""
+
 from __future__ import annotations
 
 import os
@@ -63,8 +64,7 @@ def test_dialog_template_dropdown_populated(app):
         {"id": "warm", "name": "Warmup V1", "custom_fields": []},
     ]
     dialog = NewExperimentDialog(available_templates=templates)
-    items = [dialog._template_combo.itemText(i)
-             for i in range(dialog._template_combo.count())]
+    items = [dialog._template_combo.itemText(i) for i in range(dialog._template_combo.count())]
     assert "Cooldown V2" in items
     assert "Warmup V1" in items
 
@@ -72,8 +72,11 @@ def test_dialog_template_dropdown_populated(app):
 def test_dialog_template_change_rebuilds_custom_fields(app):
     templates = [
         {"id": "plain", "name": "Plain", "custom_fields": []},
-        {"id": "with", "name": "WithCustom",
-         "custom_fields": [{"id": "goal", "label": "Цель", "default": "test"}]},
+        {
+            "id": "with",
+            "name": "WithCustom",
+            "custom_fields": [{"id": "goal", "label": "Цель", "default": "test"}],
+        },
     ]
     dialog = NewExperimentDialog(available_templates=templates)
     # Select "WithCustom" (index 2: first is "без шаблона", then "Plain", then "WithCustom")

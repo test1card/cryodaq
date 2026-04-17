@@ -13,6 +13,7 @@ Drain pending Qt events at the end of every shell test so any pending
 singleShot fires *during* the shell test (with the harmless no-op stub
 applied here), not during the next test.
 """
+
 from __future__ import annotations
 
 import pytest

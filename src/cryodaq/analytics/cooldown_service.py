@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Cooldown detector: state machine for cycle detection
 # ============================================================================
 
+
 class CooldownPhase(Enum):
     """Фаза цикла охлаждения."""
 
@@ -118,7 +119,8 @@ class CooldownDetector:
                     self._confirm_start_ts = None
                     logger.info(
                         "Обнаружено начало охлаждения: dT/dt=%.1f K/ч, T_cold=%.1f K",
-                        dT_dt, T_cold,
+                        dT_dt,
+                        T_cold,
                     )
             else:
                 self._confirm_start_ts = None
@@ -128,7 +130,8 @@ class CooldownDetector:
                 self._phase = CooldownPhase.STABILIZING
                 logger.info(
                     "Охлаждение -> стабилизация: T_cold=%.2f K < %.1f K",
-                    T_cold, self._end_T_thr,
+                    T_cold,
+                    self._end_T_thr,
                 )
 
         elif self._phase == CooldownPhase.STABILIZING:
@@ -140,7 +143,8 @@ class CooldownDetector:
                     self._confirm_end_ts = None
                     logger.info(
                         "Охлаждение завершено: T_cold=%.2f K, |dT/dt|=%.3f K/ч",
-                        T_cold, abs(dT_dt) if dT_dt else 0.0,
+                        T_cold,
+                        abs(dT_dt) if dT_dt else 0.0,
                     )
             else:
                 self._confirm_end_ts = None
@@ -164,6 +168,7 @@ class CooldownDetector:
 # ============================================================================
 # CooldownService: asyncio integration with DataBroker
 # ============================================================================
+
 
 class CooldownService:
     """Асинхронный сервис прогнозирования охлаждения.
@@ -259,10 +264,12 @@ class CooldownService:
 
         self._running = True
         self._consume_task = asyncio.create_task(
-            self._consume_loop(), name="cooldown_consume",
+            self._consume_loop(),
+            name="cooldown_consume",
         )
         self._predict_task = asyncio.create_task(
-            self._predict_loop(), name="cooldown_predict",
+            self._predict_loop(),
+            name="cooldown_predict",
         )
         logger.info("CooldownService запущен")
 
@@ -289,7 +296,8 @@ class CooldownService:
             while self._running:
                 try:
                     reading: Reading = await asyncio.wait_for(
-                        self._queue.get(), timeout=5.0,
+                        self._queue.get(),
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     continue
@@ -363,7 +371,10 @@ class CooldownService:
             Tc = buf_arr[:, 1]
             Tw = buf_arr[:, 2]
             rate_cold, rate_warm = compute_rate_from_history(
-                t_h, Tc, Tw, window_h=self._rate_window_h,
+                t_h,
+                Tc,
+                Tw,
+                window_h=self._rate_window_h,
             )
 
         # Run predict in executor (scipy is CPU-heavy)
@@ -403,7 +414,7 @@ class CooldownService:
             metadata["future_T_cold_lower"] = pred.future_T_cold_lower.tolist()
 
         # Publish DerivedMetric
-        metric = DerivedMetric.now(
+        DerivedMetric.now(
             plugin_id="cooldown_predictor",
             metric="cooldown_eta",
             value=pred.t_remaining_hours,
@@ -443,14 +454,17 @@ class CooldownService:
         duration_h = float(t_hours[-1])
         logger.info(
             "Цикл охлаждения завершён: %.1f ч, T_cold_final=%.2f K, %d точек",
-            duration_h, float(T_cold[-1]), len(t_hours),
+            duration_h,
+            float(T_cold[-1]),
+            len(t_hours),
         )
 
         if self._auto_ingest and self._model is not None:
             if duration_h < self._min_cooldown_hours:
                 logger.warning(
                     "Цикл слишком короткий для ingest: %.1f ч < %.1f ч",
-                    duration_h, self._min_cooldown_hours,
+                    duration_h,
+                    self._min_cooldown_hours,
                 )
             else:
                 loop = asyncio.get_running_loop()
@@ -459,7 +473,9 @@ class CooldownService:
                         None,
                         lambda: ingest_from_raw_arrays(
                             self._model_dir,
-                            t_hours, T_cold, T_warm,
+                            t_hours,
+                            T_cold,
+                            T_warm,
                         ),
                     )
                     if ok and new_model is not None:

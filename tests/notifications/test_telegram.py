@@ -17,6 +17,7 @@ from cryodaq.notifications.telegram import TelegramNotifier
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _event(
     event_type: str = "activated",
     severity: AlarmSeverity = AlarmSeverity.WARNING,
@@ -50,6 +51,7 @@ def _notifier(**kwargs) -> TelegramNotifier:
 # 1. _format_message for "activated" event contains emoji and ТРЕВОГА header
 # ---------------------------------------------------------------------------
 
+
 def test_format_message_activated() -> None:
     notifier = _notifier()
     event = _event(
@@ -77,6 +79,7 @@ def test_format_message_activated() -> None:
 # 2. _format_message for "cleared" event contains "Тревога снята"
 # ---------------------------------------------------------------------------
 
+
 def test_format_message_cleared() -> None:
     notifier = _notifier()
     event = _event(
@@ -99,6 +102,7 @@ def test_format_message_cleared() -> None:
 # 3. __call__ with "acknowledged" event returns early — no HTTP call
 # ---------------------------------------------------------------------------
 
+
 async def test_acknowledged_skipped() -> None:
     notifier = _notifier()
     event = _event(event_type="acknowledged")
@@ -115,6 +119,7 @@ async def test_acknowledged_skipped() -> None:
 # 4. send_cleared=False skips cleared events — no HTTP call
 # ---------------------------------------------------------------------------
 
+
 async def test_send_cleared_disabled() -> None:
     notifier = _notifier(send_cleared=False)
     event = _event(event_type="cleared")
@@ -129,6 +134,7 @@ async def test_send_cleared_disabled() -> None:
 # ---------------------------------------------------------------------------
 # 5. from_config loads bot_token and chat_id from YAML
 # ---------------------------------------------------------------------------
+
 
 def test_from_config(tmp_path: Path) -> None:
     config_path = tmp_path / "notifications.yaml"
@@ -158,6 +164,7 @@ def test_from_config(tmp_path: Path) -> None:
 # Additional: activated event does invoke _send
 # ---------------------------------------------------------------------------
 
+
 async def test_activated_calls_send() -> None:
     notifier = _notifier()
     event = _event(event_type="activated")
@@ -176,6 +183,7 @@ async def test_activated_calls_send() -> None:
 # Additional: from_config raises FileNotFoundError for missing file
 # ---------------------------------------------------------------------------
 
+
 def test_from_config_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         TelegramNotifier.from_config(tmp_path / "does_not_exist.yaml")
@@ -184,6 +192,7 @@ def test_from_config_missing_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Additional: _format_message includes time string in expected format
 # ---------------------------------------------------------------------------
+
 
 def test_format_message_time_format() -> None:
     notifier = _notifier()
@@ -200,6 +209,7 @@ def test_format_message_time_format() -> None:
 # ===========================================================================
 # TelegramCommandBot v2 tests
 # ===========================================================================
+
 
 def _make_bot(**kwargs):
     """Создать TelegramCommandBot с заглушками."""
@@ -218,7 +228,8 @@ def _make_bot(**kwargs):
     # caller overrides it.
     kwargs.setdefault("allowed_chat_ids", [1234])
     bot = TelegramCommandBot(
-        broker, alarm_engine,
+        broker,
+        alarm_engine,
         bot_token="fake:TOKEN",
         **kwargs,
     )
@@ -271,9 +282,7 @@ async def test_cmd_phase_advances() -> None:
     handler.assert_called_once()
     cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "experiment_advance_phase"
-    assert cmd["phase"] == "cooldown", (
-        "legacy 'cooling' must canonicalise to enum value 'cooldown'"
-    )
+    assert cmd["phase"] == "cooldown", "legacy 'cooling' must canonicalise to enum value 'cooldown'"
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -287,6 +296,7 @@ async def test_cmd_phase_invalid_returns_error() -> None:
 # ===========================================================================
 # EscalationService tests
 # ===========================================================================
+
 
 async def test_escalation_chain_sends() -> None:
     from cryodaq.notifications.escalation import EscalationService

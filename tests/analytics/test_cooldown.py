@@ -15,7 +15,7 @@ from plugins.cooldown_estimator import CooldownEstimator
 # ---------------------------------------------------------------------------
 
 TARGET_CH = "lakeshore/ch1"
-TARGET_T = 10.0   # K — target temperature used in most tests
+TARGET_T = 10.0  # K — target temperature used in most tests
 
 
 def _configured_plugin(
@@ -168,7 +168,7 @@ async def test_target_already_reached():
     readings = [
         _make_reading(
             TARGET_CH,
-            target_T - i * 2.0,   # starts at target_T, goes below
+            target_T - i * 2.0,  # starts at target_T, goes below
             datetime.fromtimestamp(t_now - 280 + i * 10, tz=UTC),
         )
         for i in range(15)

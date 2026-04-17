@@ -17,6 +17,7 @@ from cryodaq.storage.sqlite_writer import SQLiteWriter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _reading(
     channel: str = "CH1",
     value: float = 4.5,
@@ -53,6 +54,7 @@ def _fixed_ts(hour: int, minute: int = 0, second: int = 0) -> datetime:
 # 1. replay publishes all readings to broker
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_publishes_readings(tmp_path: Path) -> None:
     readings = [
         _reading("CH1", 4.1, ts=_fixed_ts(10, 0, 0)),
@@ -82,13 +84,14 @@ async def test_replay_publishes_readings(tmp_path: Path) -> None:
 # 2. speed=0 replays without sleeping (completes essentially instantly)
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_speed_zero(tmp_path: Path) -> None:
     import time
 
     # Use timestamps far apart — if speed > 0 this would take a long time
     readings = [
         _reading("CH1", ts=_fixed_ts(0, 0, 0)),
-        _reading("CH2", ts=_fixed_ts(6, 0, 0)),   # 6 hours later
+        _reading("CH2", ts=_fixed_ts(6, 0, 0)),  # 6 hours later
         _reading("CH3", ts=_fixed_ts(12, 0, 0)),  # 12 hours later
     ]
     db_path = _make_db(tmp_path, readings)
@@ -110,13 +113,12 @@ async def test_replay_speed_zero(tmp_path: Path) -> None:
 # 3. Replayed count matches the number of rows written to the DB
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_count(tmp_path: Path) -> None:
     n = 20
-    ts_base = _fixed_ts(10)
+    _fixed_ts(10)
     readings = [
-        _reading(f"CH{i % 8 + 1}", float(i), ts=datetime(
-            2026, 3, 14, 10, 0, i, tzinfo=UTC
-        ))
+        _reading(f"CH{i % 8 + 1}", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC))
         for i in range(n)
     ]
     db_path = _make_db(tmp_path, readings)
@@ -135,6 +137,7 @@ async def test_replay_count(tmp_path: Path) -> None:
 # 4. FileNotFoundError on nonexistent file
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_missing_file(tmp_path: Path) -> None:
     broker = DataBroker()
     replay = ReplaySource(broker, speed=0.0)
@@ -147,16 +150,14 @@ async def test_replay_missing_file(tmp_path: Path) -> None:
 # 5. stop() mid-replay halts publishing
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_stop(tmp_path: Path) -> None:
     # Use a small number of readings and a non-zero speed so the loop contains
     # real asyncio.sleep() calls — giving stop() a guaranteed opportunity to run.
     # Timestamps are 1 second apart; speed=100 means each sleep is 10 ms.
     n = 10
     readings = [
-        _reading("CH1", float(i), ts=datetime(
-            2026, 3, 14, 10, 0, i, tzinfo=UTC
-        ))
-        for i in range(n)
+        _reading("CH1", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)
     ]
     db_path = _make_db(tmp_path, readings)
 

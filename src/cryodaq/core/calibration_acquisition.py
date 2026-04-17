@@ -39,9 +39,7 @@ class CalibrationAcquisitionService:
         try:
             return self._channel_manager.resolve_channel_reference(reference)
         except ChannelConfigError as e:
-            raise CalibrationCommandError(
-                f"cannot resolve channel reference: {e}"
-            ) from e
+            raise CalibrationCommandError(f"cannot resolve channel reference: {e}") from e
 
     def activate(self, reference_channel: str, target_channels: list[str]) -> None:
         """Start recording SRDG for *target_channels*."""
@@ -147,7 +145,9 @@ class CalibrationAcquisitionService:
         return (to_write, pending if pending else None)
 
     def on_srdg_persisted(
-        self, count: int, pending_state: dict[str, float] | None = None,
+        self,
+        count: int,
+        pending_state: dict[str, float] | None = None,
     ) -> None:
         """Update counter and apply pending state after successful persistence."""
         self._point_count += count

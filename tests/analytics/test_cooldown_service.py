@@ -31,6 +31,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 # Test configuration helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_config(tmp_path: Path, **overrides) -> dict:
     """Return a minimal CooldownService config suitable for fast unit tests."""
     cfg = {
@@ -39,14 +40,14 @@ def _make_config(tmp_path: Path, **overrides) -> dict:
         "model_dir": str(tmp_path / "model"),
         "detect": {
             "start_rate_threshold": -5.0,
-            "start_confirm_minutes": 0.01,   # ~0.6 s — very short for tests
+            "start_confirm_minutes": 0.01,  # ~0.6 s — very short for tests
             "end_T_cold_threshold": 6.0,
             "end_rate_threshold": 0.1,
             "end_confirm_minutes": 0.01,
         },
         "predict_interval_s": 0.1,
-        "rate_window_h": 0.01,              # tiny window so tests converge fast
-        "auto_ingest": False,               # don't touch disk in most tests
+        "rate_window_h": 0.01,  # tiny window so tests converge fast
+        "auto_ingest": False,  # don't touch disk in most tests
         "min_cooldown_hours": 0.001,
     }
     cfg.update(overrides)
@@ -119,6 +120,7 @@ def _stable_readings(
 # ---------------------------------------------------------------------------
 # Fixture: a small pre-built model on disk (uses synthetic_curves fixture)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 async def model_in_tmp(tmp_path: Path, synthetic_curves: list[dict]) -> Path:
@@ -205,13 +207,18 @@ async def test_cooldown_detection_start(tmp_path: Path):
     from cryodaq.analytics.cooldown_service import CooldownService
 
     broker = DataBroker()
-    cfg = _make_config(tmp_path, **{"detect": {
-        "start_rate_threshold": -5.0,
-        "start_confirm_minutes": 0.005,   # ~0.3 s
-        "end_T_cold_threshold": 6.0,
-        "end_rate_threshold": 0.1,
-        "end_confirm_minutes": 0.01,
-    }})
+    cfg = _make_config(
+        tmp_path,
+        **{
+            "detect": {
+                "start_rate_threshold": -5.0,
+                "start_confirm_minutes": 0.005,  # ~0.3 s
+                "end_T_cold_threshold": 6.0,
+                "end_rate_threshold": 0.1,
+                "end_confirm_minutes": 0.01,
+            }
+        },
+    )
     service = CooldownService(broker, cfg, Path(cfg["model_dir"]))
     await service.start()
 
@@ -283,17 +290,20 @@ async def test_predict_publishes_derived_metric(
     from cryodaq.analytics.cooldown_service import CooldownService
 
     broker = DataBroker()
-    cfg = _make_config(tmp_path, **{
-        "model_dir": str(model_in_tmp),
-        "predict_interval_s": 0.05,  # predict very frequently in test
-        "detect": {
-            "start_rate_threshold": -5.0,
-            "start_confirm_minutes": 0.005,
-            "end_T_cold_threshold": 6.0,
-            "end_rate_threshold": 0.1,
-            "end_confirm_minutes": 0.01,
+    cfg = _make_config(
+        tmp_path,
+        **{
+            "model_dir": str(model_in_tmp),
+            "predict_interval_s": 0.05,  # predict very frequently in test
+            "detect": {
+                "start_rate_threshold": -5.0,
+                "start_confirm_minutes": 0.005,
+                "end_T_cold_threshold": 6.0,
+                "end_rate_threshold": 0.1,
+                "end_confirm_minutes": 0.01,
+            },
         },
-    })
+    )
 
     # Subscribe to analytics channel BEFORE starting the service
     results_queue = await broker.subscribe(
@@ -320,9 +330,7 @@ async def test_predict_publishes_derived_metric(
         try:
             metric_reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
         except TimeoutError:
-            pytest.fail(
-                "No analytics/cooldown_predictor reading appeared in broker within 2s"
-            )
+            pytest.fail("No analytics/cooldown_predictor reading appeared in broker within 2s")
 
         # Validate the published reading
         assert "cooldown_predictor" in metric_reading.channel
@@ -339,9 +347,7 @@ async def test_predict_publishes_derived_metric(
 # ---------------------------------------------------------------------------
 
 
-async def test_predict_metadata_contains_trajectory(
-    tmp_path: Path, model_in_tmp: Path
-):
+async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp: Path):
     """The DerivedMetric metadata from a prediction must contain trajectory arrays.
 
     GUI needs future_t, future_T_cold_mean etc. for rendering the prediction
@@ -350,17 +356,20 @@ async def test_predict_metadata_contains_trajectory(
     from cryodaq.analytics.cooldown_service import CooldownService
 
     broker = DataBroker()
-    cfg = _make_config(tmp_path, **{
-        "model_dir": str(model_in_tmp),
-        "predict_interval_s": 0.05,
-        "detect": {
-            "start_rate_threshold": -5.0,
-            "start_confirm_minutes": 0.005,
-            "end_T_cold_threshold": 6.0,
-            "end_rate_threshold": 0.1,
-            "end_confirm_minutes": 0.01,
+    cfg = _make_config(
+        tmp_path,
+        **{
+            "model_dir": str(model_in_tmp),
+            "predict_interval_s": 0.05,
+            "detect": {
+                "start_rate_threshold": -5.0,
+                "start_confirm_minutes": 0.005,
+                "end_T_cold_threshold": 6.0,
+                "end_rate_threshold": 0.1,
+                "end_confirm_minutes": 0.01,
+            },
         },
-    })
+    )
 
     results_queue = await broker.subscribe(
         "test_meta",
@@ -421,17 +430,20 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
     from cryodaq.analytics.cooldown_service import CooldownService
 
     broker = DataBroker()
-    cfg = _make_config(tmp_path, **{
-        "model_dir": str(tmp_path / "no_model"),
-        "predict_interval_s": 0.05,
-        "detect": {
-            "start_rate_threshold": -5.0,
-            "start_confirm_minutes": 0.005,
-            "end_T_cold_threshold": 6.0,
-            "end_rate_threshold": 0.1,
-            "end_confirm_minutes": 0.01,
+    cfg = _make_config(
+        tmp_path,
+        **{
+            "model_dir": str(tmp_path / "no_model"),
+            "predict_interval_s": 0.05,
+            "detect": {
+                "start_rate_threshold": -5.0,
+                "start_confirm_minutes": 0.005,
+                "end_T_cold_threshold": 6.0,
+                "end_rate_threshold": 0.1,
+                "end_confirm_minutes": 0.01,
+            },
         },
-    })
+    )
 
     results_queue = await broker.subscribe(
         "test_no_pred",
@@ -450,9 +462,7 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
         await asyncio.sleep(0.3)
 
         # Queue must be empty — no predictions without a model
-        assert results_queue.empty(), (
-            "Service emitted predictions despite no model on disk"
-        )
+        assert results_queue.empty(), "Service emitted predictions despite no model on disk"
     finally:
         await service.stop()
         await broker.unsubscribe("test_no_pred")

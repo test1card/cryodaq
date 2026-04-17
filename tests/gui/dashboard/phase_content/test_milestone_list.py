@@ -1,4 +1,5 @@
 """Tests for MilestoneList widget (B.5.5)."""
+
 from __future__ import annotations
 
 import os
@@ -16,10 +17,12 @@ def test_milestone_list_shows_empty_state(app):
 
 def test_milestone_list_renders_completed_phases(app):
     w = MilestoneList()
-    w.set_milestones([
-        {"phase": "preparation", "duration_s": 3600},
-        {"phase": "vacuum", "duration_s": 7200},
-    ])
+    w.set_milestones(
+        [
+            {"phase": "preparation", "duration_s": 3600},
+            {"phase": "vacuum", "duration_s": 7200},
+        ]
+    )
     assert w._empty_label.isHidden()
     assert len(w._row_labels) == 2
 

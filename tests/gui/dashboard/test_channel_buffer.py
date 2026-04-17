@@ -1,4 +1,5 @@
 """Tests for ChannelBufferStore (Phase UI-1 v2 Block B.2)."""
+
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 
 

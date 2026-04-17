@@ -27,12 +27,13 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.broker import DataBroker
+from cryodaq.drivers.base import Reading
+
 
 class InterlockConfigError(RuntimeError):
     """Raised when interlocks.yaml cannot be loaded in a fail-closed manner."""
 
-from cryodaq.core.broker import DataBroker
-from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,8 @@ _SUBSCRIPTION_NAME = "interlock_engine"
 class InterlockState(Enum):
     """Состояние блокировки."""
 
-    ARMED = "armed"          # Активна, ожидает срабатывания
-    TRIPPED = "tripped"      # Сработала — действие выполнено, ожидает подтверждения
+    ARMED = "armed"  # Активна, ожидает срабатывания
+    TRIPPED = "tripped"  # Сработала — действие выполнено, ожидает подтверждения
     ACKNOWLEDGED = "acknowledged"  # Подтверждена оператором, возврат в ARMED
 
 
@@ -238,8 +239,7 @@ class InterlockEngine:
 
         if not isinstance(raw, dict):
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: expected mapping, "
-                f"got {type(raw).__name__}"
+                f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
             )
 
         entries = raw.get("interlocks", [])
@@ -290,9 +290,7 @@ class InterlockEngine:
             действие не найдено в словаре actions.
         """
         if condition.name in self._interlocks:
-            raise ValueError(
-                f"Блокировка '{condition.name}' уже зарегистрирована."
-            )
+            raise ValueError(f"Блокировка '{condition.name}' уже зарегистрирована.")
         if condition.action not in self._actions:
             raise ValueError(
                 f"Блокировка '{condition.name}': неизвестное действие "
@@ -329,9 +327,7 @@ class InterlockEngine:
             _SUBSCRIPTION_NAME,
             maxsize=10_000,
         )
-        self._task = asyncio.create_task(
-            self._check_loop(), name="interlock_check_loop"
-        )
+        self._task = asyncio.create_task(self._check_loop(), name="interlock_check_loop")
         logger.info(
             "InterlockEngine запущен. Активных блокировок: %d.",
             len(self._interlocks),
@@ -482,7 +478,9 @@ class InterlockEngine:
             except Exception as exc:
                 logger.critical(
                     "trip_handler failed for interlock '%s': %s",
-                    condition.name, exc, exc_info=True,
+                    condition.name,
+                    exc,
+                    exc_info=True,
                 )
 
     # ------------------------------------------------------------------

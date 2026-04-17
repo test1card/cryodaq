@@ -1,4 +1,5 @@
 """Tests for QuickLogBlock (B.7)."""
+
 from __future__ import annotations
 
 import os
@@ -34,9 +35,11 @@ def test_empty_state_shown_when_no_entries(app):
 
 def test_single_entry_shown(app):
     w = QuickLogBlock()
-    w.set_entries([
-        {"timestamp": "2026-04-15T17:00:00", "message": "Test entry one"},
-    ])
+    w.set_entries(
+        [
+            {"timestamp": "2026-04-15T17:00:00", "message": "Test entry one"},
+        ]
+    )
     labels = w.findChildren(QLabel)
     texts = [lbl.text() for lbl in labels]
     assert any("Test entry one" in t for t in texts)
@@ -45,8 +48,7 @@ def test_single_entry_shown(app):
 def test_max_2_entries_visible(app):
     w = QuickLogBlock()
     entries = [
-        {"timestamp": f"2026-04-15T17:{i:02d}:00", "message": f"Entry {i}"}
-        for i in range(20)
+        {"timestamp": f"2026-04-15T17:{i:02d}:00", "message": f"Entry {i}"} for i in range(20)
     ]
     w.set_entries(entries)
     labels = w.findChildren(QLabel)
@@ -58,9 +60,13 @@ def test_submit_emits_signal(app):
     w = QuickLogBlock()
     received = []
     w.entry_submitted.connect(lambda msg: received.append(msg))
-    w._input.setText("\u0422\u0435\u0441\u0442\u043e\u0432\u0430\u044f \u0437\u0430\u043c\u0435\u0442\u043a\u0430")
+    w._input.setText(
+        "\u0422\u0435\u0441\u0442\u043e\u0432\u0430\u044f \u0437\u0430\u043c\u0435\u0442\u043a\u0430"  # noqa: E501
+    )
     w._on_submit()
-    assert received == ["\u0422\u0435\u0441\u0442\u043e\u0432\u0430\u044f \u0437\u0430\u043c\u0435\u0442\u043a\u0430"]
+    assert received == [
+        "\u0422\u0435\u0441\u0442\u043e\u0432\u0430\u044f \u0437\u0430\u043c\u0435\u0442\u043a\u0430"  # noqa: E501
+    ]
     assert w._input.text() == ""  # cleared after submit
 
 

@@ -1,4 +1,5 @@
 """Smoke tests for TopWatchBar (Phase UI-1 v2 Block A)."""
+
 from __future__ import annotations
 
 import os
@@ -83,7 +84,10 @@ def test_mode_badge_shows_experiment() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
     assert not bar._mode_badge.isHidden()
-    assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+    assert (
+        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
+        in bar._mode_badge.text()
+    )
 
 
 def test_mode_badge_shows_debug() -> None:
@@ -127,17 +131,26 @@ def test_mode_badge_updates_when_experiment_active() -> None:
     }
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
-    assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+    assert (
+        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
+        in bar._mode_badge.text()
+    )
 
 
 def test_mode_badge_updates_on_change() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
-    assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+    assert (
+        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
+        in bar._mode_badge.text()
+    )
     bar._update_mode_badge("debug")
     assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
     bar._update_mode_badge("experiment")
-    assert "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422" in bar._mode_badge.text()
+    assert (
+        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
+        in bar._mode_badge.text()
+    )
 
 
 # --- B.6.2 Clickable badge tests ---

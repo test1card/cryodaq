@@ -107,7 +107,8 @@ class Keithley2604B(InstrumentDriver):
                 except Exception as exc:
                     log.critical(
                         "%s: SAFETY: failed to force output off on connect: %s",
-                        self.name, exc,
+                        self.name,
+                        exc,
                     )
         except Exception:
             await self._transport.close()
@@ -145,7 +146,9 @@ class Keithley2604B(InstrumentDriver):
 
                     if not output_on:
                         readings.extend(
-                            self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0)
+                            self._build_channel_readings(
+                                smu_channel, 0.0, 0.0, resistance_override=0.0
+                            )
                         )
                         continue
 
@@ -167,9 +170,10 @@ class Keithley2604B(InstrumentDriver):
                 if in_compliance:
                     self._compliance_count[smu_channel] += 1
                     log.warning(
-                        "%s: %s in compliance — P=const regulation ineffective "
-                        "(consecutive=%d)",
-                        self.name, smu_channel, self._compliance_count[smu_channel],
+                        "%s: %s in compliance — P=const regulation ineffective (consecutive=%d)",
+                        self.name,
+                        smu_channel,
+                        self._compliance_count[smu_channel],
                     )
                     extra_meta["compliance"] = True
                     # Do NOT adjust voltage — the SMU is already at its limit.
@@ -187,18 +191,23 @@ class Keithley2604B(InstrumentDriver):
                             current_v = self._last_v[smu_channel]
                             delta_v = target_v - current_v
                             if abs(delta_v) > MAX_DELTA_V_PER_STEP:
-                                delta_v = MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
+                                delta_v = (
+                                    MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
+                                )
                                 target_v = current_v + delta_v
                                 log.debug(
                                     "Slew rate limited: delta=%.3f V, target=%.3f V",
-                                    delta_v, target_v,
+                                    delta_v,
+                                    target_v,
                                 )
 
                             await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
                             self._last_v[smu_channel] = target_v
 
                 readings.extend(
-                    self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta)
+                    self._build_channel_readings(
+                        smu_channel, voltage, current, extra_meta=extra_meta
+                    )
                 )
             except OSError as exc:
                 # Transport-level error (USB disconnect, pipe broken) —
@@ -240,7 +249,9 @@ class Keithley2604B(InstrumentDriver):
         await self._transport.write(f"{smu_channel}.reset()")
         await self._transport.write(f"{smu_channel}.source.func = {smu_channel}.OUTPUT_DCVOLTS")
         await self._transport.write(f"{smu_channel}.source.autorangev = {smu_channel}.AUTORANGE_ON")
-        await self._transport.write(f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON")
+        await self._transport.write(
+            f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON"
+        )
         await self._transport.write(f"{smu_channel}.source.limitv = {v_compliance}")
         await self._transport.write(f"{smu_channel}.source.limiti = {i_compliance}")
         await self._transport.write(f"{smu_channel}.source.levelv = 0")
@@ -279,7 +290,7 @@ class Keithley2604B(InstrumentDriver):
 
         end_idx = start_idx + count - 1
         raw = await self._transport.query(
-            f"printbuffer({start_idx}, {end_idx}, smua.nvbuffer1.timestamps, smua.nvbuffer1.sourcevalues, smua.nvbuffer1)",
+            f"printbuffer({start_idx}, {end_idx}, smua.nvbuffer1.timestamps, smua.nvbuffer1.sourcevalues, smua.nvbuffer1)",  # noqa: E501
             timeout_ms=10_000,
         )
         return self._parse_buffer_response(raw)
@@ -299,7 +310,9 @@ class Keithley2604B(InstrumentDriver):
         for smu_channel in channels:
             try:
                 await self._transport.write(f"{smu_channel}.source.levelv = 0")
-                await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
+                await self._transport.write(
+                    f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF"
+                )
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
             # SAFETY (Phase 2a Codex G.1): readback-verify each channel.
@@ -312,9 +325,10 @@ class Keithley2604B(InstrumentDriver):
                 await self._verify_output_off(smu_channel)
             except Exception as exc:
                 log.critical(
-                    "%s: emergency_off verify FAILED on %s: %s — "
-                    "instrument may still be sourcing!",
-                    self.name, smu_channel, exc,
+                    "%s: emergency_off verify FAILED on %s: %s — instrument may still be sourcing!",
+                    self.name,
+                    smu_channel,
+                    exc,
                 )
 
     async def check_error(self) -> str | None:
@@ -357,12 +371,18 @@ class Keithley2604B(InstrumentDriver):
         if self.mock or not self._connected:
             return
         smu_channel = normalize_smu_channel(channel)
-        response = await self._transport.query(f"print({smu_channel}.source.output)", timeout_ms=3000)
+        response = await self._transport.query(
+            f"print({smu_channel}.source.output)", timeout_ms=3000
+        )
         try:
             if float(response.strip()) > 0.5:
-                log.critical("%s: %s still reports output=%s", self.name, smu_channel, response.strip())
+                log.critical(
+                    "%s: %s still reports output=%s", self.name, smu_channel, response.strip()
+                )
         except ValueError:
-            log.critical("%s: %s unexpected output response: %r", self.name, smu_channel, response.strip())
+            log.critical(
+                "%s: %s unexpected output response: %r", self.name, smu_channel, response.strip()
+            )
 
     def _parse_iv_response(self, raw: str, channel: SmuChannel) -> tuple[float, float]:
         parts = raw.strip().split("\t")
@@ -379,8 +399,10 @@ class Keithley2604B(InstrumentDriver):
         resistance_override: float | None = None,
         extra_meta: dict[str, Any] | None = None,
     ) -> list[Reading]:
-        resistance = resistance_override if resistance_override is not None else (
-            voltage / current if current != 0.0 else float("nan")
+        resistance = (
+            resistance_override
+            if resistance_override is not None
+            else (voltage / current if current != 0.0 else float("nan"))
         )
         power = voltage * current
         metadata: dict[str, Any] = {"resource_str": self._resource_str, "smu_channel": channel}
@@ -410,7 +432,9 @@ class Keithley2604B(InstrumentDriver):
                 value=resistance,
                 unit="Ohm",
                 instrument_id=self.name,
-                status=ChannelStatus.OK if math.isfinite(resistance) else ChannelStatus.SENSOR_ERROR,
+                status=ChannelStatus.OK
+                if math.isfinite(resistance)
+                else ChannelStatus.SENSOR_ERROR,
                 raw=resistance if math.isfinite(resistance) else None,
                 metadata=metadata,
             ),
@@ -481,7 +505,11 @@ class Keithley2604B(InstrumentDriver):
         results: list[dict[str, float]] = []
         resistance = self._mock_r_of_t()
         runtime = self._channels["smua"]
-        voltage = math.sqrt(runtime.p_target * resistance) if runtime.active and runtime.p_target > 0.0 else 0.0
+        voltage = (
+            math.sqrt(runtime.p_target * resistance)
+            if runtime.active and runtime.p_target > 0.0
+            else 0.0
+        )
         current = voltage / resistance if resistance > 0.0 else 0.0
         for idx in range(count):
             results.append(

@@ -1,4 +1,5 @@
 """Verify GPIB/USBTMC transports use dedicated executors (Phase 2b F.2 + F.1)."""
+
 from __future__ import annotations
 
 import inspect
@@ -9,10 +10,9 @@ from unittest.mock import patch
 
 def test_gpib_transport_no_default_executor():
     from cryodaq.drivers.transport.gpib import GPIBTransport
+
     src = inspect.getsource(GPIBTransport)
-    assert "ThreadPoolExecutor" in src, (
-        "GPIBTransport must use a dedicated ThreadPoolExecutor"
-    )
+    assert "ThreadPoolExecutor" in src, "GPIBTransport must use a dedicated ThreadPoolExecutor"
     assert "run_in_executor(None" not in src, (
         "GPIBTransport must NOT use the default executor for VISA calls"
     )
@@ -21,6 +21,7 @@ def test_gpib_transport_no_default_executor():
 
 def test_usbtmc_transport_no_default_executor():
     from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
     src = inspect.getsource(USBTMCTransport)
     assert "ThreadPoolExecutor" in src
     assert "run_in_executor(None" not in src
@@ -53,12 +54,14 @@ def test_usbtmc_get_executor_creates_single_worker_pool():
 def test_gpib_close_shuts_down_executor():
     """The class source must call _executor.shutdown in the close path."""
     from cryodaq.drivers.transport import gpib
+
     src = inspect.getsource(gpib)
     assert "self._executor.shutdown" in src or "_executor.shutdown" in src
 
 
 def test_usbtmc_close_shuts_down_executor():
     from cryodaq.drivers.transport import usbtmc
+
     src = inspect.getsource(usbtmc)
     assert "self._executor.shutdown" in src or "_executor.shutdown" in src
 
@@ -66,6 +69,7 @@ def test_usbtmc_close_shuts_down_executor():
 def test_gpib_resource_manager_lock_exists():
     """Phase 2b F.1: _get_rm must be guarded by a class-level lock."""
     from cryodaq.drivers.transport.gpib import GPIBTransport
+
     assert hasattr(GPIBTransport, "_rm_lock")
     assert isinstance(GPIBTransport._rm_lock, type(threading.Lock()))
 
@@ -81,6 +85,7 @@ def test_concurrent_get_rm_creates_single_manager():
 
     def fake_rm():
         import time
+
         time.sleep(0.01)  # widen the TOCTOU window
         marker = object()
         with create_lock:
@@ -108,9 +113,7 @@ def test_concurrent_get_rm_creates_single_manager():
             t.join()
 
     assert errors == [], f"Worker thread errors: {errors}"
-    assert len(created) == 1, (
-        f"Expected exactly 1 RM creation, got {len(created)} — TOCTOU race"
-    )
+    assert len(created) == 1, f"Expected exactly 1 RM creation, got {len(created)} — TOCTOU race"
     assert len(results) == 10, f"Some workers did not return: got {len(results)}"
     # All workers must have received the SAME instance.
     first = results[0]
@@ -126,6 +129,7 @@ def test_close_all_managers_holds_rm_lock():
     import inspect
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
+
     src = inspect.getsource(GPIBTransport.close_all_managers)
     assert "_rm_lock" in src, (
         "close_all_managers must hold _rm_lock — otherwise scheduler L3 "

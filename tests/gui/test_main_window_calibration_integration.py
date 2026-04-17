@@ -57,7 +57,9 @@ def _patch_all_sends(monkeypatch) -> None:
     """Patch send_command at the zmq_client level (used by ZmqCommandWorker) and
     at the widget module level (used by blocking calls like refresh_state)."""
     monkeypatch.setattr("cryodaq.gui.zmq_client.send_command", _fake_workspace_send)
-    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send)
+    monkeypatch.setattr(
+        "cryodaq.gui.widgets.experiment_workspace.send_command", _fake_workspace_send
+    )
     monkeypatch.setattr("cryodaq.gui.main_window.TrayController", _TrayStub)
 
 

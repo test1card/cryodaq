@@ -1,4 +1,5 @@
 """Verify SecretStr masks repr/str + telegram modules use it (Phase 2b K.1)."""
+
 from __future__ import annotations
 
 import inspect
@@ -43,6 +44,7 @@ def test_secret_str_bool_and_eq():
 def test_telegram_notifier_no_plain_url_attribute():
     """TelegramNotifier must NOT store a plain-string _api_url containing the token."""
     from cryodaq.notifications import telegram
+
     src = inspect.getsource(telegram)
     if "self._api_url = f" in src:
         pytest.fail(
@@ -54,6 +56,7 @@ def test_telegram_notifier_no_plain_url_attribute():
 def test_telegram_command_bot_no_plain_api_attribute():
     """TelegramCommandBot must compute _api on demand from SecretStr."""
     from cryodaq.notifications import telegram_commands
+
     src = inspect.getsource(telegram_commands)
     # The old `self._api = f"https://..."` constant string is gone.
     assert 'self._api = f"https' not in src, (
@@ -66,6 +69,7 @@ def test_telegram_command_bot_no_plain_api_attribute():
 def test_periodic_report_no_plain_url_attribute():
     """PeriodicReporter must not store the URL with the token as an attr."""
     from cryodaq.notifications import periodic_report
+
     src = inspect.getsource(periodic_report)
     assert "self._api_url = f" not in src
     assert "SecretStr" in src

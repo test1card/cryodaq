@@ -4,6 +4,7 @@ Status: dashboard usage removed in B.5.6 (compact phase strip).
 Reserved for B.10 Analytics overlay where hero treatment fits the
 context (full screen real estate, drill-down view).
 """
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
@@ -94,9 +95,7 @@ class EtaDisplay(QWidget):
             return
         self._value_label.setText(_format_duration_ru(seconds))
         if confidence_seconds is not None:
-            self._confidence_label.setText(
-                f"\u00b1 {_format_duration_ru(confidence_seconds)}"
-            )
+            self._confidence_label.setText(f"\u00b1 {_format_duration_ru(confidence_seconds)}")
             self._confidence_label.setVisible(True)
         else:
             self._confidence_label.setText("")

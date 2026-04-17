@@ -17,9 +17,11 @@ def test_correlation_with_tiny_timestamp_offset() -> None:
     Regression: before fix, float set intersection failed with any offset,
     causing correlation to always return None.
     """
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     rng = np.random.default_rng(42)
     # Push with sub-millisecond offset (simulating slight timing jitter)
     for i in range(200):
@@ -34,9 +36,11 @@ def test_correlation_with_tiny_timestamp_offset() -> None:
 
 def test_correlation_with_identical_timestamps() -> None:
     """Correlation still works with exactly matching timestamps (common case)."""
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     rng = np.random.default_rng(42)
     for i in range(200):
         base = 50.0 + 0.1 * rng.normal()

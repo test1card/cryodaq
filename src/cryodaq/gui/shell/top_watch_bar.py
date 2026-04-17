@@ -6,14 +6,15 @@ active experiment + phase + elapsed, channel summary, and alarm count.
 Pixel sizes (height, padding, zone widths) are first-pass guesses from
 docs/PHASE_UI1_V2_WIREFRAME.md section 3 — calibrate on lab PC later.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
@@ -30,10 +31,10 @@ _HEIGHT_PX = 48  # [calibrate]
 
 def _fmt_elapsed(start_iso: str) -> str:
     try:
-        start = datetime.fromisoformat(start_iso).astimezone(timezone.utc)
+        start = datetime.fromisoformat(start_iso).astimezone(UTC)
     except (TypeError, ValueError):
         return ""
-    delta = datetime.now(timezone.utc) - start
+    delta = datetime.now(UTC) - start
     total = max(0, int(delta.total_seconds()))
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
@@ -67,7 +68,9 @@ class TopWatchBar(QWidget):
     alarms_clicked = Signal()
     experiment_status_received = Signal(dict)  # B.5: forward /status to dashboard
 
-    def __init__(self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setFixedHeight(_HEIGHT_PX)
         self.setObjectName("TopWatchBar")
@@ -190,18 +193,13 @@ class TopWatchBar(QWidget):
         """Set experiment label with elide + tooltip for long names."""
         metrics = self._exp_label.fontMetrics()
         max_w = self._exp_label.maximumWidth()
-        elided = metrics.elidedText(
-            full_text, Qt.TextElideMode.ElideRight, max_w
-        )
+        elided = metrics.elidedText(full_text, Qt.TextElideMode.ElideRight, max_w)
         self._exp_label.setText(elided)
         self._exp_label.setToolTip(full_text)
 
     def _build_persistent_context(self) -> None:
         """Add 4-value persistent context strip to the watch bar."""
-        label_style = (
-            f"color: {theme.TEXT_MUTED}; "
-            f"font-size: 11px;"
-        )
+        label_style = f"color: {theme.TEXT_MUTED}; font-size: 11px;"
         value_style = (
             f"color: {theme.TEXT_PRIMARY}; "
             f"font-size: 12px; "
@@ -212,17 +210,16 @@ class TopWatchBar(QWidget):
         self._context_frame = QFrame(self)
         self._context_frame.setObjectName("topWatchBarContext")
         self._context_frame.setStyleSheet(
-            f"#topWatchBarContext {{ "
-            f"background-color: transparent; "
-            f"padding: 2px 8px; "
-            f"}}"
+            "#topWatchBarContext { background-color: transparent; padding: 2px 8px; }"
         )
         ctx = QHBoxLayout(self._context_frame)
         ctx.setContentsMargins(8, 2, 8, 2)
         ctx.setSpacing(theme.SPACE_3)
 
         # Pressure
-        self._ctx_pressure_label = QLabel("\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435")  # Давление
+        self._ctx_pressure_label = QLabel(
+            "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435"
+        )  # Давление
         self._ctx_pressure_label.setStyleSheet(label_style)
         self._ctx_pressure_value = QLabel("\u2014")
         self._ctx_pressure_value.setStyleSheet(value_style)
@@ -252,7 +249,9 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._make_ctx_dot())
 
         # Heater
-        self._ctx_heater_label = QLabel("\u041d\u0430\u0433\u0440\u0435\u0432\u0430\u0442\u0435\u043b\u044c")  # Нагреватель
+        self._ctx_heater_label = QLabel(
+            "\u041d\u0430\u0433\u0440\u0435\u0432\u0430\u0442\u0435\u043b\u044c"
+        )  # Нагреватель
         self._ctx_heater_label.setStyleSheet(label_style)
         self._ctx_heater_value = QLabel("\u2014")
         self._ctx_heater_value.setStyleSheet(value_style)
@@ -283,22 +282,16 @@ class TopWatchBar(QWidget):
     def _make_ctx_dot() -> QLabel:
         """Middle dot separator for items within persistent context strip."""
         dot = QLabel(" \u00b7 ")  # · middle dot
-        dot.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; font-size: 11px;"
-        )
+        dot.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: 11px;")
         return dot
 
     def _refresh_cold_set(self) -> None:
         if self._channel_mgr is None:
             self._cold_channel_set = set()
             return
-        self._cold_channel_set = set(
-            self._channel_mgr.get_visible_cold_channels()
-        )
+        self._cold_channel_set = set(self._channel_mgr.get_visible_cold_channels())
         self._latest_cold_temps = {
-            ch: data
-            for ch, data in self._latest_cold_temps.items()
-            if ch in self._cold_channel_set
+            ch: data for ch, data in self._latest_cold_temps.items() if ch in self._cold_channel_set
         }
         self._update_temp_display()
 
@@ -318,9 +311,7 @@ class TopWatchBar(QWidget):
             text = f"{value:.2e} mbar"
         if age > _STALE_TIMEOUT_S:
             text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"  # (устар.)
-            self._ctx_pressure_value.setStyleSheet(
-                f"color: {theme.TEXT_MUTED};"
-            )
+            self._ctx_pressure_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
             self._ctx_pressure_value.setStyleSheet(
                 f"color: {theme.TEXT_PRIMARY}; "
@@ -336,8 +327,7 @@ class TopWatchBar(QWidget):
             return
         now = time.time()
         fresh = [
-            val for ch, (ts, val) in self._latest_cold_temps.items()
-            if now - ts <= _STALE_TIMEOUT_S
+            val for ch, (ts, val) in self._latest_cold_temps.items() if now - ts <= _STALE_TIMEOUT_S
         ]
         if not fresh:
             self._ctx_tmin_value.setText("\u2014 (\u0443\u0441\u0442\u0430\u0440.)")
@@ -490,7 +480,8 @@ class TopWatchBar(QWidget):
                 if status in (ChannelStatus.SENSOR_ERROR, ChannelStatus.TIMEOUT):
                     worst = ChannelStatus.SENSOR_ERROR
                 elif worst != ChannelStatus.SENSOR_ERROR and status in (
-                    ChannelStatus.OVERRANGE, ChannelStatus.UNDERRANGE
+                    ChannelStatus.OVERRANGE,
+                    ChannelStatus.UNDERRANGE,
                 ):
                     worst = ChannelStatus.OVERRANGE
 
@@ -580,9 +571,7 @@ class TopWatchBar(QWidget):
             )
             self._mode_badge.setVisible(True)
         elif app_mode == "debug":
-            self._mode_badge.setText(
-                "\u041e\u0422\u041b\u0410\u0414\u041a\u0410"
-            )  # ОТЛАДКА
+            self._mode_badge.setText("\u041e\u0422\u041b\u0410\u0414\u041a\u0410")  # ОТЛАДКА
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
                 f"background-color: rgba(196, 134, 46, 0.2); "
@@ -615,23 +604,23 @@ class TopWatchBar(QWidget):
 
         if self._app_mode == "experiment":
             target = "debug"
-            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u041e\u0442\u043b\u0430\u0434\u043a\u0430?"
+            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u041e\u0442\u043b\u0430\u0434\u043a\u0430?"  # noqa: E501
             body = (
-                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u041e\u0442\u043b\u0430\u0434\u043a\u0430 "
-                "\u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "
+                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u041e\u0442\u043b\u0430\u0434\u043a\u0430 "  # noqa: E501
+                "\u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "  # noqa: E501
                 "\u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f, "
-                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "
-                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "
-                "\u043e\u0442\u0447\u0451\u0442\u044b \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u044e\u0442\u0441\u044f."
+                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "  # noqa: E501
+                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "  # noqa: E501
+                "\u043e\u0442\u0447\u0451\u0442\u044b \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u044e\u0442\u0441\u044f."  # noqa: E501
             )
         else:
             target = "experiment"
-            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"
+            title = "\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0432 \u0440\u0435\u0436\u0438\u043c \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442?"  # noqa: E501
             body = (
-                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 "
-                "\u0441\u043e\u0437\u0434\u0430\u044e\u0442\u0441\u044f \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0438, "
-                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "
-                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "
+                "\u0412 \u0440\u0435\u0436\u0438\u043c\u0435 \u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 "  # noqa: E501
+                "\u0441\u043e\u0437\u0434\u0430\u044e\u0442\u0441\u044f \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0438, "  # noqa: E501
+                "\u0430\u0440\u0445\u0438\u0432\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 "  # noqa: E501
+                "\u0438 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0435 "  # noqa: E501
                 "\u043e\u0442\u0447\u0451\u0442\u044b."
             )
 
@@ -665,7 +654,10 @@ class TopWatchBar(QWidget):
         if not result.get("ok"):
             from PySide6.QtWidgets import QMessageBox
 
-            error = result.get("error", "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043c\u0435\u043d\u0438\u0442\u044c \u0440\u0435\u0436\u0438\u043c.")
+            error = result.get(
+                "error",
+                "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043c\u0435\u043d\u0438\u0442\u044c \u0440\u0435\u0436\u0438\u043c.",  # noqa: E501
+            )
             QMessageBox.warning(self, "\u041e\u0448\u0438\u0431\u043a\u0430", str(error))
 
     def closeEvent(self, event):  # noqa: ANN001

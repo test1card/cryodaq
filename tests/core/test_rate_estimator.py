@@ -7,9 +7,16 @@ import random
 from cryodaq.core.rate_estimator import RateEstimator
 
 
-def _feed_linear(estimator: RateEstimator, channel: str, *, rate_per_min: float,
-                 start_value: float = 4.2, n_points: int = 120,
-                 interval_s: float = 1.0, t0: float | None = None) -> float:
+def _feed_linear(
+    estimator: RateEstimator,
+    channel: str,
+    *,
+    rate_per_min: float,
+    start_value: float = 4.2,
+    n_points: int = 120,
+    interval_s: float = 1.0,
+    t0: float | None = None,
+) -> float:
     """Feed linearly changing values. Returns timestamp of last point."""
     if t0 is None:
         t0 = 1_000_000.0

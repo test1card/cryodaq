@@ -57,7 +57,9 @@ def test_smub_reading_updates_only_smub_panel() -> None:
     _app()
     panel = KeithleyPanel()
 
-    panel.on_reading(Reading.now(channel="K1/smub/current", value=0.12, unit="A", instrument_id="K1"))
+    panel.on_reading(
+        Reading.now(channel="K1/smub/current", value=0.12, unit="A", instrument_id="K1")
+    )
 
     assert "0.12" in panel._smu_panels["smub"]._value_labels["current"].text()
     assert "0.12" not in panel._smu_panels["smua"]._value_labels["current"].text()
@@ -92,7 +94,9 @@ def test_zero_readings_do_not_turn_channel_on_without_backend_state() -> None:
     panel = KeithleyPanel()
 
     panel.on_reading(Reading.now(channel="K1/smua/power", value=5.0, unit="W", instrument_id="K1"))
-    panel.on_reading(Reading.now(channel="K1/smua/current", value=0.1, unit="A", instrument_id="K1"))
+    panel.on_reading(
+        Reading.now(channel="K1/smua/current", value=0.1, unit="A", instrument_id="K1")
+    )
 
     assert panel._smu_panels["smua"]._channel_state == "off"
 
@@ -284,7 +288,9 @@ def test_live_limits_debounce_starts_when_on(monkeypatch) -> None:
     smu = panel._smu_panels["smua"]
     smu._v_spin.setValue(30.0)
 
-    assert smu._limits_debounce.isActive(), "Limits debounce timer should be active after spin change"
+    assert smu._limits_debounce.isActive(), (
+        "Limits debounce timer should be active after spin change"
+    )
 
 
 def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
@@ -299,6 +305,7 @@ def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
     # the assertion. The validation in _validate_start_request is the
     # contract under test.
     from unittest.mock import MagicMock
+
     captured: list[dict] = []
 
     def _fake_worker(payload, parent=None, **kw):
@@ -309,9 +316,7 @@ def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
         w.finished.connect = MagicMock()
         return w
 
-    monkeypatch.setattr(
-        "cryodaq.gui.widgets.keithley_panel.ZmqCommandWorker", _fake_worker
-    )
+    monkeypatch.setattr("cryodaq.gui.widgets.keithley_panel.ZmqCommandWorker", _fake_worker)
     panel._smu_panels["smua"]._p_spin.setValue(0.0)
     panel._smu_panels["smub"]._p_spin.setValue(0.0)
 
@@ -320,9 +325,7 @@ def test_group_start_without_dispatch_shows_panel_warning(monkeypatch) -> None:
 
     # No keithley_start commands should be issued for either channel.
     starts = [p for p in captured if p.get("cmd") == "keithley_start"]
-    assert starts == [], (
-        f"Validation should block keithley_start when p=0, got: {starts}"
-    )
+    assert starts == [], f"Validation should block keithley_start when p=0, got: {starts}"
     # Validation message visible on both channels.
     assert "больше нуля" in panel._smu_panels["smua"]._status_banner.text()
     assert "больше нуля" in panel._smu_panels["smub"]._status_banner.text()

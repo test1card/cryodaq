@@ -1,4 +1,5 @@
 """Tests for TimeWindow enum (Phase UI-1 v2 Block B.2)."""
+
 from cryodaq.gui.dashboard.time_window import TimeWindow
 
 

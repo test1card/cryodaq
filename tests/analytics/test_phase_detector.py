@@ -78,6 +78,7 @@ def _get_phase(metrics) -> str:
 # 1. Cooldown detection
 # ---------------------------------------------------------------------------
 
+
 async def test_cooldown_detection() -> None:
     d = _make_detector()
     # 300K → 100K over 200 points at 3s each — continuous decrease
@@ -91,6 +92,7 @@ async def test_cooldown_detection() -> None:
 # ---------------------------------------------------------------------------
 # 2. Measurement detection
 # ---------------------------------------------------------------------------
+
 
 async def test_measurement_detection() -> None:
     d = _make_detector(stabilization_window_s=60)
@@ -106,6 +108,7 @@ async def test_measurement_detection() -> None:
 # 3. Warmup detection
 # ---------------------------------------------------------------------------
 
+
 async def test_warmup_detection() -> None:
     d = _make_detector()
     # 4.2K → 50K over 200 points
@@ -120,11 +123,12 @@ async def test_warmup_detection() -> None:
 # 4. Vacuum detection
 # ---------------------------------------------------------------------------
 
+
 async def test_vacuum_detection() -> None:
     d = _make_detector()
     # Room temp, pressure dropping
     temps = [295.0 + 0.01 * ((-1) ** i) for i in range(200)]
-    pressures = [1000.0 * (0.99 ** i) for i in range(200)]  # exponential drop
+    pressures = [1000.0 * (0.99**i) for i in range(200)]  # exponential drop
     t_readings = _make_temp_readings("T7", temps, dt_s=3.0)
     p_readings = _make_pressure_readings("P1", pressures, dt_s=3.0)
     # Interleave
@@ -140,6 +144,7 @@ async def test_vacuum_detection() -> None:
 # 5. Preparation detection
 # ---------------------------------------------------------------------------
 
+
 async def test_preparation_detection() -> None:
     d = _make_detector()
     # Room temp, no pressure data
@@ -153,6 +158,7 @@ async def test_preparation_detection() -> None:
 # ---------------------------------------------------------------------------
 # 6. Teardown detection
 # ---------------------------------------------------------------------------
+
 
 async def test_teardown_detection() -> None:
     d = _make_detector()
@@ -173,6 +179,7 @@ async def test_teardown_detection() -> None:
 # ---------------------------------------------------------------------------
 # 7. Phase transitions: full sequence
 # ---------------------------------------------------------------------------
+
 
 async def test_full_phase_sequence() -> None:
     d = _make_detector(stabilization_window_s=30, rate_window_s=60)
@@ -215,6 +222,7 @@ async def test_full_phase_sequence() -> None:
 # 8. Insufficient data
 # ---------------------------------------------------------------------------
 
+
 async def test_insufficient_data() -> None:
     d = _make_detector()
     readings = _make_temp_readings("T7", [4.2] * 5, dt_s=1.0)
@@ -226,15 +234,18 @@ async def test_insufficient_data() -> None:
 # 9. Config validation
 # ---------------------------------------------------------------------------
 
+
 def test_config_sets_parameters() -> None:
     d = PhaseDetector()
-    d.configure({
-        "temperature_channel": "T1",
-        "pressure_channel": "P1",
-        "target_T_K": 10.0,
-        "stabilization_tolerance_K": 0.5,
-        "room_temp_K": 250,
-    })
+    d.configure(
+        {
+            "temperature_channel": "T1",
+            "pressure_channel": "P1",
+            "target_T_K": 10.0,
+            "stabilization_tolerance_K": 0.5,
+            "room_temp_K": 250,
+        }
+    )
     assert d._temp_channel == "T1"
     assert d._pressure_channel == "P1"
     assert d._target_T == 10.0
@@ -245,6 +256,7 @@ def test_config_sets_parameters() -> None:
 # ---------------------------------------------------------------------------
 # 10. dT_dt computation
 # ---------------------------------------------------------------------------
+
 
 async def test_dT_dt_computation() -> None:
     d = _make_detector(rate_window_s=60)

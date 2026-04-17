@@ -29,16 +29,17 @@ logger = logging.getLogger(__name__)
 # AlarmEvent
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AlarmEvent:
     """Событие срабатывания аларма."""
 
     alarm_id: str
-    level: str                        # "INFO" | "WARNING" | "CRITICAL"
+    level: str  # "INFO" | "WARNING" | "CRITICAL"
     message: str
-    triggered_at: float               # unix timestamp
-    channels: list[str]               # каналы-участники
-    values: dict[str, float]          # channel → значение на момент срабатывания
+    triggered_at: float  # unix timestamp
+    channels: list[str]  # каналы-участники
+    values: dict[str, float]  # channel → значение на момент срабатывания
     acknowledged: bool = False
     acknowledged_at: float = 0.0
     acknowledged_by: str = ""
@@ -54,6 +55,7 @@ AlarmTransition = Literal["TRIGGERED", "CLEARED"]
 # ---------------------------------------------------------------------------
 # Provider protocols (duck-typed, без runtime Protocol overhead)
 # ---------------------------------------------------------------------------
+
 
 class PhaseProvider:
     """Базовый провайдер фазы — заглушка для тестов."""
@@ -152,9 +154,7 @@ class AlarmEvaluator:
                 )
         return None
 
-    def _check_threshold_channel(
-        self, channel: str, check: str, cfg: dict
-    ) -> tuple[bool, float]:
+    def _check_threshold_channel(self, channel: str, check: str, cfg: dict) -> tuple[bool, float]:
         """Возвращает (сработал, значение)."""
         if check == "fault_count_in_window":
             count = self._state.get_fault_count(channel)
@@ -230,16 +230,14 @@ class AlarmEvaluator:
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
             return any(
-                (s := self._state.get(ch)) is not None and s.value < threshold
-                for ch in channels
+                (s := self._state.get(ch)) is not None and s.value < threshold for ch in channels
             )
 
         elif check == "any_above":
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
             return any(
-                (s := self._state.get(ch)) is not None and s.value > threshold
-                for ch in channels
+                (s := self._state.get(ch)) is not None and s.value > threshold for ch in channels
             )
 
         elif check == "above":
@@ -389,6 +387,7 @@ class AlarmEvaluator:
 # AlarmStateManager
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _AlarmRecord:
     event: AlarmEvent
@@ -448,16 +447,20 @@ class AlarmStateManager:
                 return None  # Уже активен, не re-notify
 
             self._active[alarm_id] = event
-            self._history.append({
-                "alarm_id": alarm_id,
-                "transition": "TRIGGERED",
-                "at": event.triggered_at,
-                "level": event.level,
-                "message": event.message,
-            })
+            self._history.append(
+                {
+                    "alarm_id": alarm_id,
+                    "transition": "TRIGGERED",
+                    "at": event.triggered_at,
+                    "level": event.level,
+                    "message": event.message,
+                }
+            )
             logger.info(
                 "ALARM TRIGGERED: %s [%s] %s",
-                alarm_id, event.level, event.message[:80],
+                alarm_id,
+                event.level,
+                event.message[:80],
             )
             return "TRIGGERED"
 
@@ -474,18 +477,18 @@ class AlarmStateManager:
                 return None  # Ещё в зоне гистерезиса
 
             old_event = self._active.pop(alarm_id)
-            self._history.append({
-                "alarm_id": alarm_id,
-                "transition": "CLEARED",
-                "at": time.time(),
-                "level": old_event.level,
-            })
+            self._history.append(
+                {
+                    "alarm_id": alarm_id,
+                    "transition": "CLEARED",
+                    "at": time.time(),
+                    "level": old_event.level,
+                }
+            )
             logger.info("ALARM CLEARED: %s", alarm_id)
             return "CLEARED"
 
-    def _check_hysteresis_cleared(
-        self, alarm_id: str, config: dict, hysteresis: Any
-    ) -> bool:
+    def _check_hysteresis_cleared(self, alarm_id: str, config: dict, hysteresis: Any) -> bool:
         """Проверить что аларм вышел из зоны гистерезиса.
 
         Упрощённая реализация: hysteresis как отдельный порог не реализован
@@ -522,7 +525,8 @@ class AlarmStateManager:
         if event.acknowledged:
             logger.debug(
                 "ALARM ACK NOOP: %s already acknowledged by %s",
-                alarm_id, event.acknowledged_by or "—",
+                alarm_id,
+                event.acknowledged_by or "—",
             )
             return None
 
@@ -530,17 +534,21 @@ class AlarmStateManager:
         event.acknowledged_at = time.time()
         event.acknowledged_by = operator
 
-        self._history.append({
-            "alarm_id": alarm_id,
-            "transition": "ACKNOWLEDGED",
-            "at": event.acknowledged_at,
-            "level": event.level,
-            "operator": operator,
-            "reason": reason,
-        })
+        self._history.append(
+            {
+                "alarm_id": alarm_id,
+                "transition": "ACKNOWLEDGED",
+                "at": event.acknowledged_at,
+                "level": event.level,
+                "operator": operator,
+                "reason": reason,
+            }
+        )
         logger.info(
             "ALARM ACKNOWLEDGED: %s by %s (reason: %s)",
-            alarm_id, operator or "—", reason or "—",
+            alarm_id,
+            operator or "—",
+            reason or "—",
         )
         return {
             "alarm_id": alarm_id,

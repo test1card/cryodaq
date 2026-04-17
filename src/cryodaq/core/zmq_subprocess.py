@@ -6,6 +6,7 @@ the death via is_alive() and restarts it.
 
 The GUI process never imports zmq.
 """
+
 from __future__ import annotations
 
 import json
@@ -101,10 +102,12 @@ def zmq_bridge_main(
                         dropped_count += 1
                         if dropped_count % 100 == 1:
                             try:
-                                data_queue.put_nowait({
-                                    "__type": "warning",
-                                    "message": f"Queue overflow: {dropped_count} readings dropped",
-                                })
+                                data_queue.put_nowait(
+                                    {
+                                        "__type": "warning",
+                                        "message": f"Queue overflow: {dropped_count} readings dropped",  # noqa: E501
+                                    }
+                                )
                             except queue.Full:
                                 pass
                     except Exception:
@@ -131,7 +134,9 @@ def zmq_bridge_main(
                 except queue.Full:
                     # Log via data_queue warning so health monitoring sees it
                     try:
-                        data_queue.put_nowait({"__type": "warning", "message": "Reply queue overflow"})
+                        data_queue.put_nowait(
+                            {"__type": "warning", "message": "Reply queue overflow"}
+                        )
                     except queue.Full:
                         pass
             except queue.Empty:

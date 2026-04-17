@@ -70,9 +70,15 @@ class ReportDataExtractor:
             readings=readings,
             operator_log=operator_log,
             alarm_readings=alarm_readings,
-            run_records=[dict(item) for item in metadata.get("run_records", []) if isinstance(item, dict)],
-            artifact_index=[dict(item) for item in metadata.get("artifact_index", []) if isinstance(item, dict)],
-            result_tables=[dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)],
+            run_records=[
+                dict(item) for item in metadata.get("run_records", []) if isinstance(item, dict)
+            ],
+            artifact_index=[
+                dict(item) for item in metadata.get("artifact_index", []) if isinstance(item, dict)
+            ],
+            result_tables=[
+                dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)
+            ],
             summary_metadata=dict(metadata.get("summary_metadata") or {}),
         )
 
@@ -135,7 +141,9 @@ class ReportDataExtractor:
                     "FROM readings WHERE timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp"
                 )
-                for row in conn.execute(query, (start_time.timestamp(), end_time.timestamp())).fetchall():
+                for row in conn.execute(
+                    query, (start_time.timestamp(), end_time.timestamp())
+                ).fetchall():
                     rows.append(
                         HistoricalReading(
                             timestamp=_parse_timestamp(row["timestamp"]),

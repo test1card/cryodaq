@@ -1,4 +1,5 @@
 """DrillDownBreadcrumb — sticky top bar with back navigation."""
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
@@ -90,9 +91,7 @@ class DrillDownBreadcrumb(QWidget):
             f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
             f"}}"
         )
-        self._overlay_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.NoTextInteraction
-        )
+        self._overlay_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(self._overlay_label, 1)
 
         layout.addStretch()

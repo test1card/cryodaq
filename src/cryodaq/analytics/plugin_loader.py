@@ -93,9 +93,7 @@ class PluginPipeline:
         self._process_task = asyncio.create_task(
             self._process_loop(), name="analytics_process_loop"
         )
-        self._watch_task = asyncio.create_task(
-            self._watch_loop(), name="analytics_watch_loop"
-        )
+        self._watch_task = asyncio.create_task(self._watch_loop(), name="analytics_watch_loop")
         logger.info(
             "Пайплайн запущен: загружено плагинов=%d, интервал=%.2f с",
             len(self._plugins),
@@ -143,13 +141,9 @@ class PluginPipeline:
         """
         try:
             plugin_id = path.stem
-            spec = importlib.util.spec_from_file_location(
-                f"cryodaq_plugin_{plugin_id}", path
-            )
+            spec = importlib.util.spec_from_file_location(f"cryodaq_plugin_{plugin_id}", path)
             if spec is None or spec.loader is None:
-                logger.error(
-                    "Не удалось создать spec для плагина '%s': %s", plugin_id, path
-                )
+                logger.error("Не удалось создать spec для плагина '%s': %s", plugin_id, path)
                 return
 
             module: types.ModuleType = importlib.util.module_from_spec(spec)
@@ -219,9 +213,7 @@ class PluginPipeline:
         if removed is not None:
             logger.info("Плагин выгружен: id='%s'", plugin_id)
         else:
-            logger.debug(
-                "Попытка выгрузить незарегистрированный плагин '%s'", plugin_id
-            )
+            logger.debug("Попытка выгрузить незарегистрированный плагин '%s'", plugin_id)
 
     # ------------------------------------------------------------------
     # Фоновые задачи
@@ -248,9 +240,7 @@ class PluginPipeline:
                 if remaining <= 0:
                     break
                 try:
-                    reading = await asyncio.wait_for(
-                        self._queue.get(), timeout=remaining
-                    )
+                    reading = await asyncio.wait_for(self._queue.get(), timeout=remaining)
                     batch.append(reading)
                 except TimeoutError:
                     break
@@ -279,7 +269,8 @@ class PluginPipeline:
                         value=metric.value,
                         unit=metric.unit,
                         instrument_id=plugin_id,
-                        metadata=metric.metadata | {
+                        metadata=metric.metadata
+                        | {
                             "source": "analytics",
                             "plugin_id": plugin_id,
                         },
@@ -314,9 +305,7 @@ class PluginPipeline:
                         logger.info("Обнаружен новый файл плагина: %s", filename)
                         self._load_plugin(self._plugins_dir / filename)
                     elif known_files[filename] != mtime:
-                        logger.info(
-                            "Файл плагина изменён, перезагрузка: %s", filename
-                        )
+                        logger.info("Файл плагина изменён, перезагрузка: %s", filename)
                         self._unload_plugin(Path(filename).stem)
                         self._load_plugin(self._plugins_dir / filename)
 
@@ -331,9 +320,7 @@ class PluginPipeline:
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.error(
-                    "Ошибка в цикле слежения за плагинами: %s — продолжаю работу", exc
-                )
+                logger.error("Ошибка в цикле слежения за плагинами: %s — продолжаю работу", exc)
 
     # ------------------------------------------------------------------
     # Вспомогательные методы

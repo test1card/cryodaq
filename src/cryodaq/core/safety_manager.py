@@ -131,9 +131,7 @@ class SafetyManager:
 
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
-        self._broker.set_overflow_callback(
-            lambda: self._fault("SafetyBroker overflow - data lost")
-        )
+        self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
 
     def load_config(self, path: Path) -> None:
         if not path.exists():
@@ -147,8 +145,7 @@ class SafetyManager:
 
         if not isinstance(raw, dict):
             raise SafetyConfigError(
-                f"safety.yaml at {path} is malformed (expected mapping, "
-                f"got {type(raw).__name__})"
+                f"safety.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})"
             )
 
         raw_patterns = raw.get("critical_channels", [])
@@ -176,18 +173,16 @@ class SafetyManager:
 
         if errors:
             raise SafetyConfigError(
-                f"safety.yaml at {path} has invalid critical_channels regex:\n"
-                + "\n".join(errors)
+                f"safety.yaml at {path} has invalid critical_channels regex:\n" + "\n".join(errors)
             )
 
         if not patterns:
-            raise SafetyConfigError(
-                f"safety.yaml at {path} produced no valid critical_channels"
-            )
+            raise SafetyConfigError(f"safety.yaml at {path} produced no valid critical_channels")
 
         logger.info(
             "SafetyManager config: %d critical channel patterns from %s",
-            len(patterns), path,
+            len(patterns),
+            path,
         )
 
         try:
@@ -198,9 +193,13 @@ class SafetyManager:
                 heartbeat_timeout_s=float(raw.get("heartbeat_timeout_s", 15.0)),
                 max_safety_backlog=int(raw.get("max_safety_backlog", 100)),
                 require_keithley_for_run=bool(raw.get("require_keithley_for_run", True)),
-                max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
+                max_dT_dt_K_per_min=float(
+                    raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)
+                ),
                 require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
-                cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
+                cooldown_before_rearm_s=float(
+                    raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)
+                ),
                 max_power_w=float(src_limits.get("max_power_w", 5.0)),
                 max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
                 max_current_a=float(src_limits.get("max_current_a", 1.0)),
@@ -211,12 +210,13 @@ class SafetyManager:
             ]
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise SafetyConfigError(
-                f"safety.yaml at {path}: invalid config value — "
-                f"{type(exc).__name__}: {exc}"
+                f"safety.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
             ) from exc
 
     async def start(self) -> None:
-        self._queue = self._broker.subscribe("safety_manager", maxsize=self._config.max_safety_backlog)
+        self._queue = self._broker.subscribe(
+            "safety_manager", maxsize=self._config.max_safety_backlog
+        )
         self._broker.freeze()
         self._collect_task = asyncio.create_task(self._collect_loop(), name="safety_collect")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="safety_monitor")
@@ -257,24 +257,59 @@ class SafetyManager:
             smu_channel = normalize_smu_channel(channel)
 
             if self._state == SafetyState.FAULT_LATCHED:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"FAULT: {self._fault_reason}"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"FAULT: {self._fault_reason}",
+                }
 
             if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Start not allowed from {self._state.value}"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"Start not allowed from {self._state.value}",
+                }
 
             if smu_channel in self._active_sources:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"Channel {smu_channel} already active"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"Channel {smu_channel} already active",
+                }
 
             ok, reason = self._check_preconditions()
             if not ok:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": reason}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": reason,
+                }
 
             if p_target > self._config.max_power_w:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W",
+                }
             if v_comp > self._config.max_voltage_v:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V",
+                }
             if i_comp > self._config.max_current_a:
-                return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
+                }
 
             if self._state != SafetyState.RUNNING:
                 self._run_permitted_since = time.monotonic()
@@ -288,13 +323,25 @@ class SafetyManager:
             if self._keithley is None:
                 if self._config.require_keithley_for_run and not self._mock:
                     self._transition(SafetyState.SAFE_OFF, "Keithley not connected")
-                    return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": "Keithley not connected"}
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": "Keithley not connected",
+                    }
             else:
                 try:
                     await self._keithley.start_source(smu_channel, p_target, v_comp, i_comp)
                 except Exception as exc:
-                    await self._fault(f"Source start failed on {smu_channel}: {exc}", channel=smu_channel)
-                    return {"ok": False, "state": self._state.value, "channel": smu_channel, "error": str(exc)}
+                    await self._fault(
+                        f"Source start failed on {smu_channel}: {exc}", channel=smu_channel
+                    )
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": str(exc),
+                    }
 
                 # CRITICAL safety reconciliation (Codex Phase 1 review P0-2):
                 # _fault() runs OUTSIDE _cmd_lock — a fail-on-silence /
@@ -308,9 +355,7 @@ class SafetyManager:
                     try:
                         await self._keithley.emergency_off()
                     except Exception as exc:
-                        logger.critical(
-                            "FAULT after start_source: emergency_off failed: %s", exc
-                        )
+                        logger.critical("FAULT after start_source: emergency_off failed: %s", exc)
                     return {
                         "ok": False,
                         "state": self._state.value,
@@ -397,7 +442,10 @@ class SafetyManager:
                 return {"ok": False, "error": "p_target must be > 0"}
 
             if p_target > self._config.max_power_w:
-                return {"ok": False, "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W"}
+                return {
+                    "ok": False,
+                    "error": f"P={p_target}W exceeds limit {self._config.max_power_w}W",
+                }
 
             if self._keithley is None:
                 return {"ok": False, "error": "Keithley not connected"}
@@ -440,7 +488,10 @@ class SafetyManager:
                 if v_comp <= 0:
                     return {"ok": False, "error": "v_comp must be > 0"}
                 if v_comp > self._config.max_voltage_v:
-                    return {"ok": False, "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V"}
+                    return {
+                        "ok": False,
+                        "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V",
+                    }
                 if not self._keithley.mock:
                     await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
                 runtime.v_comp = v_comp  # update only after successful write
@@ -449,28 +500,46 @@ class SafetyManager:
                 if i_comp <= 0:
                     return {"ok": False, "error": "i_comp must be > 0"}
                 if i_comp > self._config.max_current_a:
-                    return {"ok": False, "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A"}
+                    return {
+                        "ok": False,
+                        "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
+                    }
                 if not self._keithley.mock:
                     await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
                 runtime.i_comp = i_comp  # update only after successful write
 
             logger.info(
                 "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
-                smu_channel, runtime.v_comp, runtime.i_comp,
+                smu_channel,
+                runtime.v_comp,
+                runtime.i_comp,
             )
-            return {"ok": True, "channel": smu_channel, "v_comp": runtime.v_comp, "i_comp": runtime.i_comp}
+            return {
+                "ok": True,
+                "channel": smu_channel,
+                "v_comp": runtime.v_comp,
+                "i_comp": runtime.i_comp,
+            }
 
     async def acknowledge_fault(self, reason: str) -> dict[str, Any]:
         async with self._cmd_lock:
             if self._state != SafetyState.FAULT_LATCHED:
-                return {"ok": False, "state": self._state.value, "error": "Нет активной аварии для подтверждения"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "error": "Нет активной аварии для подтверждения",
+                }
             if self._config.require_reason and not reason.strip():
                 return {"ok": False, "state": self._state.value, "error": "Укажите причину аварии"}
 
             elapsed = time.monotonic() - self._fault_time
             if elapsed < self._config.cooldown_before_rearm_s:
                 remaining = self._config.cooldown_before_rearm_s - elapsed
-                return {"ok": False, "state": self._state.value, "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления"}
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "error": f"Ожидание: ещё {remaining:.0f}с до разрешения восстановления",
+                }
 
             self._recovery_reason = reason.strip()
             # Phase 2a H.1: clear persistence-failure latch on the writer
@@ -480,9 +549,7 @@ class SafetyManager:
                 try:
                     self._persistence_failure_clear()
                 except Exception as exc:
-                    logger.error(
-                        "persistence_failure_clear callback failed: %s", exc
-                    )
+                    logger.error("persistence_failure_clear callback failed: %s", exc)
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
@@ -498,7 +565,8 @@ class SafetyManager:
             "fault_reason": self._fault_reason,
             "recovery_reason": self._recovery_reason,
             "channels_tracked": len(self._latest),
-            "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
+            "keithley_connected": self._keithley is not None
+            and getattr(self._keithley, "connected", False),
             "active_channels": sorted(self._active_sources),
             "mock": self._mock,
         }
@@ -554,7 +622,9 @@ class SafetyManager:
             try:
                 await self._data_broker.publish(reading)
             except Exception as exc:
-                logger.warning("Failed to publish Keithley channel state for %s: %s", smu_channel, exc)
+                logger.warning(
+                    "Failed to publish Keithley channel state for %s: %s", smu_channel, exc
+                )
 
     def _transition(
         self,
@@ -668,9 +738,7 @@ class SafetyManager:
                 try:
                     await log_task
                 except Exception as exc:
-                    logger.error(
-                        "Failed to write safety fault to operator_log: %s", exc
-                    )
+                    logger.error("Failed to write safety fault to operator_log: %s", exc)
                 raise
             except Exception as exc:
                 logger.error("Failed to write safety fault to operator_log: %s", exc)
@@ -714,9 +782,7 @@ class SafetyManager:
                 try:
                     await off_task
                 except Exception as exc:
-                    logger.critical(
-                        "_safe_off shielded emergency_off failed: %s", exc
-                    )
+                    logger.critical("_safe_off shielded emergency_off failed: %s", exc)
                 raise
             except Exception as exc:
                 logger.error("_ensure_output_off in _safe_off failed: %s", exc)
@@ -838,7 +904,7 @@ class SafetyManager:
                 for smu_channel in sorted(self._active_sources):
                     if not self._has_fresh_keithley_data(now, smu_channel):
                         await self._fault(
-                            f"Keithley heartbeat timeout {smu_channel}: no data {self._config.heartbeat_timeout_s}s",
+                            f"Keithley heartbeat timeout {smu_channel}: no data {self._config.heartbeat_timeout_s}s",  # noqa: E501
                             channel=smu_channel,
                         )
                         return
@@ -864,7 +930,7 @@ class SafetyManager:
             abs_rate = abs(rate)
             if abs_rate > self._config.max_dT_dt_K_per_min:
                 await self._fault(
-                    f"Rate limit exceeded {ch}: {abs_rate:.2f} K/min > {self._config.max_dT_dt_K_per_min}",
+                    f"Rate limit exceeded {ch}: {abs_rate:.2f} K/min > {self._config.max_dT_dt_K_per_min}",  # noqa: E501
                     channel=ch,
                     value=abs_rate,
                 )
@@ -877,7 +943,10 @@ class SafetyManager:
                 continue
             if not any(pattern.match(channel) for pattern in self._keithley_patterns):
                 continue
-            if any(f"/{alias}/" in channel for alias in aliases) and now - ts < self._config.heartbeat_timeout_s:
+            if (
+                any(f"/{alias}/" in channel for alias in aliases)
+                and now - ts < self._config.heartbeat_timeout_s
+            ):
                 return True
         return False
 
@@ -921,7 +990,8 @@ class SafetyManager:
                     except Exception as exc:
                         logger.error(
                             "stop_source interlock: emergency_off failed: %s — "
-                            "escalating to full fault", exc,
+                            "escalating to full fault",
+                            exc,
                         )
                         # The lock is released when this `async with` block
                         # exits via the `return` below. _fault itself is
@@ -929,7 +999,8 @@ class SafetyManager:
                         # serialize behind the lock until _fault returns.
                         await self._fault(
                             f"{reason} (emergency_off failed: {exc})",
-                            channel=channel, value=value,
+                            channel=channel,
+                            value=value,
                         )
                         return
                 self._active_sources.clear()
@@ -946,11 +1017,13 @@ class SafetyManager:
         # Unknown action — fail-safe to a full fault rather than ignore.
         logger.critical(
             "Unknown interlock action %r for '%s' — escalating to full fault",
-            action, interlock_name,
+            action,
+            interlock_name,
         )
         await self._fault(
             f"Unknown interlock action {action!r}: {reason}",
-            channel=channel, value=value,
+            channel=channel,
+            value=value,
         )
 
     async def on_persistence_failure(self, reason: str) -> None:

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMainWindow, QMenu, QSystemTrayIcon
 
 
-class TrayLevel(str, Enum):
+class TrayLevel(StrEnum):
     HEALTHY = "healthy"
     WARNING = "warning"
     FAULT = "fault"
@@ -20,32 +20,50 @@ class TrayStatus:
     tooltip: str
 
 
-def resolve_tray_status(*, connected: bool, safety_state: str | None, alarm_count: int | None) -> TrayStatus:
+def resolve_tray_status(
+    *, connected: bool, safety_state: str | None, alarm_count: int | None
+) -> TrayStatus:
     safety = (safety_state or "").strip().lower() or None
     alarms = 0 if alarm_count is None else max(0, int(alarm_count))
 
     if alarms > 0 or safety in {"fault", "fault_latched"}:
         return TrayStatus(
             level=TrayLevel.FAULT,
-            tooltip=_build_tooltip("Авария", connected=connected, safety_state=safety, alarm_count=alarms),
+            tooltip=_build_tooltip(
+                "Авария", connected=connected, safety_state=safety, alarm_count=alarms
+            ),
         )
     if not connected or safety is None:
         return TrayStatus(
             level=TrayLevel.WARNING,
-            tooltip=_build_tooltip("Нет полной информации", connected=connected, safety_state=safety, alarm_count=alarms),
+            tooltip=_build_tooltip(
+                "Нет полной информации",
+                connected=connected,
+                safety_state=safety,
+                alarm_count=alarms,
+            ),
         )
     if safety in {"safe_off", "ready", "run_permitted", "running"}:
         return TrayStatus(
             level=TrayLevel.HEALTHY,
-            tooltip=_build_tooltip("Система в норме", connected=connected, safety_state=safety, alarm_count=alarms),
+            tooltip=_build_tooltip(
+                "Система в норме", connected=connected, safety_state=safety, alarm_count=alarms
+            ),
         )
     return TrayStatus(
         level=TrayLevel.WARNING,
-        tooltip=_build_tooltip("Состояние требует проверки", connected=connected, safety_state=safety, alarm_count=alarms),
+        tooltip=_build_tooltip(
+            "Состояние требует проверки",
+            connected=connected,
+            safety_state=safety,
+            alarm_count=alarms,
+        ),
     )
 
 
-def _build_tooltip(summary: str, *, connected: bool, safety_state: str | None, alarm_count: int) -> str:
+def _build_tooltip(
+    summary: str, *, connected: bool, safety_state: str | None, alarm_count: int
+) -> str:
     connection_text = "подключено" if connected else "нет данных"
     safety_text = safety_state or "неизвестно"
     return (

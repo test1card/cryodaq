@@ -14,6 +14,7 @@ from cryodaq.drivers.base import InstrumentDriver, Reading
 # Concrete mock driver for use in all scheduler tests
 # ---------------------------------------------------------------------------
 
+
 class MockDriver(InstrumentDriver):
     """Minimal concrete driver: connect sets flag, read returns one reading."""
 
@@ -40,6 +41,7 @@ class MockDriver(InstrumentDriver):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def broker() -> DataBroker:
     return DataBroker()
@@ -54,6 +56,7 @@ def scheduler(broker: DataBroker) -> Scheduler:
 # 1. add() registers the instrument by driver name
 # ---------------------------------------------------------------------------
 
+
 async def test_add_instrument(scheduler: Scheduler) -> None:
     driver = MockDriver("ls218s")
     config = InstrumentConfig(driver=driver, poll_interval_s=1.0)
@@ -65,6 +68,7 @@ async def test_add_instrument(scheduler: Scheduler) -> None:
 # ---------------------------------------------------------------------------
 # 2. Mock driver is polled and readings reach the broker
 # ---------------------------------------------------------------------------
+
 
 async def test_mock_driver_polled(broker: DataBroker) -> None:
     queue = await broker.subscribe("test_consumer", maxsize=100)
@@ -88,6 +92,7 @@ async def test_mock_driver_polled(broker: DataBroker) -> None:
 # 3. Registering the same driver name twice raises ValueError
 # ---------------------------------------------------------------------------
 
+
 async def test_duplicate_driver_rejected(scheduler: Scheduler) -> None:
     driver_a = MockDriver("duplicate")
     driver_b = MockDriver("duplicate")
@@ -101,6 +106,7 @@ async def test_duplicate_driver_rejected(scheduler: Scheduler) -> None:
 # ---------------------------------------------------------------------------
 # 4. stats.total_reads increases after polling
 # ---------------------------------------------------------------------------
+
 
 async def test_stats_track_reads(broker: DataBroker) -> None:
     await broker.subscribe("stats_consumer", maxsize=1000)
@@ -119,6 +125,7 @@ async def test_stats_track_reads(broker: DataBroker) -> None:
 # ---------------------------------------------------------------------------
 # 5. stop() cancels tasks and disconnects drivers
 # ---------------------------------------------------------------------------
+
 
 async def test_graceful_stop(broker: DataBroker) -> None:
     await broker.subscribe("stop_consumer", maxsize=100)
@@ -144,6 +151,7 @@ async def test_graceful_stop(broker: DataBroker) -> None:
 # ---------------------------------------------------------------------------
 # 6. GPIB instruments on same bus share one task; non-GPIB get their own
 # ---------------------------------------------------------------------------
+
 
 async def test_gpib_bus_grouping(broker: DataBroker) -> None:
     await broker.subscribe("gpib_consumer", maxsize=1000)

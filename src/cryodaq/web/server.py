@@ -82,6 +82,7 @@ _DATA_DIR = get_data_dir()
 # Глобальное состояние сервера
 # ---------------------------------------------------------------------------
 
+
 class _ServerState:
     """Общее состояние для всех WebSocket-клиентов."""
 
@@ -132,9 +133,8 @@ class _ServerState:
             self.instrument_status[inst_id] = {
                 "last_seen": reading.timestamp.isoformat(),
                 "status": reading.status.value,
-                "total_readings": self.instrument_status.get(inst_id, {}).get(
-                    "total_readings", 0
-                ) + 1,
+                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0)
+                + 1,
             }
 
     def status_json(self) -> dict[str, Any]:
@@ -160,6 +160,7 @@ _state = _ServerState()
 # ---------------------------------------------------------------------------
 # Broadcast к WebSocket-клиентам
 # ---------------------------------------------------------------------------
+
 
 async def _broadcast(data: dict[str, Any]) -> None:
     """Отправить JSON всем подключённым WebSocket-клиентам."""
@@ -199,7 +200,7 @@ async def _zmq_to_ws_bridge() -> None:
     logger.info("ZMQ→WS мост запущен")
     # Задача живёт вечно — остановка через lifespan
     try:
-        while True:
+        while True:  # noqa: ASYNC110
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
         await sub.stop()
@@ -233,6 +234,7 @@ def _on_reading_callback(reading: Reading) -> None:
 # ---------------------------------------------------------------------------
 # История из SQLite
 # ---------------------------------------------------------------------------
+
 
 def _find_recent_db(data_dir: Path) -> Path | None:
     """Найти самый свежий файл data_YYYY-MM-DD.db в директории."""
@@ -272,11 +274,13 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
             continue
         for row in rows:
             ch = row["channel"]
-            result.setdefault(ch, []).append({
-                "t": datetime.fromtimestamp(row["timestamp"], tz=UTC).isoformat(),
-                "v": row["value"],
-                "u": row["unit"],
-            })
+            result.setdefault(ch, []).append(
+                {
+                    "t": datetime.fromtimestamp(row["timestamp"], tz=UTC).isoformat(),
+                    "v": row["value"],
+                    "u": row["unit"],
+                }
+            )
 
     return result
 
@@ -284,6 +288,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 # ---------------------------------------------------------------------------
 # FastAPI приложение
 # ---------------------------------------------------------------------------
+
 
 def create_app() -> FastAPI:
     """Создать и настроить FastAPI-приложение."""
@@ -415,12 +420,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:system-ui,-apple-system,sans-serif;padding:8px}
-.header{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px}
+.header{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
+background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px}
 .header h1{font-size:16px;color:#f0f6fc}
 .header .ver{color:#8b949e;font-size:12px}
-.status-bar{display:flex;gap:16px;padding:8px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px;flex-wrap:wrap}
+.status-bar{display:flex;gap:16px;padding:8px 12px;background:#161b22;
+border:1px solid #30363d;border-radius:6px;margin-bottom:8px;flex-wrap:wrap}
 .status-bar .item{font-size:13px}
-.section{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin-bottom:8px}
+.section{background:#161b22;border:1px solid #30363d;border-radius:6px;
+padding:10px 12px;margin-bottom:8px}
 .section-title{font-size:12px;color:#8b949e;margin-bottom:6px;text-transform:uppercase}
 .temps{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}
 @media(max-width:600px){.temps{grid-template-columns:repeat(4,1fr)}}
@@ -442,13 +450,16 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,-apple-system,sans-s
  <span class="item" id="channels">0 каналов</span>
 </div>
 <div class="section"><div class="section-title">Эксперимент</div><div id="experiment">—</div></div>
-<div class="section"><div class="section-title">Температуры</div><div class="temps" id="temps"></div></div>
+<div class="section"><div class="section-title">Температуры</div>
+<div class="temps" id="temps"></div></div>
 <div class="section"><div class="section-title">Давление</div><div id="pressure">—</div></div>
 <div class="section"><div class="section-title">Keithley</div><div id="keithley">—</div></div>
 <div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
 <div id="updated"></div>
 <script>
-function escapeHtml(s){if(s==null)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function escapeHtml(s){if(s==null)return '';return String(s)
+ .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+ .replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function tempColor(v){if(v<10)return'cold';if(v<100)return'mid';if(v<250)return'warm';return'hot'}
 async function refresh(){
  try{
@@ -474,7 +485,8 @@ async function refresh(){
   for(const[ch,r]of sorted){
    if(r.unit==='K'&&ch.match(/^\\u0422|^T/)){
     const c=tempColor(r.value);
-    temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div><div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
+    temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div>`+
+      `<div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
    }
    if(r.unit==='mbar')pressure=r.value.toExponential(2)+' mbar';
    if(ch.includes('/smua/'))kA=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kA;
@@ -497,7 +509,8 @@ async function refresh(){
   let html='';
   for(const e of(ld.entries||[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
-   html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> [${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
+   html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> `+
+     `[${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
   document.getElementById('log').innerHTML=html||'Нет записей';
  }catch(e){}

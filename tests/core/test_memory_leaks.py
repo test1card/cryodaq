@@ -25,6 +25,7 @@ from cryodaq.core.rate_estimator import RateEstimator
 # 1. AlarmStateManager._history bounded
 # ---------------------------------------------------------------------------
 
+
 def _make_event(alarm_id: str = "test") -> AlarmEvent:
     return AlarmEvent(
         alarm_id=alarm_id,
@@ -76,6 +77,7 @@ def test_alarm_state_manager_history_is_deque() -> None:
 # 2. RateEstimator deque maxlen tightened
 # ---------------------------------------------------------------------------
 
+
 def test_rate_estimator_maxlen_computed_from_window() -> None:
     """maxlen must be computed from window_s, not hardcoded 5000."""
     est = RateEstimator(window_s=120.0)
@@ -107,6 +109,7 @@ def test_rate_estimator_small_window_uses_floor() -> None:
 # ---------------------------------------------------------------------------
 # 3. ChannelStateTracker fault_history bounded
 # ---------------------------------------------------------------------------
+
 
 def _make_reading(channel: str, value: float, unit: str = "K"):
     """Create a minimal Reading-like object for ChannelStateTracker.update()."""
@@ -151,9 +154,11 @@ def test_channel_state_fault_history_deque_has_maxlen_after_update() -> None:
 # 4. web/server.py — broadcast queue replaces per-reading tasks
 # ---------------------------------------------------------------------------
 
+
 def test_broadcast_state_has_queue_attribute() -> None:
     """_ServerState must have a broadcast_q attribute (may be None before startup)."""
     from cryodaq.web.server import _ServerState
+
     state = _ServerState()
     assert hasattr(state, "broadcast_q")
     assert state.broadcast_q is None  # initialised in startup only
@@ -197,15 +202,14 @@ async def test_broadcast_queue_bounded() -> None:
         _state.broadcast_q.put_nowait({"v": i})
 
     # One more — must NOT raise, must be silently dropped in callback
-    reading = _make_reading("T1", 4.2)
+    _make_reading("T1", 4.2)
     _state.clients.clear()  # no clients so callback returns early anyway
 
     # Verify queue is still bounded after overflow attempt
     try:
         _state.broadcast_q.put_nowait({"overflow": True})
-        overflow_dropped = False
     except asyncio.QueueFull:
-        overflow_dropped = True
+        pass
 
     # Either dropped (QueueFull caught) or queue is bounded at 5
     assert _state.broadcast_q.qsize() <= 5

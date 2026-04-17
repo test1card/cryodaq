@@ -93,7 +93,9 @@ class UserPreferences:
         self._data[key] = history[:max_items]
 
 
-def suggest_experiment_name(template_id: str, existing_names: list[str], template_name_map: dict[str, str] | None = None) -> str:
+def suggest_experiment_name(
+    template_id: str, existing_names: list[str], template_name_map: dict[str, str] | None = None
+) -> str:
     """Предложить имя для нового эксперимента с авто-инкрементом.
 
     Параметры
@@ -119,7 +121,7 @@ def suggest_experiment_name(template_id: str, existing_names: list[str], templat
     max_num = 0
     for name in existing_names:
         if name.startswith(prefix + "-"):
-            suffix = name[len(prefix) + 1:]
+            suffix = name[len(prefix) + 1 :]
             try:
                 num = int(suffix)
                 max_num = max(max_num, num)

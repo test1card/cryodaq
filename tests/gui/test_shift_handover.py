@@ -38,9 +38,10 @@ def _patch_worker_capture():
     )
     return patcher, captured
 
-from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui.widgets.shift_handover import (
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from cryodaq.gui.widgets.shift_handover import (  # noqa: E402
     ShiftBar,
     ShiftEndDialog,
     ShiftPeriodicPrompt,
@@ -61,6 +62,7 @@ def _app() -> QApplication:
 # Config loading
 # ---------------------------------------------------------------------------
 
+
 def test_load_shift_config_returns_dict() -> None:
     config = load_shift_config()
     assert isinstance(config, dict)
@@ -78,6 +80,7 @@ def test_shift_id_format() -> None:
 # ---------------------------------------------------------------------------
 # ShiftStartDialog
 # ---------------------------------------------------------------------------
+
 
 def test_shift_start_dialog_creates_with_operators() -> None:
     _app()
@@ -113,6 +116,7 @@ def test_shift_start_dialog_accepts_with_operator() -> None:
 # ShiftPeriodicPrompt
 # ---------------------------------------------------------------------------
 
+
 def test_periodic_prompt_submits_log_entry() -> None:
     """Phase 2c baseline cleanup: shift_handover dispatches via ZmqCommandWorker
     on a Qt thread now (was direct send_command). Patch the worker class
@@ -141,6 +145,7 @@ def test_periodic_prompt_submits_log_entry() -> None:
 # ---------------------------------------------------------------------------
 # ShiftEndDialog
 # ---------------------------------------------------------------------------
+
 
 def test_shift_end_dialog_generates_summary() -> None:
     _app()
@@ -177,6 +182,7 @@ def test_shift_end_dialog_generates_summary() -> None:
 # ---------------------------------------------------------------------------
 # ShiftBar
 # ---------------------------------------------------------------------------
+
 
 def test_shift_bar_initializes_inactive() -> None:
     _app()

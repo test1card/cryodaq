@@ -1,4 +1,5 @@
 """Regression test for H.14: Stored XSS via operator log innerHTML."""
+
 from pathlib import Path
 
 SERVER_PY = Path("src/cryodaq/web/server.py")

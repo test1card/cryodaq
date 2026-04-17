@@ -72,9 +72,7 @@ class EscalationService:
                 name=f"escalation_{key}",
             )
             self._pending[key] = task
-            logger.debug(
-                "Эскалация %s: chat_id=%s, задержка=%.0f с", event_type, chat_id, delay_s
-            )
+            logger.debug("Эскалация %s: chat_id=%s, задержка=%.0f с", event_type, chat_id, delay_s)
 
     async def cancel(self, event_type: str) -> None:
         """Отменить все pending-уведомления для данного типа события.

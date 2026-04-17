@@ -71,7 +71,7 @@ def _alarm_condition(
     )
 
 
-async def _drain_queue(queue: asyncio.Queue, *, timeout: float = 0.1) -> list[Reading]:
+async def _drain_queue(queue: asyncio.Queue, *, timeout: float = 0.1) -> list[Reading]:  # noqa: ASYNC109
     """Drain all items from a queue within timeout."""
     items: list[Reading] = []
     deadline = asyncio.get_event_loop().time() + timeout
@@ -110,7 +110,9 @@ async def test_alarm_publishes_reading_on_activate() -> None:
     await engine.start()
     try:
         # Trigger alarm: value=150 > threshold=100
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(test_q, timeout=0.2)
@@ -145,11 +147,15 @@ async def test_alarm_publishes_reading_on_clear() -> None:
     await engine.start()
     try:
         # Activate
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         # Clear: value=80 < threshold - hysteresis_k = 90
-        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(test_q, timeout=0.2)
@@ -174,7 +180,9 @@ async def test_alarm_publishes_reading_on_acknowledge() -> None:
     )
     await engine.start()
     try:
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         await engine.acknowledge("high_temp")
@@ -203,7 +211,9 @@ async def test_alarm_publishes_alarm_count_on_activate() -> None:
     await engine.start()
     try:
         # Trigger alarm
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(count_q, timeout=0.2)
@@ -233,7 +243,9 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
     await engine.start()
     try:
         # Activate
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         # Acknowledge
@@ -241,7 +253,9 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
         await asyncio.sleep(0.02)
 
         # Clear: value=80 < 90
-        await broker.publish(Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         readings = await _drain_queue(count_q, timeout=0.2)
@@ -268,7 +282,9 @@ async def test_alarm_count_remains_unresolved_after_acknowledge() -> None:
     )
     await engine.start()
     try:
-        await broker.publish(Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test"))
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
         await asyncio.sleep(0.05)
 
         await engine.acknowledge("high_temp")
@@ -321,9 +337,9 @@ async def test_alarm_no_feedback_loop() -> None:
         readings = await _drain_queue(alarm_q, timeout=0.15)
         # The only reading should be the one we published, not new engine-generated ones
         engine_generated = [
-            r for r in readings
-            if r is not alarm_reading
-            and r.metadata.get("event_type") in ("activated", "cleared")
+            r
+            for r in readings
+            if r is not alarm_reading and r.metadata.get("event_type") in ("activated", "cleared")
         ]
         assert not engine_generated, (
             f"Feedback loop detected! Engine generated new alarm readings: {engine_generated}"
@@ -341,9 +357,7 @@ async def test_alarm_initial_count_zero() -> None:
         filter_fn=lambda r: r.channel == "analytics/alarm_count",
     )
     engine = AlarmEngine(broker=broker)
-    engine.add_condition(
-        _alarm_condition(name="high_temp", threshold=100.0, comparison=">")
-    )
+    engine.add_condition(_alarm_condition(name="high_temp", threshold=100.0, comparison=">"))
     await engine.start()
     try:
         readings = await _drain_queue(count_q, timeout=0.2)
@@ -373,9 +387,7 @@ async def test_safety_start_publishes_initial_state_safe_off() -> None:
     try:
         readings = await _drain_queue(state_q, timeout=0.2)
         assert readings, "Expected analytics/safety_state Reading on start"
-        safe_off_readings = [
-            r for r in readings if r.metadata.get("state") == "safe_off"
-        ]
+        safe_off_readings = [r for r in readings if r.metadata.get("state") == "safe_off"]
         assert safe_off_readings, (
             f"Expected Reading with state='safe_off', got: "
             f"{[r.metadata.get('state') for r in readings]}"
@@ -436,7 +448,9 @@ async def test_safety_publish_failure_does_not_crash() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _make_safety_ready(*, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0):
+async def _make_safety_ready(
+    *, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0
+):
     """Create a SafetyManager in READY state with source limits configured."""
     mgr, sb = await _make_safety()
     # Configure source limits
@@ -491,14 +505,10 @@ async def test_request_run_rejects_over_current_limit() -> None:
 
 async def test_request_run_accepts_exact_limits() -> None:
     """request_run returns ok=True when parameters equal the limits (== is allowed)."""
-    mgr, sb = await _make_safety_ready(
-        max_power_w=5.0, max_voltage_v=40.0, max_current_a=1.0
-    )
+    mgr, sb = await _make_safety_ready(max_power_w=5.0, max_voltage_v=40.0, max_current_a=1.0)
     try:
         result = await mgr.request_run(p_target=5.0, v_comp=40.0, i_comp=1.0)
-        assert result["ok"] is True, (
-            f"Expected acceptance at exact limits, got: {result}"
-        )
+        assert result["ok"] is True, f"Expected acceptance at exact limits, got: {result}"
         assert mgr.state == SafetyState.RUNNING
     finally:
         await mgr.stop()
@@ -519,13 +529,9 @@ async def test_emergency_off_returns_latched_flag_in_fault() -> None:
 
         result = await mgr.emergency_off()
 
-        assert result.get("latched") is True, (
-            f"Expected latched=True in response, got: {result}"
-        )
+        assert result.get("latched") is True, f"Expected latched=True in response, got: {result}"
         warning = result.get("warning", "")
-        assert warning, (
-            f"Expected a non-empty warning string when latched, got: {result}"
-        )
+        assert warning, f"Expected a non-empty warning string when latched, got: {result}"
         # FAULT_LATCHED state must be preserved after emergency_off
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"FAULT_LATCHED must be preserved after emergency_off, got: {mgr.state}"

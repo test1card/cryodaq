@@ -45,6 +45,7 @@ async def _feed(broker, channel="Т1 Криостат верх", value=4.5, unit
 # 1. Initial state is SAFE_OFF
 # ---------------------------------------------------------------------------
 
+
 async def test_initial_state_safe_off():
     mgr, broker = await _make_manager()
     try:
@@ -56,6 +57,7 @@ async def test_initial_state_safe_off():
 # ---------------------------------------------------------------------------
 # 2. SAFE_OFF → READY when data arrives (mock mode)
 # ---------------------------------------------------------------------------
+
 
 async def test_safe_off_to_ready():
     mgr, broker = await _make_manager()
@@ -71,6 +73,7 @@ async def test_safe_off_to_ready():
 # ---------------------------------------------------------------------------
 # 3. READY → RUNNING via request_run
 # ---------------------------------------------------------------------------
+
 
 async def test_ready_to_running():
     mgr, broker = await _make_manager()
@@ -89,6 +92,7 @@ async def test_ready_to_running():
 # ---------------------------------------------------------------------------
 # 4. RUNNING → SAFE_OFF via request_stop
 # ---------------------------------------------------------------------------
+
 
 async def test_running_to_safe_off():
     mgr, broker = await _make_manager()
@@ -109,6 +113,7 @@ async def test_running_to_safe_off():
 # 5. RUNNING → FAULT_LATCHED on stale data (fail-on-silence)
 # ---------------------------------------------------------------------------
 
+
 async def test_fault_on_stale_data():
     mgr, broker = await _make_manager(stale=1.0)
     mgr._config.critical_channels = []  # No critical channels for READY
@@ -121,6 +126,7 @@ async def test_fault_on_stale_data():
 
         # Now add critical channel pattern and stop feeding
         import re
+
         mgr._config.critical_channels = [re.compile("Т1 .*")]
 
         # Wait for stale timeout + monitor check
@@ -134,6 +140,7 @@ async def test_fault_on_stale_data():
 # ---------------------------------------------------------------------------
 # 6. FAULT_LATCHED → MANUAL_RECOVERY → READY (recovery flow)
 # ---------------------------------------------------------------------------
+
 
 async def test_recovery_flow():
     mgr, broker = await _make_manager()
@@ -166,6 +173,7 @@ async def test_recovery_flow():
 # 7. Acknowledge without reason rejected
 # ---------------------------------------------------------------------------
 
+
 async def test_acknowledge_requires_reason():
     mgr, broker = await _make_manager()
     try:
@@ -182,6 +190,7 @@ async def test_acknowledge_requires_reason():
 # 8. Cooldown prevents immediate recovery
 # ---------------------------------------------------------------------------
 
+
 async def test_cooldown_before_recovery():
     mgr, broker = await _make_manager()
     mgr._config.cooldown_before_rearm_s = 5.0
@@ -197,6 +206,7 @@ async def test_cooldown_before_recovery():
 # ---------------------------------------------------------------------------
 # 9. Emergency off from any state
 # ---------------------------------------------------------------------------
+
 
 async def test_emergency_off_from_running():
     k = _mock_keithley()
@@ -218,6 +228,7 @@ async def test_emergency_off_from_running():
 # 10. Cannot start from FAULT_LATCHED
 # ---------------------------------------------------------------------------
 
+
 async def test_cannot_run_from_fault():
     mgr, broker = await _make_manager()
     try:
@@ -232,6 +243,7 @@ async def test_cannot_run_from_fault():
 # ---------------------------------------------------------------------------
 # 11. SafetyBroker overflow triggers FAULT
 # ---------------------------------------------------------------------------
+
 
 async def test_broker_overflow_triggers_fault():
     broker = SafetyBroker()
@@ -260,6 +272,7 @@ async def test_broker_overflow_triggers_fault():
 # 12. Keithley required in non-mock mode
 # ---------------------------------------------------------------------------
 
+
 async def test_keithley_required_non_mock():
     broker = SafetyBroker()
     mgr = SafetyManager(broker, keithley_driver=None, mock=False)
@@ -277,6 +290,7 @@ async def test_keithley_required_non_mock():
 # 13. get_status returns correct info
 # ---------------------------------------------------------------------------
 
+
 async def test_get_status():
     mgr, broker = await _make_manager()
     try:
@@ -291,6 +305,7 @@ async def test_get_status():
 # ---------------------------------------------------------------------------
 # 14. Event history recorded
 # ---------------------------------------------------------------------------
+
 
 async def test_event_history():
     mgr, broker = await _make_manager()
@@ -307,6 +322,7 @@ async def test_event_history():
 # ---------------------------------------------------------------------------
 # 15. Interlock trip goes through SafetyManager
 # ---------------------------------------------------------------------------
+
 
 async def test_interlock_trip_causes_fault():
     k = _mock_keithley()
@@ -327,6 +343,7 @@ async def test_interlock_trip_causes_fault():
 # ---------------------------------------------------------------------------
 # Phase-2d-A1 regression tests
 # ---------------------------------------------------------------------------
+
 
 async def test_fault_hardware_shutdown_completes_under_cancellation():
     """F2 regression: _fault() hardware shutdown must complete even if
@@ -456,11 +473,7 @@ def test_load_config_fails_on_non_string_pattern(tmp_path):
 def test_load_config_fails_on_non_numeric_timeout(tmp_path):
     """A.4.1 residual: non-numeric stale_timeout_s must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n"
-        "  - 'Т1 .*'\n"
-        "stale_timeout_s: 'not_a_number'\n"
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -469,11 +482,7 @@ def test_load_config_fails_on_non_numeric_timeout(tmp_path):
 def test_load_config_fails_on_non_dict_source_limits(tmp_path):
     """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n"
-        "  - 'Т1 .*'\n"
-        "source_limits: 'not_a_dict'\n"
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -482,12 +491,7 @@ def test_load_config_fails_on_non_dict_source_limits(tmp_path):
 def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
     """A.4.1 residual: non-numeric source limit must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n"
-        "  - 'Т1 .*'\n"
-        "source_limits:\n"
-        "  max_power_w: [1, 2, 3]\n"
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -579,9 +583,7 @@ async def test_fault_log_callback_survives_outer_cancellation():
     broker = SafetyBroker()
     sm = SafetyManager(broker, mock=True, fault_log_callback=slow_callback)
 
-    fault_task = asyncio.create_task(
-        sm._fault("test cancellation", channel="smua", value=1.0)
-    )
+    fault_task = asyncio.create_task(sm._fault("test cancellation", channel="smua", value=1.0))
     await asyncio.wait_for(callback_started.wait(), timeout=2.0)
     fault_task.cancel()
 
@@ -626,9 +628,7 @@ async def test_safe_off_fault_latched_shields_emergency_off():
 
     await asyncio.sleep(0.2)
 
-    assert off_completed.is_set(), (
-        "Cancellation of _safe_off swallowed shielded _ensure_output_off"
-    )
+    assert off_completed.is_set(), "Cancellation of _safe_off swallowed shielded _ensure_output_off"
 
 
 def test_fault_callback_shielded_in_source():
@@ -687,6 +687,4 @@ async def test_fault_log_callback_runs_before_publish():
     except asyncio.CancelledError:
         pass
 
-    assert callback_invoked.is_set(), (
-        "Log callback not invoked before publish — ordering wrong"
-    )
+    assert callback_invoked.is_set(), "Log callback not invoked before publish — ordering wrong"

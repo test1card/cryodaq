@@ -48,27 +48,30 @@ def _bind_with_retry(socket: Any, address: str) -> None:
             socket.bind(address)
             if attempt > 0:
                 logger.info(
-                    "ZMQ bound to %s after %d retries", address, attempt,
+                    "ZMQ bound to %s after %d retries",
+                    address,
+                    attempt,
                 )
             return
         except zmq.ZMQError as exc:
             # libzmq maps EADDRINUSE to its own errno value.
-            is_addr_in_use = (
-                exc.errno == zmq.EADDRINUSE
-                or exc.errno == errno.EADDRINUSE
-            )
+            is_addr_in_use = exc.errno == zmq.EADDRINUSE or exc.errno == errno.EADDRINUSE
             if not is_addr_in_use:
                 raise
             if attempt == _BIND_MAX_ATTEMPTS - 1:
                 logger.critical(
                     "ZMQ bind FAILED after %d attempts: %s still in use. "
                     "Check for stale sockets via lsof/netstat.",
-                    _BIND_MAX_ATTEMPTS, address,
+                    _BIND_MAX_ATTEMPTS,
+                    address,
                 )
                 raise
             logger.warning(
                 "ZMQ bind EADDRINUSE on %s, retry in %.1fs (attempt %d/%d)",
-                address, delay, attempt + 1, _BIND_MAX_ATTEMPTS,
+                address,
+                delay,
+                attempt + 1,
+                _BIND_MAX_ATTEMPTS,
             )
             time.sleep(delay)
             delay = min(delay * 2, _BIND_MAX_DELAY_S)
@@ -297,8 +300,7 @@ class ZMQCommandServer:
             try:
                 cmd = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                await self._socket.send(json.dumps(
-                    {"ok": False, "error": "invalid JSON"}).encode())
+                await self._socket.send(json.dumps({"ok": False, "error": "invalid JSON"}).encode())
                 continue
 
             try:
@@ -313,8 +315,7 @@ class ZMQCommandServer:
                 # CancelledError during handler — must still send reply
                 # to avoid leaving REP socket in stuck state.
                 try:
-                    await self._socket.send(json.dumps(
-                        {"ok": False, "error": "internal"}).encode())
+                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
                 except Exception:
                     pass
                 raise
@@ -327,8 +328,7 @@ class ZMQCommandServer:
             except asyncio.CancelledError:
                 # Shutting down — try best-effort send
                 try:
-                    await self._socket.send(json.dumps(
-                        {"ok": False, "error": "internal"}).encode())
+                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
                 except Exception:
                     pass
                 raise
@@ -337,8 +337,9 @@ class ZMQCommandServer:
                 # Serialization or send failure — must still send a reply
                 # to avoid leaving the REP socket in stuck state.
                 try:
-                    await self._socket.send(json.dumps(
-                        {"ok": False, "error": "serialization error"}).encode())
+                    await self._socket.send(
+                        json.dumps({"ok": False, "error": "serialization error"}).encode()
+                    )
                 except Exception:
                     pass
 

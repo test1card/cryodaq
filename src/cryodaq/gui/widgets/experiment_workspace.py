@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
 from cryodaq.core.phase_labels import PHASE_LABELS_RU_SHORT, PHASE_ORDER
 from cryodaq.core.user_preferences import UserPreferences, suggest_experiment_name
 from cryodaq.drivers.base import Reading
-from cryodaq.paths import get_data_dir
 from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import (
     PanelHeader,
@@ -39,6 +38,7 @@ from cryodaq.gui.widgets.common import (
     build_action_row,
 )
 from cryodaq.gui.zmq_client import ZmqCommandWorker, send_command
+from cryodaq.paths import get_data_dir
 
 
 class ExperimentWorkspace(QWidget):
@@ -91,7 +91,9 @@ class ExperimentWorkspace(QWidget):
 
         self._templates = list(result.get("templates", []))
         self._templates_by_id = {
-            str(template.get("id", "")): template for template in self._templates if template.get("id")
+            str(template.get("id", "")): template
+            for template in self._templates
+            if template.get("id")
         }
         self._active_experiment = result.get("active_experiment")
         self._app_mode = str(result.get("app_mode", "experiment"))
@@ -107,7 +109,10 @@ class ExperimentWorkspace(QWidget):
             active_id = str(self._active_experiment.get("experiment_id", "")).strip()
             if experiment_id and experiment_id == active_id:
                 self._reload_timeline()
-        elif reading.channel.startswith("analytics/keithley_channel_state/") and self._active_experiment:
+        elif (
+            reading.channel.startswith("analytics/keithley_channel_state/")
+            and self._active_experiment
+        ):
             channel_name = reading.channel.rsplit("/", 1)[-1]
             state_name = str(reading.metadata.get("state", "off")).strip() or "off"
             self._prepend_runtime_timeline_entry(
@@ -138,6 +143,7 @@ class ExperimentWorkspace(QWidget):
         from PySide6.QtWidgets import QDialog
 
         from cryodaq.gui.widgets.preflight_dialog import PreFlightDialog
+
         preflight = PreFlightDialog(self)
         if preflight.exec() != QDialog.DialogCode.Accepted:
             return
@@ -160,7 +166,9 @@ class ExperimentWorkspace(QWidget):
         }
         self._create_button.setEnabled(False)
         worker = ZmqCommandWorker(payload)
-        worker.finished.connect(lambda result, op=operator, pl=payload: self._on_create_result(result, op, pl))
+        worker.finished.connect(
+            lambda result, op=operator, pl=payload: self._on_create_result(result, op, pl)
+        )
         self._workers.append(worker)
         worker.start()
 
@@ -177,6 +185,7 @@ class ExperimentWorkspace(QWidget):
         # Сохранить оператора в QSettings-историю
         if operator:
             from PySide6.QtCore import QSettings
+
             _s = QSettings("FIAN", "CryoDAQ")
             _known = _s.value("known_operators", [])
             if not isinstance(_known, list):
@@ -200,7 +209,7 @@ class ExperimentWorkspace(QWidget):
             self._workspace_status.show_success("Эксперимент создан, карточка открыта.")
         else:
             self._workspace_status.show_warning(
-                "Команда на создание эксперимента выполнена, но состояние интерфейса не удалось обновить."
+                "Команда на создание эксперимента выполнена, но состояние интерфейса не удалось обновить."  # noqa: E501
             )
         self._notify_post_action()
 
@@ -237,7 +246,9 @@ class ExperimentWorkspace(QWidget):
         updated = result.get("experiment")
         if isinstance(updated, dict):
             self._active_experiment = dict(updated)
-            template = self._templates_by_id.get(str(self._active_experiment.get("template_id", "custom")), {})
+            template = self._templates_by_id.get(
+                str(self._active_experiment.get("template_id", "custom")), {}
+            )
             self._populate_active_card(self._active_experiment)
             self._rebuild_artifacts(self._active_experiment, template)
         self._save_status.show_success("Карточка сохранена. Поля оставлены без очистки.")
@@ -315,7 +326,7 @@ class ExperimentWorkspace(QWidget):
         root.addWidget(
             PanelHeader(
                 "Рабочее место оператора",
-                "Главная карточка эксперимента, режим приложения и основные действия без перехода к отдельному журналу.",
+                "Главная карточка эксперимента, режим приложения и основные действия без перехода к отдельному журналу.",  # noqa: E501
             )
         )
 
@@ -385,7 +396,7 @@ class ExperimentWorkspace(QWidget):
         debug_layout.setContentsMargins(12, 10, 12, 10)
         debug_layout.addWidget(QLabel("Режим отладки активен."))
         self._debug_message = QLabel(
-            "Карточка эксперимента не открывается. Архивные записи и автоматические отчёты по эксперименту сейчас не формируются."
+            "Карточка эксперимента не открывается. Архивные записи и автоматические отчёты по эксперименту сейчас не формируются."  # noqa: E501
         )
         self._debug_message.setWordWrap(True)
         self._debug_message.setStyleSheet(f"color: {theme.TEXT_SECONDARY};")
@@ -406,6 +417,7 @@ class ExperimentWorkspace(QWidget):
         self._create_operator_edit.setEditable(True)
         self._create_operator_edit.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         from PySide6.QtCore import QSettings
+
         _settings = QSettings("FIAN", "CryoDAQ")
         _known_ops = _settings.value("known_operators", [])
         if isinstance(_known_ops, list) and _known_ops:
@@ -453,7 +465,9 @@ class ExperimentWorkspace(QWidget):
         apply_group_box_style(self._passport_box, "#58a6ff")
         passport_layout = QFormLayout(self._passport_box)
         passport_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        passport_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        passport_layout.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._card_experiment_id = QLabel("—")
         self._card_experiment_id.setWordWrap(True)
         self._card_status = QLabel("—")
@@ -514,7 +528,9 @@ class ExperimentWorkspace(QWidget):
         apply_button_style(self._abort_button, "danger")
         self._abort_button.clicked.connect(self._on_abort_experiment)
         card_fields_layout.addLayout(
-            build_action_row(self._save_button, self._finalize_button, self._abort_button, add_stretch=True)
+            build_action_row(
+                self._save_button, self._finalize_button, self._abort_button, add_stretch=True
+            )
         )
         self._save_status = StatusBanner()
         self._save_status.clear_message()
@@ -606,7 +622,7 @@ class ExperimentWorkspace(QWidget):
         answer = QMessageBox.question(
             self,
             "Режим приложения",
-            f"Переключить приложение в режим «{'Эксперимент' if mode == 'experiment' else 'Отладка'}»?",
+            f"Переключить приложение в режим «{'Эксперимент' if mode == 'experiment' else 'Отладка'}»?",  # noqa: E501
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -638,9 +654,9 @@ class ExperimentWorkspace(QWidget):
             bold=True,
         )
         self._mode_notice.setText(
-            "В режиме эксперимента доступна одна активная карточка, архивирование и подготовка отчётов."
+            "В режиме эксперимента доступна одна активная карточка, архивирование и подготовка отчётов."  # noqa: E501
             if self._app_mode == "experiment"
-            else "В режиме отладки карточка эксперимента не ведётся, архив и автоматические отчёты не формируются."
+            else "В режиме отладки карточка эксперимента не ведётся, архив и автоматические отчёты не формируются."  # noqa: E501
         )
         apply_status_label_style(
             self._mode_notice,
@@ -782,24 +798,30 @@ class ExperimentWorkspace(QWidget):
         artifact_dir = str(experiment.get("artifact_dir", "")).strip()
         metadata_path = str(experiment.get("metadata_path", "")).strip()
         for text in [
-            f"artifact_dir: {artifact_dir}" if artifact_dir else "artifact_dir: будет создан backend",
-            f"metadata: {metadata_path}" if metadata_path else "metadata: будет обновляться вместе с карточкой",
-            f"sections: {', '.join(experiment.get('sections', []))}" if experiment.get("sections") else "",
-            f"template_report_enabled: {'yes' if experiment.get('report_enabled', template.get('report_enabled', True)) else 'no'}",
+            f"artifact_dir: {artifact_dir}"
+            if artifact_dir
+            else "artifact_dir: будет создан backend",
+            f"metadata: {metadata_path}"
+            if metadata_path
+            else "metadata: будет обновляться вместе с карточкой",
+            f"sections: {', '.join(experiment.get('sections', []))}"
+            if experiment.get("sections")
+            else "",
+            f"template_report_enabled: {'yes' if experiment.get('report_enabled', template.get('report_enabled', True)) else 'no'}",  # noqa: E501
         ]:
             if text:
                 self._artifacts_list.addItem(QListWidgetItem(text))
         if self._artifacts_list.count() == 0:
-            self._artifacts_list.addItem(QListWidgetItem("Артефакты и результаты ещё не зафиксированы."))
+            self._artifacts_list.addItem(
+                QListWidgetItem("Артефакты и результаты ещё не зафиксированы.")
+            )
 
     def _describe_report_state(self, experiment: dict[str, Any]) -> str:
         if self._app_mode == "debug":
             return "Автоматические отчёты отключены в режиме отладки."
         if not bool(experiment.get("report_enabled", True)):
             return "Для выбранного шаблона автоматический отчёт отключён."
-        return (
-            "Карточка активна. Автоматический отчёт станет доступен после завершения и архивирования эксперимента."
-        )
+        return "Карточка активна. Автоматический отчёт станет доступен после завершения и архивирования эксперимента."  # noqa: E501
 
     def _update_phase_display(self) -> None:
         """Update phase labels from current experiment status (non-blocking)."""
@@ -821,7 +843,9 @@ class ExperimentWorkspace(QWidget):
         for key, lbl in self._phase_labels.items():
             if key == current:
                 lbl.setText(f"● {lbl.text().split(' ', 1)[-1]}")
-                lbl.setStyleSheet(f"color: {theme.STATUS_OK}; font-weight: bold; border: none; font-size: 11px;")
+                lbl.setStyleSheet(
+                    f"color: {theme.STATUS_OK}; font-weight: bold; border: none; font-size: 11px;"
+                )
             elif key in completed:
                 lbl.setText(f"✓ {lbl.text().split(' ', 1)[-1]}")
                 lbl.setStyleSheet(f"color: {theme.TEXT_ACCENT}; border: none; font-size: 11px;")
@@ -833,7 +857,9 @@ class ExperimentWorkspace(QWidget):
     @Slot()
     def _on_advance_phase(self) -> None:
         from PySide6.QtWidgets import QInputDialog
+
         from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
+
         phases = list(PHASE_ORDER)
         labels = [PHASE_LABELS_RU[p] for p in phases]
         item, ok = QInputDialog.getItem(self, "Следующая фаза", "Выберите фазу:", labels, 0, False)
@@ -842,7 +868,9 @@ class ExperimentWorkspace(QWidget):
         idx = labels.index(item)
         self._advance_phase_btn.setEnabled(False)
         worker = ZmqCommandWorker({"cmd": "experiment_advance_phase", "phase": phases[idx]})
-        worker.finished.connect(lambda result, label=item: self._on_advance_phase_result(result, label))
+        worker.finished.connect(
+            lambda result, label=item: self._on_advance_phase_result(result, label)
+        )
         self._workers.append(worker)
         worker.start()
 
@@ -875,7 +903,9 @@ class ExperimentWorkspace(QWidget):
     @staticmethod
     def _format_timeline_entry(entry: dict[str, Any]) -> str:
         stamp = ExperimentWorkspace._format_datetime(entry.get("timestamp"))
-        author = str(entry.get("author", "")).strip() or str(entry.get("source", "")).strip() or "system"
+        author = (
+            str(entry.get("author", "")).strip() or str(entry.get("source", "")).strip() or "system"
+        )
         message = str(entry.get("message", "")).strip()
         return f"{stamp} • {author}: {message}"
 

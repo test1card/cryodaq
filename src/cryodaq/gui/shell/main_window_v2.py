@@ -13,6 +13,7 @@ Replaces the tab-based MainWindow. Layout:
 Constructor signature matches the old MainWindow so the launcher and
 gui/app.py can swap implementations without further changes.
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,7 +30,10 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.dashboard.time_window import TimeWindow
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
+from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
 from cryodaq.gui.shell.tool_rail import ToolRail
@@ -39,12 +43,9 @@ from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
-from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
-from cryodaq.gui.dashboard import DashboardView
-from cryodaq.gui.dashboard.time_window import TimeWindow
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
@@ -140,29 +141,29 @@ class MainWindowV2(QMainWindow):
         # Wire signals
         self._tool_rail.tool_clicked.connect(self._on_tool_clicked)
         self._top_bar.experiment_clicked.connect(self._on_experiment_clicked)
-        self._top_bar.alarms_clicked.connect(
-            lambda: self._on_tool_clicked("alarms")
-        )
+        self._top_bar.alarms_clicked.connect(lambda: self._on_tool_clicked("alarms"))
 
         # Forward alarm count from AlarmPanel directly to top bar
         self._alarm_panel.v2_alarm_count_changed.connect(self._top_bar.set_alarm_count)
 
         # B.5: forward experiment status from top bar to dashboard phase widget
-        self._top_bar.experiment_status_received.connect(
-            self._on_experiment_status_received
-        )
+        self._top_bar.experiment_status_received.connect(self._on_experiment_status_received)
         self._latest_experiment_status: dict | None = None
 
         # B.8: wire dashboard «+ Создать» button to new experiment dialog
-        if hasattr(self._overview_panel, '_phase_widget') and \
-           self._overview_panel._phase_widget is not None:
+        if (
+            hasattr(self._overview_panel, "_phase_widget")
+            and self._overview_panel._phase_widget is not None
+        ):
             self._overview_panel._phase_widget.create_experiment_requested.connect(
                 self._show_new_experiment_dialog
             )
 
         # Wire dashboard time window picker → top bar echo
-        if hasattr(self._overview_panel, '_temp_plot') and \
-           self._overview_panel._temp_plot is not None:
+        if (
+            hasattr(self._overview_panel, "_temp_plot")
+            and self._overview_panel._temp_plot is not None
+        ):
             self._overview_panel._temp_plot.time_window_changed.connect(
                 lambda window: self._top_bar.set_time_window_echo(window.label)
             )
@@ -238,9 +239,7 @@ class MainWindowV2(QMainWindow):
                     exp = dict(exp)
                     exp["current_phase"] = self._latest_experiment_status.get("current_phase")
                     exp["app_mode"] = self._latest_experiment_status.get("app_mode")
-                widget.set_templates(
-                    self._latest_experiment_status.get("templates", [])
-                )
+                widget.set_templates(self._latest_experiment_status.get("templates", []))
                 widget.set_experiment(
                     exp,
                     self._latest_experiment_status.get("phases", []),
@@ -263,15 +262,12 @@ class MainWindowV2(QMainWindow):
         try:
             self._top_bar.on_reading(reading)
         except Exception:
-            logger.warning(
-                "TopWatchBar reading dispatch failed", exc_info=True
-            )
+            logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
         self._alarm_panel.on_reading(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
         # B.8.0.2: route log entries to overlay for live timeline
-        if (channel == "analytics/operator_log_entry"
-                and self._experiment_overlay is not None):
+        if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
         if reading.unit == "K" and self._calibration_panel is not None:
             self._calibration_panel.on_reading(reading)
@@ -299,9 +295,7 @@ class MainWindowV2(QMainWindow):
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
                 state_name = reading.metadata.get("state")
-                self._last_safety_state = (
-                    str(state_name) if state_name is not None else None
-                )
+                self._last_safety_state = str(state_name) if state_name is not None else None
                 self._bottom_bar.set_safety_state(self._last_safety_state)
         if self._instrument_panel is not None:
             self._instrument_panel.on_reading(reading)
@@ -367,7 +361,6 @@ class MainWindowV2(QMainWindow):
             self._show_new_experiment_dialog()
 
     def _show_new_experiment_dialog(self) -> None:
-        from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 
         templates = []
         if self._latest_experiment_status:
@@ -407,7 +400,7 @@ class MainWindowV2(QMainWindow):
         try:
             with socket.create_connection((host, _WEB_PORT), timeout=0.5):
                 pass
-        except (OSError, socket.timeout):
+        except (TimeoutError, OSError):
             QMessageBox.information(
                 self,
                 "Web-панель",
@@ -431,8 +424,7 @@ class MainWindowV2(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Перезапуск Engine",
-            "Перезапустить Engine?\n\n"
-            "Запись данных будет прервана на несколько секунд.",
+            "Перезапустить Engine?\n\nЗапись данных будет прервана на несколько секунд.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

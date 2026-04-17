@@ -4,6 +4,7 @@ No toolbar — synchronizes X axis with the temperature plot via
 setXLink in DashboardView. Always uses log Y because cryogenic
 vacuum spans many orders of magnitude.
 """
+
 from __future__ import annotations
 
 import pyqtgraph as pg
@@ -51,15 +52,16 @@ class PressurePlotWidget(QWidget):
         self._plot.setBackground(theme.SURFACE_CARD)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Давление", units="mbar",
-                     color=theme.TEXT_SECONDARY)
+        pi.setLabel("left", "Давление", units="mbar", color=theme.TEXT_SECONDARY)
         pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
         pi.setLabel("bottom", "Время", color=theme.TEXT_SECONDARY)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.setLogMode(x=False, y=True)
         self._curve = self._plot.plot(
-            [], [], pen=pg.mkPen("#FF7F0E", width=2),
+            [],
+            [],
+            pen=pg.mkPen("#FF7F0E", width=2),
         )
 
     def refresh(self) -> None:

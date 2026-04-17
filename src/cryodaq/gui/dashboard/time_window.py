@@ -3,6 +3,7 @@
 Shared between TempPlotWidget (interactive picker) and TopWatchBar
 (read-only echo). Modifying this single source updates both surfaces.
 """
+
 from __future__ import annotations
 
 from enum import Enum

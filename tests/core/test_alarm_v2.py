@@ -21,6 +21,7 @@ from cryodaq.drivers.base import Reading
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _reading(channel: str, value: float, unit: str = "K", ts: float | None = None) -> Reading:
     if ts is None:
         ts = time.time()
@@ -62,8 +63,14 @@ def _make_evaluator(
     return AlarmEvaluator(state, rate, phase_provider, sp_provider)
 
 
-def _linear_rate_data(channel: str, *, rate_per_min: float, n: int = 90,
-                       start_val: float = 10.0, t0: float | None = None) -> list[tuple[float, float]]:
+def _linear_rate_data(
+    channel: str,
+    *,
+    rate_per_min: float,
+    n: int = 90,
+    start_val: float = 10.0,
+    t0: float | None = None,
+) -> list[tuple[float, float]]:
     """Generate (ts, value) list for given rate."""
     if t0 is None:
         t0 = time.time() - n
@@ -75,10 +82,17 @@ def _linear_rate_data(channel: str, *, rate_per_min: float, n: int = 90,
 # Threshold checks
 # ---------------------------------------------------------------------------
 
+
 def test_threshold_above() -> None:
     ev = _make_evaluator([_reading("T1", 5.0)])
-    cfg = {"alarm_type": "threshold", "channel": "T1", "check": "above",
-           "threshold": 4.0, "level": "WARNING", "message": "T1 high"}
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T1",
+        "check": "above",
+        "threshold": 4.0,
+        "level": "WARNING",
+        "message": "T1 high",
+    }
     result = ev.evaluate("test_above", cfg)
     assert result is not None
     assert result.alarm_id == "test_above"
@@ -88,15 +102,25 @@ def test_threshold_above() -> None:
 
 def test_threshold_above_not_triggered() -> None:
     ev = _make_evaluator([_reading("T1", 3.0)])
-    cfg = {"alarm_type": "threshold", "channel": "T1", "check": "above",
-           "threshold": 4.0, "level": "WARNING"}
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T1",
+        "check": "above",
+        "threshold": 4.0,
+        "level": "WARNING",
+    }
     assert ev.evaluate("test", cfg) is None
 
 
 def test_threshold_below() -> None:
     ev = _make_evaluator([_reading("T1", 1.0)])
-    cfg = {"alarm_type": "threshold", "channel": "T1", "check": "below",
-           "threshold": 2.0, "level": "WARNING"}
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T1",
+        "check": "below",
+        "threshold": 2.0,
+        "level": "WARNING",
+    }
     result = ev.evaluate("test_below", cfg)
     assert result is not None
 
@@ -104,8 +128,13 @@ def test_threshold_below() -> None:
 def test_threshold_outside_range() -> None:
     # Below range
     ev = _make_evaluator([_reading("T3", -1.0)])
-    cfg = {"alarm_type": "threshold", "channel": "T3", "check": "outside_range",
-           "range": [0.0, 350.0], "level": "WARNING"}
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T3",
+        "check": "outside_range",
+        "range": [0.0, 350.0],
+        "level": "WARNING",
+    }
     assert ev.evaluate("sensor_fault", cfg) is not None
 
     # Above range
@@ -120,9 +149,12 @@ def test_threshold_outside_range() -> None:
 def test_threshold_deviation_from_setpoint() -> None:
     ev = _make_evaluator([_reading("T12", 5.5)], setpoints={"T12_setpoint": 4.2})
     cfg = {
-        "alarm_type": "threshold", "channel": "T12",
+        "alarm_type": "threshold",
+        "channel": "T12",
         "check": "deviation_from_setpoint",
-        "setpoint_source": "T12_setpoint", "threshold": 0.5, "level": "WARNING",
+        "setpoint_source": "T12_setpoint",
+        "threshold": 0.5,
+        "level": "WARNING",
     }
     result = ev.evaluate("detector_drift", cfg)
     assert result is not None  # |5.5 - 4.2| = 1.3 > 0.5
@@ -131,9 +163,12 @@ def test_threshold_deviation_from_setpoint() -> None:
 def test_threshold_deviation_from_setpoint_ok() -> None:
     ev = _make_evaluator([_reading("T12", 4.3)], setpoints={"T12_setpoint": 4.2})
     cfg = {
-        "alarm_type": "threshold", "channel": "T12",
+        "alarm_type": "threshold",
+        "channel": "T12",
         "check": "deviation_from_setpoint",
-        "setpoint_source": "T12_setpoint", "threshold": 0.5, "level": "WARNING",
+        "setpoint_source": "T12_setpoint",
+        "threshold": 0.5,
+        "level": "WARNING",
     }
     assert ev.evaluate("drift", cfg) is None  # |4.3 - 4.2| = 0.1 < 0.5
 
@@ -141,8 +176,13 @@ def test_threshold_deviation_from_setpoint_ok() -> None:
 def test_threshold_missing_channel_no_fire() -> None:
     """Канал без данных не вызывает аларм."""
     ev = _make_evaluator()
-    cfg = {"alarm_type": "threshold", "channel": "T99", "check": "above",
-           "threshold": 1.0, "level": "WARNING"}
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T99",
+        "check": "above",
+        "threshold": 1.0,
+        "level": "WARNING",
+    }
     assert ev.evaluate("test", cfg) is None
 
 
@@ -150,13 +190,17 @@ def test_threshold_missing_channel_no_fire() -> None:
 # Sustained
 # ---------------------------------------------------------------------------
 
+
 def test_threshold_sustained_fires_after_delay() -> None:
     ev = _make_evaluator([_reading("T12", 5.5)], setpoints={"T12_setpoint": 4.2})
     cfg = {
-        "alarm_type": "threshold", "channel": "T12",
+        "alarm_type": "threshold",
+        "channel": "T12",
         "check": "deviation_from_setpoint",
-        "setpoint_source": "T12_setpoint", "threshold": 0.5,
-        "level": "WARNING", "sustained_s": 60,
+        "setpoint_source": "T12_setpoint",
+        "threshold": 0.5,
+        "level": "WARNING",
+        "sustained_s": 60,
     }
     state_mgr = AlarmStateManager()
 
@@ -183,19 +227,24 @@ def test_threshold_sustained_resets_on_clear() -> None:
 # Composite
 # ---------------------------------------------------------------------------
 
+
 def test_composite_and_both_true() -> None:
-    ev = _make_evaluator([
-        _reading("T11", 100.0),  # < 200 → any_below condition true
-        _reading("T12", 100.0),
-        _reading("P1", 2e-3, unit="mbar"),  # > 1e-3 → above condition true
-    ])
+    ev = _make_evaluator(
+        [
+            _reading("T11", 100.0),  # < 200 → any_below condition true
+            _reading("T12", 100.0),
+            _reading("P1", 2e-3, unit="mbar"),  # > 1e-3 → above condition true
+        ]
+    )
     cfg = {
-        "alarm_type": "composite", "operator": "AND",
+        "alarm_type": "composite",
+        "operator": "AND",
         "conditions": [
             {"channels": ["T11", "T12"], "check": "any_below", "threshold": 200},
             {"channel": "P1", "check": "above", "threshold": 1e-3},
         ],
-        "level": "CRITICAL", "message": "Vacuum loss",
+        "level": "CRITICAL",
+        "message": "Vacuum loss",
     }
     result = ev.evaluate("vacuum_loss_cold", cfg)
     assert result is not None
@@ -203,13 +252,16 @@ def test_composite_and_both_true() -> None:
 
 
 def test_composite_and_one_false() -> None:
-    ev = _make_evaluator([
-        _reading("T11", 100.0),  # any_below 200 → True
-        _reading("T12", 100.0),
-        _reading("P1", 1e-6, unit="mbar"),  # < 1e-3 → False
-    ])
+    ev = _make_evaluator(
+        [
+            _reading("T11", 100.0),  # any_below 200 → True
+            _reading("T12", 100.0),
+            _reading("P1", 1e-6, unit="mbar"),  # < 1e-3 → False
+        ]
+    )
     cfg = {
-        "alarm_type": "composite", "operator": "AND",
+        "alarm_type": "composite",
+        "operator": "AND",
         "conditions": [
             {"channels": ["T11", "T12"], "check": "any_below", "threshold": 200},
             {"channel": "P1", "check": "above", "threshold": 1e-3},
@@ -220,12 +272,15 @@ def test_composite_and_one_false() -> None:
 
 
 def test_composite_or() -> None:
-    ev = _make_evaluator([
-        _reading("T11", 250.0),  # > 200 → any_below 200 False
-        _reading("P1", 2e-3, unit="mbar"),  # > 1e-3 → True
-    ])
+    ev = _make_evaluator(
+        [
+            _reading("T11", 250.0),  # > 200 → any_below 200 False
+            _reading("P1", 2e-3, unit="mbar"),  # > 1e-3 → True
+        ]
+    )
     cfg = {
-        "alarm_type": "composite", "operator": "OR",
+        "alarm_type": "composite",
+        "operator": "OR",
         "conditions": [
             {"channels": ["T11"], "check": "any_below", "threshold": 200},
             {"channel": "P1", "check": "above", "threshold": 1e-3},
@@ -240,6 +295,7 @@ def test_composite_or() -> None:
 # Rate
 # ---------------------------------------------------------------------------
 
+
 def test_rate_above_fires() -> None:
     """dT/dt > 5 K/мин должен сработать."""
     t0 = time.time() - 90
@@ -251,9 +307,12 @@ def test_rate_above_fires() -> None:
         state.update(_reading("T11", val, ts=ts))
 
     cfg = {
-        "alarm_type": "rate", "channels": ["T11"],
-        "check": "rate_above", "threshold": 5.0,
-        "rate_window_s": 90, "level": "WARNING",
+        "alarm_type": "rate",
+        "channels": ["T11"],
+        "check": "rate_above",
+        "threshold": 5.0,
+        "rate_window_s": 90,
+        "level": "WARNING",
         "message": "Cooling rate {channel}: {value} K/min",
     }
     result = ev.evaluate("excessive_cooling", cfg)
@@ -268,9 +327,12 @@ def test_rate_below_fires() -> None:
     ev = _make_evaluator(rate_data={"T12": rd})
 
     cfg = {
-        "alarm_type": "rate", "channels": ["T12"],
-        "check": "rate_below", "threshold": -5.0,
-        "rate_window_s": 90, "level": "WARNING",
+        "alarm_type": "rate",
+        "channels": ["T12"],
+        "check": "rate_below",
+        "threshold": -5.0,
+        "rate_window_s": 90,
+        "level": "WARNING",
     }
     result = ev.evaluate("fast_cooling", cfg)
     assert result is not None
@@ -283,9 +345,12 @@ def test_rate_near_zero() -> None:
     ev = _make_evaluator(rate_data={"T12": rd})
 
     cfg = {
-        "alarm_type": "rate", "channel": "T12",
-        "check": "rate_near_zero", "rate_threshold": 0.1,
-        "rate_window_s": 90, "level": "INFO",
+        "alarm_type": "rate",
+        "channel": "T12",
+        "check": "rate_near_zero",
+        "rate_threshold": 0.1,
+        "rate_window_s": 90,
+        "level": "INFO",
     }
     result = ev.evaluate("cooldown_stall", cfg)
     assert result is not None
@@ -295,8 +360,11 @@ def test_rate_no_data_no_fire() -> None:
     """Нет данных о скорости → нет аларма."""
     ev = _make_evaluator()
     cfg = {
-        "alarm_type": "rate", "channel": "T1",
-        "check": "rate_above", "threshold": 5.0, "rate_window_s": 90,
+        "alarm_type": "rate",
+        "channel": "T1",
+        "check": "rate_above",
+        "threshold": 5.0,
+        "rate_window_s": 90,
     }
     assert ev.evaluate("test", cfg) is None
 
@@ -305,13 +373,17 @@ def test_rate_no_data_no_fire() -> None:
 # Stale
 # ---------------------------------------------------------------------------
 
+
 def test_stale_fires() -> None:
     """Нет данных > 30 с → stale аларм."""
     old_ts = time.time() - 60.0
     ev = _make_evaluator([_reading("T1", 4.2, ts=old_ts)])
     cfg = {
-        "alarm_type": "stale", "channel": "T1",
-        "timeout_s": 30, "level": "WARNING", "message": "Stale: {channel}",
+        "alarm_type": "stale",
+        "channel": "T1",
+        "timeout_s": 30,
+        "level": "WARNING",
+        "message": "Stale: {channel}",
     }
     result = ev.evaluate("data_stale", cfg)
     assert result is not None
@@ -329,10 +401,15 @@ def test_stale_not_fires_fresh() -> None:
 # AlarmStateManager
 # ---------------------------------------------------------------------------
 
+
 def _event(alarm_id: str = "a1", level: str = "WARNING") -> AlarmEvent:
     return AlarmEvent(
-        alarm_id=alarm_id, level=level, message="test",
-        triggered_at=time.time(), channels=["T1"], values={"T1": 5.0},
+        alarm_id=alarm_id,
+        level=level,
+        message="test",
+        triggered_at=time.time(),
+        channels=["T1"],
+        values={"T1": 5.0},
     )
 
 
@@ -403,15 +480,22 @@ def test_state_manager_history() -> None:
 # Prefix resolution: config uses short ID, readings use full channel name
 # ---------------------------------------------------------------------------
 
+
 def test_threshold_alarm_with_full_channel_names() -> None:
-    """Alarm config references short '\u042212', readings arrive as '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'.
+    """Alarm config references short '\u042212', readings arrive as
+    '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'.
 
     The ChannelStateTracker prefix resolution must bridge the gap.
     """
     # Feed readings with full channel names (as drivers produce)
-    ev = _make_evaluator([
-        _reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 15.0),
-    ])
+    ev = _make_evaluator(
+        [
+            _reading(
+                "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2",  # noqa: E501
+                15.0,
+            ),
+        ]
+    )
     # Config uses short channel ID (as in alarms_v3.yaml)
     cfg = {
         "alarm_type": "threshold",
@@ -500,8 +584,8 @@ def test_acknowledge_is_idempotent():
     first = mgr.acknowledge("test_alarm", operator="op1", reason="first")
     second = mgr.acknowledge("test_alarm", operator="op2", reason="second")
 
-    assert first is not None   # newly acknowledged → event dict
-    assert second is None      # already acknowledged → no event (idempotent)
+    assert first is not None  # newly acknowledged → event dict
+    assert second is None  # already acknowledged → no event (idempotent)
     history = mgr.get_history()
     ack_entries = [h for h in history if h.get("transition") == "ACKNOWLEDGED"]
     assert len(ack_entries) == 1, f"Got {len(ack_entries)} ACK entries, expected 1"

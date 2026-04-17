@@ -3,6 +3,7 @@
 Uses flock (Linux) / msvcrt.locking (Windows) — same kernel-level
 mechanism as engine.py. Lock released automatically when process exits.
 """
+
 from __future__ import annotations
 
 import logging
@@ -33,9 +34,11 @@ def try_acquire_lock(lock_name: str) -> int | None:
     try:
         if sys.platform == "win32":
             import msvcrt
+
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)

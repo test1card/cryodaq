@@ -3,9 +3,10 @@
 Horizontal pills showing phase numbers 1-6. Current highlighted,
 past muted, future dim. Hover tooltip shows full Russian phase name.
 """
+
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -16,9 +17,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.phase_labels import PHASE_LABELS_PILL, PHASE_LABELS_RU, PHASE_ORDER
 from cryodaq.gui import theme
 
-PHASE_NUMBERS: dict[str, int] = {
-    phase: idx + 1 for idx, phase in enumerate(PHASE_ORDER)
-}
+PHASE_NUMBERS: dict[str, int] = {phase: idx + 1 for idx, phase in enumerate(PHASE_ORDER)}
 
 _PILL_HEIGHT_PX = 24
 _PILL_PADDING_PX = 6

@@ -1,4 +1,5 @@
 """Tests for bundled font registration (B.5.7.2 / B.5.7.3)."""
+
 from __future__ import annotations
 
 import inspect
@@ -37,9 +38,7 @@ def test_gui_app_loads_fonts():
     from cryodaq.gui import app as gui_app
 
     source = inspect.getsource(gui_app.main)
-    assert "_load_bundled_fonts" in source, (
-        "gui/app.py:main must call _load_bundled_fonts()"
-    )
+    assert "_load_bundled_fonts" in source, "gui/app.py:main must call _load_bundled_fonts()"
 
 
 def test_fira_resolves_at_runtime(app):

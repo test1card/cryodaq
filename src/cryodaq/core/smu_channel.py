@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
+from typing import Literal
 
-SmuChannel: TypeAlias = Literal["smua", "smub"]
+type SmuChannel = Literal["smua", "smub"]
 SMU_CHANNELS: tuple[SmuChannel, SmuChannel] = ("smua", "smub")
 
 

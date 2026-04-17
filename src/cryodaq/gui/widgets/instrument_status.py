@@ -37,8 +37,8 @@ _COLOR_OFFLINE = theme.STATUS_STALE
 
 # Adaptive timeout: timeout = median_interval × multiplier
 _TIMEOUT_MULTIPLIER = 5.0
-_MIN_TIMEOUT_S = 10.0          # floor — don't go below even for fast sources
-_DEFAULT_TIMEOUT_S = 300.0     # before enough data to compute interval
+_MIN_TIMEOUT_S = 10.0  # floor — don't go below even for fast sources
+_DEFAULT_TIMEOUT_S = 300.0  # before enough data to compute interval
 _MIN_READINGS_FOR_ADAPTIVE = 3  # minimum readings to compute median interval
 
 

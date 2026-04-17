@@ -39,10 +39,9 @@ from cryodaq.gui.widgets.common import (
     create_panel_root,
     setup_standard_table,
 )
+from cryodaq.paths import get_config_dir as _get_config_dir
 
 logger = logging.getLogger(__name__)
-
-from cryodaq.paths import get_config_dir as _get_config_dir
 
 _INSTRUMENTS_DEFAULT = _get_config_dir() / "instruments.yaml"
 
@@ -50,6 +49,7 @@ _INSTRUMENTS_DEFAULT = _get_config_dir() / "instruments.yaml"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _strip_instrument_prefix(channel_ref: str) -> str:
     """Strip 'instrument_id:' prefix from a channel reference.
@@ -100,6 +100,7 @@ def _load_lakeshore_channels(config_path: Path) -> list[dict[str, Any]]:
 # CoverageBar
 # ---------------------------------------------------------------------------
 
+
 class CoverageBar(QWidget):
     """Horizontal bar showing calibration point density across temperature range."""
 
@@ -138,6 +139,7 @@ class CoverageBar(QWidget):
 # CalibrationSetupWidget
 # ---------------------------------------------------------------------------
 
+
 class CalibrationSetupWidget(QWidget):
     """Setup mode: channel selection, import, existing curves."""
 
@@ -156,10 +158,12 @@ class CalibrationSetupWidget(QWidget):
     def _build_ui(self) -> None:
         root = create_panel_root(self)
 
-        root.addWidget(PanelHeader(
-            "Калибровка датчиков",
-            "Автоматический сбор KRDG + SRDG во время калибровочного прогона.",
-        ))
+        root.addWidget(
+            PanelHeader(
+                "Калибровка датчиков",
+                "Автоматический сбор KRDG + SRDG во время калибровочного прогона.",
+            )
+        )
 
         # Reference channel
         ref_form = QFormLayout()
@@ -242,19 +246,19 @@ class CalibrationSetupWidget(QWidget):
         name = f"Calibration-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        self._start_worker = ZmqCommandWorker({
-            "cmd": "experiment_start",
-            "template_id": "calibration",
-            "name": name,
-            "title": name,
-            "operator": "",
-            "custom_fields": {
-                "reference_channel": _strip_instrument_prefix(ref),
-                "target_channels": ", ".join(
-                    _strip_instrument_prefix(t) for t in targets
-                ),
-            },
-        })
+        self._start_worker = ZmqCommandWorker(
+            {
+                "cmd": "experiment_start",
+                "template_id": "calibration",
+                "name": name,
+                "title": name,
+                "operator": "",
+                "custom_fields": {
+                    "reference_channel": _strip_instrument_prefix(ref),
+                    "target_channels": ", ".join(_strip_instrument_prefix(t) for t in targets),
+                },
+            }
+        )
         self._start_worker.finished.connect(self._on_start_result)
         self._start_btn.setEnabled(False)
         self._start_worker.start()
@@ -269,15 +273,13 @@ class CalibrationSetupWidget(QWidget):
 
     def get_selected_targets(self) -> list[str]:
         ref = self._reference_combo.currentText()
-        return [
-            ch for ch, cb in self._target_checkboxes.items()
-            if cb.isChecked() and ch != ref
-        ]
+        return [ch for ch, cb in self._target_checkboxes.items() if cb.isChecked() and ch != ref]
 
 
 # ---------------------------------------------------------------------------
 # CalibrationAcquisitionWidget
 # ---------------------------------------------------------------------------
+
 
 class CalibrationAcquisitionWidget(QWidget):
     """Acquisition mode: live stats + coverage bar."""
@@ -289,7 +291,9 @@ class CalibrationAcquisitionWidget(QWidget):
     def _build_ui(self) -> None:
         root = create_panel_root(self)
 
-        root.addWidget(PanelHeader("Сбор данных — активен", "Запись KRDG + SRDG идёт автоматически."))
+        root.addWidget(
+            PanelHeader("Сбор данных — активен", "Запись KRDG + SRDG идёт автоматически.")
+        )
 
         # Stats
         stats_form = QFormLayout()
@@ -310,10 +314,7 @@ class CalibrationAcquisitionWidget(QWidget):
         self._coverage_bar = CoverageBar()
         cov_layout.addWidget(self._coverage_bar)
 
-        legend = QLabel(
-            "▓ dense (>10 pts/K)  ▒ medium (3-10 pts/K)  "
-            "░ sparse (<3 pts/K)  ▁ empty"
-        )
+        legend = QLabel("▓ dense (>10 pts/K)  ▒ medium (3-10 pts/K)  ░ sparse (<3 pts/K)  ▁ empty")
         legend.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 9pt;")
         cov_layout.addWidget(legend)
         root.addWidget(coverage_box)
@@ -324,7 +325,9 @@ class CalibrationAcquisitionWidget(QWidget):
         self._live_label.setWordWrap(True)
         root.addWidget(self._live_label, stretch=1)
 
-        note = QLabel("Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент.")
+        note = QLabel(
+            "Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент."
+        )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         root.addWidget(note)
@@ -343,6 +346,7 @@ class CalibrationAcquisitionWidget(QWidget):
 # ---------------------------------------------------------------------------
 # CalibrationResultsWidget
 # ---------------------------------------------------------------------------
+
 
 class CalibrationResultsWidget(QWidget):
     """Results mode: fit metrics, scatter plot, export, runtime apply."""
@@ -387,7 +391,12 @@ class CalibrationResultsWidget(QWidget):
         self._export_340_btn = QPushButton(".340")
         self._export_json_btn = QPushButton("JSON")
         self._export_csv_btn = QPushButton("CSV")
-        for btn in (self._export_330_btn, self._export_340_btn, self._export_json_btn, self._export_csv_btn):
+        for btn in (
+            self._export_330_btn,
+            self._export_340_btn,
+            self._export_json_btn,
+            self._export_csv_btn,
+        ):
             apply_button_style(btn, "neutral")
             export_layout.addWidget(btn)
         root.addWidget(export_box)
@@ -431,6 +440,7 @@ class CalibrationResultsWidget(QWidget):
 # ---------------------------------------------------------------------------
 # CalibrationPanel — main container
 # ---------------------------------------------------------------------------
+
 
 class CalibrationPanel(QWidget):
     """Three-mode calibration panel with auto-switching."""

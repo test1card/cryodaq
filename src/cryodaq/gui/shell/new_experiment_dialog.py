@@ -3,6 +3,7 @@
 Modal dialog with templates, autocomplete, dynamic custom fields per template,
 full legacy payload on submit.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,14 +42,12 @@ class NewExperimentDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(
-            "\u041d\u043e\u0432\u044b\u0439 \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"
+            "\u041d\u043e\u0432\u044b\u0439 \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
         )
         self.setMinimumWidth(550)
         self.setModal(True)
         self._templates = available_templates or []
-        self._templates_by_id = {
-            str(t.get("id", "")): t for t in self._templates if t.get("id")
-        }
+        self._templates_by_id = {str(t.get("id", "")): t for t in self._templates if t.get("id")}
         self._custom_edits: dict[str, QLineEdit] = {}
         self._preferences = UserPreferences(get_data_dir() / "user_preferences.json")
         self._build_ui()
@@ -61,9 +60,7 @@ class NewExperimentDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(theme.SPACE_2)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Template
         self._template_combo = QComboBox()
@@ -87,6 +84,7 @@ class NewExperimentDialog(QDialog):
         self._operator_combo.setEditable(True)
         self._operator_combo.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         from PySide6.QtCore import QSettings
+
         known_ops = QSettings("FIAN", "CryoDAQ").value("known_operators", [])
         if isinstance(known_ops, list) and known_ops:
             self._operator_combo.addItems(known_ops)
@@ -99,9 +97,11 @@ class NewExperimentDialog(QDialog):
         # Cryostat (editable combobox)
         self._cryostat_combo = QComboBox()
         self._cryostat_combo.setEditable(True)
-        self._cryostat_combo.addItems([
-            "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0410\u041a\u0426 \u0424\u0418\u0410\u041d"
-        ])
+        self._cryostat_combo.addItems(
+            [
+                "\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0410\u041a\u0426 \u0424\u0418\u0410\u041d"  # noqa: E501
+            ]
+        )
         form.addRow("\u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442:", self._cryostat_combo)
 
         # Description
@@ -136,7 +136,7 @@ class NewExperimentDialog(QDialog):
         cancel.clicked.connect(self.reject)
         btns.addWidget(cancel)
         self._create_btn = QPushButton(
-            "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"
+            "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
         )
         self._create_btn.setDefault(True)
         self._create_btn.clicked.connect(self._on_create_clicked)
@@ -160,9 +160,7 @@ class NewExperimentDialog(QDialog):
         self._operator_combo.lineEdit().setCompleter(
             _make_completer(self._preferences.get_history("operator"))
         )
-        self._sample_edit.setCompleter(
-            _make_completer(self._preferences.get_history("sample"))
-        )
+        self._sample_edit.setCompleter(_make_completer(self._preferences.get_history("sample")))
         self._cryostat_combo.lineEdit().setCompleter(
             _make_completer(self._preferences.get_history("cryostat"))
         )
@@ -202,11 +200,15 @@ class NewExperimentDialog(QDialog):
         name = self._name_edit.text().strip()
         operator = self._operator_combo.currentText().strip()
         if not name:
-            self._show_error("\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435")
+            self._show_error(
+                "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435"  # noqa: E501
+            )
             self._name_edit.setFocus()
             return
         if not operator:
-            self._show_error("\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430")
+            self._show_error(
+                "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430"  # noqa: E501
+            )
             self._operator_combo.setFocus()
             return
 
@@ -230,6 +232,7 @@ class NewExperimentDialog(QDialog):
         # Save preferences
         if operator:
             from PySide6.QtCore import QSettings
+
             s = QSettings("FIAN", "CryoDAQ")
             known = s.value("known_operators", [])
             if not isinstance(known, list):

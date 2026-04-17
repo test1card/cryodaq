@@ -26,24 +26,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FitResult:
-    model_type: str          # "exponential" | "power_law" | "combined"
+    model_type: str  # "exponential" | "power_law" | "combined"
     params: dict[str, float]
     bic: float
-    r_squared: float         # on log₁₀(P)
-    residual_std: float      # σ of residuals in log₁₀(mbar)
+    r_squared: float  # on log₁₀(P)
+    residual_std: float  # σ of residuals in log₁₀(mbar)
     predict: Callable[[np.ndarray], np.ndarray]  # t_array -> log10P_array
     n_params: int = 3
 
 
 @dataclass
 class VacuumPrediction:
-    model_type: str                        # best model or "insufficient_data"
-    p_ultimate_mbar: float                 # estimated ultimate pressure
-    eta_targets: dict[str, float | None]   # {target_str: ETA_seconds or None}
-    trend: str                             # "pumping_down"|"stable"|"rising"|"anomaly"
-    confidence: float                      # R² of best fit (0-1)
-    residual_std: float                    # σ of residuals (log₁₀)
-    fit_params: dict[str, Any]             # for debugging
+    model_type: str  # best model or "insufficient_data"
+    p_ultimate_mbar: float  # estimated ultimate pressure
+    eta_targets: dict[str, float | None]  # {target_str: ETA_seconds or None}
+    trend: str  # "pumping_down"|"stable"|"rising"|"anomaly"
+    confidence: float  # R² of best fit (0-1)
+    residual_std: float  # σ of residuals (log₁₀)
+    fit_params: dict[str, Any]  # for debugging
     extrapolation_t: list[float] = field(default_factory=list)
     extrapolation_logP: list[float] = field(default_factory=list)
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -52,6 +52,7 @@ class VacuumPrediction:
 # ---------------------------------------------------------------------------
 # Model functions (all operate on log₁₀(P))
 # ---------------------------------------------------------------------------
+
 
 def _exponential_model(t: np.ndarray, log_p_ult: float, A: float, tau: float) -> np.ndarray:
     """log₁₀(P(t)) = log₁₀(P_ult) + A * exp(-t/τ)"""
@@ -68,8 +69,10 @@ def _power_law_model(t: np.ndarray, log_p_ult: float, B: float, alpha: float) ->
 def _combined_model(
     t: np.ndarray,
     log_p_ult: float,
-    A: float, tau: float,
-    B: float, alpha: float,
+    A: float,
+    tau: float,
+    B: float,
+    alpha: float,
 ) -> np.ndarray:
     """log₁₀(P(t)) = log₁₀(P_ult) + A*exp(-t/τ) + B*(t/t₀)^(-α)"""
     t_safe = np.maximum(t, 1.0)
@@ -80,11 +83,12 @@ def _combined_model(
 # BIC computation
 # ---------------------------------------------------------------------------
 
+
 def _compute_bic(n: int, k: int, residuals: np.ndarray) -> float:
     """Bayesian Information Criterion: BIC = n*ln(σ²) + k*ln(n)."""
     if n <= k:
         return float("inf")
-    ss = float(np.sum(residuals ** 2))
+    ss = float(np.sum(residuals**2))
     sigma_sq = ss / n
     if sigma_sq <= 0:
         return float("-inf")
@@ -102,6 +106,7 @@ def _compute_r_squared(y: np.ndarray, y_fit: np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 # VacuumTrendPredictor
 # ---------------------------------------------------------------------------
+
 
 class VacuumTrendPredictor:
     """Экстраполяция P(t) при откачке. Read-only consumer."""
@@ -229,7 +234,9 @@ class VacuumTrendPredictor:
                 tau_init = 100.0
 
             popt, _ = curve_fit(
-                _exponential_model, t, logP,
+                _exponential_model,
+                t,
+                logP,
                 p0=[log_p_last, A_init, tau_init],
                 bounds=([-20, 0, 1], [5, 30, 1e7]),
                 maxfev=5000,
@@ -259,7 +266,9 @@ class VacuumTrendPredictor:
             alpha_init = 1.0
 
             popt, _ = curve_fit(
-                _power_law_model, t, logP,
+                _power_law_model,
+                t,
+                logP,
                 p0=[log_p_last, B_init, alpha_init],
                 bounds=([-20, 0, 0.01], [5, 30, 5.0]),
                 maxfev=5000,
@@ -290,7 +299,9 @@ class VacuumTrendPredictor:
                 tau_init = 100.0
 
             popt, _ = curve_fit(
-                _combined_model, t, logP,
+                _combined_model,
+                t,
+                logP,
                 p0=[log_p_last, A_init, tau_init, B_init, 1.0],
                 bounds=([-20, 0, 1, 0, 0.01], [5, 30, 1e7, 30, 5.0]),
                 maxfev=10000,
@@ -300,8 +311,11 @@ class VacuumTrendPredictor:
             return FitResult(
                 model_type="combined",
                 params={
-                    "log_p_ult": popt[0], "A": popt[1], "tau": popt[2],
-                    "B": popt[3], "alpha": popt[4],
+                    "log_p_ult": popt[0],
+                    "A": popt[1],
+                    "tau": popt[2],
+                    "B": popt[3],
+                    "alpha": popt[4],
                 },
                 bic=_compute_bic(len(t), 5, residuals),
                 r_squared=_compute_r_squared(logP, y_fit),
@@ -321,7 +335,9 @@ class VacuumTrendPredictor:
     # -------------------------------------------------------------------
 
     def _compute_eta(
-        self, fit: FitResult, t_current: float,
+        self,
+        fit: FitResult,
+        t_current: float,
     ) -> dict[str, float | None]:
         """Compute ETA to each target pressure.
 
@@ -359,7 +375,10 @@ class VacuumTrendPredictor:
         return result
 
     def _binary_search_eta(
-        self, fit: FitResult, t_current: float, log_target: float,
+        self,
+        fit: FitResult,
+        t_current: float,
+        log_target: float,
     ) -> float | None:
         """Binary search for time when predicted log₁₀(P) crosses log_target."""
         # Search up to 10× window into the future
@@ -423,7 +442,7 @@ class VacuumTrendPredictor:
             n_baseline = max(10, int(n * 0.7))
             baseline_sigma = float(np.std(residuals[:n_baseline]))
             if baseline_sigma > 0:
-                recent_residuals = residuals[-min(30, n):]
+                recent_residuals = residuals[-min(30, n) :]
                 if float(np.mean(recent_residuals)) > self.anomaly_sigma * baseline_sigma:
                     return "anomaly"
 

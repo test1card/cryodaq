@@ -72,9 +72,7 @@ async def test_multiple_subscribers() -> None:
 
 async def test_overflow_drop_oldest() -> None:
     broker = DataBroker()
-    q = await broker.subscribe(
-        "overflow_sub", maxsize=3, policy=OverflowPolicy.DROP_OLDEST
-    )
+    q = await broker.subscribe("overflow_sub", maxsize=3, policy=OverflowPolicy.DROP_OLDEST)
 
     # Fill the queue to capacity
     r1 = _reading("T1", 1.0)
@@ -106,9 +104,7 @@ async def test_overflow_drop_oldest() -> None:
 
 async def test_overflow_drop_newest() -> None:
     broker = DataBroker()
-    q = await broker.subscribe(
-        "newest_sub", maxsize=3, policy=OverflowPolicy.DROP_NEWEST
-    )
+    q = await broker.subscribe("newest_sub", maxsize=3, policy=OverflowPolicy.DROP_NEWEST)
 
     r1 = _reading("T1", 1.0)
     r2 = _reading("T1", 2.0)
@@ -187,7 +183,7 @@ async def test_unsubscribe() -> None:
 
 async def test_stats() -> None:
     broker = DataBroker()
-    q = await broker.subscribe("stats_sub", maxsize=2, policy=OverflowPolicy.DROP_OLDEST)
+    await broker.subscribe("stats_sub", maxsize=2, policy=OverflowPolicy.DROP_OLDEST)
 
     await broker.publish(_reading("T1", 1.0))
     await broker.publish(_reading("T1", 2.0))
@@ -239,7 +235,9 @@ async def test_exception_isolation_one_bad_subscriber() -> None:
     """A subscriber whose filter raises does not prevent delivery to siblings."""
     broker = DataBroker()
     q_bad = await broker.subscribe(
-        "bad_filter", maxsize=10, filter_fn=lambda r: 1 / 0,
+        "bad_filter",
+        maxsize=10,
+        filter_fn=lambda r: 1 / 0,
     )
     q_good = await broker.subscribe("good", maxsize=10)
 
@@ -268,7 +266,9 @@ async def test_exception_isolation_logs_subscriber_name(caplog: pytest.LogCaptur
     """Exception log mentions which subscriber failed for debuggability."""
     broker = DataBroker()
     await broker.subscribe(
-        "misbehaving_widget", maxsize=10, filter_fn=lambda r: 1 / 0,
+        "misbehaving_widget",
+        maxsize=10,
+        filter_fn=lambda r: 1 / 0,
     )
 
     with caplog.at_level(logging.ERROR):

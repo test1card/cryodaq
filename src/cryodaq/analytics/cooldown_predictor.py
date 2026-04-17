@@ -52,14 +52,15 @@ T_WARM_START = 295.0
 T_WARM_END = 85.0
 
 # Adaptive rate-based weighting
-RATE_WINDOW_H = 1.5          # compute avg cooling rate over first 1.5h
-RATE_MIN_HISTORY_H = 0.5     # need at least 0.5h of data to estimate rate
-RATE_WEIGHT_STRENGTH = 2.0   # exponent: higher = sharper preference for similar rates
+RATE_WINDOW_H = 1.5  # compute avg cooling rate over first 1.5h
+RATE_MIN_HISTORY_H = 0.5  # need at least 0.5h of data to estimate rate
+RATE_WEIGHT_STRENGTH = 2.0  # exponent: higher = sharper preference for similar rates
 
 
 # ============================================================================
 # Data structures
 # ============================================================================
+
 
 @dataclass
 class ReferenceCurve:
@@ -76,8 +77,8 @@ class ReferenceCurve:
     T_cold_smooth: np.ndarray | None = field(default=None, repr=False)
     T_warm_smooth: np.ndarray | None = field(default=None, repr=False)
     progress: np.ndarray | None = field(default=None, repr=False)
-    initial_rate_cold: float = 0.0    # K/h, avg dT_cold/dt over first RATE_WINDOW_H
-    initial_rate_warm: float = 0.0    # K/h, avg dT_warm/dt over first RATE_WINDOW_H
+    initial_rate_cold: float = 0.0  # K/h, avg dT_cold/dt over first RATE_WINDOW_H
+    initial_rate_warm: float = 0.0  # K/h, avg dT_warm/dt over first RATE_WINDOW_H
     _t_of_p: interp1d | None = field(default=None, repr=False)
     _p_of_t: interp1d | None = field(default=None, repr=False)
     _Tc_of_p: interp1d | None = field(default=None, repr=False)
@@ -144,10 +145,10 @@ class EnsembleModel:
 # Loading
 # ============================================================================
 
+
 def load_curves(data_dir: Path) -> list[ReferenceCurve]:
     json_files = sorted(data_dir.glob("*.json"))
-    json_files = [f for f in json_files
-                  if f.name not in ("cooldown_model.json", "reject_log.json")]
+    json_files = [f for f in json_files if f.name not in ("cooldown_model.json", "reject_log.json")]
     curves = []
     for fp in json_files:
         try:
@@ -164,8 +165,11 @@ def load_curves(data_dir: Path) -> list[ReferenceCurve]:
             if len(tw) == 0 or len(tw) != len(tc):
                 tw = np.full_like(tc, np.nan)
             rc = ReferenceCurve(
-                name=d.get("source_file", fp.stem), date=d.get("date", ""),
-                t_hours=t_h, T_cold=tc, T_warm=tw,
+                name=d.get("source_file", fp.stem),
+                date=d.get("date", ""),
+                t_hours=t_h,
+                T_cold=tc,
+                T_warm=tw,
                 duration_hours=d.get("duration_hours", float(t_h[-1])),
                 phase1_hours=d.get("phase1_hours", 0.0),
                 phase2_hours=d.get("phase2_hours", 0.0),
@@ -182,6 +186,7 @@ def load_curves(data_dir: Path) -> list[ReferenceCurve]:
 # ============================================================================
 # Curve preparation & progress variable
 # ============================================================================
+
 
 def _smooth(arr: np.ndarray, window: int = SMOOTH_WINDOW) -> np.ndarray:
     n = len(arr)
@@ -253,23 +258,33 @@ def prepare_curve(rc: ReferenceCurve) -> ReferenceCurve:
     rc.progress = np.maximum.accumulate(rc.progress)
 
     # p(t)
-    rc._p_of_t = interp1d(rc.t_hours, rc.progress, kind="linear",
-                          bounds_error=False, fill_value=(0.0, 1.0))
+    rc._p_of_t = interp1d(
+        rc.t_hours, rc.progress, kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
+    )
 
     # t(p), Tc(p), Tw(p) -- need unique progress values
     _, unique_idx = np.unique(rc.progress, return_index=True)
     if len(unique_idx) >= 2:
         p_u = rc.progress[unique_idx]
         t_u = rc.t_hours[unique_idx]
-        rc._t_of_p = interp1d(p_u, t_u, kind="linear",
-                              bounds_error=False, fill_value=(t_u[0], t_u[-1]))
-        rc._Tc_of_p = interp1d(p_u, Tc[unique_idx], kind="linear",
-                               bounds_error=False,
-                               fill_value=(Tc[unique_idx[0]], Tc[unique_idx[-1]]))
+        rc._t_of_p = interp1d(
+            p_u, t_u, kind="linear", bounds_error=False, fill_value=(t_u[0], t_u[-1])
+        )
+        rc._Tc_of_p = interp1d(
+            p_u,
+            Tc[unique_idx],
+            kind="linear",
+            bounds_error=False,
+            fill_value=(Tc[unique_idx[0]], Tc[unique_idx[-1]]),
+        )
         if not np.all(np.isnan(Tw)):
-            rc._Tw_of_p = interp1d(p_u, Tw[unique_idx], kind="linear",
-                                   bounds_error=False,
-                                   fill_value=(Tw[unique_idx[0]], Tw[unique_idx[-1]]))
+            rc._Tw_of_p = interp1d(
+                p_u,
+                Tw[unique_idx],
+                kind="linear",
+                bounds_error=False,
+                fill_value=(Tw[unique_idx[0]], Tw[unique_idx[-1]]),
+            )
     return rc
 
 
@@ -292,6 +307,7 @@ def prepare_all(curves: list[ReferenceCurve]) -> list[ReferenceCurve]:
 # Ensemble model
 # ============================================================================
 
+
 def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
     n = len(curves)
     p_grid = np.linspace(0, 1, N_PROGRESS_GRID)
@@ -299,14 +315,20 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
     if n == 0:
         empty = np.full(N_PROGRESS_GRID, np.nan)
         return EnsembleModel(
-            curves=[], p_grid=p_grid,
+            curves=[],
+            p_grid=p_grid,
             t_matrix=np.empty((0, N_PROGRESS_GRID)),
             Tc_matrix=np.empty((0, N_PROGRESS_GRID)),
             Tw_matrix=np.empty((0, N_PROGRESS_GRID)),
-            t_mean=empty, t_std=empty,
-            Tc_mean=empty, Tc_std=empty,
-            Tw_mean=empty, Tw_std=empty,
-            n_curves=0, duration_mean=0.0, duration_std=0.0,
+            t_mean=empty,
+            t_std=empty,
+            Tc_mean=empty,
+            Tc_std=empty,
+            Tw_mean=empty,
+            Tw_std=empty,
+            n_curves=0,
+            duration_mean=0.0,
+            duration_std=0.0,
         )
 
     t_mat = np.full((n, N_PROGRESS_GRID), np.nan)
@@ -329,33 +351,47 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
     Tw_std = np.nanstd(Tw_mat, axis=0)
 
     valid = ~np.isnan(t_mean)
-    _t_of_p = interp1d(p_grid[valid], t_mean[valid], kind="linear",
-                       bounds_error=False,
-                       fill_value=(t_mean[valid][0], t_mean[valid][-1]))
+    _t_of_p = interp1d(
+        p_grid[valid],
+        t_mean[valid],
+        kind="linear",
+        bounds_error=False,
+        fill_value=(t_mean[valid][0], t_mean[valid][-1]),
+    )
 
     t_sorted_idx = np.argsort(t_mean[valid])
     t_sorted = t_mean[valid][t_sorted_idx]
     p_sorted = p_grid[valid][t_sorted_idx]
     _, u_idx = np.unique(t_sorted, return_index=True)
-    _p_of_t = interp1d(t_sorted[u_idx], p_sorted[u_idx], kind="linear",
-                       bounds_error=False, fill_value=(0.0, 1.0))
+    _p_of_t = interp1d(
+        t_sorted[u_idx], p_sorted[u_idx], kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
+    )
 
     durations = [rc.duration_hours for rc in curves]
 
     model = EnsembleModel(
-        curves=curves, p_grid=p_grid,
-        t_matrix=t_mat, Tc_matrix=Tc_mat, Tw_matrix=Tw_mat,
-        t_mean=t_mean, t_std=t_std,
-        Tc_mean=Tc_mean, Tc_std=Tc_std,
-        Tw_mean=Tw_mean, Tw_std=Tw_std,
-        _t_of_p_mean=_t_of_p, _p_of_t_mean=_p_of_t,
+        curves=curves,
+        p_grid=p_grid,
+        t_matrix=t_mat,
+        Tc_matrix=Tc_mat,
+        Tw_matrix=Tw_mat,
+        t_mean=t_mean,
+        t_std=t_std,
+        Tc_mean=Tc_mean,
+        Tc_std=Tc_std,
+        Tw_mean=Tw_mean,
+        Tw_std=Tw_std,
+        _t_of_p_mean=_t_of_p,
+        _p_of_t_mean=_p_of_t,
         n_curves=n,
         duration_mean=float(np.mean(durations)),
         duration_std=float(np.std(durations)),
     )
     logger.info(
         "Ансамбль: %d кривых, длительность %.1f +/- %.1f ч",
-        n, model.duration_mean, model.duration_std,
+        n,
+        model.duration_mean,
+        model.duration_std,
     )
     return model
 
@@ -363,6 +399,7 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
 # ============================================================================
 # Prediction
 # ============================================================================
+
 
 def predict(
     model: EnsembleModel,
@@ -388,17 +425,17 @@ def predict(
 
     Without observed_rate: falls back to progress-only weighting (v1.0 behavior).
     """
-    p_now = float(compute_progress(
-        np.array([T_cold_now]), np.array([T_warm_now])
-    )[0])
+    p_now = float(compute_progress(np.array([T_cold_now]), np.array([T_warm_now]))[0])
 
     # Compute rate statistics for outlier detection
-    ref_rates_cold = np.array([rc.initial_rate_cold for rc in model.curves
-                               if rc.initial_rate_cold != 0.0])
-    ref_rates_warm = np.array([rc.initial_rate_warm for rc in model.curves
-                               if rc.initial_rate_warm != 0.0])
+    ref_rates_cold = np.array(
+        [rc.initial_rate_cold for rc in model.curves if rc.initial_rate_cold != 0.0]
+    )
+    ref_rates_warm = np.array(
+        [rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0]
+    )
 
-    rate_cold_mean = float(np.mean(ref_rates_cold)) if len(ref_rates_cold) >= 2 else 0.0
+    float(np.mean(ref_rates_cold)) if len(ref_rates_cold) >= 2 else 0.0
     rate_cold_std = float(np.std(ref_rates_cold)) if len(ref_rates_cold) >= 2 else 999.0
     rate_warm_mean = float(np.mean(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 0.0
     rate_warm_std = float(np.std(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 999.0
@@ -444,11 +481,18 @@ def predict(
 
     if not estimates:
         return PredictionResult(
-            t_remaining_hours=0, t_remaining_low_68=0, t_remaining_high_68=0,
-            t_remaining_low_95=0, t_remaining_high_95=0, t_total_hours=0,
-            progress=p_now, phase="unknown",
-            T_cold_predicted_final=4.0, T_warm_predicted_final=85.0,
-            n_references=0, individual_estimates=[],
+            t_remaining_hours=0,
+            t_remaining_low_68=0,
+            t_remaining_high_68=0,
+            t_remaining_low_95=0,
+            t_remaining_high_95=0,
+            t_total_hours=0,
+            progress=p_now,
+            phase="unknown",
+            T_cold_predicted_final=4.0,
+            T_warm_predicted_final=85.0,
+            n_references=0,
+            individual_estimates=[],
         )
 
     # --- Fallback: if rate weighting killed all references, disable it ---
@@ -530,7 +574,8 @@ def _progress_bar(p: float, width: int = 30) -> str:
 
 
 def compute_rate_from_history(
-    t_hours: np.ndarray, T_cold: np.ndarray,
+    t_hours: np.ndarray,
+    T_cold: np.ndarray,
     T_warm: np.ndarray | None = None,
     window_h: float = RATE_WINDOW_H,
 ) -> tuple[float | None, float | None]:
@@ -552,8 +597,10 @@ def compute_rate_from_history(
     if T_warm is not None and len(T_warm) == len(T_cold):
         rate_w = _compute_initial_rate(t_hours, T_warm, window_h)
 
-    return (rate_c if rate_c != 0.0 else None,
-            rate_w if rate_w is not None and rate_w != 0.0 else None)
+    return (
+        rate_c if rate_c != 0.0 else None,
+        rate_w if rate_w is not None and rate_w != 0.0 else None,
+    )
 
 
 def format_prediction(pred: PredictionResult) -> str:
@@ -577,6 +624,7 @@ def format_prediction(pred: PredictionResult) -> str:
 # LOO cross-validation
 # ============================================================================
 
+
 def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[ValidationResult]:
     results = []
     for i_hold in range(len(curves)):
@@ -598,21 +646,38 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
         for qi in range(i_s, i_e, step):
             t_el = held.t_hours[qi]
             Tc = held.T_cold[qi]
-            Tw = held.T_warm[qi] if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi]) else 200.0
+            Tw = (
+                held.T_warm[qi]
+                if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi])
+                else 200.0
+            )
 
             # Adaptive rate: compute from held-out history up to this point
             rate_c, rate_w = None, None
             if t_el >= RATE_MIN_HISTORY_H:
-                hist_mask = held.t_hours[:qi+1] <= RATE_WINDOW_H
+                hist_mask = held.t_hours[: qi + 1] <= RATE_WINDOW_H
                 if np.sum(hist_mask) >= 10:
-                    rate_c = _compute_initial_rate(held.t_hours[:qi+1], held.T_cold[:qi+1], RATE_WINDOW_H)
-                    if not np.all(np.isnan(held.T_warm[:qi+1])):
-                        rate_w = _compute_initial_rate(held.t_hours[:qi+1], held.T_warm[:qi+1], RATE_WINDOW_H)
-                    if rate_c == 0.0: rate_c = None
-                    if rate_w is not None and rate_w == 0.0: rate_w = None
+                    rate_c = _compute_initial_rate(
+                        held.t_hours[: qi + 1], held.T_cold[: qi + 1], RATE_WINDOW_H
+                    )
+                    if not np.all(np.isnan(held.T_warm[: qi + 1])):
+                        rate_w = _compute_initial_rate(
+                            held.t_hours[: qi + 1], held.T_warm[: qi + 1], RATE_WINDOW_H
+                        )
+                    if rate_c == 0.0:
+                        rate_c = None
+                    if rate_w is not None and rate_w == 0.0:
+                        rate_w = None
 
-            pred = predict(model, Tc, Tw, t_el, generate_trajectory=False,
-                           observed_rate_cold=rate_c, observed_rate_warm=rate_w)
+            pred = predict(
+                model,
+                Tc,
+                Tw,
+                t_el,
+                generate_trajectory=False,
+                observed_rate_cold=rate_c,
+                observed_rate_warm=rate_w,
+            )
             t_q.append(t_el)
             Tc_q.append(Tc)
             Tw_q.append(Tw)
@@ -627,10 +692,14 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
 
         vr = ValidationResult(
             curve_name=held.name,
-            t_query=np.array(t_q), T_cold_query=np.array(Tc_q),
-            T_warm_query=np.array(Tw_q), progress_query=np.array(p_q),
-            t_remaining_true=rem_true, t_remaining_pred=rem_pred,
-            t_remaining_err=err, t_remaining_pct_err=pct,
+            t_query=np.array(t_q),
+            T_cold_query=np.array(Tc_q),
+            T_warm_query=np.array(Tw_q),
+            progress_query=np.array(p_q),
+            t_remaining_true=rem_true,
+            t_remaining_pred=rem_pred,
+            t_remaining_err=err,
+            t_remaining_pct_err=pct,
         )
         results.append(vr)
         mae = float(np.mean(np.abs(err)))
@@ -641,6 +710,7 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
 # ============================================================================
 # Plotting (matplotlib imported lazily)
 # ============================================================================
+
 
 def plot_ensemble(model: EnsembleModel, output: Path):
     import matplotlib.pyplot as plt
@@ -653,14 +723,29 @@ def plot_ensemble(model: EnsembleModel, output: Path):
     # T_cold vs time
     ax1 = fig.add_subplot(gs[0, 0])
     for i, rc in enumerate(model.curves):
-        ax1.plot(rc.t_hours, rc.T_cold_smooth, color=cmap(i % 10),
-                 alpha=0.5, lw=0.8, label=rc.name[:25] if i < 10 else None)
+        ax1.plot(
+            rc.t_hours,
+            rc.T_cold_smooth,
+            color=cmap(i % 10),
+            alpha=0.5,
+            lw=0.8,
+            label=rc.name[:25] if i < 10 else None,
+        )
     ax1.plot(model.t_mean, model.Tc_mean, "k-", lw=2, label="Mean")
-    ax1.fill_between(model.t_mean, model.Tc_mean - model.Tc_std,
-                     model.Tc_mean + model.Tc_std, alpha=0.2, color="gray", label="+/-1s")
-    ax1.set_ylabel("T cold, K"); ax1.set_title("Cold Stage")
-    ax1.set_yscale("log"); ax1.set_ylim(1, 500)
-    ax1.legend(fontsize=6, loc="upper right"); ax1.grid(True, alpha=0.3)
+    ax1.fill_between(
+        model.t_mean,
+        model.Tc_mean - model.Tc_std,
+        model.Tc_mean + model.Tc_std,
+        alpha=0.2,
+        color="gray",
+        label="+/-1s",
+    )
+    ax1.set_ylabel("T cold, K")
+    ax1.set_title("Cold Stage")
+    ax1.set_yscale("log")
+    ax1.set_ylim(1, 500)
+    ax1.legend(fontsize=6, loc="upper right")
+    ax1.grid(True, alpha=0.3)
 
     # T_warm vs time
     ax2 = fig.add_subplot(gs[0, 1])
@@ -668,9 +753,16 @@ def plot_ensemble(model: EnsembleModel, output: Path):
         if rc.T_warm_smooth is not None and not np.all(np.isnan(rc.T_warm_smooth)):
             ax2.plot(rc.t_hours, rc.T_warm_smooth, color=cmap(i % 10), alpha=0.5, lw=0.8)
     ax2.plot(model.t_mean, model.Tw_mean, "k-", lw=2)
-    ax2.fill_between(model.t_mean, model.Tw_mean - model.Tw_std,
-                     model.Tw_mean + model.Tw_std, alpha=0.2, color="gray")
-    ax2.set_ylabel("T warm, K"); ax2.set_title("Warm Stage"); ax2.grid(True, alpha=0.3)
+    ax2.fill_between(
+        model.t_mean,
+        model.Tw_mean - model.Tw_std,
+        model.Tw_mean + model.Tw_std,
+        alpha=0.2,
+        color="gray",
+    )
+    ax2.set_ylabel("T warm, K")
+    ax2.set_title("Warm Stage")
+    ax2.grid(True, alpha=0.3)
 
     # Progress vs time
     ax3 = fig.add_subplot(gs[1, 0])
@@ -678,36 +770,60 @@ def plot_ensemble(model: EnsembleModel, output: Path):
         if rc.progress is not None:
             ax3.plot(rc.t_hours, rc.progress, color=cmap(i % 10), alpha=0.5, lw=0.8)
     ax3.plot(model.t_mean, model.p_grid, "k-", lw=2, label="Mean p(t)")
-    ax3.set_xlabel("Time, h"); ax3.set_ylabel("Progress p")
-    ax3.set_title("Progress Variable"); ax3.set_ylim(-0.05, 1.05)
-    ax3.grid(True, alpha=0.3); ax3.legend(fontsize=8)
+    ax3.set_xlabel("Time, h")
+    ax3.set_ylabel("Progress p")
+    ax3.set_title("Progress Variable")
+    ax3.set_ylim(-0.05, 1.05)
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(fontsize=8)
 
     # t(p) envelope -- THE predictor
     ax4 = fig.add_subplot(gs[1, 1])
     for i in range(model.n_curves):
         ax4.plot(model.p_grid, model.t_matrix[i], color=cmap(i % 10), alpha=0.4, lw=0.6)
     ax4.plot(model.p_grid, model.t_mean, "k-", lw=2, label="Mean t(p)")
-    ax4.fill_between(model.p_grid, model.t_mean - model.t_std,
-                     model.t_mean + model.t_std, alpha=0.15, color="blue", label="+/-1s")
-    ax4.fill_between(model.p_grid, model.t_mean - 2*model.t_std,
-                     model.t_mean + 2*model.t_std, alpha=0.08, color="blue", label="+/-2s")
-    ax4.set_xlabel("Progress p"); ax4.set_ylabel("Time, h")
-    ax4.set_title("Predictor: t(p) +/- CI"); ax4.legend(fontsize=8); ax4.grid(True, alpha=0.3)
+    ax4.fill_between(
+        model.p_grid,
+        model.t_mean - model.t_std,
+        model.t_mean + model.t_std,
+        alpha=0.15,
+        color="blue",
+        label="+/-1s",
+    )
+    ax4.fill_between(
+        model.p_grid,
+        model.t_mean - 2 * model.t_std,
+        model.t_mean + 2 * model.t_std,
+        alpha=0.08,
+        color="blue",
+        label="+/-2s",
+    )
+    ax4.set_xlabel("Progress p")
+    ax4.set_ylabel("Time, h")
+    ax4.set_title("Predictor: t(p) +/- CI")
+    ax4.legend(fontsize=8)
+    ax4.grid(True, alpha=0.3)
 
     # sigma vs progress
     ax5 = fig.add_subplot(gs[2, 0])
     ax5.plot(model.p_grid, model.t_std, "r-", lw=1.5)
-    ax5.set_xlabel("Progress p"); ax5.set_ylabel("sigma(t_remaining), h")
-    ax5.set_title("Prediction Uncertainty vs Progress"); ax5.grid(True, alpha=0.3)
+    ax5.set_xlabel("Progress p")
+    ax5.set_ylabel("sigma(t_remaining), h")
+    ax5.set_title("Prediction Uncertainty vs Progress")
+    ax5.grid(True, alpha=0.3)
 
     # Duration histogram
     ax6 = fig.add_subplot(gs[2, 1])
     durs = [rc.duration_hours for rc in model.curves]
-    ax6.hist(durs, bins=max(3, len(durs)//2), edgecolor="black", alpha=0.7, color="steelblue")
-    ax6.axvline(model.duration_mean, color="red", ls="--",
-                label=f"Mean: {model.duration_mean:.1f}h")
-    ax6.set_xlabel("Duration, h"); ax6.set_ylabel("Count")
-    ax6.set_title(f"Duration (n={model.n_curves})"); ax6.legend(); ax6.grid(True, alpha=0.3)
+    ax6.hist(durs, bins=max(3, len(durs) // 2), edgecolor="black", alpha=0.7, color="steelblue")
+    ax6.axvline(
+        model.duration_mean, color="red", ls="--", label=f"Mean: {model.duration_mean:.1f}h"
+    )
+    ax6.set_xlabel("Duration, h")
+    ax6.set_ylabel("Count")
+    ax6.set_title(f"Duration (n={model.n_curves})")
+    ax6.legend()
+    ax6.grid(True, alpha=0.3)
 
     fig.suptitle("CryoDAQ Cooldown Predictor - Ensemble Model", fontsize=14, fontweight="bold")
     fig.savefig(output, dpi=150, bbox_inches="tight")
@@ -724,34 +840,56 @@ def plot_prediction(model, pred, T_cold_now, T_warm_now, t_elapsed, output):
         if rc.T_warm_smooth is not None and not np.all(np.isnan(rc.T_warm_smooth)):
             axes[1].plot(rc.t_hours, rc.T_warm_smooth, color="lightgray", lw=0.5, alpha=0.5)
 
-    axes[0].plot(t_elapsed, T_cold_now, "ro", ms=12, zorder=10,
-                 label=f"Now: {T_cold_now:.1f}K @ {t_elapsed:.1f}h")
-    axes[1].plot(t_elapsed, T_warm_now, "ro", ms=12, zorder=10,
-                 label=f"Now: {T_warm_now:.1f}K")
+    axes[0].plot(
+        t_elapsed,
+        T_cold_now,
+        "ro",
+        ms=12,
+        zorder=10,
+        label=f"Now: {T_cold_now:.1f}K @ {t_elapsed:.1f}h",
+    )
+    axes[1].plot(t_elapsed, T_warm_now, "ro", ms=12, zorder=10, label=f"Now: {T_warm_now:.1f}K")
 
     if pred.future_t is not None:
         axes[0].plot(pred.future_t, pred.future_T_cold_mean, "b-", lw=2, label="Predicted")
-        axes[0].fill_between(pred.future_t, pred.future_T_cold_lower,
-                             pred.future_T_cold_upper, alpha=0.2, color="blue")
+        axes[0].fill_between(
+            pred.future_t,
+            pred.future_T_cold_lower,
+            pred.future_T_cold_upper,
+            alpha=0.2,
+            color="blue",
+        )
         axes[1].plot(pred.future_t, pred.future_T_warm_mean, "b-", lw=2, label="Predicted")
-        axes[1].fill_between(pred.future_t, pred.future_T_warm_lower,
-                             pred.future_T_warm_upper, alpha=0.2, color="blue")
+        axes[1].fill_between(
+            pred.future_t,
+            pred.future_T_warm_lower,
+            pred.future_T_warm_upper,
+            alpha=0.2,
+            color="blue",
+        )
 
     t_end = t_elapsed + pred.t_remaining_hours
     ci = pred.t_remaining_high_68 - pred.t_remaining_hours
-    axes[0].axvline(t_end, color="green", ls="--", alpha=0.7,
-                    label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)")
+    axes[0].axvline(
+        t_end, color="green", ls="--", alpha=0.7, label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)"
+    )
     axes[1].axvline(t_end, color="green", ls="--", alpha=0.7)
 
-    axes[0].set_ylabel("T_cold, K"); axes[0].set_yscale("log"); axes[0].set_ylim(1, 500)
-    axes[0].legend(fontsize=8, loc="upper right"); axes[0].grid(True, alpha=0.3)
+    axes[0].set_ylabel("T_cold, K")
+    axes[0].set_yscale("log")
+    axes[0].set_ylim(1, 500)
+    axes[0].legend(fontsize=8, loc="upper right")
+    axes[0].grid(True, alpha=0.3)
     h, m = int(pred.t_remaining_hours), int((pred.t_remaining_hours % 1) * 60)
     axes[0].set_title(f"p={pred.progress:.1%} | {h}h{m:02d}m left | {pred.phase}", fontsize=11)
-    axes[1].set_ylabel("T_warm, K"); axes[1].set_xlabel("Time, h")
-    axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
+    axes[1].set_ylabel("T_warm, K")
+    axes[1].set_xlabel("Time, h")
+    axes[1].legend(fontsize=8)
+    axes[1].grid(True, alpha=0.3)
 
     fig.suptitle("CryoDAQ Cooldown Prediction", fontsize=13, fontweight="bold")
-    fig.savefig(output, dpi=150, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(output, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     logger.info("График прогноза сохранён: %s", output)
 
 
@@ -763,53 +901,89 @@ def plot_validation(results: list[ValidationResult], output: Path):
 
     ax = axes[0, 0]
     for i, vr in enumerate(results):
-        ax.plot(vr.t_query, vr.t_remaining_err * 60, "o-", color=cmap(i%10),
-                ms=2, lw=0.8, alpha=0.7, label=vr.curve_name[:20])
+        ax.plot(
+            vr.t_query,
+            vr.t_remaining_err * 60,
+            "o-",
+            color=cmap(i % 10),
+            ms=2,
+            lw=0.8,
+            alpha=0.7,
+            label=vr.curve_name[:20],
+        )
     ax.axhline(0, color="k", lw=0.5)
-    ax.set_xlabel("Elapsed, h"); ax.set_ylabel("Error, min")
-    ax.set_title("Error vs Time"); ax.legend(fontsize=5, ncol=2); ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Elapsed, h")
+    ax.set_ylabel("Error, min")
+    ax.set_title("Error vs Time")
+    ax.legend(fontsize=5, ncol=2)
+    ax.grid(True, alpha=0.3)
 
     ax = axes[0, 1]
     for i, vr in enumerate(results):
-        ax.plot(vr.progress_query, vr.t_remaining_err * 60, "o-",
-                color=cmap(i%10), ms=2, lw=0.8, alpha=0.7)
+        ax.plot(
+            vr.progress_query,
+            vr.t_remaining_err * 60,
+            "o-",
+            color=cmap(i % 10),
+            ms=2,
+            lw=0.8,
+            alpha=0.7,
+        )
     ax.axhline(0, color="k", lw=0.5)
-    ax.set_xlabel("Progress"); ax.set_ylabel("Error, min")
-    ax.set_title("Error vs Progress"); ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Progress")
+    ax.set_ylabel("Error, min")
+    ax.set_title("Error vs Progress")
+    ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
     for i, vr in enumerate(results):
-        ax.scatter(vr.t_remaining_true, vr.t_remaining_pred, c=[cmap(i%10)], s=5, alpha=0.6)
+        ax.scatter(vr.t_remaining_true, vr.t_remaining_pred, c=[cmap(i % 10)], s=5, alpha=0.6)
     all_t = np.concatenate([vr.t_remaining_true for vr in results])
     all_p = np.concatenate([vr.t_remaining_pred for vr in results])
     lim = max(all_t.max(), all_p.max()) * 1.05
     ax.plot([0, lim], [0, lim], "k--", lw=0.5)
-    ax.set_xlabel("True remaining, h"); ax.set_ylabel("Predicted, h")
-    ax.set_title("Predicted vs True"); ax.set_aspect("equal")
-    ax.set_xlim(0, lim); ax.set_ylim(0, lim); ax.grid(True, alpha=0.3)
+    ax.set_xlabel("True remaining, h")
+    ax.set_ylabel("Predicted, h")
+    ax.set_title("Predicted vs True")
+    ax.set_aspect("equal")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.grid(True, alpha=0.3)
 
-    ax = axes[1, 1]; ax.axis("off")
+    ax = axes[1, 1]
+    ax.axis("off")
     all_err = np.concatenate([vr.t_remaining_err for vr in results])
     all_abs = np.abs(all_err)
-    all_pct = np.concatenate([vr.t_remaining_pct_err for vr in results])
+    np.concatenate([vr.t_remaining_pct_err for vr in results])
     curve_maes = [float(np.mean(np.abs(vr.t_remaining_err))) for vr in results]
 
-    txt = (f"LOO Cross-Validation (n={len(results)})\n"
-           f"{'='*40}\n"
-           f"MAE:    {np.mean(all_abs):.2f} h ({np.mean(all_abs)*60:.0f} min)\n"
-           f"RMSE:   {np.sqrt(np.mean(all_err**2)):.2f} h\n"
-           f"Max:    {np.max(all_abs):.2f} h\n"
-           f"Median: {np.median(all_abs):.2f} h\n"
-           f"Bias:   {np.mean(all_err):.3f} h\n"
-           f"{'='*40}\n")
+    txt = (
+        f"LOO Cross-Validation (n={len(results)})\n"
+        f"{'=' * 40}\n"
+        f"MAE:    {np.mean(all_abs):.2f} h ({np.mean(all_abs) * 60:.0f} min)\n"
+        f"RMSE:   {np.sqrt(np.mean(all_err**2)):.2f} h\n"
+        f"Max:    {np.max(all_abs):.2f} h\n"
+        f"Median: {np.median(all_abs):.2f} h\n"
+        f"Bias:   {np.mean(all_err):.3f} h\n"
+        f"{'=' * 40}\n"
+    )
     for vr, mae in zip(results, curve_maes):
         txt += f"  {vr.curve_name[:28]:28s} MAE={mae:.2f}h\n"
-    ax.text(0.05, 0.95, txt, transform=ax.transAxes, fontsize=9,
-            va="top", fontfamily="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8))
+    ax.text(
+        0.05,
+        0.95,
+        txt,
+        transform=ax.transAxes,
+        fontsize=9,
+        va="top",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8),
+    )
 
     fig.suptitle("CryoDAQ Predictor - LOO Validation", fontsize=14, fontweight="bold")
-    fig.tight_layout(); fig.savefig(output, dpi=150, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout()
+    fig.savefig(output, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     logger.info("График валидации сохранён: %s", output)
 
 
@@ -817,23 +991,36 @@ def plot_validation(results: list[ValidationResult], output: Path):
 # Model save/load
 # ============================================================================
 
+
 def save_model(model: EnsembleModel, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     md = {
-        "version": "1.0", "n_curves": model.n_curves,
-        "duration_mean": model.duration_mean, "duration_std": model.duration_std,
+        "version": "1.0",
+        "n_curves": model.n_curves,
+        "duration_mean": model.duration_mean,
+        "duration_std": model.duration_std,
         "p_grid": model.p_grid.tolist(),
-        "t_mean": model.t_mean.tolist(), "t_std": model.t_std.tolist(),
-        "Tc_mean": model.Tc_mean.tolist(), "Tc_std": model.Tc_std.tolist(),
-        "Tw_mean": model.Tw_mean.tolist(), "Tw_std": model.Tw_std.tolist(),
-        "curves": [{
-            "name": rc.name, "date": rc.date,
-            "duration_hours": rc.duration_hours,
-            "phase1_hours": rc.phase1_hours, "phase2_hours": rc.phase2_hours,
-            "T_cold_final": rc.T_cold_final, "T_warm_final": rc.T_warm_final,
-            "t_hours": rc.t_hours.tolist(),
-            "T_cold": rc.T_cold.tolist(), "T_warm": rc.T_warm.tolist(),
-        } for rc in model.curves],
+        "t_mean": model.t_mean.tolist(),
+        "t_std": model.t_std.tolist(),
+        "Tc_mean": model.Tc_mean.tolist(),
+        "Tc_std": model.Tc_std.tolist(),
+        "Tw_mean": model.Tw_mean.tolist(),
+        "Tw_std": model.Tw_std.tolist(),
+        "curves": [
+            {
+                "name": rc.name,
+                "date": rc.date,
+                "duration_hours": rc.duration_hours,
+                "phase1_hours": rc.phase1_hours,
+                "phase2_hours": rc.phase2_hours,
+                "T_cold_final": rc.T_cold_final,
+                "T_warm_final": rc.T_warm_final,
+                "t_hours": rc.t_hours.tolist(),
+                "T_cold": rc.T_cold.tolist(),
+                "T_warm": rc.T_warm.tolist(),
+            }
+            for rc in model.curves
+        ],
     }
     out = output_dir / "predictor_model.json"
     out.write_text(json.dumps(md, ensure_ascii=False), encoding="utf-8")
@@ -845,12 +1032,16 @@ def load_model(model_dir: Path) -> EnsembleModel:
     curves = []
     for cd in d["curves"]:
         rc = ReferenceCurve(
-            name=cd["name"], date=cd["date"],
-            t_hours=np.array(cd["t_hours"]), T_cold=np.array(cd["T_cold"]),
+            name=cd["name"],
+            date=cd["date"],
+            t_hours=np.array(cd["t_hours"]),
+            T_cold=np.array(cd["T_cold"]),
             T_warm=np.array(cd["T_warm"]),
             duration_hours=cd["duration_hours"],
-            phase1_hours=cd["phase1_hours"], phase2_hours=cd["phase2_hours"],
-            T_cold_final=cd["T_cold_final"], T_warm_final=cd["T_warm_final"],
+            phase1_hours=cd["phase1_hours"],
+            phase2_hours=cd["phase2_hours"],
+            T_cold_final=cd["T_cold_final"],
+            T_warm_final=cd["T_warm_final"],
         )
         curves.append(rc)
     curves = prepare_all(curves)
@@ -864,8 +1055,8 @@ def load_model(model_dir: Path) -> EnsembleModel:
 # Quality gate thresholds for incoming curves
 INGEST_MIN_DURATION_H = 10.0
 INGEST_MAX_DURATION_H = 30.0
-INGEST_MIN_T_START = 150.0       # K
-INGEST_MAX_T_COLD_FINAL = 12.0   # K
+INGEST_MIN_T_START = 150.0  # K
+INGEST_MAX_T_COLD_FINAL = 12.0  # K
 INGEST_MAX_T_WARM_FINAL = 120.0  # K
 INGEST_MIN_MONOTONICITY = 0.70
 INGEST_MIN_POINTS = 500
@@ -939,7 +1130,9 @@ def ingest_curve(
         new_rc = ReferenceCurve(
             name=d.get("source_file", new_curve_json.stem),
             date=d.get("date", ""),
-            t_hours=t_h, T_cold=tc, T_warm=tw,
+            t_hours=t_h,
+            T_cold=tc,
+            T_warm=tw,
             duration_hours=d.get("duration_hours", float(t_h[-1])),
             phase1_hours=d.get("phase1_hours", 0.0),
             phase2_hours=d.get("phase2_hours", 0.0),
@@ -991,7 +1184,8 @@ def ingest_curve(
     curves = []
     for cd in model_data["curves"]:
         rc = ReferenceCurve(
-            name=cd["name"], date=cd["date"],
+            name=cd["name"],
+            date=cd["date"],
             t_hours=np.array(cd["t_hours"]),
             T_cold=np.array(cd["T_cold"]),
             T_warm=np.array(cd["T_warm"]),
@@ -1028,26 +1222,31 @@ def ingest_curve(
 
     # Update history log
     history = model_data.get("history", [])
-    history.append({
-        "action": "ingest",
-        "curve": new_rc.name,
-        "date": new_rc.date,
-        "duration_h": round(new_rc.duration_hours, 1),
-        "n_curves_after": model.n_curves,
-    })
+    history.append(
+        {
+            "action": "ingest",
+            "curve": new_rc.name,
+            "date": new_rc.date,
+            "duration_h": round(new_rc.duration_hours, 1),
+            "n_curves_after": model.n_curves,
+        }
+    )
     model_data["history"] = history
 
     # Backup old model, then save
     backup = model_dir / "predictor_model.json.bak"
     if model_file.exists():
         import shutil
+
         shutil.copy2(model_file, backup)
 
     model_file.write_text(json.dumps(model_data, ensure_ascii=False), encoding="utf-8")
 
-    msg = (f"OK: added '{new_rc.name}' ({new_rc.duration_hours:.1f}h). "
-           f"Model v{model_data['version']}: {model.n_curves} curves, "
-           f"{model.duration_mean:.1f}+/-{model.duration_std:.1f}h")
+    msg = (
+        f"OK: added '{new_rc.name}' ({new_rc.duration_hours:.1f}h). "
+        f"Model v{model_data['version']}: {model.n_curves} curves, "
+        f"{model.duration_mean:.1f}+/-{model.duration_std:.1f}h"
+    )
     logger.info(msg)
     return True, msg, model
 
@@ -1068,9 +1267,11 @@ def ingest_from_raw_arrays(
     """
     if not name:
         from datetime import datetime as _dt
+
         name = f"auto_ingest_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
     if not date:
         from datetime import datetime as _dt
+
         date = _dt.now().strftime("%Y-%m-%d")
 
     # Find phase1 boundary

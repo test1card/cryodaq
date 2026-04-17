@@ -1,4 +1,5 @@
 """Verify sensor channel classification (Phase 2c user report)."""
+
 from __future__ import annotations
 
 import pytest
@@ -12,33 +13,40 @@ from cryodaq.core.sensor_diagnostics import (
 # is_physical_sensor()
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("channel", [
-    "Т1 Криостат верх",
-    "Т9 Компрессор вход",
-    "Т15",
-    "lakeshore/Т11 Холодная плита",
-    "VSP63D_1/pressure",
-    "thyracont/pressure",
-])
+
+@pytest.mark.parametrize(
+    "channel",
+    [
+        "Т1 Криостат верх",
+        "Т9 Компрессор вход",
+        "Т15",
+        "lakeshore/Т11 Холодная плита",
+        "VSP63D_1/pressure",
+        "thyracont/pressure",
+    ],
+)
 def test_physical_sensors_included(channel):
     assert is_physical_sensor(channel) is True, (
         f"{channel!r} should be classified as physical sensor"
     )
 
 
-@pytest.mark.parametrize("channel", [
-    "system/disk_free_gb",
-    "system/heartbeat",
-    "analytics/safety_state",
-    "analytics/keithley_channel_state/smua",
-    "analytics/alarm_count",
-    "Keithley_1/smua/voltage",
-    "Keithley_1/smua/current",
-    "Keithley_1/smua/power",
-    "Keithley_1/smua/resistance",
-    "Keithley_1/smub/voltage",
-    "Keithley_1/smub/power",
-])
+@pytest.mark.parametrize(
+    "channel",
+    [
+        "system/disk_free_gb",
+        "system/heartbeat",
+        "analytics/safety_state",
+        "analytics/keithley_channel_state/smua",
+        "analytics/alarm_count",
+        "Keithley_1/smua/voltage",
+        "Keithley_1/smua/current",
+        "Keithley_1/smua/power",
+        "Keithley_1/smua/resistance",
+        "Keithley_1/smub/voltage",
+        "Keithley_1/smub/power",
+    ],
+)
 def test_derived_channels_excluded(channel):
     assert is_physical_sensor(channel) is False, (
         f"{channel!r} is derived/computed, must NOT be classified as physical sensor"
@@ -58,6 +66,7 @@ def test_arbitrary_string_returns_false():
 # ---------------------------------------------------------------------------
 # SensorDiagnosticsEngine.push() filters at ingest
 # ---------------------------------------------------------------------------
+
 
 def test_push_silently_drops_derived_channel():
     """The engine must not even buffer derived channels — health is

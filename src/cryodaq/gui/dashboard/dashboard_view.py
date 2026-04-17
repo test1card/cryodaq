@@ -5,6 +5,7 @@ pressurePlotZone with real pyqtgraph widgets. B.3 fills
 sensorGridZone with DynamicSensorGrid. Other zones remain
 placeholder until B.4-B.6.
 """
+
 from __future__ import annotations
 
 import logging
@@ -60,7 +61,10 @@ class DashboardView(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
         )
         root.setSpacing(theme.SPACE_2)
 
@@ -68,7 +72,8 @@ class DashboardView(QWidget):
             if obj_name == "tempPlotZone":
                 zone = self._make_zone(obj_name, None)
                 self._temp_plot = TempPlotWidget(
-                    self._buffer_store, self._channel_mgr,
+                    self._buffer_store,
+                    self._channel_mgr,
                 )
                 zone.layout().addWidget(self._temp_plot)
             elif obj_name == "pressurePlotZone":
@@ -85,27 +90,19 @@ class DashboardView(QWidget):
             elif obj_name == "sensorGridZone":
                 zone = self._make_zone(obj_name, None)
                 self._sensor_grid = DynamicSensorGrid(
-                    self._channel_mgr, self._buffer_store, parent=self,
+                    self._channel_mgr,
+                    self._buffer_store,
+                    parent=self,
                 )
-                self._sensor_grid.rename_requested.connect(
-                    self._on_rename_requested
-                )
-                self._sensor_grid.hide_requested.connect(
-                    self._on_hide_requested
-                )
-                self._sensor_grid.show_on_plot_requested.connect(
-                    self._on_show_on_plot_requested
-                )
-                self._sensor_grid.history_requested.connect(
-                    self._on_history_requested
-                )
+                self._sensor_grid.rename_requested.connect(self._on_rename_requested)
+                self._sensor_grid.hide_requested.connect(self._on_hide_requested)
+                self._sensor_grid.show_on_plot_requested.connect(self._on_show_on_plot_requested)
+                self._sensor_grid.history_requested.connect(self._on_history_requested)
                 zone.layout().addWidget(self._sensor_grid)
             elif obj_name == "quickLogZone":
                 zone = self._make_zone(obj_name, None)
                 self._quick_log = QuickLogBlock(parent=self)
-                self._quick_log.entry_submitted.connect(
-                    self._on_log_entry_submitted
-                )
+                self._quick_log.entry_submitted.connect(self._on_log_entry_submitted)
                 zone.layout().addWidget(self._quick_log)
             else:
                 zone = self._make_zone(obj_name, label_text)

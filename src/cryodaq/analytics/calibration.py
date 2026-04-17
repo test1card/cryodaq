@@ -191,7 +191,6 @@ class CalibrationCurve:
         )
 
 
-
 class CalibrationStore:
     """Calibration curve storage and multi-zone Chebyshev fitting."""
 
@@ -237,8 +236,12 @@ class CalibrationStore:
         if len(normalized_samples) < max(4, min_points_per_zone):
             raise ValueError("Not enough calibration samples for fitting after preprocessing.")
 
-        temperatures = np.array([sample.reference_temperature for sample in normalized_samples], dtype=float)
-        raw_values = np.array([sample.sensor_raw_value for sample in normalized_samples], dtype=float)
+        temperatures = np.array(
+            [sample.reference_temperature for sample in normalized_samples], dtype=float
+        )
+        raw_values = np.array(
+            [sample.sensor_raw_value for sample in normalized_samples], dtype=float
+        )
 
         if not np.all(np.isfinite(raw_values)) or not np.all(np.isfinite(temperatures)):
             raise ValueError("Calibration samples must contain finite values only.")
@@ -450,7 +453,9 @@ class CalibrationStore:
         self._write_index()
         return target
 
-    def get_curve_info(self, sensor_id: str | None = None, curve_id: str | None = None) -> dict[str, Any]:
+    def get_curve_info(
+        self, sensor_id: str | None = None, curve_id: str | None = None
+    ) -> dict[str, Any]:
         curve = self._resolve_curve(sensor_id=sensor_id, curve_id=curve_id)
         return {
             "sensor_id": curve.sensor_id,
@@ -470,9 +475,15 @@ class CalibrationStore:
         curve = self._require_curve(sensor_id)
         return {
             "curve_path": str(self._curve_path(curve.sensor_id, curve.curve_id)),
-            "table_path": str(self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"),
-            "curve_330_path": str(self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"),
-            "curve_340_path": str(self._curve_340_path(curve.sensor_id, curve.curve_id) if self._exports_dir else ""),
+            "table_path": str(
+                self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"
+            ),
+            "curve_330_path": str(
+                self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"
+            ),
+            "curve_340_path": str(
+                self._curve_340_path(curve.sensor_id, curve.curve_id) if self._exports_dir else ""
+            ),
             "index_path": str(self._index_path) if self._index_path else "",
         }
 
@@ -662,16 +673,25 @@ class CalibrationStore:
             assignment = dict(self._assignments.get(sensor_id) or {})
         elif channel_key:
             assignment = next(
-                (dict(item) for item in self._assignments.values() if str(item.get("channel_key", "")).strip() == channel_key),
+                (
+                    dict(item)
+                    for item in self._assignments.values()
+                    if str(item.get("channel_key", "")).strip() == channel_key
+                ),
                 None,
             )
         if assignment is None:
             if sensor_id and sensor_id in self._curves:
                 curve = self._curves[sensor_id]
-                assignment = dict(self._ensure_assignment(sensor_id=curve.sensor_id, curve_id=curve.curve_id))
+                assignment = dict(
+                    self._ensure_assignment(sensor_id=curve.sensor_id, curve_id=curve.curve_id)
+                )
             else:
                 raise KeyError("Calibration curve lookup did not match any sensor or channel.")
-        curve = self._resolve_curve(sensor_id=str(assignment.get("sensor_id", "")), curve_id=str(assignment.get("curve_id", "")))
+        curve = self._resolve_curve(
+            sensor_id=str(assignment.get("sensor_id", "")),
+            curve_id=str(assignment.get("curve_id", "")),
+        )
         return {
             "assignment": assignment,
             "curve": self.get_curve_info(curve_id=curve.curve_id),
@@ -682,7 +702,9 @@ class CalibrationStore:
             raise KeyError(f"Calibration curve for sensor '{sensor_id}' is not loaded.")
         return self._curves[sensor_id]
 
-    def _resolve_curve(self, *, sensor_id: str | None = None, curve_id: str | None = None) -> CalibrationCurve:
+    def _resolve_curve(
+        self, *, sensor_id: str | None = None, curve_id: str | None = None
+    ) -> CalibrationCurve:
         if sensor_id:
             return self._require_curve(sensor_id)
         if curve_id:
@@ -702,7 +724,12 @@ class CalibrationStore:
     def _curve_340_path(self, sensor_id: str, curve_id: str) -> Path:
         if self._exports_dir is None:
             raise RuntimeError("CalibrationStore base_dir is required for export.")
-        return self._exports_dir / _safe_path_fragment(sensor_id) / _safe_path_fragment(curve_id) / "curve.340"
+        return (
+            self._exports_dir
+            / _safe_path_fragment(sensor_id)
+            / _safe_path_fragment(curve_id)
+            / "curve.340"
+        )
 
     def _load_index(self) -> None:
         if self._index_path is None or not self._index_path.exists():
@@ -727,7 +754,12 @@ class CalibrationStore:
                         "channel_key": str(item.get("channel_key", sensor_id)).strip() or sensor_id,
                         "updated_at": str(item.get("updated_at", "")).strip(),
                         "runtime_apply_ready": bool(item.get("runtime_apply_ready", False)),
-                        "reading_mode_policy": str(item.get("reading_mode_policy", "inherit") or "inherit").strip().lower() or "inherit",
+                        "reading_mode_policy": str(
+                            item.get("reading_mode_policy", "inherit") or "inherit"
+                        )
+                        .strip()
+                        .lower()
+                        or "inherit",
                     }
 
     def _write_index(self) -> None:
@@ -749,18 +781,30 @@ class CalibrationStore:
                     "raw_unit": curve.raw_unit,
                     "sensor_kind": curve.sensor_kind,
                     "curve_path": str(self._curve_path(curve.sensor_id, curve.curve_id)),
-                    "table_path": str(self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"),
-                    "curve_330_path": str(self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"),
-                    "curve_340_path": str(self._curve_340_path(curve.sensor_id, curve.curve_id) if self._exports_dir else ""),
+                    "table_path": str(
+                        self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"
+                    ),
+                    "curve_330_path": str(
+                        self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"
+                    ),
+                    "curve_340_path": str(
+                        self._curve_340_path(curve.sensor_id, curve.curve_id)
+                        if self._exports_dir
+                        else ""
+                    ),
                     "source_session_ids": list(curve.source_session_ids),
                 }
-                for curve in sorted(self._curves.values(), key=lambda item: item.fit_timestamp, reverse=True)
+                for curve in sorted(
+                    self._curves.values(), key=lambda item: item.fit_timestamp, reverse=True
+                )
             ],
             "assignments": [dict(item) for item in self.list_assignments()],
         }
         from cryodaq.core.atomic_write import atomic_write_text
 
-        atomic_write_text(self._index_path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
+        atomic_write_text(
+            self._index_path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
+        )
 
     def _ensure_assignment(self, *, sensor_id: str, curve_id: str) -> dict[str, Any]:
         existing = self._assignments.get(sensor_id)
@@ -784,11 +828,15 @@ class CalibrationStore:
         raw_min = curve.zones[0].raw_min
         raw_max = curve.zones[-1].raw_max
         raw_grid = np.linspace(raw_min, raw_max, dense_points, dtype=float)
-        temperatures = np.array([curve.evaluate(float(raw_value)) for raw_value in raw_grid], dtype=float)
+        temperatures = np.array(
+            [curve.evaluate(float(raw_value)) for raw_value in raw_grid], dtype=float
+        )
         order = np.argsort(temperatures)
         sorted_temperatures = temperatures[order]
         sorted_raw = raw_grid[order]
-        sorted_temperatures, sorted_raw = self._collapse_duplicate_axis(sorted_temperatures, sorted_raw)
+        sorted_temperatures, sorted_raw = self._collapse_duplicate_axis(
+            sorted_temperatures, sorted_raw
+        )
         indices = self._adaptive_breakpoint_indices(sorted_temperatures, sorted_raw, max(points, 2))
         rows = [(float(sorted_temperatures[index]), float(sorted_raw[index])) for index in indices]
         deduped: list[tuple[float, float]] = []
@@ -845,7 +893,9 @@ class CalibrationStore:
                 continue
             rows.append((temperature_k, raw_value))
         if len(rows) < 4:
-            raise ValueError(f"Calibration file '{path.name}' does not contain enough numeric pairs.")
+            raise ValueError(
+                f"Calibration file '{path.name}' does not contain enough numeric pairs."
+            )
         resolved_sensor_id = (sensor_id or (channel_key or path.stem)).strip()
         samples = [
             CalibrationSample(
@@ -904,7 +954,9 @@ class CalibrationStore:
             temperature = rows[index][0]
             bucket = [rows[index]]
             index += 1
-            while index < len(rows) and math.isclose(rows[index][0], temperature, rel_tol=0.0, abs_tol=1e-9):
+            while index < len(rows) and math.isclose(
+                rows[index][0], temperature, rel_tol=0.0, abs_tol=1e-9
+            ):
                 bucket.append(rows[index])
                 index += 1
             template = bucket[-1][2]
@@ -923,7 +975,9 @@ class CalibrationStore:
             )
         if len(aggregated) <= downsample_target:
             return tuple(aggregated)
-        return tuple(self._downsample_uniform_temperature(aggregated, downsample_target=downsample_target))
+        return tuple(
+            self._downsample_uniform_temperature(aggregated, downsample_target=downsample_target)
+        )
 
     def _downsample_uniform_temperature(
         self,
@@ -962,7 +1016,9 @@ class CalibrationStore:
                 CalibrationSample(
                     timestamp=template.timestamp,
                     reference_channel=template.reference_channel,
-                    reference_temperature=float(np.mean([item.reference_temperature for item in bucket])),
+                    reference_temperature=float(
+                        np.mean([item.reference_temperature for item in bucket])
+                    ),
                     sensor_channel=template.sensor_channel,
                     sensor_raw_value=float(np.mean([item.sensor_raw_value for item in bucket])),
                     reference_instrument_id=template.reference_instrument_id,
@@ -1057,7 +1113,9 @@ class CalibrationStore:
         ordered_indices = np.argsort(raw_values)
         ordered_raw = np.asarray(raw_values[ordered_indices], dtype=float)
         ordered_temperatures = np.asarray(temperatures[ordered_indices], dtype=float)
-        ordered_raw, ordered_temperatures = self._collapse_duplicate_axis(ordered_raw, ordered_temperatures)
+        ordered_raw, ordered_temperatures = self._collapse_duplicate_axis(
+            ordered_raw, ordered_temperatures
+        )
         if len(ordered_raw) < 2 or np.ptp(ordered_raw) <= 0:
             raise RuntimeError("Failed to fit calibration zone: degenerate input range.")
 
@@ -1127,7 +1185,9 @@ class CalibrationStore:
             return zone.rmse_k
         folds = min(5, max(2, sample_count // max(order + 1, 4)))
         indices = np.arange(sample_count)
-        fold_indices = [indices[offset::folds] for offset in range(folds) if len(indices[offset::folds]) > 0]
+        fold_indices = [
+            indices[offset::folds] for offset in range(folds) if len(indices[offset::folds]) > 0
+        ]
         rmses: list[float] = []
         for fold in fold_indices:
             mask = np.ones(sample_count, dtype=bool)
@@ -1137,7 +1197,9 @@ class CalibrationStore:
             if len(train_raw) <= order:
                 continue
             zone = self._build_zone(train_raw, train_temperatures, order=order)
-            predictions = np.array([zone.evaluate(float(value)) for value in raw_values[fold]], dtype=float)
+            predictions = np.array(
+                [zone.evaluate(float(value)) for value in raw_values[fold]], dtype=float
+            )
             residuals = predictions - temperatures[fold]
             rmses.append(float(math.sqrt(np.mean(np.square(residuals)))))
         if not rmses:
@@ -1206,14 +1268,18 @@ class CalibrationStore:
         best_score: tuple[float, float] | None = None
         for index in range(start, stop + 1):
             try:
-                left_zone = self._fit_zone_cv(raw_values[:index], temperatures[:index], max_order=max_order)
-                right_zone = self._fit_zone_cv(raw_values[index:], temperatures[index:], max_order=max_order)
+                left_zone = self._fit_zone_cv(
+                    raw_values[:index], temperatures[:index], max_order=max_order
+                )
+                right_zone = self._fit_zone_cv(
+                    raw_values[index:], temperatures[index:], max_order=max_order
+                )
             except RuntimeError:
                 continue
             weighted_rmse = math.sqrt(
                 (
-                    (left_zone.rmse_k ** 2) * left_zone.point_count
-                    + (right_zone.rmse_k ** 2) * right_zone.point_count
+                    (left_zone.rmse_k**2) * left_zone.point_count
+                    + (right_zone.rmse_k**2) * right_zone.point_count
                 )
                 / max(left_zone.point_count + right_zone.point_count, 1)
             )
@@ -1230,7 +1296,9 @@ class CalibrationStore:
     ) -> tuple[np.ndarray, np.ndarray]:
         if len(primary) < 2:
             return np.asarray(primary, dtype=float), np.asarray(secondary, dtype=float)
-        rows = sorted(zip(primary.tolist(), secondary.tolist(), strict=False), key=lambda item: item[0])
+        rows = sorted(
+            zip(primary.tolist(), secondary.tolist(), strict=False), key=lambda item: item[0]
+        )
         unique_primary: list[float] = []
         unique_secondary: list[float] = []
         bucket_primary = [rows[0][0]]

@@ -38,8 +38,7 @@ def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
         ) from exc
     if not isinstance(raw, dict):
         raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: expected mapping, "
-            f"got {type(raw).__name__}"
+            f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
         )
     return raw
 
@@ -149,9 +148,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
         with config_path.open(encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
     except Exception as exc:
-        logger.error(
-            "Failed to load alarms_v3 for throttle protection: %s", exc
-        )
+        logger.error("Failed to load alarms_v3 for throttle protection: %s", exc)
         return set()
 
     if not isinstance(data, dict):
@@ -233,7 +230,9 @@ class _ThrottleState:
 
 
 class AdaptiveThrottle:
-    def __init__(self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None) -> None:
+    def __init__(
+        self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None
+    ) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
         self._include = [re.compile(str(item)) for item in cfg.get("include_patterns", [])]
@@ -244,7 +243,9 @@ class AdaptiveThrottle:
         self._transition_holdoff_s = float(cfg.get("transition_holdoff_s", 30.0))
         delta_cfg = cfg.get("absolute_delta", {})
         self._default_delta = float(delta_cfg.get("default", 0.05))
-        self._delta_by_unit = {str(key): float(value) for key, value in delta_cfg.items() if key != "default"}
+        self._delta_by_unit = {
+            str(key): float(value) for key, value in delta_cfg.items() if key != "default"
+        }
         self._state: dict[str, _ThrottleState] = {}
         self._active_alarm_count = 0
         self._transition_until: datetime | None = None
@@ -260,12 +261,16 @@ class AdaptiveThrottle:
             self._active_alarm_count = max(0, int(round(reading.value)))
             return
         if channel.startswith("analytics/keithley_channel_state/"):
-            self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
+            self._transition_until = reading.timestamp + timedelta(
+                seconds=self._transition_holdoff_s
+            )
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()
             if state != "running":
-                self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
+                self._transition_until = reading.timestamp + timedelta(
+                    seconds=self._transition_holdoff_s
+                )
 
     def filter_for_archive(self, readings: list[Reading]) -> list[Reading]:
         if not self.enabled:

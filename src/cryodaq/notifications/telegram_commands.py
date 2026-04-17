@@ -17,6 +17,13 @@ import aiohttp
 
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
+
+# Phase 2c Codex I.2: derive the accepted phase vocabulary from the canonical
+# ExperimentPhase enum. Previously this was a hand-maintained list that
+# drifted ("cooling"/"warming" instead of the enum's "cooldown"/"warmup",
+# missing "vacuum") so remote operators received bogus "unknown phase"
+# errors for phases that exist locally.
+from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
 
@@ -34,13 +41,6 @@ _HELP_TEXT = (
     "/alarms — активные тревоги\n"
     "/help — список команд"
 )
-
-# Phase 2c Codex I.2: derive the accepted phase vocabulary from the canonical
-# ExperimentPhase enum. Previously this was a hand-maintained list that
-# drifted ("cooling"/"warming" instead of the enum's "cooldown"/"warmup",
-# missing "vacuum") so remote operators received bogus "unknown phase"
-# errors for phases that exist locally.
-from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
 
 VALID_PHASES: frozenset[str] = frozenset(p.value for p in _ExperimentPhase)
 # Backwards-compatible aliases for Telegram clients that learned the old
@@ -99,9 +99,7 @@ class TelegramCommandBot:
         self._broker = broker
         self._alarm_engine = alarm_engine
         # Phase 2b K.1: SecretStr wrapper.
-        self._bot_token = (
-            bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
-        )
+        self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
         self._poll_interval_s = poll_interval_s
         self._command_handler = command_handler
@@ -184,9 +182,7 @@ class TelegramCommandBot:
         try:
             while True:
                 iteration += 1
-                logger.info(
-                    "Telegram polling #%d, offset=%s", iteration, self._last_update_id
-                )
+                logger.info("Telegram polling #%d, offset=%s", iteration, self._last_update_id)
                 try:
                     await self._fetch_updates()
                     backoff_s = self._poll_interval_s  # сброс бэкоффа при успехе
@@ -195,12 +191,12 @@ class TelegramCommandBot:
                     backoff_s = min(backoff_s * 2, 300)
                     logger.error(
                         "Telegram token error (#%d), backoff=%.0fs: %s",
-                        iteration, backoff_s, exc,
+                        iteration,
+                        backoff_s,
+                        exc,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "Telegram polling error (#%d): %s", iteration, exc, exc_info=True
-                    )
+                    logger.error("Telegram polling error (#%d): %s", iteration, exc, exc_info=True)
                 await asyncio.sleep(backoff_s)
         except asyncio.CancelledError:
             logger.info("Telegram polling task cancelled after %d iterations", iteration)
@@ -216,9 +212,7 @@ class TelegramCommandBot:
         async with session.get(url, params=params) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                logger.error(
-                    "Telegram getUpdates HTTP %d: %s", resp.status, body[:300]
-                )
+                logger.error("Telegram getUpdates HTTP %d: %s", resp.status, body[:300])
                 if resp.status in (401, 404):
                     raise _TelegramAuthError(f"HTTP {resp.status}: {body[:100]}")
                 return
@@ -261,7 +255,8 @@ class TelegramCommandBot:
 
         if not self._is_chat_allowed(chat_id):
             logger.warning(
-                "Отклонён прямой вызов _handle_message от chat_id=%s", chat_id,
+                "Отклонён прямой вызов _handle_message от chat_id=%s",
+                chat_id,
             )
             return
 
@@ -280,10 +275,10 @@ class TelegramCommandBot:
         elif command in ("/help", "/start"):
             await self._send(chat_id, _HELP_TEXT)
         elif command == "/log":
-            log_text = text[len("/log"):].strip()
+            log_text = text[len("/log") :].strip()
             await self._cmd_log(chat_id, log_text, msg)
         elif command == "/phase":
-            phase_arg = text[len("/phase"):].strip()
+            phase_arg = text[len("/phase") :].strip()
             await self._cmd_phase(chat_id, phase_arg, msg)
         else:
             await self._send(chat_id, f"Неизвестная команда: {command}\n\n{_HELP_TEXT}")
@@ -329,8 +324,7 @@ class TelegramCommandBot:
         return "\n".join(lines)
 
     def _cmd_temps(self) -> str:
-        temps = {ch: r for ch, r in self._latest.items()
-                 if r.unit == "K" and ch.startswith("Т")}
+        temps = {ch: r for ch, r in self._latest.items() if r.unit == "K" and ch.startswith("Т")}
 
         if not temps:
             return "Нет температурных данных."
@@ -399,12 +393,14 @@ class TelegramCommandBot:
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler({
-            "cmd": "log_entry",
-            "message": text,
-            "author": username,
-            "source": "telegram",
-        })
+        result = await self._command_handler(
+            {
+                "cmd": "log_entry",
+                "message": text,
+                "author": username,
+                "source": "telegram",
+            }
+        )
         if result.get("ok"):
             await self._send(chat_id, "✅ Записано в журнал")
         else:
@@ -425,11 +421,13 @@ class TelegramCommandBot:
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler({
-            "cmd": "experiment_advance_phase",
-            "phase": phase,
-            "operator": username,
-        })
+        result = await self._command_handler(
+            {
+                "cmd": "experiment_advance_phase",
+                "phase": phase,
+                "operator": username,
+            }
+        )
         if result.get("ok"):
             await self._send(chat_id, f"✅ Фаза: → {phase}")
         else:

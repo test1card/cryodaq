@@ -156,7 +156,9 @@ async def test_heartbeat_fresh_ok_reading_keeps_running():
     mgr._config.critical_channels = []
     try:
         # Seed Keithley data BEFORE entering RUNNING (so heartbeat has data)
-        await _feed(broker, channel="keithley/smu_a/voltage", value=0.1, unit="V", status=ChannelStatus.OK)
+        await _feed(
+            broker, channel="keithley/smu_a/voltage", value=0.1, unit="V", status=ChannelStatus.OK
+        )
         await _get_to_running(mgr, broker)
 
         # Continue feeding healthy data
@@ -186,11 +188,15 @@ async def test_heartbeat_uses_smu_channel_pattern():
     mgr._config.critical_channels = []
     try:
         # Seed Keithley data before RUNNING
-        await _feed(broker, channel="keithley/smu_a/power", value=0.1, unit="W", status=ChannelStatus.OK)
+        await _feed(
+            broker, channel="keithley/smu_a/power", value=0.1, unit="W", status=ChannelStatus.OK
+        )
         await _get_to_running(mgr, broker)
 
         # Feed more data
-        await _feed(broker, channel="keithley/smu_a/power", value=0.5, unit="W", status=ChannelStatus.OK)
+        await _feed(
+            broker, channel="keithley/smu_a/power", value=0.5, unit="W", status=ChannelStatus.OK
+        )
         await asyncio.sleep(0.5)
 
         # Within heartbeat window — should remain RUNNING
@@ -241,9 +247,7 @@ async def test_get_data_dir_uses_env_var(tmp_path: Path, monkeypatch: pytest.Mon
     importlib.reload(cryodaq_paths)
 
     result = cryodaq_paths.get_data_dir()
-    assert result == tmp_path / "data", (
-        f"Expected {tmp_path / 'data'}, got {result}"
-    )
+    assert result == tmp_path / "data", f"Expected {tmp_path / 'data'}, got {result}"
 
     # Cleanup: reload without env var so other tests are not affected
     monkeypatch.delenv("CRYODAQ_ROOT", raising=False)
@@ -262,13 +266,9 @@ async def test_get_data_dir_default_fallback(monkeypatch: pytest.MonkeyPatch):
 
     result = cryodaq_paths.get_data_dir()
     assert isinstance(result, Path), "get_data_dir() must return a pathlib.Path"
-    assert result.name == "data", (
-        f"Default data dir must be named 'data', got '{result.name}'"
-    )
+    assert result.name == "data", f"Default data dir must be named 'data', got '{result.name}'"
     # The parent (project root) must exist — it is a real directory
-    assert result.parent.exists(), (
-        f"Parent of data dir must exist, got {result.parent}"
-    )
+    assert result.parent.exists(), f"Parent of data dir must exist, got {result.parent}"
 
     importlib.reload(cryodaq_paths)
 
@@ -284,9 +284,7 @@ async def test_get_data_dir_returns_path_type(monkeypatch: pytest.MonkeyPatch, t
     importlib.reload(cryodaq_paths)
 
     result = cryodaq_paths.get_data_dir()
-    assert isinstance(result, Path), (
-        f"get_data_dir() must return pathlib.Path, got {type(result)}"
-    )
+    assert isinstance(result, Path), f"get_data_dir() must return pathlib.Path, got {type(result)}"
 
     monkeypatch.delenv("CRYODAQ_ROOT", raising=False)
     importlib.reload(cryodaq_paths)
@@ -362,8 +360,7 @@ async def test_telegram_notifier_skips_cleared_when_disabled():
     await notifier(cleared_event)
 
     assert not send_calls, (
-        "TelegramNotifier must not call _send for cleared events when "
-        "send_cleared=False"
+        "TelegramNotifier must not call _send for cleared events when send_cleared=False"
     )
 
 
@@ -389,9 +386,7 @@ async def test_telegram_notifier_skips_acknowledged_events():
 
     await notifier(ack_event)
 
-    assert not send_calls, (
-        "TelegramNotifier must not call _send for acknowledged events"
-    )
+    assert not send_calls, "TelegramNotifier must not call _send for acknowledged events"
 
 
 async def test_telegram_notifier_sends_activated_event():
@@ -458,8 +453,7 @@ async def test_sqlite_writes_real_timestamp(tmp_path: Path):
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
         pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet "
-            "implemented (P1-07 fix pending)"
+            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
         )
 
     writer = SQLiteWriter(tmp_path)
@@ -487,8 +481,7 @@ async def test_parse_timestamp_real():
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
         pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet "
-            "implemented (P1-07 fix pending)"
+            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
         )
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp
@@ -496,18 +489,12 @@ async def test_parse_timestamp_real():
     epoch_float = 1710000000.0  # 2024-03-10 UTC
     dt = _parse_timestamp(epoch_float)
 
-    assert isinstance(dt, datetime), (
-        f"_parse_timestamp(float) must return datetime, got {type(dt)}"
-    )
-    assert dt.tzinfo is not None, (
-        "_parse_timestamp(float) must return a timezone-aware datetime"
-    )
+    assert isinstance(dt, datetime), f"_parse_timestamp(float) must return datetime, got {type(dt)}"
+    assert dt.tzinfo is not None, "_parse_timestamp(float) must return a timezone-aware datetime"
     # Verify the epoch is decoded correctly (within 1 s tolerance)
     expected = datetime.fromtimestamp(epoch_float, tz=UTC)
     delta = abs((dt - expected).total_seconds())
-    assert delta < 1.0, (
-        f"_parse_timestamp({epoch_float}) decoded to {dt}, expected ~{expected}"
-    )
+    assert delta < 1.0, f"_parse_timestamp({epoch_float}) decoded to {dt}, expected ~{expected}"
 
 
 async def test_parse_timestamp_text_legacy():
@@ -515,8 +502,7 @@ async def test_parse_timestamp_text_legacy():
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
         pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet "
-            "implemented (P1-07 fix pending)"
+            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
         )
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp
@@ -524,9 +510,7 @@ async def test_parse_timestamp_text_legacy():
     iso_str = "2026-03-14T12:00:00+00:00"
     dt = _parse_timestamp(iso_str)
 
-    assert isinstance(dt, datetime), (
-        f"_parse_timestamp(str) must return datetime, got {type(dt)}"
-    )
+    assert isinstance(dt, datetime), f"_parse_timestamp(str) must return datetime, got {type(dt)}"
     assert dt.year == 2026
     assert dt.month == 3
     assert dt.day == 14
@@ -538,8 +522,7 @@ async def test_parse_timestamp_text_naive_legacy():
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
         pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet "
-            "implemented (P1-07 fix pending)"
+            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
         )
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp

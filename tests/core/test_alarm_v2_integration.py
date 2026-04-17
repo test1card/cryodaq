@@ -17,6 +17,7 @@ from cryodaq.drivers.base import Reading
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _reading(channel: str, value: float, unit: str = "K", ts: float | None = None) -> Reading:
     if ts is None:
         ts = time.time()
@@ -57,6 +58,7 @@ def _make_stack(
 # ---------------------------------------------------------------------------
 # Phase-filtered alarm: only fires in correct phase
 # ---------------------------------------------------------------------------
+
 
 def test_phase_alarm_suppressed_outside_phase() -> None:
     state, rate, ev, sm = _make_stack(phase="vacuum")
@@ -103,6 +105,7 @@ def test_phase_alarm_fires_in_correct_phase() -> None:
 # ---------------------------------------------------------------------------
 # Full tick simulation
 # ---------------------------------------------------------------------------
+
 
 def _simulate_tick(
     evaluator: AlarmEvaluator,
@@ -194,6 +197,7 @@ def test_tick_dedup_no_retrigger() -> None:
 # ---------------------------------------------------------------------------
 # alarm_v2_status command shape
 # ---------------------------------------------------------------------------
+
 
 def test_alarm_v2_status_shape() -> None:
     _, _, ev, sm = _make_stack()

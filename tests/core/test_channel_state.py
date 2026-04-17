@@ -9,8 +9,13 @@ from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.drivers.base import Reading
 
 
-def _reading(channel: str, value: float, unit: str = "K",
-             instrument_id: str = "LS218", ts: float | None = None) -> Reading:
+def _reading(
+    channel: str,
+    value: float,
+    unit: str = "K",
+    instrument_id: str = "LS218",
+    ts: float | None = None,
+) -> Reading:
     if ts is None:
         ts = time.time()
     dt = datetime.fromtimestamp(ts, tz=UTC)
@@ -64,7 +69,7 @@ def test_get_stale_channels() -> None:
     tracker = ChannelStateTracker(stale_timeout_s=5.0)
     now = time.time()
     tracker.update(_reading("T1", 4.2, ts=now - 10.0))  # stale
-    tracker.update(_reading("T2", 4.5, ts=now))           # fresh
+    tracker.update(_reading("T2", 4.5, ts=now))  # fresh
     stale = tracker.get_stale_channels()
     assert "T1" in stale
     assert "T2" not in stale
@@ -141,18 +146,31 @@ def test_channels_list() -> None:
 
 
 def test_resolve_short_to_full() -> None:
-    """Short ID '\u042212' resolves to full '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'."""
+    """Short ID '\u042212' resolves to full '\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2'."""  # noqa: E501
     tracker = ChannelStateTracker()
-    tracker.update(_reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 4.2))
+    tracker.update(
+        _reading(
+            "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2",  # noqa: E501
+            4.2,
+        )
+    )
     # Lookup by short ID should resolve
     state = tracker.get("\u042212")
     assert state is not None
-    assert state.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    assert (
+        state.channel
+        == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
+    )
     assert abs(state.value - 4.2) < 1e-9
     # Full name also works
-    state2 = tracker.get("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2")
+    state2 = tracker.get(
+        "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    )
     assert state2 is not None
-    assert state2.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    assert (
+        state2.channel
+        == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
+    )
 
 
 def test_resolve_fault_count() -> None:
@@ -160,7 +178,13 @@ def test_resolve_fault_count() -> None:
     tracker = ChannelStateTracker(fault_window_s=300.0)
     now = time.time()
     # Update with full channel name and fault value (> 350 K)
-    tracker.update(_reading("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", 999.0, ts=now))
+    tracker.update(
+        _reading(
+            "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2",  # noqa: E501
+            999.0,
+            ts=now,
+        )
+    )
     # Query by short ID
     count = tracker.get_fault_count("\u042212")
     assert count >= 1

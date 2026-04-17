@@ -1,4 +1,5 @@
 """Tests for cryodaq.core.atomic_write."""
+
 from __future__ import annotations
 
 import os

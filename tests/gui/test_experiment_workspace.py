@@ -64,7 +64,9 @@ def test_workspace_experiment_mode_without_active_shows_create_form(monkeypatch)
                     {
                         "id": "cooldown_test",
                         "name": "Cooldown Test",
-                        "custom_fields": [{"id": "target_temperature", "label": "Target Temperature"}],
+                        "custom_fields": [
+                            {"id": "target_temperature", "label": "Target Temperature"}
+                        ],
                     }
                 ],
             }
@@ -152,6 +154,7 @@ def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch
     ZmqCommandWorker (was direct send_command). Patch the worker class so
     we can capture the payload synchronously without running a Qt thread."""
     from unittest.mock import MagicMock
+
     _app()
     calls: list[dict] = []
     worker_payloads: list[dict] = []
@@ -173,7 +176,11 @@ def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch
     def _fake_send(payload: dict) -> dict:
         calls.append(dict(payload))
         if payload["cmd"] == "experiment_status":
-            return states[0] if len([x for x in calls if x["cmd"] == "experiment_status"]) == 1 else states[1]
+            return (
+                states[0]
+                if len([x for x in calls if x["cmd"] == "experiment_status"]) == 1
+                else states[1]
+            )
         if payload["cmd"] == "set_app_mode":
             return {"ok": True, "app_mode": payload["app_mode"], "active_experiment": None}
         raise AssertionError(payload)
@@ -188,9 +195,7 @@ def test_workspace_mode_switch_uses_confirmation_and_backend_command(monkeypatch
         return worker
 
     monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.send_command", _fake_send)
-    monkeypatch.setattr(
-        "cryodaq.gui.widgets.experiment_workspace.ZmqCommandWorker", _fake_worker
-    )
+    monkeypatch.setattr("cryodaq.gui.widgets.experiment_workspace.ZmqCommandWorker", _fake_worker)
     monkeypatch.setattr(
         "cryodaq.gui.widgets.experiment_workspace.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Yes,

@@ -16,6 +16,7 @@ from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetp
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_yaml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "alarms_v3.yaml"
     p.write_text(textwrap.dedent(content), encoding="utf-8")
@@ -205,6 +206,7 @@ global_alarms:
 # ExperimentPhaseProvider
 # ---------------------------------------------------------------------------
 
+
 def _make_mgr(phase: str | None = "cooldown", started_ago_s: float = 3700.0):
     mgr = MagicMock()
     mgr.get_current_phase.return_value = phase
@@ -245,8 +247,10 @@ def test_phase_provider_elapsed_zero_no_phase() -> None:
 # ExperimentSetpointProvider
 # ---------------------------------------------------------------------------
 
+
 def _make_setpoint_defs():
     from cryodaq.core.alarm_config import SetpointDef
+
     return {
         "T12_setpoint": SetpointDef(
             key="T12_setpoint",

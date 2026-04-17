@@ -8,9 +8,10 @@ or compose with content widgets. Provides:
 - ``closed`` signal emitted on any close mechanism
 - Theme-token based styling only
 """
+
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRect, Signal
+from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -32,9 +33,7 @@ class _Backdrop(QWidget):
         self.setObjectName("modalCardBackdrop")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setStyleSheet(
-            f"#modalCardBackdrop {{ background: {theme.SURFACE_OVERLAY_RGBA}; }}"
-        )
+        self.setStyleSheet(f"#modalCardBackdrop {{ background: {theme.SURFACE_OVERLAY_RGBA}; }}")
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
@@ -80,9 +79,7 @@ class ModalCard(QWidget):
         )
 
         card_layout = QVBoxLayout(self._card)
-        card_layout.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_3, theme.SPACE_5, theme.SPACE_5
-        )
+        card_layout.setContentsMargins(theme.SPACE_5, theme.SPACE_3, theme.SPACE_5, theme.SPACE_5)
         card_layout.setSpacing(theme.SPACE_3)
 
         chrome_row = QHBoxLayout()
@@ -115,9 +112,7 @@ class ModalCard(QWidget):
         self._content_host = QWidget(self._card)
         self._content_host.setObjectName("modalCardContentHost")
         self._content_layout = QVBoxLayout(self._content_host)
-        self._content_layout.setContentsMargins(
-            theme.SPACE_3, 0, theme.SPACE_3, theme.SPACE_3
-        )
+        self._content_layout.setContentsMargins(theme.SPACE_3, 0, theme.SPACE_3, theme.SPACE_3)
         self._content_layout.setSpacing(theme.SPACE_3)
         card_layout.addWidget(self._content_host, 1)
 
@@ -162,9 +157,7 @@ class ModalCard(QWidget):
         outer_margin = theme.SPACE_5
         available_width = max(0, self.width() - 2 * outer_margin)
         available_height = max(0, self.height() - 2 * outer_margin)
-        max_height = max(
-            0, min(available_height, (self.height() * self._max_height_vh_pct) // 100)
-        )
+        max_height = max(0, min(available_height, (self.height() * self._max_height_vh_pct) // 100))
         card_width = min(self._max_width, available_width)
         card_height = max_height
         x = (self.width() - card_width) // 2

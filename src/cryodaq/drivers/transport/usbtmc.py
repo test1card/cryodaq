@@ -1,4 +1,5 @@
 """Асинхронная обёртка над pyvisa для USB-TMC коммуникации."""
+
 from __future__ import annotations
 
 import asyncio

@@ -4,9 +4,9 @@ Receives data from ChannelBufferStore via refresh() called from
 DashboardView's refresh timer. Time window picker, Lin/Log toggle,
 and clickable legend live entirely inside this widget.
 """
+
 from __future__ import annotations
 
-import math
 import time
 
 import pyqtgraph as pg
@@ -24,11 +24,30 @@ from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 from cryodaq.gui.dashboard.time_window import TimeWindow
 
 _LINE_PALETTE: list[str] = [
-    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
-    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
-    "#AEC7E8", "#FFBB78", "#98DF8A", "#FF9896", "#C5B0D5",
-    "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
-    "#393B79", "#637939", "#8C6D31", "#843C39",
+    "#1F77B4",
+    "#FF7F0E",
+    "#2CA02C",
+    "#D62728",
+    "#9467BD",
+    "#8C564B",
+    "#E377C2",
+    "#7F7F7F",
+    "#BCBD22",
+    "#17BECF",
+    "#AEC7E8",
+    "#FFBB78",
+    "#98DF8A",
+    "#FF9896",
+    "#C5B0D5",
+    "#C49C94",
+    "#F7B6D2",
+    "#C7C7C7",
+    "#DBDB8D",
+    "#9EDAE5",
+    "#393B79",
+    "#637939",
+    "#8C6D31",
+    "#843C39",
 ]
 
 _MAX_POINTS = 2000
@@ -114,15 +133,14 @@ class TempPlotWidget(QWidget):
         btn.setStyleSheet(
             f"QPushButton {{ background: {bg}; color: {fg}; border: none; "
             f"border-radius: {theme.RADIUS_SM}px; padding: 2px 8px; }}"
-            f"QPushButton:hover {{ background: {theme.SURFACE_CARD}; color: {theme.TEXT_SECONDARY}; }}"
+            f"QPushButton:hover {{ background: {theme.SURFACE_CARD}; color: {theme.TEXT_SECONDARY}; }}"  # noqa: E501
         )
 
     def _init_plot(self) -> None:
         self._plot.setBackground(theme.SURFACE_CARD)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Температура", units="K",
-                     color=theme.TEXT_SECONDARY)
+        pi.setLabel("left", "Температура", units="K", color=theme.TEXT_SECONDARY)
         pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
@@ -139,8 +157,7 @@ class TempPlotWidget(QWidget):
         if pi.legend is not None:
             pi.legend.clear()
 
-        visible_ids = [ch for ch in self._channel_mgr.get_all_visible()
-                       if ch.startswith("\u0422")]
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("\u0422")]
         for idx, ch_id in enumerate(visible_ids):
             display = self._channel_mgr.get_display_name(ch_id)
             color = _LINE_PALETTE[idx % len(_LINE_PALETTE)]

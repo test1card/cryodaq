@@ -67,7 +67,9 @@ class LakeShore218S(InstrumentDriver):
                 except Exception as exc:
                     log.warning(
                         "%s: *IDN? query failed (attempt %d/2): %s",
-                        self.name, attempt + 1, exc,
+                        self.name,
+                        attempt + 1,
+                        exc,
                     )
                     idn_raw = ""
 
@@ -81,16 +83,17 @@ class LakeShore218S(InstrumentDriver):
                 if attempt == 0:
                     # Try a Selected Device Clear before the second attempt.
                     log.warning(
-                        "%s: IDN validation failed (response=%r), "
-                        "issuing GPIB clear and retrying",
-                        self.name, idn_raw,
+                        "%s: IDN validation failed (response=%r), issuing GPIB clear and retrying",
+                        self.name,
+                        idn_raw,
                     )
                     try:
                         await self._transport.clear_bus()
                     except Exception as clear_exc:
                         log.warning(
                             "%s: clear_bus before IDN retry failed: %s",
-                            self.name, clear_exc,
+                            self.name,
+                            clear_exc,
                         )
                     await asyncio.sleep(0.2)
 
@@ -124,9 +127,13 @@ class LakeShore218S(InstrumentDriver):
             readings = await self._read_krdg_channels()
         else:
             temperature_readings = await self._read_krdg_channels()
-            needs_curve = any(policy.get("reading_mode") == "curve" for policy in runtime_policies.values())
+            needs_curve = any(
+                policy.get("reading_mode") == "curve" for policy in runtime_policies.values()
+            )
             raw_readings = await self.read_srdg_channels() if needs_curve else []
-            readings = self._merge_runtime_readings(temperature_readings, raw_readings, runtime_policies)
+            readings = self._merge_runtime_readings(
+                temperature_readings, raw_readings, runtime_policies
+            )
 
         # Periodic RDGST? status check (every 60s)
         now = _time.monotonic()
@@ -161,13 +168,16 @@ class LakeShore218S(InstrumentDriver):
             self._krdg0_fail_count += 1
             log.warning(
                 "%s: KRDG? returned %d values (expected 8), fallback #%d",
-                self.name, len(readings), self._krdg0_fail_count,
+                self.name,
+                len(readings),
+                self._krdg0_fail_count,
             )
             if self._krdg0_fail_count >= 3:
                 self._use_per_channel_krdg = True
                 log.warning(
                     "%s: KRDG? failed %d times, switching to per-channel mode permanently",
-                    self.name, self._krdg0_fail_count,
+                    self.name,
+                    self._krdg0_fail_count,
                 )
             return await self._read_krdg_per_channel()
         self._krdg0_fail_count = 0
@@ -248,13 +258,16 @@ class LakeShore218S(InstrumentDriver):
             self._srdg0_fail_count += 1
             log.warning(
                 "%s: SRDG? returned %d values (expected 8), fallback #%d",
-                self.name, len(readings), self._srdg0_fail_count,
+                self.name,
+                len(readings),
+                self._srdg0_fail_count,
             )
             if self._srdg0_fail_count >= 3:
                 self._use_per_channel_srdg = True
                 log.warning(
                     "%s: SRDG? failed %d times, switching to per-channel mode permanently",
-                    self.name, self._srdg0_fail_count,
+                    self.name,
+                    self._srdg0_fail_count,
                 )
             return await self._read_srdg_per_channel()
         self._srdg0_fail_count = 0
@@ -459,7 +472,12 @@ class LakeShore218S(InstrumentDriver):
             resolution = self._calibration_store.resolve_runtime_policy(channel_key=channel_key)
             policies[channel_num] = resolution
             reason = str(resolution.get("reason", ""))
-            if resolution.get("reading_mode") != "curve" and reason not in {"global_off", "channel_off", "missing_assignment", ""}:
+            if resolution.get("reading_mode") != "curve" and reason not in {
+                "global_off",
+                "channel_off",
+                "missing_assignment",
+                "",
+            }:
                 self._log_runtime_fallback(channel_key=channel_key, reason=reason)
         return policies
 
@@ -478,7 +496,9 @@ class LakeShore218S(InstrumentDriver):
         for reading in temperature_readings:
             channel_num = int(reading.metadata.get("raw_channel", 0))
             policy = policies.get(channel_num) or {}
-            assignment = policy.get("assignment") if isinstance(policy.get("assignment"), dict) else {}
+            assignment = (
+                policy.get("assignment") if isinstance(policy.get("assignment"), dict) else {}
+            )
             if policy.get("reading_mode") != "curve":
                 merged.append(
                     self._with_runtime_metadata(
@@ -494,7 +514,9 @@ class LakeShore218S(InstrumentDriver):
 
             raw_reading = raw_by_channel.get(channel_num)
             if raw_reading is None or raw_reading.status is not ChannelStatus.OK:
-                self._log_runtime_fallback(channel_key=str(policy.get("channel_key", "")), reason="missing_srdg")
+                self._log_runtime_fallback(
+                    channel_key=str(policy.get("channel_key", "")), reason="missing_srdg"
+                )
                 merged.append(
                     self._with_runtime_metadata(
                         reading,
@@ -509,9 +531,13 @@ class LakeShore218S(InstrumentDriver):
 
             sensor_id = str(assignment.get("sensor_id", "")).strip()
             try:
-                calibrated_value = self._calibration_store.evaluate(sensor_id, float(raw_reading.value))  # type: ignore[union-attr]
+                calibrated_value = self._calibration_store.evaluate(
+                    sensor_id, float(raw_reading.value)
+                )  # type: ignore[union-attr]
             except Exception:
-                self._log_runtime_fallback(channel_key=str(policy.get("channel_key", "")), reason="curve_evaluate_failed")
+                self._log_runtime_fallback(
+                    channel_key=str(policy.get("channel_key", "")), reason="curve_evaluate_failed"
+                )
                 merged.append(
                     self._with_runtime_metadata(
                         reading,

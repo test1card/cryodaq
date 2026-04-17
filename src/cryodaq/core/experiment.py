@@ -11,7 +11,7 @@ import sqlite3
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +50,7 @@ class ExperimentStatus(Enum):
     ABORTED = "ABORTED"
 
 
-class ExperimentPhase(str, Enum):
+class ExperimentPhase(StrEnum):
     PREPARATION = "preparation"
     VACUUM = "vacuum"
     COOLDOWN = "cooldown"
@@ -340,7 +340,9 @@ class ExperimentManager:
             "current_phase": self.get_current_phase(),
             "phase_started_at": phase_started_at,
             "phases": self.get_phase_history(),
-            "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
+            "run_records": [
+                record.to_payload() for record in self.list_run_records(active_only=True)
+            ],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
 
@@ -365,7 +367,9 @@ class ExperimentManager:
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
-            raise RuntimeError("Cannot switch to debug mode while an experiment card is still active.")
+            raise RuntimeError(
+                "Cannot switch to debug mode while an experiment card is still active."
+            )
         if next_mode == self._state.app_mode:
             return self._state.app_mode
         self._state = ExperimentState(
@@ -392,6 +396,7 @@ class ExperimentManager:
         # Date-only input (00:00:00) → make inclusive: include entire selected day
         if end_dt and end_dt.hour == 0 and end_dt.minute == 0 and end_dt.second == 0:
             from datetime import timedelta
+
             end_dt = end_dt + timedelta(days=1)
         entries: list[ArchiveEntry] = []
         if not self._artifacts_dir.exists():
@@ -406,10 +411,14 @@ class ExperimentManager:
                     dict(item) for item in payload.get("run_records", []) if isinstance(item, dict)
                 )
                 artifact_index = tuple(
-                    dict(item) for item in payload.get("artifact_index", []) if isinstance(item, dict)
+                    dict(item)
+                    for item in payload.get("artifact_index", [])
+                    if isinstance(item, dict)
                 )
                 result_tables = tuple(
-                    dict(item) for item in payload.get("result_tables", []) if isinstance(item, dict)
+                    dict(item)
+                    for item in payload.get("result_tables", [])
+                    if isinstance(item, dict)
                 )
                 artifact_dir = metadata_path.parent
                 docx_path = artifact_dir / "reports" / "report_editable.docx"
@@ -422,7 +431,9 @@ class ExperimentManager:
                     experiment_id=_clean_text(experiment.get("experiment_id")),
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
                     template_id=_clean_text(experiment.get("template_id") or template.get("id")),
-                    template_name=_clean_text(template.get("name") or experiment.get("template_id")),
+                    template_name=_clean_text(
+                        template.get("name") or experiment.get("template_id")
+                    ),
                     operator=_clean_text(experiment.get("operator")),
                     sample=_clean_text(experiment.get("sample")),
                     status=_clean_text(experiment.get("status")),
@@ -538,7 +549,9 @@ class ExperimentManager:
         )
         payload = self._read_metadata_payload(active.experiment_id)
         existing_records = [
-            RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)
+            RunRecord.from_payload(item)
+            for item in payload.get("run_records", [])
+            if isinstance(item, dict)
         ]
         updated_records: list[RunRecord] = []
         replaced = False
@@ -567,7 +580,9 @@ class ExperimentManager:
             return []
         payload = self._read_metadata_payload(experiment_id)
         records = [
-            RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)
+            RunRecord.from_payload(item)
+            for item in payload.get("run_records", [])
+            if isinstance(item, dict)
         ]
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
@@ -589,7 +604,7 @@ class ExperimentManager:
         self._require_experiment_mode()
         if self._active is not None:
             raise RuntimeError(
-                f"Experiment '{self._active.name}' ({self._active.experiment_id}) is already active."
+                f"Experiment '{self._active.name}' ({self._active.experiment_id}) is already active."  # noqa: E501
             )
 
         template = self.get_template(template_id)
@@ -753,7 +768,9 @@ class ExperimentManager:
 
                 ReportGenerator(self.data_dir).generate(finished.experiment_id)
             except Exception as exc:
-                logger.warning("Failed to auto-generate reports for %s: %s", finished.experiment_id, exc)
+                logger.warning(
+                    "Failed to auto-generate reports for %s: %s", finished.experiment_id, exc
+                )
 
         # Phase 2e stage 1: Parquet archive — best-effort
         try:
@@ -859,14 +876,16 @@ class ExperimentManager:
 
     def _require_experiment_mode(self) -> None:
         if self.app_mode is not AppMode.EXPERIMENT:
-            raise RuntimeError("Experiment lifecycle commands are only available in experiment mode.")
+            raise RuntimeError(
+                "Experiment lifecycle commands are only available in experiment mode."
+            )
 
     def _require_active(self, experiment_id: str | None = None) -> ExperimentInfo:
         if self._active is None:
             raise RuntimeError("No active experiment to operate on.")
         if experiment_id is not None and experiment_id != self._active.experiment_id:
             raise ValueError(
-                f"experiment_id '{experiment_id}' does not match active '{self._active.experiment_id}'."
+                f"experiment_id '{experiment_id}' does not match active '{self._active.experiment_id}'."  # noqa: E501
             )
         return self._active
 
@@ -897,7 +916,9 @@ class ExperimentManager:
         if self._state_path.exists():
             try:
                 payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-                app_mode = self._normalize_app_mode(payload.get("app_mode", AppMode.EXPERIMENT.value))
+                app_mode = self._normalize_app_mode(
+                    payload.get("app_mode", AppMode.EXPERIMENT.value)
+                )
                 active_experiment_id = _clean_text(payload.get("active_experiment_id")) or None
             except Exception as exc:
                 logger.warning("Failed to load experiment state %s: %s", self._state_path, exc)
@@ -938,11 +959,15 @@ class ExperimentManager:
             notes=_clean_text(experiment.get("notes")),
             start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
             end_time=_parse_time(experiment.get("end_time")),
-            status=ExperimentStatus(_clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value),
+            status=ExperimentStatus(
+                _clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value
+            ),
             config_snapshot=dict(experiment.get("config_snapshot") or {}),
             custom_fields=_normalize_custom_fields(experiment.get("custom_fields")),
             report_enabled=bool(experiment.get("report_enabled", True)),
-            sections=tuple(str(item) for item in experiment.get("sections", []) if str(item).strip()),
+            sections=tuple(
+                str(item) for item in experiment.get("sections", []) if str(item).strip()
+            ),
             artifact_dir=self._artifact_dir(experiment_id),
             metadata_path=metadata_path,
             retroactive=bool(experiment.get("retroactive", False)),
@@ -1005,6 +1030,7 @@ class ExperimentManager:
     def _all_db_names_for_range(self, start: datetime, end: datetime) -> set[str]:
         """Return all daily DB filenames that overlap [start, end]."""
         from datetime import timedelta
+
         names: set[str] = set()
         day = start.date()
         end_day = end.date()
@@ -1037,8 +1063,8 @@ class ExperimentManager:
         try:
             conn.execute(
                 "INSERT INTO experiments ("
-                "experiment_id, name, operator, cryostat, sample, description, start_time, end_time, "
-                "status, config_snapshot, template_id, title, notes, custom_fields, report_enabled, "
+                "experiment_id, name, operator, cryostat, sample, description, start_time, end_time, "  # noqa: E501
+                "status, config_snapshot, template_id, title, notes, custom_fields, report_enabled, "  # noqa: E501
                 "artifact_dir, metadata_path, sections, retroactive"
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                 (
@@ -1072,8 +1098,8 @@ class ExperimentManager:
         try:
             conn.execute(
                 "UPDATE experiments SET "
-                "name = ?, title = ?, sample = ?, description = ?, notes = ?, end_time = ?, status = ?, "
-                "custom_fields = ?, report_enabled = ?, template_id = ?, artifact_dir = ?, metadata_path = ?, "
+                "name = ?, title = ?, sample = ?, description = ?, notes = ?, end_time = ?, status = ?, "  # noqa: E501
+                "custom_fields = ?, report_enabled = ?, template_id = ?, artifact_dir = ?, metadata_path = ?, "  # noqa: E501
                 "sections = ?, retroactive = ? "
                 "WHERE experiment_id = ?;",
                 (
@@ -1113,16 +1139,23 @@ class ExperimentManager:
         template = self.get_template(info.template_id)
         existing_payload = self._read_metadata_payload(info.experiment_id)
         payload = {
-            **{key: value for key, value in existing_payload.items() if key not in {"experiment", "template", "data_range", "artifacts", "run_records"}},
+            **{
+                key: value
+                for key, value in existing_payload.items()
+                if key not in {"experiment", "template", "data_range", "artifacts", "run_records"}
+            },
             "schema_version": int(existing_payload.get("schema_version", 1) or 1),
             "experiment": info.to_payload(),
             "template": template.to_payload(),
             "data_range": {
                 "start_time": info.start_time.isoformat(),
                 "end_time": info.end_time.isoformat() if info.end_time else None,
-                "daily_db_files": sorted(self._all_db_names_for_range(
-                    info.start_time, info.end_time or info.start_time,
-                )),
+                "daily_db_files": sorted(
+                    self._all_db_names_for_range(
+                        info.start_time,
+                        info.end_time or info.start_time,
+                    )
+                ),
             },
             "artifacts": {
                 "root_dir": str(artifact_dir),
@@ -1368,8 +1401,10 @@ class ExperimentManager:
             plots_dir / "pressure.png",
             readings,
             artifact_index,
-            channel_filter=lambda item: "pressure" in str(item["channel"]).lower()
-            or str(item["unit"]).lower() in {"mbar", "pa"},
+            channel_filter=lambda item: (
+                "pressure" in str(item["channel"]).lower()
+                or str(item["unit"]).lower() in {"mbar", "pa"}
+            ),
             role="pressure",
             title="Pressure",
             y_label="Pressure",
@@ -1429,7 +1464,9 @@ class ExperimentManager:
                     for row in conn.execute(query, params).fetchall():
                         rows.append(
                             {
-                                "timestamp": datetime.fromtimestamp(float(row["timestamp"]), tz=UTC),
+                                "timestamp": datetime.fromtimestamp(
+                                    float(row["timestamp"]), tz=UTC
+                                ),
                                 "instrument_id": str(row["instrument_id"] or ""),
                                 "channel": str(row["channel"] or ""),
                                 "value": float(row["value"]),
@@ -1463,7 +1500,12 @@ class ExperimentManager:
                     target = source
                     linked = False
                 else:
-                    target_dir = archive_root / "runs" / self._safe_slug(record.source_tab) / self._safe_slug(record.source_run_id)
+                    target_dir = (
+                        archive_root
+                        / "runs"
+                        / self._safe_slug(record.source_tab)
+                        / self._safe_slug(record.source_run_id)
+                    )
                     target_dir.mkdir(parents=True, exist_ok=True)
                     target = target_dir / source.name
                     if not target.exists():
@@ -1530,7 +1572,15 @@ class ExperimentManager:
             writer.writerow(["run_record_id", "source_tab", "run_type", "parameter", "value"])
             for record in run_records:
                 for key, value in sorted(record.parameters.items()):
-                    writer.writerow([record.record_id, record.source_tab, record.run_type, key, json.dumps(value, ensure_ascii=False)])
+                    writer.writerow(
+                        [
+                            record.record_id,
+                            record.source_tab,
+                            record.run_type,
+                            key,
+                            json.dumps(value, ensure_ascii=False),
+                        ]
+                    )
                     rows += 1
         return rows
 
@@ -1577,9 +1627,7 @@ class ExperimentManager:
                     continue
                 try:
                     with path.open(encoding="utf-8", newline="") as handle:
-                        reader = csv.DictReader(
-                            line for line in handle if not line.startswith("#")
-                        )
+                        reader = csv.DictReader(line for line in handle if not line.startswith("#"))
                         for item in reader:
                             try:
                                 rows.append(
@@ -1600,7 +1648,9 @@ class ExperimentManager:
             writer = csv.writer(handle)
             writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
             for item in rows:
-                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
+                writer.writerow(
+                    [item["temperature_k"], item["conductance_wk"], item["resistance_kw"]]
+                )
 
     def _maybe_write_channel_plot(
         self,
@@ -1636,15 +1686,20 @@ class ExperimentManager:
     ) -> bool:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 
             plt.figure(figsize=(8, 3.5))
             series: dict[str, list[tuple[datetime, float]]] = {}
             for item in readings:
-                series.setdefault(str(item["channel"]), []).append((item["timestamp"], float(item["value"])))
+                series.setdefault(str(item["channel"]), []).append(
+                    (item["timestamp"], float(item["value"]))
+                )
             for channel, values in sorted(series.items()):
-                plt.plot([stamp for stamp, _ in values], [value for _, value in values], label=channel)
+                plt.plot(
+                    [stamp for stamp, _ in values], [value for _, value in values], label=channel
+                )
             plt.title(title)
             plt.ylabel(y_label)
             if len(series) <= 6:
@@ -1670,6 +1725,7 @@ class ExperimentManager:
     ) -> bool:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 

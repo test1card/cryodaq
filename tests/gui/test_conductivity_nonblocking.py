@@ -1,4 +1,5 @@
 """Test: auto-sweep methods must not call blocking send_command."""
+
 from __future__ import annotations
 
 import ast
@@ -6,8 +7,10 @@ from pathlib import Path
 
 
 def test_auto_tick_no_blocking_send_command():
-    """_auto_tick, _on_auto_start, _on_auto_stop, _auto_complete must not call blocking send_command."""
-    src = Path(__file__).parents[2] / "src" / "cryodaq" / "gui" / "widgets" / "conductivity_panel.py"
+    """_auto_tick, _on_auto_start, _on_auto_stop, _auto_complete must not call blocking send_command."""  # noqa: E501
+    src = (
+        Path(__file__).parents[2] / "src" / "cryodaq" / "gui" / "widgets" / "conductivity_panel.py"
+    )
     source = src.read_text(encoding="utf-8")
     tree = ast.parse(source)
 

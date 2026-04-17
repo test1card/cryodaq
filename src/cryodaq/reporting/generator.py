@@ -93,13 +93,19 @@ class ReportGenerator:
         self._apply_gost_formatting(document)
 
         from cryodaq.reporting.sections import _reset_counters
+
         _reset_counters()
 
         # Only break before major sections, not after every one
         _PAGE_BREAK_BEFORE = {
-            "cooldown_section", "thermal_section", "pressure_section",
-            "operator_log_section", "alarms_section", "config_section",
-            "operator_comments_section", "artifact_manifest_section",
+            "cooldown_section",
+            "thermal_section",
+            "pressure_section",
+            "operator_log_section",
+            "alarms_section",
+            "config_section",
+            "operator_comments_section",
+            "artifact_manifest_section",
         }
         for index, section_name in enumerate(sections):
             if index > 0 and section_name in _PAGE_BREAK_BEFORE:
@@ -161,6 +167,7 @@ class ReportGenerator:
 
         # Force black headings — clear theme color that overrides rgb
         from docx.oxml.ns import qn as _qn
+
         for sn in ("Heading 1", "Heading 2", "Title"):
             rpr = document.styles[sn].element.find(_qn("w:rPr"))
             if rpr is not None:
@@ -184,18 +191,25 @@ class ReportGenerator:
         fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         from docx.oxml.ns import qn
+
         run = fp.add_run()
-        run._element.append(run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"}))
+        run._element.append(
+            run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
+        )
         run2 = fp.add_run()
         instr = run2._element.makeelement(qn("w:instrText"), {qn("xml:space"): "preserve"})
         instr.text = " PAGE "
         run2._element.append(instr)
         run3 = fp.add_run()
-        run3._element.append(run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"}))
+        run3._element.append(
+            run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
+        )
 
     def _resolve_raw_sections(self, metadata: dict) -> tuple[str, ...]:
         template = metadata.get("template", {})
-        configured = [name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY]
+        configured = [
+            name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY
+        ]
         ordered: list[str] = []
         for name in self._BASE_RAW_SECTIONS + tuple(configured):
             if name not in ordered:
@@ -210,7 +224,15 @@ class ReportGenerator:
             return None
         output_dir = source_docx_path.parent
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", str(source_docx_path), "--outdir", str(output_dir)],
+            [
+                soffice,
+                "--headless",
+                "--convert-to",
+                "pdf",
+                str(source_docx_path),
+                "--outdir",
+                str(output_dir),
+            ],
             check=False,
             capture_output=True,
         )

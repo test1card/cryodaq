@@ -47,11 +47,11 @@ _DERIVED_CHANNEL_PATTERNS: tuple[re.Pattern[str], ...] = (
 # physics. Accepts both Cyrillic Т (canonical, per CLAUDE.md) and Latin T
 # (used in some test fixtures and legacy configs).
 _PHYSICAL_SENSOR_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^[ТT]\d+(\b|\s|/|$)"),    # T-prefixed cryo channels
-    re.compile(r"/[ТT]\d+(\b|\s|/|$)"),    # …with instrument prefix
-    re.compile(r"/pressure\b"),            # Vacuum gauges
-    re.compile(r"/temperature\b"),         # Generic temperature sensors
-    re.compile(r"VSP63D"),                 # Thyracont vacuum gauge namespace
+    re.compile(r"^[ТT]\d+(\b|\s|/|$)"),  # T-prefixed cryo channels
+    re.compile(r"/[ТT]\d+(\b|\s|/|$)"),  # …with instrument prefix
+    re.compile(r"/pressure\b"),  # Vacuum gauges
+    re.compile(r"/temperature\b"),  # Generic temperature sensors
+    re.compile(r"VSP63D"),  # Thyracont vacuum gauge namespace
 )
 
 
@@ -78,13 +78,13 @@ class ChannelDiagnostics:
     channel_id: str
     channel_name: str
     current_T: float
-    noise_std: float           # MAD-based σ (K)
-    noise_mK: float            # same in mK
-    drift_rate: float          # K/min
-    drift_mK_per_min: float    # same in mK/min
-    outlier_count: int         # in outlier window
+    noise_std: float  # MAD-based σ (K)
+    noise_mK: float  # same in mK
+    drift_rate: float  # K/min
+    drift_mK_per_min: float  # same in mK/min
+    outlier_count: int  # in outlier window
     correlation: float | None  # Pearson r with nearest neighbour in group
-    health_score: int          # 0-100
+    health_score: int  # 0-100
     fault_flags: list[str] = field(default_factory=list)
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -92,9 +92,9 @@ class ChannelDiagnostics:
 @dataclass
 class DiagnosticsSummary:
     total_channels: int
-    healthy: int               # health >= 80
-    warning: int               # 50 <= health < 80
-    critical: int              # health < 50
+    healthy: int  # health >= 80
+    warning: int  # 50 <= health < 80
+    critical: int  # health < 50
     worst_channel: str
     worst_score: int
     worst_flags: list[str] = field(default_factory=list)
@@ -103,6 +103,7 @@ class DiagnosticsSummary:
 # ---------------------------------------------------------------------------
 # Noise thresholds by temperature (DT-670 sensitivity zones)
 # ---------------------------------------------------------------------------
+
 
 def _get_noise_threshold(T: float) -> float:
     """Допустимый шум (K) для данной температуры DT-670."""
@@ -119,6 +120,7 @@ def _get_noise_threshold(T: float) -> float:
 # ---------------------------------------------------------------------------
 # Statistics helpers
 # ---------------------------------------------------------------------------
+
 
 def _mad_sigma(values: np.ndarray) -> float:
     """MAD-based estimate of σ: median(|x - median(x)|) × 1.4826."""
@@ -146,6 +148,7 @@ def _pearson_r(x: np.ndarray, y: np.ndarray) -> float | None:
 # ---------------------------------------------------------------------------
 # Main engine
 # ---------------------------------------------------------------------------
+
 
 class SensorDiagnosticsEngine:
     """Мониторинг здоровья датчиков. Read-only, работает поверх буферов данных."""
@@ -220,8 +223,13 @@ class SensorDiagnosticsEngine:
         diags = list(self._diagnostics.values())
         if not diags:
             return DiagnosticsSummary(
-                total_channels=0, healthy=0, warning=0, critical=0,
-                worst_channel="", worst_score=100, worst_flags=[],
+                total_channels=0,
+                healthy=0,
+                warning=0,
+                critical=0,
+                worst_channel="",
+                worst_score=100,
+                worst_flags=[],
             )
         healthy = sum(1 for d in diags if d.health_score >= 80)
         warning = sum(1 for d in diags if 50 <= d.health_score < 80)
@@ -242,7 +250,10 @@ class SensorDiagnosticsEngine:
     # -------------------------------------------------------------------
 
     def _compute_channel(
-        self, channel_id: str, buf: deque[tuple[float, float]], now: datetime,
+        self,
+        channel_id: str,
+        buf: deque[tuple[float, float]],
+        now: datetime,
     ) -> ChannelDiagnostics:
         current_T = buf[-1][1]
         name = self._channel_names.get(channel_id, channel_id)
@@ -272,12 +283,20 @@ class SensorDiagnosticsEngine:
 
         # Fault flags
         fault_flags = self._compute_fault_flags(
-            current_T, noise_std, drift_rate, outlier_count, correlation,
+            current_T,
+            noise_std,
+            drift_rate,
+            outlier_count,
+            correlation,
         )
 
         # Health score
         health_score = self._compute_health(
-            noise_std, drift_rate, outlier_count, correlation, current_T,
+            noise_std,
+            drift_rate,
+            outlier_count,
+            correlation,
+            current_T,
         )
 
         return ChannelDiagnostics(
@@ -303,7 +322,9 @@ class SensorDiagnosticsEngine:
         cutoff = latest_ts - window_s
         return np.array([v for t, v in buf if t >= cutoff])
 
-    def _window_points(self, buf: deque[tuple[float, float]], window_s: float) -> list[tuple[float, float]]:
+    def _window_points(
+        self, buf: deque[tuple[float, float]], window_s: float
+    ) -> list[tuple[float, float]]:
         """Extract (ts, value) pairs within the last window_s seconds."""
         if not buf:
             return []

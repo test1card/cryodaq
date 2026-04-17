@@ -31,7 +31,9 @@ def _make_samples(n: int = 7) -> list[CalibrationSample]:
 def instruments_yaml(tmp_path: Path) -> Path:
     path = tmp_path / "instruments.yaml"
     path.write_text(
-        yaml.dump({"instruments": [{"name": "ls218s", "type": "lakeshore_218s", "resource": "MOCK"}]}),
+        yaml.dump(
+            {"instruments": [{"name": "ls218s", "type": "lakeshore_218s", "resource": "MOCK"}]}
+        ),
     )
     return path
 
@@ -44,8 +46,11 @@ def experiment_manager(tmp_path: Path, instruments_yaml: Path) -> ExperimentMana
 def _fit_and_save(store: CalibrationStore, sensor_id: str = "sensor-002") -> str:
     """Fit a curve and return its curve_id."""
     curve = store.fit_curve(
-        sensor_id, _make_samples(),
-        raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2,
+        sensor_id,
+        _make_samples(),
+        raw_unit="sensor_unit",
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
     )
     store.save_curve(curve)
     return curve.curve_id
@@ -66,8 +71,8 @@ async def test_calibration_curve_export_import(
         drivers_by_name={},
     )
 
-    assert Path(exported["json_path"]).exists()
-    assert Path(exported["table_path"]).exists()
+    assert Path(exported["json_path"]).exists()  # noqa: ASYNC240
+    assert Path(exported["table_path"]).exists()  # noqa: ASYNC240
 
     imported_store = CalibrationStore(tmp_path / "imported")
     imported = _run_calibration_command(
@@ -95,7 +100,8 @@ async def test_calibration_curve_list_and_lookup(
         drivers_by_name={},
     )
     listed = _run_calibration_command(
-        "calibration_curve_list", {},
+        "calibration_curve_list",
+        {},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
@@ -152,7 +158,8 @@ async def test_calibration_runtime_set_global_and_channel_policy(
         drivers_by_name={},
     )
     status = _run_calibration_command(
-        "calibration_runtime_status", {},
+        "calibration_runtime_status",
+        {},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},

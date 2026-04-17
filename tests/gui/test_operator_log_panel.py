@@ -68,7 +68,10 @@ def test_operator_log_panel_empty_state(monkeypatch) -> None:
     _process_events()
 
     assert panel._entries_list.count() == 1
-    assert panel._entries_list.item(0).text() == "Записи отсутствуют. Нажмите «Обновить список» или добавьте новую запись."
+    assert (
+        panel._entries_list.item(0).text()
+        == "Записи отсутствуют. Нажмите «Обновить список» или добавьте новую запись."
+    )
     assert panel._status_label.text() == "Записей по текущему фильтру нет."
 
 

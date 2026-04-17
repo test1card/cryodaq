@@ -180,8 +180,8 @@ class VacuumTrendPanel(QWidget):
         self._confidence_bar.setTextVisible(True)
         self._confidence_bar.setFixedHeight(16)
         self._confidence_bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "
-            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "  # noqa: E501
+            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "  # noqa: E501
             f"QProgressBar::chunk {{ background: {_COLOR_GREEN}; border-radius: 2px; }}"
         )
         sb.addWidget(self._confidence_bar)
@@ -208,7 +208,9 @@ class VacuumTrendPanel(QWidget):
         )
         # Extrapolation: dashed white
         self._extrap_curve = self._plot.plot(
-            [], [], pen=pg.mkPen(color="#ffffff", width=1, style=Qt.PenStyle.DashLine),
+            [],
+            [],
+            pen=pg.mkPen(color="#ffffff", width=1, style=Qt.PenStyle.DashLine),
             name="Экстраполяция",
         )
         # Target lines stored as list
@@ -236,6 +238,7 @@ class VacuumTrendPanel(QWidget):
     @Slot()
     def _poll(self) -> None:
         from cryodaq.gui.zmq_client import ZmqCommandWorker
+
         worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, parent=self)
         worker.finished.connect(self._on_result)
         worker.start()
@@ -312,8 +315,8 @@ class VacuumTrendPanel(QWidget):
         self._confidence_bar.setValue(int(confidence * 100))
         color = _confidence_color(confidence)
         self._confidence_bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "
-            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_SM}px; "  # noqa: E501
+            f"background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; font-size: 9px; }} "  # noqa: E501
             f"QProgressBar::chunk {{ background: {color}; border-radius: 2px; }}"
         )
 
@@ -384,7 +387,8 @@ class VacuumTrendPanel(QWidget):
             except (ValueError, ZeroDivisionError):
                 continue
             line = pg.InfiniteLine(
-                pos=log_target, angle=0,
+                pos=log_target,
+                angle=0,
                 pen=pg.mkPen(color=_COLOR_RED, width=1, style=Qt.PenStyle.DashLine),
                 label=f"{_fmt_pressure(target_mbar)}",
                 labelOpts={"color": _COLOR_RED, "position": 0.95},

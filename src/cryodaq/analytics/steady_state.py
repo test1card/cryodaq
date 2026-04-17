@@ -26,13 +26,13 @@ class SteadyStatePrediction:
     """Результат предсказания стационарного состояния."""
 
     channel: str
-    t_predicted: float     # T_inf — предсказанная стационарная температура (К)
-    t_current: float       # Текущая температура (К)
-    tau_s: float           # Постоянная времени (секунды)
-    amplitude: float       # A — амплитуда экспоненты
+    t_predicted: float  # T_inf — предсказанная стационарная температура (К)
+    t_current: float  # Текущая температура (К)
+    tau_s: float  # Постоянная времени (секунды)
+    amplitude: float  # A — амплитуда экспоненты
     percent_settled: float  # 0–100%: степень стабилизации
-    confidence: float      # Относительная ошибка аппроксимации (0–1)
-    valid: bool            # Достаточно ли данных для прогноза
+    confidence: float  # Относительная ошибка аппроксимации (0–1)
+    valid: bool  # Достаточно ли данных для прогноза
 
 
 class SteadyStatePredictor:
@@ -92,9 +92,14 @@ class SteadyStatePredictor:
 
             if len(buf) < _MIN_POINTS:
                 self._predictions[channel] = SteadyStatePrediction(
-                    channel=channel, t_predicted=0.0, t_current=buf[-1][1] if buf else 0.0,
-                    tau_s=0.0, amplitude=0.0, percent_settled=0.0,
-                    confidence=0.0, valid=False,
+                    channel=channel,
+                    t_predicted=0.0,
+                    t_current=buf[-1][1] if buf else 0.0,
+                    tau_s=0.0,
+                    amplitude=0.0,
+                    percent_settled=0.0,
+                    confidence=0.0,
+                    valid=False,
                 )
                 continue
 
@@ -114,7 +119,10 @@ class SteadyStatePredictor:
         return updated
 
     def _fit_exponential(
-        self, channel: str, buf: deque[tuple[float, float]], rate: float,
+        self,
+        channel: str,
+        buf: deque[tuple[float, float]],
+        rate: float,
     ) -> SteadyStatePrediction:
         """Выполнить аппроксимацию T(t) = T_inf + A * exp(-t/tau)."""
         t_current = buf[-1][1]
@@ -122,9 +130,14 @@ class SteadyStatePredictor:
         # Если скорость слишком мала — уже стационар
         if rate < _MIN_RATE:
             return SteadyStatePrediction(
-                channel=channel, t_predicted=t_current, t_current=t_current,
-                tau_s=0.0, amplitude=0.0, percent_settled=100.0,
-                confidence=1.0, valid=True,
+                channel=channel,
+                t_predicted=t_current,
+                t_current=t_current,
+                tau_s=0.0,
+                amplitude=0.0,
+                percent_settled=100.0,
+                confidence=1.0,
+                valid=True,
             )
 
         try:
@@ -132,9 +145,14 @@ class SteadyStatePredictor:
         except ImportError:
             logger.warning("scipy не установлен — предсказание недоступно")
             return SteadyStatePrediction(
-                channel=channel, t_predicted=t_current, t_current=t_current,
-                tau_s=0.0, amplitude=0.0, percent_settled=0.0,
-                confidence=0.0, valid=False,
+                channel=channel,
+                t_predicted=t_current,
+                t_current=t_current,
+                tau_s=0.0,
+                amplitude=0.0,
+                percent_settled=0.0,
+                confidence=0.0,
+                valid=False,
             )
 
         # Подготовить данные
@@ -161,11 +179,13 @@ class SteadyStatePredictor:
                 return T_inf + A * np.exp(-t / max(tau, 0.01))
 
             popt, pcov = curve_fit(
-                model_vec, xs_arr, ys_arr,
+                model_vec,
+                xs_arr,
+                ys_arr,
                 p0=[T_inf_guess, A_guess, max(tau_guess, 1.0)],
                 maxfev=2000,
                 bounds=(
-                    [0.0, -1000.0, 0.1],      # нижние границы (T≥0K)
+                    [0.0, -1000.0, 0.1],  # нижние границы (T≥0K)
                     [500.0, 1000.0, 100000.0],  # верхние границы
                 ),
             )
@@ -173,7 +193,7 @@ class SteadyStatePredictor:
 
             # Оценка ошибки
             residuals = ys_arr - model_vec(xs_arr, *popt)
-            rmse = float(np.sqrt(np.mean(residuals ** 2)))
+            rmse = float(np.sqrt(np.mean(residuals**2)))
             y_range = max(ys) - min(ys) if max(ys) != min(ys) else 1.0
             confidence = max(0.0, 1.0 - rmse / y_range)
 
@@ -198,7 +218,12 @@ class SteadyStatePredictor:
         except Exception as exc:
             logger.debug("curve_fit для '%s' не сошёлся: %s", channel, exc)
             return SteadyStatePrediction(
-                channel=channel, t_predicted=t_current, t_current=t_current,
-                tau_s=0.0, amplitude=0.0, percent_settled=0.0,
-                confidence=0.0, valid=False,
+                channel=channel,
+                t_predicted=t_current,
+                t_current=t_current,
+                tau_s=0.0,
+                amplitude=0.0,
+                percent_settled=0.0,
+                confidence=0.0,
+                valid=False,
             )

@@ -7,6 +7,7 @@ new ``trip_handler`` callback delivers the full ``(condition, reading)``
 context to ``SafetyManager.on_interlock_trip(action=...)``, which
 differentiates the two actions.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -81,7 +82,10 @@ async def test_stop_source_allows_request_run_after(mgr):
     # should be permitted (no FAULT prefix in error). It may still be
     # blocked by other preconditions in mock mode, but NOT by fault latch.
     result = await mgr.request_run(
-        p_target=1.0, v_comp=10.0, i_comp=0.1, channel="smua",
+        p_target=1.0,
+        v_comp=10.0,
+        i_comp=0.1,
+        channel="smua",
     )
     assert "FAULT" not in str(result.get("error", "")), (
         f"request_run blocked by FAULT despite stop_source: {result}"
@@ -112,6 +116,7 @@ async def test_default_action_is_emergency_off(mgr):
 
 # ---- InterlockEngine trip_handler integration ----
 
+
 @pytest.mark.asyncio
 async def test_interlock_engine_trip_handler_receives_full_context():
     """End-to-end: InterlockEngine._trip must call trip_handler with the
@@ -128,9 +133,7 @@ async def test_interlock_engine_trip_handler_receives_full_context():
     received: list[tuple[str, str, str, float]] = []
 
     async def trip_handler(condition, reading) -> None:
-        received.append(
-            (condition.action, condition.name, reading.channel, reading.value)
-        )
+        received.append((condition.action, condition.name, reading.channel, reading.value))
 
     # Action callable is a no-op — the real signal is the trip_handler.
     async def noop() -> None:

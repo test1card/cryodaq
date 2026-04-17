@@ -36,11 +36,12 @@ class OperatorLogPanel(QWidget):
         layout.addWidget(
             PanelHeader(
                 "Служебный журнал",
-                "Вторичный технический лог для совместимости и сервисных заметок. Основная карточка эксперимента ведётся на главной странице.",
+                "Вторичный технический лог для совместимости и сервисных заметок. Основная карточка эксперимента ведётся на главной странице.",  # noqa: E501
             )
         )
 
         from PySide6.QtCore import QSettings
+
         self._settings = QSettings("FIAN", "CryoDAQ")
         self._author_edit = QLineEdit()
         self._author_edit.setPlaceholderText("Автор")
@@ -106,7 +107,9 @@ class OperatorLogPanel(QWidget):
         self._entries_list.clear()
         if not self._entries:
             self._entries_list.addItem(
-                QListWidgetItem("Записи отсутствуют. Нажмите «Обновить список» или добавьте новую запись.")
+                QListWidgetItem(
+                    "Записи отсутствуют. Нажмите «Обновить список» или добавьте новую запись."
+                )
             )
             self._status_label.show_warning("Записей по текущему фильтру нет.")
             return
@@ -156,7 +159,9 @@ class OperatorLogPanel(QWidget):
     def _format_entry(entry: dict) -> str:
         raw_ts = str(entry.get("timestamp", ""))
         try:
-            stamp = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+            stamp = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
         except ValueError:
             stamp = raw_ts
         author = str(entry.get("author", "")).strip()

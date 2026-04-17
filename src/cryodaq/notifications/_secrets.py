@@ -8,6 +8,7 @@ Combined with the ``_TokenRedactFilter`` in ``cryodaq.logging_setup``, this
 gives defense-in-depth against the historic Telegram token leak class
 (CHANGELOG 0.4.0 had a token committed to git).
 """
+
 from __future__ import annotations
 
 

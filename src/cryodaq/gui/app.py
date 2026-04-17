@@ -13,18 +13,16 @@ from __future__ import annotations
 import logging
 import sys
 
+import qdarktheme
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtWidgets import QApplication, QMessageBox
+
 # Theme module MUST be imported before any other cryodaq.gui submodule.
 # It applies pyqtgraph global config at import time, which only takes
 # effect for PlotWidget/GraphicsLayoutWidget instances created AFTER this
 # import. See gui/theme.py docstring for the contract.
 import cryodaq.gui.theme as theme  # noqa: F401 (side-effect import)
-
-import qdarktheme
-
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication, QMessageBox
-
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
 from cryodaq.instance_lock import release_lock, try_acquire_lock
@@ -124,6 +122,7 @@ def main() -> None:
     # PySide6 is already imported at module load time above.
 
     from cryodaq.logging_setup import setup_logging
+
     setup_logging("gui")
 
     app = QApplication(sys.argv)
@@ -154,8 +153,7 @@ def main() -> None:
         QMessageBox.critical(
             None,
             "CryoDAQ",
-            "CryoDAQ GUI уже запущен.\n\n"
-            "Используйте уже открытый экземпляр.",
+            "CryoDAQ GUI уже запущен.\n\nИспользуйте уже открытый экземпляр.",
         )
         sys.exit(0)
 

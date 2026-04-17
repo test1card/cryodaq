@@ -60,19 +60,43 @@ _BUFFER_MAXLEN = 7200
 _WINDOW_S = 600.0
 
 _ALL_CHANNELS = [
-    "Т1 Криостат верх", "Т2 Криостат низ", "Т3 Радиатор 1", "Т4 Радиатор 2",
-    "Т5 Экран 77К", "Т6 Экран 4К", "Т7 Детектор", "Т8 Калибровка",
-    "Т9 Компрессор вход", "Т10 Компрессор выход",
-    "Т11 Теплообменник 1", "Т12 Теплообменник 2",
-    "Т13 Труба подачи", "Т14 Труба возврата",
-    "Т15 Вакуумный кожух", "Т16 Фланец",
-    "Т17 Зеркало 1", "Т18 Зеркало 2", "Т19 Подвес", "Т20 Рама",
-    "Т21 Резерв 1", "Т22 Резерв 2", "Т23 Резерв 3", "Т24 Резерв 4",
+    "Т1 Криостат верх",
+    "Т2 Криостат низ",
+    "Т3 Радиатор 1",
+    "Т4 Радиатор 2",
+    "Т5 Экран 77К",
+    "Т6 Экран 4К",
+    "Т7 Детектор",
+    "Т8 Калибровка",
+    "Т9 Компрессор вход",
+    "Т10 Компрессор выход",
+    "Т11 Теплообменник 1",
+    "Т12 Теплообменник 2",
+    "Т13 Труба подачи",
+    "Т14 Труба возврата",
+    "Т15 Вакуумный кожух",
+    "Т16 Фланец",
+    "Т17 Зеркало 1",
+    "Т18 Зеркало 2",
+    "Т19 Подвес",
+    "Т20 Рама",
+    "Т21 Резерв 1",
+    "Т22 Резерв 2",
+    "Т23 Резерв 3",
+    "Т24 Резерв 4",
 ]
 
 _LINE_COLORS = [
-    "#58a6ff", "#3fb950", "#f0883e", "#f85149", "#bc8cff",
-    "#ff7b72", "#79c0ff", "#56d364", "#ffa657", "#d2a8ff",
+    "#58a6ff",
+    "#3fb950",
+    "#f0883e",
+    "#f85149",
+    "#bc8cff",
+    "#ff7b72",
+    "#79c0ff",
+    "#56d364",
+    "#ffa657",
+    "#d2a8ff",
 ]
 
 
@@ -285,10 +309,17 @@ class AutoSweepPanel(QWidget):
 
         # Таблица результатов
         self._results_table = QTableWidget(0, 7)
-        self._results_table.setHorizontalHeaderLabels([
-            "P (Вт)", "T гор. (К)", "T хол. (К)", "T ср. (К)",
-            "dT (К)", "R (К/Вт)", "G (Вт/К)",
-        ])
+        self._results_table.setHorizontalHeaderLabels(
+            [
+                "P (Вт)",
+                "T гор. (К)",
+                "T хол. (К)",
+                "T ср. (К)",
+                "dT (К)",
+                "R (К/Вт)",
+                "G (Вт/К)",
+            ]
+        )
         self._results_table.setAlternatingRowColors(True)
         self._results_table.verticalHeader().setVisible(False)
         self._results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -408,16 +439,21 @@ class AutoSweepPanel(QWidget):
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=5.0)
 
         # Send command
-        reply = send_command({
-            "cmd": "keithley_start",
-            "channel": self._smu_channel,
-            "p_target": p,
-            "v_comp": self._v_comp_spin.value(),
-            "i_comp": self._i_comp_spin.value(),
-        })
+        reply = send_command(
+            {
+                "cmd": "keithley_start",
+                "channel": self._smu_channel,
+                "p_target": p,
+                "v_comp": self._v_comp_spin.value(),
+                "i_comp": self._i_comp_spin.value(),
+            }
+        )
         logger.info(
             "Автоизмерение: шаг %d/%d, P=%.4f Вт, ответ: %s",
-            self._current_step + 1, len(self._power_list), p, reply,
+            self._current_step + 1,
+            len(self._power_list),
+            p,
+            reply,
         )
 
     def _finish_sweep(self) -> None:
@@ -427,9 +463,7 @@ class AutoSweepPanel(QWidget):
         self._start_btn.setEnabled(True)
         self._pause_btn.setEnabled(False)
         self._stop_btn.setEnabled(False)
-        self._progress_label.setText(
-            f"Завершено! {len(self._results)} точек измерено."
-        )
+        self._progress_label.setText(f"Завершено! {len(self._results)} точек измерено.")
         self._progress_bar.setValue(100)
         self._save_results()
 
@@ -451,8 +485,13 @@ class AutoSweepPanel(QWidget):
         G = P / dT if dT != 0 else 0
 
         result = {
-            "P": P, "T_hot": T_hot, "T_cold": T_cold,
-            "T_avg": T_avg, "dT": dT, "R": R, "G": G,
+            "P": P,
+            "T_hot": T_hot,
+            "T_cold": T_cold,
+            "T_avg": T_avg,
+            "dT": dT,
+            "R": R,
+            "G": G,
         }
         self._results.append(result)
 
@@ -460,9 +499,7 @@ class AutoSweepPanel(QWidget):
         row = self._results_table.rowCount()
         self._results_table.setRowCount(row + 1)
         for col, key in enumerate(["P", "T_hot", "T_cold", "T_avg", "dT", "R", "G"]):
-            self._results_table.setItem(
-                row, col, QTableWidgetItem(f"{result[key]:.6g}")
-            )
+            self._results_table.setItem(row, col, QTableWidgetItem(f"{result[key]:.6g}"))
 
     # ------------------------------------------------------------------
     # Data
@@ -515,7 +552,7 @@ class AutoSweepPanel(QWidget):
             return
 
         # Update predictor
-        preds = self._predictor.update(now)
+        self._predictor.update(now)
         all_preds = self._predictor.get_all_predictions()
 
         # Check if step is done
@@ -523,8 +560,11 @@ class AutoSweepPanel(QWidget):
         max_wait_s = self._max_wait.value() * 60.0
         elapsed = time.monotonic() - self._step_start_time
 
-        valid_preds = [all_preds.get(ch) for ch in self._selected_channels
-                       if all_preds.get(ch) and all_preds[ch].valid]
+        valid_preds = [
+            all_preds.get(ch)
+            for ch in self._selected_channels
+            if all_preds.get(ch) and all_preds[ch].valid
+        ]
 
         min_pct = min((p.percent_settled for p in valid_preds), default=0.0)
         step_total = len(self._power_list)
@@ -556,7 +596,8 @@ class AutoSweepPanel(QWidget):
             if timed_out:
                 logger.warning(
                     "Автоизмерение: шаг %d — таймаут (%d мин), записываю текущие",
-                    self._current_step + 1, self._max_wait.value(),
+                    self._current_step + 1,
+                    self._max_wait.value(),
                 )
             self._record_step()
             self._current_step += 1
@@ -593,14 +634,14 @@ class AutoSweepPanel(QWidget):
             w.writerow([])
             w.writerow(["P_W", "T_hot_K", "T_cold_K", "T_avg_K", "dT_K", "R_KW", "G_WK"])
             for r in self._results:
-                w.writerow([r["P"], r["T_hot"], r["T_cold"], r["T_avg"],
-                            r["dT"], r["R"], r["G"]])
+                w.writerow([r["P"], r["T_hot"], r["T_cold"], r["T_avg"], r["dT"], r["R"], r["G"]])
 
         logger.info("Результаты сохранены: %s", csv_path)
 
         # PNG plot
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 
@@ -643,8 +684,12 @@ class AutoSweepPanel(QWidget):
                 "run_type": "autosweep",
                 "status": "COMPLETED" if self._running is False else "RUNNING",
                 "source_run_id": base,
-                "started_at": self._run_started_at.isoformat() if self._run_started_at else now.isoformat(),
-                "finished_at": self._run_finished_at.isoformat() if self._run_finished_at else now.isoformat(),
+                "started_at": self._run_started_at.isoformat()
+                if self._run_started_at
+                else now.isoformat(),
+                "finished_at": self._run_finished_at.isoformat()
+                if self._run_finished_at
+                else now.isoformat(),
                 "parameters": {
                     "sample": sample,
                     "material": material,
@@ -666,8 +711,12 @@ class AutoSweepPanel(QWidget):
                         if self._results
                         else 0.0
                     ),
-                    "max_resistance_kw": max((float(item["R"]) for item in self._results), default=0.0),
-                    "max_conductance_wk": max((float(item["G"]) for item in self._results), default=0.0),
+                    "max_resistance_kw": max(
+                        (float(item["R"]) for item in self._results), default=0.0
+                    ),
+                    "max_conductance_wk": max(
+                        (float(item["G"]) for item in self._results), default=0.0
+                    ),
                 },
                 "artifact_paths": [
                     str(csv_path),

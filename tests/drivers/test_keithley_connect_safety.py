@@ -1,4 +1,5 @@
 """Verify Keithley connect()/emergency_off() safety guards (Phase 2a G.1)."""
+
 from __future__ import annotations
 
 import logging
@@ -21,9 +22,7 @@ async def test_connect_forces_output_off_non_mock():
     transport.open = AsyncMock()
     transport.close = AsyncMock()
     transport.write = AsyncMock()
-    transport.query = AsyncMock(
-        return_value="KEITHLEY INSTRUMENTS,MODEL 2604B,FAKE,1.0"
-    )
+    transport.query = AsyncMock(return_value="KEITHLEY INSTRUMENTS,MODEL 2604B,FAKE,1.0")
     k._transport = transport
 
     await k.connect()
@@ -79,9 +78,7 @@ async def test_connect_does_not_fail_on_force_off_error(caplog):
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(
-        return_value="KEITHLEY INSTRUMENTS,MODEL 2604B,FAKE,1.0"
-    )
+    transport.query = AsyncMock(return_value="KEITHLEY INSTRUMENTS,MODEL 2604B,FAKE,1.0")
 
     write_calls = {"n": 0}
 
@@ -97,9 +94,9 @@ async def test_connect_does_not_fail_on_force_off_error(caplog):
     await k.connect()
 
     assert k._connected is True, "connect must succeed even if force-off failed"
-    assert any(
-        "failed to force output off" in r.message.lower() for r in caplog.records
-    ), "CRITICAL log not emitted for force-off failure"
+    assert any("failed to force output off" in r.message.lower() for r in caplog.records), (
+        "CRITICAL log not emitted for force-off failure"
+    )
 
 
 @pytest.mark.asyncio
@@ -139,13 +136,12 @@ async def test_emergency_off_logs_critical_on_verify_failure(caplog):
     await k.emergency_off()
 
     relevant = [
-        r for r in caplog.records
-        if "still reports output" in r.message
-        or "verify FAILED" in r.message
+        r
+        for r in caplog.records
+        if "still reports output" in r.message or "verify FAILED" in r.message
     ]
     assert relevant, (
-        f"no CRITICAL log emitted on verify failure. records: "
-        f"{[r.message for r in caplog.records]}"
+        f"no CRITICAL log emitted on verify failure. records: {[r.message for r in caplog.records]}"
     )
 
 
@@ -164,7 +160,8 @@ async def test_emergency_off_handles_query_exception(caplog):
 
     # CRITICAL log MUST be emitted (Codex Phase 2a P2 — was missing).
     relevant = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "verify FAILED" in r.message
         or "unexpected output response" in r.message
         or "still reports output" in r.message

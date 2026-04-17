@@ -140,7 +140,9 @@ def test_downsampling_is_uniform_by_temperature_to_task_target(tmp_path: Path) -
     store = CalibrationStore(tmp_path)
     samples = _dense_nonuniform_samples()
 
-    preprocessed = store._preprocess_samples(samples, downsample_target=store._TASK_DOWNSAMPLE_TARGET)
+    preprocessed = store._preprocess_samples(
+        samples, downsample_target=store._TASK_DOWNSAMPLE_TARGET
+    )
     temperatures = np.array([sample.reference_temperature for sample in preprocessed], dtype=float)
     histogram, _ = np.histogram(temperatures, bins=10)
 
@@ -150,14 +152,20 @@ def test_downsampling_is_uniform_by_temperature_to_task_target(tmp_path: Path) -
 
 def test_t_from_v_matches_evaluate_and_voltage_to_temp(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve("sensor-api", _multi_zone_samples(), raw_unit="V", max_zones=3, min_points_per_zone=24)
+    curve = store.fit_curve(
+        "sensor-api", _multi_zone_samples(), raw_unit="V", max_zones=3, min_points_per_zone=24
+    )
     store.save_curve(curve)
 
     raw_value = _piecewise_raw(123.0)
 
     assert store.evaluate("sensor-api", raw_value) == pytest.approx(123.0, abs=0.05)
-    assert store.T_from_V("sensor-api", raw_value) == pytest.approx(store.evaluate("sensor-api", raw_value), abs=1e-9)
-    assert store.voltage_to_temp("sensor-api", raw_value) == pytest.approx(store.evaluate("sensor-api", raw_value), abs=1e-9)
+    assert store.T_from_V("sensor-api", raw_value) == pytest.approx(
+        store.evaluate("sensor-api", raw_value), abs=1e-9
+    )
+    assert store.voltage_to_temp("sensor-api", raw_value) == pytest.approx(
+        store.evaluate("sensor-api", raw_value), abs=1e-9
+    )
 
 
 def test_calibration_store_import_export_json(tmp_path: Path) -> None:
@@ -192,7 +200,9 @@ def test_export_340_uses_200_breakpoints_and_roundtrips_via_import(tmp_path: Pat
     path_340 = source_store.export_curve_340("sensor-003", points=200)
     path_330 = source_store.export_curve_330("sensor-003", points=200)
     imported_store = CalibrationStore(tmp_path / "imported")
-    imported_curve = imported_store.import_curve_file(path_340, sensor_id="sensor-003B", channel_key="LS218:CH3", raw_unit="V")
+    imported_curve = imported_store.import_curve_file(
+        path_340, sensor_id="sensor-003B", channel_key="LS218:CH3", raw_unit="V"
+    )
 
     exported_lines = _data_lines(path_340)
     roundtrip_raw = _piecewise_raw(88.0)
@@ -217,8 +227,12 @@ def test_calibration_store_imports_330_and_340_and_supports_lookup(tmp_path: Pat
     exported_340 = source_store.export_curve_340("sensor-004", points=48)
 
     imported_store = CalibrationStore(tmp_path / "imported")
-    imported_curve_330 = imported_store.import_curve_file(exported_330, sensor_id="sensor-004A", channel_key="LS218:CH2")
-    imported_curve_340 = imported_store.import_curve_file(exported_340, sensor_id="sensor-004B", channel_key="LS218:CH3")
+    imported_curve_330 = imported_store.import_curve_file(
+        exported_330, sensor_id="sensor-004A", channel_key="LS218:CH2"
+    )
+    imported_curve_340 = imported_store.import_curve_file(
+        exported_340, sensor_id="sensor-004B", channel_key="LS218:CH3"
+    )
 
     lookup = imported_store.lookup_curve(channel_key="LS218:CH3")
 
@@ -259,6 +273,7 @@ def test_calibration_index_uses_atomic_write():
     """B-1.2: calibration.py index/curve writes must use atomic_write_text."""
     source = Path("src/cryodaq/analytics/calibration.py").read_text(encoding="utf-8")
     import re
+
     raw_state_writes = re.findall(r"_index_path\.write_text|target\.write_text\(json", source)
     assert len(raw_state_writes) == 0, (
         f"Found {len(raw_state_writes)} raw write_text calls for state files — "

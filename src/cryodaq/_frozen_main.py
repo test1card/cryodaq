@@ -22,6 +22,7 @@ References
 - https://superfastpython.com/multiprocessing-freeze-support-in-python/
 - https://github.com/pyinstaller/pyinstaller/wiki/Recipe-Multiprocessing
 """
+
 from __future__ import annotations
 
 

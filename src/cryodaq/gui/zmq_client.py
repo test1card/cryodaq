@@ -4,6 +4,7 @@ The GUI process never imports zmq. Communication with the subprocess
 is via multiprocessing.Queue. If libzmq crashes (signaler.cpp assertion
 on Windows), only the subprocess dies — GUI detects and restarts it.
 """
+
 from __future__ import annotations
 
 import logging
@@ -106,7 +107,9 @@ class ZmqBridge:
         # Start dedicated reply consumer thread
         self._reply_stop.clear()
         self._reply_consumer = threading.Thread(
-            target=self._consume_replies, daemon=True, name="zmq-reply-consumer",
+            target=self._consume_replies,
+            daemon=True,
+            name="zmq-reply-consumer",
         )
         self._reply_consumer.start()
         logger.info("ZMQ bridge subprocess started (PID=%d)", self._process.pid)
@@ -143,7 +146,9 @@ class ZmqBridge:
             return False
         if self._last_heartbeat == 0.0:
             return True  # just started, give it time
-        return time.monotonic() - self._last_heartbeat < 30.0  # generous: survives blocked GUI thread
+        return (
+            time.monotonic() - self._last_heartbeat < 30.0
+        )  # generous: survives blocked GUI thread
 
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""

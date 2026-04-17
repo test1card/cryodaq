@@ -5,6 +5,7 @@ columns = floor(width / min_width), rows = ceil(n / cols).
 Subscribes to ChannelManager.on_change for runtime updates
 with proper cleanup via off_change.
 """
+
 from __future__ import annotations
 
 import logging
@@ -59,7 +60,10 @@ class DynamicSensorGrid(QWidget):
         self.setObjectName("dynamicSensorGrid")
         root = QVBoxLayout(self)
         root.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
+            theme.SPACE_2,
         )
         root.setSpacing(theme.SPACE_2)
 
@@ -84,7 +88,8 @@ class DynamicSensorGrid(QWidget):
         self._cells.clear()
 
         visible_ids = [
-            ch for ch in self._channel_mgr.get_all_visible()
+            ch
+            for ch in self._channel_mgr.get_all_visible()
             if ch.startswith("\u0422")  # cyrillic Т
         ]
 
@@ -111,8 +116,7 @@ class DynamicSensorGrid(QWidget):
         else:
             cols = max(
                 1,
-                available_width
-                // (self._MIN_CELL_WIDTH + self._grid_layout.spacing()),
+                available_width // (self._MIN_CELL_WIDTH + self._grid_layout.spacing()),
             )
             cols = min(cols, n_cells)
 

@@ -1,4 +1,5 @@
 """Tests for Parquet experiment archive export (Phase 2e stage 1)."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -8,9 +9,9 @@ from pathlib import Path
 import pytest
 
 pa = pytest.importorskip("pyarrow")
-import pyarrow.parquet as pq
+import pyarrow.parquet as pq  # noqa: E402
 
-from cryodaq.storage.parquet_archive import (
+from cryodaq.storage.parquet_archive import (  # noqa: E402
     ParquetExportResult,
     export_experiment_readings_to_parquet,
 )
@@ -44,10 +45,7 @@ def _make_readings(
     base_ts: float,
     channel: str = "Т1 Криостат верх",
 ) -> list[tuple]:
-    return [
-        (base_ts + i, "ls218s", channel, 77.0 + i * 0.01, "K", "ok")
-        for i in range(n)
-    ]
+    return [(base_ts + i, "ls218s", channel, 77.0 + i * 0.01, "K", "ok") for i in range(n)]
 
 
 def test_export_basic_success(tmp_path: Path) -> None:
@@ -99,10 +97,13 @@ def test_export_handles_overrange_inf(tmp_path: Path) -> None:
     day = datetime(2026, 4, 14, tzinfo=UTC)
     base_ts = day.timestamp()
     db_path = tmp_path / f"data_{day.date().isoformat()}.db"
-    _create_test_db(db_path, [
-        (base_ts, "ls218s", "Т7", float("inf"), "K", "overrange"),
-        (base_ts + 1, "ls218s", "Т8", float("-inf"), "K", "underrange"),
-    ])
+    _create_test_db(
+        db_path,
+        [
+            (base_ts, "ls218s", "Т7", float("inf"), "K", "overrange"),
+            (base_ts + 1, "ls218s", "Т8", float("-inf"), "K", "underrange"),
+        ],
+    )
 
     output = tmp_path / "readings.parquet"
     result = export_experiment_readings_to_parquet(

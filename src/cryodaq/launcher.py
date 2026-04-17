@@ -70,6 +70,7 @@ def _make_icon(color: str) -> QIcon:
 def _is_port_busy(port: int) -> bool:
     """Check if engine is listening by probing BOTH PUB and CMD ports."""
     import socket
+
     for p in (port, port + 1):  # PUB=5555, CMD=5556
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -89,6 +90,7 @@ def _ping_engine() -> bool:
         import json
 
         import zmq
+
         ctx = zmq.Context()
         sock = ctx.socket(zmq.REQ)
         sock.setsockopt(zmq.RCVTIMEO, 2000)
@@ -200,9 +202,11 @@ class LauncherWindow(QMainWindow):
     @staticmethod
     def _is_process_alive(pid: int) -> bool:
         import os
+
         try:
             if sys.platform == "win32":
                 import ctypes
+
                 handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
                 if handle:
                     ctypes.windll.kernel32.CloseHandle(handle)
@@ -228,6 +232,7 @@ class LauncherWindow(QMainWindow):
 
         # Probe lock file via flock — OS-agnostic, no read_text on Windows
         from cryodaq.paths import get_data_dir
+
         lock_path = get_data_dir() / ".engine.lock"
         if lock_path.exists():
             probe_fd = None
@@ -235,10 +240,12 @@ class LauncherWindow(QMainWindow):
                 probe_fd = os.open(str(lock_path), os.O_RDWR)
                 if sys.platform == "win32":
                     import msvcrt
+
                     msvcrt.locking(probe_fd, msvcrt.LK_NBLCK, 1)
                     msvcrt.locking(probe_fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
+
                     fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe_fd, fcntl.LOCK_UN)
                 # Lock was free → stale file, proceed
@@ -615,9 +622,9 @@ class LauncherWindow(QMainWindow):
 
         if self._restart_attempts >= self._max_restart_attempts:
             logger.critical(
-                "Engine crashed %d times in succession (last code=%s). "
-                "Surrendering auto-restart.",
-                self._restart_attempts, returncode,
+                "Engine crashed %d times in succession (last code=%s). Surrendering auto-restart.",
+                self._restart_attempts,
+                returncode,
             )
             self._restart_giving_up = True
             self._engine_proc = None
@@ -628,7 +635,10 @@ class LauncherWindow(QMainWindow):
         delay_s = self._restart_backoff_s[backoff_idx]
         logger.warning(
             "Engine crashed (code=%s). Restart attempt %d/%d in %ds.",
-            returncode, self._restart_attempts + 1, self._max_restart_attempts, delay_s,
+            returncode,
+            self._restart_attempts + 1,
+            self._max_restart_attempts,
+            delay_s,
         )
         self._restart_attempts += 1
         self._last_restart_time = time.monotonic()
@@ -636,12 +646,12 @@ class LauncherWindow(QMainWindow):
 
         if not self._tray_only:
             self._engine_label.setText(
-                f"Engine: рестарт через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})"
+                f"Engine: рестарт через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})"  # noqa: E501
             )
         if self._tray.isVisible():
             self._tray.showMessage(
                 "CryoDAQ",
-                f"Engine перезапуск через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})",
+                f"Engine перезапуск через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})",  # noqa: E501
                 QSystemTrayIcon.MessageIcon.Warning,
                 3000,
             )
@@ -687,10 +697,7 @@ class LauncherWindow(QMainWindow):
                 self._engine_indicator.setStyleSheet("color: #2ECC40;")
                 self._engine_label.setText("Engine: работает")
             # Reset the backoff counter after a healthy run window.
-            if (
-                self._restart_attempts > 0
-                and time.monotonic() - self._last_restart_time > 300.0
-            ):
+            if self._restart_attempts > 0 and time.monotonic() - self._last_restart_time > 300.0:
                 logger.info(
                     "Engine healthy for >5min, resetting restart counter (was %d)",
                     self._restart_attempts,
@@ -766,8 +773,7 @@ class LauncherWindow(QMainWindow):
         if self._tray.isVisible():
             self._tray.showMessage(
                 "CryoDAQ",
-                "Система продолжает работать в фоне.\n"
-                "Для выхода используйте меню в трее → Выход.",
+                "Система продолжает работать в фоне.\nДля выхода используйте меню в трее → Выход.",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
             )
@@ -780,6 +786,7 @@ async def _tick_coro() -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Точка входа cryodaq (лаунчер).
@@ -805,6 +812,7 @@ def main() -> None:
     args, remaining = parser.parse_known_args()
 
     from cryodaq.logging_setup import setup_logging
+
     setup_logging("launcher")
 
     mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
@@ -819,6 +827,7 @@ def main() -> None:
     # entry), because `cryodaq` launcher creates QApplication + MainWindow
     # directly without going through gui/app.py.
     from cryodaq.gui.app import _load_bundled_fonts
+
     _load_bundled_fonts()
 
     # Single-instance guard

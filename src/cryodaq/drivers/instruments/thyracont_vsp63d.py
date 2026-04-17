@@ -1,4 +1,5 @@
 """Драйвер вакуумметра Thyracont VSP63D (RS-232/USB-Serial)."""
+
 from __future__ import annotations
 
 import logging
@@ -124,7 +125,9 @@ class ThyracontVSP63D(InstrumentDriver):
                 if baud != self._baudrate:
                     log.info(
                         "%s: connected via Protocol V1 @ %d baud (fallback from %d)",
-                        self.name, baud, self._baudrate,
+                        self.name,
+                        baud,
+                        self._baudrate,
                     )
                 else:
                     log.info("%s: connected via Protocol V1", self.name)
@@ -138,7 +141,9 @@ class ThyracontVSP63D(InstrumentDriver):
                 if baud != self._baudrate:
                     log.info(
                         "%s: connected via MV00 @ %d baud (fallback from %d)",
-                        self.name, baud, self._baudrate,
+                        self.name,
+                        baud,
+                        self._baudrate,
                     )
                 else:
                     log.info("%s: connected via MV00", self.name)
@@ -340,7 +345,8 @@ class ThyracontVSP63D(InstrumentDriver):
             if not self._verify_v1_checksum(response_stripped):
                 log.warning(
                     "%s: V1 checksum mismatch in '%s' — possible RS-232 corruption",
-                    self.name, response_stripped,
+                    self.name,
+                    response_stripped,
                 )
                 return Reading.now(
                     channel=channel,
@@ -359,7 +365,7 @@ class ThyracontVSP63D(InstrumentDriver):
                 raise ValueError(f"Неверный адрес в ответе: '{response_stripped}'")
 
             # Пропустить адрес (3 символа) + команду (1 символ)
-            payload = response_stripped[len(self._address) + 1:]
+            payload = response_stripped[len(self._address) + 1 :]
 
             if len(payload) < 6:
                 raise ValueError(f"Слишком короткий payload: '{payload}'")
@@ -373,7 +379,9 @@ class ThyracontVSP63D(InstrumentDriver):
         except (ValueError, IndexError) as exc:
             log.error(
                 "%s: не удалось разобрать V1 ответ '%s' — %s",
-                self.name, response_stripped, exc,
+                self.name,
+                response_stripped,
+                exc,
             )
             return Reading.now(
                 channel=channel,

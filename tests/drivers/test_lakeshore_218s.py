@@ -22,7 +22,14 @@ NORMAL_RESPONSE = (
 )
 
 EXPECTED_NORMAL_VALUES = [
-    4.235, 4.891, 4.100, 3.998, 4.567, 4.123, 3.876, 4.321,
+    4.235,
+    4.891,
+    4.100,
+    3.998,
+    4.567,
+    4.123,
+    3.876,
+    4.321,
 ]
 
 RAW_RESPONSE = (
@@ -42,6 +49,7 @@ def _make_mock_transport(response: str) -> MagicMock:
 
     *IDN? returns a valid LakeShore 218 identification string.
     """
+
     async def _query(cmd: str, **kwargs):
         if cmd.strip().upper() == "*IDN?":
             return _IDN_RESPONSE
@@ -60,6 +68,7 @@ def _wrap_query_with_idn(side_effect_or_fn):
 
     if callable(side_effect_or_fn) and not isinstance(side_effect_or_fn, list):
         original_fn = side_effect_or_fn
+
         async def _wrapped(cmd, **kw):
             if cmd.strip().upper() == "*IDN?":
                 return _IDN_RESPONSE
@@ -67,10 +76,12 @@ def _wrap_query_with_idn(side_effect_or_fn):
             if _inspect.isawaitable(result):
                 return await result
             return result
+
         return _wrapped
 
     # side_effect is a list
     remaining = list(side_effect_or_fn)
+
     async def _wrapped(cmd, **kw):
         if cmd.strip().upper() == "*IDN?":
             return _IDN_RESPONSE
@@ -82,12 +93,14 @@ def _wrap_query_with_idn(side_effect_or_fn):
                 raise val
             return val
         raise StopIteration("No more mock responses")
+
     return _wrapped
 
 
 # ---------------------------------------------------------------------------
 # 1. connect / disconnect lifecycle in mock mode
 # ---------------------------------------------------------------------------
+
 
 async def test_mock_mode_connect_disconnect() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
@@ -107,6 +120,7 @@ async def test_mock_mode_connect_disconnect() -> None:
 # ---------------------------------------------------------------------------
 # 2. Mock mode returns 8 valid cryogenic readings
 # ---------------------------------------------------------------------------
+
 
 async def test_mock_returns_8_channels() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
@@ -145,12 +159,22 @@ async def test_mock_returns_raw_sensor_channels() -> None:
 # 3. Custom channel labels appear in Reading.channel
 # ---------------------------------------------------------------------------
 
+
 async def test_mock_channel_labels() -> None:
-    labels = {1: "STAGE_A", 2: "STAGE_B", 3: "SHIELD", 4: "COLD_PLATE",
-              5: "WARM_PLATE", 6: "FLANGE", 7: "AMBIENT", 8: "SPARE"}
+    labels = {
+        1: "STAGE_A",
+        2: "STAGE_B",
+        3: "SHIELD",
+        4: "COLD_PLATE",
+        5: "WARM_PLATE",
+        6: "FLANGE",
+        7: "AMBIENT",
+        8: "SPARE",
+    }
 
     driver = LakeShore218S(
-        "ls218s", "GPIB0::12::INSTR",
+        "ls218s",
+        "GPIB0::12::INSTR",
         channel_labels=labels,
         mock=True,
     )
@@ -169,6 +193,7 @@ async def test_mock_channel_labels() -> None:
 # ---------------------------------------------------------------------------
 # 4. Parse a normal 8-value KRDG response
 # ---------------------------------------------------------------------------
+
 
 async def test_parse_normal_response() -> None:
     transport = _make_mock_transport(NORMAL_RESPONSE)
@@ -196,10 +221,10 @@ async def test_parse_normal_response() -> None:
 # 5. +OVL tokens produce OVERRANGE status and value=inf
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_overrange() -> None:
     ovl_response = (
-        "+OVL,+004.891E+0,+OVL,+003.998E+0,"
-        "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+        "+OVL,+004.891E+0,+OVL,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
     )
     transport = _make_mock_transport(ovl_response)
 
@@ -268,11 +293,9 @@ async def test_read_calibration_pair_resolves_channels() -> None:
 # 6. Garbled tokens produce SENSOR_ERROR status
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_garbled_response() -> None:
-    garbled_response = (
-        "GARBAGE,+004.891E+0,???,+003.998E+0,"
-        "BAD,+004.123E+0,+003.876E+0,+004.321E+0"
-    )
+    garbled_response = "GARBAGE,+004.891E+0,???,+003.998E+0,BAD,+004.123E+0,+003.876E+0,+004.321E+0"
     transport = _make_mock_transport(garbled_response)
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
@@ -297,6 +320,7 @@ async def test_parse_garbled_response() -> None:
 # ---------------------------------------------------------------------------
 # 7. asyncio.TimeoutError from transport is handled gracefully
 # ---------------------------------------------------------------------------
+
 
 async def test_timeout_handling() -> None:
     transport = MagicMock()
@@ -337,6 +361,7 @@ async def test_timeout_handling() -> None:
 # 8. Reconnect after disconnect works correctly
 # ---------------------------------------------------------------------------
 
+
 async def test_reconnect_after_disconnect() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
 
@@ -361,8 +386,10 @@ async def test_reconnect_after_disconnect() -> None:
 # 11. Reading has instrument_id as first-class field
 # ---------------------------------------------------------------------------
 
+
 async def test_reading_has_instrument_id_field():
     from cryodaq.drivers.base import Reading
+
     r = Reading.now(channel="CH1", value=4.5, unit="K", instrument_id="LS218_1")
     assert r.instrument_id == "LS218_1"
 
@@ -383,7 +410,13 @@ def _calibration_samples(sensor_channel: str) -> list[CalibrationSample]:
 
 async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    curve = store.fit_curve(
+        "ls218s:CH1",
+        _calibration_samples("CH1"),
+        raw_unit="sensor_unit",
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
+    )
     store.save_curve(curve)
     store.assign_curve(sensor_id="ls218s:CH1", channel_key="ls218s:CH1", runtime_apply_ready=True)
     store.set_runtime_global_mode("off")
@@ -405,7 +438,13 @@ async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
 
 async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(tmp_path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    curve = store.fit_curve(
+        "ls218s:CH1",
+        _calibration_samples("CH1"),
+        raw_unit="sensor_unit",
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
+    )
     store.save_curve(curve)
     store.assign_curve(
         sensor_id="ls218s:CH1",
@@ -433,14 +472,38 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     assert readings[0].raw == pytest.approx(82.98)
 
 
-async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(tmp_path) -> None:
+async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(
+    tmp_path,
+) -> None:
     store = CalibrationStore(tmp_path)
-    curve_ch1 = store.fit_curve("ls218s:CH1", _calibration_samples("CH1"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
-    curve_ch2 = store.fit_curve("ls218s:CH2", _calibration_samples("CH2"), raw_unit="sensor_unit", min_points_per_zone=3, target_rmse_k=0.2)
+    curve_ch1 = store.fit_curve(
+        "ls218s:CH1",
+        _calibration_samples("CH1"),
+        raw_unit="sensor_unit",
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
+    )
+    curve_ch2 = store.fit_curve(
+        "ls218s:CH2",
+        _calibration_samples("CH2"),
+        raw_unit="sensor_unit",
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
+    )
     store.save_curve(curve_ch1)
     store.save_curve(curve_ch2)
-    store.assign_curve(sensor_id="ls218s:CH1", channel_key="ls218s:CH1", runtime_apply_ready=True, reading_mode_policy="on")
-    store.assign_curve(sensor_id="ls218s:CH2", channel_key="ls218s:CH2", runtime_apply_ready=True, reading_mode_policy="off")
+    store.assign_curve(
+        sensor_id="ls218s:CH1",
+        channel_key="ls218s:CH1",
+        runtime_apply_ready=True,
+        reading_mode_policy="on",
+    )
+    store.assign_curve(
+        sensor_id="ls218s:CH2",
+        channel_key="ls218s:CH2",
+        runtime_apply_ready=True,
+        reading_mode_policy="off",
+    )
     store.set_runtime_global_mode("on")
 
     transport = MagicMock()
@@ -462,10 +525,19 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
 # Per-channel fallback when KRDG? returns < 8 values
 # ---------------------------------------------------------------------------
 
+
 async def test_krdg_fallback_to_per_channel() -> None:
     """If KRDG? returns < 8 values, fall back to KRDG? 1..8."""
-    all_values = ["+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
-                  "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"]
+    all_values = [
+        "+004.235E+0",
+        "+004.891E+0",
+        "+004.100E+0",
+        "+003.998E+0",
+        "+004.567E+0",
+        "+004.123E+0",
+        "+003.876E+0",
+        "+004.321E+0",
+    ]
 
     async def _query_handler(cmd, timeout_ms=None):
         if cmd == "KRDG?":
@@ -508,8 +580,16 @@ async def test_krdg_sticky_fallback() -> None:
             return "+004.235E+0"  # Always short → triggers fallback
         if cmd.startswith("KRDG? "):
             ch = int(cmd.split()[-1]) - 1
-            return ["+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
-                    "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0"][ch]
+            return [
+                "+004.235E+0",
+                "+004.891E+0",
+                "+004.100E+0",
+                "+003.998E+0",
+                "+004.567E+0",
+                "+004.123E+0",
+                "+003.876E+0",
+                "+004.321E+0",
+            ][ch]
         return ""
 
     transport.query = _wrap_query_with_idn(_patched_query)
@@ -524,6 +604,7 @@ async def test_krdg_sticky_fallback() -> None:
 
     # Suppress batch retry by setting last retry to now
     import time as _time
+
     driver._krdg_last_batch_retry = _time.monotonic()
     bulk_call_count = 0
     readings = await driver._read_krdg_channels()

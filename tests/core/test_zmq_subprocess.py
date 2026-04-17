@@ -24,8 +24,7 @@ def test_subprocess_starts_and_stops(bridge_env):
     data_q, cmd_q, reply_q, shutdown = bridge_env
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:15555", "tcp://127.0.0.1:15556",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:15555", "tcp://127.0.0.1:15556", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -41,8 +40,7 @@ def test_subprocess_death_detected(bridge_env):
     data_q, cmd_q, reply_q, shutdown = bridge_env
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:15557", "tcp://127.0.0.1:15558",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:15557", "tcp://127.0.0.1:15558", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -58,8 +56,7 @@ def test_subprocess_restart_after_kill(bridge_env):
     data_q, cmd_q, reply_q, shutdown = bridge_env
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:15559", "tcp://127.0.0.1:15560",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:15559", "tcp://127.0.0.1:15560", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -71,8 +68,7 @@ def test_subprocess_restart_after_kill(bridge_env):
     shutdown.clear()
     proc2 = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:15559", "tcp://127.0.0.1:15560",
-              data_q, cmd_q, reply_q, shutdown),
+        args=("tcp://127.0.0.1:15559", "tcp://127.0.0.1:15560", data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc2.start()
@@ -112,6 +108,7 @@ def test_heartbeat_interval_value():
     """HEARTBEAT_INTERVAL must be 5s (matches is_healthy threshold)."""
     import importlib
     import inspect
+
     mod = importlib.import_module("cryodaq.core.zmq_subprocess")
     source = inspect.getsource(mod.zmq_bridge_main)
     assert "HEARTBEAT_INTERVAL = 5.0" in source
@@ -122,6 +119,7 @@ def test_is_healthy_threshold_generous():
     import inspect
 
     from cryodaq.gui.zmq_client import ZmqBridge
+
     source = inspect.getsource(ZmqBridge.is_healthy)
     assert "30.0" in source, "is_healthy threshold must be 30s"
 
@@ -131,6 +129,7 @@ def test_launcher_poll_checks_is_healthy():
     import inspect
 
     from cryodaq.launcher import LauncherWindow
+
     source = inspect.getsource(LauncherWindow._poll_bridge_data)
     assert "is_healthy()" in source, (
         "_poll_bridge_data must call is_healthy() to detect hung bridge"

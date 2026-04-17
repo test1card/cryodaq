@@ -61,13 +61,9 @@ class AnalyticsPanel(QWidget):
 
         # --- Буферы данных ---
         # (unix_timestamp, value) для R_thermal
-        self._r_thermal_buf: deque[tuple[float, float]] = deque(
-            maxlen=_R_THERMAL_BUFFER_MAXLEN
-        )
+        self._r_thermal_buf: deque[tuple[float, float]] = deque(maxlen=_R_THERMAL_BUFFER_MAXLEN)
         # (часы от старта cooldown, T_K) для живой линии на графике
-        self._t_cold_buf: deque[tuple[float, float]] = deque(
-            maxlen=_T_COLD_BUFFER_MAXLEN
-        )
+        self._t_cold_buf: deque[tuple[float, float]] = deque(maxlen=_T_COLD_BUFFER_MAXLEN)
 
         # --- Состояние cooldown predictor ---
         self._prediction_meta: dict = {}
@@ -117,7 +113,7 @@ class AnalyticsPanel(QWidget):
         """Карточка: Тепловое сопротивление."""
         card = QFrame()
         card.setStyleSheet(
-            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"  # noqa: E501
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -154,7 +150,7 @@ class AnalyticsPanel(QWidget):
         """Карточка: Прогноз охлаждения."""
         card = QFrame()
         card.setStyleSheet(
-            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"
+            f"background-color: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_LG}px;"  # noqa: E501
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -198,9 +194,9 @@ class AnalyticsPanel(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
         self._progress_bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; "
-            f"background-color: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; }} "
-            f"QProgressBar::chunk {{ background-color: {theme.ACCENT_400}; border-radius: {theme.RADIUS_SM}px; }}"
+            f"QProgressBar {{ border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; "  # noqa: E501
+            f"background-color: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; text-align: center; }} "  # noqa: E501
+            f"QProgressBar::chunk {{ background-color: {theme.ACCENT_400}; border-radius: {theme.RADIUS_SM}px; }}"  # noqa: E501
         )
         self._progress_bar.setVisible(False)
         layout.addWidget(self._progress_bar)
@@ -230,9 +226,12 @@ class AnalyticsPanel(QWidget):
 
         # Empty state overlay
         from PySide6.QtWidgets import QLabel as _Label
+
         self._empty_overlay = _Label("Нет данных для аналитики.\nНачните эксперимент.", self._plot)
         self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_overlay.setStyleSheet(f"color: {theme.TEXT_DISABLED}; font-size: 14pt; background: transparent;")
+        self._empty_overlay.setStyleSheet(
+            f"color: {theme.TEXT_DISABLED}; font-size: 14pt; background: transparent;"
+        )
         self._empty_overlay.setGeometry(0, 0, 400, 100)
 
         pi = self._plot.getPlotItem()
@@ -360,9 +359,7 @@ class AnalyticsPanel(QWidget):
                 rel_hours = (ts - self._cooldown_start_time) / 3600.0
                 self._t_cold_buf.append((rel_hours, reading.value))
 
-    def _update_eta_display(
-        self, t_hours: float, ci_hours: float, meta: dict
-    ) -> None:
+    def _update_eta_display(self, t_hours: float, ci_hours: float, meta: dict) -> None:
         """Обновить карточку ETA по данным cooldown_predictor."""
         active = meta.get("cooldown_active", False)
 

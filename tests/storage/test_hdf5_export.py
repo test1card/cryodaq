@@ -15,6 +15,7 @@ from cryodaq.storage.sqlite_writer import SQLiteWriter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _reading(
     channel: str = "CH1",
     value: float = 4.5,
@@ -47,6 +48,7 @@ def _populate_db(tmp_path: Path, readings: list[Reading]) -> Path:
 # 1. export() produces an .h5 file
 # ---------------------------------------------------------------------------
 
+
 async def test_export_creates_file(tmp_path: Path) -> None:
     db_path = _populate_db(tmp_path, [_reading()])
     output_path = tmp_path / "export" / "test.h5"
@@ -61,6 +63,7 @@ async def test_export_creates_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 2. Exported readings have correct values in datasets
 # ---------------------------------------------------------------------------
+
 
 async def test_readings_in_hdf5(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
@@ -88,6 +91,7 @@ async def test_readings_in_hdf5(tmp_path: Path) -> None:
 # 3. Each instrument_id gets its own HDF5 group
 # ---------------------------------------------------------------------------
 
+
 async def test_instrument_groups(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     readings = [
@@ -113,6 +117,7 @@ async def test_instrument_groups(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 4. experiment_metadata dict written as root attrs
 # ---------------------------------------------------------------------------
+
 
 async def test_experiment_metadata_as_attrs(tmp_path: Path) -> None:
     db_path = _populate_db(tmp_path, [_reading()])
@@ -143,6 +148,7 @@ async def test_experiment_metadata_as_attrs(tmp_path: Path) -> None:
 # 5. DB with no readings → returns 0
 # ---------------------------------------------------------------------------
 
+
 async def test_empty_db_returns_zero(tmp_path: Path) -> None:
     # Create an empty DB by writing an empty batch (no-op) — but that doesn't
     # create the file. Instead write one reading to trigger DB creation, then
@@ -171,6 +177,7 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 6. All datasets have gzip compression enabled
 # ---------------------------------------------------------------------------
+
 
 async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)

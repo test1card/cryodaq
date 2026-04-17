@@ -264,8 +264,15 @@ class CalibrationFitter:
         temps = [t for _, t in raw_pairs]
         t_min, t_max = min(temps), max(temps)
         if t_max - t_min < 0.1:
-            return [{"temp_min": t_min, "temp_max": t_max, "point_count": len(raw_pairs),
-                      "density": float(len(raw_pairs)), "status": "dense"}]
+            return [
+                {
+                    "temp_min": t_min,
+                    "temp_max": t_max,
+                    "point_count": len(raw_pairs),
+                    "density": float(len(raw_pairs)),
+                    "status": "dense",
+                }
+            ]
 
         bin_edges = np.linspace(t_min, t_max, n_bins + 1)
         bins: list[dict[str, Any]] = []
@@ -285,13 +292,15 @@ class CalibrationFitter:
             else:
                 status = "dense"
 
-            bins.append({
-                "temp_min": round(lo, 3),
-                "temp_max": round(hi, 3),
-                "point_count": count,
-                "density": round(density, 2),
-                "status": status,
-            })
+            bins.append(
+                {
+                    "temp_min": round(lo, 3),
+                    "temp_max": round(hi, 3),
+                    "point_count": count,
+                    "density": round(density, 2),
+                    "status": status,
+                }
+            )
 
         return bins
 
@@ -319,8 +328,11 @@ class CalibrationFitter:
 
         # 1. Extract
         raw_pairs = self.extract_pairs(
-            data_dir, start_ts, end_ts,
-            reference_channel, target_channel,
+            data_dir,
+            start_ts,
+            end_ts,
+            reference_channel,
+            target_channel,
         )
         if len(raw_pairs) < max(4, min_points_per_zone):
             raise ValueError(
@@ -333,7 +345,9 @@ class CalibrationFitter:
 
         # 3. Breakpoints
         breakpoints = self.generate_breakpoints(
-            downsampled, max_breakpoints, tolerance_mk,
+            downsampled,
+            max_breakpoints,
+            tolerance_mk,
         )
 
         # 4. Chebyshev fit via CalibrationStore

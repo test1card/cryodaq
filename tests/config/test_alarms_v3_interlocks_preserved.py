@@ -3,6 +3,7 @@
 Its channels (smua_power, smub_power) are not covered by any regex in
 config/interlocks.yaml and would lose throttle protection if removed.
 """
+
 from pathlib import Path
 
 import yaml

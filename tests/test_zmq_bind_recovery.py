@@ -1,4 +1,5 @@
 """Verify ZMQ bind has EADDRINUSE retry + LINGER=0 (Phase 2b H.4)."""
+
 from __future__ import annotations
 
 import inspect

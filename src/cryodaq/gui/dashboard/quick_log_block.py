@@ -4,6 +4,7 @@ Peripheral awareness indicator — shows last 1-2 journal entries and
 inline composer. Not a reading surface; full journal is in
 OperatorLogPanel overlay.
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,9 +39,7 @@ class QuickLogBlock(QWidget):
         self.setObjectName("QuickLogBlock")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMaximumHeight(_MAX_HEIGHT_PX)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self._entries: list[dict] = []
         self._entry_labels: list[QLabel] = []
@@ -54,9 +53,7 @@ class QuickLogBlock(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        root.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         root.setSpacing(2)
 
         # Row 1: Inline composer
@@ -128,8 +125,7 @@ class QuickLogBlock(QWidget):
         self._entries_container.addWidget(self._empty_label)
 
         self.setStyleSheet(
-            self.styleSheet()
-            + f"#QuickLogBlock {{ "
+            self.styleSheet() + f"#QuickLogBlock {{ "
             f"background-color: {theme.SURFACE_PANEL}; "
             f"border-top: 1px solid {theme.BORDER}; "
             f"}}"

@@ -21,7 +21,9 @@ def _make_reading(channel: str, value: float, status: ChannelStatus = ChannelSta
 
 
 def _make_heater_reading(value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status)
+    return Reading.now(
+        channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status
+    )
 
 
 def _configured_plugin() -> ThermalCalculator:
@@ -45,9 +47,9 @@ async def test_thermal_resistance_basic():
     """Known T_hot, T_cold, P should produce the expected R_thermal value."""
     plugin = _configured_plugin()
 
-    T_hot = 30.0   # K
+    T_hot = 30.0  # K
     T_cold = 10.0  # K
-    P = 4.0        # W
+    P = 4.0  # W
     # Expected R = (30 - 10) / 4 = 5.0 K/W
 
     readings = [

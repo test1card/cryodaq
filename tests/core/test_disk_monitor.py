@@ -112,9 +112,7 @@ async def test_disk_monitor_value_is_reasonable(tmp_path: Path) -> None:
     assert len(readings) > 0
 
     for r in readings:
-        assert abs(r.value - 50.0) < 0.1, (
-            f"disk_free_gb={r.value} does not match mocked 50 GB"
-        )
+        assert abs(r.value - 50.0) < 0.1, f"disk_free_gb={r.value} does not match mocked 50 GB"
 
 
 # ---------------------------------------------------------------------------
@@ -161,14 +159,13 @@ async def test_disk_monitor_critical_threshold(
 
     monitor = DiskMonitor(tmp_path, broker, check_interval_s=0.1)
 
-    with caplog.at_level(logging.CRITICAL), patch(
-        "cryodaq.core.disk_monitor.shutil.disk_usage", return_value=fake_usage
+    with (
+        caplog.at_level(logging.CRITICAL),
+        patch("cryodaq.core.disk_monitor.shutil.disk_usage", return_value=fake_usage),
     ):
         await monitor.start()
         await asyncio.sleep(0.2)
         await monitor.stop()
 
     critical_messages = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
-    assert len(critical_messages) > 0, (
-        "Expected at least one CRITICAL log when disk free < 2 GB"
-    )
+    assert len(critical_messages) > 0, "Expected at least one CRITICAL log when disk free < 2 GB"

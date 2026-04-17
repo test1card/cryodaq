@@ -9,6 +9,7 @@ Handles three modes:
 
 See: https://pyinstaller.org/en/latest/runtime-information.html
 """
+
 from __future__ import annotations
 
 import os

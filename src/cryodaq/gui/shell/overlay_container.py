@@ -4,6 +4,7 @@ Phase UI-1 v2 Block A. The dashboard is the existing OverviewPanel for
 now (Block B will rewrite the dashboard internals). Overlays are the
 existing detail panels hosted as full-takeover stack pages.
 """
+
 from __future__ import annotations
 
 from PySide6.QtWidgets import QStackedWidget, QWidget

@@ -39,7 +39,9 @@ def test_resolve_tray_status_marks_healthy_only_for_known_safe_state() -> None:
 
 def test_tray_controller_gracefully_disables_when_tray_unavailable(monkeypatch) -> None:
     _app()
-    monkeypatch.setattr("cryodaq.gui.tray_status.QSystemTrayIcon.isSystemTrayAvailable", lambda: False)
+    monkeypatch.setattr(
+        "cryodaq.gui.tray_status.QSystemTrayIcon.isSystemTrayAvailable", lambda: False
+    )
 
     controller = TrayController(QMainWindow())
 

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 # PhaseProvider
 # ---------------------------------------------------------------------------
 
+
 class ExperimentPhaseProvider(PhaseProvider):
     """Читает текущую фазу из ExperimentManager.
 
@@ -54,6 +55,7 @@ class ExperimentPhaseProvider(PhaseProvider):
             return 0.0
         # started_at хранится как ISO string
         from datetime import datetime
+
         try:
             if isinstance(started_at_raw, str):
                 dt = datetime.fromisoformat(started_at_raw)
@@ -68,6 +70,7 @@ class ExperimentPhaseProvider(PhaseProvider):
 # ---------------------------------------------------------------------------
 # SetpointProvider
 # ---------------------------------------------------------------------------
+
 
 class ExperimentSetpointProvider(SetpointProvider):
     """Читает setpoints из метаданных эксперимента.

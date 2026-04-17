@@ -8,10 +8,11 @@ Buffer maxlen matches the legacy OverviewPanel value (24 hours at
 1 Hz nominal) — enough history for the longest time window option
 ('Всё' acts as 'show whole buffer').
 """
+
 from __future__ import annotations
 
 from collections import deque
-from typing import Iterable
+from collections.abc import Iterable
 
 # 1 Hz nominal × 24 hours = 86400 samples per channel.
 _BUFFER_MAXLEN = 86400
@@ -25,8 +26,7 @@ class ChannelBufferStore:
         self._last_value: dict[str, tuple[float, float]] = {}
         self._maxlen = maxlen
 
-    def append(self, channel: str, timestamp_epoch: float,
-               value: float) -> None:
+    def append(self, channel: str, timestamp_epoch: float, value: float) -> None:
         """Append a single sample to the channel's buffer."""
         if channel not in self._buffers:
             self._buffers[channel] = deque(maxlen=self._maxlen)
@@ -40,8 +40,7 @@ class ChannelBufferStore:
             return []
         return list(buf)
 
-    def get_history_since(self, channel: str,
-                          since_epoch: float) -> list[tuple[float, float]]:
+    def get_history_since(self, channel: str, since_epoch: float) -> list[tuple[float, float]]:
         """Return entries newer than since_epoch."""
         buf = self._buffers.get(channel)
         if buf is None:

@@ -1,4 +1,5 @@
 """Verify Telegram command bot default-deny on empty allowlist (Phase 2b Codex K.1)."""
+
 from __future__ import annotations
 
 import pytest
@@ -72,16 +73,15 @@ async def test_handle_message_defense_in_depth_blocks_unknown_chat(caplog):
 
     caplog.set_level(logging.WARNING)
     # An unknown chat id reaching _handle_message directly must be denied.
-    await bot._handle_message({
-        "text": "/status",
-        "chat": {"id": 99999999},
-        "from": {"id": 1, "username": "u", "first_name": "x"},
-    })
-    bot._send.assert_not_called()
-    assert any(
-        "Отклонён" in r.message or "_handle_message" in r.message
-        for r in caplog.records
+    await bot._handle_message(
+        {
+            "text": "/status",
+            "chat": {"id": 99999999},
+            "from": {"id": 1, "username": "u", "first_name": "x"},
+        }
     )
+    bot._send.assert_not_called()
+    assert any("Отклонён" in r.message or "_handle_message" in r.message for r in caplog.records)
 
 
 def test_default_deny_on_unknown_chat():

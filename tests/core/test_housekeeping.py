@@ -6,8 +6,15 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.housekeeping import AdaptiveThrottle, HousekeepingService
+from cryodaq.core.housekeeping import (
+    AdaptiveThrottle,
+    HousekeepingConfigError,
+    HousekeepingService,
+    load_housekeeping_config,
+)
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
@@ -61,7 +68,9 @@ async def test_adaptive_throttle_reduces_stable_non_safety_writes(tmp_path: Path
             "transition_holdoff_s": 0.0,
         }
     )
-    sched = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle)
+    sched = Scheduler(
+        broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle
+    )
     sched.add(InstrumentConfig(driver=StableDriver([4.0] * 20), poll_interval_s=0.01))
 
     await sched.start()
@@ -92,7 +101,9 @@ async def test_protected_channels_are_not_throttled(tmp_path: Path) -> None:
         },
         protected_patterns=["TEMP_A"],
     )
-    sched = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle)
+    sched = Scheduler(
+        broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle
+    )
     sched.add(InstrumentConfig(driver=StableDriver([4.0] * 10), poll_interval_s=0.01))
 
     await sched.start()
@@ -192,10 +203,6 @@ async def test_housekeeping_compresses_old_unlinked_db(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Phase 2d C-1.2: fail-closed housekeeping loading
 # ---------------------------------------------------------------------------
-
-import pytest
-
-from cryodaq.core.housekeeping import HousekeepingConfigError, load_housekeeping_config
 
 
 def test_housekeeping_missing_file_raises(tmp_path):

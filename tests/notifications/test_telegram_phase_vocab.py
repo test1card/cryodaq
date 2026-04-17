@@ -1,4 +1,5 @@
 """Verify /phase vocabulary matches ExperimentPhase enum (Phase 2c Codex I.2)."""
+
 from __future__ import annotations
 
 from cryodaq.core.experiment import ExperimentPhase
@@ -20,6 +21,7 @@ def test_telegram_phase_vocab_matches_enum():
 
 def test_telegram_accepts_all_enum_values():
     from cryodaq.notifications.telegram_commands import VALID_PHASES
+
     for phase in ExperimentPhase:
         assert phase.value in VALID_PHASES, (
             f"ExperimentPhase.{phase.name}.value={phase.value!r} not in Telegram VALID_PHASES"
@@ -45,4 +47,5 @@ def test_vacuum_phase_now_supported():
     """Phase 2c bug fix: 'vacuum' phase from the enum was missing entirely
     from the old hand-maintained list."""
     from cryodaq.notifications.telegram_commands import VALID_PHASES
+
     assert "vacuum" in VALID_PHASES

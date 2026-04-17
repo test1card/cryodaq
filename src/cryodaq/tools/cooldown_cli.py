@@ -30,8 +30,11 @@ from cryodaq.analytics.cooldown_predictor import (
 # Synthetic curve generation (for demo/testing only)
 # ============================================================================
 
+
 def generate_synthetic_curves(
-    model_path: Path, n_curves: int = 9, seed: int = 42,
+    model_path: Path,
+    n_curves: int = 9,
+    seed: int = 42,
 ) -> list[ReferenceCurve]:
     """Generate synthetic cooldown curves from model statistics.
 
@@ -93,10 +96,14 @@ def generate_synthetic_curves(
         actual_ph1 = float(t[min(cross_idx, n - 1)])
 
         rc = ReferenceCurve(
-            name=f"synthetic_{i+1:02d}", date=f"2025-{6+i:02d}-01",
-            t_hours=t, T_cold=T_cold, T_warm=T_warm,
+            name=f"synthetic_{i + 1:02d}",
+            date=f"2025-{6 + i:02d}-01",
+            t_hours=t,
+            T_cold=T_cold,
+            T_warm=T_warm,
             duration_hours=float(t[-1]),
-            phase1_hours=actual_ph1, phase2_hours=float(t[-1]) - actual_ph1,
+            phase1_hours=actual_ph1,
+            phase2_hours=float(t[-1]) - actual_ph1,
             T_cold_final=float(np.min(T_cold)),
             T_warm_final=float(np.min(T_warm)),
         )
@@ -110,6 +117,7 @@ def generate_synthetic_curves(
 # CLI commands
 # ============================================================================
 
+
 def cmd_build(args):
     curves = load_curves(Path(args.data))
     if not curves:
@@ -119,15 +127,23 @@ def cmd_build(args):
     out = Path(args.output)
     save_model(model, out)
     plot_ensemble(model, out / "ensemble_overview.png")
-    print(f"\nModel: {model.n_curves} curves, {model.duration_mean:.1f}+/-{model.duration_std:.1f} h")
+    print(
+        f"\nModel: {model.n_curves} curves, {model.duration_mean:.1f}+/-{model.duration_std:.1f} h"
+    )
 
 
 def cmd_predict(args):
     model = load_model(Path(args.model))
     rate_c = args.rate_cold if hasattr(args, "rate_cold") else None
     rate_w = args.rate_warm if hasattr(args, "rate_warm") else None
-    pred = predict(model, args.T_cold, args.T_warm, args.t_elapsed,
-                   observed_rate_cold=rate_c, observed_rate_warm=rate_w)
+    pred = predict(
+        model,
+        args.T_cold,
+        args.T_warm,
+        args.t_elapsed,
+        observed_rate_cold=rate_c,
+        observed_rate_warm=rate_w,
+    )
     print(format_prediction(pred))
     if args.output:
         plot_prediction(model, pred, args.T_cold, args.T_warm, args.t_elapsed, Path(args.output))
@@ -138,33 +154,43 @@ def cmd_validate(args):
     if len(curves) < 3:
         sys.exit(f"Need >=3 curves, got {len(curves)}")
     curves = prepare_all(curves)
-    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
     results = validate_loo(curves)
     if results:
         plot_validation(results, out / "loo_validation.png")
-        summary = [{"curve": vr.curve_name,
-                     "mae_h": float(np.mean(np.abs(vr.t_remaining_err))),
-                     "rmse_h": float(np.sqrt(np.mean(vr.t_remaining_err**2))),
-                     "max_err_h": float(np.max(np.abs(vr.t_remaining_err)))}
-                    for vr in results]
+        summary = [
+            {
+                "curve": vr.curve_name,
+                "mae_h": float(np.mean(np.abs(vr.t_remaining_err))),
+                "rmse_h": float(np.sqrt(np.mean(vr.t_remaining_err**2))),
+                "max_err_h": float(np.max(np.abs(vr.t_remaining_err))),
+            }
+            for vr in results
+        ]
         (out / "loo_results.json").write_text(json.dumps(summary, indent=2))
     print(f"\nValidation: {len(results)} folds")
 
 
 def cmd_demo(args):
-    out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
     mp = Path(args.model_json) if args.model_json else None
     if mp and mp.exists():
         curves = generate_synthetic_curves(mp)
     else:
-        default = {"statistics": {
-            "total_duration_hours": {"mean": 19.3, "std": 1.0, "min": 17.7, "max": 21.0},
-            "phase1_hours": {"mean": 8.0, "std": 0.5, "min": 7.0, "max": 9.0},
-            "T_cold_baseline": {"mean": 4.7, "std": 1.5, "min": 4.0, "max": 9.0},
-            "T_warm_baseline": {"mean": 87.0, "std": 6.0, "min": 78.0, "max": 98.0},
-        }}
-        tmp = out / "_tmp.json"; tmp.write_text(json.dumps(default))
-        curves = generate_synthetic_curves(tmp); tmp.unlink()
+        default = {
+            "statistics": {
+                "total_duration_hours": {"mean": 19.3, "std": 1.0, "min": 17.7, "max": 21.0},
+                "phase1_hours": {"mean": 8.0, "std": 0.5, "min": 7.0, "max": 9.0},
+                "T_cold_baseline": {"mean": 4.7, "std": 1.5, "min": 4.0, "max": 9.0},
+                "T_warm_baseline": {"mean": 87.0, "std": 6.0, "min": 78.0, "max": 98.0},
+            }
+        }
+        tmp = out / "_tmp.json"
+        tmp.write_text(json.dumps(default))
+        curves = generate_synthetic_curves(tmp)
+        tmp.unlink()
 
     curves = prepare_all(curves)
     model = build_ensemble(curves)
@@ -225,10 +251,10 @@ def main():
     p.add_argument("--T_warm", type=float, required=True)
     p.add_argument("--t_elapsed", type=float, default=0.0)
     p.add_argument("--output")
-    p.add_argument("--rate_cold", type=float, default=None,
-                   help="Observed dT_cold/dt [K/h] (negative=cooling)")
-    p.add_argument("--rate_warm", type=float, default=None,
-                   help="Observed dT_warm/dt [K/h]")
+    p.add_argument(
+        "--rate_cold", type=float, default=None, help="Observed dT_cold/dt [K/h] (negative=cooling)"
+    )
+    p.add_argument("--rate_warm", type=float, default=None, help="Observed dT_warm/dt [K/h]")
 
     p = sub.add_parser("validate")
     p.add_argument("--data", required=True)
@@ -244,8 +270,13 @@ def main():
     p.add_argument("--force", action="store_true", help="Skip quality gate")
 
     args = parser.parse_args()
-    {"build": cmd_build, "predict": cmd_predict, "validate": cmd_validate,
-     "demo": cmd_demo, "update": cmd_update}[args.command](args)
+    {
+        "build": cmd_build,
+        "predict": cmd_predict,
+        "validate": cmd_validate,
+        "demo": cmd_demo,
+        "update": cmd_update,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

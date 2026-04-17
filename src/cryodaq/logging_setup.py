@@ -8,6 +8,7 @@ Also applies a filter that redacts Telegram bot tokens (Phase 2b K.1
 defence-in-depth — combined with the SecretStr wrapper, prevents accidental
 token leaks via aiohttp debug logs or exception traces).
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,12 +29,8 @@ from cryodaq.paths import get_logs_dir
 # We match BOTH. Bare form requires 8+ digit ID + 30+ char secret to keep
 # false-positive rate near zero on unrelated colon-delimited strings.
 # (Codex Phase 2b Block A P1.)
-_TELEGRAM_TOKEN_RE = re.compile(
-    r"(?:bot)?\d{6,}:[A-Za-z0-9_-]{20,}"
-)
-_BARE_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])\d{8,}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])"
-)
+_TELEGRAM_TOKEN_RE = re.compile(r"(?:bot)?\d{6,}:[A-Za-z0-9_-]{20,}")
+_BARE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])\d{8,}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
 
 
 def _redact(text: str) -> str:
@@ -59,13 +56,11 @@ class _TokenRedactFilter(logging.Filter):
             try:
                 if isinstance(record.args, tuple):
                     record.args = tuple(
-                        _redact(a) if isinstance(a, str) else a
-                        for a in record.args
+                        _redact(a) if isinstance(a, str) else a for a in record.args
                     )
                 elif isinstance(record.args, dict):
                     record.args = {
-                        k: (_redact(v) if isinstance(v, str) else v)
-                        for k, v in record.args.items()
+                        k: (_redact(v) if isinstance(v, str) else v) for k, v in record.args.items()
                     }
             except Exception:
                 # Filter must never raise — drop redaction silently if the
@@ -145,6 +140,4 @@ def setup_logging(
             file_handler.addFilter(redact)
             root.addHandler(file_handler)
         except Exception as exc:
-            sys.stderr.write(
-                f"WARNING: failed to set up file logging for {component}: {exc}\n"
-            )
+            sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")

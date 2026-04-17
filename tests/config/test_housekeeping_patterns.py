@@ -1,4 +1,5 @@
 """Regression test for C.5: Latin T in housekeeping.yaml include_patterns."""
+
 import re
 from pathlib import Path
 

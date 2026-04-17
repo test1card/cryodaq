@@ -5,10 +5,11 @@ Phase-specific data (ETA, R_thermal, pressure) shown inline in the
 context label. Per-phase hero widgets (HeroReadout, EtaDisplay,
 MilestoneList) preserved in phase_content/ for B.10 Analytics overlay.
 """
+
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -46,9 +47,7 @@ class PhaseAwareWidget(QWidget):
         self.setObjectName("PhaseAwareWidget")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMaximumHeight(_MAX_HEIGHT_PX)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self._current_phase: str | None = None
         self._phase_started_at: float | None = None
@@ -75,9 +74,7 @@ class PhaseAwareWidget(QWidget):
 
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        root.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         root.setSpacing(theme.SPACE_3)
 
         # Stepper (compact, numbers only)
@@ -88,11 +85,7 @@ class PhaseAwareWidget(QWidget):
         self._context_label = QLabel()
         self._context_label.setObjectName("phaseContextLabel")
         self._context_label.setTextFormat(Qt.TextFormat.RichText)
-        self._context_label.setStyleSheet(
-            f"#phaseContextLabel {{ "
-            f"background: transparent; "
-            f"}}"
-        )
+        self._context_label.setStyleSheet("#phaseContextLabel { background: transparent; }")
         root.addWidget(self._context_label, stretch=1)
 
         # Duration label
@@ -113,9 +106,7 @@ class PhaseAwareWidget(QWidget):
         )
         self._create_btn.setObjectName("phaseCreateBtn")
         self._create_btn.setFixedHeight(_BUTTON_HEIGHT_PX)
-        self._create_btn.clicked.connect(
-            self.create_experiment_requested.emit
-        )
+        self._create_btn.clicked.connect(self.create_experiment_requested.emit)
         self._create_btn.setStyleSheet(
             f"#phaseCreateBtn {{ "
             f"background-color: {theme.ACCENT}; "
@@ -135,8 +126,7 @@ class PhaseAwareWidget(QWidget):
         root.addWidget(self._controls)
 
         self.setStyleSheet(
-            self.styleSheet()
-            + f"#PhaseAwareWidget {{ "
+            self.styleSheet() + f"#PhaseAwareWidget {{ "
             f"background-color: {theme.SURFACE_PANEL}; "
             f"border-bottom: 1px solid {theme.BORDER}; "
             f"}}"
@@ -159,10 +149,7 @@ class PhaseAwareWidget(QWidget):
             f"font-size: {theme.FONT_SIZE_SM}px; "
         )
         btn_hover = f"background-color: {theme.PRIMARY}; "
-        btn_disabled = (
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"background-color: {theme.MUTED}; "
-        )
+        btn_disabled = f"color: {theme.MUTED_FOREGROUND}; background-color: {theme.MUTED}; "
 
         self._back_btn = QPushButton(
             "\u041d\u0430\u0437\u0430\u0434"  # Назад
@@ -186,9 +173,7 @@ class PhaseAwareWidget(QWidget):
         )  # Перейти к...
         for phase in PHASE_ORDER:
             self._jump_combo.addItem(PHASE_LABELS_RU[phase], phase)
-        self._jump_combo.setStyleSheet(
-            f"#phaseJumpCombo {{ {btn_style} }}"
-        )
+        self._jump_combo.setStyleSheet(f"#phaseJumpCombo {{ {btn_style} }}")
         self._jump_combo.currentIndexChanged.connect(self._on_jump_selected)
         layout.addWidget(self._jump_combo)
 
@@ -227,40 +212,42 @@ class PhaseAwareWidget(QWidget):
                 "\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0444\u0430\u0437\u044b\u2026"
             )  # Ожидание фазы…
         else:
-            phase_name = PHASE_LABELS_RU.get(
-                self._current_phase, self._current_phase
-            ).upper()
+            phase_name = PHASE_LABELS_RU.get(self._current_phase, self._current_phase).upper()
             parts = [self._styled_phase(phase_name)]
 
             if self._current_phase == "cooldown":
                 if self._cached_eta_s is not None:
-                    parts.append(self._styled_metric(
-                        "ETA", _format_duration_ru(self._cached_eta_s)
-                    ))
+                    parts.append(
+                        self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s))
+                    )
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric(
-                        "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
-                    ))
+                    parts.append(
+                        self._styled_metric(
+                            "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
+                        )
+                    )
             elif self._current_phase == "vacuum":
                 if self._cached_pressure is not None:
-                    parts.append(self._styled_metric(
-                        "P", f"{self._cached_pressure:.2e} mbar"
-                    ))
+                    parts.append(self._styled_metric("P", f"{self._cached_pressure:.2e} mbar"))
             elif self._current_phase == "measurement":
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric(
-                        "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
-                    ))
+                    parts.append(
+                        self._styled_metric(
+                            "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
+                        )
+                    )
             elif self._current_phase == "teardown":
                 if self._completed_phases_count > 0:
-                    parts.append(self._styled_dim(
-                        f"{self._completed_phases_count} "
-                        "\u0444\u0430\u0437 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e"
-                    ))
+                    parts.append(
+                        self._styled_dim(
+                            f"{self._completed_phases_count} "
+                            "\u0444\u0430\u0437 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e"  # noqa: E501
+                        )
+                    )
 
             text = (
                 f' <span style="color:{theme.MUTED_FOREGROUND}; '
-                f"font-size:{theme.FONT_SIZE_SM}px;\"> \u00b7 </span> "
+                f'font-size:{theme.FONT_SIZE_SM}px;"> \u00b7 </span> '
             ).join(parts)
 
         if text != self._last_context_text:
@@ -314,9 +301,7 @@ class PhaseAwareWidget(QWidget):
 
             # Count completed phases for teardown context
             phases = status.get("phases") or []
-            self._completed_phases_count = sum(
-                1 for p in phases if p.get("ended_at") is not None
-            )
+            self._completed_phases_count = sum(1 for p in phases if p.get("ended_at") is not None)
 
             if (
                 has_experiment == self._has_active_experiment
@@ -335,9 +320,7 @@ class PhaseAwareWidget(QWidget):
             else:
                 self._apply_active_state_no_phase()
         except Exception:
-            logger.warning(
-                "PhaseAwareWidget on_status_update failed", exc_info=True
-            )
+            logger.warning("PhaseAwareWidget on_status_update failed", exc_info=True)
 
     def on_reading(self, reading) -> None:
         """Route analytics readings to cached values for inline context."""
@@ -408,18 +391,13 @@ class PhaseAwareWidget(QWidget):
         self._refresh_context_label()
 
     def _update_duration_display(self) -> None:
-        if (
-            not self._has_active_experiment
-            or self._phase_started_at is None
-        ):
+        if not self._has_active_experiment or self._phase_started_at is None:
             self._duration_label.setText("")
             return
         try:
-            now = datetime.now(timezone.utc).timestamp()
+            now = datetime.now(UTC).timestamp()
             elapsed = max(0.0, now - self._phase_started_at)
-            self._duration_label.setText(
-                f"\u00b7 {_format_duration_ru(elapsed)}"
-            )
+            self._duration_label.setText(f"\u00b7 {_format_duration_ru(elapsed)}")
         except Exception:
             logger.warning("duration display failed", exc_info=True)
 

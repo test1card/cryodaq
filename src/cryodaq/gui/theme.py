@@ -4,6 +4,7 @@ Canonical source: docs/design-system/README.md
 Full token inventory: docs/design-system/MANIFEST.md
 Token naming convention: docs/design-system/governance/token-naming.md
 """
+
 from __future__ import annotations
 
 import pyqtgraph as pg
@@ -67,10 +68,10 @@ PLOT_LINE_PALETTE = [
 # COLORS — Quantity coding (V/I/R/P electronics convention, desaturated)
 # =============================================================================
 
-QUANTITY_VOLTAGE = "#5b8db8"     # steel blue
-QUANTITY_CURRENT = STATUS_OK    # forest green
+QUANTITY_VOLTAGE = "#5b8db8"  # steel blue
+QUANTITY_CURRENT = STATUS_OK  # forest green
 QUANTITY_RESISTANCE = STATUS_WARNING  # amber
-QUANTITY_POWER = "#c44545"      # brick red
+QUANTITY_POWER = "#c44545"  # brick red
 
 # =============================================================================
 # TYPOGRAPHY

@@ -1,4 +1,5 @@
 """Verify disk-full detection and graceful degradation (Phase 2a H.1)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -87,16 +88,12 @@ def test_other_operational_errors_still_raise(tmp_path):
     """Non-disk OperationalErrors keep the existing raise semantics."""
     writer = SQLiteWriter(tmp_path)
 
-    poisoned = _poisoned_conn(
-        sqlite3.OperationalError("table readings has no column foo")
-    )
+    poisoned = _poisoned_conn(sqlite3.OperationalError("table readings has no column foo"))
 
     with pytest.raises(sqlite3.OperationalError):
         writer._write_day_batch(poisoned, [_reading()])
 
-    assert writer.is_disk_full is False, (
-        "non-disk error must NOT set the disk_full flag"
-    )
+    assert writer.is_disk_full is False, "non-disk error must NOT set the disk_full flag"
 
 
 def test_clear_disk_full_resets_flag(tmp_path):
@@ -161,9 +158,9 @@ async def test_disk_monitor_does_NOT_auto_clear_flag(tmp_path, caplog):
         "Recovery requires explicit operator acknowledge_fault."
     )
     # Recovery WAS logged for the operator.
-    assert any(
-        "acknowledge_fault" in r.message.lower() for r in caplog.records
-    ), "DiskMonitor must log a recovery notice prompting the operator"
+    assert any("acknowledge_fault" in r.message.lower() for r in caplog.records), (
+        "DiskMonitor must log a recovery notice prompting the operator"
+    )
 
 
 @pytest.mark.asyncio
@@ -212,9 +209,7 @@ async def test_disk_full_classifier_rejects_unrelated_disk_messages(tmp_path):
     writer = SQLiteWriter(tmp_path)
 
     # SQLITE_CORRUPT — must NOT trigger disk-full
-    poisoned1 = _poisoned_conn(
-        sqlite3.OperationalError("database disk image is malformed")
-    )
+    poisoned1 = _poisoned_conn(sqlite3.OperationalError("database disk image is malformed"))
     with pytest.raises(sqlite3.OperationalError):
         writer._write_day_batch(poisoned1, [_reading()])
     assert writer.is_disk_full is False, "SQLITE_CORRUPT must not be classified as disk-full"

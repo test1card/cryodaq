@@ -3,6 +3,7 @@
 Shows channel label, current value, unit, and status-colored border.
 Supports inline rename (double-click) and right-click context menu.
 """
+
 from __future__ import annotations
 
 import logging
@@ -102,9 +103,7 @@ class SensorCell(QFrame):
             f"font-family: '{theme.FONT_UI}'; "
             f"font-size: {theme.FONT_LABEL_SIZE}px;"
         )
-        self._label_widget.setTextInteractionFlags(
-            Qt.TextInteractionFlag.NoTextInteraction
-        )
+        self._label_widget.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self._label_widget.setWordWrap(False)
         self._label_widget.setMinimumWidth(0)
         root.addWidget(self._label_widget)
@@ -134,7 +133,9 @@ class SensorCell(QFrame):
         root.addLayout(value_row)
 
         # Status hint (bottom, small text)
-        self._status_hint_widget = QLabel("\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445")  # Нет данных
+        self._status_hint_widget = QLabel(
+            "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+        )  # Нет данных
         self._status_hint_widget.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; "
             f"font-family: '{theme.FONT_UI}'; "
@@ -290,9 +291,7 @@ class SensorCell(QFrame):
         if not self._is_renaming:
             return
         new_name = self._rename_edit.text().strip()
-        if new_name and new_name != self._channel_mgr.get_name(
-            self._channel_id
-        ):
+        if new_name and new_name != self._channel_mgr.get_name(self._channel_id):
             self.rename_requested.emit(self._channel_id, new_name)
         self._exit_rename_mode()
 
@@ -327,31 +326,25 @@ class SensorCell(QFrame):
         menu.setObjectName("sensorCellContextMenu")
 
         rename_action = menu.addAction(
-            "\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c"  # Переименовать
+            "\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c"  # Переименовать  # noqa: E501
         )
         rename_action.triggered.connect(self._enter_rename_mode)
 
         hide_action = menu.addAction(
             "\u0421\u043a\u0440\u044b\u0442\u044c"  # Скрыть
         )
-        hide_action.triggered.connect(
-            lambda: self.hide_requested.emit(self._channel_id)
-        )
+        hide_action.triggered.connect(lambda: self.hide_requested.emit(self._channel_id))
 
         menu.addSeparator()
 
         plot_action = menu.addAction(
-            "\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043d\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0435"  # Показать на графике
+            "\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043d\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0435"  # Показать на графике  # noqa: E501
         )
-        plot_action.triggered.connect(
-            lambda: self.show_on_plot_requested.emit(self._channel_id)
-        )
+        plot_action.triggered.connect(lambda: self.show_on_plot_requested.emit(self._channel_id))
 
         history_action = menu.addAction(
-            "\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0437\u0430 \u0447\u0430\u0441"  # История за час
+            "\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0437\u0430 \u0447\u0430\u0441"  # История за час  # noqa: E501
         )
-        history_action.triggered.connect(
-            lambda: self.history_requested.emit(self._channel_id)
-        )
+        history_action.triggered.connect(lambda: self.history_requested.emit(self._channel_id))
 
         menu.exec(event.globalPos())

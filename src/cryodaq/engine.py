@@ -5,7 +5,8 @@
     python -m cryodaq.engine  # напрямую
 
 Загружает конфигурации, создаёт и связывает все подсистемы:
-    drivers → DataBroker → [SQLiteWriter, ZMQPublisher, AlarmEngine, InterlockEngine, PluginPipeline]
+    drivers → DataBroker →
+    [SQLiteWriter, ZMQPublisher, AlarmEngine, InterlockEngine, PluginPipeline]
 
 Корректное завершение по SIGINT / SIGTERM (Unix) или Ctrl+C (Windows).
 """
@@ -33,9 +34,6 @@ from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
-from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
-from cryodaq.core.housekeeping import HousekeepingConfigError
-from cryodaq.core.interlock import InterlockConfigError
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
@@ -43,18 +41,20 @@ from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
     CalibrationCommandError,
 )
+from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
+    HousekeepingConfigError,
     HousekeepingService,
     load_critical_channels_from_alarms_v3,
     load_housekeeping_config,
     load_protected_channel_patterns,
 )
-from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
@@ -67,6 +67,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
+from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -75,7 +76,6 @@ logger = logging.getLogger("cryodaq.engine")
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
 # ---------------------------------------------------------------------------
-from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 
 _PROJECT_ROOT = get_project_root()
 _CONFIG_DIR = get_config_dir()
@@ -228,7 +228,9 @@ def _run_calibration_command(
     if action == "calibration_curve_list":
         return {
             "ok": True,
-            "curves": calibration_store.list_curves(sensor_id=str(cmd.get("sensor_id", "")).strip() or None),
+            "curves": calibration_store.list_curves(
+                sensor_id=str(cmd.get("sensor_id", "")).strip() or None
+            ),
             "assignments": calibration_store.list_assignments(),
         }
 
@@ -277,9 +279,7 @@ def _run_calibration_command(
             sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
             curve_id=str(cmd.get("curve_id", "")).strip() or None,
             runtime_apply_ready=(
-                bool(cmd.get("runtime_apply_ready"))
-                if "runtime_apply_ready" in cmd
-                else None
+                bool(cmd.get("runtime_apply_ready")) if "runtime_apply_ready" in cmd else None
             ),
         )
         return {"ok": True, **result}
@@ -290,21 +290,29 @@ def _run_calibration_command(
             raise ValueError("sensor_id is required.")
         json_path = calibration_store.export_curve_json(
             sensor_id,
-            Path(str(cmd.get("json_path")).strip()) if str(cmd.get("json_path", "")).strip() else None,
+            Path(str(cmd.get("json_path")).strip())
+            if str(cmd.get("json_path", "")).strip()
+            else None,
         )
         table_path = calibration_store.export_curve_table(
             sensor_id,
-            path=Path(str(cmd.get("table_path")).strip()) if str(cmd.get("table_path", "")).strip() else None,
+            path=Path(str(cmd.get("table_path")).strip())
+            if str(cmd.get("table_path", "")).strip()
+            else None,
             points=int(cmd.get("points", 200)),
         )
         curve_330_path = calibration_store.export_curve_330(
             sensor_id,
-            path=Path(str(cmd.get("curve_330_path")).strip()) if str(cmd.get("curve_330_path", "")).strip() else None,
+            path=Path(str(cmd.get("curve_330_path")).strip())
+            if str(cmd.get("curve_330_path", "")).strip()
+            else None,
             points=int(cmd.get("points", 200)),
         )
         curve_340_path = calibration_store.export_curve_340(
             sensor_id,
-            path=Path(str(cmd.get("curve_340_path")).strip()) if str(cmd.get("curve_340_path", "")).strip() else None,
+            path=Path(str(cmd.get("curve_340_path")).strip())
+            if str(cmd.get("curve_340_path", "")).strip()
+            else None,
             points=int(cmd.get("points", 200)),
         )
         return {
@@ -367,6 +375,7 @@ def _try_activate_calibration_acquisition(
             return
         with raw_path.open(encoding="utf-8") as fh:
             import yaml as _yaml
+
             raw = _yaml.safe_load(fh) or {}
         if not raw.get("calibration_acquisition"):
             return
@@ -529,7 +538,11 @@ def _run_experiment_command(
                 if str(item).strip()
             ],
         )
-        return {"ok": True, "attached": record is not None, "run_record": record.to_payload() if record else None}
+        return {
+            "ok": True,
+            "attached": record is not None,
+            "run_record": record.to_payload() if record else None,
+        }
 
     if action == "experiment_create_retroactive":
         info = experiment_manager.create_retroactive_experiment(
@@ -576,6 +589,7 @@ def _run_experiment_command(
         elapsed = 0.0
         if history and history[-1].get("ended_at") is None:
             from datetime import datetime as _dt
+
             try:
                 started = _dt.fromisoformat(history[-1]["started_at"])
                 elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
@@ -592,7 +606,9 @@ def _run_experiment_command(
 
 
 def _run_calibration_v2_command(
-    action: str, cmd: dict[str, Any], calibration_store: Any,
+    action: str,
+    cmd: dict[str, Any],
+    calibration_store: Any,
 ) -> dict[str, Any]:
     """Sync calibration fitter commands — runs in thread to avoid blocking event loop."""
     from cryodaq.analytics.calibration_fitter import CalibrationFitter
@@ -600,26 +616,40 @@ def _run_calibration_v2_command(
     fitter = CalibrationFitter()
     if action == "calibration_v2_extract":
         pairs = fitter.extract_pairs(
-            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
-            str(cmd["reference_channel"]), str(cmd["target_channel"]),
+            _DATA_DIR,
+            float(cmd.get("start_ts", 0)),
+            float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]),
+            str(cmd["target_channel"]),
         )
         return {"ok": True, "pair_count": len(pairs), "pairs_sample": pairs[:20]}
     if action == "calibration_v2_coverage":
         pairs = fitter.extract_pairs(
-            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
-            str(cmd["reference_channel"]), str(cmd["target_channel"]),
+            _DATA_DIR,
+            float(cmd.get("start_ts", 0)),
+            float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]),
+            str(cmd["target_channel"]),
         )
         coverage = fitter.compute_coverage(pairs)
         return {"ok": True, "coverage": coverage, "total_points": len(pairs)}
     if action == "calibration_v2_fit":
         result = fitter.fit(
-            _DATA_DIR, float(cmd.get("start_ts", 0)), float(cmd.get("end_ts", 0)),
-            str(cmd["reference_channel"]), str(cmd["target_channel"]), calibration_store,
+            _DATA_DIR,
+            float(cmd.get("start_ts", 0)),
+            float(cmd.get("end_ts", 0)),
+            str(cmd["reference_channel"]),
+            str(cmd["target_channel"]),
+            calibration_store,
         )
         return {
-            "ok": True, "sensor_id": result.sensor_id, "curve_id": result.curve.curve_id,
-            "metrics": result.metrics, "raw_count": result.raw_pairs_count,
-            "downsampled_count": result.downsampled_count, "breakpoint_count": result.breakpoint_count,
+            "ok": True,
+            "sensor_id": result.sensor_id,
+            "curve_id": result.curve.curve_id,
+            "metrics": result.metrics,
+            "raw_count": result.raw_pairs_count,
+            "downsampled_count": result.downsampled_count,
+            "breakpoint_count": result.breakpoint_count,
         }
     raise ValueError(f"Unknown calibration_v2 action: {action}")
 
@@ -633,6 +663,7 @@ def _get_memory_mb() -> float:
         import os
 
         import psutil  # type: ignore[import]
+
         return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
     except Exception:
         pass
@@ -666,6 +697,7 @@ def _get_memory_mb() -> float:
         pass
     try:
         import resource as _resource  # Unix only
+
         return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return 0.0
@@ -674,6 +706,7 @@ def _get_memory_mb() -> float:
 # ---------------------------------------------------------------------------
 # Загрузка конфигурации приборов
 # ---------------------------------------------------------------------------
+
 
 def _load_drivers(
     config_path: Path,
@@ -721,10 +754,15 @@ def _load_drivers(
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
 
-        configs.append(InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource))
+        configs.append(
+            InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource)
+        )
         logger.info(
             "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
-            name, itype, resource, poll_interval_s,
+            name,
+            itype,
+            resource,
+            poll_interval_s,
         )
 
     return configs
@@ -733,6 +771,7 @@ def _load_drivers(
 # ---------------------------------------------------------------------------
 # Самодиагностика (watchdog)
 # ---------------------------------------------------------------------------
+
 
 async def _watchdog(
     broker: DataBroker,
@@ -761,7 +800,9 @@ async def _watchdog(
             logger.info(
                 "HEARTBEAT | uptime=%02d:%02d:%02d | mem=%.1f MB | "
                 "queued=%d | dropped=%d | written=%d | instruments=%s",
-                hours, minutes, secs,
+                hours,
+                minutes,
+                secs,
                 mem_mb,
                 total_queued,
                 total_dropped,
@@ -775,6 +816,7 @@ async def _watchdog(
 # ---------------------------------------------------------------------------
 # Основной цикл
 # ---------------------------------------------------------------------------
+
 
 async def _run_engine(*, mock: bool = False) -> None:
     """Инициализировать и запустить все подсистемы engine."""
@@ -833,7 +875,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     merged_patterns = list({*legacy_patterns, *v3_patterns})
     logger.info(
         "Adaptive-throttle protection: %d legacy + %d v3 = %d unique patterns",
-        len(legacy_patterns), len(v3_patterns), len(merged_patterns),
+        len(legacy_patterns),
+        len(v3_patterns),
+        len(merged_patterns),
     )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
@@ -855,7 +899,10 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # H.6: wire safety fault → operator_log machine event
     async def _safety_fault_log_callback(
-        source: str, message: str, channel: str = "", value: float = 0.0,
+        source: str,
+        message: str,
+        channel: str = "",
+        value: float = 0.0,
     ) -> None:
         entry = await writer.append_operator_log(
             message=message,
@@ -868,15 +915,14 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             await _publish_operator_log_entry(broker, entry)
         except Exception as exc:
-            logger.error(
-                "Failed to publish safety fault operator_log entry: %s", exc
-            )
+            logger.error("Failed to publish safety fault operator_log entry: %s", exc)
 
     safety_manager._fault_log_callback = _safety_fault_log_callback
 
     # Calibration acquisition — continuous SRDG during calibration experiments
     calibration_acquisition = CalibrationAcquisitionService(
-        writer, channel_manager=get_channel_manager(),
+        writer,
+        channel_manager=get_channel_manager(),
     )
 
     # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации
@@ -934,7 +980,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             logger.critical(
                 "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
                 "escalating to guaranteed fault.",
-                condition.name, condition.action, exc, exc_info=True,
+                condition.name,
+                condition.action,
+                exc,
+                exc_info=True,
             )
             try:
                 await safety_manager._fault(
@@ -946,7 +995,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                 logger.critical(
                     "INTERLOCK escalation _fault FAILED for '%s': %s — "
                     "instrument state UNKNOWN, immediate operator intervention!",
-                    condition.name, exc2, exc_info=True,
+                    condition.name,
+                    exc2,
+                    exc_info=True,
                 )
 
     interlock_engine = InterlockEngine(
@@ -1078,7 +1129,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                         continue
                 try:
                     event = alarm_v2_evaluator.evaluate(alarm_cfg.alarm_id, alarm_cfg.config)
-                    transition = alarm_v2_state_mgr.process(alarm_cfg.alarm_id, event, alarm_cfg.config)
+                    transition = alarm_v2_state_mgr.process(
+                        alarm_cfg.alarm_id, event, alarm_cfg.config
+                    )
                     if transition == "TRIGGERED" and event is not None:
                         # GUI polls via alarm_v2_status command; optionally notify via Telegram
                         if "telegram" in alarm_cfg.notify and telegram_bot is not None:
@@ -1157,7 +1210,13 @@ async def _run_engine(*, mock: bool = False) -> None:
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
         try:
-            if action in {"keithley_emergency_off", "keithley_stop", "keithley_start", "keithley_set_target", "keithley_set_limits"}:
+            if action in {
+                "keithley_emergency_off",
+                "keithley_stop",
+                "keithley_start",
+                "keithley_set_target",
+                "keithley_set_limits",
+            }:
                 result = await _run_keithley_command(action, cmd, safety_manager)
                 if result.get("ok"):
                     ch = cmd.get("channel", "?")
@@ -1166,7 +1225,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                     elif action == "keithley_stop":
                         await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
                     elif action == "keithley_emergency_off":
-                        await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
+                        await event_logger.log_event(
+                            "keithley", f"\u26a0 Keithley {ch}: аварийное отключение"
+                        )
                         if escalation_service is not None:
                             await escalation_service.escalate(
                                 "emergency",
@@ -1208,20 +1269,23 @@ async def _run_engine(*, mock: bool = False) -> None:
                 operator = cmd.get("operator", "")
                 reason = cmd.get("reason", "")
                 ack_event = alarm_v2_state_mgr.acknowledge(
-                    name, operator=operator, reason=reason,
+                    name,
+                    operator=operator,
+                    reason=reason,
                 )
                 if ack_event is not None:
-                    await broker.publish(Reading(
-                        timestamp=datetime.now(UTC),
-                        instrument_id="alarm_v2",
-                        channel="alarm_v2/acknowledged",
-                        value=ack_event["acknowledged_at"],
-                        unit="",
-                        metadata=ack_event,
-                    ))
+                    await broker.publish(
+                        Reading(
+                            timestamp=datetime.now(UTC),
+                            instrument_id="alarm_v2",
+                            channel="alarm_v2/acknowledged",
+                            value=ack_event["acknowledged_at"],
+                            unit="",
+                            metadata=ack_event,
+                        )
+                    )
                 return {
-                    "ok": ack_event is not None
-                    or name in alarm_v2_state_mgr.get_active(),
+                    "ok": ack_event is not None or name in alarm_v2_state_mgr.get_active(),
                     "alarm_name": name,
                     "event_emitted": ack_event is not None,
                 }
@@ -1247,18 +1311,25 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "experiment_phase_status",
             }:
                 result = await asyncio.to_thread(
-                    _run_experiment_command, action, cmd, experiment_manager,
+                    _run_experiment_command,
+                    action,
+                    cmd,
+                    experiment_manager,
                 )
                 # Hook calibration acquisition on experiment lifecycle
                 if result.get("ok") and action in {"experiment_start", "experiment_create"}:
                     await asyncio.to_thread(
                         _try_activate_calibration_acquisition,
-                        calibration_acquisition, experiment_manager, cmd,
+                        calibration_acquisition,
+                        experiment_manager,
+                        cmd,
                     )
                     name = cmd.get("name") or cmd.get("title") or "?"
                     await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
                 elif result.get("ok") and action in {
-                    "experiment_finalize", "experiment_stop", "experiment_abort",
+                    "experiment_finalize",
+                    "experiment_stop",
+                    "experiment_abort",
                 }:
                     calibration_acquisition.deactivate()
                     if action == "experiment_abort":
@@ -1277,7 +1348,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "calibration_v2_coverage",
             }:
                 return await asyncio.to_thread(
-                    _run_calibration_v2_command, action, cmd, calibration_store,
+                    _run_calibration_v2_command,
+                    action,
+                    cmd,
+                    calibration_store,
                 )
             if action == "readings_history":
                 channels_raw = cmd.get("channels")
@@ -1328,6 +1402,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if sensor_diag is None:
                     return {"ok": False, "error": "SensorDiagnostics отключён"}
                 from dataclasses import asdict
+
                 diag = sensor_diag.get_diagnostics()
                 summary = sensor_diag.get_summary()
                 return {
@@ -1339,6 +1414,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if vacuum_trend is None:
                     return {"ok": False, "error": "VacuumTrendPredictor отключён"}
                 from dataclasses import asdict
+
                 pred = vacuum_trend.get_prediction()
                 if pred is None:
                     return {"ok": True, "status": "no_data"}
@@ -1363,6 +1439,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             _cd_cfg = _cd_raw.get("cooldown", {})
             if _cd_cfg.get("enabled", False):
                 from cryodaq.analytics.cooldown_service import CooldownService
+
                 cooldown_service = CooldownService(
                     broker=broker,
                     config=_cd_cfg,
@@ -1390,7 +1467,8 @@ async def _run_engine(*, mock: bool = False) -> None:
             pr_cfg = notif_raw.get("periodic_report", {})
             if pr_cfg.get("enabled", False) and token_valid:
                 periodic_reporter = PeriodicReporter(
-                    broker, alarm_engine,
+                    broker,
+                    alarm_engine,
                     bot_token=bot_token,
                     chat_id=tg_cfg.get("chat_id", 0),
                     report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
@@ -1403,7 +1481,9 @@ async def _run_engine(*, mock: bool = False) -> None:
             cmd_cfg = notif_raw.get("commands", {})
             commands_enabled = bool(cmd_cfg.get("enabled", False)) and token_valid
             if commands_enabled:
-                allowed_raw = tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
+                allowed_raw = (
+                    tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
+                )
                 allowed_ids = [int(x) for x in allowed_raw]
                 # Phase 2b Codex K.1 — TelegramCommandBot raises on empty list,
                 # so refuse to enable cleanly here with a config-error log
@@ -1417,7 +1497,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                 else:
                     telegram_bot = TelegramCommandBot(
-                        broker, alarm_engine,
+                        broker,
+                        alarm_engine,
                         bot_token=bot_token,
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
@@ -1431,6 +1512,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             # EscalationService
             if token_valid and notif_raw.get("escalation"):
                 from cryodaq.notifications.telegram import TelegramNotifier
+
                 _esc_notifier = TelegramNotifier(
                     bot_token=bot_token,
                     chat_id=tg_cfg.get("chat_id", 0),
@@ -1480,7 +1562,8 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # Watchdog
     watchdog_task = asyncio.create_task(
-        _watchdog(broker, scheduler, writer, start_ts), name="engine_watchdog",
+        _watchdog(broker, scheduler, writer, start_ts),
+        name="engine_watchdog",
     )
 
     # DiskMonitor — also wires the writer so disk-recovery can clear the
@@ -1489,8 +1572,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     await disk_monitor.start()
 
     logger.info(
-        "═══ CryoDAQ Engine запущен ═══ | "
-        "приборов=%d | тревог=%d | блокировок=%d | mock=%s",
+        "═══ CryoDAQ Engine запущен ═══ | приборов=%d | тревог=%d | блокировок=%d | mock=%s",
         len(driver_configs),
         len(alarm_engine.get_state()),
         len(interlock_engine.get_state()),
@@ -1612,12 +1694,14 @@ async def _run_engine(*, mock: bool = False) -> None:
     logger.info("ZMQ Publisher остановлен")
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
+
     GPIBTransport.close_all_managers()
     logger.info("GPIB ResourceManagers закрыты")
 
     uptime = time.monotonic() - start_ts
     logger.info(
-        "═══ CryoDAQ Engine завершён ═══ | uptime=%.1f с", uptime,
+        "═══ CryoDAQ Engine завершён ═══ | uptime=%.1f с",
+        uptime,
     )
 
 
@@ -1633,6 +1717,7 @@ def _is_pid_alive(pid: int) -> bool:
     try:
         if sys.platform == "win32":
             import ctypes
+
             handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
             if handle:
                 ctypes.windll.kernel32.CloseHandle(handle)
@@ -1656,9 +1741,11 @@ def _acquire_engine_lock() -> int:
     try:
         if sys.platform == "win32":
             import msvcrt
+
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         # Lock held by another process (flock/msvcrt is authoritative)
@@ -1707,8 +1794,8 @@ def _force_kill_existing() -> None:
         try:
             if sys.platform == "win32":
                 import subprocess
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                               capture_output=True, timeout=5)
+
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=5)
             else:
                 os.kill(pid, 9)  # SIGKILL
         except Exception as exc:
@@ -1755,11 +1842,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
-    parser.add_argument("--force", action="store_true",
-                        help="Kill existing engine and take over")
+    parser.add_argument("--force", action="store_true", help="Kill existing engine and take over")
     args = parser.parse_args()
 
     from cryodaq.logging_setup import setup_logging
+
     setup_logging("engine")
 
     if args.force:
@@ -1781,7 +1868,8 @@ def main() -> None:
             # launcher refuses to spin in a tight restart loop.
             logger.critical(
                 "CONFIG ERROR (YAML parse): %s\n%s",
-                exc, traceback.format_exc(),
+                exc,
+                traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except FileNotFoundError as exc:
@@ -1789,10 +1877,17 @@ def main() -> None:
             # error: same exit code.
             logger.critical(
                 "CONFIG ERROR (file not found): %s\n%s",
-                exc, traceback.format_exc(),
+                exc,
+                traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
-        except (SafetyConfigError, AlarmConfigError, InterlockConfigError, HousekeepingConfigError, ChannelConfigError) as exc:
+        except (
+            SafetyConfigError,
+            AlarmConfigError,
+            InterlockConfigError,
+            HousekeepingConfigError,
+            ChannelConfigError,
+        ) as exc:
             labels = {
                 SafetyConfigError: "safety",
                 AlarmConfigError: "alarm",
@@ -1803,7 +1898,9 @@ def main() -> None:
             label = labels.get(type(exc), "config")
             logger.critical(
                 "CONFIG ERROR (%s config): %s\n%s",
-                label, exc, traceback.format_exc(),
+                label,
+                exc,
+                traceback.format_exc(),
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:

@@ -240,9 +240,7 @@ class AlarmEngine:
             Если конфигурация содержит ошибки (дублирование имён, некорректные поля).
         """
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"Файл конфигурации тревог не найден: {config_path}"
-            )
+            raise FileNotFoundError(f"Файл конфигурации тревог не найден: {config_path}")
 
         with config_path.open(encoding="utf-8") as fh:
             raw: dict[str, Any] = yaml.safe_load(fh)
@@ -298,9 +296,7 @@ class AlarmEngine:
             Если тревога с таким именем уже зарегистрирована.
         """
         if condition.name in self._alarms:
-            raise ValueError(
-                f"Тревога '{condition.name}' уже зарегистрирована."
-            )
+            raise ValueError(f"Тревога '{condition.name}' уже зарегистрирована.")
         self._alarms[condition.name] = _AlarmRecord(condition=condition)
         logger.info(
             "Тревога добавлена: '%s' | канал: '%s' | порог: %s %s | "
@@ -332,9 +328,7 @@ class AlarmEngine:
             maxsize=10_000,
             filter_fn=lambda r: not r.channel.startswith(("alarm/", "analytics/", "system/")),
         )
-        self._task = asyncio.create_task(
-            self._check_loop(), name="alarm_check_loop"
-        )
+        self._task = asyncio.create_task(self._check_loop(), name="alarm_check_loop")
         logger.info(
             "AlarmEngine запущен. Зарегистрировано тревог: %d.",
             len(self._alarms),
@@ -410,8 +404,7 @@ class AlarmEngine:
         self._events.append(event)
 
         logger.warning(
-            "Тревога '%s' подтверждена оператором (ACTIVE → ACKNOWLEDGED). "
-            "Описание: %s.",
+            "Тревога '%s' подтверждена оператором (ACTIVE → ACKNOWLEDGED). Описание: %s.",
             alarm_name,
             record.condition.description,
         )
@@ -562,10 +555,10 @@ class AlarmEngine:
                 await self._publish_alarm_reading(event)
                 await self._publish_alarm_count()
 
-            elif (
-                record.state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED)
-                and condition.is_cleared(reading.value)
-            ):
+            elif record.state in (
+                AlarmState.ACTIVE,
+                AlarmState.ACKNOWLEDGED,
+            ) and condition.is_cleared(reading.value):
                 # Переход ACTIVE/ACKNOWLEDGED → OK
                 previous_state = record.state
                 record.state = AlarmState.OK

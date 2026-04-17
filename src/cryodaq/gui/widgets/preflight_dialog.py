@@ -1,4 +1,4 @@
-﻿"""Pre-Flight Checklist — диалог проверки готовности перед стартом эксперимента.
+"""Pre-Flight Checklist — диалог проверки готовности перед стартом эксперимента.
 
 Показывается при нажатии «Создать эксперимент» перед фактическим созданием.
 Автоматически проверяет условия и позволяет оператору принять решение.
@@ -35,7 +35,11 @@ class PreFlightCheck:
 
 
 _STATUS_ICON = {"ok": "✅", "warning": "⚠️", "error": "❌"}
-_STATUS_COLOR = {"ok": theme.STATUS_OK, "warning": theme.STATUS_WARNING, "error": theme.STATUS_FAULT}
+_STATUS_COLOR = {
+    "ok": theme.STATUS_OK,
+    "warning": theme.STATUS_WARNING,
+    "error": theme.STATUS_FAULT,
+}
 
 # Пороги
 _DISK_WARN_GB = 10
@@ -87,27 +91,17 @@ class PreFlightDialog(QDialog):
                     detail = f"Состояние: {state}"
                     if reason:
                         detail += f" ({reason})"
-                    self._checks.append(
-                        PreFlightCheck("Safety state", "error", detail)
-                    )
+                    self._checks.append(PreFlightCheck("Safety state", "error", detail))
                 else:
-                    self._checks.append(
-                        PreFlightCheck("Safety state", "ok", state or "—")
-                    )
+                    self._checks.append(PreFlightCheck("Safety state", "ok", state or "—"))
             else:
                 self._checks.append(
                     PreFlightCheck("Engine подключён", "error", result.get("error", "нет ответа"))
                 )
-                self._checks.append(
-                    PreFlightCheck("Safety state", "error", "Engine недоступен")
-                )
+                self._checks.append(PreFlightCheck("Safety state", "error", "Engine недоступен"))
         except Exception as exc:
-            self._checks.append(
-                PreFlightCheck("Engine подключён", "error", str(exc))
-            )
-            self._checks.append(
-                PreFlightCheck("Safety state", "error", "Engine недоступен")
-            )
+            self._checks.append(PreFlightCheck("Engine подключён", "error", str(exc)))
+            self._checks.append(PreFlightCheck("Safety state", "error", "Engine недоступен"))
         self._check_complete()
 
     @Slot(dict)
@@ -121,9 +115,7 @@ class PreFlightDialog(QDialog):
                     detail = f"{count} активных: {names}"
                     if count > 3:
                         detail += "..."
-                    self._checks.append(
-                        PreFlightCheck("Алармы", "warning", detail)
-                    )
+                    self._checks.append(PreFlightCheck("Алармы", "warning", detail))
                 else:
                     self._checks.append(PreFlightCheck("Алармы", "ok", "0"))
             else:
@@ -142,7 +134,9 @@ class PreFlightDialog(QDialog):
                 critical = summary.get("critical", 0)
                 warning = summary.get("warning", 0)
                 if critical > 0:
-                    self._checks.append(PreFlightCheck("Датчики", "warning", f"{critical} критичных"))
+                    self._checks.append(
+                        PreFlightCheck("Датчики", "warning", f"{critical} критичных")
+                    )
                 elif warning > 0:
                     self._checks.append(
                         PreFlightCheck("Датчики", "warning", f"{warning} с предупреждениями")
@@ -170,26 +164,21 @@ class PreFlightDialog(QDialog):
     def _check_disk(self) -> None:
         try:
             from cryodaq.paths import get_data_dir
+
             data_dir = get_data_dir()
             data_dir.mkdir(parents=True, exist_ok=True)
             usage = shutil.disk_usage(str(data_dir))
-            free_gb = usage.free / (1024 ** 3)
+            free_gb = usage.free / (1024**3)
             if free_gb < _DISK_ERROR_GB:
                 self._checks.append(
                     PreFlightCheck("Диск", "error", f"{free_gb:.1f} ГБ (критически мало)")
                 )
             elif free_gb < _DISK_WARN_GB:
-                self._checks.append(
-                    PreFlightCheck("Диск", "warning", f"{free_gb:.1f} ГБ")
-                )
+                self._checks.append(PreFlightCheck("Диск", "warning", f"{free_gb:.1f} ГБ"))
             else:
-                self._checks.append(
-                    PreFlightCheck("Диск", "ok", f"{free_gb:.0f} ГБ свободно")
-                )
+                self._checks.append(PreFlightCheck("Диск", "ok", f"{free_gb:.0f} ГБ свободно"))
         except Exception as exc:
-            self._checks.append(
-                PreFlightCheck("Диск", "warning", f"Не удалось проверить: {exc}")
-            )
+            self._checks.append(PreFlightCheck("Диск", "warning", f"Не удалось проверить: {exc}"))
 
     # ------------------------------------------------------------------
     # UI
@@ -251,7 +240,8 @@ class PreFlightDialog(QDialog):
             label = QLabel(text)
             label.setStyleSheet(f"color: {color};")
             self._checks_layout.insertWidget(
-                self._checks_layout.count() - 1, label,
+                self._checks_layout.count() - 1,
+                label,
             )
 
         # Summary

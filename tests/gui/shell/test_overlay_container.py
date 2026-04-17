@@ -1,4 +1,5 @@
 """Smoke tests for OverlayContainer (Phase UI-1 v2 Block A)."""
+
 from __future__ import annotations
 
 import os

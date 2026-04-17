@@ -9,7 +9,12 @@ import pytest
 import yaml
 
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
+from cryodaq.core.interlock import (
+    InterlockCondition,
+    InterlockConfigError,
+    InterlockEngine,
+    InterlockState,
+)
 from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------
@@ -105,9 +110,7 @@ async def test_tripped_to_acknowledged() -> None:
 async def test_cooldown_prevents_retrip() -> None:
     broker, engine, called = await _make_engine()
     # Use a very long cooldown so the second publish definitely falls within it
-    engine.add_condition(
-        _make_condition(threshold=300.0, comparison=">", cooldown_s=60.0)
-    )
+    engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=60.0))
 
     # First trip
     await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
@@ -226,9 +229,7 @@ async def test_greater_than_comparison() -> None:
 
 async def test_less_than_comparison() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(
-        _make_condition(threshold=2.0, comparison="<", channel_pattern=r"T\d+")
-    )
+    engine.add_condition(_make_condition(threshold=2.0, comparison="<", channel_pattern=r"T\d+"))
 
     # Value above threshold — should NOT trip
     await broker.publish(Reading.now("T1", 3.0, "K", instrument_id="test"))
@@ -283,9 +284,7 @@ async def test_event_history_bounded() -> None:
 
     engine = InterlockEngine(broker=broker, actions={"emergency_off": counting_action})
     # Use cooldown_s=0 so every reading can trip; interlock re-arms each time
-    engine.add_condition(
-        _make_condition(threshold=300.0, comparison=">", cooldown_s=0.0)
-    )
+    engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=0.0))
     await engine.start()
 
     # Publish 1100 readings that all exceed the threshold.
@@ -344,9 +343,7 @@ async def test_missing_action_rejected() -> None:
     engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None})
 
     with pytest.raises(ValueError, match="неизвестное действие"):
-        engine.add_condition(
-            _make_condition(name="bad", action="nonexistent_action")
-        )
+        engine.add_condition(_make_condition(name="bad", action="nonexistent_action"))
 
 
 # ---------------------------------------------------------------------------
@@ -390,15 +387,14 @@ async def test_get_state() -> None:
 async def test_detector_warmup_pattern_matches_full_channel() -> None:
     """Regex pattern '\u042212 .*' from interlocks.yaml matches full channel name."""
     import re
+
     pattern = "\u042212 .*"
-    full_name = "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
-    assert re.fullmatch(pattern, full_name), (
-        f"Pattern {pattern!r} should match {full_name!r}"
+    full_name = (
+        "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
     )
+    assert re.fullmatch(pattern, full_name), f"Pattern {pattern!r} should match {full_name!r}"
     # Also verify it does NOT match Latin T12
-    assert not re.fullmatch(pattern, "T12 Something"), (
-        "Cyrillic pattern should not match Latin T"
-    )
+    assert not re.fullmatch(pattern, "T12 Something"), "Cyrillic pattern should not match Latin T"
 
 
 async def test_multiple_interlocks() -> None:
@@ -412,9 +408,7 @@ async def test_multiple_interlocks() -> None:
         called_b.append(True)
 
     broker = DataBroker()
-    engine = InterlockEngine(
-        broker=broker, actions={"action_a": action_a, "action_b": action_b}
-    )
+    engine = InterlockEngine(broker=broker, actions={"action_a": action_a, "action_b": action_b})
 
     # lock_a monitors T-channels and trips above 300 K
     engine.add_condition(
@@ -467,8 +461,6 @@ async def test_multiple_interlocks() -> None:
 # Phase 2d C-1.1: fail-closed interlock loading
 # ---------------------------------------------------------------------------
 
-from cryodaq.core.interlock import InterlockConfigError
-
 
 def test_interlock_missing_file_raises(tmp_path):
     """C-1.1: missing interlocks.yaml must raise InterlockConfigError."""
@@ -491,17 +483,23 @@ def test_interlock_malformed_yaml_raises(tmp_path):
 
 def test_interlock_valid_config_loads(tmp_path):
     cfg = tmp_path / "ok.yaml"
-    cfg.write_text(yaml.dump({
-        "interlocks": [{
-            "name": "test_lock",
-            "description": "test",
-            "channel_pattern": "Т1 .*",
-            "threshold": 350.0,
-            "comparison": ">",
-            "action": "emergency_off",
-            "cooldown_s": 10.0,
-        }],
-    }))
+    cfg.write_text(
+        yaml.dump(
+            {
+                "interlocks": [
+                    {
+                        "name": "test_lock",
+                        "description": "test",
+                        "channel_pattern": "Т1 .*",
+                        "threshold": 350.0,
+                        "comparison": ">",
+                        "action": "emergency_off",
+                        "cooldown_s": 10.0,
+                    }
+                ],
+            }
+        )
+    )
     from cryodaq.core.interlock import InterlockEngine
 
     engine = InterlockEngine(

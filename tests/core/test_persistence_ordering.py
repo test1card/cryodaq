@@ -161,9 +161,7 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path) -> None:
     db_path = _db_path_for_writer(writer, reading.timestamp)
     assert db_path.exists(), "DB file must exist before reading reaches subscriber"
     row_count = _count_rows(db_path)
-    assert row_count >= 1, (
-        f"Expected at least 1 row in DB, found {row_count}"
-    )
+    assert row_count >= 1, f"Expected at least 1 row in DB, found {row_count}"
 
     await writer.stop()
 
@@ -182,6 +180,7 @@ async def test_write_immediate_timeout_handling(tmp_path: Path) -> None:
 
     def slow_write_batch(batch: list[Reading]) -> None:
         import time
+
         time.sleep(0.1)  # 100 ms — deliberate slow write in the executor thread
         original_write_batch(batch)
 
@@ -271,6 +270,4 @@ async def test_scheduler_without_writer_still_publishes(tmp_path: Path) -> None:
         await sched.stop()
 
     assert reading.channel == "CH1"
-    assert abs(reading.value - 4.2) < 1e-9, (
-        f"Unexpected reading value: {reading.value}"
-    )
+    assert abs(reading.value - 4.2) < 1e-9, f"Unexpected reading value: {reading.value}"

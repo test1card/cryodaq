@@ -138,7 +138,10 @@ def test_archive_panel_empty_state(monkeypatch) -> None:
 
     assert panel._table.rowCount() == 0
     assert panel._summary_label.text() == "Эксперименты по текущему фильтру не найдены."
-    assert panel._notes_view.toPlainText() == "Выберите эксперимент, чтобы увидеть сведения и артефакты."
+    assert (
+        panel._notes_view.toPlainText()
+        == "Выберите эксперимент, чтобы увидеть сведения и артефакты."
+    )
     assert panel._runs_view.toPlainText() == "Записей прогонов нет."
     assert panel._artifacts_view.toPlainText() == "Артефактов ещё нет."
     assert panel._results_view.toPlainText() == "Таблиц результатов нет."
@@ -199,7 +202,9 @@ def test_archive_panel_regenerate_report_wiring(monkeypatch, tmp_path: Path) -> 
     panel._regenerate_selected_report()
     _process_events()
 
-    generate_calls = [payload for payload in calls if payload["cmd"] == "experiment_generate_report"]
+    generate_calls = [
+        payload for payload in calls if payload["cmd"] == "experiment_generate_report"
+    ]
     assert len(generate_calls) == 1
     assert generate_calls[0]["experiment_id"] == "exp-003"
 
@@ -292,7 +297,9 @@ def test_archive_panel_details_show_missing_report_text(monkeypatch, tmp_path: P
     assert panel._open_docx_button.isEnabled() is False
 
 
-def test_archive_panel_report_disabled_template_updates_details(monkeypatch, tmp_path: Path) -> None:
+def test_archive_panel_report_disabled_template_updates_details(
+    monkeypatch, tmp_path: Path
+) -> None:
     _app()
     folder = tmp_path / "exp-005"
     folder.mkdir()

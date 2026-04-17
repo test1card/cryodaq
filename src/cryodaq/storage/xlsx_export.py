@@ -184,7 +184,9 @@ class XLSXExporter:
         wb.save(str(output_path))
         logger.info(
             "XLSX экспорт: %s (%d записей, %d каналов)",
-            output_path, data_row_count, len(unique_channels),
+            output_path,
+            data_row_count,
+            len(unique_channels),
         )
         return data_row_count
 
@@ -193,7 +195,9 @@ class XLSXExporter:
     # ------------------------------------------------------------------
 
     def _find_db_files(
-        self, start: datetime | None, end: datetime | None,
+        self,
+        start: datetime | None,
+        end: datetime | None,
     ) -> list[Path]:
         """Найти daily-файлы SQLite, покрывающие указанный диапазон."""
         if not self._data_dir.exists():

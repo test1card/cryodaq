@@ -1,7 +1,8 @@
 """Tests for SensorCell (Phase UI-1 v2 Block B.3)."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.dashboard.sensor_cell import SensorCell
@@ -18,15 +19,13 @@ def test_sensor_cell_displays_label(app, mock_channel_mgr, buffer_store):
     assert "\u04221" in cell._label_widget.text()
 
 
-def test_sensor_cell_update_value_with_reading(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_update_value_with_reading(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     reading = Reading(
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=4.21,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
@@ -36,22 +35,16 @@ def test_sensor_cell_update_value_with_reading(
     assert cell._last_status == ChannelStatus.OK
 
 
-def test_sensor_cell_refresh_from_empty_buffer_marks_stale(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_refresh_from_empty_buffer_marks_stale(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     cell.refresh_from_buffer()
     assert cell._data_stale is True
 
 
-def test_sensor_cell_inline_rename_signals(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_inline_rename_signals(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     received = []
-    cell.rename_requested.connect(
-        lambda ch, name: received.append((ch, name))
-    )
+    cell.rename_requested.connect(lambda ch, name: received.append((ch, name)))
     cell._enter_rename_mode()
     assert cell._is_renaming is True
     cell._rename_edit.setText("\u041d\u043e\u0432\u043e\u0435 \u0438\u043c\u044f")
@@ -60,9 +53,7 @@ def test_sensor_cell_inline_rename_signals(
     assert cell._is_renaming is False
 
 
-def test_sensor_cell_rename_escape_cancels(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_rename_escape_cancels(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     cell._enter_rename_mode()
     assert cell._is_renaming is True
@@ -71,15 +62,13 @@ def test_sensor_cell_rename_escape_cancels(
     assert cell._rename_edit is None
 
 
-def test_sensor_cell_update_value_large_number(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_update_value_large_number(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     reading = Reading(
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=1500.0,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
@@ -95,7 +84,7 @@ def test_sensor_cell_stale_recovery(app, mock_channel_mgr, buffer_store):
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=4.2,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
@@ -118,15 +107,13 @@ def test_sensor_cell_stale_recovery(app, mock_channel_mgr, buffer_store):
     assert theme.STATUS_OK in ss
 
 
-def test_sensor_cell_update_value_small_number(
-    app, mock_channel_mgr, buffer_store
-):
+def test_sensor_cell_update_value_small_number(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("\u04221", mock_channel_mgr, buffer_store)
     reading = Reading(
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=0.005,
         unit="K",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )

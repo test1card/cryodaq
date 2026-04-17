@@ -19,16 +19,30 @@ from cryodaq.core.sensor_diagnostics import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _push_constant(engine: SensorDiagnosticsEngine, ch: str, T: float, n: int = 200,
-                   dt: float = 0.5, t0: float = 0.0) -> None:
+
+def _push_constant(
+    engine: SensorDiagnosticsEngine,
+    ch: str,
+    T: float,
+    n: int = 200,
+    dt: float = 0.5,
+    t0: float = 0.0,
+) -> None:
     """Push n constant-temperature readings."""
     for i in range(n):
         engine.push(ch, t0 + i * dt, T)
 
 
-def _push_noisy(engine: SensorDiagnosticsEngine, ch: str, T: float, sigma: float,
-                n: int = 200, dt: float = 0.5, t0: float = 0.0,
-                rng: np.random.Generator | None = None) -> None:
+def _push_noisy(
+    engine: SensorDiagnosticsEngine,
+    ch: str,
+    T: float,
+    sigma: float,
+    n: int = 200,
+    dt: float = 0.5,
+    t0: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> None:
     """Push n readings with Gaussian noise around T."""
     if rng is None:
         rng = np.random.default_rng(42)
@@ -36,9 +50,15 @@ def _push_noisy(engine: SensorDiagnosticsEngine, ch: str, T: float, sigma: float
         engine.push(ch, t0 + i * dt, T + rng.normal(0, sigma))
 
 
-def _push_linear(engine: SensorDiagnosticsEngine, ch: str, T0: float,
-                 rate_K_per_min: float, n: int = 200, dt: float = 0.5,
-                 t0: float = 0.0) -> None:
+def _push_linear(
+    engine: SensorDiagnosticsEngine,
+    ch: str,
+    T0: float,
+    rate_K_per_min: float,
+    n: int = 200,
+    dt: float = 0.5,
+    t0: float = 0.0,
+) -> None:
     """Push n readings with a linear drift: T = T0 + rate * t."""
     rate_per_sec = rate_K_per_min / 60.0
     for i in range(n):
@@ -49,6 +69,7 @@ def _push_linear(engine: SensorDiagnosticsEngine, ch: str, T0: float,
 # ---------------------------------------------------------------------------
 # 1. test_noise_std_constant_signal — const T → noise ≈ 0
 # ---------------------------------------------------------------------------
+
 
 def test_noise_std_constant_signal() -> None:
     engine = SensorDiagnosticsEngine()
@@ -62,6 +83,7 @@ def test_noise_std_constant_signal() -> None:
 # 2. test_noise_std_known_gaussian — T + N(0,σ) → noise ≈ σ (±20%)
 # ---------------------------------------------------------------------------
 
+
 def test_noise_std_known_gaussian() -> None:
     engine = SensorDiagnosticsEngine()
     sigma = 0.05
@@ -74,6 +96,7 @@ def test_noise_std_known_gaussian() -> None:
 # ---------------------------------------------------------------------------
 # 3. test_noise_mad_robust_to_outlier — one spike does not inflate noise
 # ---------------------------------------------------------------------------
+
 
 def test_noise_mad_robust_to_outlier() -> None:
     engine = SensorDiagnosticsEngine()
@@ -101,6 +124,7 @@ def test_noise_mad_robust_to_outlier() -> None:
 # 4. test_drift_zero_constant — const T → drift ≈ 0
 # ---------------------------------------------------------------------------
 
+
 def test_drift_zero_constant() -> None:
     engine = SensorDiagnosticsEngine()
     _push_constant(engine, "T1", 50.0, n=200, dt=3.0)  # 600s window
@@ -112,6 +136,7 @@ def test_drift_zero_constant() -> None:
 # ---------------------------------------------------------------------------
 # 5. test_drift_known_slope — T = T₀ + rate·t → drift ≈ rate (±10%)
 # ---------------------------------------------------------------------------
+
 
 def test_drift_known_slope() -> None:
     engine = SensorDiagnosticsEngine()
@@ -126,10 +151,13 @@ def test_drift_known_slope() -> None:
 # 6. test_correlation_identical_signals — r ≈ 1.0
 # ---------------------------------------------------------------------------
 
+
 def test_correlation_identical_signals() -> None:
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     rng = np.random.default_rng(42)
     for i in range(200):
         v = 50.0 + rng.normal(0, 0.1)
@@ -145,10 +173,13 @@ def test_correlation_identical_signals() -> None:
 # 7. test_correlation_uncorrelated — random vs random → |r| < 0.3
 # ---------------------------------------------------------------------------
 
+
 def test_correlation_uncorrelated() -> None:
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     rng = np.random.default_rng(42)
     for i in range(500):
         engine.push("T1", i * 0.5, 50.0 + rng.normal(0, 1.0))
@@ -163,10 +194,13 @@ def test_correlation_uncorrelated() -> None:
 # 8. test_correlation_no_neighbor — single channel in group → None
 # ---------------------------------------------------------------------------
 
+
 def test_correlation_no_neighbor() -> None:
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1"]},
+        }
+    )
     _push_constant(engine, "T1", 50.0)
     engine.update()
     diag = engine.get_diagnostics()["T1"]
@@ -177,10 +211,13 @@ def test_correlation_no_neighbor() -> None:
 # 9. test_health_perfect — low noise, zero drift, no outliers → 100
 # ---------------------------------------------------------------------------
 
+
 def test_health_perfect() -> None:
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     rng = np.random.default_rng(42)
     # Shared noise at warm T (threshold=0.2K) — noise ~0.01K << threshold,
     # identical signal → r=1.0, no drift, no outliers.
@@ -197,6 +234,7 @@ def test_health_perfect() -> None:
 # 10. test_health_noisy — noise > 3× threshold → health ≤ 60
 # ---------------------------------------------------------------------------
 
+
 def test_health_noisy() -> None:
     engine = SensorDiagnosticsEngine()
     # At T=50K, threshold=0.05K; noise = 0.2K → >3× threshold → -40
@@ -210,6 +248,7 @@ def test_health_noisy() -> None:
 # 11. test_health_drifting — high drift → health ≤ 75
 # ---------------------------------------------------------------------------
 
+
 def test_health_drifting() -> None:
     engine = SensorDiagnosticsEngine()
     # Drift 0.5 K/min > threshold 0.1 → -25 → health = 75
@@ -222,6 +261,7 @@ def test_health_drifting() -> None:
 # ---------------------------------------------------------------------------
 # 12. test_health_multiple_faults — noisy + drifting → health ≤ 35
 # ---------------------------------------------------------------------------
+
 
 def test_health_multiple_faults() -> None:
     engine = SensorDiagnosticsEngine()
@@ -242,6 +282,7 @@ def test_health_multiple_faults() -> None:
 # 13. test_noise_threshold_temperature_dependent
 # ---------------------------------------------------------------------------
 
+
 def test_noise_threshold_temperature_dependent() -> None:
     assert _get_noise_threshold(10.0) == pytest.approx(0.02)
     assert _get_noise_threshold(50.0) == pytest.approx(0.05)
@@ -252,6 +293,7 @@ def test_noise_threshold_temperature_dependent() -> None:
 # ---------------------------------------------------------------------------
 # 14. test_outlier_detection — spikes detected, count correct
 # ---------------------------------------------------------------------------
+
 
 def test_outlier_detection() -> None:
     engine = SensorDiagnosticsEngine()
@@ -272,6 +314,7 @@ def test_outlier_detection() -> None:
 # 15. test_fault_flags_disconnected — T = 380K → ["disconnected"]
 # ---------------------------------------------------------------------------
 
+
 def test_fault_flags_disconnected() -> None:
     engine = SensorDiagnosticsEngine()
     _push_constant(engine, "T1", 380.0)
@@ -285,6 +328,7 @@ def test_fault_flags_disconnected() -> None:
 # 16. test_fault_flags_shorted — T ≈ 0K → ["shorted"]
 # ---------------------------------------------------------------------------
 
+
 def test_fault_flags_shorted() -> None:
     engine = SensorDiagnosticsEngine()
     _push_constant(engine, "T1", 0.0)
@@ -297,6 +341,7 @@ def test_fault_flags_shorted() -> None:
 # ---------------------------------------------------------------------------
 # 17. test_summary_counts — 18 ok + 1 warn + 1 crit → summary correct
 # ---------------------------------------------------------------------------
+
 
 def test_summary_counts() -> None:
     engine = SensorDiagnosticsEngine()
@@ -328,6 +373,7 @@ def test_summary_counts() -> None:
 # 18. test_insufficient_data — <10 points → noise/drift = NaN, health = 100
 # ---------------------------------------------------------------------------
 
+
 def test_insufficient_data() -> None:
     engine = SensorDiagnosticsEngine()
     for i in range(5):
@@ -342,6 +388,7 @@ def test_insufficient_data() -> None:
 # ---------------------------------------------------------------------------
 # 19. test_buffer_window_sliding — old points expire
 # ---------------------------------------------------------------------------
+
 
 def test_buffer_window_sliding() -> None:
     engine = SensorDiagnosticsEngine(config={"noise_window_s": 10})
@@ -358,10 +405,13 @@ def test_buffer_window_sliding() -> None:
 # 20. test_serialization — asdict → JSON-compatible
 # ---------------------------------------------------------------------------
 
+
 def test_serialization() -> None:
-    engine = SensorDiagnosticsEngine(config={
-        "correlation_groups": {"shield": ["T1", "T2"]},
-    })
+    engine = SensorDiagnosticsEngine(
+        config={
+            "correlation_groups": {"shield": ["T1", "T2"]},
+        }
+    )
     _push_constant(engine, "T1", 50.0)
     _push_constant(engine, "T2", 51.0)
     engine.update()
@@ -386,6 +436,7 @@ def test_serialization() -> None:
 # ---------------------------------------------------------------------------
 # Integration: engine config loading + feed + command response
 # ---------------------------------------------------------------------------
+
 
 def test_engine_config_loading() -> None:
     """SensorDiagnosticsEngine created from plugins.yaml-style config dict."""
@@ -475,6 +526,7 @@ def test_engine_feed_and_command_response() -> None:
 # Regression: correlation groups resolve short config IDs to full runtime names
 # ---------------------------------------------------------------------------
 
+
 def test_correlation_groups_resolve_short_to_full() -> None:
     """Correlation groups use short IDs (Т12), push uses full names (Т12 Теплообменник 2)."""
     cfg = {
@@ -491,14 +543,24 @@ def test_correlation_groups_resolve_short_to_full() -> None:
     t0 = time.time()
     # Push with full runtime names (Cyrillic Т)
     for i in range(10):
-        engine.push("\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1", t0 + i, 80.0 + i * 0.1)
-        engine.push("\u0422\u0031\u0032 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2", t0 + i, 4.2 + i * 0.05)
+        engine.push(
+            "\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1",  # noqa: E501
+            t0 + i,
+            80.0 + i * 0.1,
+        )
+        engine.push(
+            "\u0422\u0031\u0032 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2",  # noqa: E501
+            t0 + i,
+            4.2 + i * 0.05,
+        )
     engine.update()
     diag = engine.get_diagnostics()
     # Channel with full name should have correlation computed (not None)
-    d11 = diag.get("\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1")
+    d11 = diag.get(
+        "\u0422\u0031\u0031 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1"  # noqa: E501
+    )
     assert d11 is not None, "\u0422\u003111 diagnostics missing"
     # Correlation should be computable (both channels in same group)
     assert d11.correlation is not None, (
-        "Correlation should be computed \u2014 short IDs in config must resolve to full runtime names"
+        "Correlation should be computed \u2014 short IDs in config must resolve to full runtime names"  # noqa: E501
     )

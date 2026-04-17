@@ -165,7 +165,7 @@ async def test_experiment_abort_command(manager: ExperimentManager) -> None:
 
 
 async def test_experiment_attach_run_record_persists_metadata(manager: ExperimentManager) -> None:
-    created = _run_experiment_command(
+    _run_experiment_command(
         "experiment_create",
         {
             "template_id": "cooldown_test",

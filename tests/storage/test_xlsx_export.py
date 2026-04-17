@@ -75,9 +75,7 @@ async def test_xlsx_has_two_sheets(tmp_path: Path) -> None:
     XLSXExporter(data_dir).export(output_path)
 
     wb = openpyxl.load_workbook(output_path)
-    assert wb.sheetnames == ["Данные", "Информация"], (
-        f"Unexpected sheet names: {wb.sheetnames}"
-    )
+    assert wb.sheetnames == ["Данные", "Информация"], f"Unexpected sheet names: {wb.sheetnames}"
 
 
 # ---------------------------------------------------------------------------

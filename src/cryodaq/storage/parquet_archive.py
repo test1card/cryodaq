@@ -5,13 +5,14 @@ daily SQLite files into a single Parquet file during experiment finalization.
 
 pyarrow is OPTIONAL — functions degrade gracefully if not installed.
 """
+
 from __future__ import annotations
 
 import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,15 +52,17 @@ def export_experiment_readings_to_parquet(
 
     t0 = time.monotonic()
 
-    schema = pa.schema([
-        ("timestamp", pa.timestamp("us", tz="UTC")),
-        ("instrument_id", pa.string()),
-        ("channel", pa.string()),
-        ("value", pa.float64()),
-        ("unit", pa.string()),
-        ("status", pa.string()),
-        ("experiment_id", pa.string()),
-    ])
+    schema = pa.schema(
+        [
+            ("timestamp", pa.timestamp("us", tz="UTC")),
+            ("instrument_id", pa.string()),
+            ("channel", pa.string()),
+            ("value", pa.float64()),
+            ("unit", pa.string()),
+            ("status", pa.string()),
+            ("experiment_id", pa.string()),
+        ]
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = pq.ParquetWriter(
@@ -113,9 +116,7 @@ def export_experiment_readings_to_parquet(
 
                     for row in rows:
                         ts_epoch = row["timestamp"]
-                        timestamps.append(
-                            datetime.fromtimestamp(ts_epoch, tz=UTC)
-                        )
+                        timestamps.append(datetime.fromtimestamp(ts_epoch, tz=UTC))
                         instrument_ids.append(row["instrument_id"])
                         channels.append(row["channel"])
                         values.append(float(row["value"]))
@@ -150,7 +151,10 @@ def export_experiment_readings_to_parquet(
 
     logger.info(
         "Parquet archive: %d rows, %.1f MB, %.1fs → %s",
-        total_rows, file_size / 1e6, duration, output_path.name,
+        total_rows,
+        file_size / 1e6,
+        duration,
+        output_path.name,
     )
 
     return ParquetExportResult(

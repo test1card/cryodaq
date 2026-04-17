@@ -17,8 +17,13 @@ def _synthetic_dt670(srdg: float) -> float:
     return max(1.5, 1600.0 / (srdg + 15.0) + 0.05 * math.sin(srdg / 5.0))
 
 
-def _populate_db(db_path: Path, reference_channel: str, target_channel: str,
-                 n_points: int = 200, t_start: float = 1000.0) -> float:
+def _populate_db(
+    db_path: Path,
+    reference_channel: str,
+    target_channel: str,
+    n_points: int = 200,
+    t_start: float = 1000.0,
+) -> float:
     """Create a SQLite DB with synthetic KRDG + SRDG readings. Returns end timestamp."""
     conn = sqlite3.connect(str(db_path))
     conn.execute(
@@ -65,9 +70,14 @@ def data_dir(tmp_path):
 # Extract
 # ------------------------------------------------------------------
 
+
 def test_extract_pairs_basic(data_dir) -> None:
     pairs = CalibrationFitter.extract_pairs(
-        data_dir, 1000.0, 2000.0, "Т1", "Т2",
+        data_dir,
+        1000.0,
+        2000.0,
+        "Т1",
+        "Т2",
     )
     assert len(pairs) == 200
     for srdg_val, krdg_val in pairs:
@@ -85,13 +95,19 @@ def test_extract_filters_ovl(tmp_path) -> None:
     )
     # Normal pair
     conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'OK')")
-    conn.execute("INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')")
+    conn.execute(
+        "INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')"
+    )
     # OVL pair (inf KRDG)
     conn.execute("INSERT INTO readings VALUES (3, 101.0, 'ls', 'ref', 1e308, 'K', 'OK')")
-    conn.execute("INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')")
+    conn.execute(
+        "INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')"
+    )
     # Zero SRDG
     conn.execute("INSERT INTO readings VALUES (5, 102.0, 'ls', 'ref', 77.0, 'K', 'OK')")
-    conn.execute("INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'OK')")
+    conn.execute(
+        "INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'OK')"
+    )
     conn.commit()
     conn.close()
 
@@ -110,20 +126,27 @@ def test_time_alignment_filter(tmp_path) -> None:
     )
     # Aligned pair (0.5s delta)
     conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'OK')")
-    conn.execute("INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')")
+    conn.execute(
+        "INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')"
+    )
     # Misaligned pair (5s delta)
     conn.execute("INSERT INTO readings VALUES (3, 110.0, 'ls', 'ref', 78.0, 'K', 'OK')")
-    conn.execute("INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')")
+    conn.execute(
+        "INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')"
+    )
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 120.0, "ref", "tgt", max_time_delta_s=2.0)
+    pairs = CalibrationFitter.extract_pairs(
+        tmp_path, 99.0, 120.0, "ref", "tgt", max_time_delta_s=2.0
+    )
     assert len(pairs) == 1
 
 
 # ------------------------------------------------------------------
 # Downsample
 # ------------------------------------------------------------------
+
 
 def test_downsample_preserves_curvature(data_dir) -> None:
     pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
@@ -156,6 +179,7 @@ def test_downsample_preserves_boundaries(data_dir) -> None:
 # ------------------------------------------------------------------
 # Breakpoints
 # ------------------------------------------------------------------
+
 
 def test_breakpoints_douglas_peucker(data_dir) -> None:
     pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
@@ -192,6 +216,7 @@ def test_breakpoints_max_limit() -> None:
 # Coverage
 # ------------------------------------------------------------------
 
+
 def test_coverage_statistics(data_dir) -> None:
     pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
@@ -219,11 +244,17 @@ def test_coverage_empty_regions(tmp_path) -> None:
     for i in range(20):
         ts = 1000.0 + i
         conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 4.0, 'K', 'OK')", (ts,))
-        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 80.0, 'sensor_unit', 'OK')", (ts + 0.1,))
+        conn.execute(
+            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 80.0, 'sensor_unit', 'OK')",
+            (ts + 0.1,),
+        )
     for i in range(20):
         ts = 1020.0 + i
         conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 300.0, 'K', 'OK')", (ts,))
-        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 5.0, 'sensor_unit', 'OK')", (ts + 0.1,))
+        conn.execute(
+            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 5.0, 'sensor_unit', 'OK')",
+            (ts + 0.1,),
+        )
     conn.commit()
     conn.close()
 
@@ -238,6 +269,7 @@ def test_coverage_empty_regions(tmp_path) -> None:
 # Full pipeline
 # ------------------------------------------------------------------
 
+
 def test_fit_end_to_end(data_dir, tmp_path) -> None:
     cal_dir = tmp_path / "cal"
     cal_dir.mkdir()
@@ -245,8 +277,12 @@ def test_fit_end_to_end(data_dir, tmp_path) -> None:
 
     fitter = CalibrationFitter()
     result = fitter.fit(
-        data_dir, 1000.0, 2000.0,
-        "Т1", "Т2", store,
+        data_dir,
+        1000.0,
+        2000.0,
+        "Т1",
+        "Т2",
+        store,
         target_count=100,
         min_points_per_zone=3,
         target_rmse_k=0.5,

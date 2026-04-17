@@ -1,5 +1,6 @@
 """Verify SafetyManager uses min_points >= 60 for the rate estimator
 (Phase 2c CC I.3)."""
+
 from __future__ import annotations
 
 from cryodaq.core.safety_broker import SafetyBroker

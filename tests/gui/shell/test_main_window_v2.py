@@ -1,4 +1,5 @@
 """Smoke tests for MainWindowV2 (Phase UI-1 v2 Block A)."""
+
 from __future__ import annotations
 
 import os
@@ -55,4 +56,3 @@ def test_tool_rail_click_switches_overlay() -> None:
     w._on_tool_clicked("home")
     assert w._overlay.current_overlay == "home"
     assert w._tool_rail._buttons["home"]._active is True
-

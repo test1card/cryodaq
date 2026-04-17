@@ -16,6 +16,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_reading(
     channel: str = "CH1",
     value: float = 4.2,
@@ -40,6 +41,7 @@ def _make_reading(
 # 1. Basic roundtrip
 # ---------------------------------------------------------------------------
 
+
 async def test_pack_unpack_roundtrip() -> None:
     original = _make_reading(channel="T_STAGE", value=4.2, unit="K")
     packed = _pack_reading(original)
@@ -56,6 +58,7 @@ async def test_pack_unpack_roundtrip() -> None:
 # ---------------------------------------------------------------------------
 # 2. All fields preserved
 # ---------------------------------------------------------------------------
+
 
 async def test_pack_preserves_all_fields() -> None:
     original = Reading(
@@ -83,6 +86,7 @@ async def test_pack_preserves_all_fields() -> None:
 # 3. ChannelStatus enum survives roundtrip
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("status", list(ChannelStatus))
 async def test_channel_status_serialized(status: ChannelStatus) -> None:
     reading = _make_reading(status=status)
@@ -93,6 +97,7 @@ async def test_channel_status_serialized(status: ChannelStatus) -> None:
 # ---------------------------------------------------------------------------
 # 4. Metadata dict survives msgpack roundtrip
 # ---------------------------------------------------------------------------
+
 
 async def test_metadata_preserved() -> None:
     meta = {
@@ -114,13 +119,11 @@ async def test_metadata_preserved() -> None:
 # 5. Publisher/Subscriber integration via _pack/_unpack (no live sockets)
 # ---------------------------------------------------------------------------
 
+
 async def test_publisher_subscriber_integration() -> None:
     """Verify that a batch of readings can be serialized and deserialized
     in the same way the pub/sub loop does it (topic-stripped payload)."""
-    readings = [
-        _make_reading(channel=f"CH{i}", value=float(i), unit="K")
-        for i in range(5)
-    ]
+    readings = [_make_reading(channel=f"CH{i}", value=float(i), unit="K") for i in range(5)]
 
     # Simulate what ZMQPublisher sends and ZMQSubscriber receives
     topic = b"readings"

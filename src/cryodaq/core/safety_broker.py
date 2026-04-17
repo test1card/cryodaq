@@ -59,7 +59,9 @@ class SafetyBroker:
 
         queue: asyncio.Queue[Reading] = asyncio.Queue(maxsize=maxsize)
         self._subscribers[name] = _SafetySubscription(
-            name=name, queue=queue, maxsize=maxsize,
+            name=name,
+            queue=queue,
+            maxsize=maxsize,
         )
         logger.info("SafetyBroker: подписчик '%s' зарегистрирован (maxsize=%d)", name, maxsize)
         return queue
@@ -68,7 +70,8 @@ class SafetyBroker:
         """Заморозить список подписчиков. После этого subscribe() недоступен."""
         self._frozen = True
         logger.info(
-            "SafetyBroker заморожен: %d подписчиков", len(self._subscribers),
+            "SafetyBroker заморожен: %d подписчиков",
+            len(self._subscribers),
         )
 
     def set_overflow_callback(self, callback: Callable[[], Any]) -> None:
@@ -88,7 +91,8 @@ class SafetyBroker:
                 logger.critical(
                     "SafetyBroker ПЕРЕПОЛНЕНИЕ: подписчик '%s', канал '%s'. "
                     "Данные безопасности потеряны!",
-                    sub.name, reading.channel,
+                    sub.name,
+                    reading.channel,
                 )
                 if self._overflow_callback:
                     try:

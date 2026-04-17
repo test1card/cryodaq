@@ -120,7 +120,9 @@ async def test_debug_mode_blocks_experiment_creation(manager: ExperimentManager)
         manager.create_experiment("Lambda run", "Ivanov", template_id="thermal_conductivity")
 
 
-async def test_start_experiment_creates_artifact_metadata(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_start_experiment_creates_artifact_metadata(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Lambda run",
         title="Lambda run",
@@ -173,7 +175,9 @@ async def test_active_experiment_is_restored_from_persisted_state(
     assert reloaded.get_app_mode() is AppMode.EXPERIMENT
 
 
-async def test_finalize_persists_metadata_and_sqlite(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_finalize_persists_metadata_and_sqlite(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -234,7 +238,9 @@ async def test_update_preserves_existing_fields_after_save(
     assert updated.notes == "Updated note"
     assert updated.custom_fields == {"sample_id": "S-1", "heater_geometry": "spiral"}
 
-    payload = json.loads((tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8"))
+    payload = json.loads(
+        (tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8")
+    )
     assert payload["experiment"]["sample"] == "Cu-01"
     assert payload["experiment"]["description"] == "Original description"
     assert payload["experiment"]["notes"] == "Updated note"
@@ -242,7 +248,9 @@ async def test_update_preserves_existing_fields_after_save(
     assert payload["experiment"]["custom_fields"]["heater_geometry"] == "spiral"
 
 
-async def test_report_disabled_template_is_stored(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_disabled_template_is_stored(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Checkout",
         title="Checkout",
@@ -297,7 +305,9 @@ async def test_duplicate_start_rejected(manager: ExperimentManager) -> None:
         manager.start_experiment("Second", "Operator", template_id="custom")
 
 
-async def test_switch_to_debug_with_active_experiment_is_rejected(manager: ExperimentManager) -> None:
+async def test_switch_to_debug_with_active_experiment_is_rejected(
+    manager: ExperimentManager,
+) -> None:
     manager.start_experiment("First", "Operator", template_id="custom")
 
     with pytest.raises(RuntimeError, match="debug mode"):
@@ -354,7 +364,9 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     archive_root = tmp_path / "experiments" / exp_id / "archive"
-    metadata = json.loads((tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8")
+    )
     assert (archive_root / "tables" / "measured_values.csv").exists()
     assert (archive_root / "tables" / "setpoint_values.csv").exists()
     assert (archive_root / "tables" / "run_results.csv").exists()
@@ -368,7 +380,12 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
     assert (archive_root / "runs" / "autosweep" / "autosweep-001" / sweep_png.name).exists()
 
     result_table_ids = {item["table_id"] for item in metadata["result_tables"]}
-    assert {"measured_values", "setpoint_values", "run_results", "conductivity_vs_temperature"} <= result_table_ids
+    assert {
+        "measured_values",
+        "setpoint_values",
+        "run_results",
+        "conductivity_vs_temperature",
+    } <= result_table_ids
     assert metadata["summary_metadata"]["run_record_count"] == 1
     assert metadata["summary_metadata"]["artifact_count"] >= 8
     assert metadata["summary_metadata"]["conductivity_rows"] == 2
@@ -383,6 +400,7 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
 # ---------------------------------------------------------------------------
 # Phase tracking
 # ---------------------------------------------------------------------------
+
 
 async def test_advance_phase_creates_entry(manager: ExperimentManager) -> None:
     manager.start_experiment("PhaseTest", "Op1", template_id="custom")
@@ -415,6 +433,7 @@ async def test_get_current_phase(manager: ExperimentManager) -> None:
 
 async def test_phase_persisted_in_metadata(manager: ExperimentManager, tmp_path: Path) -> None:
     import json as _json
+
     manager.start_experiment("PhaseTest4", "Op1", template_id="custom")
     manager.advance_phase("measurement", "Op1")
 
@@ -444,6 +463,7 @@ def test_experiment_sidecars_use_atomic_write():
     """B-1.1: experiment.py JSON sidecar writes must use atomic_write_text."""
     source = Path("src/cryodaq/core/experiment.py").read_text(encoding="utf-8")
     import re as _re
+
     raw_json_writes = _re.findall(r"\.write_text\(json\.dumps", source)
     assert len(raw_json_writes) == 0, (
         f"Found {len(raw_json_writes)} raw write_text(json.dumps...) — "

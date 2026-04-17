@@ -45,11 +45,30 @@ _STATUS_COLORS: dict[ChannelStatus, str] = {
 
 # Набор различимых цветов для линий графика (до 24 каналов)
 _LINE_PALETTE: list[str] = [
-    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
-    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
-    "#AEC7E8", "#FFBB78", "#98DF8A", "#FF9896", "#C5B0D5",
-    "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
-    "#393B79", "#637939", "#8C6D31", "#843C39",
+    "#1F77B4",
+    "#FF7F0E",
+    "#2CA02C",
+    "#D62728",
+    "#9467BD",
+    "#8C564B",
+    "#E377C2",
+    "#7F7F7F",
+    "#BCBD22",
+    "#17BECF",
+    "#AEC7E8",
+    "#FFBB78",
+    "#98DF8A",
+    "#FF9896",
+    "#C5B0D5",
+    "#C49C94",
+    "#F7B6D2",
+    "#C7C7C7",
+    "#DBDB8D",
+    "#9EDAE5",
+    "#393B79",
+    "#637939",
+    "#8C6D31",
+    "#843C39",
 ]
 
 # Длина кольцевого буфера (1 час при 1 Гц)
@@ -62,6 +81,7 @@ _DEFAULT_WINDOW_S = 600.0
 # ---------------------------------------------------------------------------
 # ChannelCard
 # ---------------------------------------------------------------------------
+
 
 class ChannelCard(QFrame):
     """Карточка одного температурного канала."""
@@ -155,6 +175,7 @@ class ChannelCard(QFrame):
 # TemperaturePanel
 # ---------------------------------------------------------------------------
 
+
 class TemperaturePanel(QWidget):
     """Панель из 24 температурных каналов с графиком истории.
 
@@ -209,9 +230,7 @@ class TemperaturePanel(QWidget):
         cards_scroll = QScrollArea()
         cards_scroll.setWidgetResizable(True)
         cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        cards_scroll.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-        )
+        cards_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         cards_container = QWidget()
         cards_container.setStyleSheet("background: transparent;")
@@ -242,7 +261,7 @@ class TemperaturePanel(QWidget):
         # --- Правая панель: график ---
         plot_frame = QFrame()
         plot_frame.setStyleSheet(
-            f"QFrame {{ background-color: {theme.SURFACE_SUNKEN}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; }}"
+            f"QFrame {{ background-color: {theme.SURFACE_SUNKEN}; border: 1px solid {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px; }}"  # noqa: E501
         )
         plot_layout = QVBoxLayout(plot_frame)
         plot_layout.setContentsMargins(4, 4, 4, 4)
@@ -253,10 +272,14 @@ class TemperaturePanel(QWidget):
         title_font.setPointSize(10)
         title_font.setBold(True)
         title_label.setFont(title_font)
-        title_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
+        title_label.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
+        )
         plot_layout.addWidget(title_label)
 
-        self._plot_widget = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        self._plot_widget = pg.PlotWidget(
+            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+        )
         plot_layout.addWidget(self._plot_widget)
 
         root_layout.addWidget(plot_frame, stretch=1)
@@ -319,9 +342,7 @@ class TemperaturePanel(QWidget):
         self._cards[channel_id].update_reading(reading)
 
         # Добавить в кольцевой буфер
-        self._buffers[channel_id].append(
-            (reading.timestamp.timestamp(), reading.value)
-        )
+        self._buffers[channel_id].append((reading.timestamp.timestamp(), reading.value))
 
     @Slot(str, bool)
     def _on_visibility_toggled(self, channel_id: str, visible: bool) -> None:
@@ -377,6 +398,4 @@ class TemperaturePanel(QWidget):
             return
         card = self._cards[channel_id]
         if card.is_selected != selected:
-            card.mousePressEvent(
-                type("_FakeEvent", (), {"button": lambda self: Qt.LeftButton})()
-            )
+            card.mousePressEvent(type("_FakeEvent", (), {"button": lambda self: Qt.LeftButton})())

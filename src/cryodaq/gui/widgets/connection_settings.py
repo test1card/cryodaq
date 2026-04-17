@@ -28,11 +28,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-logger = logging.getLogger(__name__)
-
 from cryodaq.gui import theme
 from cryodaq.gui.widgets.common import apply_button_style
 from cryodaq.paths import get_config_dir as _get_config_dir
+
+logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = _get_config_dir()
 _LOCAL_CONFIG = _CONFIG_DIR / "instruments.local.yaml"
@@ -63,7 +63,9 @@ class ConnectionSettingsDialog(QDialog):
             with cfg_path.open(encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}
             self._instruments = raw.get("instruments", [])
-        logger.info("Загружена конфигурация: %s (%d приборов)", cfg_path.name, len(self._instruments))
+        logger.info(
+            "Загружена конфигурация: %s (%d приборов)", cfg_path.name, len(self._instruments)
+        )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -82,9 +84,16 @@ class ConnectionSettingsDialog(QDialog):
 
         # Таблица
         self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels([
-            "Имя", "Тип", "Адрес", "Бод", "Интервал (с)", "Действия",
-        ])
+        self._table.setHorizontalHeaderLabels(
+            [
+                "Имя",
+                "Тип",
+                "Адрес",
+                "Бод",
+                "Интервал (с)",
+                "Действия",
+            ]
+        )
         self._table.verticalHeader().setVisible(False)
         h = self._table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -196,7 +205,8 @@ class ConnectionSettingsDialog(QDialog):
         if row < len(self._instruments):
             name = self._instruments[row].get("name", "?")
             reply = QMessageBox.question(
-                self, "Удалить прибор",
+                self,
+                "Удалить прибор",
                 f"Удалить {name}?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -231,12 +241,16 @@ class ConnectionSettingsDialog(QDialog):
         with _LOCAL_CONFIG.open("w", encoding="utf-8") as fh:
             yaml.dump(
                 {"instruments": instruments},
-                fh, allow_unicode=True, default_flow_style=False, sort_keys=False,
+                fh,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False,
             )
         logger.info("Конфигурация приборов сохранена: %s", _LOCAL_CONFIG)
 
         QMessageBox.information(
-            self, "Сохранено",
+            self,
+            "Сохранено",
             f"Конфигурация сохранена в:\n{_LOCAL_CONFIG}\n\n"
             "Перезапустите Engine для применения изменений.",
         )

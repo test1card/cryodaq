@@ -4,9 +4,8 @@ Status: dashboard usage removed in B.5.6 (compact phase strip).
 Reserved for B.10 Analytics overlay where hero treatment fits the
 context (full screen real estate, drill-down view).
 """
-from __future__ import annotations
 
-from datetime import datetime
+from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
@@ -25,12 +24,10 @@ class MilestoneList(QWidget):
         super().__init__(parent)
         self.setObjectName("milestoneList")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_1, theme.SPACE_2, theme.SPACE_1
-        )
+        self._layout.setContentsMargins(theme.SPACE_2, theme.SPACE_1, theme.SPACE_2, theme.SPACE_1)
         self._layout.setSpacing(2)
         self._empty_label = QLabel(
-            "\u041d\u0435\u0442 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u044b\u0445 \u0444\u0430\u0437"
+            "\u041d\u0435\u0442 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u044b\u0445 \u0444\u0430\u0437"  # noqa: E501
         )  # Нет завершённых фаз
         self._empty_label.setObjectName("milestoneEmpty")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

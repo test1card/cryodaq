@@ -22,6 +22,7 @@ def _app() -> QApplication:
 def _process_workers(dialog: PreFlightDialog, timeout_ms: int = 5000) -> None:
     """Process Qt events until all async preflight checks complete."""
     import time
+
     deadline = time.monotonic() + timeout_ms / 1000
     while dialog._pending_checks > 0 and time.monotonic() < deadline:
         QCoreApplication.processEvents()

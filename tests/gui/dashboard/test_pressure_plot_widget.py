@@ -1,4 +1,5 @@
 """Smoke tests for PressurePlotWidget (Phase UI-1 v2 Block B.2)."""
+
 from __future__ import annotations
 
 import os

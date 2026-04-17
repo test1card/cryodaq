@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from cryodaq.drivers.base import Reading
 
 # Fault: значение за пределами физически допустимого диапазона температур
-_FAULT_MIN = 0.0    # K
+_FAULT_MIN = 0.0  # K
 _FAULT_MAX = 350.0  # K
 
 
@@ -25,7 +25,7 @@ class ChannelState:
 
     channel: str
     value: float
-    timestamp: float          # unix timestamp
+    timestamp: float  # unix timestamp
     unit: str
     instrument_id: str
     is_stale: bool = False
@@ -107,10 +107,7 @@ class ChannelStateTracker:
         """Каналы без обновлений дольше timeout_s (или stale_timeout_s по умолчанию)."""
         threshold = timeout_s if timeout_s is not None else self._stale_timeout
         now = time.time()
-        return [
-            ch for ch, st in self._states.items()
-            if (now - st.timestamp) > threshold
-        ]
+        return [ch for ch, st in self._states.items() if (now - st.timestamp) > threshold]
 
     def record_fault(self, channel: str, timestamp: float) -> None:
         """Записать fault reading для intermittent fault detection."""

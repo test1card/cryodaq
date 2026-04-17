@@ -60,11 +60,30 @@ _BUFFER_MAXLEN = 86400  # 1 point/s × 24h ≈ 3 MB per channel — acceptable
 _DEFAULT_WINDOW_S = 3600.0  # 1 час по умолчанию
 
 _LINE_PALETTE: list[str] = [
-    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
-    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
-    "#AEC7E8", "#FFBB78", "#98DF8A", "#FF9896", "#C5B0D5",
-    "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
-    "#393B79", "#637939", "#8C6D31", "#843C39",
+    "#1F77B4",
+    "#FF7F0E",
+    "#2CA02C",
+    "#D62728",
+    "#9467BD",
+    "#8C564B",
+    "#E377C2",
+    "#7F7F7F",
+    "#BCBD22",
+    "#17BECF",
+    "#AEC7E8",
+    "#FFBB78",
+    "#98DF8A",
+    "#FF9896",
+    "#C5B0D5",
+    "#C49C94",
+    "#F7B6D2",
+    "#C7C7C7",
+    "#DBDB8D",
+    "#9EDAE5",
+    "#393B79",
+    "#637939",
+    "#8C6D31",
+    "#843C39",
 ]
 
 
@@ -80,7 +99,7 @@ def _disk_free_gb() -> float:
     """Свободное место на диске data/ (или C:) в ГБ."""
     try:
         usage = shutil.disk_usage(get_data_dir())
-        return usage.free / (1024 ** 3)
+        return usage.free / (1024**3)
     except Exception:
         return -1.0
 
@@ -130,6 +149,7 @@ class _OrphanedStub:
 # ---------------------------------------------------------------------------
 # StatusStrip
 # ---------------------------------------------------------------------------
+
 
 class StatusStrip(QFrame):
     """Горизонтальная полоса статуса (~40px)."""
@@ -277,6 +297,7 @@ class StatusStrip(QFrame):
 # ---------------------------------------------------------------------------
 # CompactTempCard
 # ---------------------------------------------------------------------------
+
 
 class CompactTempCard(QFrame):
     """Мини-карточка температурного канала (~100x60px). Clickable to toggle plot visibility."""
@@ -472,6 +493,7 @@ class CompactTempCard(QFrame):
 # TempCardGrid
 # ---------------------------------------------------------------------------
 
+
 class _PlaceholderCard(QFrame):
     """Greyed-out placeholder for invisible / empty grid cells."""
 
@@ -481,7 +503,7 @@ class _PlaceholderCard(QFrame):
         self.setMaximumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet(
-            f"background: {theme.SURFACE_PANEL}; border: 1px dashed {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px;"
+            f"background: {theme.SURFACE_PANEL}; border: 1px dashed {theme.BORDER_SUBTLE}; border-radius: {theme.RADIUS_MD}px;"  # noqa: E501
         )
 
 
@@ -556,6 +578,7 @@ class TempCardGrid(QWidget):
 # ---------------------------------------------------------------------------
 # PressureCard
 # ---------------------------------------------------------------------------
+
 
 class PressureCard(QFrame):
     """Карточка текущего давления с цветовой индикацией вакуума."""
@@ -676,6 +699,7 @@ class PressureCard(QFrame):
 # ---------------------------------------------------------------------------
 # KeithleyStrip
 # ---------------------------------------------------------------------------
+
 
 class KeithleyStrip(QFrame):
     """Dual-channel Keithley strip driven by backend truth."""
@@ -805,6 +829,7 @@ class KeithleyStrip(QFrame):
 # ExperimentStatusWidget
 # ---------------------------------------------------------------------------
 
+
 class ExperimentStatusWidget(QFrame):
     """Compact experiment status bar for Overview: name, template, elapsed time."""
 
@@ -874,9 +899,12 @@ class ExperimentStatusWidget(QFrame):
         phase = result.get("current_phase")
         if phase:
             _phase_labels = {
-                "preparation": "Подготовка", "vacuum": "Откачка",
-                "cooldown": "Захолаживание", "measurement": "Измерение",
-                "warmup": "Растепление", "teardown": "Разборка",
+                "preparation": "Подготовка",
+                "vacuum": "Откачка",
+                "cooldown": "Захолаживание",
+                "measurement": "Измерение",
+                "warmup": "Растепление",
+                "teardown": "Разборка",
             }
             parts.append(_phase_labels.get(phase, phase))
         self._status_label.setText(" ".join(parts))
@@ -903,6 +931,7 @@ class ExperimentStatusWidget(QFrame):
 # QuickLogWidget
 # ---------------------------------------------------------------------------
 
+
 class QuickLogWidget(QFrame):
     """Inline quick-log entry for Overview: single-line input + recent entries."""
 
@@ -927,7 +956,7 @@ class QuickLogWidget(QFrame):
         self._input.setPlaceholderText("Заметка оператора...")
         self._input.setStyleSheet(
             f"QLineEdit {{ background: {theme.SURFACE_SUNKEN}; color: {theme.TEXT_SECONDARY}; "
-            f"border: 1px solid {theme.BORDER_STRONG}; border-radius: {theme.RADIUS_SM}px; padding: 2px 6px; }}"
+            f"border: 1px solid {theme.BORDER_STRONG}; border-radius: {theme.RADIUS_SM}px; padding: 2px 6px; }}"  # noqa: E501
         )
         self._input.returnPressed.connect(self._on_submit)
         input_row.addWidget(self._input, stretch=1)
@@ -942,7 +971,9 @@ class QuickLogWidget(QFrame):
 
         # Recent entries
         self._recent_label = QLabel("")
-        self._recent_label.setStyleSheet(f"color: {theme.TEXT_DISABLED}; border: none; font-size: 9pt;")
+        self._recent_label.setStyleSheet(
+            f"color: {theme.TEXT_DISABLED}; border: none; font-size: 9pt;"
+        )
         self._recent_label.setWordWrap(True)
         layout.addWidget(self._recent_label, stretch=1)
 
@@ -960,12 +991,14 @@ class QuickLogWidget(QFrame):
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        worker = ZmqCommandWorker({
-            "cmd": "log_entry",
-            "message": text,
-            "source": "overview",
-            "current_experiment": True,
-        })
+        worker = ZmqCommandWorker(
+            {
+                "cmd": "log_entry",
+                "message": text,
+                "source": "overview",
+                "current_experiment": True,
+            }
+        )
         worker.finished.connect(self._on_submit_done)
         self._workers: list[object] = getattr(self, "_workers", [])
         self._workers.append(worker)
@@ -983,7 +1016,9 @@ class QuickLogWidget(QFrame):
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        self._refresh_worker = ZmqCommandWorker({"cmd": "log_get", "limit": 5, "current_experiment": True})
+        self._refresh_worker = ZmqCommandWorker(
+            {"cmd": "log_get", "limit": 5, "current_experiment": True}
+        )
         self._refresh_worker.finished.connect(self._on_refresh_result)
         self._refresh_worker.start()
 
@@ -1010,6 +1045,7 @@ class QuickLogWidget(QFrame):
 # ---------------------------------------------------------------------------
 # OverviewPanel
 # ---------------------------------------------------------------------------
+
 
 class OverviewPanel(QWidget):
     """Главный виджет вкладки «Обзор».
@@ -1118,8 +1154,7 @@ class OverviewPanel(QWidget):
         self._btn_all = QPushButton("Всё")
         self._btn_all.setFixedSize(QSize(50, 24))
         self._btn_all.setToolTip(
-            "Весь период текущего эксперимента "
-            "(или с запуска engine, если эксперимент не активен)"
+            "Весь период текущего эксперимента (или с запуска engine, если эксперимент не активен)"
         )
         apply_button_style(self._btn_all, "neutral", compact=True)
         self._btn_all.clicked.connect(self._on_all_clicked)
@@ -1151,7 +1186,9 @@ class OverviewPanel(QWidget):
         # ============ 4. GRAPHS — vertical splitter (temp ~70%, pressure ~30%) ============
         graph_splitter = QSplitter(Qt.Orientation.Vertical)
         graph_splitter.setHandleWidth(3)
-        graph_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {theme.BORDER_SUBTLE}; }}")
+        graph_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background-color: {theme.BORDER_SUBTLE}; }}"
+        )
 
         # Temperature plot
         temp_axis = pg.DateAxisItem(orientation="bottom")
@@ -1179,7 +1216,12 @@ class OverviewPanel(QWidget):
         # Background provided by gui.theme global pyqtgraph config.
 
         pi = pw.getPlotItem()
-        pi.setLabel("left", "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u0430", units="\u041a", color="#AAAAAA")
+        pi.setLabel(
+            "left",
+            "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u0430",
+            units="\u041a",
+            color="#AAAAAA",
+        )
         pi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.enableAutoRange(axis="y", enable=True)
@@ -1208,7 +1250,12 @@ class OverviewPanel(QWidget):
         # Background provided by gui.theme global pyqtgraph config.
 
         ppi = pp.getPlotItem()
-        ppi.setLabel("left", "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435", units="mbar", color="#AAAAAA")
+        ppi.setLabel(
+            "left",
+            "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435",
+            units="mbar",
+            color="#AAAAAA",
+        )
         ppi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
         ppi.setLogMode(x=False, y=True)
         ppi.showGrid(x=True, y=True, alpha=0.3)
@@ -1232,7 +1279,8 @@ class OverviewPanel(QWidget):
 
         # --- Cooldown prediction overlay on temperature plot ---
         self._pred_curve = self._plot.plot(
-            [], [],
+            [],
+            [],
             pen=pg.mkPen(color="#ff7b72", width=2, style=Qt.PenStyle.DashLine),
             name="Прогноз",
         )
@@ -1241,17 +1289,19 @@ class OverviewPanel(QWidget):
         self._ci_upper_curve = self._plot.plot([], [], pen=None)
         self._ci_lower_curve = self._plot.plot([], [], pen=None)
         self._ci_band = pg.FillBetweenItem(
-            self._ci_upper_curve, self._ci_lower_curve,
+            self._ci_upper_curve,
+            self._ci_lower_curve,
             brush=pg.mkBrush(255, 123, 114, 30),
         )
         self._plot.addItem(self._ci_band)
         self._ci_band.setVisible(False)
 
         from PySide6.QtWidgets import QLabel as _Label
+
         self._eta_overlay = _Label("", self._plot)
         self._eta_overlay.setStyleSheet(
             f"color: {theme.TEXT_FAULT}; font-size: 12pt; font-weight: bold; "
-            f"background: {theme.SURFACE_PANEL}; padding: 4px 8px; border-radius: {theme.RADIUS_MD}px;"
+            f"background: {theme.SURFACE_PANEL}; padding: 4px 8px; border-radius: {theme.RADIUS_MD}px;"  # noqa: E501
         )
         self._eta_overlay.setVisible(False)
 
@@ -1351,17 +1401,13 @@ class OverviewPanel(QWidget):
                 if card is not None:
                     card.update_reading(reading)
                 if ch_id in self._buffers:
-                    self._buffers[ch_id].append(
-                        (reading.timestamp.timestamp(), reading.value)
-                    )
+                    self._buffers[ch_id].append((reading.timestamp.timestamp(), reading.value))
 
         # Давление → карточка + буфер графика
         if reading.unit == "mbar":
             self._pressure_channel_name = reading.channel
             self._pressure_card.update_pressure(reading)
-            self._pressure_buffer.append(
-                (reading.timestamp.timestamp(), reading.value)
-            )
+            self._pressure_buffer.append((reading.timestamp.timestamp(), reading.value))
 
         # Cooldown prediction
         if channel.endswith("/cooldown_eta"):
@@ -1443,8 +1489,7 @@ class OverviewPanel(QWidget):
             self._pred_curve.setData(abs_ts, future_mean)
             self._pred_curve.setVisible(True)
 
-            if (future_upper and future_lower
-                    and len(future_upper) == len(future_t)):
+            if future_upper and future_lower and len(future_upper) == len(future_t):
                 self._ci_upper_curve.setData(abs_ts, future_upper)
                 self._ci_lower_curve.setData(abs_ts, future_lower)
                 self._ci_band.setVisible(True)
@@ -1557,6 +1602,7 @@ class OverviewPanel(QWidget):
             if raw_start:
                 try:
                     from datetime import datetime
+
                     dt = datetime.fromisoformat(str(raw_start))
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=UTC)
@@ -1565,7 +1611,8 @@ class OverviewPanel(QWidget):
                 except Exception as exc:
                     logger.warning(
                         "_on_all_clicked: failed to parse experiment start_time %r: %s",
-                        raw_start, exc,
+                        raw_start,
+                        exc,
                     )
 
         # Fallback: panel construction time ≈ engine launch wall-clock.
@@ -1577,6 +1624,7 @@ class OverviewPanel(QWidget):
         duration_s = max(now_ts - start_ts, 60.0)
         # Round up to whole hours (>= 1) — _load_history takes hours.
         import math
+
         hours = max(1, math.ceil(duration_s / 3600.0))
 
         # Set the visible window so setXRange in _draw uses the full span.
@@ -1584,7 +1632,11 @@ class OverviewPanel(QWidget):
 
         logger.info(
             "Overview 'Всё' preset: from=%.0f to=%.0f duration=%.1fmin source=%s hours=%d",
-            start_ts, now_ts, duration_s / 60.0, source, hours,
+            start_ts,
+            now_ts,
+            duration_s / 60.0,
+            source,
+            hours,
         )
 
         # Load history from SQLite at the same hourly granularity as the
@@ -1650,7 +1702,9 @@ class OverviewPanel(QWidget):
                     channel == self._pressure_channel_name
                     or channel.startswith(self._pressure_channel_name.split("/")[0])
                 ):
-                    existing_min_ts = self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
+                    existing_min_ts = (
+                        self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
+                    )
                     new_points = [(ts, val) for ts, val in points if ts < existing_min_ts]
                     if new_points:
                         existing = list(self._pressure_buffer)
@@ -1683,8 +1737,13 @@ class OverviewPanel(QWidget):
     def _on_export_png(self) -> None:
         from datetime import datetime
 
-        default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
-        path, _ = QFileDialog.getSaveFileName(self, "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c PNG", default_name, "PNG (*.png)")
+        default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"  # noqa: E501
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c PNG",
+            default_name,
+            "PNG (*.png)",
+        )
         if path:
             # Print mode override — intentionally light background for report export.
             self._plot.setBackground("white")
@@ -1695,8 +1754,13 @@ class OverviewPanel(QWidget):
     def _on_export_csv(self) -> None:
         from datetime import datetime
 
-        default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c CSV", default_name, "CSV (*.csv)")
+        default_name = f"CryoDAQ_\u041e\u0431\u0437\u043e\u0440_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"  # noqa: E501
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c CSV",
+            default_name,
+            "CSV (*.csv)",
+        )
         if path:
             with open(path, "w", encoding="utf-8-sig") as f:
                 # Заголовок: Время;Channel1;Channel2;...
@@ -1715,9 +1779,7 @@ class OverviewPanel(QWidget):
                 for ts in sorted(all_ts.keys()):
                     from datetime import datetime as dt
 
-                    time_str = dt.fromtimestamp(ts, tz=UTC).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
+                    time_str = dt.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
                     row_data = all_ts[ts]
                     values = []
                     for ch_id in channels:

@@ -123,7 +123,9 @@ def _doc_text(path: Path) -> str:
     return "\n".join(parts)
 
 
-async def test_report_generation_uses_new_output_names_and_sections(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_generation_uses_new_output_names_and_sections(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Lambda",
         title="Lambda",
@@ -175,7 +177,9 @@ async def test_report_generation_uses_new_output_names_and_sections(manager: Exp
     assert "Фотографии и внешние изображения" in text
 
 
-async def test_report_generation_for_cooldown_template_uses_archive_tables(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_generation_for_cooldown_template_uses_archive_tables(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -188,14 +192,18 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(manag
 
     result = ReportGenerator(tmp_path).generate(exp_id)
 
-    assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
+    assert (
+        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    ).exists()
     text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
     assert "Алармы" in text
     assert "Таблица измеренных величин" in text
 
 
-async def test_report_disabled_template_is_respected(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_disabled_template_is_respected(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Checkout",
         title="Checkout",
@@ -212,7 +220,9 @@ async def test_report_disabled_template_is_respected(manager: ExperimentManager,
     assert result.docx_path.exists() is False
 
 
-async def test_report_artifact_folder_contains_named_outputs(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_artifact_folder_contains_named_outputs(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Artifact Check",
         title="Artifact Check",
@@ -287,7 +297,9 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
-    assert (tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv").exists()
+    assert (
+        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    ).exists()
 
 
 def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:

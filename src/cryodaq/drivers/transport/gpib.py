@@ -12,6 +12,7 @@ Recovery: three-level escalation on errors:
 Unaddressing (VI_ATTR_GPIB_UNADDR_EN) enabled on connect to prevent
 bus lockup from addressing state corruption in TNT4882 ASIC.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -94,6 +95,7 @@ class GPIBTransport:
         with cls._rm_lock:
             if bus_prefix not in cls._resource_managers:
                 import pyvisa
+
                 cls._resource_managers[bus_prefix] = pyvisa.ResourceManager()
             return cls._resource_managers[bus_prefix]
 
@@ -335,8 +337,14 @@ class GPIBTransport:
             if ch:
                 idx = int(ch) - 1
                 values = [
-                    "+004.235E+0", "+004.891E+0", "+004.100E+0", "+003.998E+0",
-                    "+004.567E+0", "+004.123E+0", "+003.876E+0", "+004.321E+0",
+                    "+004.235E+0",
+                    "+004.891E+0",
+                    "+004.100E+0",
+                    "+003.998E+0",
+                    "+004.567E+0",
+                    "+004.123E+0",
+                    "+003.876E+0",
+                    "+004.321E+0",
                 ]
                 return values[idx] if 0 <= idx < 8 else "+000.000E+0"
             return (
@@ -348,8 +356,14 @@ class GPIBTransport:
             if ch:
                 idx = int(ch) - 1
                 values = [
-                    "+8.298000E+1", "+8.017000E+1", "+1.738000E+1", "+1.728000E+1",
-                    "+8.204000E+1", "+8.332000E+1", "+8.433000E+1", "+5.114000E+0",
+                    "+8.298000E+1",
+                    "+8.017000E+1",
+                    "+1.738000E+1",
+                    "+1.728000E+1",
+                    "+8.204000E+1",
+                    "+8.332000E+1",
+                    "+8.433000E+1",
+                    "+5.114000E+0",
                 ]
                 return values[idx] if 0 <= idx < 8 else "+0.000000E+0"
             return (

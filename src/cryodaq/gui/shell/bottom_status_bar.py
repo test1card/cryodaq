@@ -4,12 +4,12 @@ Safety FSM state, engine uptime, disk space, data rate, connection,
 current time. All info already polled by MainWindow somewhere; this
 widget receives updates from MainWindowV2 via setters.
 """
+
 from __future__ import annotations
 
 import shutil
 import time
 from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
@@ -138,7 +138,7 @@ class BottomStatusBar(QWidget):
         try:
             data_dir = get_data_dir()
             data_dir.mkdir(parents=True, exist_ok=True)
-            free_gb = shutil.disk_usage(str(data_dir)).free / (1024 ** 3)
+            free_gb = shutil.disk_usage(str(data_dir)).free / (1024**3)
             if free_gb < 10:
                 color = theme.STATUS_FAULT
             elif free_gb < 50:

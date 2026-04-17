@@ -27,12 +27,13 @@ class AlarmConfigError(RuntimeError):
 # Dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SetpointDef:
     """Описание одного setpoint из секции engine.setpoints."""
 
     key: str
-    source: str          # "experiment_metadata" | "constant"
+    source: str  # "experiment_metadata" | "constant"
     default: float
     unit: str = "K"
 
@@ -76,6 +77,7 @@ class AlarmConfig:
 # Loader
 # ---------------------------------------------------------------------------
 
+
 def load_alarm_config(
     path: str | Path | None = None,
 ) -> tuple[EngineConfig, list[AlarmConfig]]:
@@ -106,14 +108,11 @@ def load_alarm_config(
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
     except yaml.YAMLError as exc:
-        raise AlarmConfigError(
-            f"alarms_v3.yaml at {path}: YAML parse error — {exc}"
-        ) from exc
+        raise AlarmConfigError(f"alarms_v3.yaml at {path}: YAML parse error — {exc}") from exc
 
     if not isinstance(raw, dict):
         raise AlarmConfigError(
-            f"alarms_v3.yaml at {path} is malformed (expected mapping, "
-            f"got {type(raw).__name__})"
+            f"alarms_v3.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})"
         )
 
     channel_groups: dict[str, list[str]] = raw.get("channel_groups", {})
@@ -137,8 +136,7 @@ def load_alarm_config(
                     alarms.append(cfg)
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise AlarmConfigError(
-            f"alarms_v3.yaml at {path}: invalid config value — "
-            f"{type(exc).__name__}: {exc}"
+            f"alarms_v3.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
         ) from exc
 
     return engine_cfg, alarms
@@ -147,6 +145,7 @@ def load_alarm_config(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_engine_config(raw: dict) -> EngineConfig:
     setpoints: dict[str, SetpointDef] = {}

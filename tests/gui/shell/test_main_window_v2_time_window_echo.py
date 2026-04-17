@@ -1,4 +1,5 @@
 """Test TopWatchBar time window echo wiring (Phase UI-1 v2 Block B.2)."""
+
 from __future__ import annotations
 
 import os
@@ -20,6 +21,7 @@ def app():
 def test_time_window_echo_initialized(app):
     w = MainWindowV2()
     from PySide6.QtCore import QTimer
+
     for t in w.findChildren(QTimer):
         try:
             t.stop()
@@ -31,6 +33,7 @@ def test_time_window_echo_initialized(app):
 def test_time_window_echo_updates_on_signal(app):
     w = MainWindowV2()
     from PySide6.QtCore import QTimer
+
     for t in w.findChildren(QTimer):
         try:
             t.stop()
