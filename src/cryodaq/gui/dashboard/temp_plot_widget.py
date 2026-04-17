@@ -20,35 +20,9 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.gui import theme
+from cryodaq.gui._plot_style import apply_plot_style, series_pen
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 from cryodaq.gui.dashboard.time_window import TimeWindow
-
-_LINE_PALETTE: list[str] = [
-    "#1F77B4",
-    "#FF7F0E",
-    "#2CA02C",
-    "#D62728",
-    "#9467BD",
-    "#8C564B",
-    "#E377C2",
-    "#7F7F7F",
-    "#BCBD22",
-    "#17BECF",
-    "#AEC7E8",
-    "#FFBB78",
-    "#98DF8A",
-    "#FF9896",
-    "#C5B0D5",
-    "#C49C94",
-    "#F7B6D2",
-    "#C7C7C7",
-    "#DBDB8D",
-    "#9EDAE5",
-    "#393B79",
-    "#637939",
-    "#8C6D31",
-    "#843C39",
-]
 
 _MAX_POINTS = 2000
 
@@ -137,10 +111,9 @@ class TempPlotWidget(QWidget):
         )
 
     def _init_plot(self) -> None:
-        self._plot.setBackground(theme.SURFACE_CARD)
-        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Температура", units="K", color=theme.TEXT_SECONDARY)
+        pi.setLabel("left", "Температура", units="K", color=theme.PLOT_LABEL_COLOR)
         pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
@@ -160,8 +133,9 @@ class TempPlotWidget(QWidget):
         visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("\u0422")]
         for idx, ch_id in enumerate(visible_ids):
             display = self._channel_mgr.get_display_name(ch_id)
-            color = _LINE_PALETTE[idx % len(_LINE_PALETTE)]
-            pen = pg.mkPen(color=color, width=1.5)
+            # DESIGN: tokens/chart-tokens.md — palette cycles PLOT_LINE_PALETTE
+            # with PLOT_LINE_WIDTH; centralized in _plot_style.series_pen().
+            pen = series_pen(idx)
             item = self._plot.plot([], [], pen=pen, name=display)
             item.setDownsampling(auto=True, method="peak")
             item.setClipToView(True)

@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from cryodaq.gui import theme
+from cryodaq.gui._plot_style import apply_plot_style, series_pen
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
 
 _MAX_POINTS = 2000
@@ -49,20 +50,19 @@ class PressurePlotWidget(QWidget):
         root.addWidget(self._plot)
 
     def _init_plot(self) -> None:
-        self._plot.setBackground(theme.SURFACE_CARD)
-        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Давление", units="mbar", color=theme.TEXT_SECONDARY)
+        # DESIGN: RULE-COPY-006 — operator-facing pressure unit is Cyrillic мбар.
+        pi.setLabel("left", "Давление", units="мбар", color=theme.PLOT_LABEL_COLOR)
         pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
-        pi.setLabel("bottom", "Время", color=theme.TEXT_SECONDARY)
+        pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
+        # DESIGN: RULE-DATA-008 — pressure plots mandatory log-Y.
         pi.setLogMode(x=False, y=True)
-        self._curve = self._plot.plot(
-            [],
-            [],
-            pen=pg.mkPen("#FF7F0E", width=2),
-        )
+        # Single-series pressure curve uses palette slot 0
+        # (COLD_HIGHLIGHT by convention; see tokens/chart-tokens.md).
+        self._curve = self._plot.plot([], [], pen=series_pen(0))
 
     def refresh(self) -> None:
         pts = self._buffer.get_history(self._channel_id)
