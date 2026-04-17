@@ -74,6 +74,11 @@ class ZmqBridge:
         self._shutdown_event: mp.Event = mp.Event()
         self._process: mp.Process | None = None
         self._last_heartbeat: float = 0.0
+        # Data-flow watchdog: timestamp of the most recently drained
+        # actual reading (not heartbeat, not warning). Stays 0.0 until
+        # the first reading arrives so startup and between-experiment
+        # pauses don't trigger false-positive restarts.
+        self._last_reading_time: float = 0.0
         # Future-per-request command routing
         self._pending: dict[str, Future] = {}
         self._pending_lock = threading.Lock()
@@ -132,6 +137,7 @@ class ZmqBridge:
                 if msg_type == "warning":
                     logger.warning("ZMQ bridge: %s", d.get("message", ""))
                     continue
+                self._last_reading_time = time.monotonic()
                 readings.append(_reading_from_dict(d))
             except (queue.Empty, EOFError):
                 break
@@ -141,14 +147,29 @@ class ZmqBridge:
         return readings
 
     def is_healthy(self) -> bool:
-        """True if subprocess is alive AND sending heartbeats."""
+        """True if subprocess is alive AND heartbeats AND data are fresh.
+
+        Three conditions:
+        1. subprocess process is still alive
+        2. heartbeat emitted within the last 30s (proves sub_drain thread runs)
+        3. if any reading has ever arrived, one has arrived in the last 30s
+           (proves the data path is actually flowing end-to-end)
+
+        The data-flow check only activates after the first reading, so
+        startup and long between-experiment pauses do not trigger a
+        false restart.
+        """
         if not self.is_alive():
             return False
-        if self._last_heartbeat == 0.0:
-            return True  # just started, give it time
-        return (
-            time.monotonic() - self._last_heartbeat < 30.0
-        )  # generous: survives blocked GUI thread
+        now = time.monotonic()
+        if self._last_heartbeat != 0.0 and (now - self._last_heartbeat) >= 30.0:
+            return False
+        if (
+            self._last_reading_time != 0.0
+            and (now - self._last_reading_time) >= 30.0
+        ):
+            return False
+        return True
 
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""

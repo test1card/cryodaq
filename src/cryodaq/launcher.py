@@ -571,7 +571,14 @@ class LauncherWindow(QMainWindow):
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
         if not self._bridge.is_healthy():
             if self._bridge.is_alive():
-                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+                now = time.monotonic()
+                reason = "no heartbeat"
+                if (
+                    self._bridge._last_reading_time != 0.0
+                    and (now - self._bridge._last_reading_time) >= 30.0
+                ):
+                    reason = "no readings"
+                logger.warning("ZMQ bridge not healthy (%s), restarting...", reason)
                 self._bridge.shutdown()
             else:
                 logger.warning("ZMQ bridge died, restarting...")
