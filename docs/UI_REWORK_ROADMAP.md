@@ -1,3 +1,5 @@
+> **SUPERSEDED.** Replaced by `docs/phase-ui-1/phase_ui_v2_roadmap.md`. Retained for historical context.
+
 # CryoDAQ UI Rework Roadmap
 
 > **Живой документ** с планами переработки каждого экрана CryoDAQ GUI и

@@ -1,3 +1,5 @@
+> **HISTORICAL.** Snapshot from commit `7aaeb2b`. See `docs/REPO_AUDIT_REPORT.md` for current state.
+
 # CryoDAQ Documentation Reality Map
 
 **Date:** 2026-04-12

@@ -1,3 +1,5 @@
+> **SUPERSEDED.** Replaced by `docs/phase-ui-1/phase_ui_v2_roadmap.md`. Retained for historical context.
+
 # CryoDAQ — Phase UI-1 v2 Wireframe & Architecture
 
 > **Purpose:** Архитектурный документ нового UI основанный на реальных user

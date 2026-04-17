@@ -1,3 +1,5 @@
+> **SUPERSEDED.** This document (v0.3) is replaced by `docs/design-system/README.md` (v1.0.1). Retained for historical context.
+
 # CryoDAQ Design System v0.3
 
 > **Источник истины** для визуального языка CryoDAQ GUI. Спецификация, не код.
