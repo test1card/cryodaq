@@ -2,9 +2,9 @@
 
 **Дата:** 2026-04-17
 **Ветка:** master
-**Последний commit:** `0d4d386` (`chore: repo cleanup — move audit artifacts, mark superseded docs`)
+**Последний commit:** `05f27d0` (`fix(gui): PhaseStepper active phase ACCENT → STATUS_OK (A.4)`)
 **Тесты:** 1 087 passed, 2 skipped (1 089 collected)
-**Фронтир:** Phase I.1 shell + Design System v1.0.1 merged; Phase II UI rebuild в процессе (Group 1 open).
+**Фронтир:** Phase I.1 shell + Design System v1.0.1 merged; Phase II Group 1 **COMPLETE**.
 
 ---
 
@@ -110,14 +110,14 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 ## В работе
 
-**Phase II UI rebuild — Group 1 OPEN (2026-04-17).**
+**Phase II UI rebuild — Group 1 COMPLETE (2026-04-17).**
 
 Cleanup + quick wins:
 
-- ✅ Repo cleanup: root audit-артефакты → `docs/audits/2026-04-09/`, superseded markers на старой design system / wireframe / roadmap, RETRO V1/V2 в архив.
-- ✅ `PROJECT_STATUS.md` refresh (этот commit).
-- ⏭ PhaseStepper ACCENT → STATUS_OK (A.4).
-- ⏭ Fira Code + Fira Sans bundle + load (C.1 / FONT-1).
+- ✅ Repo cleanup (`0d4d386`): root audit-артефакты → `docs/audits/2026-04-09/`, superseded markers на старой design system / wireframe / roadmap, RETRO V1/V2 в архив.
+- ✅ `PROJECT_STATUS.md` refresh (`50ab8c0`).
+- ✅ PhaseStepper ACCENT → STATUS_OK (`05f27d0`, A.4) — active pill теперь `theme.STATUS_OK`; `ACCENT` остаётся только для keyboard focus ring.
+- ✅ Fira Code + Fira Sans bundle + load — **Case D, уже сделано**: 12 .ttf files под `src/cryodaq/gui/resources/fonts/`, `_load_bundled_fonts()` вызывается из `gui/app.py:131` и `launcher.py:825` до любой widget construction, family-names matched theme tokens (`Fira Code` / `Fira Sans` / `Fira Code`).
 
 **Phase II Groups 2–7 — not yet started.**
 
