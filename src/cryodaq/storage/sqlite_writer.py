@@ -614,7 +614,12 @@ class SQLiteWriter:
             end_time=end_time,
             limit=limit,
         )
-        return await loop.run_in_executor(self._executor, task)
+        # Read-only operations use _read_executor to avoid blocking behind
+        # persistence-first writes on _executor. The engine REP task awaits
+        # this call for every `log_get` command (~0.1 Hz from the dashboard),
+        # and was previously serialised against scheduler.write_immediate()
+        # on the single-worker write executor.
+        return await loop.run_in_executor(self._read_executor, task)
 
     async def start_immediate(self) -> None:
         """Инициализировать writer без очереди (persistence-first режим).
