@@ -87,6 +87,19 @@ for res in rm.list_resources():
 `smua` и `smub` активны одновременно (инвариант уровня кодовой базы;
 см. `CLAUDE.md` / design-system).
 
+**Адрес на шаблоне:**
+
+| Прибор | Resource | Каналы |
+|---|---|---|
+| Keithley_1 | `USB0::0x05E6::0x2604::04052028::INSTR` | `smua` + `smub` |
+
+Серийный номер (`04052028` в примере) **уникален для каждого прибора**
+— на новом стенде он будет другим. Остальные поля (`USB0`, vendor
+`0x05E6`, product `0x2604`, суффикс `INSTR`) одинаковые для всех
+Keithley 2604B. Подставь фактический серийник из «Проверить
+подключение» ниже в `resource` для записи Keithley в
+`config/instruments.yaml` (или в `instruments.local.yaml`).
+
 **Проверить подключение:**
 
 ```bash
@@ -96,6 +109,9 @@ dev = usb.core.find(idVendor=0x05E6, idProduct=0x2604)
 print('Found:', dev.serial_number if dev else None)
 "
 ```
+
+Серийный номер из вывода — это значение, которое идёт в середину
+строки `USB0::0x05E6::0x2604::<СЕРИЙНЫЙ>::INSTR`.
 
 **Язык команд:** TSP (Lua), не SCPI. Драйвер
 `src/cryodaq/drivers/instruments/keithley_2604b.py` ходит через
