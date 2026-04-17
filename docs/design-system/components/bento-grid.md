@@ -71,12 +71,12 @@ The grid is **8 columns wide** by default — narrow enough to maintain readable
 5. **Tile placement validated.** `col + col_span <= num_columns`, no overlapping placements.
 6. **Row heights follow content.** Row heights not fixed; tiles size to content with minimum. For fixed-height regions use `QGridLayout.setRowMinimumHeight()`.
 
-## API (canonical target — not yet shipped)
+## API
 
-The signature below is the canonical target. Phase I.1
-`src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` presently
-implements a 12-column auto-flow variant without bounds/overlap checks;
-treat the snippet as the extraction target.
+The signature below matches the shipped `BentoGrid` at
+`src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py`.
+`DEFAULT_COLUMNS = 8`, `add_tile()` takes keyword-only `col` and
+`row`, overlap detection is active, no auto-flow.
 
 ```python
 class BentoGrid(QWidget):
