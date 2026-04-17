@@ -11,6 +11,22 @@
 
 ### Добавлено
 
+- **Runtime theme switcher — 6 bundled theme packs.**
+  GUI color tokens now load at import time from
+  `config/themes/<selected>.yaml` via `src/cryodaq/gui/_theme_loader.py`.
+  Bundled packs: `default_cool` (pre-switcher look), `warm_stone` (new
+  default — Pantone Warm Gray dark), `anthropic_mono` (brand terracotta),
+  `ochre_bloom` (Ableton Ochre, olive accent), `taupe_quiet` (subtle
+  warm shift with forest accent), `rose_dusk` (dusty rose, late-night).
+  Selection persisted in `config/settings.local.yaml` (gitignored).
+  «Настройки → Тема» menu in the launcher offers radio-exclusive
+  selection; confirmation dialog warns the GUI restarts in ~1 s while
+  engine and data recording continue in the detached engine subprocess.
+  The launcher re-execs itself via `os.execv` on theme change — no
+  `importlib.reload` cascade (fragile with Qt widget trees and
+  module-level pyqtgraph config). New design token `COLD_HIGHLIGHT`
+  for cryogenic-channel accent surfaces.
+
 - **Phase I.1 — Overlay Design System primitives (foundational shell).**
   ModalCard (centered card + backdrop dim + 3 close mechanisms),
   DrillDownBreadcrumb (sticky top bar with back navigation),
@@ -20,6 +36,36 @@
   primitives systematically. Visual showcase at
   `_design_system/_showcase.py` for review before Phase I.2
   (BentoTile + ExecutiveKpi + DataDenseTile + LiveTile).
+
+### Изменено
+
+- **`src/cryodaq/gui/theme.py` — color tokens load from YAML pack at import.**
+  Module-level color constants (BACKGROUND, SURFACE_PANEL, ACCENT, status
+  tiers, accent scale, text variants) are now read from the active theme
+  pack via `_theme_loader.load_theme()`. Non-color tokens (typography,
+  spacing, layout, radius, motion, plot palette, legacy STONE_* unique
+  stops) remain hardcoded — they do not theme. Downstream consumers still
+  use the same `from cryodaq.gui import theme; theme.ACCENT` API.
+
+- **Status palette — one-time semantic refresh (LOCKED across all themes).**
+  `STATUS_CAUTION` shifts from `#c47a30` (amber) to `#b35a38` (red-orange)
+  to be clearly distinct from `STATUS_WARNING` (`#c4862e`); `STATUS_INFO`
+  `#4a7ba8` → `#6490c4` for slightly higher legibility on dark surfaces;
+  `COLD_HIGHLIGHT` `#5b8db8` → `#7ab8c4` for better cryogenic-channel
+  differentiation. These values are identical across every bundled pack
+  including `default_cool` — safety semantics do not shift with style,
+  and the refresh is a deliberate improvement, not a regression. Verified
+  by `tests/gui/test_theme_loader.py::test_status_palette_identical_across_all_themes`.
+
+- **`apply_panel_frame_style` callers strip GitHub-Primer-dark hex overrides.**
+  9 call-sites in `widgets/` (sensor_diag_panel, overview_panel,
+  experiment_workspace mode/phase frames, shift_handover, keithley_panel,
+  vacuum_trend_panel) previously pinned cold-gray background/border hexes
+  (`#11151d` / `#30363d` / `#141821` etc.) that bypassed theme.py and
+  prevented theme packs from taking effect. They now inherit
+  `theme.SURFACE_PANEL` / `theme.BORDER_SUBTLE` defaults. Semantic hexes
+  (debug-panel amber, group-box status accents, `_set_bg` heat-tier
+  cases) deliberately retained pending proper STATUS_* tokenization.
 
 ### Исправлено
 
