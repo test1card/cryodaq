@@ -12,19 +12,23 @@ references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 
 Thin vertical icon-only navigation strip along the left edge of every screen. Primary application navigation — each icon opens one of the major panels.
 
-> **Implementation status.** The shipped ToolRail at `src/cryodaq/gui/shell/tool_rail.py` diverges from this spec:
+> **Implementation status.** The shipped ToolRail at
+> `src/cryodaq/gui/shell/tool_rail.py` is aligned with the spec on
+> dimensions, icon size, and keyboard shortcuts:
 >
 > | Aspect | Spec (canonical) | Shipped code |
 > |---|---|---|
-> | Slots | 9 top-level slots | 9 top-level slots + `More` menu |
+> | Width | 56px (`TOOL_RAIL_WIDTH`) | 56px ✓ (aliased to `theme.TOOL_RAIL_WIDTH`) |
+> | Slot size | 56×56 square | 56×56 ✓ |
+> | Icon size | 24px | 24px ✓ (proposed `theme.ICON_SIZE_MD`, literal until token lands) |
+> | Shortcuts | Mnemonic (`Ctrl+L/E/A/K/M/R/C/D`) + transitional `Ctrl+1..9` | Registered on `ToolRail._register_shortcuts()` using Qt `WindowShortcut` context so QLineEdit-local Ctrl+C / Ctrl+A still work for text copy / select-all ✓ |
+> | Slots | 9 top-level slots | 9 top-level slots + `More` menu (see below) |
 > | Slot names | `dashboard`, `create`, `experiment`, `keithley`, `analytics`, `conductivity`, `alarms`, `log`, `diagnostics` | `home`, `new_experiment`, `experiment`, `source`, `analytics`, `conductivity`, `alarms`, `log`, `instruments` |
 > | More menu | Not part of canonical rail | `archive`, `calibration`, `settings`, `web_panel`, `restart_engine` |
-> | Shortcuts | Mnemonic (`Ctrl+L/E/A/K/M/R/C/D`) + transitional `Ctrl+1..9` | None bound in shipped ToolRail / `MainWindowV2` |
-> | Width | 56px | 50px (`_RAIL_WIDTH`) |
-> | Slot size | 56x56 square | 50x40 (`_RAIL_WIDTH` x `_BUTTON_SIZE`) |
-> | Icon size | 24px | 20px (`_ICON_SIZE`) |
 >
-> This spec is the canonical target per architect policy (docs = canon, code adapts). New development should follow the spec. Code alignment is tracked as Phase II work.
+> Remaining divergences (slot rename to canonical names, removal of More
+> menu) are documentation-vs-code naming mismatches rather than visual
+> regressions; tracked as later Phase II work.
 
 **When to use:**
 - Singleton in `MainWindow` — always visible at left edge

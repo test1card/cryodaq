@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFrame,
@@ -50,9 +50,23 @@ def _colored_icon(svg_path_str: str, color: str, size: int) -> QIcon:
     return QIcon(pixmap)
 
 
-_RAIL_WIDTH = 50  # [calibrate]
-_BUTTON_SIZE = 40  # [calibrate]
-_ICON_SIZE = 20
+_RAIL_WIDTH = theme.TOOL_RAIL_WIDTH  # DESIGN: 56px, couples to HEADER_HEIGHT
+_BUTTON_SIZE = theme.TOOL_RAIL_WIDTH  # DESIGN: 56×56 square slots
+_ICON_SIZE = 24  # proposed: theme.ICON_SIZE_MD (not yet in theme.py)
+
+# Canonical mnemonic shortcuts (AD-002 / tokens/keyboard-shortcuts.md).
+# Maps Ctrl+<letter> → ToolRail slot name. Ctrl+R maps to an item in
+# the More menu; all others are top-level slots.
+_MNEMONIC_SHORTCUTS: dict[str, str] = {
+    "Ctrl+L": "log",           # Журнал
+    "Ctrl+E": "experiment",    # Эксперимент
+    "Ctrl+A": "analytics",     # Аналитика
+    "Ctrl+K": "source",        # Keithley (источник мощности)
+    "Ctrl+M": "alarms",        # Модуль сигнализации
+    "Ctrl+R": "archive",       # Records (архив, lives in More menu)
+    "Ctrl+C": "conductivity",  # Теплопроводность
+    "Ctrl+D": "instruments",   # Диагностика / приборы
+}
 
 _ICONS_DIR = Path(__file__).parent.parent / "resources" / "icons"
 
@@ -170,6 +184,7 @@ class ToolRail(QFrame):
 
         self._buttons: dict[str, ToolRailButton] = {}
         self._build_ui()
+        self._register_shortcuts()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -191,6 +206,36 @@ class ToolRail(QFrame):
         self._more_btn.clicked.connect(self._show_more_menu)
         self._buttons[_MORE_NAME] = self._more_btn
         layout.addWidget(self._more_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    def _register_shortcuts(self) -> None:
+        """Register canonical mnemonic + transitional numeric shortcuts.
+
+        Shortcuts fire on `tool_clicked` so the parent shell's existing
+        handler resolves them (open overlay / activate rail slot) the
+        same way as a mouse click on the corresponding button. Uses
+        `WindowShortcut` (default) so QLineEdit-local Ctrl+C / Ctrl+A
+        still work for text copy / select-all — Qt dispatches to the
+        focused widget first and only falls through to the shortcut
+        when the widget does not consume the key.
+        """
+        # Canonical mnemonics (AD-002).
+        for seq, slot_name in _MNEMONIC_SHORTCUTS.items():
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(lambda n=slot_name: self.tool_clicked.emit(n))
+
+        # Transitional numeric shortcuts Ctrl+1..Ctrl+9 — phased out per AD-002
+        # but kept alive so operators with memorised slot positions are not
+        # disrupted mid-release. Map to top-level visible slots in order.
+        numeric_order = (
+            [name for name, _, _ in _TOP_ITEMS]
+            + [name for name, _, _ in _NEW_ITEMS]
+            + [name for name, _, _ in _OVERLAY_ITEMS]
+        )
+        for i, slot_name in enumerate(numeric_order, start=1):
+            if i > 9:
+                break
+            sc = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
+            sc.activated.connect(lambda n=slot_name: self.tool_clicked.emit(n))
 
     def _show_more_menu(self) -> None:
         menu = QMenu(self)
