@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from cryodaq.gui import theme
 from cryodaq.paths import get_data_dir
 
-_HEIGHT_PX = 24  # [calibrate]
+_HEIGHT_PX = theme.BOTTOM_BAR_HEIGHT  # DESIGN: invariant #1 — canonical 28px
 
 
 def _separator() -> QLabel:
@@ -109,7 +109,10 @@ class BottomStatusBar(QWidget):
             color = theme.STATUS_INFO
         else:
             color = theme.TEXT_MUTED
-        self._safety_label.setText(f"● {state.upper()}")
+        # DESIGN: invariant #3 — safety state displayed lowercase as-is
+        # (matches engine FSM ID; operator learns these from logs).
+        # CLAUDE.md absolute rule: FSM states displayed lowercase.
+        self._safety_label.setText(f"● {s}")
         self._safety_label.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def set_data_rate(self, rate_per_sec: float) -> None:

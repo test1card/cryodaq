@@ -12,7 +12,19 @@ references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voi
 
 Thin chrome strip at the bottom of every screen. Shows system-level status: engine connection, safety FSM state, ZMQ heartbeat, timestamp. Low-priority information; operator rarely looks at it unless something is wrong.
 
-> **Implementation status.** This spec defines the canonical target. The shipped code at `src/cryodaq/gui/shell/bottom_status_bar.py` currently renders a 24px bar with safety, uptime, disk, data-rate, connection, and local clock fields. The shipped widget uppercases the safety FSM label via `state.upper()`, does not implement this spec's engine / safety / ZMQ-heartbeat information model, and shows a local `HH:MM:SS` clock without UTC offset while connection state is derived in `src/cryodaq/gui/shell/main_window_v2.py` from recent-reading silence rather than a heartbeat interval. Code alignment is tracked as Phase II work. New development should follow this spec even where the shipped code diverges.
+> **Implementation status.** The shipped BottomStatusBar at
+> `src/cryodaq/gui/shell/bottom_status_bar.py` is partially aligned
+> with this spec: height = `BOTTOM_BAR_HEIGHT` (28px, invariant #1)
+> and the safety FSM label is rendered lowercase as-is (`safe_off`,
+> `running`, `fault_latched`) per invariant #3. The shipped widget
+> still uses a different information model than the canonical target
+> (safety + uptime + disk + data-rate + connection + local clock
+> rather than engine / safety / ZMQ-heartbeat / UTC-offset timestamp),
+> and connection state is derived in
+> `src/cryodaq/gui/shell/main_window_v2.py` from recent-reading
+> silence rather than from an explicit ZMQ heartbeat interval.
+> Migrating to the canonical 4-field model + heartbeat source is
+> tracked as later Phase II work.
 
 **When to use:**
 - Singleton in `MainWindow`, always visible at bottom
