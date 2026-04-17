@@ -598,6 +598,22 @@ class SafetyManager:
             pass
 
     async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:
+        # Early-return guard: ignore concurrent re-entries while already latched.
+        # Multiple call sites (SafetyBroker overflow, monitoring loop, channel
+        # faults, start_source failure) can fire in the same tick. Without
+        # this guard, a second call would overwrite _fault_reason, emit
+        # duplicate events + log entries, and queue a redundant emergency_off.
+        # The check is safe under asyncio single-threaded semantics: state is
+        # mutated synchronously below before any await, so a later call sees
+        # FAULT_LATCHED and exits.
+        if self._state == SafetyState.FAULT_LATCHED:
+            logger.info(
+                "_fault() re-entry ignored (already latched); new reason=%s channel=%s",
+                reason,
+                channel or "-",
+            )
+            return
+
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
         #    FAULT_LATCHED and reject before any yield point.
