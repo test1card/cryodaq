@@ -100,7 +100,7 @@ class VacuumTrendPanel(QWidget):
 
         # Header
         header = QFrame()
-        apply_panel_frame_style(header, background="#11151d", border="#30363d", radius=6)
+        apply_panel_frame_style(header)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(12, 8, 12, 8)
         title = QLabel("ПРОГНОЗ ВАКУУМА")
@@ -119,7 +119,7 @@ class VacuumTrendPanel(QWidget):
 
         # --- Left sidebar ---
         sidebar = QFrame()
-        apply_panel_frame_style(sidebar, background="#0d1117", border="#21262d", radius=6)
+        apply_panel_frame_style(sidebar)
         sidebar.setFixedWidth(180)
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(12, 12, 12, 12)

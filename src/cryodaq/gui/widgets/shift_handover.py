@@ -439,7 +439,7 @@ class ShiftBar(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(36)
-        apply_panel_frame_style(self, background="#1A1A2E", border="#2A2A5E")
+        apply_panel_frame_style(self)
 
         self._config = load_shift_config()
         self._active = False

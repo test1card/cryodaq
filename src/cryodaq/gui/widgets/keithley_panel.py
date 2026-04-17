@@ -97,7 +97,7 @@ class _SmuPanel(QFrame):
             self._status_banner.show_error(text)
 
     def _build_ui(self, colors: dict[str, str]) -> None:
-        apply_panel_frame_style(self, background="#141821", border="#30363d", radius=6)
+        apply_panel_frame_style(self)
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
@@ -116,7 +116,7 @@ class _SmuPanel(QFrame):
         root.addLayout(header)
 
         controls = QWidget()
-        apply_panel_frame_style(controls, background="#1e2430", border="#30363d", radius=6)
+        apply_panel_frame_style(controls)
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(10, 8, 10, 8)
         controls_layout.setSpacing(10)

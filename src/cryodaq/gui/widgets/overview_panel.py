@@ -836,7 +836,7 @@ class ExperimentStatusWidget(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(32)
-        apply_panel_frame_style(self, background="#1A2332", border="#2A4060")
+        apply_panel_frame_style(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 2, 12, 2)

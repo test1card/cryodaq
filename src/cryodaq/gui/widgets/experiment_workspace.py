@@ -331,7 +331,7 @@ class ExperimentWorkspace(QWidget):
         )
 
         mode_frame = QFrame()
-        apply_panel_frame_style(mode_frame, background="#11151d", border="#30363d", radius=6)
+        apply_panel_frame_style(mode_frame)
         mode_layout = QHBoxLayout(mode_frame)
         mode_layout.setContentsMargins(12, 10, 12, 10)
         mode_layout.setSpacing(10)
@@ -367,7 +367,7 @@ class ExperimentWorkspace(QWidget):
 
         # Phase progress bar (visible only when experiment is active)
         self._phase_frame = QFrame()
-        apply_panel_frame_style(self._phase_frame, background="#11151d", border="#30363d", radius=6)
+        apply_panel_frame_style(self._phase_frame)
         phase_layout = QHBoxLayout(self._phase_frame)
         phase_layout.setContentsMargins(12, 6, 12, 6)
         phase_layout.setSpacing(4)

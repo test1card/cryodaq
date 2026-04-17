@@ -76,7 +76,7 @@ class SensorDiagPanel(QWidget):
 
         # Header with summary badge
         header_frame = QFrame()
-        apply_panel_frame_style(header_frame, background="#11151d", border="#30363d", radius=6)
+        apply_panel_frame_style(header_frame)
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(12, 8, 12, 8)
 
