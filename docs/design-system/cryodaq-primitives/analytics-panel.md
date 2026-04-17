@@ -53,6 +53,43 @@ AD-002) or from ToolRail slot 5 (analytics).
 >   re-uses it on subsequent Ctrl+A presses. The panel itself does
 >   not guard against duplicate construction.
 
+## Known limitations (data availability)
+
+The shell (`main_window_v2._adapt_reading_to_analytics`) today
+translates exactly one analytics channel into a panel setter call:
+
+- **`analytics/cooldown_predictor/cooldown_eta`** → `set_cooldown()`.
+  Plugin output shape is documented in
+  `src/cryodaq/analytics/cooldown_service.py:400-433`; the adapter
+  handles asymmetric `t_remaining_ci68` by collapsing to a
+  conservative symmetric half-width and converts `progress` from a
+  `[0, 1]` fraction into the panel's `0..100` percent.
+
+Current consequences the operator sees:
+
+- **Actual cooldown trajectory is not rendered** (cooldown plot's
+  «Измерено» line stays empty). The predictor keeps the raw buffer
+  internal and does not publish the time-series back onto the broker;
+  adding a publisher (e.g. a downsampled `analytics/.../t_cold_history`
+  channel) is a separate analytics-side change.
+
+- **R_thermal tile + mini plot show the placeholder «—»** indefinitely.
+  Nothing in `src/cryodaq/analytics/` publishes an
+  `analytics/*/r_thermal` (or similar) channel today. The panel's
+  `set_r_thermal()` method is part of the B.8 API contract and stays
+  callable, but no consumer is wired to it. Adding an R_thermal
+  publisher is the prerequisite.
+
+- **Cooldown phase label «Завершено» never appears.** The predictor
+  emits `"phase1" / "transition" / "phase2" / "steady"` (see
+  `cooldown_predictor.py:518-524`); the adapter remaps `"steady"` to
+  spec's `"stabilizing"`. The spec's `"complete"` is not distinguishable
+  from plugin output. A predictor update that emits a terminal `"complete"`
+  phase when progress pins at 1.0 would unlock it.
+
+All three are analytics-layer changes, not UI changes — the v2 panel
+itself is ready to render the data the moment a publisher exists.
+
 Distinct from the Dashboard's live sensor grid: Analytics shows
 **computed** values, not raw readings. The values update at lower
 cadence (typically 1 Hz or slower) because the underlying plugins

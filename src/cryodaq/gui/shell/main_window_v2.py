@@ -294,8 +294,12 @@ class MainWindowV2(QMainWindow):
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (Codex B.5.5 F3)
+            # B.8: the v2 AnalyticsPanel exposes set_cooldown /
+            # set_r_thermal / set_fault setters instead of a generic
+            # on_reading sink. The shell adapts specific analytics
+            # channels into the typed snapshots below.
             if self._analytics_panel is not None:
-                self._analytics_panel.on_reading(reading)
+                self._adapt_reading_to_analytics(reading)
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
@@ -304,6 +308,118 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_safety_state(self._last_safety_state)
         if self._instrument_panel is not None:
             self._instrument_panel.on_reading(reading)
+
+    # ------------------------------------------------------------------
+    # Analytics channel adapter (B.8 follow-up)
+    # ------------------------------------------------------------------
+
+    def _adapt_reading_to_analytics(self, reading: Reading) -> None:
+        """Translate broker `analytics/*` readings into AnalyticsPanel
+        setter calls.
+
+        Today only the cooldown predictor publishes structured data on
+        the broker (`analytics/cooldown_predictor/cooldown_eta`, see
+        `src/cryodaq/analytics/cooldown_service.py`). R_thermal has no
+        publisher, so `set_r_thermal` is never invoked and the tile
+        shows its «—» placeholder. `actual_trajectory` is also not
+        published — the cooldown plugin keeps the raw buffer internal
+        — so the actual-line on the cooldown plot stays empty until a
+        publisher is added. Both gaps are flagged in the analytics
+        spec's «Known limitations» section.
+        """
+        if self._analytics_panel is None:
+            return
+        channel = reading.channel
+        if channel == "analytics/cooldown_predictor/cooldown_eta":
+            data = self._cooldown_reading_to_data(reading)
+            if data is not None:
+                self._analytics_panel.set_cooldown(data)
+        # Any other analytics/* channel is silently dropped — previously
+        # went to the legacy panel's on_reading sink; the v2 panel has no
+        # equivalent general sink, so unknown analytics channels are
+        # intentional no-ops here rather than attribute errors.
+
+    @staticmethod
+    def _cooldown_reading_to_data(reading: Reading):
+        """Build a `CooldownData` snapshot from a cooldown_predictor reading.
+
+        Plugin output shape (see cooldown_service.py:400-433):
+          - value              = t_remaining_hours (also in metadata)
+          - metadata["t_remaining_hours"]   float, hours
+          - metadata["t_remaining_ci68"]    (low, high) asymmetric
+          - metadata["progress"]            float in [0, 1]  (fraction, NOT %)
+          - metadata["phase"]               "phase1" | "transition" | "phase2" | "steady"
+          - metadata["future_t"]            optional list[float], hours
+          - metadata["future_T_cold_mean"]  optional list[float], K
+          - metadata["future_T_cold_upper"] optional list[float], K
+          - metadata["future_T_cold_lower"] optional list[float], K
+        """
+        # Lazy import — avoids a hard dependency at module-load time.
+        from cryodaq.gui.shell.overlays.analytics_panel import CooldownData
+
+        meta = reading.metadata or {}
+        try:
+            t_hours = float(meta.get("t_remaining_hours", reading.value))
+        except (TypeError, ValueError):
+            return None
+
+        # Asymmetric CI (low, high) → conservative symmetric half-width.
+        # Spec's CooldownData uses a single ±ci value; picking the larger
+        # side preserves the worst case rather than hiding it.
+        ci_hours = 0.0
+        ci_tuple = meta.get("t_remaining_ci68")
+        if isinstance(ci_tuple, (tuple, list)) and len(ci_tuple) == 2:
+            try:
+                low_ci, high_ci = float(ci_tuple[0]), float(ci_tuple[1])
+                ci_hours = max(high_ci - t_hours, t_hours - low_ci, 0.0)
+            except (TypeError, ValueError):
+                ci_hours = 0.0
+
+        progress_raw = meta.get("progress", 0.0)
+        try:
+            progress_pct = max(0.0, min(100.0, float(progress_raw) * 100.0))
+        except (TypeError, ValueError):
+            progress_pct = 0.0
+
+        # Phase remap: plugin emits "steady" for p ≥ 0.98; spec uses
+        # "stabilizing". The spec's "complete" state is NOT distinguished
+        # by the plugin today, so it never flows through this adapter.
+        plugin_phase = str(meta.get("phase", "") or "")
+        phase = "stabilizing" if plugin_phase == "steady" else plugin_phase
+
+        # Trajectories: plugin publishes PREDICTED future only. Actual
+        # trajectory stays empty until a publisher is added; the cooldown
+        # plot's actual-line will simply render no points.
+        predicted: list = []
+        ci_traj: list = []
+        future_t = meta.get("future_t")
+        future_mean = meta.get("future_T_cold_mean")
+        future_upper = meta.get("future_T_cold_upper")
+        future_lower = meta.get("future_T_cold_lower")
+        if (
+            isinstance(future_t, list)
+            and isinstance(future_mean, list)
+            and len(future_t) == len(future_mean)
+        ):
+            predicted = list(zip(future_t, future_mean, strict=False))
+        if (
+            isinstance(future_t, list)
+            and isinstance(future_upper, list)
+            and isinstance(future_lower, list)
+            and len(future_t) == len(future_upper) == len(future_lower)
+        ):
+            ci_traj = list(zip(future_t, future_lower, future_upper, strict=False))
+
+        return CooldownData(
+            t_hours=t_hours,
+            ci_hours=ci_hours,
+            phase=phase,
+            progress_pct=progress_pct,
+            actual_trajectory=[],
+            predicted_trajectory=predicted,
+            ci_trajectory=ci_traj,
+            phase_boundaries_hours=[],
+        )
 
     # ------------------------------------------------------------------
     # Bottom bar tick
