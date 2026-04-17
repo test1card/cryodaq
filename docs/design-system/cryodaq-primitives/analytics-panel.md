@@ -2,8 +2,8 @@
 title: Analytics Panel
 keywords: analytics, R_thermal, cooldown, ETA, prediction, vacuum trend, phase, аналитика
 applies_to: analytics overlay panel (Ctrl+A from ToolRail)
-status: proposed
-implements: not yet extracted; B.8 rebuild target. Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` (518 lines) is kept alive until B.13.
+status: active
+implements: src/cryodaq/gui/shell/overlays/analytics_panel.py (Phase B.8); legacy src/cryodaq/gui/widgets/analytics_panel.py retained until Block B.13
 last_updated: 2026-04-17
 ---
 
@@ -13,6 +13,45 @@ Full-screen overlay surfacing derived metrics computed by analytics
 plugins — thermal resistance, cooldown trajectory with prediction,
 vacuum trend. Operator opens it via `Ctrl+A` (canonical mnemonic per
 AD-002) or from ToolRail slot 5 (analytics).
+
+> **Implementation status.** The shipped AnalyticsPanel at
+> `src/cryodaq/gui/shell/overlays/analytics_panel.py` is aligned
+> with this spec: inherits `ModalCard` (focus trap + restoration +
+> Escape to close), composes its body on a canonical 8-column
+> `BentoGrid` matching the anatomy table (Hero ETA at row 0 col 0..8,
+> Cooldown plot at row 1..3 col 0..5, R_thermal tile at row 1 col
+> 5..8, R_thermal mini plot at row 2..3 col 5..8, Vacuum host at
+> row 4 col 0..8 — BentoGrid validates no-overlap). Hero ETA uses
+> `FONT_DISPLAY_*` typography with an `ACCENT` / `SURFACE_SUNKEN`
+> progress bar; `_format_eta` and `_PHASE_LABELS` preserve the legacy
+> v1 semantics verbatim. Both plots run through `apply_plot_style()`;
+> the cooldown plot has `enableAutoRange(y, False)` with fixed Y
+> range per spec common-mistake #3, dashed predicted line via
+> `series_pen(1, style=Qt.DashLine)`, CI band via
+> `warn_region_brush()` on `pg.FillBetweenItem`, and phase
+> boundaries rendered from `CooldownData.phase_boundaries_hours`
+> (no hardcoded temperatures). R_thermal tile uses 3-decimal
+> precision per RULE-DATA-004 and applies `(устар.)` +
+> `STATUS_STALE` colour when `last_updated_ts > 60s` ago per
+> RULE-A11Y-003. Fault chrome via `set_fault(True)` adds
+> `STATUS_FAULT` border on hero + cooldown plot without hiding
+> content. Data flow: the shell (`main_window_v2.py`) subscribes to
+> engine analytics output and calls `set_cooldown()` /
+> `set_r_thermal()` / `set_fault()` on this panel — the panel does
+> not import `zmq` or subscribe directly.
+>
+> **Follow-ups tracked.**
+> - `VacuumTrendPanel` (embedded via `_VacuumHost`) still uses its
+>   own pre-design-system styling — `apply_plot_style()` alignment,
+>   Cyrillic мбар axis label (RULE-COPY-006), and explicit log-Y
+>   (RULE-DATA-008) are tracked as a separate follow-up per spec's
+>   §Vacuum trend B.8 scope note.
+> - Single-instance enforcement (spec invariant #2) lives at the
+>   ToolRail / shell level — the lazy-construct factory in
+>   `main_window_v2.py._OVERLAY_FACTORIES` creates at most one
+>   `AnalyticsPanel` per MainWindow, and `_on_tool_clicked("analytics")`
+>   re-uses it on subsequent Ctrl+A presses. The panel itself does
+>   not guard against duplicate construction.
 
 Distinct from the Dashboard's live sensor grid: Analytics shows
 **computed** values, not raw readings. The values update at lower

@@ -36,10 +36,10 @@ from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
+from cryodaq.gui.shell.overlays.analytics_panel import AnalyticsPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
-from cryodaq.gui.widgets.analytics_panel import AnalyticsPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
@@ -228,6 +228,11 @@ class MainWindowV2(QMainWindow):
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
         # B.8: wire overlay signals
+        if name == "analytics" and hasattr(widget, "closed"):
+            # AnalyticsPanel inherits ModalCard; `closed` fires on
+            # backdrop click, close button, or Escape. Route back to
+            # the dashboard and update the rail-active indicator.
+            widget.closed.connect(lambda: self._on_tool_clicked("home"))
         if name == "experiment" and hasattr(widget, "closed"):
             widget.closed.connect(lambda: self._on_tool_clicked("home"))
             widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
