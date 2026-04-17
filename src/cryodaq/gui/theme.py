@@ -3,55 +3,87 @@
 Canonical source: docs/design-system/README.md
 Full token inventory: docs/design-system/MANIFEST.md
 Token naming convention: docs/design-system/governance/token-naming.md
+
+Runtime: color tokens are loaded at import time from a YAML pack via
+:mod:`cryodaq.gui._theme_loader`. Selection is persisted in
+``config/settings.local.yaml``; packs live in ``config/themes/*.yaml``.
+Non-color tokens (typography, spacing, radius, motion) stay hardcoded
+here — they don't theme.
 """
 
 from __future__ import annotations
 
 import pyqtgraph as pg
 
-# =============================================================================
-# COLORS — Base palette (warm-leaning instrument dark theme)
-# =============================================================================
-# Tone-down revision (B.4.5.1) of original Smart Home/IoT Dashboard palette.
-# Skill philosophy preserved (16 semantic tokens, status tier model) but
-# specific hex values adjusted for laboratory instrument context where
-# 14+ simultaneous status indicators must coexist without visual fatigue.
+from cryodaq.gui._theme_loader import load_theme
 
-PRIMARY = "#181a22"
-ON_PRIMARY = "#e8eaf0"
-SECONDARY = "#22252f"
-ON_SECONDARY = "#e8eaf0"
-ACCENT = "#7c8cff"
-ON_ACCENT = "#0d0e12"
-BACKGROUND = "#0d0e12"
-FOREGROUND = "#e8eaf0"
-CARD = "#181a22"
-CARD_FOREGROUND = "#e8eaf0"
-MUTED = "#1d2028"
-MUTED_FOREGROUND = "#8a8f9b"
-BORDER = "#2d3038"
-DESTRUCTIVE = "#c44545"
-ON_DESTRUCTIVE = "#e8eaf0"
-RING = "#7c8cff"
+_pack = load_theme()
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
 
 # =============================================================================
-# COLORS — Status tiers (desaturated for monitoring density)
+# COLORS — Base palette (from active theme pack)
 # =============================================================================
-# These colors must work with 14+ simultaneous instances on screen
-# without causing visual fatigue. Saturation reduced 30-40% from
-# Tailwind defaults. Hue preserved for color-blind compatibility.
 
-STATUS_OK = "#4a8a5e"
-STATUS_WARNING = "#c4862e"
-STATUS_CAUTION = "#c47a30"
-STATUS_FAULT = "#c44545"
-STATUS_INFO = "#4a7ba8"
-STATUS_STALE = "#5a5d68"
-COLD_HIGHLIGHT = "#5b8db8"
+BACKGROUND = _pack["BACKGROUND"]
+FOREGROUND = _pack["FOREGROUND"]
+
+SURFACE_PANEL = _pack["SURFACE_PANEL"]
+SURFACE_CARD = _pack["SURFACE_CARD"]
+SURFACE_ELEVATED = _pack["SURFACE_ELEVATED"]
+SURFACE_SUNKEN = _pack["SURFACE_SUNKEN"]
+SURFACE_MUTED = _pack["SURFACE_MUTED"]
+SURFACE_WINDOW = BACKGROUND
+SURFACE_BG = BACKGROUND
+SURFACE_OVERLAY_RGBA = _hex_to_rgba(BACKGROUND, 0.6)
+
+PRIMARY = SURFACE_PANEL
+SECONDARY = SURFACE_ELEVATED
+CARD = SURFACE_CARD
+MUTED = SURFACE_MUTED
+CARD_FOREGROUND = FOREGROUND
+
+BORDER = _pack["BORDER"]
+BORDER_SUBTLE = _pack["BORDER_SUBTLE"]
+BORDER_STRONG = BORDER
+
+ACCENT = _pack["ACCENT"]
+RING = ACCENT
+BORDER_FOCUS = ACCENT
+
+ON_PRIMARY = _pack["ON_PRIMARY"]
+ON_SECONDARY = FOREGROUND
+ON_ACCENT = BACKGROUND
+ON_DESTRUCTIVE = _pack["ON_DESTRUCTIVE"]
+
+MUTED_FOREGROUND = _pack["MUTED_FOREGROUND"]
+
+# =============================================================================
+# COLORS — Status tiers (LOCKED across all theme packs)
+# =============================================================================
+# Safety semantics do not shift with style — status colors are identical
+# in every bundled pack. Verified by
+# tests/gui/test_theme_loader.py::test_status_palette_identical_across_all_themes.
+
+STATUS_OK = _pack["STATUS_OK"]
+STATUS_WARNING = _pack["STATUS_WARNING"]
+STATUS_CAUTION = _pack["STATUS_CAUTION"]
+STATUS_FAULT = _pack["STATUS_FAULT"]
+STATUS_INFO = _pack["STATUS_INFO"]
+STATUS_STALE = _pack["STATUS_STALE"]
+COLD_HIGHLIGHT = _pack["COLD_HIGHLIGHT"]
+
+DESTRUCTIVE = STATUS_FAULT
 
 # =============================================================================
 # COLORS — Plot line palette (desaturated for multi-line plots)
 # =============================================================================
+# Not themed (Commit 1 scope): hardcoded.
 
 PLOT_LINE_PALETTE = [
     "#5b8db8",  # 0: muted steel blue
@@ -61,7 +93,7 @@ PLOT_LINE_PALETTE = [
     "#c4862e",  # 4: amber (= STATUS_WARNING)
     "#b88a5b",  # 5: warm tan
     "#b87b9b",  # 6: muted rose
-    "#7c8cff",  # 7: indigo (= ACCENT)
+    "#7c8cff",  # 7: indigo
 ]
 
 # =============================================================================
@@ -130,10 +162,6 @@ RADIUS_LG = 8
 RADIUS_FULL = 9999
 
 # =============================================================================
-# MOTION
-# =============================================================================
-
-# =============================================================================
 # PLOT LAYOUT
 # =============================================================================
 
@@ -176,25 +204,11 @@ QDARKTHEME_CORNER_SHAPE = "rounded"
 # Every callsite that uses an old alias should be migrated as touched, then
 # aliases removed in B.7 cleanup.
 
-# --- Surface tokens ---
-SURFACE_WINDOW = BACKGROUND
-SURFACE_PANEL = CARD
-SURFACE_CARD = CARD
-SURFACE_ELEVATED = SECONDARY
-SURFACE_SUNKEN = PRIMARY
-SURFACE_BG = BACKGROUND
-SURFACE_OVERLAY_RGBA = "rgba(13, 14, 18, 0.6)"
-
-# --- Border tokens ---
-BORDER_SUBTLE = BORDER
-BORDER_STRONG = BORDER
-BORDER_FOCUS = ACCENT
-
 # --- Text tokens ---
 TEXT_PRIMARY = FOREGROUND
-TEXT_SECONDARY = MUTED_FOREGROUND
+TEXT_SECONDARY = _pack["TEXT_SECONDARY"]
 TEXT_MUTED = MUTED_FOREGROUND
-TEXT_DISABLED = "#555a66"
+TEXT_DISABLED = _pack["TEXT_DISABLED"]
 TEXT_INVERSE = ON_PRIMARY
 
 # --- Semantic text colors ---
@@ -205,13 +219,16 @@ TEXT_WARNING = STATUS_WARNING
 TEXT_CAUTION = STATUS_CAUTION
 TEXT_ACCENT = ACCENT
 
-# --- Accent scale (indigo) ---
-ACCENT_300 = "#6470d9"
+# --- Accent scale ---
+ACCENT_300 = _pack["ACCENT_300"]
 ACCENT_400 = ACCENT
-ACCENT_500 = "#95a3ff"
-ACCENT_600 = "#b8c0ff"
+ACCENT_500 = _pack["ACCENT_500"]
+ACCENT_600 = _pack["ACCENT_600"]
 
 # --- Legacy raw stone colors ---
+# STONE_400/800/1000 are unique ramp stops that are not currently themed
+# (they serve as legacy-only fallbacks). Will migrate to pack if any
+# non-default-cool theme needs to override them.
 STONE_0 = BACKGROUND
 STONE_50 = BACKGROUND
 STONE_100 = CARD

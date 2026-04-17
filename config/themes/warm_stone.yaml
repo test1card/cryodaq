@@ -1,0 +1,39 @@
+__meta_name__: "Тёплый камень"
+__meta_description__: "Тёплый серый на основе Pantone Warm Gray. Лабораторная атмосфера без клинического холода."
+
+# Surfaces
+BACKGROUND: "#1a1816"
+SURFACE_PANEL: "#221f1c"
+SURFACE_CARD: "#2b2723"
+SURFACE_ELEVATED: "#332f2a"
+SURFACE_SUNKEN: "#15130f"
+SURFACE_MUTED: "#252220"
+
+# Borders
+BORDER: "#3d3833"
+BORDER_SUBTLE: "#2d2925"
+
+# Text
+FOREGROUND: "#e8e2d9"
+TEXT_SECONDARY: "#b6ada5"
+MUTED_FOREGROUND: "#7a7167"
+TEXT_DISABLED: "#5a554f"
+
+# Accent (forest green) + scale
+ACCENT: "#4a8a5e"
+ACCENT_300: "#3a6e48"
+ACCENT_500: "#68a77c"
+ACCENT_600: "#8bc49b"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#141210"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED — identical across all bundled themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

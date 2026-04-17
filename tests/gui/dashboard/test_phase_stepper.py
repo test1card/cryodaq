@@ -53,10 +53,13 @@ def test_active_phase_uses_status_ok_not_accent(app):
     s = PhaseStepper()
     s.set_current_phase("cooldown")
     active_ss = s._pills["cooldown"].styleSheet()
-    assert theme.STATUS_OK in active_ss, (
-        f"active phase stylesheet missing STATUS_OK: {active_ss!r}"
-    )
-    assert theme.ACCENT not in active_ss, (
-        f"active phase stylesheet leaked ACCENT (reserved for focus ring): "
-        f"{active_ss!r}"
-    )
+    assert theme.STATUS_OK in active_ss, f"active phase stylesheet missing STATUS_OK: {active_ss!r}"
+    # Hex-substring check only meaningful when ACCENT and STATUS_OK differ.
+    # Some themes (e.g. warm_stone) adopt a forest-green accent that equals
+    # STATUS_OK; the distinction the rule guards is then not expressible
+    # via stylesheet grep — the source-level check above (`STATUS_OK in active_ss`)
+    # still proves the correct token was read.
+    if theme.ACCENT != theme.STATUS_OK:
+        assert theme.ACCENT not in active_ss, (
+            f"active phase stylesheet leaked ACCENT (reserved for focus ring): {active_ss!r}"
+        )

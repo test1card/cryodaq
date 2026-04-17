@@ -6,30 +6,42 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import re
+
 from cryodaq.gui import theme
+
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def test_base_palette_tokens_exist():
-    """Base palette has tone-down (B.4.5.1) values."""
-    assert theme.PRIMARY == "#181a22"
-    assert theme.BACKGROUND == "#0d0e12"
-    assert theme.FOREGROUND == "#e8eaf0"
-    assert theme.CARD == "#181a22"
-    assert theme.MUTED_FOREGROUND == "#8a8f9b"
-    assert theme.BORDER == "#2d3038"
-    assert theme.DESTRUCTIVE == "#c44545"
-    assert theme.ACCENT == "#7c8cff"
+    """Base palette tokens are present and well-formed hex colors.
+
+    Specific values are pack-dependent (loaded at import from
+    config/themes/*.yaml); this test pins the contract, not the palette.
+    """
+    for name in (
+        "PRIMARY",
+        "BACKGROUND",
+        "FOREGROUND",
+        "CARD",
+        "MUTED_FOREGROUND",
+        "BORDER",
+        "DESTRUCTIVE",
+        "ACCENT",
+    ):
+        val = getattr(theme, name)
+        assert _HEX.match(val), f"{name}={val!r} not a #rrggbb hex color"
 
 
 def test_status_tier_tokens_exist():
-    """Status tiers are desaturated (B.4.5.1)."""
+    """Status tiers are locked across all themes — safety semantics."""
     assert theme.STATUS_OK == "#4a8a5e"
     assert theme.STATUS_WARNING == "#c4862e"
-    assert theme.STATUS_CAUTION == "#c47a30"
+    assert theme.STATUS_CAUTION == "#b35a38"
     assert theme.STATUS_FAULT == "#c44545"
-    assert theme.STATUS_INFO == "#4a7ba8"
+    assert theme.STATUS_INFO == "#6490c4"
     assert theme.STATUS_STALE == "#5a5d68"
-    assert theme.COLD_HIGHLIGHT == "#5b8db8"
+    assert theme.COLD_HIGHLIGHT == "#7ab8c4"
 
 
 def test_backwards_compatible_aliases_exist():
@@ -37,7 +49,6 @@ def test_backwards_compatible_aliases_exist():
     assert theme.TEXT_PRIMARY == theme.FOREGROUND
     assert theme.TEXT_MUTED == theme.MUTED_FOREGROUND
     assert theme.SURFACE_CARD == theme.CARD
-    assert theme.BORDER_SUBTLE == theme.BORDER
     assert theme.ACCENT_400 == theme.ACCENT
     assert theme.SUCCESS_400 == theme.STATUS_OK
 

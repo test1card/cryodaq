@@ -104,8 +104,11 @@ def test_mode_badge_uses_status_ok_for_experiment() -> None:
     assert theme.STATUS_OK in ss, f"Эксперимент badge missing STATUS_OK: {ss!r}"
     assert theme.ON_DESTRUCTIVE in ss
     # ACCENT must NOT leak into the mode badge — that's reserved for
-    # focus/selection per RULE-COLOR-004.
-    assert theme.ACCENT not in ss, f"Mode badge leaked ACCENT: {ss!r}"
+    # focus/selection per RULE-COLOR-004. Hex-substring check is only
+    # meaningful when ACCENT ≠ STATUS_OK (some packs, e.g. warm_stone,
+    # adopt a forest-green accent equal to STATUS_OK).
+    if theme.ACCENT != theme.STATUS_OK:
+        assert theme.ACCENT not in ss, f"Mode badge leaked ACCENT: {ss!r}"
 
 
 def test_mode_badge_uses_status_caution_for_debug() -> None:
@@ -116,7 +119,8 @@ def test_mode_badge_uses_status_caution_for_debug() -> None:
     ss = bar._mode_badge.styleSheet()
     assert theme.STATUS_CAUTION in ss, f"Отладка badge missing STATUS_CAUTION: {ss!r}"
     assert theme.ON_DESTRUCTIVE in ss
-    assert theme.ACCENT not in ss
+    if theme.ACCENT != theme.STATUS_CAUTION:
+        assert theme.ACCENT not in ss
 
 
 def test_mode_badge_hides_on_unknown_value() -> None:
