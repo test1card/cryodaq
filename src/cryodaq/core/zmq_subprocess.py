@@ -5,14 +5,23 @@ assertion on Windows), only this subprocess dies. The GUI detects
 the death via is_alive() and restarts it.
 
 The GUI process never imports zmq.
+
+Threading model (see fix(gui): split bridge subprocess ...):
+- sub_drain owns the SUB socket, receives readings, emits heartbeats.
+  Heartbeat comes from this thread so it proves the *data* path is alive.
+- cmd_forward owns the REQ socket, sends commands and waits up to 3s
+  per reply. May block; does not affect sub_drain.
+- Main thread starts both threads and waits on shutdown_event.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import multiprocessing as mp
 import queue
+import threading
 import time
 from typing import Any
 
@@ -61,7 +70,8 @@ def zmq_bridge_main(
     cmd_addr:
         Engine REP address, e.g. "tcp://127.0.0.1:5556".
     data_queue:
-        Subprocess → GUI: Reading dicts.
+        Subprocess → GUI: Reading dicts plus control messages
+        (``__type`` in {"heartbeat", "warning"}).
     cmd_queue:
         GUI → subprocess: command dicts to send via REQ.
     reply_queue:
@@ -70,6 +80,8 @@ def zmq_bridge_main(
         Set by GUI to signal clean shutdown.
     """
     import zmq
+
+    HEARTBEAT_INTERVAL = 5.0  # seconds — keep generous vs is_healthy() threshold
 
     ctx = zmq.Context()
 
@@ -93,77 +105,117 @@ def zmq_bridge_main(
     req.setsockopt(zmq.REQ_CORRELATE, 1)
     req.connect(cmd_addr)
 
-    HEARTBEAT_INTERVAL = 5.0  # seconds — keep generous vs is_healthy() threshold
-    last_heartbeat = time.monotonic()
-    dropped_count = 0
+    dropped_counter = {"n": 0}
 
-    try:
+    def sub_drain_loop() -> None:
+        """Own SUB socket; drain readings and emit periodic heartbeats.
+
+        Heartbeat comes from this thread (not the command thread) so
+        the GUI's heartbeat freshness check proves the *data* path is
+        alive, not just that the subprocess exists.
+        """
+        last_heartbeat = time.monotonic()
         while not shutdown_event.is_set():
-            # 1. Receive data from engine PUB
+            # SUB: blocking receive with 100ms RCVTIMEO. Keeps the loop
+            # responsive for shutdown and heartbeat emission.
             try:
-                parts = sub.recv_multipart(zmq.NOBLOCK)
+                parts = sub.recv_multipart()
                 if len(parts) == 2:
                     try:
                         reading_dict = _unpack_reading_dict(parts[1])
-                        data_queue.put_nowait(reading_dict)
-                    except queue.Full:
-                        dropped_count += 1
-                        if dropped_count % 100 == 1:
-                            try:
-                                data_queue.put_nowait(
-                                    {
-                                        "__type": "warning",
-                                        "message": f"Queue overflow: {dropped_count} readings dropped",  # noqa: E501
-                                    }
-                                )
-                            except queue.Full:
-                                pass
                     except Exception:
-                        pass  # skip malformed
+                        reading_dict = None  # skip malformed
+                    if reading_dict is not None:
+                        try:
+                            data_queue.put_nowait(reading_dict)
+                        except queue.Full:
+                            dropped_counter["n"] += 1
+                            if dropped_counter["n"] % 100 == 1:
+                                with contextlib.suppress(queue.Full):
+                                    data_queue.put_nowait(
+                                        {
+                                            "__type": "warning",
+                                            "message": (
+                                                f"Queue overflow: "
+                                                f"{dropped_counter['n']} readings dropped"
+                                            ),
+                                        }
+                                    )
             except zmq.Again:
                 pass
+            except zmq.ZMQError:
+                if shutdown_event.is_set():
+                    break
+                # Unexpected socket error — swallow and continue.
+                time.sleep(0.01)
 
-            # 2. Forward commands from GUI to engine
-            try:
-                cmd = cmd_queue.get_nowait()
-                rid = cmd.pop("_rid", None)
-                try:
-                    req.send_string(json.dumps(cmd))
-                    reply_raw = req.recv_string()
-                    reply = json.loads(reply_raw)
-                except zmq.ZMQError:
-                    reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
-                except Exception as exc:
-                    reply = {"ok": False, "error": str(exc)}
-                if rid is not None:
-                    reply["_rid"] = rid
-                try:
-                    reply_queue.put(reply, timeout=2.0)
-                except queue.Full:
-                    # Log via data_queue warning so health monitoring sees it
-                    try:
-                        data_queue.put_nowait(
-                            {"__type": "warning", "message": "Reply queue overflow"}
-                        )
-                    except queue.Full:
-                        pass
-            except queue.Empty:
-                pass
-
-            # 3. Heartbeat — prove subprocess is alive and not hung
             now = time.monotonic()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                try:
+                with contextlib.suppress(queue.Full):
                     data_queue.put_nowait({"__type": "heartbeat", "ts": now})
-                except queue.Full:
-                    pass
                 last_heartbeat = now
 
-            time.sleep(0.005)  # 5ms poll — low CPU, ~200 Hz throughput
+    def cmd_forward_loop() -> None:
+        """Own REQ socket; forward GUI commands, return replies.
 
+        May block up to 3s per timed-out REQ. That does not starve
+        the data path because SUB drain runs on a separate thread.
+        A timed-out REQ emits a ``warning`` control message via
+        data_queue so the GUI can distinguish data starvation from
+        command-channel starvation.
+        """
+        while not shutdown_event.is_set():
+            try:
+                cmd = cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
+            try:
+                req.send_string(json.dumps(cmd))
+                reply_raw = req.recv_string()
+                reply = json.loads(reply_raw)
+            except zmq.ZMQError as exc:
+                reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
+                with contextlib.suppress(queue.Full):
+                    cmd_type = cmd.get("type") if isinstance(cmd, dict) else None
+                    if cmd_type is None and isinstance(cmd, dict):
+                        cmd_type = cmd.get("cmd", "?")
+                    data_queue.put_nowait(
+                        {
+                            "__type": "warning",
+                            "message": f"REP timeout on {cmd_type} ({exc})",
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                reply = {"ok": False, "error": str(exc)}
+            if rid is not None:
+                reply["_rid"] = rid
+            try:
+                reply_queue.put(reply, timeout=2.0)
+            except queue.Full:
+                with contextlib.suppress(queue.Full):
+                    data_queue.put_nowait(
+                        {"__type": "warning", "message": "Reply queue overflow"}
+                    )
+
+    sub_thread = threading.Thread(
+        target=sub_drain_loop, name="zmq-sub-drain", daemon=True
+    )
+    cmd_thread = threading.Thread(
+        target=cmd_forward_loop, name="zmq-cmd-forward", daemon=True
+    )
+
+    try:
+        sub_thread.start()
+        cmd_thread.start()
+        while not shutdown_event.is_set():
+            shutdown_event.wait(timeout=0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        shutdown_event.set()
+        sub_thread.join(timeout=2.0)
+        cmd_thread.join(timeout=2.0)
         sub.close(linger=0)
         req.close(linger=0)
         ctx.term()
