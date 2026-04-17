@@ -25,7 +25,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -425,6 +425,9 @@ class LauncherWindow(QMainWindow):
         self.statusBar().setVisible(False)
         # MainWindowV2 has no menu actions, so this is a no-op for v2.
         self._merge_main_window_menus()
+        # Own menu (Настройки → Тема) lives on the launcher, not on
+        # MainWindowV2 which has no menuBar of its own.
+        self._build_settings_menu()
         root.addWidget(self._main_window, stretch=1)
 
         # Phase UI-1 v2: status bar widgets retained as orphaned
@@ -472,6 +475,92 @@ class LauncherWindow(QMainWindow):
         for action in source_bar.actions():
             dest_bar.addAction(action)
         source_bar.setVisible(False)
+
+    def _build_settings_menu(self) -> None:
+        """Построить меню «Настройки → Тема» на menuBar лаунчера."""
+        from cryodaq.gui._theme_loader import (
+            _selected_theme_name,
+            available_themes,
+        )
+
+        settings_menu = self.menuBar().addMenu("Настройки")
+        theme_menu = settings_menu.addMenu("Тема")
+
+        current = _selected_theme_name()
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        for pack in available_themes():
+            action = QAction(pack["name"], self, checkable=True)
+            if pack.get("description"):
+                action.setToolTip(pack["description"])
+            action.setChecked(pack["id"] == current)
+            action.triggered.connect(
+                lambda _checked=False, pid=pack["id"]: self._on_theme_selected(pid)
+            )
+            group.addAction(action)
+            theme_menu.addAction(action)
+
+    @Slot(str)
+    def _on_theme_selected(self, theme_id: str) -> None:
+        """Persist the selected theme and re-exec the launcher.
+
+        Engine subprocess keeps running — it's a separate OS process that
+        survives launcher exit via reparenting to init. The new launcher
+        detects the busy ZMQ port on startup and attaches as an external
+        engine client instead of spawning a duplicate.
+        """
+        from cryodaq.gui._theme_loader import (
+            _selected_theme_name,
+            available_themes,
+            write_theme_selection,
+        )
+
+        if theme_id == _selected_theme_name():
+            return
+
+        pack_name = next(
+            (p["name"] for p in available_themes() if p["id"] == theme_id),
+            theme_id,
+        )
+        reply = QMessageBox.question(
+            self,
+            "Применить тему",
+            f"Применить тему «{pack_name}»?\n\n"
+            "Интерфейс будет перезапущен (≈1 секунда). Engine и запись "
+            "данных не прерываются.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            write_theme_selection(theme_id)
+        except Exception as exc:
+            logger.exception("theme: failed to persist selection")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить выбор темы:\n{exc}",
+            )
+            return
+
+        self._restart_gui_with_theme_change()
+
+    def _restart_gui_with_theme_change(self) -> None:
+        """Re-exec the launcher process with the same arguments.
+
+        Uses os.execv; importlib.reload cascade is intentionally NOT
+        attempted — Qt widget trees plus module-level pyqtgraph config
+        make partial reload fragile. A full process replacement is the
+        single robust path.
+
+        Engine subprocess persists because it was started via
+        subprocess.Popen without job-object binding; orphaned children
+        reparent to init on POSIX and continue serving the ZMQ ports.
+        """
+        logger.info("theme: re-executing launcher to apply new theme")
+        os.execv(sys.executable, [sys.executable, "-m", "cryodaq.launcher", *sys.argv[1:]])
 
     # ------------------------------------------------------------------
     # Event handlers
