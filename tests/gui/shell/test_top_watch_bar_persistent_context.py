@@ -68,7 +68,6 @@ def test_constructs_with_channel_mgr(app, mock_channel_mgr):
     assert bar._ctx_pressure_value is not None
     assert bar._ctx_tmin_value is not None
     assert bar._ctx_tmax_value is not None
-    assert bar._ctx_heater_value is not None
 
 
 def test_initial_state_shows_dashes(app, mock_channel_mgr):
@@ -77,7 +76,33 @@ def test_initial_state_shows_dashes(app, mock_channel_mgr):
     assert "\u2014" in bar._ctx_pressure_value.text()
     assert "\u2014" in bar._ctx_tmin_value.text()
     assert "\u2014" in bar._ctx_tmax_value.text()
-    assert "\u2014" in bar._ctx_heater_value.text()
+
+
+def test_no_heater_cell_in_top_watch_bar(app, mock_channel_mgr):
+    # Heater removed from TopWatchBar anatomy — header now shows only
+    # pressure + T min + T max (plus outer zones). Heater concept
+    # still exists on the Keithley panel.
+    bar = TopWatchBar(mock_channel_mgr)
+    _stop_timers(bar)
+    assert not hasattr(bar, "_ctx_heater_value")
+    assert not hasattr(bar, "_ctx_heater_label")
+    assert not hasattr(bar, "_update_heater_display")
+
+
+def test_no_time_window_picker_in_top_watch_bar(app, mock_channel_mgr):
+    # Picker lives on TempPlotWidget — must not surface in the header.
+    from PySide6.QtWidgets import QPushButton
+
+    bar = TopWatchBar(mock_channel_mgr)
+    _stop_timers(bar)
+    btns = bar.findChildren(QPushButton)
+    labels_to_reject = {"1мин", "1ч", "6ч", "24ч", "Всё"}
+    for b in btns:
+        assert b.text() not in labels_to_reject, (
+            f"unexpected time-window button: {b.text()}"
+        )
+    assert not hasattr(bar, "_time_window_echo_label")
+    assert not hasattr(bar, "set_time_window_echo")
 
 
 def test_pressure_reading_updates_display(app, mock_channel_mgr):
@@ -146,29 +171,6 @@ def test_warm_channel_ignored_for_tmin_tmax(app, mock_channel_mgr):
     )
     assert "\u2014" in bar._ctx_tmin_value.text()
     assert "\u2014" in bar._ctx_tmax_value.text()
-
-
-def test_heater_zero_shows_dash(app, mock_channel_mgr):
-    bar = TopWatchBar(mock_channel_mgr)
-    _stop_timers(bar)
-    bar.on_reading(_make_reading("Keithley_1/smua/power", 0.0, "W"))
-    assert "\u2014" in bar._ctx_heater_value.text()
-
-
-def test_heater_active_shows_watts(app, mock_channel_mgr):
-    bar = TopWatchBar(mock_channel_mgr)
-    _stop_timers(bar)
-    bar.on_reading(_make_reading("Keithley_1/smua/power", 2.5, "W"))
-    assert "2.50" in bar._ctx_heater_value.text()
-    assert "\u0412\u0442" in bar._ctx_heater_value.text()
-
-
-def test_heater_milliwatts(app, mock_channel_mgr):
-    bar = TopWatchBar(mock_channel_mgr)
-    _stop_timers(bar)
-    bar.on_reading(_make_reading("Keithley_1/smua/power", 0.05, "W"))
-    assert "50" in bar._ctx_heater_value.text()
-    assert "\u043c\u0412\u0442" in bar._ctx_heater_value.text()
 
 
 def test_nan_value_ignored(app, mock_channel_mgr):

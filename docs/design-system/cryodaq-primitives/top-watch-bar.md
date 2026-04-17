@@ -17,11 +17,20 @@ Horizontal chrome strip at the top of every screen. Shows 4 global vital reading
 > height = `HEADER_HEIGHT` (56px), pressure formatted in `мбар`
 > (Cyrillic), `Т мин` / `Т макс` locked to `Т11` / `Т12` (positionally
 > fixed reference channels), no emoji in the alarms cell. The bar
-> still uses a zone-based layout (engine / experiment+phase / time
-> window / channel summary / alarms) with an inserted persistent
-> context strip, rather than the canonical 4-vital-cell + mode-badge
-> anatomy shown above. Moving to the 4-cell anatomy is tracked as
-> later Phase II work.
+> still uses a zone-based layout (engine / experiment+phase /
+> channel summary / alarms) with an inserted persistent context
+> strip, rather than the canonical 4-vital-cell + mode-badge anatomy
+> shown above. Moving to the 4-cell anatomy is tracked as later
+> Phase II work.
+>
+> **Batch A (2026-04-17) cleanup:** zone separators now carry explicit
+> `background: transparent` (Fusion palette was painting them as
+> filled rectangles around the 1px divider); the heater cell was
+> removed from the context strip (low-signal for operators; heater
+> current still surfaces on the Keithley panel) so the strip is now
+> **pressure + T мин + T макс**; the time-window echo label was
+> removed from the header (picker remains on `TempPlotWidget` — the
+> header does not echo it).
 
 **When to use:**
 - Single instance in `MainWindow`, always visible at the top

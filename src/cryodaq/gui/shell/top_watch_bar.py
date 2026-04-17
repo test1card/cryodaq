@@ -161,12 +161,6 @@ class TopWatchBar(QWidget):
 
         layout.addWidget(self._make_zone_sep())
 
-        self._time_window_echo_label = QLabel("▸ окно 1ч")
-        self._time_window_echo_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        layout.addWidget(self._time_window_echo_label)
-
-        layout.addWidget(self._make_zone_sep())
-
         # Zone 3: channel summary
         self._channel_label = QLabel("● —/— норма")
         self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
@@ -188,13 +182,19 @@ class TopWatchBar(QWidget):
     def _make_zone_sep() -> QWidget:
         """Zone separator: VLine in wrapper for consistent spacing."""
         container = QWidget()
+        # Without explicit transparent background, Fusion palette paints
+        # the wrapper + VLine frame with Window fill, producing visible
+        # rectangles around the 1px divider.
+        container.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(container)
         lay.setContentsMargins(theme.SPACE_2, 0, theme.SPACE_2, 0)
         lay.setSpacing(0)
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFixedHeight(20)
-        sep.setStyleSheet(f"color: {theme.BORDER}; max-width: 1px;")
+        sep.setStyleSheet(
+            f"color: {theme.BORDER}; max-width: 1px; background: transparent;"
+        )
         lay.addWidget(sep)
         return container
 
@@ -255,18 +255,6 @@ class TopWatchBar(QWidget):
         ctx.addWidget(self._ctx_tmax_label)
         ctx.addWidget(self._ctx_tmax_value)
 
-        ctx.addWidget(self._make_ctx_dot())
-
-        # Heater
-        self._ctx_heater_label = QLabel(
-            "\u041d\u0430\u0433\u0440\u0435\u0432\u0430\u0442\u0435\u043b\u044c"
-        )  # Нагреватель
-        self._ctx_heater_label.setStyleSheet(label_style)
-        self._ctx_heater_value = QLabel("\u2014")
-        self._ctx_heater_value.setStyleSheet(value_style)
-        ctx.addWidget(self._ctx_heater_label)
-        ctx.addWidget(self._ctx_heater_value)
-
         # Insert after exp_label, before mode_badge
         # exp_label is at index 2, mode_badge at index 3
         main = self.layout()
@@ -281,7 +269,6 @@ class TopWatchBar(QWidget):
         # experiments depending on the visible-channel set.
         self._latest_ref_temps: dict[str, tuple[float, float]] = {}
         self._latest_pressure: tuple[float, float] | None = None
-        self._latest_heater_power: tuple[float, float] | None = None
 
     @staticmethod
     def _make_ctx_dot() -> QLabel:
@@ -351,38 +338,10 @@ class TopWatchBar(QWidget):
         _render(T_MIN_CHANNEL, self._ctx_tmin_value)
         _render(T_MAX_CHANNEL, self._ctx_tmax_value)
 
-    def _update_heater_display(self) -> None:
-        if self._latest_heater_power is None:
-            self._ctx_heater_value.setText("\u2014")
-            return
-        ts, value = self._latest_heater_power
-        age = time.time() - ts
-        if value <= 1e-6:  # sub-microwatt treated as off
-            self._ctx_heater_value.setText("\u2014")
-            self._ctx_heater_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-            return
-        if value < 0.001:
-            text = f"{value * 1e6:.0f} \u043c\u043a\u0412\u0442"  # мкВт
-        elif value < 1.0:
-            text = f"{value * 1000:.1f} \u043c\u0412\u0442"  # мВт
-        else:
-            text = f"{value:.2f} \u0412\u0442"  # Вт
-        if age > _STALE_TIMEOUT_S:
-            text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"
-            self._ctx_heater_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        else:
-            self._ctx_heater_value.setStyleSheet(
-                f"color: {theme.TEXT_PRIMARY}; "
-                f"font-size: 12px; font-weight: 600; "
-                f"font-family: '{theme.FONT_MONO}', monospace;"
-            )
-        self._ctx_heater_value.setText(text)
-
     def _stale_check_tick(self) -> None:
         """Re-run display updates to refresh stale markers."""
         self._update_pressure_display()
         self._update_temp_display()
-        self._update_heater_display()
 
     # ------------------------------------------------------------------
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
@@ -407,11 +366,6 @@ class TopWatchBar(QWidget):
                 ts = reading.timestamp.timestamp()
                 self._latest_pressure = (ts, float(value))
                 self._update_pressure_display()
-        elif ch.endswith("/smua/power"):
-            if isinstance(value, (int, float)) and not math.isnan(value):
-                ts = reading.timestamp.timestamp()
-                self._latest_heater_power = (ts, float(value))
-                self._update_heater_display()
 
     # ------------------------------------------------------------------
     # Zone refresh
@@ -531,13 +485,6 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
     # External setters (for direct injection from MainWindowV2 dispatchers)
     # ------------------------------------------------------------------
-
-    def set_time_window_echo(self, label: str) -> None:
-        """Set the time window display in zone 2 footer.
-
-        Called by MainWindowV2 when TempPlotWidget emits time_window_changed.
-        """
-        self._time_window_echo_label.setText(f"▸ окно {label}")
 
     def set_engine_state(self, alive: bool) -> None:
         """Update zone 1 from authoritative external source.

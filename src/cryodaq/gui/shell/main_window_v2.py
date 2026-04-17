@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
-from cryodaq.gui.dashboard.time_window import TimeWindow
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
@@ -158,16 +157,6 @@ class MainWindowV2(QMainWindow):
             self._overview_panel._phase_widget.create_experiment_requested.connect(
                 self._show_new_experiment_dialog
             )
-
-        # Wire dashboard time window picker → top bar echo
-        if (
-            hasattr(self._overview_panel, "_temp_plot")
-            and self._overview_panel._temp_plot is not None
-        ):
-            self._overview_panel._temp_plot.time_window_changed.connect(
-                lambda window: self._top_bar.set_time_window_echo(window.label)
-            )
-            self._top_bar.set_time_window_echo(TimeWindow.default().label)
 
         # Compose layout
         central = QWidget()
