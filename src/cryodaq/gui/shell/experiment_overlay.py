@@ -97,26 +97,15 @@ class ExperimentOverlay(QWidget):
 
         name_row.addStretch()
 
-        # ⋯ menu button (contains Abort)
+        # ⋯ menu button (contains Abort). No × close button — ExperimentOverlay
+        # is a primary view (opened via ToolRail), not a modal overlay, so the
+        # operator navigates away via the rail. ESC still emits `closed` for
+        # keyboard-only workflows (see keyPressEvent).
         self._more_btn = QPushButton("\u22ef")  # ⋯
         self._more_btn.setObjectName("expMoreBtn")
         self._more_btn.setFixedSize(32, 32)
         self._more_btn.clicked.connect(self._show_more_menu)
         name_row.addWidget(self._more_btn)
-
-        # × close button
-        self._close_btn = QPushButton("\u2715")  # ✕
-        self._close_btn.setObjectName("expCloseBtn")
-        self._close_btn.setFixedSize(32, 32)
-        self._close_btn.setStyleSheet(
-            f"#expCloseBtn {{ "
-            f"background: transparent; color: {theme.MUTED_FOREGROUND}; "
-            f"border: none; font-size: 16px; "
-            f"}} "
-            f"#expCloseBtn:hover {{ color: {theme.FOREGROUND}; }}"
-        )
-        self._close_btn.clicked.connect(self.closed.emit)
-        name_row.addWidget(self._close_btn)
         root.addLayout(name_row)
 
         # Passport one-liner
