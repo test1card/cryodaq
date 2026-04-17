@@ -152,17 +152,29 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 - `src/cryodaq/engine.py` — headless engine
 - `src/cryodaq/launcher.py` — operator launcher
+- `src/cryodaq/__main__.py` — `python -m cryodaq` invokes launcher
+- `src/cryodaq/_frozen_main.py` — frozen-app entry point wrapper (PyInstaller)
 - `src/cryodaq/gui/app.py` — standalone GUI entry point
+- `src/cryodaq/gui/__main__.py` — `python -m cryodaq.gui` invokes the GUI app
+
+**Поддержка процесса**
+
+- `src/cryodaq/instance_lock.py` — single-instance lock for GUI processes
+- `src/cryodaq/logging_setup.py` — shared logging configuration (secret redaction defence-in-depth)
+- `src/cryodaq/paths.py` — runtime path resolution (CRYODAQ_ROOT, frozen vs source layout)
 
 **Core**
 
 - `src/cryodaq/core/alarm.py` — v1 alarm engine (threshold + hysteresis)
 - `src/cryodaq/core/alarm_v2.py` — v2 alarm engine (YAML-driven, phase-aware, composite conditions)
+- `src/cryodaq/core/alarm_config.py` — загрузка и парсинг конфигурации алармов v3
+- `src/cryodaq/core/alarm_providers.py` — конкретные PhaseProvider / SetpointProvider для alarm engine v2
 - `src/cryodaq/core/atomic_write.py` — atomic file write via os.replace()
 - `src/cryodaq/core/broker.py` — DataBroker fan-out pub/sub
 - `src/cryodaq/core/calibration_acquisition.py` — непрерывный сбор SRDG при калибровке
 - `src/cryodaq/core/channel_manager.py` — channel name/visibility singleton (get_channel_manager())
 - `src/cryodaq/core/channel_state.py` — per-channel state tracker for alarm evaluation (staleness, fault history)
+- `src/cryodaq/core/disk_monitor.py` — мониторинг свободного места на диске
 - `src/cryodaq/core/event_logger.py` — автоматическое логирование системных событий
 - `src/cryodaq/core/experiment.py` — управление экспериментами, фазы (ExperimentPhase)
 - `src/cryodaq/core/housekeeping.py`
@@ -174,6 +186,8 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/safety_manager.py` — 6-state FSM, fail-on-silence, rate limiting
 - `src/cryodaq/core/scheduler.py` — instrument polling, persistence-first ordering
 - `src/cryodaq/core/sensor_diagnostics.py` — noise/drift/correlation health scoring (numpy exception)
+- `src/cryodaq/core/smu_channel.py` — SmuChannel enum + normalize helper for Keithley channel IDs
+- `src/cryodaq/core/user_preferences.py` — persistent user preferences for experiment-creation forms
 - `src/cryodaq/core/zmq_bridge.py` — ZMQ PUB/SUB + REP/REQ command server
 - `src/cryodaq/core/zmq_subprocess.py` — subprocess isolation for ZMQ bridge
 
@@ -206,55 +220,78 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/notifications/periodic_report.py` — scheduled Telegram reports with charts
 - `src/cryodaq/notifications/_secrets.py` — SecretStr wrapper for token leak prevention
 
-**GUI shell (Phase UI-1 v2)**
+**GUI — Shell (Phase I.1 chrome)**
 
-- `src/cryodaq/gui/shell/main_window_v2.py` — primary shell, replaces tab-based MainWindow
-- `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: engine indicator, experiment status, time window echo, app_mode badge
-- `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation
-- `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety state indicator
-- `src/cryodaq/gui/shell/overlay_container.py` — central content container
-- `src/cryodaq/gui/shell/overlays/_design_system/` — Phase I primitives (ModalCard, DrillDownBreadcrumb, BentoGrid, future tiles)
+- `src/cryodaq/gui/shell/main_window_v2.py` — v2 shell: TopWatchBar + ToolRail + BottomStatusBar + main content area; canonical mnemonic shortcuts (`Ctrl+L/E/A/K/M/R/C/D`, `F5`, `Ctrl+Shift+X`) per AD-002 — registry migration tracked, today shortcuts still bind in `gui/main_window.py`
+- `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: 4 vitals + mode badge (Эксперимент / Отладка)
+- `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation (9 slots, Ctrl+[1-9] transitional)
+- `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety-state strip
+- `src/cryodaq/gui/shell/overlay_container.py` — central content container (overlay host)
 - `src/cryodaq/gui/shell/new_experiment_dialog.py` — experiment creation dialog (B.8 rebuild)
 - `src/cryodaq/gui/shell/experiment_overlay.py` — experiment management overlay (B.8)
 
-**GUI dashboard (Phase UI-1 v2, Block B.1-B.2)**
+**GUI — Overlay primitives (`shell/overlays/_design_system/`)**
+
+- `src/cryodaq/gui/shell/overlays/_design_system/modal_card.py` — centered overlay with backdrop (Phase I.1)
+- `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` — grid layout (12-col runtime; 8-col canonical target per design-system)
+- `src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py` — sticky top bar with back navigation
+- `src/cryodaq/gui/shell/overlays/_design_system/_showcase.py` — standalone visual showcase for overlay primitives
+
+**GUI — Dashboard (Phase I.1 content)**
 
 - `src/cryodaq/gui/dashboard/dashboard_view.py` — 5-zone dashboard container
 - `src/cryodaq/gui/dashboard/channel_buffer.py` — shared per-channel rolling history store
-- `src/cryodaq/gui/dashboard/time_window.py` — TimeWindow enum for time-range selection
+- `src/cryodaq/gui/dashboard/dynamic_sensor_grid.py` — width-driven responsive grid of SensorCell widgets
+- `src/cryodaq/gui/dashboard/sensor_cell.py` — single-channel data cell (B.3)
+- `src/cryodaq/gui/dashboard/phase_aware_widget.py` — compact phase-aware widget for dashboard (B.5.6)
+- `src/cryodaq/gui/dashboard/phase_stepper.py` — 6-phase stepper (extracted from PhaseAwareWidget B.5.5)
+- `src/cryodaq/gui/dashboard/phase_content/hero_readout.py` — phase hero readout
+- `src/cryodaq/gui/dashboard/phase_content/eta_display.py` — phase ETA display
+- `src/cryodaq/gui/dashboard/phase_content/milestone_list.py` — phase milestone list
 - `src/cryodaq/gui/dashboard/temp_plot_widget.py` — multi-channel temperature plot with clickable legend
-- `src/cryodaq/gui/dashboard/phase_stepper.py` — phase progression stepper (extracted from PhaseAwareWidget B.5.5)
-- `src/cryodaq/gui/dashboard/phase_content/` — per-phase content widgets (HeroReadout, EtaDisplay, MilestoneList)
 - `src/cryodaq/gui/dashboard/pressure_plot_widget.py` — compact log-Y pressure plot
 - `src/cryodaq/gui/dashboard/quick_log_block.py` — compact inline log composer + recent entries (B.7)
+- `src/cryodaq/gui/dashboard/time_window.py` — TimeWindow enum for time-range selection
 
-**GUI theming**
+**GUI — Theming and IPC**
 
-- `src/cryodaq/gui/theme.py` — foundation design tokens (colors, fonts, spacing)
+- `src/cryodaq/gui/theme.py` — foundation design tokens (colors, fonts, spacing) — 139 tokens, see design-system v1.0.1
+- `src/cryodaq/gui/zmq_client.py` — ZMQ bridge client for GUI (all ZMQ lives in a subprocess)
 
-**Legacy GUI (kept alive until Block B.7)**
+**GUI — Legacy panels (v1, pre-Phase-I.1, kept alive until Block B.7)**
 
-- `src/cryodaq/gui/main_window.py` — горячие клавиши (Ctrl+L/E/1-9, F5, Ctrl+Shift+X)
-- `src/cryodaq/gui/tray_status.py`
+- `src/cryodaq/gui/main_window.py` — legacy v1 main window; today's actual shortcut bindings (`Ctrl+L/E/1-9`, `F5`, `Ctrl+Shift+X`); `Ctrl+1-9` is transitional rail-slot scheme being phased out per AD-002
+- `src/cryodaq/gui/tray_status.py` — system-tray status indicator
+- `src/cryodaq/gui/widgets/alarm_panel.py` — панель тревог (AlarmPanel)
+- `src/cryodaq/gui/widgets/analytics_panel.py` — R_thermal + прогноз охлаждения
 - `src/cryodaq/gui/widgets/archive_panel.py`
+- `src/cryodaq/gui/widgets/autosweep_panel.py` — DEPRECATED
 - `src/cryodaq/gui/widgets/calibration_panel.py` — три режима (Setup/Acquisition/Results)
+- `src/cryodaq/gui/widgets/channel_editor.py` — редактор каналов (видимость, имена)
+- `src/cryodaq/gui/widgets/common.py` — shared helpers / mixins for v1 widgets
+- `src/cryodaq/gui/widgets/conductivity_panel.py` — теплопроводность + автоизмерение
+- `src/cryodaq/gui/widgets/connection_settings.py` — диалог настройки подключения приборов
+- `src/cryodaq/gui/widgets/experiment_dialogs.py` — диалоги старта/завершения эксперимента (legacy)
 - `src/cryodaq/gui/widgets/experiment_workspace.py` — фазы, карточка эксперимента
+- `src/cryodaq/gui/widgets/instrument_status.py` — вкладка приборов + адаптивный liveness
+- `src/cryodaq/gui/widgets/keithley_panel.py`
 - `src/cryodaq/gui/widgets/operator_log_panel.py`
 - `src/cryodaq/gui/widgets/overview_panel.py` — двухколоночный: графики + карточки
-- `src/cryodaq/gui/widgets/keithley_panel.py`
-- `src/cryodaq/gui/widgets/conductivity_panel.py` — теплопроводность + автоизмерение
-- `src/cryodaq/gui/widgets/sensor_diag_panel.py` — диагностика датчиков
-- `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
-- `src/cryodaq/gui/widgets/autosweep_panel.py` — DEPRECATED
-- `src/cryodaq/gui/widgets/channel_editor.py` — редактор каналов (видимость, имена)
 - `src/cryodaq/gui/widgets/preflight_dialog.py` — предполётная проверка перед экспериментом
-- `src/cryodaq/gui/widgets/instrument_status.py` — вкладка приборов + адаптивный liveness
+- `src/cryodaq/gui/widgets/pressure_panel.py` — панель давления (вакуумметр)
+- `src/cryodaq/gui/widgets/sensor_diag_panel.py` — диагностика датчиков
 - `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
+- `src/cryodaq/gui/widgets/temp_panel.py` — панель отображения температурных каналов (24 канала)
+- `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
 
 **Storage**
 
 - `src/cryodaq/storage/sqlite_writer.py` — WAL-mode SQLite, daily rotation, persistence-first
 - `src/cryodaq/storage/parquet_archive.py` — Parquet export/read для архива экспериментов (pyarrow optional)
+- `src/cryodaq/storage/csv_export.py` — экспорт данных из SQLite в CSV
+- `src/cryodaq/storage/hdf5_export.py` — экспорт данных из SQLite в HDF5
+- `src/cryodaq/storage/xlsx_export.py` — экспорт данных в Excel (.xlsx) через openpyxl
+- `src/cryodaq/storage/replay.py` — воспроизведение исторических данных из SQLite через DataBroker
 
 **Reporting**
 
@@ -265,6 +302,12 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 **Web**
 
 - `src/cryodaq/web/server.py`
+
+**Design System**
+
+- `docs/design-system/README.md` — design system entry point (v1.0.1, 67 files, 139 tokens)
+- `docs/design-system/MANIFEST.md` — full index + 65 encoded decisions
+- See `## Источник истины по UI/визуальному дизайну` above for the full reference and authority rules
 
 **Tools**
 
