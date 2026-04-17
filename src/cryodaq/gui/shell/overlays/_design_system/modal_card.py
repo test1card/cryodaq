@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QPushButton,
@@ -21,6 +22,18 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.gui import theme
+
+
+def _is_focusable_descendant(widget: QWidget) -> bool:
+    """A widget is a valid focus-trap target if it's enabled, visible,
+    and accepts some form of keyboard focus."""
+    if widget.focusPolicy() == Qt.FocusPolicy.NoFocus:
+        return False
+    if not widget.isEnabled():
+        return False
+    if not widget.isVisible():
+        return False
+    return True
 
 
 class _Backdrop(QWidget):
@@ -63,6 +76,15 @@ class ModalCard(QWidget):
         self._max_width = max_width
         self._max_height_vh_pct = max_height_vh_pct
         self._content_widget: QWidget | None = None
+        # RULE-INTER-002: remember who held focus when the modal opened
+        # so we can return focus there after any close path.
+        self._opener: QWidget | None = None
+
+        # Restore focus to opener on every close path. closed.emit() fires
+        # from backdrop click / close button / Escape; closeEvent fires
+        # from programmatic close(). Both route through _restore_opener_focus
+        # which is idempotent.
+        self.closed.connect(self._restore_opener_focus)
 
         self._backdrop = _Backdrop(self)
         self._backdrop.clicked.connect(self.closed.emit)
@@ -140,8 +162,74 @@ class ModalCard(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        # RULE-INTER-002: snapshot the pre-open focus owner so we can
+        # return focus there on close. QApplication.focusWidget() may
+        # be None if nothing has focus (headless tests often), in which
+        # case _restore_opener_focus becomes a no-op.
+        self._opener = QApplication.focusWidget()
         self._reposition_card()
+        # RULE-A11Y-001: move focus to the first focusable descendant
+        # so keyboard users can start interacting immediately.
+        if not self._focus_first_child():
+            self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        # Programmatic close() path — restore focus explicitly.
+        # The closed-signal handler is idempotent so duplicate calls
+        # from closed.emit() + closeEvent are harmless.
+        self._restore_opener_focus()
+        super().closeEvent(event)
+
+    def focusNextPrevChild(self, next: bool) -> bool:  # type: ignore[override]
+        """Focus trap — Tab and Shift+Tab cycle through focusable
+        descendants of the modal only; focus cannot leave.
+
+        RULE-A11Y-001 / RULE-INTER-002. Qt calls this on Tab / Shift+Tab;
+        default implementation walks the whole top-level window's focus
+        chain, which would allow focus to escape. We override to cycle
+        only through our own descendants.
+        """
+        focusable = [w for w in self.findChildren(QWidget) if _is_focusable_descendant(w)]
+        if not focusable:
+            return False
+
+        current = QApplication.focusWidget()
+        try:
+            idx = focusable.index(current)
+        except ValueError:
+            idx = -1 if next else 0
+
+        if next:
+            new_idx = (idx + 1) % len(focusable)
+        else:
+            new_idx = (idx - 1) % len(focusable)
+
+        focusable[new_idx].setFocus(Qt.FocusReason.TabFocusReason)
+        return True
+
+    def _focus_first_child(self) -> bool:
+        """Focus the first focusable descendant. Returns True on success."""
+        for w in self.findChildren(QWidget):
+            if _is_focusable_descendant(w):
+                w.setFocus(Qt.FocusReason.OtherFocusReason)
+                return True
+        return False
+
+    def _restore_opener_focus(self) -> None:
+        """Return focus to the widget that held it when the modal opened."""
+        opener = self._opener
+        if opener is None:
+            return
+        try:
+            # Opener may have been deleted between show and close; the
+            # PySide6 wrapper raises RuntimeError in that case.
+            opener.setFocus(Qt.FocusReason.OtherFocusReason)
+        except RuntimeError:
+            pass
+        finally:
+            # Clear so a reopened modal re-snapshots on the next showEvent
+            # instead of restoring to a stale opener.
+            self._opener = None
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() == Qt.Key.Key_Escape:

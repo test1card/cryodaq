@@ -12,7 +12,19 @@ references: rules/surface-rules.md, rules/interaction-rules.md, tokens/elevation
 
 Centered overlay card with dimmed backdrop. Blocks interaction with content beneath. Dismissible via close button or Escape.
 
-> **Implementation status.** This spec defines the canonical target. The shipped code at `src/cryodaq/gui/shell/overlays/_design_system/modal_card.py` currently implements a low-level `ModalCard` container with backdrop click, close button, Escape-to-close, and a single `set_content()` insertion API. It does not implement the richer API shape used in this spec's examples (`set_header`, `set_footer`, `open()`), does not trap focus within the card, and does not restore focus to the previously focused control on close. `showEvent()` only focuses the wrapper widget itself. Code alignment is tracked as Phase II work. New development should follow this spec even where the shipped code diverges.
+> **Implementation status.** The shipped `ModalCard` at
+> `src/cryodaq/gui/shell/overlays/_design_system/modal_card.py` is
+> aligned with this spec on accessibility: focus trap via
+> `focusNextPrevChild` override (Tab cycles through all focusable
+> descendants of the modal, Shift+Tab reverses, focus never escapes),
+> and focus restoration to the opener widget on both close paths
+> (programmatic `close()` via `closeEvent`, and Escape /
+> close-button / backdrop via the `closed` signal). First focusable
+> descendant receives focus on `showEvent`. Covers RULE-A11Y-001
+> and RULE-INTER-002. The richer API shape (`set_header`,
+> `set_footer`, `open()`) from this spec's examples is not yet
+> extracted; current code uses a single `set_content()` insertion
+> point. Moving to the richer API is tracked as later Phase II work.
 
 **When to use:**
 - Drilling into detail from dashboard (drill-down pattern — breadcrumb back to parent)

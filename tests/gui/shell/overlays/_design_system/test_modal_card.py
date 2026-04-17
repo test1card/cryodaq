@@ -142,3 +142,133 @@ def test_modal_card_set_content_swaps_widget(app):
     assert first.parent() is None
     assert second.parent() is not None
     assert card._content_widget is second
+
+
+def _is_descendant_of(root: QWidget, w: QWidget | None) -> bool:
+    """True if `w` is `root` or any descendant."""
+    if w is None:
+        return False
+    node: QWidget | None = w
+    while node is not None:
+        if node is root:
+            return True
+        node = node.parentWidget()
+    return False
+
+
+def test_modal_card_focus_trap_never_escapes(app):
+    # RULE-A11Y-001 / RULE-INTER-002 — Tab must not move focus outside
+    # the modal. With the close button + two content buttons, cycling
+    # forward and backward should always land inside the modal subtree.
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    card = ModalCard()
+    card.resize(800, 600)
+
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    btn1 = QPushButton("A", content)
+    btn2 = QPushButton("B", content)
+    layout.addWidget(btn1)
+    layout.addWidget(btn2)
+    card.set_content(content)
+    card.show()
+    app.processEvents()
+
+    btn1.setFocus()
+    # Tab forward several times — every hop must stay inside the modal.
+    for _ in range(6):
+        card.focusNextPrevChild(True)
+        assert _is_descendant_of(card, QApplication.focusWidget())
+
+    # Shift+Tab backward several times — same invariant.
+    for _ in range(6):
+        card.focusNextPrevChild(False)
+        assert _is_descendant_of(card, QApplication.focusWidget())
+
+
+def test_modal_card_focus_trap_wraps(app):
+    # Cycling Tab N times through N focusable descendants returns to start.
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    card = ModalCard()
+    card.resize(800, 600)
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    btn1 = QPushButton("A", content)
+    btn2 = QPushButton("B", content)
+    layout.addWidget(btn1)
+    layout.addWidget(btn2)
+    card.set_content(content)
+    card.show()
+    app.processEvents()
+
+    # Enumerate focusable descendants of the shown modal.
+    from cryodaq.gui.shell.overlays._design_system.modal_card import (
+        _is_focusable_descendant,
+    )
+
+    focusable = [w for w in card.findChildren(QWidget) if _is_focusable_descendant(w)]
+    assert len(focusable) >= 2, "modal should expose at least 2 focusable descendants"
+
+    focusable[0].setFocus()
+    for _ in range(len(focusable)):
+        card.focusNextPrevChild(True)
+    assert QApplication.focusWidget() is focusable[0]
+
+
+def test_modal_card_restores_focus_to_opener_on_close(app):
+    # RULE-INTER-002 — on programmatic close(), focus returns to the
+    # widget that held focus when the modal opened.
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    parent = QWidget()
+    parent.resize(400, 300)
+    parent_layout = QVBoxLayout(parent)
+    opener = QPushButton("Open", parent)
+    parent_layout.addWidget(opener)
+    parent.show()
+    parent.activateWindow()
+    app.processEvents()
+    opener.setFocus()
+    app.processEvents()
+    assert opener.hasFocus()
+
+    card = ModalCard(parent)
+    card.resize(800, 600)
+    card.set_content(QLabel("content"))
+    card.show()
+    app.processEvents()
+    card.close()
+    app.processEvents()
+
+    assert opener.hasFocus(), "opener should regain focus after modal closes"
+
+
+def test_modal_card_restores_focus_on_closed_signal_path(app):
+    # Backdrop / close-button / Escape mechanisms only emit `closed`
+    # (they don't call close()). The restoration is wired via that
+    # signal so focus still returns to the opener.
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    parent = QWidget()
+    parent.resize(400, 300)
+    parent_layout = QVBoxLayout(parent)
+    opener = QPushButton("Open", parent)
+    parent_layout.addWidget(opener)
+    parent.show()
+    parent.activateWindow()
+    app.processEvents()
+    opener.setFocus()
+    app.processEvents()
+
+    card = ModalCard(parent)
+    card.resize(800, 600)
+    card.set_content(QLabel("content"))
+    card.show()
+    app.processEvents()
+    # Simulate the Escape / close-button path: emit closed directly.
+    card.closed.emit()
+    app.processEvents()
+
+    assert opener.hasFocus(), "opener should regain focus after closed signal"
