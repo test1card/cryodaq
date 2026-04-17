@@ -26,7 +26,14 @@ logger = logging.getLogger(__name__)
 
 _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
 
-_HEIGHT_PX = 48  # [calibrate]
+# Positionally fixed reference channels (design system invariant #21,
+# MANIFEST.md decision #21). Т11 / Т12 are physically immovable on the
+# second stage (nitrogen plate); cannot be relocated without dismantling
+# the rheostat. All temperature channels are metrologically calibrated,
+# but only these two qualify as fixed quantitative references for
+# TopWatchBar T-min / T-max display.
+T_MIN_CHANNEL = "Т11"  # U+0422 Cyrillic Т
+T_MAX_CHANNEL = "Т12"  # U+0422 Cyrillic Т
 
 
 def _fmt_elapsed(start_iso: str) -> str:
@@ -72,7 +79,9 @@ class TopWatchBar(QWidget):
         self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self.setFixedHeight(_HEIGHT_PX)
+        # DESIGN: invariant #1 — height = HEADER_HEIGHT (56), coupled to
+        # TOOL_RAIL_WIDTH per RULE-SPACE-006 (corner square).
+        self.setFixedHeight(theme.HEADER_HEIGHT)
         self.setObjectName("TopWatchBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
@@ -165,8 +174,8 @@ class TopWatchBar(QWidget):
 
         layout.addWidget(self._make_zone_sep())
 
-        # Zone 4: alarms (clickable)
-        self._alarms_label = _ClickableLabel("🛎 0")
+        # Zone 4: alarms (clickable). No emoji per RULE-COPY-005 — text label only.
+        self._alarms_label = _ClickableLabel("Тревоги: 0")
         self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._alarms_label.clicked.connect(self.alarms_clicked.emit)
         layout.addWidget(self._alarms_label)
@@ -265,18 +274,14 @@ class TopWatchBar(QWidget):
         main.insertWidget(4, self._context_frame)
         main.insertWidget(5, self._make_zone_sep())  # sep after context
 
-        # Cold channel tracking
-        self._cold_channel_set: set[str] = set()
-        self._latest_cold_temps: dict[str, tuple[float, float]] = {}
+        # T-min / T-max lock: track only Т11 and Т12 readings
+        # (positionally fixed reference channels, design system invariant #21).
+        # Other cold channels are metrologically valid but not positionally
+        # fixed, so using them would allow T-min / T-max to shift between
+        # experiments depending on the visible-channel set.
+        self._latest_ref_temps: dict[str, tuple[float, float]] = {}
         self._latest_pressure: tuple[float, float] | None = None
         self._latest_heater_power: tuple[float, float] | None = None
-
-        if self._channel_mgr is not None:
-            self._refresh_cold_set()
-            self._channel_mgr.on_change(self._refresh_cold_set)
-            mgr = self._channel_mgr
-            cb = self._refresh_cold_set
-            self.destroyed.connect(lambda: mgr.off_change(cb))
 
     @staticmethod
     def _make_ctx_dot() -> QLabel:
@@ -284,16 +289,6 @@ class TopWatchBar(QWidget):
         dot = QLabel(" \u00b7 ")  # · middle dot
         dot.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: 11px;")
         return dot
-
-    def _refresh_cold_set(self) -> None:
-        if self._channel_mgr is None:
-            self._cold_channel_set = set()
-            return
-        self._cold_channel_set = set(self._channel_mgr.get_visible_cold_channels())
-        self._latest_cold_temps = {
-            ch: data for ch, data in self._latest_cold_temps.items() if ch in self._cold_channel_set
-        }
-        self._update_temp_display()
 
     # ------------------------------------------------------------------
     # Persistent context display updates
@@ -308,7 +303,9 @@ class TopWatchBar(QWidget):
         if value <= 0:
             text = "\u2014"
         else:
-            text = f"{value:.2e} mbar"
+            # DESIGN: RULE-COPY-006 — operator-facing pressure unit is мбар
+            # (Cyrillic), not ASCII mbar.
+            text = f"{value:.2e} мбар"
         if age > _STALE_TIMEOUT_S:
             text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"  # (устар.)
             self._ctx_pressure_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
@@ -321,29 +318,38 @@ class TopWatchBar(QWidget):
         self._ctx_pressure_value.setText(text)
 
     def _update_temp_display(self) -> None:
-        if not self._latest_cold_temps:
-            self._ctx_tmin_value.setText("\u2014")
-            self._ctx_tmax_value.setText("\u2014")
-            return
+        """Render T min / T max from locked reference channels Т11 / Т12.
+
+        DESIGN: invariant #4, MANIFEST.md decision #21 — T min / T max
+        read specifically from Т11 and Т12. No fallback to other visible
+        cold channels: those are metrologically calibrated but not
+        positionally fixed, so using them would let the displayed
+        min/max shift between experiments when channels are toggled.
+        """
         now = time.time()
-        fresh = [
-            val for ch, (ts, val) in self._latest_cold_temps.items() if now - ts <= _STALE_TIMEOUT_S
-        ]
-        if not fresh:
-            self._ctx_tmin_value.setText("\u2014 (\u0443\u0441\u0442\u0430\u0440.)")
-            self._ctx_tmax_value.setText("\u2014 (\u0443\u0441\u0442\u0430\u0440.)")
-            self._ctx_tmin_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-            self._ctx_tmax_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-            return
         val_style = (
             f"color: {theme.TEXT_PRIMARY}; "
             f"font-size: 12px; font-weight: 600; "
             f"font-family: '{theme.FONT_MONO}', monospace;"
         )
-        self._ctx_tmin_value.setText(f"{min(fresh):.2f} K")
-        self._ctx_tmax_value.setText(f"{max(fresh):.2f} K")
-        self._ctx_tmin_value.setStyleSheet(val_style)
-        self._ctx_tmax_value.setStyleSheet(val_style)
+        muted_style = f"color: {theme.TEXT_MUTED};"
+
+        def _render(ch_id: str, label_widget: QLabel) -> None:
+            entry = self._latest_ref_temps.get(ch_id)
+            if entry is None:
+                label_widget.setText("\u2014")
+                label_widget.setStyleSheet(muted_style)
+                return
+            ts, val = entry
+            if now - ts > _STALE_TIMEOUT_S:
+                label_widget.setText(f"{val:.2f} K (\u0443\u0441\u0442\u0430\u0440.)")
+                label_widget.setStyleSheet(muted_style)
+                return
+            label_widget.setText(f"{val:.2f} K")
+            label_widget.setStyleSheet(val_style)
+
+        _render(T_MIN_CHANNEL, self._ctx_tmin_value)
+        _render(T_MAX_CHANNEL, self._ctx_tmax_value)
 
     def _update_heater_display(self) -> None:
         if self._latest_heater_power is None:
@@ -389,12 +395,12 @@ class TopWatchBar(QWidget):
 
         if ch.startswith("\u0422") and reading.unit == "K":
             self._channel_last_seen[ch] = (time.monotonic(), reading.status)
-            # B.4: cold channel temp tracking for persistent context
+            # T-min / T-max locked to positionally fixed reference channels.
             if isinstance(value, (int, float)) and not math.isnan(value):
                 short_id = ch.split(" ")[0]
-                if short_id in self._cold_channel_set:
+                if short_id in (T_MIN_CHANNEL, T_MAX_CHANNEL):
                     ts = reading.timestamp.timestamp()
-                    self._latest_cold_temps[short_id] = (ts, float(value))
+                    self._latest_ref_temps[short_id] = (ts, float(value))
                     self._update_temp_display()
         elif ch.endswith("/pressure"):
             if isinstance(value, (int, float)) and not math.isnan(value):
@@ -516,10 +522,10 @@ class TopWatchBar(QWidget):
         n = len(active)
         self._alarm_count = n
         if n == 0:
-            self._alarms_label.setText("🛎 0")
+            self._alarms_label.setText("Тревоги: 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"🛎 {n} актив.")
+            self._alarms_label.setText(f"Тревоги: {n} актив.")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
     # ------------------------------------------------------------------
@@ -661,19 +667,13 @@ class TopWatchBar(QWidget):
             QMessageBox.warning(self, "\u041e\u0448\u0438\u0431\u043a\u0430", str(error))
 
     def closeEvent(self, event):  # noqa: ANN001
-        """Clean up ChannelManager subscription on close."""
-        if self._channel_mgr is not None:
-            try:
-                self._channel_mgr.off_change(self._refresh_cold_set)
-            except Exception:
-                pass
         super().closeEvent(event)
 
     def set_alarm_count(self, n: int) -> None:
         self._alarm_count = max(0, int(n))
         if self._alarm_count == 0:
-            self._alarms_label.setText("🛎 0")
+            self._alarms_label.setText("Тревоги: 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"🛎 {self._alarm_count} актив.")
+            self._alarms_label.setText(f"Тревоги: {self._alarm_count} актив.")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
