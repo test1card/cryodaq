@@ -275,3 +275,28 @@ powershell -ExecutionPolicy Bypass -File scripts\disable_usb_suspend.ps1
 
 Дополнительно: Device Manager → каждый USB Root Hub → Properties →
 Power Management → убрать "Allow the computer to turn off this device to save power".
+
+
+## Qt theme on Linux
+
+Qt style is forced to **Fusion** with an explicit dark palette pinned
+to the design-system theme tokens. Both application entry points
+(`cryodaq` launcher and `cryodaq-gui`) call
+`cryodaq.gui.app.apply_fusion_dark_palette(app)` immediately after
+`QApplication` construction and before any widget is created.
+
+If the lab PC's system theme leaks through — white backgrounds inside
+`QLineEdit` / `QSpinBox` / `QComboBox`, or a white top-level window
+background — confirm that `apply_fusion_dark_palette` was reached at
+startup:
+
+```python
+from PySide6.QtWidgets import QApplication
+app = QApplication.instance()
+assert app.property("_cryodaq_fusion_applied") is True
+```
+
+If the property is missing, the helper was bypassed (custom entry
+point, PyQt5 fallback, etc.) and the GTK / Plasma native theme will
+bleed into the dark UI. The fix is to call `apply_fusion_dark_palette`
+before any widget is constructed on that entry path.

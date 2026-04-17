@@ -826,9 +826,15 @@ def main() -> None:
     # Must be here (launcher process), not only in gui/app.py (cryodaq-gui
     # entry), because `cryodaq` launcher creates QApplication + MainWindow
     # directly without going through gui/app.py.
-    from cryodaq.gui.app import _load_bundled_fonts
+    from cryodaq.gui.app import _load_bundled_fonts, apply_fusion_dark_palette
 
     _load_bundled_fonts()
+    # Force Fusion style + theme-token dark palette BEFORE any widget
+    # is constructed. Same helper as cryodaq-gui; launcher does not
+    # run qdarktheme, so this is the only theme-application on this
+    # entry path — critical for Linux systems where system-level
+    # GTK themes leak light defaults without it.
+    apply_fusion_dark_palette(app)
 
     # Single-instance guard
     lock_fd = try_acquire_lock(".launcher.lock")

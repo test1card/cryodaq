@@ -15,7 +15,7 @@ import sys
 
 import qdarktheme
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 # Theme module MUST be imported before any other cryodaq.gui submodule.
@@ -114,6 +114,102 @@ def _enable_tabular_figures(font: QFont) -> None:
     logger.warning("Tabular figures not supported by this PySide6 build")
 
 
+def apply_fusion_dark_palette(app: QApplication) -> None:
+    """Force Fusion style + design-token dark palette on the application.
+
+    Must be called AFTER QApplication instantiation and BEFORE any
+    widget is constructed. Idempotent — safe to call multiple times.
+
+    Rationale. Linux systems with GTK-native Qt themes leak light
+    defaults into widgets (QLineEdit / QSpinBox / QComboBox) and
+    top-level window backgrounds, producing white strips inside our
+    dark UI. Setting Fusion as the baseline style and pinning every
+    palette role to a `theme.*` token makes the rendering deterministic
+    across platforms.
+
+    Composes with qdarktheme: call this AFTER `qdarktheme.setup_theme()`
+    on the `cryodaq-gui` entry so our explicit palette wins, and call
+    it standalone on entries that do not use qdarktheme (e.g. the
+    `cryodaq` launcher). Existing application-level stylesheets (e.g.
+    the sheet qdarktheme installs) are preserved — our menu/tooltip
+    QSS is appended, not replaced.
+    """
+    app.setStyle("Fusion")
+    # Qt6 wraps the active style in QStyleSheetStyle as soon as a
+    # non-empty stylesheet is installed, which hides the underlying
+    # Fusion identity from `app.style().objectName()` / metaObject.
+    # Cache the fact that we set Fusion so tests and downstream code
+    # can assert the invariant without unwrapping Qt internals.
+    app.setProperty("_cryodaq_fusion_applied", True)
+
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(theme.BACKGROUND))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(theme.FOREGROUND))
+    palette.setColor(QPalette.ColorRole.Base, QColor(theme.SURFACE_CARD))
+    palette.setColor(
+        QPalette.ColorRole.AlternateBase, QColor(theme.SURFACE_SUNKEN)
+    )
+    palette.setColor(QPalette.ColorRole.Text, QColor(theme.FOREGROUND))
+    palette.setColor(
+        QPalette.ColorRole.PlaceholderText, QColor(theme.MUTED_FOREGROUND)
+    )
+    palette.setColor(QPalette.ColorRole.Button, QColor(theme.SURFACE_CARD))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.FOREGROUND))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme.SURFACE_CARD))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(theme.FOREGROUND))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.ACCENT))
+    palette.setColor(
+        QPalette.ColorRole.HighlightedText, QColor(theme.ON_DESTRUCTIVE)
+    )
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(theme.STATUS_FAULT))
+    palette.setColor(QPalette.ColorRole.Link, QColor(theme.ACCENT))
+
+    # Disabled state — muted foreground so inactive text stays legible
+    # but clearly distinguishable from live text.
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.Text,
+        QColor(theme.MUTED_FOREGROUND),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.ButtonText,
+        QColor(theme.MUTED_FOREGROUND),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.WindowText,
+        QColor(theme.MUTED_FOREGROUND),
+    )
+
+    app.setPalette(palette)
+
+    # Minimal stylesheet for surfaces Fusion doesn't fully cover via
+    # palette alone (tooltips keep a system border; QMenu selection
+    # inherits platform defaults). Concatenate with any existing
+    # app-level stylesheet so we don't wipe out contributions from
+    # libraries that set their own (qdarktheme in particular).
+    extras = (
+        f"QToolTip {{"
+        f"  background: {theme.SURFACE_CARD};"
+        f"  color: {theme.FOREGROUND};"
+        f"  border: 1px solid {theme.BORDER};"
+        f"  padding: 4px;"
+        f"}}"
+        f"QMenu {{"
+        f"  background: {theme.SURFACE_CARD};"
+        f"  color: {theme.FOREGROUND};"
+        f"  border: 1px solid {theme.BORDER};"
+        f"}}"
+        f"QMenu::item:selected {{"
+        f"  background: {theme.ACCENT};"
+        f"  color: {theme.ON_DESTRUCTIVE};"
+        f"}}"
+    )
+    existing = app.styleSheet() or ""
+    app.setStyleSheet((existing + "\n" + extras) if existing else extras)
+
+
 def main() -> None:
     """Точка входа cryodaq-gui."""
     # NOTE: multiprocessing.freeze_support() is called in
@@ -143,6 +239,11 @@ def main() -> None:
         corner_shape=theme.QDARKTHEME_CORNER_SHAPE,
         custom_colors={"primary": theme.QDARKTHEME_ACCENT},
     )
+
+    # Force Fusion style + theme-token palette AFTER qdarktheme so our
+    # explicit palette wins deterministically (fixes Linux GTK-native
+    # theme leaks into QLineEdit / QSpinBox / QComboBox surfaces).
+    apply_fusion_dark_palette(app)
 
     app.setApplicationName("CryoDAQ")
     app.setOrganizationName("АКЦ ФИАН")
