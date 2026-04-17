@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.gui import theme
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 
 
@@ -84,17 +85,38 @@ def test_mode_badge_shows_experiment() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
     assert not bar._mode_badge.isHidden()
-    assert (
-        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
-        in bar._mode_badge.text()
-    )
+    assert "Эксперимент" in bar._mode_badge.text()
 
 
 def test_mode_badge_shows_debug() -> None:
     bar = _make_bar()
     bar._update_mode_badge("debug")
     assert not bar._mode_badge.isHidden()
-    assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
+    assert "Отладка" in bar._mode_badge.text()
+
+
+def test_mode_badge_uses_status_ok_for_experiment() -> None:
+    # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge spec —
+    # Эксперимент = STATUS_OK (operational green) on ON_DESTRUCTIVE text.
+    bar = _make_bar()
+    bar._update_mode_badge("experiment")
+    ss = bar._mode_badge.styleSheet()
+    assert theme.STATUS_OK in ss, f"Эксперимент badge missing STATUS_OK: {ss!r}"
+    assert theme.ON_DESTRUCTIVE in ss
+    # ACCENT must NOT leak into the mode badge — that's reserved for
+    # focus/selection per RULE-COLOR-004.
+    assert theme.ACCENT not in ss, f"Mode badge leaked ACCENT: {ss!r}"
+
+
+def test_mode_badge_uses_status_caution_for_debug() -> None:
+    # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge spec —
+    # Отладка = STATUS_CAUTION (amber operator-attention).
+    bar = _make_bar()
+    bar._update_mode_badge("debug")
+    ss = bar._mode_badge.styleSheet()
+    assert theme.STATUS_CAUTION in ss, f"Отладка badge missing STATUS_CAUTION: {ss!r}"
+    assert theme.ON_DESTRUCTIVE in ss
+    assert theme.ACCENT not in ss
 
 
 def test_mode_badge_hides_on_unknown_value() -> None:
@@ -117,7 +139,7 @@ def test_mode_badge_updates_when_no_active_experiment() -> None:
     }
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
-    assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
+    assert "Отладка" in bar._mode_badge.text()
 
 
 def test_mode_badge_updates_when_experiment_active() -> None:
@@ -131,26 +153,17 @@ def test_mode_badge_updates_when_experiment_active() -> None:
     }
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
-    assert (
-        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
-        in bar._mode_badge.text()
-    )
+    assert "Эксперимент" in bar._mode_badge.text()
 
 
 def test_mode_badge_updates_on_change() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
-    assert (
-        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
-        in bar._mode_badge.text()
-    )
+    assert "Эксперимент" in bar._mode_badge.text()
     bar._update_mode_badge("debug")
-    assert "\u041e\u0422\u041b\u0410\u0414\u041a\u0410" in bar._mode_badge.text()
+    assert "Отладка" in bar._mode_badge.text()
     bar._update_mode_badge("experiment")
-    assert (
-        "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
-        in bar._mode_badge.text()
-    )
+    assert "Эксперимент" in bar._mode_badge.text()
 
 
 # --- B.6.2 Clickable badge tests ---

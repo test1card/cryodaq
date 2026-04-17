@@ -559,35 +559,37 @@ class TopWatchBar(QWidget):
         if app_mode is None:
             self._mode_badge.setVisible(False)
             return
+        # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge reference +
+        # invariant #5 "Mode badge always visible" + spec color table
+        # (Эксперимент = STATUS_OK operational; Отладка = STATUS_CAUTION
+        # amber operator-attention). Text is sentence case per RULE-COPY-003.
+        # Both modes use ON_DESTRUCTIVE as foreground (the canonical
+        # on-solid-status-color text token).
+        base_style = (
+            f"border: none; "
+            f"border-radius: {theme.RADIUS_SM}px; "
+            f"padding: {theme.SPACE_1}px {theme.SPACE_3}px; "
+            f"font-family: '{theme.FONT_BODY}'; "
+            f"font-size: {theme.FONT_LABEL_SIZE}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+        )
         if app_mode == "experiment":
-            self._mode_badge.setText(
-                "\u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422"
-            )  # ЭКСПЕРИМЕНТ
+            self._mode_badge.setText("Эксперимент")
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
-                f"background-color: {theme.MUTED}; "
-                f"color: {theme.MUTED_FOREGROUND}; "
-                f"border: 1px solid {theme.BORDER}; "
-                f"border-radius: {theme.RADIUS_SM}px; "
-                f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
-                f"font-family: '{theme.FONT_BODY}'; "
-                f"font-size: {theme.FONT_SIZE_SM}px; "
-                f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+                f"background-color: {theme.STATUS_OK}; "
+                f"color: {theme.ON_DESTRUCTIVE}; "
+                f"{base_style}"
                 f"}}"
             )
             self._mode_badge.setVisible(True)
         elif app_mode == "debug":
-            self._mode_badge.setText("\u041e\u0422\u041b\u0410\u0414\u041a\u0410")  # ОТЛАДКА
+            self._mode_badge.setText("Отладка")
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
-                f"background-color: rgba(196, 134, 46, 0.2); "
-                f"color: {theme.STATUS_WARNING}; "
-                f"border: 1px solid {theme.STATUS_WARNING}; "
-                f"border-radius: {theme.RADIUS_SM}px; "
-                f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
-                f"font-family: '{theme.FONT_BODY}'; "
-                f"font-size: {theme.FONT_SIZE_SM}px; "
-                f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+                f"background-color: {theme.STATUS_CAUTION}; "
+                f"color: {theme.ON_DESTRUCTIVE}; "
+                f"{base_style}"
                 f"}}"
             )
             self._mode_badge.setVisible(True)
