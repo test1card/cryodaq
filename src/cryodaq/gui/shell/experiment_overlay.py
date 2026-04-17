@@ -398,8 +398,8 @@ class ExperimentOverlay(QWidget):
             )
             self._passport_label.setText("")
             self._finalize_btn.setEnabled(False)
-            self._prev_btn.setEnabled(False)
-            self._next_btn.setEnabled(False)
+            self._prev_btn.setVisible(False)
+            self._next_btn.setVisible(False)
             return
 
         exp = self._experiment
@@ -439,33 +439,32 @@ class ExperimentOverlay(QWidget):
                 "\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0444\u0430\u0437\u044b"
             )
 
-        # Nav buttons
+        # Nav buttons — hide (not disable) when no preceding / succeeding phase
+        # so the operator never sees a dead grey rectangle.
         if current_phase:
             try:
                 idx = PHASE_ORDER.index(current_phase)
+            except ValueError:
+                self._prev_btn.setVisible(False)
+                self._next_btn.setVisible(False)
+            else:
                 if idx > 0:
                     prev_name = PHASE_LABELS_RU[PHASE_ORDER[idx - 1]]
                     self._prev_btn.setText(f"\u2190 {prev_name}")
-                    self._prev_btn.setEnabled(True)
+                    self._prev_btn.setVisible(True)
                 else:
-                    self._prev_btn.setText("")
-                    self._prev_btn.setEnabled(False)
+                    self._prev_btn.setVisible(False)
                 if idx < len(PHASE_ORDER) - 1:
                     next_name = PHASE_LABELS_RU[PHASE_ORDER[idx + 1]]
                     self._next_btn.setText(f"{next_name} \u2192")
-                    self._next_btn.setEnabled(True)
+                    self._next_btn.setVisible(True)
                 else:
-                    self._next_btn.setText("")
-                    self._next_btn.setEnabled(False)
-            except ValueError:
-                self._prev_btn.setEnabled(False)
-                self._next_btn.setEnabled(False)
+                    self._next_btn.setVisible(False)
         else:
-            self._prev_btn.setText("")
-            self._prev_btn.setEnabled(False)
+            self._prev_btn.setVisible(False)
             first_name = PHASE_LABELS_RU[PHASE_ORDER[0]]
             self._next_btn.setText(f"{first_name} \u2192")
-            self._next_btn.setEnabled(True)
+            self._next_btn.setVisible(True)
 
         # Card fields
         self._sample_edit.setText(exp.get("sample", ""))
