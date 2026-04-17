@@ -225,6 +225,20 @@ def test_all_bundled_packs_load_cleanly(real_themes_dir):
         assert set(loader.REQUIRED_TOKENS).issubset(pack.keys()), pack_file
 
 
+def test_bundled_theme_inventory(real_themes_dir):
+    """The six shipped pack ids are frozen — renames or deletions must
+    be paired with a CHANGELOG entry and an operator-facing note."""
+    ids = sorted(p.stem for p in real_themes_dir.glob("*.yaml"))
+    assert ids == [
+        "anthropic_mono",
+        "default_cool",
+        "ochre_bloom",
+        "rose_dusk",
+        "taupe_quiet",
+        "warm_stone",
+    ]
+
+
 def test_status_palette_identical_across_all_themes(real_themes_dir):
     """Safety invariant: every bundled theme must ship the same status
     tier colors. Style varies; safety semantics don't."""

@@ -1,0 +1,39 @@
+__meta_name__: "Охра"
+__meta_description__: "Тёплый студийный охристо-коричневый. Вдохновлено темой Ableton Ochre — оливковый акцент на тёмно-коричневом фоне."
+
+# Surfaces
+BACKGROUND: "#1c1915"
+SURFACE_PANEL: "#252119"
+SURFACE_CARD: "#2e2920"
+SURFACE_ELEVATED: "#383223"
+SURFACE_SUNKEN: "#16130f"
+SURFACE_MUTED: "#1f1c17"
+
+# Borders
+BORDER: "#453d2f"
+BORDER_SUBTLE: "#2f2a22"
+
+# Text
+FOREGROUND: "#e5ddcd"
+TEXT_SECONDARY: "#aca294"
+MUTED_FOREGROUND: "#7a7060"
+TEXT_DISABLED: "#605748"
+
+# Accent (olive) + scale
+ACCENT: "#a39450"
+ACCENT_300: "#887a40"
+ACCENT_500: "#baa866"
+ACCENT_600: "#cdbd82"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#141210"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED — identical across all bundled themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

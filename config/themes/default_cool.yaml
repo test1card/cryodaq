@@ -1,0 +1,40 @@
+__meta_name__: "Прохладный (наследие)"
+__meta_description__: "Нейтральные серые с синеватым подтоном — состояние интерфейса до ввода переключателя тем. Для тех, кто предпочитает прежний вид."
+
+# Surfaces (byte-identical to pre-switcher theme.py neutrals)
+BACKGROUND: "#0d0e12"
+SURFACE_PANEL: "#181a22"
+SURFACE_CARD: "#181a22"
+SURFACE_ELEVATED: "#22252f"
+SURFACE_SUNKEN: "#181a22"
+SURFACE_MUTED: "#1d2028"
+
+# Borders
+BORDER: "#2d3038"
+BORDER_SUBTLE: "#2d3038"
+
+# Text
+FOREGROUND: "#e8eaf0"
+TEXT_SECONDARY: "#8a8f9b"
+MUTED_FOREGROUND: "#8a8f9b"
+TEXT_DISABLED: "#555a66"
+
+# Accent (indigo) + scale — from pre-switcher theme.py
+ACCENT: "#7c8cff"
+ACCENT_300: "#6470d9"
+ACCENT_500: "#95a3ff"
+ACCENT_600: "#b8c0ff"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#e8eaf0"
+ON_DESTRUCTIVE: "#e8eaf0"
+
+# Status palette (LOCKED — identical across all bundled themes; one-time
+# semantic refresh from v1 values, see CHANGELOG)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

@@ -1,0 +1,39 @@
+__meta_name__: "Anthropic"
+__meta_description__: "Палитра бренда Anthropic: кремовый текст на графитовом фоне, терракотовый акцент."
+
+# Surfaces
+BACKGROUND: "#141413"
+SURFACE_PANEL: "#1e1d1b"
+SURFACE_CARD: "#262420"
+SURFACE_ELEVATED: "#2f2c28"
+SURFACE_SUNKEN: "#0e0d0c"
+SURFACE_MUTED: "#1a1917"
+
+# Borders
+BORDER: "#3a3733"
+BORDER_SUBTLE: "#2a2824"
+
+# Text
+FOREGROUND: "#faf9f5"
+TEXT_SECONDARY: "#b0aea5"
+MUTED_FOREGROUND: "#6e6c66"
+TEXT_DISABLED: "#4f4d47"
+
+# Accent (terracotta) + scale
+ACCENT: "#d97757"
+ACCENT_300: "#b85f3f"
+ACCENT_500: "#e38a6f"
+ACCENT_600: "#ed9e87"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#141413"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED — identical across all bundled themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

@@ -1,0 +1,39 @@
+__meta_name__: "Таупэ"
+__meta_description__: "Мягкий переход от нейтрального серого к тёплому. Умеренный сдвиг, сохраняет forest-акцент."
+
+# Surfaces
+BACKGROUND: "#1b1917"
+SURFACE_PANEL: "#232120"
+SURFACE_CARD: "#2b2927"
+SURFACE_ELEVATED: "#332f2c"
+SURFACE_SUNKEN: "#161413"
+SURFACE_MUTED: "#1e1c1a"
+
+# Borders
+BORDER: "#383532"
+BORDER_SUBTLE: "#2a2826"
+
+# Text
+FOREGROUND: "#e8e4dd"
+TEXT_SECONDARY: "#aaa59e"
+MUTED_FOREGROUND: "#7a7670"
+TEXT_DISABLED: "#5d5a55"
+
+# Accent (forest green — matches STATUS_OK by design) + scale
+ACCENT: "#4a8a5e"
+ACCENT_300: "#3a6e48"
+ACCENT_500: "#68a77c"
+ACCENT_600: "#8bc49b"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#141210"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED — identical across all bundled themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

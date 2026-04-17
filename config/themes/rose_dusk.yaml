@@ -1,0 +1,39 @@
+__meta_name__: "Розовые сумерки"
+__meta_description__: "Пыльно-розовая палитра. Для работы в ночные часы. Не рекомендуется руководителям."
+
+# Surfaces
+BACKGROUND: "#1f1719"
+SURFACE_PANEL: "#2a1f22"
+SURFACE_CARD: "#33262a"
+SURFACE_ELEVATED: "#3c2d31"
+SURFACE_SUNKEN: "#180f12"
+SURFACE_MUTED: "#241a1c"
+
+# Borders
+BORDER: "#4a363c"
+BORDER_SUBTLE: "#332428"
+
+# Text
+FOREGROUND: "#f2e0e5"
+TEXT_SECONDARY: "#c4a5ac"
+MUTED_FOREGROUND: "#8a6a71"
+TEXT_DISABLED: "#6a5156"
+
+# Accent (dusty rose) + scale
+ACCENT: "#d07890"
+ACCENT_300: "#b05c74"
+ACCENT_500: "#dc92a6"
+ACCENT_600: "#e6adbc"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#1f1719"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED — identical across all bundled themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"
