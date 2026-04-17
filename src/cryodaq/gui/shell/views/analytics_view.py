@@ -1,17 +1,24 @@
-"""Analytics overlay — B.8 rebuild of the legacy analytics panel.
+"""Analytics primary view (B.8 revision 2) — QWidget, not ModalCard.
 
-Full-screen ModalCard overlay surfacing computed metrics from analytics
-plugins: cooldown ETA + trajectory, thermal resistance, vacuum trend.
+Hosted as a page in the shell's main content stack (OverlayContainer).
+Activated from ToolRail Ctrl+A. No backdrop, no close button, no focus
+trap, no Escape-to-dismiss — primary-view invariants per
+docs/design-system/cryodaq-primitives/analytics-panel.md (revision 2).
 
-See `docs/design-system/cryodaq-primitives/analytics-panel.md`.
+Layout is plot-dominant. The cooldown trajectory plot receives the
+largest continuous block of screen space; hero strip (ETA + phase +
+progress) and vacuum trend strip are thin chrome, R_thermal tile +
+mini plot occupy a compact right column.
 
-Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` preserves the
-domain logic and stays alive until Block B.13. The v2 panel below
-inherits ModalCard chrome (focus trap, focus restoration, Escape to
-close) and composes its body on a canonical 8-column `BentoGrid` per
-AD-001. Data flows in via `set_cooldown` / `set_r_thermal` /
-`set_fault` — the panel does not subscribe to ZMQ directly; the shell
-(`main_window_v2.py`) owns the subscription and pushes snapshots.
+Data flow (preserved from B.8 follow-up 53232ea):
+- `set_cooldown(CooldownData | None)`
+- `set_r_thermal(RThermalData | None)`
+- `set_fault(faulted: bool, reason: str)`
+
+The view does not import zmq or subscribe directly. The shell
+(`main_window_v2.py`) adapts `analytics/cooldown_predictor/cooldown_eta`
+readings into `CooldownData` via `_cooldown_reading_to_data()` and
+pushes via the setters.
 """
 
 from __future__ import annotations
@@ -37,15 +44,20 @@ from cryodaq.gui._plot_style import (
     series_pen,
     warn_region_brush,
 )
-from cryodaq.gui.shell.overlays._design_system.bento_grid import BentoGrid
-from cryodaq.gui.shell.overlays._design_system.modal_card import ModalCard
 
-# ─── Data models (from spec §API) ─────────────────────────────────────
+# ─── Data models (preserved from B.8 follow-up 53232ea) ───────────────
 
 
 @dataclass
 class CooldownData:
-    """Snapshot of cooldown predictor output."""
+    """Snapshot of cooldown predictor output.
+
+    The shell-side adapter `MainWindowV2._cooldown_reading_to_data()`
+    translates the live broker reading (channel
+    `analytics/cooldown_predictor/cooldown_eta`, metadata shape
+    documented in `src/cryodaq/analytics/cooldown_service.py:400-433`)
+    into this dataclass before pushing into `AnalyticsView.set_cooldown`.
+    """
 
     t_hours: float
     ci_hours: float
@@ -59,7 +71,8 @@ class CooldownData:
 
 @dataclass
 class RThermalData:
-    """Thermal resistance snapshot."""
+    """Thermal resistance snapshot. No plugin publishes this today;
+    `set_r_thermal()` remains part of the contract for future wiring."""
 
     current_value: float | None
     delta_per_minute: float | None
@@ -88,145 +101,155 @@ def _format_eta(t_hours: float, ci_hours: float) -> str:
 
 _R_THERMAL_STALE_S = 60.0
 
-# Fixed Y range for cooldown plot (invariant: no autoscale).
-# Start temperature ~300 K, target ~1 K. Overshoots past these bounds
-# are informative and rendered as-is.
-_COOLDOWN_Y_RANGE = (1.0, 320.0)
+# Fixed Y range for cooldown plot per spec invariant #8 (never autoscale).
+_COOLDOWN_Y_RANGE = (0.0, 310.0)
+
+# Fixed pixel heights per spec anatomy (B.8 revision 2).
+_HERO_STRIP_HEIGHT_PX = 56
+_VACUUM_STRIP_HEIGHT_PX = 140
+_RTHERMAL_TILE_HEIGHT_PX = 72
 
 
-class AnalyticsPanel(ModalCard):
-    """Full-screen analytics overlay (B.8).
+class AnalyticsView(QWidget):
+    """Analytics primary view — plot-dominant page hosted in the shell
+    main content stack.
 
-    Single-instance invariant (spec #2) is enforced at the shell level
-    (`main_window_v2.py`) — it tracks whether this panel is already
-    open and avoids creating duplicates on repeated Ctrl+A.
+    Instance lifecycle: constructed once by the shell on first Ctrl+A;
+    stays alive across switches. `set_cooldown` / `set_r_thermal` /
+    `set_fault` are idempotent — safe to call repeatedly with the same
+    payload.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("analyticsView")
         self._cooldown: CooldownData | None = None
         self._r_thermal: RThermalData | None = None
         self._faulted = False
         self._fault_reason = ""
 
-        self._content = QWidget(self)
-        self._grid = BentoGrid(parent=self._content)
-        root = QVBoxLayout(self._content)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self._grid)
-
-        # Cache the base chrome string so set_fault can toggle between
-        # default BORDER and STATUS_FAULT border-left without losing
-        # the baseline styling of the card chrome.
-        self._hero: _HeroCard | None = None
+        # Tile handles — populated in _build_layout().
+        self._hero: _HeroStrip | None = None
         self._cooldown_plot: pg.PlotWidget | None = None
+        self._cooldown_curves: dict = {}
         self._rthermal_tile: _RThermalTile | None = None
         self._rthermal_mini: pg.PlotWidget | None = None
-        self._vacuum_host: _VacuumHost | None = None
+        self._rthermal_curve: pg.PlotDataItem | None = None
+        self._vacuum_strip: _VacuumStrip | None = None
 
-        self._build_tiles()
-        self.set_content(self._content)
+        self._build_layout()
 
-        # Initial empty state
+        # Initial empty state.
         self.set_cooldown(None)
         self.set_r_thermal(None)
 
     # ------------------------------------------------------------------
-    # Tile construction
+    # Layout construction
     # ------------------------------------------------------------------
 
-    def _build_tiles(self) -> None:
-        # Row 0 (col 0..8): Hero ETA card
-        self._hero = _HeroCard(self._content)
-        self._grid.add_tile(self._hero, row=0, col=0, col_span=8, row_span=1)
+    def _build_layout(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Row 1..3 (col 0..5): Cooldown trajectory plot
+        # Hero strip — compact fixed height, stretch 0.
+        self._hero = _HeroStrip(self)
+        self._hero.setFixedHeight(_HERO_STRIP_HEIGHT_PX)
+        root.addWidget(self._hero, 0)
+
+        # Middle region — stretch 1, plot + right column.
+        middle = QWidget(self)
+        middle_row = QHBoxLayout(middle)
+        middle_row.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3
+        )
+        middle_row.setSpacing(theme.SPACE_3)
+
+        # Cooldown plot — dominant width (stretch 5).
         self._cooldown_plot, self._cooldown_curves = self._build_cooldown_plot()
-        self._grid.add_tile(
-            self._cooldown_plot, row=1, col=0, col_span=5, row_span=3
-        )
+        middle_row.addWidget(self._cooldown_plot, 5)
 
-        # Row 1 (col 5..8): R_thermal metric tile
-        self._rthermal_tile = _RThermalTile(self._content)
-        self._grid.add_tile(
-            self._rthermal_tile, row=1, col=5, col_span=3, row_span=1
-        )
+        # Right column — stretch 2.
+        right_col_wrap = QWidget(middle)
+        right_col = QVBoxLayout(right_col_wrap)
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(theme.SPACE_2)
 
-        # Row 2..3 (col 5..8): R_thermal mini plot
-        self._rthermal_mini, self._rthermal_curve = self._build_rthermal_mini_plot()
-        self._grid.add_tile(
-            self._rthermal_mini, row=2, col=5, col_span=3, row_span=2
-        )
+        self._rthermal_tile = _RThermalTile(right_col_wrap)
+        self._rthermal_tile.setFixedHeight(_RTHERMAL_TILE_HEIGHT_PX)
+        right_col.addWidget(self._rthermal_tile, 0)
 
-        # Row 4 (col 0..8): Vacuum trend host
-        self._vacuum_host = _VacuumHost(self._content)
-        self._grid.add_tile(
-            self._vacuum_host, row=4, col=0, col_span=8, row_span=1
-        )
+        self._rthermal_mini, self._rthermal_curve = self._build_rthermal_mini()
+        right_col.addWidget(self._rthermal_mini, 1)
+
+        middle_row.addWidget(right_col_wrap, 2)
+        root.addWidget(middle, 1)
+
+        # Vacuum trend strip — compact fixed height, stretch 0.
+        self._vacuum_strip = _VacuumStrip(self)
+        self._vacuum_strip.setFixedHeight(_VACUUM_STRIP_HEIGHT_PX)
+        root.addWidget(self._vacuum_strip, 0)
 
     def _build_cooldown_plot(self) -> tuple[pg.PlotWidget, dict]:
         plot = pg.PlotWidget()
+        plot.setObjectName("analyticsCooldownPlot")
         apply_plot_style(plot)
+
+        # Compact tick fonts — spec: FONT_LABEL_SIZE - 2.
+        small_tick_size = max(theme.FONT_LABEL_SIZE - 2, 8)
+        small_tick_font = QFont(theme.FONT_BODY, small_tick_size)
+        for axis_name in ("left", "bottom"):
+            plot.getAxis(axis_name).setStyle(tickFont=small_tick_font)
+
         pi = plot.getPlotItem()
+        pi.setLabel("left", "T", units="K", color=theme.PLOT_LABEL_COLOR)
         pi.setLabel(
-            "left",
-            "Температура",
-            units="K",
-            color=theme.PLOT_LABEL_COLOR,
-        )
-        pi.setLabel(
-            "bottom",
-            "Время от старта",
-            units="ч",
-            color=theme.PLOT_LABEL_COLOR,
+            "bottom", "Время от старта", units="ч", color=theme.PLOT_LABEL_COLOR
         )
 
-        # Invariant: fixed Y range, not autoscale. Overshoots render
-        # as-is because they are informative (spec common-mistake #3).
+        # Fixed Y range per invariant #8 — do not autoscale.
         pi.getViewBox().setYRange(*_COOLDOWN_Y_RANGE, padding=0)
         pi.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
 
         pi.addLegend(offset=(-10, 10))
 
-        # Actual: solid PLOT_LINE_PALETTE[0]
-        actual_curve = pi.plot([], [], pen=series_pen(0), name="Измерено")
-
-        # Predicted: dashed PLOT_LINE_PALETTE[1]
-        predicted_curve = pi.plot(
+        actual = pi.plot([], [], pen=series_pen(0), name="Измерено")
+        predicted = pi.plot(
             [], [], pen=series_pen(1, style=Qt.PenStyle.DashLine), name="Прогноз"
         )
-
-        # CI band: lower + upper invisible lines, FillBetweenItem across them.
-        ci_lower = pi.plot([], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0))
-        ci_upper = pi.plot([], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0))
+        ci_lower = pi.plot(
+            [], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0)
+        )
+        ci_upper = pi.plot(
+            [], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0)
+        )
         ci_fill = pg.FillBetweenItem(ci_lower, ci_upper, brush=warn_region_brush())
         pi.addItem(ci_fill)
 
         return plot, {
-            "actual": actual_curve,
-            "predicted": predicted_curve,
+            "actual": actual,
+            "predicted": predicted,
             "ci_lower": ci_lower,
             "ci_upper": ci_upper,
             "phase_lines": [],
         }
 
-    def _build_rthermal_mini_plot(self) -> tuple[pg.PlotWidget, pg.PlotDataItem]:
+    def _build_rthermal_mini(self) -> tuple[pg.PlotWidget, pg.PlotDataItem]:
         plot = pg.PlotWidget()
+        plot.setObjectName("analyticsRThermalMini")
         apply_plot_style(plot)
+        small_tick_size = max(theme.FONT_LABEL_SIZE - 2, 8)
+        small_tick_font = QFont(theme.FONT_BODY, small_tick_size)
         pi = plot.getPlotItem()
         pi.setLabel("left", "R", units="K/W", color=theme.PLOT_LABEL_COLOR)
         pi.setLabel("bottom", "t", units="мин", color=theme.PLOT_LABEL_COLOR)
-        # Smaller tick font for compact plot.
-        tick_size = max(theme.FONT_LABEL_SIZE - 2, 9)
-        tick_font = QFont(theme.FONT_BODY, tick_size)
-        for ax_name in ("left", "bottom"):
-            pi.getAxis(ax_name).setStyle(tickFont=tick_font)
+        for axis_name in ("left", "bottom"):
+            pi.getAxis(axis_name).setStyle(tickFont=small_tick_font)
         curve = pi.plot([], [], pen=series_pen(0))
         return plot, curve
 
     # ------------------------------------------------------------------
-    # Public setters (shell pushes state)
+    # Public setters
     # ------------------------------------------------------------------
 
     def set_cooldown(self, data: CooldownData | None) -> None:
@@ -243,7 +266,7 @@ class AnalyticsPanel(ModalCard):
         self._faulted = faulted
         self._fault_reason = reason if faulted else ""
         self._hero.set_fault(faulted)
-        self._apply_plot_fault_chrome(self._cooldown_plot, faulted)
+        self._apply_cooldown_fault_chrome(faulted)
 
     # ------------------------------------------------------------------
     # Plot update helpers
@@ -292,8 +315,6 @@ class AnalyticsPanel(ModalCard):
         self._cooldown_curves["phase_lines"] = []
 
     def _render_phase_lines(self, boundaries_hours: list[float]) -> None:
-        """Vertical dashed lines at phase transitions. Sourced from the
-        predictor meta — no hardcoded boundary temperatures."""
         self._clear_phase_lines()
         if not boundaries_hours:
             return
@@ -310,34 +331,33 @@ class AnalyticsPanel(ModalCard):
         if data is None or not data.history:
             self._rthermal_curve.setData([], [])
             return
-        # Convert (unix_ts, value) history to minutes-ago x axis so the
-        # mini plot reads "last 10 minutes" with 0 = now on the right.
         now = time.time()
         xs = [(ts - now) / 60.0 for ts, _ in data.history]
         ys = [v for _, v in data.history]
         self._rthermal_curve.setData(xs, ys)
 
-    def _apply_plot_fault_chrome(
-        self, plot_widget: pg.PlotWidget | None, faulted: bool
-    ) -> None:
-        if plot_widget is None:
-            return
-        # pyqtgraph PlotWidget has setStyleSheet via QWidget; apply a
-        # named border so set_fault(False) reverts cleanly.
-        plot_widget.setObjectName("analyticsPlot")
+    def _apply_cooldown_fault_chrome(self, faulted: bool) -> None:
+        """Spec: cooldown plot gets STATUS_FAULT outer border on fault."""
         if faulted:
-            plot_widget.setStyleSheet(
-                f"#analyticsPlot {{ border: 2px solid {theme.STATUS_FAULT}; }}"
+            self._cooldown_plot.setStyleSheet(
+                f"#analyticsCooldownPlot "
+                f"{{ border: 2px solid {theme.STATUS_FAULT}; }}"
             )
         else:
-            plot_widget.setStyleSheet("")
+            self._cooldown_plot.setStyleSheet("")
 
 
-# ─── Hero ETA card ────────────────────────────────────────────────────
+# ─── Hero strip ───────────────────────────────────────────────────────
 
 
-class _HeroCard(QFrame):
-    """Top-row hero: ETA big-font + phase label + progress bar."""
+class _HeroStrip(QFrame):
+    """Thin horizontal chrome at the top of AnalyticsView.
+
+    Three items in a row: ETA (FONT_TITLE_SIZE), phase label
+    (FONT_LABEL_SIZE muted), progress bar (flex width). No card
+    background; a bottom 1px BORDER (or STATUS_FAULT in fault state)
+    serves as the separator.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -348,40 +368,37 @@ class _HeroCard(QFrame):
         self._apply_chrome(faulted=False)
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5
+        row = QHBoxLayout(self)
+        row.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
         )
-        root.setSpacing(theme.SPACE_3)
+        row.setSpacing(theme.SPACE_4)
 
-        # Top row: ETA (big) left, phase label right.
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(theme.SPACE_4)
-
+        # ETA label — title-size, bold.
         self._eta_label = QLabel("—", self)
-        eta_font = QFont(theme.FONT_DISPLAY, theme.FONT_DISPLAY_SIZE)
-        eta_font.setWeight(QFont.Weight(theme.FONT_DISPLAY_WEIGHT))
+        eta_font = QFont(theme.FONT_BODY, theme.FONT_TITLE_SIZE)
+        eta_font.setWeight(QFont.Weight(theme.FONT_TITLE_WEIGHT))
+        try:
+            eta_font.setFeature(QFont.Tag("tnum"), 1)
+        except (AttributeError, TypeError, ValueError):
+            pass
         self._eta_label.setFont(eta_font)
         self._eta_label.setStyleSheet(
             f"color: {theme.FOREGROUND}; background: transparent;"
         )
-        top_row.addWidget(self._eta_label, 1)
+        row.addWidget(self._eta_label, 0)
 
+        # Phase label — label-size, muted foreground.
         self._phase_label = QLabel("—", self)
-        phase_font = QFont(theme.FONT_BODY, theme.FONT_TITLE_SIZE)
-        phase_font.setWeight(QFont.Weight(theme.FONT_TITLE_WEIGHT))
+        phase_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
+        phase_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
         self._phase_label.setFont(phase_font)
-        self._phase_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
         self._phase_label.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
         )
-        top_row.addWidget(self._phase_label, 0)
-        root.addLayout(top_row)
+        row.addWidget(self._phase_label, 0)
 
-        # Progress bar — 0..100 overall cooldown progress.
+        # Progress bar — flex width, thin.
         self._progress = QProgressBar(self)
         self._progress.setObjectName("analyticsHeroProgress")
         self._progress.setRange(0, 100)
@@ -399,16 +416,16 @@ class _HeroCard(QFrame):
             f"border-radius: {theme.RADIUS_SM}px;"
             f"}}"
         )
-        root.addWidget(self._progress)
-
-    # ------------------------------------------------------------------
+        row.addWidget(self._progress, 1)
 
     def set_cooldown(self, data: CooldownData | None) -> None:
         if data is None:
             self._eta_label.setText("Охлаждение не активно")
-            self._phase_label.setText("—")
+            self._phase_label.setText("")
             self._progress.setValue(0)
+            self._progress.setVisible(False)
             return
+        self._progress.setVisible(True)
         self._eta_label.setText(_format_eta(data.t_hours, data.ci_hours))
         self._phase_label.setText(_PHASE_LABELS.get(data.phase, data.phase))
         self._progress.setValue(int(round(max(0.0, min(100.0, data.progress_pct)))))
@@ -420,37 +437,42 @@ class _HeroCard(QFrame):
         self._apply_chrome(faulted=faulted)
 
     def _apply_chrome(self, *, faulted: bool) -> None:
-        base = (
+        """Hero has no card background — just a bottom border separator.
+        Fault flips the separator to STATUS_FAULT (spec §States)."""
+        border_color = theme.STATUS_FAULT if faulted else theme.BORDER
+        self.setStyleSheet(
             f"#analyticsHero {{"
-            f"background-color: {theme.SURFACE_CARD};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_LG}px;"
+            f"background-color: transparent;"
+            f"border: none;"
+            f"border-bottom: 1px solid {border_color};"
+            f"}}"
         )
-        if faulted:
-            base += f"border-left: 3px solid {theme.STATUS_FAULT};"
-        base += "}"
-        self.setStyleSheet(base)
 
 
 # ─── R_thermal metric tile ────────────────────────────────────────────
 
 
 class _RThermalTile(QFrame):
-    """Side tile: current R_thermal value + delta per minute."""
+    """Compact card: current R_thermal + delta per minute.
+
+    Stale state uses BORDER color change («STATUS_STALE») + «(устар.)»
+    text suffix; value text stays FOREGROUND per RULE-DATA-005.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("analyticsRThermal")
+        self.setObjectName("analyticsRThermalTile")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._stale = False
         self._build_ui()
         self._apply_chrome()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4
+        col = QVBoxLayout(self)
+        col.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
         )
-        root.setSpacing(theme.SPACE_2)
+        col.setSpacing(theme.SPACE_1)
 
         caption = QLabel("R_тепл", self)
         cap_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
@@ -459,7 +481,7 @@ class _RThermalTile(QFrame):
         caption.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
         )
-        root.addWidget(caption)
+        col.addWidget(caption)
 
         self._value_label = QLabel("—", self)
         val_font = QFont(theme.FONT_MONO, theme.FONT_MONO_VALUE_SIZE)
@@ -469,12 +491,14 @@ class _RThermalTile(QFrame):
         except (AttributeError, TypeError, ValueError):
             pass
         self._value_label.setFont(val_font)
+        # RULE-DATA-005: value text never dims — stays FOREGROUND even
+        # when stale. Stale is signalled via border + text suffix.
         self._value_label.setStyleSheet(
             f"color: {theme.FOREGROUND}; background: transparent;"
         )
-        root.addWidget(self._value_label)
+        col.addWidget(self._value_label)
 
-        self._delta_label = QLabel("—", self)
+        self._delta_label = QLabel("", self)
         delta_font = QFont(theme.FONT_MONO, theme.FONT_LABEL_SIZE)
         try:
             delta_font.setFeature(QFont.Tag("tnum"), 1)
@@ -484,14 +508,15 @@ class _RThermalTile(QFrame):
         self._delta_label.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
         )
-        root.addWidget(self._delta_label)
+        col.addWidget(self._delta_label)
 
     def _apply_chrome(self) -> None:
+        border = theme.STATUS_STALE if self._stale else theme.BORDER
         self.setStyleSheet(
-            f"#analyticsRThermal {{"
+            f"#analyticsRThermalTile {{"
             f"background-color: {theme.SURFACE_CARD};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_LG}px;"
+            f"border: 1px solid {border};"
+            f"border-radius: {theme.RADIUS_MD}px;"
             f"}}"
         )
 
@@ -500,96 +525,77 @@ class _RThermalTile(QFrame):
     def set_data(self, data: RThermalData | None) -> None:
         if data is None or data.current_value is None:
             self._value_label.setText("—")
-            self._value_label.setStyleSheet(
-                f"color: {theme.FOREGROUND}; background: transparent;"
-            )
-            self._delta_label.setText("—")
+            self._delta_label.setText("")
+            if self._stale:
+                self._stale = False
+                self._apply_chrome()
             return
 
-        # 3-decimal precision per RULE-DATA-004; unit is K/W.
+        # 3-decimal precision per RULE-DATA-004.
         text = f"{data.current_value:.3f} K/W"
         age = time.time() - data.last_updated_ts
-        stale = age > _R_THERMAL_STALE_S
-        if stale:
+        stale_now = age > _R_THERMAL_STALE_S
+        if stale_now:
             text += " (устар.)"
-            color = theme.STATUS_STALE
-        else:
-            color = theme.FOREGROUND
         self._value_label.setText(text)
-        self._value_label.setStyleSheet(
-            f"color: {color}; background: transparent;"
-        )
 
         if data.delta_per_minute is None:
-            self._delta_label.setText("—")
+            self._delta_label.setText("")
         else:
             sign = "+" if data.delta_per_minute > 0 else ""
             self._delta_label.setText(
-                f"Δ {sign}{data.delta_per_minute:.3f} K/W · мин"
+                f"Δ {sign}{data.delta_per_minute:.3f} K/W/мин"
             )
 
+        if stale_now != self._stale:
+            self._stale = stale_now
+            self._apply_chrome()
 
-# ─── Vacuum host ──────────────────────────────────────────────────────
+
+# ─── Vacuum trend strip ───────────────────────────────────────────────
 
 
-class _VacuumHost(QFrame):
-    """Frame hosting the legacy VacuumTrendPanel.
+class _VacuumStrip(QFrame):
+    """Bottom chrome strip hosting the legacy VacuumTrendPanel.
 
-    Per spec §Vacuum trend section / §B.8 scope note: VacuumTrendPanel
-    itself is NOT rewritten in B.8. This host just frames the existing
-    widget so it sits correctly inside the BentoGrid. Token alignment
-    inside VacuumTrendPanel (apply_plot_style, Cyrillic мбар axis, log
-    Y) is tracked as a separate follow-up per the B.8 scope note.
+    VacuumTrendPanel is NOT rewritten in B.8 revision 2 — bringing it
+    into design-system alignment (apply_plot_style, Cyrillic мбар axis
+    label, log-Y) is a separate follow-up per the spec §Vacuum trend
+    B.8 scope note. This wrapper just provides the fixed-height frame
+    and top-border separator.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("analyticsVacuumHost")
+        self.setObjectName("analyticsVacuumStrip")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._panel: QWidget | None = None
-        self._missing_panel_label: QLabel | None = None
         self._build_ui()
         self._apply_chrome()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
         )
-        root.setSpacing(theme.SPACE_2)
-
-        caption = QLabel("Прогноз вакуума", self)
-        cap_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        cap_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
-        caption.setFont(cap_font)
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        root.addWidget(caption)
-
-        # Lazy-import VacuumTrendPanel to avoid a hard dependency at
-        # module-import time — the legacy panel brings heavy Qt setup
-        # which we don't need during unit tests that don't exercise
-        # the embed.
+        lay.setSpacing(0)
         try:
             from cryodaq.gui.widgets.vacuum_trend_panel import VacuumTrendPanel
 
             self._panel = VacuumTrendPanel()
-            root.addWidget(self._panel, 1)
+            lay.addWidget(self._panel, 1)
         except Exception as exc:  # pragma: no cover — fallback path
-            self._missing_panel_label = QLabel(
-                f"[VacuumTrendPanel недоступен: {exc!s}]", self
-            )
-            self._missing_panel_label.setStyleSheet(
+            fallback = QLabel(f"[VacuumTrendPanel недоступен: {exc!s}]", self)
+            fallback.setStyleSheet(
                 f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
             )
-            root.addWidget(self._missing_panel_label, 1)
+            lay.addWidget(fallback, 1)
 
     def _apply_chrome(self) -> None:
         self.setStyleSheet(
-            f"#analyticsVacuumHost {{"
+            f"#analyticsVacuumStrip {{"
             f"background-color: {theme.SURFACE_CARD};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_LG}px;"
+            f"border: none;"
+            f"border-top: 1px solid {theme.BORDER};"
             f"}}"
         )

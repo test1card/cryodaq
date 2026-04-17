@@ -2,8 +2,8 @@
 title: Analytics Panel
 keywords: analytics, R_thermal, cooldown, ETA, prediction, vacuum trend, phase, аналитика, primary view
 applies_to: analytics primary view (Ctrl+A from ToolRail)
-status: proposed
-implements: not yet aligned with this revision. Existing implementation at `src/cryodaq/gui/shell/overlays/analytics_panel.py` inherits ModalCard — that is the architectural bug this revision corrects. Reimplementation as primary view is the next step. Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` kept alive until B.13.
+status: active
+implements: src/cryodaq/gui/shell/views/analytics_view.py (revision 2). Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` kept alive until B.13.
 last_updated: 2026-04-17
 ---
 
@@ -13,6 +13,34 @@ Full-viewport primary view surfacing computed metrics from analytics
 plugins: cooldown ETA + trajectory, thermal resistance, vacuum trend.
 Opens as the main content of the application when operator activates
 the analytics slot on ToolRail (keyboard `Ctrl+A`, AD-002).
+
+> **Implementation status.** The shipped `AnalyticsView` at
+> `src/cryodaq/gui/shell/views/analytics_view.py` is aligned with
+> this revision: primary-view `QWidget` (not `ModalCard`, not
+> `BentoGrid`), plot-dominant `QVBoxLayout` + `QHBoxLayout`
+> composition — hero strip `setFixedHeight(56)`, R_thermal tile
+> `setFixedHeight(72)`, vacuum strip `setFixedHeight(140)`, middle
+> region stretch 1 with cooldown plot stretch 5 and right column
+> stretch 2. Both plots run through `apply_plot_style()` with
+> compact tick fonts (`FONT_LABEL_SIZE - 2`); cooldown plot Y range
+> pinned to 0..310 K with autoscale disabled. Hero strip has a
+> bottom 1px BORDER separator that flips to STATUS_FAULT on
+> `set_fault(True)`; cooldown plot gets a STATUS_FAULT outer border
+> on the same call. R_thermal stale state signals via tile border
+> (STATUS_STALE) + «(устар.)» suffix, value text stays FOREGROUND
+> per RULE-DATA-005. VacuumTrendPanel embedded inside a
+> fixed-height frame without rewriting it. Data flow via
+> `set_cooldown()` / `set_r_thermal()` / `set_fault()` preserved
+> from B.8 follow-up 53232ea; shell-side adapter
+> `MainWindowV2._cooldown_reading_to_data()` unchanged.
+>
+> **What changed from revision 1.** The ModalCard overlay base and
+> BentoGrid 8-col composition are gone — they were the architectural
+> bug this revision corrects. The old file
+> `src/cryodaq/gui/shell/overlays/analytics_panel.py` has been
+> removed; new location is `shell/views/`. The previous test file
+> `tests/gui/shell/overlays/test_analytics_panel.py` was replaced
+> by `tests/gui/shell/views/test_analytics_view.py`.
 
 ## Architecture — primary view, NOT overlay
 

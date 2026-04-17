@@ -1,6 +1,6 @@
 """Regression tests for the B.8 analytics channel adapter in MainWindowV2.
 
-Covers the post-Codex fix: the v2 AnalyticsPanel exposes setters
+Covers the post-Codex fix: the v2 AnalyticsView exposes setters
 (`set_cooldown`, `set_r_thermal`, `set_fault`) instead of the legacy
 `on_reading` sink, so the shell must translate specific `analytics/*`
 channels into typed snapshots before pushing them at the panel. Any
@@ -21,8 +21,8 @@ from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
-from cryodaq.gui.shell.overlays.analytics_panel import (
-    AnalyticsPanel,
+from cryodaq.gui.shell.views.analytics_view import (
+    AnalyticsView,
     CooldownData,
 )
 
@@ -59,17 +59,17 @@ def _make_reading(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_cooldown_eta_reading_populates_analytics_panel():
+def test_cooldown_eta_reading_populates_analytics_view():
     """The shell adapter must translate the real plugin payload shape
     from cooldown_service.py:400-433 into a CooldownData and push it to
-    the v2 AnalyticsPanel via set_cooldown()."""
+    the v2 AnalyticsView via set_cooldown()."""
     _app()
     w = MainWindowV2()
     _stop_timers(w)
 
     # Eagerly construct the analytics overlay so the adapter can push.
     w._ensure_overlay("analytics")
-    assert isinstance(w._analytics_panel, AnalyticsPanel)
+    assert isinstance(w._analytics_view, AnalyticsView)
 
     reading = _make_reading(
         "analytics/cooldown_predictor/cooldown_eta",
@@ -90,7 +90,7 @@ def test_cooldown_eta_reading_populates_analytics_panel():
 
     w._dispatch_reading(reading)
     # Panel's stored snapshot matches the translated CooldownData.
-    snap = w._analytics_panel._cooldown
+    snap = w._analytics_view._cooldown
     assert isinstance(snap, CooldownData)
     assert snap.t_hours == 7.33
     # conservative ±: max(7.85 - 7.33, 7.33 - 6.83) = 0.52
@@ -131,8 +131,8 @@ def test_cooldown_eta_phase_steady_remaps_to_stabilizing():
         },
     )
     w._dispatch_reading(reading)
-    assert w._analytics_panel._cooldown is not None
-    assert w._analytics_panel._cooldown.phase == "stabilizing"
+    assert w._analytics_view._cooldown is not None
+    assert w._analytics_view._cooldown.phase == "stabilizing"
     # 'complete' is never emitted today — plugin can't distinguish it.
 
 
@@ -157,7 +157,7 @@ def test_cooldown_eta_without_future_trajectory_stays_empty():
         },
     )
     w._dispatch_reading(reading)
-    snap = w._analytics_panel._cooldown
+    snap = w._analytics_view._cooldown
     assert snap is not None
     assert snap.predicted_trajectory == []
     assert snap.ci_trajectory == []
@@ -172,7 +172,7 @@ def test_unknown_analytics_channel_is_silently_dropped():
     _stop_timers(w)
     w._ensure_overlay("analytics")
     # Prior state: panel was initialised in empty state.
-    assert w._analytics_panel._cooldown is None
+    assert w._analytics_view._cooldown is None
 
     for channel in (
         "analytics/safety_state",
@@ -187,7 +187,7 @@ def test_unknown_analytics_channel_is_silently_dropped():
         )
 
     # Panel's snapshot is untouched — adapter dropped the readings.
-    assert w._analytics_panel._cooldown is None
+    assert w._analytics_view._cooldown is None
 
 
 def test_analytics_reading_without_panel_opened_does_not_crash():
@@ -196,7 +196,7 @@ def test_analytics_reading_without_panel_opened_does_not_crash():
     _app()
     w = MainWindowV2()
     _stop_timers(w)
-    assert w._analytics_panel is None  # lazy factory hasn't fired
+    assert w._analytics_view is None  # lazy factory hasn't fired
 
     w._dispatch_reading(
         _make_reading(
@@ -211,7 +211,7 @@ def test_analytics_reading_without_panel_opened_does_not_crash():
         )
     )
     # Still no panel; no exception.
-    assert w._analytics_panel is None
+    assert w._analytics_view is None
 
 
 def test_cooldown_adapter_tolerates_malformed_metadata():
@@ -231,7 +231,7 @@ def test_cooldown_adapter_tolerates_malformed_metadata():
             metadata={"progress": 0.5, "phase": "phase1"},
         )
     )
-    snap = w._analytics_panel._cooldown
+    snap = w._analytics_view._cooldown
     assert snap is not None and snap.t_hours == 3.3
     assert snap.ci_hours == 0.0  # missing CI → zero, not crash
 
@@ -248,7 +248,7 @@ def test_cooldown_adapter_tolerates_malformed_metadata():
             },
         )
     )
-    snap = w._analytics_panel._cooldown
+    snap = w._analytics_view._cooldown
     assert snap is not None and snap.ci_hours == 0.0
 
 

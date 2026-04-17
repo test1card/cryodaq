@@ -36,9 +36,9 @@ from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
-from cryodaq.gui.shell.overlays.analytics_panel import AnalyticsPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
+from cryodaq.gui.shell.views.analytics_view import AnalyticsView
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
@@ -99,7 +99,7 @@ class MainWindowV2(QMainWindow):
     _OVERLAY_FACTORIES = {
         "experiment": ("_experiment_overlay", lambda self: ExperimentOverlay()),
         "source": ("_keithley_panel", lambda self: KeithleyPanel()),
-        "analytics": ("_analytics_panel", lambda self: AnalyticsPanel()),
+        "analytics": ("_analytics_view", lambda self: AnalyticsView()),
         "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
         "instruments": ("_instrument_panel", lambda self: InstrumentStatusPanel()),
@@ -118,7 +118,7 @@ class MainWindowV2(QMainWindow):
         # Lazy panel slots — populated on first overlay open
         self._experiment_overlay: ExperimentOverlay | None = None
         self._keithley_panel: KeithleyPanel | None = None
-        self._analytics_panel: AnalyticsPanel | None = None
+        self._analytics_view: AnalyticsView | None = None
         self._conductivity_panel: ConductivityPanel | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
         self._instrument_panel: InstrumentStatusPanel | None = None
@@ -228,11 +228,10 @@ class MainWindowV2(QMainWindow):
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
         # B.8: wire overlay signals
-        if name == "analytics" and hasattr(widget, "closed"):
-            # AnalyticsPanel inherits ModalCard; `closed` fires on
-            # backdrop click, close button, or Escape. Route back to
-            # the dashboard and update the rail-active indicator.
-            widget.closed.connect(lambda: self._on_tool_clicked("home"))
+        # AnalyticsView is a primary-view QWidget with no `closed`
+        # signal — nothing to wire here (the ToolRail drives navigation
+        # away from the view). Block intentionally removed per B.8
+        # revision 2; overlay-era comment retained as a signpost.
         if name == "experiment" and hasattr(widget, "closed"):
             widget.closed.connect(lambda: self._on_tool_clicked("home"))
             widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
@@ -294,11 +293,11 @@ class MainWindowV2(QMainWindow):
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (Codex B.5.5 F3)
-            # B.8: the v2 AnalyticsPanel exposes set_cooldown /
+            # B.8: the v2 AnalyticsView exposes set_cooldown /
             # set_r_thermal / set_fault setters instead of a generic
             # on_reading sink. The shell adapts specific analytics
             # channels into the typed snapshots below.
-            if self._analytics_panel is not None:
+            if self._analytics_view is not None:
                 self._adapt_reading_to_analytics(reading)
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
@@ -314,7 +313,7 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
 
     def _adapt_reading_to_analytics(self, reading: Reading) -> None:
-        """Translate broker `analytics/*` readings into AnalyticsPanel
+        """Translate broker `analytics/*` readings into AnalyticsView
         setter calls.
 
         Today only the cooldown predictor publishes structured data on
@@ -327,13 +326,13 @@ class MainWindowV2(QMainWindow):
         publisher is added. Both gaps are flagged in the analytics
         spec's «Known limitations» section.
         """
-        if self._analytics_panel is None:
+        if self._analytics_view is None:
             return
         channel = reading.channel
         if channel == "analytics/cooldown_predictor/cooldown_eta":
             data = self._cooldown_reading_to_data(reading)
             if data is not None:
-                self._analytics_panel.set_cooldown(data)
+                self._analytics_view.set_cooldown(data)
         # Any other analytics/* channel is silently dropped — previously
         # went to the legacy panel's on_reading sink; the v2 panel has no
         # equivalent general sink, so unknown analytics channels are
@@ -355,7 +354,7 @@ class MainWindowV2(QMainWindow):
           - metadata["future_T_cold_lower"] optional list[float], K
         """
         # Lazy import — avoids a hard dependency at module-load time.
-        from cryodaq.gui.shell.overlays.analytics_panel import CooldownData
+        from cryodaq.gui.shell.views.analytics_view import CooldownData
 
         meta = reading.metadata or {}
         try:
