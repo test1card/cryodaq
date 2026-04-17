@@ -74,7 +74,10 @@ class PhaseStepper(QWidget):
     def _style_pill(self, pill: QFrame, state: str) -> None:
         pid = pill.objectName()
         if state == "current":
-            border, bg, fg = theme.ACCENT, theme.SECONDARY, theme.FOREGROUND
+            # DESIGN: RULE-COLOR-002, RULE-COLOR-004 — active phase uses
+            # STATUS_OK (running-status green), NOT ACCENT (reserved for
+            # focus/selection affordance per design system v1.0.1).
+            border, bg, fg = theme.STATUS_OK, theme.SECONDARY, theme.FOREGROUND
         elif state == "past":
             border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
         else:
