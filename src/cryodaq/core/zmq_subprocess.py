@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Re-export constants so GUI code doesn't need to import zmq_bridge
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
+# Mirror of zmq_bridge.DEFAULT_TOPIC. Duplicated (not imported) because this
+# module is loaded in the GUI process, which must not import zmq/zmq_bridge
+# at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
+DEFAULT_TOPIC = b"readings"
 
 
 def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
@@ -69,12 +73,16 @@ def zmq_bridge_main(
 
     ctx = zmq.Context()
 
-    # SUB socket — receive data from engine
+    # SUB socket — receive data from engine.
+    # Order matters: connect() BEFORE subscribe(). The inverse pattern
+    # (subscribe-before-connect with setsockopt_string(SUBSCRIBE, "")) produced
+    # zero received messages on macOS Python 3.14 pyzmq 25+ — bridge blocked
+    # forever in zmq_msg_recv. Bytes topic matches publisher in zmq_bridge.py.
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
     sub.setsockopt(zmq.RCVTIMEO, 100)
-    sub.setsockopt_string(zmq.SUBSCRIBE, "")
     sub.connect(pub_addr)
+    sub.subscribe(DEFAULT_TOPIC)
 
     # REQ socket — send commands to engine
     req = ctx.socket(zmq.REQ)
