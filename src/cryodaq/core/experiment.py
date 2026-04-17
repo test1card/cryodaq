@@ -368,7 +368,7 @@ class ExperimentManager:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
             raise RuntimeError(
-                "Cannot switch to debug mode while an experiment card is still active."
+                "Нельзя переключиться в режим отладки, пока карточка эксперимента активна."
             )
         if next_mode == self._state.app_mode:
             return self._state.app_mode

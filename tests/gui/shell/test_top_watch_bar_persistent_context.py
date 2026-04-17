@@ -13,7 +13,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.gui.shell.top_watch_bar import TopWatchBar
+from cryodaq.gui.shell.top_watch_bar import TopWatchBar, _format_pressure
 
 
 @pytest.fixture(scope="session")
@@ -114,7 +114,9 @@ def test_pressure_reading_updates_display(app, mock_channel_mgr):
     _stop_timers(bar)
     bar.on_reading(_make_reading("VSP63D_1/pressure", 1.2e-3, "mbar"))
     text = bar._ctx_pressure_value.text()
-    assert "1.20e-03" in text or "1.2e-03" in text
+    # Compact scientific — no leading zeros in exponent ("1.2e-3" not
+    # "1.20e-03"). See _format_pressure.
+    assert "1.2e-3" in text
     assert "\u043c\u0431\u0430\u0440" in text  # мбар
 
 
@@ -178,3 +180,17 @@ def test_nan_value_ignored(app, mock_channel_mgr):
     _stop_timers(bar)
     bar.on_reading(_make_reading("\u04221 X", float("nan")))
     assert "\u2014" in bar._ctx_tmin_value.text()
+
+
+# --- _format_pressure helper (Batch A) ---
+
+
+def test_format_pressure_compact_scientific():
+    assert _format_pressure(1.45e-6) == "1.5e-6"
+    assert _format_pressure(3.2e-3) == "3.2e-3"
+    assert _format_pressure(9.87e-1) == "9.9e-1"
+
+
+def test_format_pressure_non_positive_returns_dash():
+    assert _format_pressure(0.0) == "\u2014"
+    assert _format_pressure(-1.0) == "\u2014"

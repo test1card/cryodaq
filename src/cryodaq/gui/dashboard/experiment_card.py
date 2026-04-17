@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
+from cryodaq.gui.shell.top_watch_bar import _format_pressure
 
 # Positionally fixed reference channels — the only channels that qualify
 # as "target channel" for an experiment per design-system invariant #4.
@@ -286,8 +287,10 @@ class ExperimentCard(QFrame):
             self._pressure_label.setText("Давление: —")
         else:
             # RULE-COPY-006: operator-facing unit is Cyrillic мбар.
+            # Compact scientific via shared _format_pressure helper so
+            # ExperimentCard and TopWatchBar render identically.
             self._pressure_label.setText(
-                f"Давление: {data.pressure_mbar:.2e} мбар"
+                f"Давление: {_format_pressure(data.pressure_mbar)} мбар"
             )
 
     def _set_mode_badge_style(self, mode: str) -> None:

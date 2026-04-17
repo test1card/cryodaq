@@ -126,7 +126,10 @@ def test_experiment_card_pressure_line_uses_cyrillic_unit(app):
     card = ExperimentCard()
     card.set_experiment(_make_data(pressure_mbar=1.23e-6))
     text = card._pressure_label.text()
-    assert "1.23e-06" in text
+    # Compact scientific via shared _format_pressure helper —
+    # "1.2e-6" (rounded to 1 decimal, exponent without leading zeros),
+    # not "1.23e-06".
+    assert "1.2e-6" in text
     assert "мбар" in text  # Cyrillic
     assert "mbar" not in text  # no Latin bleed
 

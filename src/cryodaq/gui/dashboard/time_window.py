@@ -28,7 +28,11 @@ class TimeWindow(Enum):
 
     @classmethod
     def default(cls) -> TimeWindow:
-        return cls.HOUR_1
+        # Cryo experiments run for hours/days; the operator's default
+        # question is "how has this trended since we started running"
+        # (especially for pressure, which moves over decades). "1ч" as
+        # the initial window hid the long-horizon signal.
+        return cls.ALL
 
     @classmethod
     def all_options(cls) -> list[TimeWindow]:

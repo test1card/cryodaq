@@ -3,9 +3,11 @@
 from cryodaq.gui.dashboard.time_window import TimeWindow
 
 
-def test_default_is_hour_1():
-    assert TimeWindow.default() == TimeWindow.HOUR_1
-    assert TimeWindow.default().label == "1ч"
+def test_default_is_all():
+    # Batch A: long-horizon signal (pressure pump-down, cooldown trends)
+    # is what the operator cares about, so initial window is "Всё".
+    assert TimeWindow.default() == TimeWindow.ALL
+    assert TimeWindow.default().label == "Всё"
 
 
 def test_all_options_returns_five():

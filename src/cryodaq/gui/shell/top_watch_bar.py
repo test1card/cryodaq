@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 
 _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
 
+
+def _format_pressure(p: float) -> str:
+    """Format pressure as compact scientific notation (X.Xe±Y).
+
+    Cryo vacuum spans many orders of magnitude; the prior `f"{p:.2e}"`
+    output `1.45e-06` wasted width on leading zeros in the exponent.
+    This helper emits `1.5e-6` — same precision bucket, tighter glyph
+    count. Non-positive values render as em-dash because pressure is
+    log-quantity-only.
+    """
+    if p <= 0:
+        return "\u2014"
+    mantissa, exp = f"{p:.1e}".split("e")
+    return f"{mantissa}e{int(exp)}"
+
 # Positionally fixed reference channels (design system invariant #21,
 # MANIFEST.md decision #21). Т11 / Т12 are physically immovable on the
 # second stage (nitrogen plate); cannot be relocated without dismantling
@@ -287,12 +302,13 @@ class TopWatchBar(QWidget):
             return
         ts, value = self._latest_pressure
         age = time.time() - ts
-        if value <= 0:
-            text = "\u2014"
+        formatted = _format_pressure(value)
+        if formatted == "\u2014":
+            text = formatted
         else:
             # DESIGN: RULE-COPY-006 — operator-facing pressure unit is мбар
             # (Cyrillic), not ASCII mbar.
-            text = f"{value:.2e} мбар"
+            text = f"{formatted} мбар"
         if age > _STALE_TIMEOUT_S:
             text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"  # (устар.)
             self._ctx_pressure_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")

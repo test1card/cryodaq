@@ -310,8 +310,30 @@ async def test_switch_to_debug_with_active_experiment_is_rejected(
 ) -> None:
     manager.start_experiment("First", "Operator", template_id="custom")
 
-    with pytest.raises(RuntimeError, match="debug mode"):
+    # Operator-facing error surfaces through ZMQ → QMessageBox, so the
+    # engine side of this boundary stays Russian (RULE-COPY, Batch A).
+    with pytest.raises(RuntimeError, match="режим отладки") as excinfo:
         manager.set_app_mode("debug")
+    assert "debug mode" not in str(excinfo.value)
+    assert "карточка эксперимента" in str(excinfo.value)
+
+
+def test_no_english_debug_switch_string_remains_in_src() -> None:
+    # Regression guard: the prior English phrasing leaked into a
+    # QMessageBox on macOS. Translate at source, not at the GUI.
+    import subprocess
+    from pathlib import Path
+
+    repo_src = Path(__file__).resolve().parents[2] / "src" / "cryodaq"
+    result = subprocess.run(
+        ["grep", "-rn", "Cannot switch to debug", str(repo_src)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.stdout == "", (
+        f"English debug-switch string still present:\n{result.stdout}"
+    )
 
 
 async def test_stop_without_active_raises(manager: ExperimentManager) -> None:

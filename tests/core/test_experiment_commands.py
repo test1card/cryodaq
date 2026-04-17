@@ -121,7 +121,7 @@ async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None
     assert updated["experiment"]["description"] == "Initial"
     assert updated["experiment"]["notes"] == "Stabilized"
 
-    with pytest.raises(RuntimeError, match="debug mode"):
+    with pytest.raises(RuntimeError, match="режим отладки"):
         _run_experiment_command("set_app_mode", {"app_mode": "debug"}, manager)
 
     finalized = _run_experiment_command(
