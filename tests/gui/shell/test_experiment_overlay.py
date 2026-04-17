@@ -147,3 +147,94 @@ def test_overlay_abort_in_more_menu(app):
         if "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c" in b.text() and not b.isHidden()
     ]
     assert len(visible_abort) == 0  # only in menu
+
+
+# ----------------------------------------------------------------------
+# Batch B regression guards
+# ----------------------------------------------------------------------
+
+
+def _set_phase(overlay: ExperimentOverlay, phase: str) -> None:
+    overlay.set_experiment(
+        {
+            "name": "T",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "current_phase": phase,
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+
+
+def test_phase_labels_are_full_russian_names(app):
+    """Regression (Batch B commit 1850482): phase pills render canonical
+    full names (PHASE_LABELS_RU), not the 3-letter PHASE_LABELS_PILL
+    abbreviations. Guards against a future refactor re-truncating them.
+    """
+    from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
+
+    overlay = ExperimentOverlay()
+    for idx, phase in enumerate(PHASE_ORDER):
+        pill = overlay._phase_pills[phase]
+        label = pill.findChild(QLabel, f"expPillLabel_{phase}")
+        assert label is not None, f"pill for {phase} missing full-name label"
+        expected = PHASE_LABELS_RU[phase]
+        assert label.text() == expected, (
+            f"pill {phase}: expected '{expected}', got '{label.text()}'"
+        )
+        # No ellipsis — full canonical name must appear verbatim.
+        assert "\u2026" not in label.text()
+        # Numbered prefix is the reading-order index (1..6, no leading zero).
+        num_label = pill.findChild(QLabel)  # first QLabel in layout is num
+        assert num_label is not None
+        # num label appears before the full label in the QVBoxLayout —
+        # walk the layout to grab the numeric one explicitly.
+        num_widget = pill.layout().itemAt(0).widget()
+        assert num_widget.text() == str(idx + 1)
+
+
+def test_nav_buttons_hidden_when_unavailable(app):
+    """Regression (Batch B commit 2d6edc7): _prev_btn / _next_btn use
+    setVisible() (not setEnabled(False)) so no dead grey rectangle
+    renders on the first / last phase. Uses isHidden() because in
+    offscreen Qt child.isVisible() reports False until the top-level
+    window is shown.
+    """
+    from cryodaq.core.phase_labels import PHASE_ORDER
+
+    overlay = ExperimentOverlay()
+
+    _set_phase(overlay, PHASE_ORDER[0])
+    assert overlay._prev_btn.isHidden(), "prev button must be hidden on first phase"
+    assert not overlay._next_btn.isHidden(), "next button must be visible on first phase"
+
+    _set_phase(overlay, PHASE_ORDER[2])
+    assert not overlay._prev_btn.isHidden(), "prev button must be visible in middle"
+    assert not overlay._next_btn.isHidden(), "next button must be visible in middle"
+
+    _set_phase(overlay, PHASE_ORDER[-1])
+    assert not overlay._prev_btn.isHidden(), "prev button must be visible on last phase"
+    assert overlay._next_btn.isHidden(), "next button must be hidden on last phase"
+
+
+def test_no_close_button_on_experiment_overlay(app):
+    """Regression (Batch B commit b0b460b): the × close button was removed
+    because ExperimentOverlay is a primary view, not a modal overlay.
+    Operator navigates away via ToolRail / ESC. Guards against the
+    × button being re-added in a future refactor.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    overlay = ExperimentOverlay()
+    for btn in overlay.findChildren(QPushButton):
+        assert btn.text() != "\u2715", (
+            f"× close button still present (objectName={btn.objectName()!r})"
+        )
+        assert "close" not in btn.objectName().lower(), (
+            f"close-named button still present: {btn.objectName()!r}"
+        )
+    assert not hasattr(overlay, "_close_btn"), (
+        "_close_btn attribute re-introduced on ExperimentOverlay"
+    )
