@@ -2,8 +2,8 @@
 title: KeithleyPanel
 keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel, smua, smub, source, measure
 applies_to: Keithley 2604B source-measure unit control panel
-status: partial
-implements: legacy power source panel (ToolRail slot 4)
+status: active
+implements: src/cryodaq/gui/shell/overlays/keithley_panel.py (Phase B.7 v2); legacy src/cryodaq/gui/widgets/keithley_panel.py retained until Block B.13
 last_updated: 2026-04-17
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
@@ -11,6 +11,28 @@ references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/de
 # KeithleyPanel
 
 Panel for controlling and monitoring the Keithley 2604B source-measure unit (SMU). Dual-channel (smua + smub), TSP-scripted hardware. One of the most complex CryoDAQ widgets because it combines live measurement displays with output control and destructive-level actions (enable/disable current output).
+
+> **Implementation status.** The shipped v2 overlay at
+> `src/cryodaq/gui/shell/overlays/keithley_panel.py` is aligned with
+> this spec: symmetric dual-channel layout («Канал А» / «Канал B»
+> with Cyrillic А per RULE-COPY-002, invariant #11), per-channel
+> mode tabs (Ток / Напряжение / Откл), setpoint input + «Применить»
+> (invariant #3: no auto-apply on typing), live readouts in Fira Mono
+> with tabular figures (RULE-TYPO-003), dot + text output indicator
+> (RULE-A11Y-002 redundant channels), per-channel fault border
+> (3px STATUS_FAULT), safety gating via `set_safety_ready(ready,
+> reason)` with a dedicated reason label, connection header that
+> flips to «Нет связи» and disables controls when disconnected,
+> Dialog confirmation on output-enable (RULE-INTER-004) and on
+> emergency-off / disconnect, emergency-stop always reachable even
+> when gated. Remaining divergences: emergency stop uses a Dialog
+> confirmation today rather than the canonical HoldConfirm 1s hold
+> (invariant #9 — tracked as later work); per-channel V/I history
+> plot from the anatomy sketch is not yet embedded (the plot is
+> optional per spec wording and the dashboard-level temp/pressure
+> plots cover live monitoring). The legacy v1 panel at
+> `src/cryodaq/gui/widgets/keithley_panel.py` stays alive until
+> Block B.13 for the transitional main_window.py path.
 
 **When to use:**
 - Dedicated Keithley panel opened via ToolRail slot 4
