@@ -2,8 +2,8 @@
 title: ExperimentCard
 keywords: experiment, card, active-experiment, phase, dashboard, tile, metadata, elapsed
 applies_to: compound widget showing active experiment metadata + phase progression
-status: partial
-implements: legacy ExperimentWorkspace widget; compact variant per Phase B.6 pending
+status: active
+implements: src/cryodaq/gui/dashboard/experiment_card.py (Phase B.6 — dashboard variant)
 last_updated: 2026-04-17
 references: rules/data-display-rules.md, rules/surface-rules.md, patterns/real-time-data.md
 ---
@@ -11,6 +11,21 @@ references: rules/data-display-rules.md, rules/surface-rules.md, patterns/real-t
 # ExperimentCard
 
 Compound widget showing the currently-active experiment's metadata, phase progression, and key vital. The dashboard's "there is currently an experiment running" signal.
+
+> **Implementation status.** The shipped dashboard variant at
+> `src/cryodaq/gui/dashboard/experiment_card.py` is aligned with this
+> spec: header row with UPPERCASE category + experiment name + mode
+> badge (STATUS_OK / STATUS_CAUTION mirroring TopWatchBar) + tabular
+> elapsed time, compact `PhaseStepper`, two-line vitals (target
+> channel Т11 / Т12 + pressure in Cyrillic мбар), actions row
+> («Подробнее» → `open_requested`, «Завершить» → `finalize_requested`),
+> empty state with «Создать эксперимент» → `create_requested`, and
+> 3px STATUS_FAULT left border on faulted. Target-channel validation
+> at `ExperimentCardData` construction enforces the positionally-fixed
+> reference-channel invariant (#4). The overlay variant with full
+> PhaseStepper + advance / abort controls is still tracked as later
+> Phase II work; today the dashboard tile emits `open_requested` and
+> the parent shell hosts the existing `experiment_overlay.py`.
 
 **When to use:**
 - Dashboard: one ExperimentCard visible when an experiment is active
