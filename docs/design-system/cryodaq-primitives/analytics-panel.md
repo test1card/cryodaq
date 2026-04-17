@@ -1,428 +1,422 @@
 ---
 title: Analytics Panel
-keywords: analytics, R_thermal, cooldown, ETA, prediction, vacuum trend, phase, аналитика
-applies_to: analytics overlay panel (Ctrl+A from ToolRail)
-status: active
-implements: src/cryodaq/gui/shell/overlays/analytics_panel.py (Phase B.8); legacy src/cryodaq/gui/widgets/analytics_panel.py retained until Block B.13
+keywords: analytics, R_thermal, cooldown, ETA, prediction, vacuum trend, phase, аналитика, primary view
+applies_to: analytics primary view (Ctrl+A from ToolRail)
+status: proposed
+implements: not yet aligned with this revision. Existing implementation at `src/cryodaq/gui/shell/overlays/analytics_panel.py` inherits ModalCard — that is the architectural bug this revision corrects. Reimplementation as primary view is the next step. Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` kept alive until B.13.
 last_updated: 2026-04-17
 ---
 
 # Analytics Panel
 
-Full-screen overlay surfacing derived metrics computed by analytics
-plugins — thermal resistance, cooldown trajectory with prediction,
-vacuum trend. Operator opens it via `Ctrl+A` (canonical mnemonic per
-AD-002) or from ToolRail slot 5 (analytics).
+Full-viewport primary view surfacing computed metrics from analytics
+plugins: cooldown ETA + trajectory, thermal resistance, vacuum trend.
+Opens as the main content of the application when operator activates
+the analytics slot on ToolRail (keyboard `Ctrl+A`, AD-002).
 
-> **Implementation status.** The shipped AnalyticsPanel at
-> `src/cryodaq/gui/shell/overlays/analytics_panel.py` is aligned
-> with this spec: inherits `ModalCard` (focus trap + restoration +
-> Escape to close), composes its body on a canonical 8-column
-> `BentoGrid` matching the anatomy table (Hero ETA at row 0 col 0..8,
-> Cooldown plot at row 1..3 col 0..5, R_thermal tile at row 1 col
-> 5..8, R_thermal mini plot at row 2..3 col 5..8, Vacuum host at
-> row 4 col 0..8 — BentoGrid validates no-overlap). Hero ETA uses
-> `FONT_DISPLAY_*` typography with an `ACCENT` / `SURFACE_SUNKEN`
-> progress bar; `_format_eta` and `_PHASE_LABELS` preserve the legacy
-> v1 semantics verbatim. Both plots run through `apply_plot_style()`;
-> the cooldown plot has `enableAutoRange(y, False)` with fixed Y
-> range per spec common-mistake #3, dashed predicted line via
-> `series_pen(1, style=Qt.DashLine)`, CI band via
-> `warn_region_brush()` on `pg.FillBetweenItem`, and phase
-> boundaries rendered from `CooldownData.phase_boundaries_hours`
-> (no hardcoded temperatures). R_thermal tile uses 3-decimal
-> precision per RULE-DATA-004 and applies `(устар.)` +
-> `STATUS_STALE` colour when `last_updated_ts > 60s` ago per
-> RULE-A11Y-003. Fault chrome via `set_fault(True)` adds
-> `STATUS_FAULT` border on hero + cooldown plot without hiding
-> content. Data flow: the shell (`main_window_v2.py`) subscribes to
-> engine analytics output and calls `set_cooldown()` /
-> `set_r_thermal()` / `set_fault()` on this panel — the panel does
-> not import `zmq` or subscribe directly.
->
-> **Follow-ups tracked.**
-> - `VacuumTrendPanel` (embedded via `_VacuumHost`) still uses its
->   own pre-design-system styling — `apply_plot_style()` alignment,
->   Cyrillic мбар axis label (RULE-COPY-006), and explicit log-Y
->   (RULE-DATA-008) are tracked as a separate follow-up per spec's
->   §Vacuum trend B.8 scope note.
-> - Single-instance enforcement (spec invariant #2) lives at the
->   ToolRail / shell level — the lazy-construct factory in
->   `main_window_v2.py._OVERLAY_FACTORIES` creates at most one
->   `AnalyticsPanel` per MainWindow, and `_on_tool_clicked("analytics")`
->   re-uses it on subsequent Ctrl+A presses. The panel itself does
->   not guard against duplicate construction.
+## Architecture — primary view, NOT overlay
 
-## Known limitations (data availability)
+Analytics is one of the application's primary views, alongside
+Dashboard, Keithley, Conductivity, Operator log, Alarms, Sensor
+diagnostics. It is **not** a ModalCard overlay.
 
-The shell (`main_window_v2._adapt_reading_to_analytics`) today
-translates exactly one analytics channel into a panel setter call:
+The shell (`main_window_v2.py`) hosts a single main content region
+(e.g. `QStackedWidget`). Each primary view is a page in that stack.
+ToolRail switches pages by emitting `tool_clicked(slot_name)`; shell
+handles the mapping `slot_name → stack_index` and calls
+`setCurrentIndex()`.
 
-- **`analytics/cooldown_predictor/cooldown_eta`** → `set_cooldown()`.
-  Plugin output shape is documented in
-  `src/cryodaq/analytics/cooldown_service.py:400-433`; the adapter
-  handles asymmetric `t_remaining_ci68` by collapsing to a
-  conservative symmetric half-width and converts `progress` from a
-  `[0, 1]` fraction into the panel's `0..100` percent.
+Primary views:
+- Do not have a backdrop.
+- Do not have a close (×) button.
+- Do not trap focus.
+- Do not dismiss on Escape.
+- Fill the entire content region between TopWatchBar and BottomStatusBar.
+- Stay alive across switches (state preserved when user navigates away).
 
-Current consequences the operator sees:
+ModalCards remain for actual modals — confirmation dialogs, new-experiment
+dialog, settings. Any view opened from ToolRail is a primary view.
 
-- **Actual cooldown trajectory is not rendered** (cooldown plot's
-  «Измерено» line stays empty). The predictor keeps the raw buffer
-  internal and does not publish the time-series back onto the broker;
-  adding a publisher (e.g. a downsampled `analytics/.../t_cold_history`
-  channel) is a separate analytics-side change.
+## When to use
 
-- **R_thermal tile + mini plot show the placeholder «—»** indefinitely.
-  Nothing in `src/cryodaq/analytics/` publishes an
-  `analytics/*/r_thermal` (or similar) channel today. The panel's
-  `set_r_thermal()` method is part of the B.8 API contract and stays
-  callable, but no consumer is wired to it. Adding an R_thermal
-  publisher is the prerequisite.
-
-- **Cooldown phase label «Завершено» never appears.** The predictor
-  emits `"phase1" / "transition" / "phase2" / "steady"` (see
-  `cooldown_predictor.py:518-524`); the adapter remaps `"steady"` to
-  spec's `"stabilizing"`. The spec's `"complete"` is not distinguishable
-  from plugin output. A predictor update that emits a terminal `"complete"`
-  phase when progress pins at 1.0 would unlock it.
-
-All three are analytics-layer changes, not UI changes — the v2 panel
-itself is ready to render the data the moment a publisher exists.
-
-Distinct from the Dashboard's live sensor grid: Analytics shows
-**computed** values, not raw readings. The values update at lower
-cadence (typically 1 Hz or slower) because the underlying plugins
-batch and smooth their inputs.
-
-**When to use:**
-- Operator wants to know "when will cooldown finish" → ETA card
-- Operator wants to verify cooldown is on track → trajectory plot
-- Operator is measuring thermal conductivity → R_thermal card + mini plot
-- Operator suspects vacuum degradation → vacuum trend section
+- Operator wants to know "when will cooldown finish" → ETA strip
+- Operator wants to verify cooldown is on track → trajectory plot (the main content)
+- Operator is measuring thermal conductivity → R_thermal tile + mini plot
+- Operator suspects vacuum degradation → vacuum trend strip at the bottom
 
 **When NOT to use:**
 - Live single-channel watching — use Dashboard + SensorCell instead
-- Full experiment lifecycle management — use ExperimentCard + overlay
-- Raw history export — use Archive panel (Ctrl+R)
+- Full experiment lifecycle management — use Experiment view (Ctrl+E)
+- Raw history export — use Archive view (Ctrl+R)
 
-## Anatomy
+## Anatomy — plot-dominant layout
 
-Full-screen overlay rendered in a `BentoGrid` (8 columns canonical per
-AD-001). Four composition zones:
+Plots are the primary content. All other elements are compact chrome
+around them.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Back ← Analytics                                                       │  ← DrillDownBreadcrumb (chrome)
-├─────────────────────────────────────────────────────────────────────────┤
-│  row 0 (col 0..8):  HERO — ETA + phase + progress bar                   │
-│  ╔═══════════════════════════════════════════════════════════════════╗  │
-│  ║  7ч 20мин ±45мин                          Фаза 2 (50K→4K)         ║  │
-│  ║  ──────────────────────────────────────                           ║  │
-│  ║  ███████████████████████░░░░░░░░░░░░░░░░░░ 68%                    ║  │
-│  ╚═══════════════════════════════════════════════════════════════════╝  │
-│                                                                         │
-│  row 1..3 (col 0..5):  Cooldown trajectory plot                         │
-│  ╔═══════════════════════════════════════════════════╗                  │
-│  ║  T_cold (K) vs time (hours from start)            ║  row 1 (col 5..8) │
-│  ║  ── actual   ── predicted   ░░ CI band            ║  R_thermal tile  │
-│  ║                                                    ║  ╔════════════╗ │
-│  ║   Phase 1     │ Transition │  Phase 2              ║  ║ 12.3 K/W   ║ │
-│  ║               ⋮            ⋮                       ║  ║ −0.03 Δ/мин║ │
-│  ║               ⋮            ⋮                       ║  ╚════════════╝ │
-│  ║                                                    ║                  │
-│  ║                                                    ║  row 2..3 (col 5..8) │
-│  ║                                                    ║  R_thermal mini plot │
-│  ║                                                    ║  ╔════════════╗ │
-│  ║                                                    ║  ║ [mini plot]║ │
-│  ╚═══════════════════════════════════════════════════╝  ╚════════════╝ │
-│                                                                         │
-│  row 4 (col 0..8):  Vacuum trend section                                │
-│  ╔═══════════════════════════════════════════════════════════════════╗  │
-│  ║  Прогноз вакуума — 10⁻⁶ мбар через ~2ч 30мин                      ║  │
-│  ║  [compact log-Y plot]                                             ║  │
-│  ╚═══════════════════════════════════════════════════════════════════╝  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│ Hero strip (compact, ~56px tall, full width)                      │
+│  7ч 20мин ±45мин   Фаза 2 (50K→4K)   ██████████░░░░░░░░░ 68%     │
+├───────────────────────────────────────────────────────────────────┤
+│                                                 │                 │
+│                                                 │  R_тепл         │
+│                                                 │  12.3 K/W       │
+│                                                 │  −0.03 K/W/мин  │
+│                                                 │─────────────────┤
+│  Cooldown trajectory plot                       │                 │
+│  (dominant vertical + horizontal space,         │  R_тепл         │
+│   ~75% of view width, ~80% of view height)      │  mini plot      │
+│                                                 │  (small,        │
+│   — actual   -- predicted   ░ CI band           │   ~25% width    │
+│                                                 │   bottom 75%    │
+│                                                 │   of right col) │
+│                                                 │                 │
+│                                                 │                 │
+├───────────────────────────────────────────────────────────────────┤
+│ Vacuum trend strip (compact, ~140px tall, full width)             │
+│  Прогноз: 1e-6 мбар через ~2ч 30мин   [compact log-Y sparkline]   │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-BentoGrid placement table:
+Layout implementation — `QVBoxLayout` at root:
 
-| Tile | `row` | `col` | `row_span` | `col_span` |
-|---|---|---|---|---|
-| Hero ETA+phase+progress | 0 | 0 | 1 | 8 |
-| Cooldown trajectory plot | 1 | 0 | 3 | 5 |
-| R_thermal metric tile | 1 | 5 | 1 | 3 |
-| R_thermal mini plot | 2 | 5 | 2 | 3 |
-| Vacuum trend section | 4 | 0 | 1 | 8 |
+```
+root QVBoxLayout:
+├── Hero strip (setFixedHeight ~56px, stretch=0)
+├── Middle region (stretch=1):
+│   └── QHBoxLayout:
+│       ├── Cooldown plot (stretch=5)
+│       └── Right column (stretch=2):
+│           └── QVBoxLayout:
+│               ├── R_thermal metric tile (setFixedHeight ~72px, stretch=0)
+│               └── R_thermal mini plot (stretch=1)
+└── Vacuum trend strip (setFixedHeight ~140px, stretch=0)
+```
 
-Total grid: 5 rows × 8 columns. No overlaps (validated by BentoGrid
-per AD-001).
+No BentoGrid for this view — BentoGrid is optimised for heterogeneous
+dashboard compositions. Primary views have deliberate single-purpose
+layouts where fixed-height chrome strips plus stretch-weighted plots
+give the right visual hierarchy.
 
 ## Parts
 
-### Hero ETA card
+### Hero strip
 
-**Purpose.** Answer the one question the operator opens Analytics for:
-«когда эксперимент станет возможен».
+**Purpose.** Answer the one question: «когда эксперимент станет возможен»,
+without stealing screen real estate from the plots.
 
-- **ETA value** (`FONT_DISPLAY_*`): 7ч 20мин ±45мин. Format from
-  `_format_eta(t_hours, ci_hours)` — preserve the existing function.
-- **Phase label** (`FONT_TITLE_*`): Фаза 1 (295K→50K) / Переход (S-bend) /
-  Фаза 2 (50K→4K) / Стабилизация / Завершено.
-- **Progress bar** (`QProgressBar` with custom QSS): overall cooldown
-  progress 0..100% (0% = cooldown start, 100% = target temperature
-  reached). Use `ACCENT` fill, `SURFACE_SUNKEN` track.
-- **Confidence interval** rendered inline with ETA as `±NNмин` in
-  `MUTED_FOREGROUND`.
+Single horizontal row, three items left-to-right:
 
-Background: `SURFACE_CARD`. Border: 1px `BORDER`. Radius: `RADIUS_LG` (8).
-Padding: `SPACE_5` (24).
+- **ETA** — `FONT_TITLE_SIZE` bold, e.g. `7ч 20мин ±45мин`. CI interval
+  inline; only the `±NNмин` portion styled `MUTED_FOREGROUND`. Uses
+  `_format_eta(t_hours, ci_hours)` preserved from legacy.
+- **Phase label** — `FONT_LABEL_SIZE`, `MUTED_FOREGROUND`. Examples:
+  «Фаза 1 (295K→50K)», «Переход (S-bend)», «Фаза 2 (50K→4K)»,
+  «Стабилизация», «Завершено».
+- **Progress bar** — `QProgressBar` with custom QSS, flexible width,
+  overall cooldown progress 0..100% (0 = start, 100 = target reached).
+  Track: `SURFACE_SUNKEN`. Fill: `ACCENT`. Height: ~8px (thin).
+
+Padding: `SPACE_3` (12) horizontal, `SPACE_2` (8) vertical. No card
+background — hero sits directly on the view background with a bottom
+1px `BORDER` separator.
+
+**Empty state:** «Охлаждение не активно» in `MUTED_FOREGROUND` centred
+in the strip. Progress bar hidden. No ETA shown.
 
 ### Cooldown trajectory plot
 
-**Purpose.** Visual sanity check — is cooldown going as predicted?
+**Purpose.** The primary content. Visual sanity check for cooldown
+progress vs prediction.
 
 Single `pg.PlotWidget`, styled via `apply_plot_style()`.
 
-- **X axis:** hours from cooldown start (linear).
-- **Y axis:** temperature in K, linear. Fixed axis range from start
-  temperature (~300 K) down to target (~4 K). Overshoots outside this
-  range are informative and rendered as-is — do not autoscale.
-- **Actual line:** `PLOT_LINE_PALETTE[0]`, width `PLOT_LINE_WIDTH`,
-  label «Измерено».
-- **Predicted line:** `PLOT_LINE_PALETTE[1]`, width `PLOT_LINE_WIDTH`,
-  dashed style (`Qt.DashLine`), label «Прогноз».
-- **CI band:** filled region between `T_pred - ci` and `T_pred + ci`,
-  using `warn_region_brush()` helper (PLOT_REGION_WARN_ALPHA).
-- **Phase boundaries:** vertical dashed lines at phase transition
-  times provided by the cooldown predictor meta. Style:
-  `PLOT_GRID_COLOR`, `Qt.DashLine`. Do not hardcode boundary
-  temperatures — predictor defines them.
-- **Legend:** in upper-right, inside plot area.
+- **X axis:** hours from cooldown start (linear). Label: «Время от старта».
+- **Y axis:** temperature in K, linear. Label: «T», units «K». Fixed
+  range ~0..310 K. Overshoots render outside the range; do not autoscale.
+- **Actual line:** `series_pen(0)`, solid, label «Измерено».
+- **Predicted line:** `series_pen(1)` with `style=Qt.DashLine`, label
+  «Прогноз».
+- **CI band:** `pg.FillBetweenItem(lower, upper, brush=warn_region_brush())`
+  between predicted-lower and predicted-upper trajectories.
+- **Phase boundaries:** vertical dashed lines (`pg.InfiniteLine(angle=90,
+  pen=pg.mkPen(theme.PLOT_GRID_COLOR, style=Qt.DashLine))`) at phase
+  transition times provided by cooldown predictor plugin meta. **Do
+  not hardcode boundary temperatures.**
+- **Legend:** small, inside plot area, upper-right.
+- **Tick fonts:** `FONT_LABEL_SIZE - 2` (compact), applied after
+  `apply_plot_style()`. The plot is the main visual — tick labels
+  should not compete with the data.
+- **Axis label fonts:** `FONT_LABEL_SIZE` with `MUTED_FOREGROUND`.
 - **Grid:** default `PLOT_GRID_ALPHA`.
 
-No hover tooltips in v1 (deferred). Plot is display-only.
+**Empty state:** axes visible, no series plotted, no placeholder text
+inside the plot area. The empty plot is the placeholder — operator's
+eye locks onto the plot location and content appears when data arrives.
 
 ### R_thermal metric tile
 
 **Purpose.** Current thermal resistance readout + short-term trend indicator.
 
-- **Current value** (`FONT_MONO_VALUE_SIZE`): `12.3 K/W` or dash if
-  not computed yet. 3-decimal precision per RULE-DATA-004.
-- **Delta indicator** (`FONT_LABEL_SIZE`, `MUTED_FOREGROUND`): Δ per
-  minute. Positive = warming, negative = cooling.
-- **Stale state:** if last R_thermal computation > 60s ago, show
-  `STATUS_STALE` color and suffix «(устар.)» per RULE-A11Y-003.
+Compact card, right column top. `setFixedHeight(~72px)`.
+
+- **Label** «R_тепл» in `FONT_LABEL_SIZE` `MUTED_FOREGROUND` (no emoji,
+  Cyrillic).
+- **Current value** in `FONT_MONO_VALUE_SIZE`, `FOREGROUND`:
+  `12.345 K/W`, 3-decimal precision per RULE-DATA-004. Dash «—» when
+  data is None.
+- **Delta per minute** below value in `FONT_LABEL_SIZE`,
+  `MUTED_FOREGROUND`: `−0.03 K/W/мин`. Hidden when data is None.
+- **Stale state** (RULE-A11Y-003): last update > 60s ago → apply
+  `STATUS_STALE` border + «(устар.)» suffix to the value. Value text
+  colour stays `FOREGROUND` (RULE-DATA-005 — never dim values).
+
+Background: `SURFACE_CARD`. Border: 1px `BORDER` (or `STATUS_STALE` /
+`STATUS_FAULT` when those states apply). Radius: `RADIUS_MD` (6).
+Padding: `SPACE_3`.
 
 ### R_thermal mini plot
 
-**Purpose.** 10-minute history of R_thermal for quick regression spotting.
+**Purpose.** 10-minute history of R_thermal for quick trend spotting.
 
-Small `pg.PlotWidget` styled via `apply_plot_style()`. Single series,
-`PLOT_LINE_PALETTE[0]`. No legend (single series). Smaller axis tick
-fonts (use `FONT_LABEL_SIZE - 2`).
+Compact `pg.PlotWidget`, right column bottom, stretch=1.
 
-### Vacuum trend section
+- `apply_plot_style()`
+- Tick fonts: `FONT_LABEL_SIZE - 2`
+- Single series, `series_pen(0)`
+- No legend
+- X axis label: «t», units «мин»
+- Y axis label: «R», units «K/W»
+- No CI band; single solid line
 
-**Purpose.** Reuse / re-embed `VacuumTrendPanel` — vacuum prediction
-is a distinct analytics output, not part of cooldown.
+**Empty state:** empty plot with axes visible.
 
-**B.8 scope note.** VacuumTrendPanel itself is not rewritten in B.8;
-AnalyticsPanel simply hosts the existing widget inside a tile frame.
-Bringing VacuumTrendPanel into design-system alignment
-(`apply_plot_style()`, Cyrillic мбар axis label per RULE-COPY-006,
-log Y per RULE-DATA-008) is tracked as a separate follow-up within
-Phase II. Until then, document the temporary divergence in the B.8
+### Vacuum trend strip
+
+**Purpose.** Host existing `VacuumTrendPanel` at the bottom of the view.
+
+Compact horizontal strip, `setFixedHeight(~140px)`.
+
+**B.8 scope note.** VacuumTrendPanel is not rewritten in this revision.
+Analytics view hosts the existing widget inside a `QFrame` with a
+`SURFACE_CARD` background and 1px top `BORDER` separator. Bringing
+VacuumTrendPanel into design-system alignment (`apply_plot_style`,
+Cyrillic мбар axis, log-Y per RULE-DATA-008) is tracked as a separate
+follow-up. Until then, document the divergence in the
 implementation-status callout.
 
 ## States
 
-| State | Hero ETA | Cooldown plot | R_thermal | Vacuum |
+| State | Hero strip | Cooldown plot | R_thermal | Vacuum |
 |---|---|---|---|---|
-| **No cooldown started** | «Охлаждение не активно» | empty plot + placeholder | «—» | last-known data + «Ожидание» overlay |
-| **Phase 1 (295→50 K)** | ETA + «Фаза 1» | actual line + predicted | updates if heater on | normal |
-| **Transition (S-bend)** | ETA + «Переход» | both lines + CI band | updates | normal |
-| **Phase 2 (50→4 K)** | ETA + «Фаза 2» | full content | updates | normal |
-| **Stabilizing** | «~5мин до цели» + «Стабилизация» | narrow CI | updates | normal |
-| **Complete** | «Завершено, Nч Mмин» | full trajectory frozen | final value | final value |
-| **Fault** | ETA + border STATUS_FAULT | plot + border STATUS_FAULT | no change | no change |
+| **No cooldown started** | «Охлаждение не активно» | empty axes | «—» | last-known data |
+| **Phase 1** | ETA + «Фаза 1» + progress | actual + predicted + CI | updates if heater on | normal |
+| **Transition** | ETA + «Переход» | both lines + CI band | updates | normal |
+| **Phase 2** | ETA + «Фаза 2» | full content | updates | normal |
+| **Stabilizing** | «~Nмин до цели» + «Стабилизация» | narrow CI | updates | normal |
+| **Complete** | «Завершено, Nч Mмин» | frozen trajectory | final | final |
+| **Fault** | `STATUS_FAULT` bottom border | `STATUS_FAULT` outer border | no change | no change |
 
-The **Fault** state does not hide analytics — operators need to see
-what the system was doing when the fault happened. Only chrome changes
-(border color per RULE-COLOR-002).
+Fault state does not hide content. Chrome borders flip to
+`STATUS_FAULT`. Values stay readable.
 
-Stale data rendering per RULE-DATA-005: value stays in `FOREGROUND`,
-stale signal via border + «(устар.)» suffix, never by dimming the
-value itself (fails AA contrast).
+Stale data (RULE-DATA-005): value colour stays `FOREGROUND`, stale
+signalled by border colour + «(устар.)» text suffix, never by dimming.
 
 ## Invariants
 
-1. **Full-screen overlay.** Analytics is always opened as a modal
-   overlay via ModalCard, never as a dashboard tile embedded in the
-   main view. Opened from ToolRail slot «analytics» (Ctrl+A).
+1. **Primary view, not overlay.** Rendered as a page in the shell's
+   main content stack. No backdrop, no close button, no focus trap,
+   no Escape-to-dismiss.
 
-2. **Single instance.** Only one Analytics overlay open at a time.
-   Ctrl+A while already open does nothing (focus the existing one).
+2. **Plots dominate.** The cooldown trajectory plot receives the
+   largest continuous block of screen space. Hero and vacuum are
+   thin strips; R_thermal tile is compact. When operator looks at
+   the view, their eye lands on the plot first.
 
-3. **No raw sensor data.** Analytics displays computed metrics only.
-   Raw T_cold trajectory displayed is the output of a smoothing pass
-   in the plugin, not direct sensor readings.
+3. **No raw sensor data.** Analytics renders computed plugin outputs
+   only. Do not subscribe to raw T_cold readings inside the view.
 
-4. **мбар in operator-facing prose** (RULE-COPY-006). Axis label,
-   hero text for vacuum. Latin `mbar` allowed in code identifiers
-   (`value_mbar`).
+4. **Cyrillic where user-facing** (RULE-COPY-001, RULE-COPY-006):
+   Т for channel IDs, мбар for pressure units, «R_тепл» not
+   «R_thermal» in labels. Latin identifiers in code.
 
-5. **Cyrillic Т for channel references** (RULE-COPY-001). R_thermal
-   is computed from a channel pair defined by the experiment template
-   (typically a stage temperature channel and a heater path reference);
-   the source channels are surfaced only in tooltips / extended details,
-   not the main tile.
+5. **No emoji** (RULE-COPY-005). Text labels only.
 
-6. **Respect STATUS_OK/WARNING/CAUTION/FAULT semantics** per RULE-COLOR-002.
-   No STATUS_* colors used for plot series — plot uses `PLOT_LINE_PALETTE`.
+6. **`apply_plot_style()` mandatory.** No hardcoded setBackground,
+   mkPen, or QColor outside theme tokens.
 
-7. **Plots use `apply_plot_style()`** — no hardcoded colors or widths.
+7. **No STATUS_* colours for plot series.** Series colours come from
+   `PLOT_LINE_PALETTE` only. STATUS_* reserved for semantic state
+   per RULE-COLOR-002.
 
-8. **Keyboard navigation.** Tab cycles: Back breadcrumb → hero card
-   (if interactive) → plot area (focus ring only) → R_thermal → vacuum.
-   Escape closes the overlay (RULE-INTER-002).
+8. **Fixed Y range on cooldown plot.** Start..target K, never autoscale.
+   Overshoots are informative.
 
-9. **No emoji** in status indicators (RULE-COPY-005). Text labels only.
+9. **Phase boundaries from predictor meta.** Not hardcoded temperatures.
 
-10. **Hero card is the dominant visual anchor.** ETA readout uses
-    `FONT_DISPLAY_SIZE` (largest). Operator reading from across the
-    room must see the time remaining.
+10. **Data flow.** View exposes `set_cooldown()`, `set_r_thermal()`,
+    `set_fault()`. Does not import zmq or subscribe directly. Shell
+    routes plugin readings into those setters via the adapter
+    `MainWindowV2._cooldown_reading_to_data()` (established in B.8
+    follow-up 53232ea).
 
-## API (proposed)
+## API
 
 ```python
-# src/cryodaq/gui/shell/overlays/analytics_panel.py
+# src/cryodaq/gui/shell/views/analytics_view.py
+# (new location — views/ directory for primary views; overlays/ for modals)
 
-from dataclasses import dataclass
-from collections import deque
-from PySide6.QtCore import Signal
-from cryodaq.gui.shell.overlays._design_system.modal_card import ModalCard
+from __future__ import annotations
+from dataclasses import dataclass, field
+from PySide6.QtWidgets import QWidget
+import pyqtgraph as pg
+
+from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen, warn_region_brush
 
 
 @dataclass
 class CooldownData:
-    """Snapshot of cooldown predictor output."""
-    t_hours: float          # ETA in hours
-    ci_hours: float         # Confidence interval ±hours
-    phase: str              # "phase1" | "transition" | "phase2" | "stabilizing" | "complete"
-    progress_pct: float     # 0..100
-    actual_trajectory: list[tuple[float, float]]  # [(hours_elapsed, T_K), ...]
-    predicted_trajectory: list[tuple[float, float]]
-    ci_trajectory: list[tuple[float, float, float]]  # [(h, T_lower, T_upper), ...]
+    t_hours: float
+    ci_hours: float
+    phase: str           # "phase1" | "transition" | "phase2" | "stabilizing" | "complete"
+    progress_pct: float  # 0..100 overall cooldown progress
+    actual_trajectory: list[tuple[float, float]] = field(default_factory=list)
+    predicted_trajectory: list[tuple[float, float]] = field(default_factory=list)
+    ci_trajectory: list[tuple[float, float, float]] = field(default_factory=list)
+    phase_boundaries_hours: list[float] = field(default_factory=list)
 
 
 @dataclass
 class RThermalData:
-    """Thermal resistance snapshot."""
-    current_value: float | None      # K/W, None if not computed yet
+    current_value: float | None
     delta_per_minute: float | None
-    last_updated_ts: float           # unix timestamp
-    history: list[tuple[float, float]]  # 10-min [(ts, K/W), ...]
+    last_updated_ts: float
+    history: list[tuple[float, float]] = field(default_factory=list)
 
 
-class AnalyticsPanel(ModalCard):
-    """Full-screen analytics overlay (B.8)."""
+class AnalyticsView(QWidget):
+    """Analytics primary view (B.8 revised).
+
+    Hosted as a page in the shell's main content QStackedWidget.
+    ToolRail Ctrl+A switches to this page; leaving the page does
+    not destroy it.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cooldown: CooldownData | None = None
+        self._r_thermal: RThermalData | None = None
+        self._faulted = False
+        self._build_layout()
 
     def set_cooldown(self, data: CooldownData | None) -> None: ...
     def set_r_thermal(self, data: RThermalData | None) -> None: ...
     def set_fault(self, faulted: bool, reason: str = "") -> None: ...
-
-    # Inherited from ModalCard: focus trap, focus restoration, Escape to close
 ```
 
-Data flow: engine publishes cooldown + R_thermal snapshots via ZMQ;
-parent shell (main_window_v2.py) subscribes and calls `set_cooldown()`
-/ `set_r_thermal()` on the panel instance. Panel does not subscribe
-to ZMQ directly.
-
-## Variants
-
-**Dashboard tile variant (deferred).** A compact 2-col × 2-row tile
-showing only ETA + phase could live on the main dashboard for
-at-a-glance info. Would reuse Hero ETA rendering logic. Not in B.8
-scope — revisit if operators ask for it.
+Class name: `AnalyticsView` (not `AnalyticsPanel`) to reinforce the
+primary-view architecture at the type level.
 
 ## Common mistakes
 
-1. **Computing metrics in the widget.** Analytics displays results
-   from `analytics/` plugins. Do not compute R_thermal or cooldown
-   prediction inside `AnalyticsPanel`. The widget is presentation only.
+1. **Inheriting from ModalCard.** ModalCard is for dismissible overlays
+   (confirmations, dialogs). Primary views are pages in the shell's
+   main content stack; no backdrop, no close button, no focus trap.
 
-2. **Using STATUS_OK for "cooldown normal" chrome.** Cooldown running
-   as expected is the default state — don't green-light it. Reserve
-   STATUS_OK for confirmed-healthy indicators (heater-off, safety SAFE).
+2. **Using BentoGrid for a single-purpose view.** BentoGrid is for
+   heterogeneous dashboard compositions. Single-purpose primary views
+   with fixed layout intent (plot-dominant, chrome strips top+bottom)
+   are clearer with `QVBoxLayout + QHBoxLayout` and explicit stretch
+   factors.
 
-3. **Scaling Y axis on every update.** Axis autoscale during active
-   cooldown causes the plot to "jump" and breaks operator's visual
-   comparison. Fix Y axis to the expected range (start..target) and
-   let actual data exceed it if it does; the overshoot is informative.
+3. **Uniform row heights.** Equal stretch compresses the plot. Use
+   `setFixedHeight()` on chrome, `stretch=1` on plot region.
 
-4. **Hiding the plot when no data yet.** Placeholder should be the
-   empty plot with axis labels visible, not a replaced widget. The
-   operator's eye locks onto the plot location; hiding and later
-   re-showing is jarring.
+4. **Autoscaling Y axis.** Autoscale during cooldown causes the plot
+   to visually "jump" and breaks operator's visual reference. Fix
+   axis range; let overshoots render out of range.
 
-5. **Putting vacuum trend at the top.** Vacuum is tertiary info.
-   Hero + cooldown + R_thermal before vacuum — F-pattern reading order.
+5. **Hiding plots when no data.** Placeholder is the empty plot with
+   axes visible. Operator's eye locks onto plot location; hiding and
+   re-showing the widget is jarring.
 
-6. **Adding hover tooltips that show raw numbers.** Tooltip text
-   under pyqtgraph is hard to style consistently with design system
-   tokens. Defer to v2 iteration.
+6. **Labels competing with data.** Axis tick fonts should be compact
+   (`FONT_LABEL_SIZE - 2`). The plot is the main visual — tick labels
+   are reference, not content.
+
+7. **Computing metrics in the view.** Plugins compute; shell adapts
+   plugin readings via `_cooldown_reading_to_data()`; view renders.
+   Do not duplicate plugin math inside the view.
 
 ## Accessibility
 
-- Focus trap: inherited from `ModalCard` (A.5 commit).
-- Tab order: breadcrumb → hero card → plot area → R_thermal → vacuum.
-- Escape closes overlay; focus returns to ToolRail slot that opened it
-  (RULE-INTER-002 via ModalCard).
-- Plot focus ring: 2px `ACCENT` border when focused (per RULE-A11Y-001).
-  Keyboard users can tab to plot area but cannot interact with series
-  inside (display-only).
-- Color-independent state signaling per RULE-A11Y-002: phase label
-  always shown in text, never just color; R_thermal stale state shown
-  with «(устар.)» text suffix, not only color.
-- Large-text readout (hero ETA) gives poor-vision operators the
-  critical info at distance.
+- No focus trap — primary view, not a modal.
+- Tab order: Hero controls (if any become interactive) → plot area
+  (focus ring only) → R_thermal tile → R_thermal mini plot → Vacuum
+  trend content.
+- Escape does nothing inside the view. Navigation happens via
+  ToolRail shortcut.
+- Colour-independent state signalling (RULE-A11Y-002): phase label
+  always in text; R_thermal stale state shown with «(устар.)» text
+  suffix, not only with colour.
+- Large-text ETA gives operators at viewing distance the critical info.
 
 ## Rule references
 
-- RULE-A11Y-001 — focus indicators
-- RULE-A11Y-002 — multi-channel redundancy
-- RULE-A11Y-003 — contrast on status colors
+- RULE-A11Y-002 — multi-channel state redundancy
+- RULE-A11Y-003 — contrast on status colours
 - RULE-COLOR-002 — STATUS_* semantic locks
-- RULE-COLOR-004 — ACCENT reserved for selection/focus
+- RULE-COLOR-004 — ACCENT reserved for selection / focus / action fills
 - RULE-COPY-001 — Cyrillic Т for channel IDs
 - RULE-COPY-005 — no emoji
 - RULE-COPY-006 — мбар canonical
 - RULE-DATA-004 — fixed precision per quantity
-- RULE-DATA-005 — stale rendering never dims value
-- RULE-DATA-008 — pressure log scale
-- RULE-INTER-002 — focus restoration
-- RULE-SURF-001..007 — card invariants
-- AD-001 — BentoGrid 8 columns canonical
+- RULE-DATA-005 — stale rendering never dims values
+- RULE-DATA-008 — pressure log scale (applies to VacuumTrendPanel follow-up)
+- RULE-SURF-001..007 — card invariants (R_thermal tile)
 - AD-002 — mnemonic shortcut Ctrl+A
 
 ## Related specs
 
-- `components/modal.md` — overlay chrome base
-- `components/bento-grid.md` — 8-col composition
-- `cryodaq-primitives/phase-stepper.md` — phase concept (related but not reused here)
-- `tokens/chart-tokens.md` — all 12 PLOT_* tokens
+- `cryodaq-primitives/tool-rail.md` — slot that opens this view
+- `cryodaq-primitives/top-watch-bar.md` — chrome above
+- `cryodaq-primitives/bottom-status-bar.md` — chrome below
+- `tokens/chart-tokens.md` — `apply_plot_style()` tokens
 - `tokens/keyboard-shortcuts.md` — Ctrl+A binding
+- `components/modal.md` — ModalCard (what this view is NOT)
+
+## Known limitations (data availability)
+
+Inherited from B.8 follow-up 53232ea:
+
+- **Actual cooldown trajectory not rendered** — plugin publishes only
+  predicted trajectory. The cooldown plot shows the predicted curve +
+  CI band; the solid «Измерено» line stays empty until a publisher
+  surfaces the actual T_cold buffer.
+- **R_thermal live values not displayed** — no plugin publishes to
+  `analytics/r_thermal/*`. `set_r_thermal()` remains as stable API;
+  the tile and mini plot show placeholder `—` in production.
+- **`"complete"` phase never emitted** — cooldown predictor conflates
+  stabilizing and complete as `"steady"`; view remaps `"steady"` →
+  `"stabilizing"` and does not render a distinct complete state
+  until the plugin distinguishes them.
 
 ## Changelog
 
-- 2026-04-17: Initial spec. Written for B.8 rebuild. Legacy v1 at
-  `src/cryodaq/gui/widgets/analytics_panel.py` (518 lines) preserves
-  domain logic and is the reference implementation for the plugin
-  integration patterns referenced above. v2 replaces the QVBoxLayout
-  + side-by-side cards layout with BentoGrid 8-col composition,
-  adopts design-system tokens via `apply_plot_style()`, switches axis
-  labels to мбар (Cyrillic), and integrates into the ModalCard
-  overlay system instead of being a dashboard tab.
+- 2026-04-17 (revision 2): Architectural correction. Changed base
+  from `ModalCard` overlay to primary-view `QWidget` rendered in
+  shell's main content stack. Removed backdrop, close button, focus
+  trap, Escape-to-close. Replaced BentoGrid 8-col composition with
+  `QVBoxLayout + QHBoxLayout` + fixed-height chrome strips to achieve
+  plot-dominant visual hierarchy. Renamed class `AnalyticsPanel` →
+  `AnalyticsView`. Moved file location
+  `shell/overlays/analytics_panel.py` → `shell/views/analytics_view.py`.
+  Reason: the first implementation (9a089f9, 53232ea) used ModalCard
+  and rendered as a dismissible card over a backdrop, which is wrong
+  for a ToolRail-activated primary view. Visual inspection showed
+  plots being compressed by BentoGrid row stretching and the close
+  button + dimmed backdrop mis-signalling the nature of the view.
+- 2026-04-17 (revision 1): Initial spec (superseded by revision 2).
