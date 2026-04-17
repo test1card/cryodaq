@@ -22,12 +22,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from cryodaq.core.phase_labels import (
-    PHASE_LABELS_PILL,
     PHASE_LABELS_RU,
     PHASE_ORDER,
 )
@@ -150,18 +150,16 @@ class ExperimentOverlay(QWidget):
         # Phase pills row
         pills_row = QHBoxLayout()
         pills_row.setSpacing(theme.SPACE_1)
-        pills_row.addStretch()
         self._phase_pills: dict[str, QFrame] = {}
         self._phase_pill_dur_labels: dict[str, QLabel] = {}
         for phase in PHASE_ORDER:
             pill = self._make_phase_pill(phase)
             self._phase_pills[phase] = pill
-            pills_row.addWidget(pill)
+            pills_row.addWidget(pill, 1)
             if phase != PHASE_ORDER[-1]:
                 arrow = QLabel("\u203a")
                 arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: 14px;")
                 pills_row.addWidget(arrow)
-        pills_row.addStretch()
         phase_layout.addLayout(pills_row)
 
         # Phase status line
@@ -313,19 +311,23 @@ class ExperimentOverlay(QWidget):
     def _make_phase_pill(self, phase: str) -> QFrame:
         pill = QFrame()
         pill.setObjectName(f"expPill_{phase}")
-        pill.setFixedSize(80, 55)
+        pill.setMinimumWidth(140)
+        pill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(pill)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2)
         layout.setSpacing(1)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        num = QLabel(f"{PHASE_ORDER.index(phase) + 1:02d}")
+        num = QLabel(f"{PHASE_ORDER.index(phase) + 1}")
         num.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(num)
 
-        short = QLabel(PHASE_LABELS_PILL[phase])
-        short.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(short)
+        full = QLabel(PHASE_LABELS_RU[phase])
+        full.setObjectName(f"expPillLabel_{phase}")
+        full.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        full.setWordWrap(False)
+        full.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(full)
 
         dur = QLabel("\u00b7")
         dur.setObjectName(f"expPillDur_{phase}")
