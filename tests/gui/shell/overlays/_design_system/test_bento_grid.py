@@ -16,6 +16,12 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def test_bento_grid_default_columns_is_eight(app):
+    # AD-001: canonical 8-column grid.
+    grid = BentoGrid()
+    assert grid.columns == 8
+
+
 def test_bento_grid_add_tile_places_widget(app):
     grid = BentoGrid()
     tile = QLabel("A")
@@ -26,17 +32,12 @@ def test_bento_grid_add_tile_places_widget(app):
     assert (row, col, row_span, col_span) == (1, 2, 2, 3)
 
 
-def test_bento_grid_auto_flow_advances_columns(app):
+def test_bento_grid_requires_explicit_col_row(app):
+    # Auto-flow is not part of the canonical contract. add_tile uses
+    # keyword-only col/row so calling without them is a TypeError.
     grid = BentoGrid(columns=4)
-    first = QLabel("A")
-    second = QLabel("B")
-    grid.add_tile(first)
-    grid.add_tile(second)
-
-    index_first = grid._layout.indexOf(first)
-    index_second = grid._layout.indexOf(second)
-    assert grid._layout.getItemPosition(index_first)[:2] == (0, 0)
-    assert grid._layout.getItemPosition(index_second)[:2] == (0, 1)
+    with pytest.raises(TypeError):
+        grid.add_tile(QLabel("no-coords"))  # type: ignore[call-arg]
 
 
 def test_bento_grid_col_span_validation(app):
@@ -49,6 +50,34 @@ def test_bento_grid_rejects_negative_coordinates(app):
     grid = BentoGrid(columns=4)
     with pytest.raises(ValueError):
         grid.add_tile(QLabel("bad"), col=-1, row=0)
+    with pytest.raises(ValueError):
+        grid.add_tile(QLabel("bad"), col=0, row=-1)
+
+
+def test_bento_grid_rejects_zero_or_negative_spans(app):
+    grid = BentoGrid(columns=4)
+    with pytest.raises(ValueError):
+        grid.add_tile(QLabel("bad"), col=0, row=0, col_span=0)
+    with pytest.raises(ValueError):
+        grid.add_tile(QLabel("bad"), col=0, row=0, row_span=0)
+
+
+def test_bento_grid_rejects_overlap(app):
+    # Two tiles cannot share any cell.
+    grid = BentoGrid()
+    grid.add_tile(QLabel("first"), col=0, row=0, col_span=4, row_span=2)
+    # Overlap on row 1 cols 2..4 — must raise.
+    with pytest.raises(ValueError):
+        grid.add_tile(QLabel("overlap"), col=2, row=1, col_span=3, row_span=1)
+
+
+def test_bento_grid_adjacent_tiles_allowed(app):
+    # Edge-touching (not overlapping) placement succeeds.
+    grid = BentoGrid()
+    grid.add_tile(QLabel("left"), col=0, row=0, col_span=4, row_span=1)
+    grid.add_tile(QLabel("right"), col=4, row=0, col_span=4, row_span=1)
+    grid.add_tile(QLabel("below"), col=0, row=1, col_span=8, row_span=1)
+    assert grid._layout.count() == 3
 
 
 def test_bento_grid_clear_tiles_removes_all(app):
@@ -62,6 +91,8 @@ def test_bento_grid_clear_tiles_removes_all(app):
     assert grid._layout.count() == 0
     assert a.parent() is None
     assert b.parent() is None
+    # Occupancy map must be empty so re-adding in cleared cells works.
+    grid.add_tile(QLabel("C"), col=0, row=0)
 
 
 def test_bento_grid_gap_defaults_to_theme_spacing(app):

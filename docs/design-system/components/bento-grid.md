@@ -12,15 +12,17 @@ references: rules/spacing-rules.md, tokens/spacing.md, tokens/layout.md
 
 Modular grid layout for arranging heterogeneous tiles in a dashboard composition. Named after the Japanese bento box metaphor: compartments of varying sizes forming a coherent whole.
 
-> **Implementation status (AD-001).** This spec defines the **canonical
-> 8-column, explicit-placement, overlap-validated** model. The current
-> Phase I.1 code at `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py`
-> uses **12 columns with auto-flow and no overlap detection**. The code
-> will be aligned with this spec in a future Phase II block. Until then,
-> **new dashboard layouts should be designed for 8 columns and explicit
-> placement** even though the runtime grid currently has more flexibility.
-> The invariants, API, patterns, and visual model below describe the
-> canonical target, not the shipped code.
+> **Implementation status (AD-001).** The shipped `BentoGrid` at
+> `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` is
+> aligned with this spec: canonical **8 columns** (`DEFAULT_COLUMNS`),
+> explicit placement (`col` and `row` are required keyword-only
+> arguments; auto-flow removed), and overlap validation via an
+> occupancy set on every `add_tile()` call. Out-of-bounds placement,
+> negative coordinates, zero/negative spans, and overlaps all raise
+> `ValueError` loudly at dev time. The overlay showcase at
+> `_showcase.py` was rewritten from its 12-column layout into an
+> 8-column composition (halves + wide + row-spanning tall tile) to
+> exercise the canonical scheme.
 
 **When to use:**
 - Dashboard layouts with mixed tile sizes (big chart + small KPIs + medium status panel)

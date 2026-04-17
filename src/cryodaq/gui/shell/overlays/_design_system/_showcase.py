@@ -80,6 +80,11 @@ def build_showcase() -> QMainWindow:
     )
     content_layout.addWidget(breadcrumb)
 
+    # Canonical 8-column Bento layout (AD-001). Composition:
+    #   Row 0:  Exec half(0..4)  |  Live half(4..8)
+    #   Row 1:  Wide left(0..5)  |  Tall right(5..8, row_span=2)
+    #   Row 2:  Support(0..5) under Wide; Tall still covers (5..8)
+    #   Row 3:  Dense half(0..4) |  Telemetry half(4..8)
     grid = BentoGrid()
     grid.add_tile(
         _placeholder_tile(
@@ -103,41 +108,41 @@ def build_showcase() -> QMainWindow:
     )
     grid.add_tile(
         _placeholder_tile(
-            "Dense tile",
-            "Compressed multi-value table.",
-        ),
-        col=8,
-        row=0,
-        col_span=4,
-        row_span=1,
-    )
-    grid.add_tile(
-        _placeholder_tile(
             "Wide tile",
-            "Time-series chart, 8-column span.",
+            "Time-series chart, 5-column span in 8-column grid.",
         ),
         col=0,
         row=1,
-        col_span=8,
+        col_span=5,
         row_span=1,
     )
     grid.add_tile(
         _placeholder_tile(
             "Tall tile",
-            "Vertical scroll content, 2-row span.",
+            "Vertical scroll content, 2-row span on the right.",
         ),
-        col=8,
+        col=5,
         row=1,
-        col_span=4,
+        col_span=3,
         row_span=2,
     )
     grid.add_tile(
         _placeholder_tile(
             "Support tile",
-            "Secondary context info.",
+            "Secondary context info; sits under Wide.",
         ),
         col=0,
         row=2,
+        col_span=5,
+        row_span=1,
+    )
+    grid.add_tile(
+        _placeholder_tile(
+            "Dense tile",
+            "Compressed multi-value table.",
+        ),
+        col=0,
+        row=3,
         col_span=4,
         row_span=1,
     )
@@ -147,7 +152,7 @@ def build_showcase() -> QMainWindow:
             "Multi-channel live readout.",
         ),
         col=4,
-        row=2,
+        row=3,
         col_span=4,
         row_span=1,
     )
