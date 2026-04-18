@@ -261,6 +261,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
         return result
 
     for db_path in sorted(_DATA_DIR.glob("data_????-??-??.db")):
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
@@ -269,9 +270,11 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
                 (cutoff_epoch,),
             ).fetchall()
-            conn.close()
         except Exception:
             continue
+        finally:
+            if conn is not None:
+                conn.close()
         for row in rows:
             ch = row["channel"]
             result.setdefault(ch, []).append(

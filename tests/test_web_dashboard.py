@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from cryodaq.web.server import create_app
+from cryodaq.web.server import _query_history, create_app
 
 
 @pytest.fixture()
@@ -53,3 +53,24 @@ def test_status_endpoint_returns_json(client) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "uptime" in data
+
+
+def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "data_2026-04-18.db"
+    db_path.write_text("")
+    closed: list[bool] = []
+
+    class _Conn:
+        row_factory = None
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr("cryodaq.web.server._DATA_DIR", tmp_path)
+    monkeypatch.setattr("cryodaq.web.server.sqlite3.connect", lambda *args, **kwargs: _Conn())
+
+    assert _query_history(5) == {}
+    assert closed == [True]
