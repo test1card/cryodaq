@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import inspect
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
+
+import pytest
 
 
 def test_gpib_transport_no_default_executor():
@@ -135,3 +138,70 @@ def test_close_all_managers_holds_rm_lock():
         "close_all_managers must hold _rm_lock — otherwise scheduler L3 "
         "recovery on one bus can race with _get_rm on healthy buses"
     )
+
+
+@pytest.mark.asyncio
+async def test_gpib_close_returns_even_if_executor_worker_is_blocked():
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+
+    transport = GPIBTransport(mock=False)
+    transport._resource_str = "GPIB0::12::INSTR"
+
+    class _Resource:
+        def close(self) -> None:
+            return None
+
+    transport._resource = _Resource()
+    executor = transport._get_executor()
+    blocker = threading.Event()
+    release = threading.Event()
+
+    def _hang() -> None:
+        blocker.set()
+        release.wait(timeout=10.0)
+
+    executor.submit(_hang)
+    assert blocker.wait(timeout=1.0)
+
+    started = time.monotonic()
+    await transport.close()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 2.5, f"GPIB close blocked too long ({elapsed:.2f}s)"
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_close_returns_even_if_executor_worker_is_blocked():
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource_str = "USB0::MOCK::INSTR"
+
+    class _Resource:
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    executor = transport._get_executor()
+    blocker = threading.Event()
+    release = threading.Event()
+
+    def _hang() -> None:
+        blocker.set()
+        release.wait(timeout=10.0)
+
+    executor.submit(_hang)
+    assert blocker.wait(timeout=1.0)
+
+    started = time.monotonic()
+    await transport.close()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 2.5, f"USBTMC close blocked too long ({elapsed:.2f}s)"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -13,6 +14,33 @@ log = logging.getLogger(__name__)
 _MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
 # smua.measure.iv() возвращает ток\tнапряжение
 _MOCK_IV_RESPONSE = "0.01\t5.0"
+_CLOSE_TIMEOUT_S = 1.0
+
+
+def _run_with_timeout(fn, *, timeout_s: float, label: str) -> None:
+    """Run a blocking cleanup function with a bounded wait."""
+    done = threading.Event()
+    error: list[Exception] = []
+
+    def _runner() -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            error.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_runner, daemon=True, name=f"usbtmc-close-{label}")
+    thread.start()
+    if not done.wait(timeout_s):
+        log.warning(
+            "USBTMC: timed out closing %s after %.1fs; detaching close thread",
+            label,
+            timeout_s,
+        )
+        return
+    if error:
+        raise error[0]
 
 
 class USBTMCTransport:
@@ -90,9 +118,17 @@ class USBTMCTransport:
             if self._resource is None:
                 return
 
-            loop = asyncio.get_running_loop()
+            resource = self._resource
+            manager = self._rm
+            self._resource = None
+            self._rm = None
             try:
-                await loop.run_in_executor(self._get_executor(), self._blocking_close)
+                await asyncio.to_thread(
+                    _run_with_timeout,
+                    lambda: self._blocking_close_handles(resource, manager),
+                    timeout_s=_CLOSE_TIMEOUT_S,
+                    label=self._resource_str or "usbtmc",
+                )
                 log.info("USBTMC: ресурс %s закрыт", self._resource_str)
             except Exception as exc:
                 log.warning(
@@ -101,11 +137,10 @@ class USBTMCTransport:
                     exc,
                 )
             finally:
-                self._resource = None
                 # Shut down the dedicated executor so threads do not
                 # accumulate across reconnects.
                 if self._executor is not None:
-                    self._executor.shutdown(wait=True)
+                    self._executor.shutdown(wait=False, cancel_futures=True)
                     self._executor = None
 
     async def write(self, cmd: str) -> None:
@@ -222,6 +257,14 @@ class USBTMCTransport:
         if self._rm is not None:
             self._rm.close()
             self._rm = None
+
+    def _blocking_close_handles(self, resource: Any, manager: Any) -> None:
+        """Close explicit resource/manager handles outside the worker executor."""
+        try:
+            resource.close()
+        finally:
+            if manager is not None:
+                manager.close()
 
     def _blocking_query(self, cmd: str, timeout_ms: int) -> str:
         """Синхронный query с установкой таймаута (вызывается в executor)."""

@@ -26,6 +26,37 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_MS = 3000
 _WRITE_READ_DELAY_S = 0.1
+_CLOSE_TIMEOUT_S = 1.0
+
+
+def _run_with_timeout(fn, *, timeout_s: float, label: str) -> None:
+    """Run a blocking cleanup function with a bounded wait.
+
+    The underlying VISA call may wedge inside a C extension. In that case
+    we log and detach instead of blocking the scheduler forever.
+    """
+    done = threading.Event()
+    error: list[Exception] = []
+
+    def _runner() -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            error.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_runner, daemon=True, name=f"gpib-close-{label}")
+    thread.start()
+    if not done.wait(timeout_s):
+        log.warning(
+            "GPIB: timed out closing %s after %.1fs; detaching close thread",
+            label,
+            timeout_s,
+        )
+        return
+    if error:
+        raise error[0]
 
 
 class GPIBTransport:
@@ -138,17 +169,22 @@ class GPIBTransport:
             return
 
         if self._resource is not None:
-            loop = asyncio.get_running_loop()
+            resource = self._resource
+            self._resource = None
             try:
-                await loop.run_in_executor(self._get_executor(), self._resource.close)
+                await asyncio.to_thread(
+                    _run_with_timeout,
+                    resource.close,
+                    timeout_s=_CLOSE_TIMEOUT_S,
+                    label=self._resource_str or "gpib",
+                )
             except Exception as exc:
                 log.warning("GPIB: error closing %s — %s", self._resource_str, exc)
-            self._resource = None
             log.info("GPIB: %s closed", self._resource_str)
         # Shut down the dedicated executor so threads don't accumulate
         # across reconnect cycles.
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
     async def write(self, cmd: str) -> None:

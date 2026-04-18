@@ -30,6 +30,7 @@ READ_TIMEOUT_S = 10.0
 # Standalone (non-GPIB) instrument disconnect backoff
 _STANDALONE_INITIAL_BACKOFF_S = 30.0
 _STANDALONE_MAX_BACKOFF_S = 300.0
+_DISCONNECT_TIMEOUT_S = 5.0
 
 _GPIB_PREFIX = "GPIB"
 
@@ -106,6 +107,32 @@ class Scheduler:
         self._instruments[name] = _InstrumentState(config=config)
         logger.info("Прибор '%s' добавлен (интервал=%.1fs)", name, config.poll_interval_s)
 
+    async def _disconnect_driver(
+        self,
+        driver: InstrumentDriver,
+        *,
+        timeout_s: float = _DISCONNECT_TIMEOUT_S,
+        context: str = "",
+    ) -> None:
+        """Disconnect with a bounded wait so wedged transports do not hang recovery."""
+        try:
+            await asyncio.wait_for(driver.disconnect(), timeout=timeout_s)
+        except TimeoutError:
+            if context:
+                logger.warning(
+                    "Таймаут отключения '%s' за %.1fs (%s)",
+                    driver.name,
+                    timeout_s,
+                    context,
+                )
+            else:
+                logger.warning("Таймаут отключения '%s' за %.1fs", driver.name, timeout_s)
+        except Exception:
+            if context:
+                logger.exception("Ошибка отключения '%s' (%s)", driver.name, context)
+            else:
+                logger.exception("Ошибка отключения '%s'", driver.name)
+
     async def _poll_loop(self, state: _InstrumentState) -> None:
         """Цикл опроса одного прибора с reconnect и backoff."""
         cfg = state.config
@@ -146,10 +173,7 @@ class Scheduler:
                         name,
                         state.consecutive_errors,
                     )
-                    try:
-                        await driver.disconnect()
-                    except Exception:
-                        logger.exception("Ошибка отключения '%s'", name)
+                    await self._disconnect_driver(driver, context="standalone timeout recovery")
                     state.backoff_s = max(state.backoff_s, _STANDALONE_INITIAL_BACKOFF_S)
                     await self._backoff(state, max_s=_STANDALONE_MAX_BACKOFF_S)
                     continue
@@ -165,10 +189,7 @@ class Scheduler:
                         name,
                         state.consecutive_errors,
                     )
-                    try:
-                        await driver.disconnect()
-                    except Exception:
-                        logger.exception("Ошибка отключения '%s'", name)
+                    await self._disconnect_driver(driver, context="standalone error recovery")
                     state.backoff_s = max(state.backoff_s, _STANDALONE_INITIAL_BACKOFF_S)
                     await self._backoff(state, max_s=_STANDALONE_MAX_BACKOFF_S)
                     continue
@@ -282,10 +303,10 @@ class Scheduler:
                             await asyncio.sleep(_IFC_COOLDOWN_S)
                             # After IFC, all devices need reconnect
                             for s in states:
-                                try:
-                                    await s.config.driver.disconnect()
-                                except Exception:
-                                    pass
+                                await self._disconnect_driver(
+                                    s.config.driver,
+                                    context=f"GPIB IFC recovery {bus_prefix}",
+                                )
                                 s.config.driver._connected = False
                             break  # restart the for-loop (all devices disconnected)
                     else:
@@ -305,10 +326,10 @@ class Scheduler:
 
                     if state.consecutive_errors >= 3:
                         logger.warning("'%s': 3+ ошибок, disconnect + skip", name)
-                        try:
-                            await driver.disconnect()
-                        except Exception:
-                            pass
+                        await self._disconnect_driver(
+                            driver,
+                            context=f"GPIB error recovery {bus_prefix}",
+                        )
                         driver._connected = False
 
             next_deadline += poll_interval
@@ -399,10 +420,7 @@ class Scheduler:
             logger.warning(
                 "Переподключение '%s' после %d ошибок", driver.name, state.consecutive_errors
             )
-            try:
-                await driver.disconnect()
-            except Exception:
-                logger.exception("Ошибка отключения '%s'", driver.name)
+            await self._disconnect_driver(driver, context="generic error recovery")
             await self._backoff(state)
 
     async def _backoff(self, state: _InstrumentState, *, max_s: float = MAX_BACKOFF_S) -> None:
@@ -505,10 +523,7 @@ class Scheduler:
 
         for state in self._instruments.values():
             state.task = None
-            try:
-                await state.config.driver.disconnect()
-            except Exception:
-                logger.exception("Ошибка отключения '%s' при остановке", state.config.driver.name)
+            await self._disconnect_driver(state.config.driver, context="scheduler stop")
         self._gpib_tasks.clear()
         logger.info("Scheduler остановлен")
 
