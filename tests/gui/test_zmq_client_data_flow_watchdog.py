@@ -172,6 +172,58 @@ def test_start_resets_last_reading_time(monkeypatch):
     assert bridge._last_reading_time == 0.0
 
 
+def test_start_stops_stale_reply_consumer_before_restart(monkeypatch):
+    """Restart after a dead subprocess must not leave two reply consumers alive."""
+
+    class _DeadProcess:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def start(self) -> None:
+            self._alive = True
+
+    class _NewThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    class _OldThread:
+        def __init__(self) -> None:
+            self.joined = False
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self.joined = True
+            self._alive = False
+
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.Process", _DeadProcess)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.threading.Thread", _NewThread)
+
+    bridge = ZmqBridge()
+    old_consumer = _OldThread()
+    bridge._reply_consumer = old_consumer
+    bridge.start()
+
+    assert old_consumer.joined is True
+    assert bridge._reply_consumer is not old_consumer
+
+
 def test_launcher_poll_drains_before_data_stall_restart():
     """Queued readings must be drained before the stale-data policy fires."""
     from cryodaq.launcher import LauncherWindow

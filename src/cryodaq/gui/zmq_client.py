@@ -89,6 +89,10 @@ class ZmqBridge:
         """Start the ZMQ bridge subprocess."""
         if self._process is not None and self._process.is_alive():
             return
+        if self._reply_consumer is not None and self._reply_consumer.is_alive():
+            self._reply_stop.set()
+            self._reply_consumer.join(timeout=1.0)
+            self._reply_consumer = None
         self._shutdown_event.clear()
         # Drain stale queues
         _drain(self._data_queue)
