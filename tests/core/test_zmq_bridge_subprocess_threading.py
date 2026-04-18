@@ -182,3 +182,83 @@ def test_cmd_timeout_emits_warning(_bridge_fixture):
                 got_warning = True
 
     assert got_warning, "cmd_forward did not emit a REP-timeout warning"
+
+
+def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
+    """A timed-out REQ must not poison later commands forever."""
+    import zmq
+
+    pub_addr, cmd_addr, data_q, cmd_q, reply_q, shutdown, proc_holder = _bridge_fixture
+
+    proc = mp.Process(
+        target=zmq_bridge_main,
+        args=(pub_addr, cmd_addr, data_q, cmd_q, reply_q, shutdown),
+        daemon=True,
+    )
+    proc_holder.append(proc)
+    proc.start()
+
+    # First command times out because no REP is bound yet.
+    cmd_q.put({"type": "safety_status", "_rid": "t1"})
+    deadline = time.monotonic() + 6.0
+    saw_timeout_reply = False
+    while time.monotonic() < deadline and not saw_timeout_reply:
+        try:
+            reply = reply_q.get(timeout=0.5)
+        except stdlib_queue.Empty:
+            continue
+        if reply.get("_rid") == "t1" and reply.get("ok") is False:
+            saw_timeout_reply = "таймаут" in str(reply.get("error", ""))
+
+    assert saw_timeout_reply, "initial timed-out command did not produce timeout reply"
+
+    ctx = zmq.Context()
+    rep = ctx.socket(zmq.REP)
+    rep.setsockopt(zmq.LINGER, 0)
+    rep.bind(cmd_addr)
+
+    def serve_once():
+        raw = rep.recv_string()
+        rep.send_string(json.dumps({"ok": True, "echo": json.loads(raw).get("type")}))
+
+    import json
+
+    server = threading.Thread(target=serve_once, daemon=True)
+    server.start()
+
+    cmd_q.put({"type": "safety_status", "_rid": "t2"})
+    deadline = time.monotonic() + 6.0
+    recovered_reply = None
+    while time.monotonic() < deadline and recovered_reply is None:
+        try:
+            reply = reply_q.get(timeout=0.5)
+        except stdlib_queue.Empty:
+            continue
+        if reply.get("_rid") == "t2":
+            recovered_reply = reply
+
+    server.join(timeout=1.0)
+    rep.close(linger=0)
+    ctx.term()
+
+    assert recovered_reply == {"ok": True, "echo": "safety_status", "_rid": "t2"}
+
+
+def test_shutdown_during_command_timeout_exits_cleanly(_bridge_fixture):
+    """Bridge subprocess must exit even if command thread is inside REQ timeout."""
+    pub_addr, cmd_addr, data_q, cmd_q, reply_q, shutdown, proc_holder = _bridge_fixture
+
+    proc = mp.Process(
+        target=zmq_bridge_main,
+        args=(pub_addr, cmd_addr, data_q, cmd_q, reply_q, shutdown),
+        daemon=True,
+    )
+    proc_holder.append(proc)
+    proc.start()
+
+    cmd_q.put({"type": "safety_status", "_rid": "hang"})
+    time.sleep(0.2)
+    shutdown.set()
+
+    proc.join(timeout=6.0)
+    assert not proc.is_alive(), "bridge subprocess hung during shutdown with in-flight REQ"

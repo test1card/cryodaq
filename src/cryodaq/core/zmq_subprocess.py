@@ -85,26 +85,6 @@ def zmq_bridge_main(
 
     ctx = zmq.Context()
 
-    # SUB socket — receive data from engine.
-    # Order matters: connect() BEFORE subscribe(). The inverse pattern
-    # (subscribe-before-connect with setsockopt_string(SUBSCRIBE, "")) produced
-    # zero received messages on macOS Python 3.14 pyzmq 25+ — bridge blocked
-    # forever in zmq_msg_recv. Bytes topic matches publisher in zmq_bridge.py.
-    sub = ctx.socket(zmq.SUB)
-    sub.setsockopt(zmq.LINGER, 0)
-    sub.setsockopt(zmq.RCVTIMEO, 100)
-    sub.connect(pub_addr)
-    sub.subscribe(DEFAULT_TOPIC)
-
-    # REQ socket — send commands to engine
-    req = ctx.socket(zmq.REQ)
-    req.setsockopt(zmq.LINGER, 0)
-    req.setsockopt(zmq.RCVTIMEO, 3000)
-    req.setsockopt(zmq.SNDTIMEO, 3000)
-    req.setsockopt(zmq.REQ_RELAXED, 1)
-    req.setsockopt(zmq.REQ_CORRELATE, 1)
-    req.connect(cmd_addr)
-
     dropped_counter = {"n": 0}
 
     def sub_drain_loop() -> None:
@@ -114,46 +94,57 @@ def zmq_bridge_main(
         the GUI's heartbeat freshness check proves the *data* path is
         alive, not just that the subprocess exists.
         """
+        # Order matters: connect() BEFORE subscribe(). The inverse pattern
+        # (subscribe-before-connect with setsockopt_string(SUBSCRIBE, "")) produced
+        # zero received messages on macOS Python 3.14 pyzmq 25+.
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.LINGER, 0)
+        sub.setsockopt(zmq.RCVTIMEO, 100)
+        sub.connect(pub_addr)
+        sub.subscribe(DEFAULT_TOPIC)
         last_heartbeat = time.monotonic()
-        while not shutdown_event.is_set():
-            # SUB: blocking receive with 100ms RCVTIMEO. Keeps the loop
-            # responsive for shutdown and heartbeat emission.
-            try:
-                parts = sub.recv_multipart()
-                if len(parts) == 2:
-                    try:
-                        reading_dict = _unpack_reading_dict(parts[1])
-                    except Exception:
-                        reading_dict = None  # skip malformed
-                    if reading_dict is not None:
+        try:
+            while not shutdown_event.is_set():
+                # SUB: blocking receive with 100ms RCVTIMEO. Keeps the loop
+                # responsive for shutdown and heartbeat emission.
+                try:
+                    parts = sub.recv_multipart()
+                    if len(parts) == 2:
                         try:
-                            data_queue.put_nowait(reading_dict)
-                        except queue.Full:
-                            dropped_counter["n"] += 1
-                            if dropped_counter["n"] % 100 == 1:
-                                with contextlib.suppress(queue.Full):
-                                    data_queue.put_nowait(
-                                        {
-                                            "__type": "warning",
-                                            "message": (
-                                                f"Queue overflow: "
-                                                f"{dropped_counter['n']} readings dropped"
-                                            ),
-                                        }
-                                    )
-            except zmq.Again:
-                pass
-            except zmq.ZMQError:
-                if shutdown_event.is_set():
-                    break
-                # Unexpected socket error — swallow and continue.
-                time.sleep(0.01)
+                            reading_dict = _unpack_reading_dict(parts[1])
+                        except Exception:
+                            reading_dict = None  # skip malformed
+                        if reading_dict is not None:
+                            try:
+                                data_queue.put_nowait(reading_dict)
+                            except queue.Full:
+                                dropped_counter["n"] += 1
+                                if dropped_counter["n"] % 100 == 1:
+                                    with contextlib.suppress(queue.Full):
+                                        data_queue.put_nowait(
+                                            {
+                                                "__type": "warning",
+                                                "message": (
+                                                    f"Queue overflow: "
+                                                    f"{dropped_counter['n']} readings dropped"
+                                                ),
+                                            }
+                                        )
+                except zmq.Again:
+                    pass
+                except zmq.ZMQError:
+                    if shutdown_event.is_set():
+                        break
+                    # Unexpected socket error — swallow and continue.
+                    time.sleep(0.01)
 
-            now = time.monotonic()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                with contextlib.suppress(queue.Full):
-                    data_queue.put_nowait({"__type": "heartbeat", "ts": now})
-                last_heartbeat = now
+                now = time.monotonic()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    with contextlib.suppress(queue.Full):
+                        data_queue.put_nowait({"__type": "heartbeat", "ts": now})
+                    last_heartbeat = now
+        finally:
+            sub.close(linger=0)
 
     def cmd_forward_loop() -> None:
         """Own REQ socket; forward GUI commands, return replies.
@@ -164,39 +155,57 @@ def zmq_bridge_main(
         data_queue so the GUI can distinguish data starvation from
         command-channel starvation.
         """
-        while not shutdown_event.is_set():
-            try:
-                cmd = cmd_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
-            try:
-                req.send_string(json.dumps(cmd))
-                reply_raw = req.recv_string()
-                reply = json.loads(reply_raw)
-            except zmq.ZMQError as exc:
-                reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
-                with contextlib.suppress(queue.Full):
-                    cmd_type = cmd.get("type") if isinstance(cmd, dict) else None
-                    if cmd_type is None and isinstance(cmd, dict):
-                        cmd_type = cmd.get("cmd", "?")
-                    data_queue.put_nowait(
-                        {
-                            "__type": "warning",
-                            "message": f"REP timeout on {cmd_type} ({exc})",
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001
-                reply = {"ok": False, "error": str(exc)}
-            if rid is not None:
-                reply["_rid"] = rid
-            try:
-                reply_queue.put(reply, timeout=2.0)
-            except queue.Full:
-                with contextlib.suppress(queue.Full):
-                    data_queue.put_nowait(
-                        {"__type": "warning", "message": "Reply queue overflow"}
-                    )
+        def _new_req_socket():
+            req = ctx.socket(zmq.REQ)
+            req.setsockopt(zmq.LINGER, 0)
+            req.setsockopt(zmq.RCVTIMEO, 3000)
+            req.setsockopt(zmq.SNDTIMEO, 3000)
+            req.setsockopt(zmq.REQ_RELAXED, 1)
+            req.setsockopt(zmq.REQ_CORRELATE, 1)
+            req.connect(cmd_addr)
+            return req
+
+        req = _new_req_socket()
+        try:
+            while not shutdown_event.is_set():
+                try:
+                    cmd = cmd_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
+                try:
+                    req.send_string(json.dumps(cmd))
+                    reply_raw = req.recv_string()
+                    reply = json.loads(reply_raw)
+                except zmq.ZMQError as exc:
+                    reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
+                    with contextlib.suppress(queue.Full):
+                        cmd_type = cmd.get("type") if isinstance(cmd, dict) else None
+                        if cmd_type is None and isinstance(cmd, dict):
+                            cmd_type = cmd.get("cmd", "?")
+                        data_queue.put_nowait(
+                            {
+                                "__type": "warning",
+                                "message": f"REP timeout on {cmd_type} ({exc})",
+                            }
+                        )
+                    req.close(linger=0)
+                    if shutdown_event.is_set():
+                        break
+                    req = _new_req_socket()
+                except Exception as exc:  # noqa: BLE001
+                    reply = {"ok": False, "error": str(exc)}
+                if rid is not None:
+                    reply["_rid"] = rid
+                try:
+                    reply_queue.put(reply, timeout=2.0)
+                except queue.Full:
+                    with contextlib.suppress(queue.Full):
+                        data_queue.put_nowait(
+                            {"__type": "warning", "message": "Reply queue overflow"}
+                        )
+        finally:
+            req.close(linger=0)
 
     sub_thread = threading.Thread(
         target=sub_drain_loop, name="zmq-sub-drain", daemon=True
@@ -215,7 +224,7 @@ def zmq_bridge_main(
     finally:
         shutdown_event.set()
         sub_thread.join(timeout=2.0)
-        cmd_thread.join(timeout=2.0)
-        sub.close(linger=0)
-        req.close(linger=0)
+        cmd_thread.join(timeout=4.0)
+        if sub_thread.is_alive() or cmd_thread.is_alive():
+            logger.warning("ZMQ bridge threads did not exit cleanly before context term")
         ctx.term()
