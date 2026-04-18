@@ -1,10 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-18
+**Дата:** 2026-04-19
 **Ветка:** master
-**Последний commit:** `27dfecb` (`fix(gui): supervise REP task, bound handler timeouts, persist engine stderr`)
-**Тесты:** 1 246 passed, 2 skipped (1 248 collected)
-**Фронтир:** Phase I.1 shell + Design System v1.0.1 shipped; Phase II progress mapped in roadmap; IPC/REP hardening complete (2026-04-18).
+**Последний commit:** `9676acc` (`feat(ui): II.3 OperatorLog overlay rebuild — timeline + filters + DS v1.0.1`)
+**Тесты:** 1 321 passed, 2 skipped (1 323 collected)
+**Фронтир:** Phase II.6 Keithley (`96adf5a`) и II.3 OperatorLog (`9676acc`) закрыты; следующий блок — II.2 ArchiveOverlay.
 
 ---
 
@@ -16,7 +16,7 @@
 | Строки кода (`src/cryodaq/`) | **44 195** |
 | Тестовые файлы (`tests/`) | **150** |
 | Строки тестов (`tests/`) | **24 275** |
-| Тесты | **1 246 passed, 2 skipped** (1 248 collected) |
+| Тесты | **1 321 passed, 2 skipped** (1 323 collected) |
 | Coverage (full suite) | **66%** (stale — last measured 2026-04-17; re-run pending) |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
 | Версия пакета | 0.13.0 |
@@ -114,12 +114,12 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 | Block | Status |
 |---|---|
-| II.1 AnalyticsView | ✅ COMPLETE |
-| II.2 ArchiveOverlay | ⬜ NOT STARTED |
-| II.3 OperatorLog | ⬜ NOT STARTED |
+| II.1 AnalyticsView | ✅ COMPLETE (`860ecf3`) |
+| II.2 ArchiveOverlay | ⬜ NOT STARTED (next) |
+| II.3 OperatorLog | ✅ COMPLETE (`9676acc`) |
 | II.4 AlarmOverlay | ⚠️ PARTIAL (badge routing only) |
 | II.5 ConductivityOverlay | ⬜ NOT STARTED |
-| II.6 KeithleyOverlay | ⚠️ PARTIAL (visual only; regression) |
+| II.6 KeithleyOverlay | ✅ COMPLETE (`96adf5a` — power-control rewrite + host integration) |
 | II.7 CalibrationOverlay | ⬜ NOT STARTED |
 | II.8 Instruments+SensorDiag | ⬜ NOT STARTED |
 | II.9 ExperimentOverlay v3 | ⚠️ PARTIAL (functional; visual pending) |
@@ -165,15 +165,29 @@ Mechanisms added:
 
 ## В работе
 
-**Phase II UI rebuild — mixed status (2026-04-16 … 2026-04-18).**
+**Phase II UI rebuild — mixed status (2026-04-16 … 2026-04-19).**
 
 Block-level status map canonicalized in `docs/phase-ui-1/phase_ui_v2_roadmap.md`. Short version:
 
 - ✅ II.1 AnalyticsView COMPLETE (`860ecf3`, primary-view QWidget)
+- ✅ II.3 OperatorLog COMPLETE (`9676acc`, timeline + filters + Host Integration Contract)
+- ✅ II.6 KeithleyOverlay COMPLETE (`96adf5a`, power-control rewrite + host wiring)
 - ⚠️ II.4 AlarmOverlay PARTIAL (badge routing only)
-- ⚠️ II.6 KeithleyOverlay PARTIAL (`920aa97`, regression — scope to reopen)
 - ⚠️ II.9 ExperimentOverlay v3 PARTIAL (functional; visual rebuild pending)
-- ⬜ II.2, II.3, II.5, II.7, II.8 NOT STARTED
+- ⬜ II.2 ArchiveOverlay — next block
+- ⬜ II.5, II.7, II.8 NOT STARTED
+
+### Host Integration Contract — pattern codified (2026-04-19)
+
+Codex FAIL on II.6 surfaced a systemic risk: overlays with public push setters (`set_connected`, `set_current_experiment`, `set_safety_ready`, etc.) are useless if `MainWindowV2` never calls them — the overlay opens in defaults and stays there. Unit tests on the overlay alone pass while production is broken.
+
+**Contract (mandatory for every overlay with push setters):**
+
+1. `_tick_status()` mirror — for `set_connected(bool)`.
+2. `_dispatch_reading()` state sinks — for stateful readings (safety state, experiment status, finalized events).
+3. `_ensure_overlay()` replay on lazy open — push cached state the moment the overlay is constructed, so the first paint is correct.
+
+**Tests:** overlay unit tests AND host integration tests (`tests/gui/shell/test_main_window_v2_<block>_wiring.py`) that exercise `MainWindowV2` entry points end-to-end — firing the signal / setting the cache / calling `_ensure_overlay` and asserting overlay state.
 
 Earlier cleanup/quick-win steps that landed between Phase I.1 close-out and Phase II blocks:
 
