@@ -350,6 +350,13 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
 
+## CI budget discipline
+
+- **Full `pytest -q` suite** (~10-15 min on Mac) runs ONLY on initial block commits where the diff is large: new overlay file (~1000 LOC), new test file, multiple `MainWindowV2` wiring changes. This is the commit that gets pushed first and reviewed by Codex.
+- **Amend-fix commits** (post-Codex-review surgical patches, 1-3 files changed, < 100 LOC delta) run ONLY targeted tests: `ruff check <touched files>` + `pytest <touched test files>`. The full suite naturally runs at the start of the next block's initial commit; regression detection is NOT lost, it's deferred by one block.
+- Rationale: amend diffs by definition have small blast radius (architect-reviewed scope limits them). Burning 10+ minutes of pytest wait time on every amend is token and wall-clock waste.
+- Exception: if the amend touches a module imported by many non-test files (e.g. `main_window_v2.py`, `engine.py`, `safety_manager.py`), run the full suite. Judgment call.
+
 ## Кодировка файлов
 
 - **Python source / Markdown / YAML source in repo** — UTF-8 **без BOM** (стандарт Python 3; все исходники в `src/`, `tests/`, `docs/`, `config/` свободны от BOM). Проверено `file src/cryodaq/gui/shell/overlays/*.py` и hex-head `head -c 3 file.py` → `"""` / `---`, не `EF BB BF`.

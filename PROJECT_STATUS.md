@@ -2,9 +2,9 @@
 
 **Дата:** 2026-04-19
 **Ветка:** master
-**Последний commit:** `9676acc` (`feat(ui): II.3 OperatorLog overlay rebuild — timeline + filters + DS v1.0.1`)
-**Тесты:** 1 321 passed, 2 skipped (1 323 collected)
-**Фронтир:** Phase II.6 Keithley (`96adf5a`) и II.3 OperatorLog (`9676acc`) закрыты; следующий блок — II.2 ArchiveOverlay.
+**Последний commit:** `e4a60f3` (`feat(ui): II.2 ArchiveOverlay + K6 bulk export migration — DS v1.0.1`)
+**Тесты:** 1 368 passed, 2 skipped
+**Фронтир:** Phase II.2 ArchiveOverlay (`e4a60f3`) и II.3 OperatorLog (`9676acc`) закрыты вслед за II.6 Keithley (`96adf5a`); следующий блок — II.5 ConductivityOverlay.
 
 ---
 
@@ -16,7 +16,7 @@
 | Строки кода (`src/cryodaq/`) | **44 195** |
 | Тестовые файлы (`tests/`) | **150** |
 | Строки тестов (`tests/`) | **24 275** |
-| Тесты | **1 321 passed, 2 skipped** (1 323 collected) |
+| Тесты | **1 368 passed, 2 skipped** |
 | Coverage (full suite) | **66%** (stale — last measured 2026-04-17; re-run pending) |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
 | Версия пакета | 0.13.0 |
@@ -115,10 +115,10 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 | Block | Status |
 |---|---|
 | II.1 AnalyticsView | ✅ COMPLETE (`860ecf3`) |
-| II.2 ArchiveOverlay | ⬜ NOT STARTED (next) |
+| II.2 ArchiveOverlay | ✅ COMPLETE (`e4a60f3` — overlay + K6 bulk export migration + refresh in-flight guard after Codex amend cycle) |
 | II.3 OperatorLog | ✅ COMPLETE (`9676acc`) |
 | II.4 AlarmOverlay | ⚠️ PARTIAL (badge routing only) |
-| II.5 ConductivityOverlay | ⬜ NOT STARTED |
+| II.5 ConductivityOverlay | ⬜ NOT STARTED (next) |
 | II.6 KeithleyOverlay | ✅ COMPLETE (`96adf5a` — power-control rewrite + host integration) |
 | II.7 CalibrationOverlay | ⬜ NOT STARTED |
 | II.8 Instruments+SensorDiag | ⬜ NOT STARTED |
@@ -170,12 +170,13 @@ Mechanisms added:
 Block-level status map canonicalized in `docs/phase-ui-1/phase_ui_v2_roadmap.md`. Short version:
 
 - ✅ II.1 AnalyticsView COMPLETE (`860ecf3`, primary-view QWidget)
+- ✅ II.2 ArchiveOverlay COMPLETE (`e4a60f3`, K6 bulk export migration + three Codex amend cycles)
 - ✅ II.3 OperatorLog COMPLETE (`9676acc`, timeline + filters + Host Integration Contract)
 - ✅ II.6 KeithleyOverlay COMPLETE (`96adf5a`, power-control rewrite + host wiring)
 - ⚠️ II.4 AlarmOverlay PARTIAL (badge routing only)
 - ⚠️ II.9 ExperimentOverlay v3 PARTIAL (functional; visual rebuild pending)
-- ⬜ II.2 ArchiveOverlay — next block
-- ⬜ II.5, II.7, II.8 NOT STARTED
+- ⬜ II.5 ConductivityOverlay — next block
+- ⬜ II.7, II.8 NOT STARTED
 
 ### Host Integration Contract — pattern codified (2026-04-19)
 
