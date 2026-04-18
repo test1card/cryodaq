@@ -36,6 +36,7 @@ from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
+from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
@@ -44,7 +45,6 @@ from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
-from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
@@ -262,6 +262,14 @@ class MainWindowV2(QMainWindow):
                     self._last_safety_state, self._last_safety_reason
                 )
                 widget.set_safety_ready(ready, reason_text)
+        # Phase II.3: replay connection + current experiment into OperatorLog
+        # overlay on first construction (same contract pattern as II.6).
+        if name == "log":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
+            widget.set_current_experiment(self._active_experiment_id())
         # B.8: wire overlay signals
         # AnalyticsView is a primary-view QWidget with no `closed`
         # signal — nothing to wire here (the ToolRail drives navigation
@@ -491,6 +499,9 @@ class MainWindowV2(QMainWindow):
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
             self._keithley_panel.set_connected(connected)
+        # Phase II.3: mirror to OperatorLog overlay (same contract).
+        if self._operator_log_panel is not None:
+            self._operator_log_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
@@ -514,6 +525,19 @@ class MainWindowV2(QMainWindow):
                 exp["app_mode"] = status.get("app_mode")
             phases = status.get("phases", [])
             self._experiment_overlay.set_experiment(exp, phases)
+        # Phase II.3: push current experiment id to OperatorLog overlay.
+        if self._operator_log_panel is not None:
+            self._operator_log_panel.set_current_experiment(self._active_experiment_id())
+
+    def _active_experiment_id(self) -> str | None:
+        """Return the cached active experiment id, or None."""
+        if not self._latest_experiment_status:
+            return None
+        active = self._latest_experiment_status.get("active_experiment")
+        if not isinstance(active, dict):
+            return None
+        value = active.get("id")
+        return str(value) if value is not None else None
 
     def _on_experiment_clicked(self) -> None:
         """TopWatchBar experiment label click — open overlay or dialog."""

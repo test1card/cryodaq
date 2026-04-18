@@ -11,6 +11,22 @@
 
 ### Changed
 
+- **Phase II.3 OperatorLog overlay rebuilt.** Full-featured operator
+  journal surface in `src/cryodaq/gui/shell/overlays/operator_log_panel.py`
+  replaces the legacy v1 widget. Timeline grouped by calendar day,
+  quick filter chips (all / current experiment / 8h / 24h), client-side
+  text / author / tag filters with 250 ms debounce, composer card with
+  tags + experiment binding, append-only with optimistic prepend on
+  `log_entry` success, load-more pagination (50-entry steps), DS
+  v1.0.1 compliant tokens throughout. Composer author persists via
+  `QSettings("FIAN", "CryoDAQ")` key `last_log_author`. Host
+  integration contract: `MainWindowV2._tick_status()` mirrors
+  connection state, `_on_experiment_status_received()` pushes current
+  experiment id, `_ensure_overlay("log")` replays cached state on lazy
+  open. Legacy widget at `src/cryodaq/gui/widgets/operator_log_panel.py`
+  marked DEPRECATED; removal in Phase III.3. `QuickLogBlock`
+  (dashboard) unchanged.
+
 - **Phase II.6 Keithley overlay rebuilt.** Replaces the dead B.7
   mode-based shell overlay (never wired into `MainWindowV2`) and
   supersedes the legacy v1 widget surface visible via Ctrl+K. Full
