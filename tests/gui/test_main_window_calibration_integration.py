@@ -150,6 +150,19 @@ def test_main_window_updates_tray_from_backend_truth(monkeypatch) -> None:
     window._refresh_tray_status()
 
     assert window._tray_controller.statuses[-1].level.value == "healthy"
+
+
+def test_main_window_alarm_signal_updates_internal_count(monkeypatch) -> None:
+    _app()
+    _patch_all_sends(monkeypatch)
+
+    window = MainWindow(_SubscriberStub())
+    _process_events()
+
+    window._alarm_panel.v2_alarm_count_changed.emit(3)
+    _process_events()
+
+    assert window._alarm_count == 3
     window.close()
     window.deleteLater()
 

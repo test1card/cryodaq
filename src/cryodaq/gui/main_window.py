@@ -152,9 +152,7 @@ class MainWindow(QMainWindow):
 
         # Вкладка «Алармы»
         self._alarm_panel = AlarmPanel()
-        self._alarm_panel.v2_alarm_count_changed.connect(
-            self._overview_panel._status_strip.set_alarm_count
-        )
+        self._alarm_panel.v2_alarm_count_changed.connect(self._on_alarm_count_changed)
         self._tabs.addTab(self._alarm_panel, "Алармы")
         self._operator_log_panel = OperatorLogPanel()
         self._tabs.addTab(self._operator_log_panel, "Служебный лог")
@@ -238,6 +236,16 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+X"), self).activated.connect(
             self._emergency_off_shortcut
         )
+
+    @Slot(int)
+    def _on_alarm_count_changed(self, count: int) -> None:
+        """Route alarm-count updates without depending on orphaned child widgets."""
+        self._alarm_count = count
+        setter = getattr(
+            getattr(self._overview_panel, "_status_strip", None), "set_alarm_count", None
+        )
+        if callable(setter):
+            setter(count)
 
     def _focus_quick_log(self) -> None:
         self._tabs.setCurrentIndex(0)
