@@ -275,13 +275,89 @@ class ZMQCommandServer:
         address: str = DEFAULT_CMD_ADDR,
         *,
         handler: Callable[[dict[str, Any]], Any] | None = None,
+        handler_timeout_s: float = 2.0,
     ) -> None:
         self._address = address
         self._handler = handler
+        self._handler_timeout_s = handler_timeout_s
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
+        self._shutdown_requested = False
+
+    def _start_serve_task(self) -> None:
+        """Spawn the command loop exactly once while the server is running."""
+        if not self._running or self._shutdown_requested:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        loop = asyncio.get_running_loop()
+        self._task = loop.create_task(self._serve_loop(), name="zmq_cmd_server")
+        self._task.add_done_callback(self._on_serve_task_done)
+
+    def _on_serve_task_done(self, task: asyncio.Task[None]) -> None:
+        """Restart the REP loop after unexpected task exit."""
+        if task is not self._task:
+            return
+
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            exc = None
+
+        self._task = None
+        if self._shutdown_requested or not self._running:
+            return
+
+        if exc is not None:
+            logger.error(
+                "ZMQCommandServer serve loop crashed; restarting",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+        else:
+            logger.error("ZMQCommandServer serve loop exited unexpectedly; restarting")
+
+        loop = task.get_loop()
+        if loop.is_closed():
+            logger.error("ZMQCommandServer loop is closed; cannot restart serve loop")
+            return
+        loop.call_soon(self._start_serve_task)
+
+    async def _run_handler(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Execute the command handler with a bounded wall-clock timeout."""
+        if self._handler is None:
+            return {"ok": False, "error": "no handler"}
+
+        action = str(cmd.get("cmd", ""))
+
+        async def _invoke() -> Any:
+            result = self._handler(cmd)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
+
+        try:
+            result = await asyncio.wait_for(_invoke(), timeout=self._handler_timeout_s)
+        except TimeoutError as exc:
+            # Preserve inner wrapper message when present (e.g. "log_get timeout (1.5s)",
+            # "experiment_status timeout (1.5s)"). Falls back to the generic envelope
+            # message when the timeout fired at the outer asyncio.wait_for layer.
+            inner_message = str(exc).strip()
+            error_message = (
+                inner_message
+                if inner_message
+                else f"handler timeout ({self._handler_timeout_s:g}s)"
+            )
+            logger.error(
+                "ZMQ command handler timeout: action=%s error=%s payload=%r",
+                action,
+                error_message,
+                cmd,
+            )
+            return {"ok": False, "error": error_message}
+
+        return result if isinstance(result, dict) else {"ok": True}
 
     async def _serve_loop(self) -> None:
         while self._running:
@@ -304,13 +380,7 @@ class ZMQCommandServer:
                 continue
 
             try:
-                if self._handler:
-                    result = self._handler(cmd)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    reply = result if isinstance(result, dict) else {"ok": True}
-                else:
-                    reply = {"ok": False, "error": "no handler"}
+                reply = await self._run_handler(cmd)
             except asyncio.CancelledError:
                 # CancelledError during handler — must still send reply
                 # to avoid leaving REP socket in stuck state.
@@ -350,10 +420,12 @@ class ZMQCommandServer:
         self._socket.setsockopt(zmq.LINGER, 0)
         _bind_with_retry(self._socket, self._address)
         self._running = True
-        self._task = asyncio.create_task(self._serve_loop(), name="zmq_cmd_server")
+        self._shutdown_requested = False
+        self._start_serve_task()
         logger.info("ZMQCommandServer запущен: %s", self._address)
 
     async def stop(self) -> None:
+        self._shutdown_requested = True
         self._running = False
         if self._task:
             self._task.cancel()

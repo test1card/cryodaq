@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import IO
 
 # Windows: pyzmq требует SelectorEventLoop
 if sys.platform == "win32":
@@ -52,6 +55,60 @@ _WEB_PORT = 8080
 
 # Флаги создания процесса без окна (Windows)
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_ENGINE_STDERR_LOG_NAME = "engine.stderr.log"
+_ENGINE_STDERR_MAX_BYTES = 50 * 1024 * 1024
+_ENGINE_STDERR_BACKUP_COUNT = 3
+_ENGINE_STDERR_LOGGER_NAME = "cryodaq.launcher.engine_stderr"
+
+
+def _create_engine_stderr_logger() -> tuple[logging.Logger, logging.Handler, Path]:
+    """Build a dedicated rotating logger for forwarded engine stderr lines."""
+    from cryodaq.paths import get_logs_dir
+
+    log_path = get_logs_dir() / _ENGINE_STDERR_LOG_NAME
+    stderr_logger = logging.getLogger(_ENGINE_STDERR_LOGGER_NAME)
+    # Explicitly close and detach any handlers from a prior _start_engine() call
+    # so the previous RotatingFileHandler releases its file lock. Plain
+    # `handlers = []` relies on GC and breaks on Windows where the file stays
+    # locked, blocking rotation across engine restarts.
+    for prior in list(stderr_logger.handlers):
+        try:
+            prior.close()
+        except Exception:
+            pass
+        stderr_logger.removeHandler(prior)
+    stderr_logger.setLevel(logging.ERROR)
+    stderr_logger.propagate = False
+
+    handler = logging.handlers.RotatingFileHandler(
+        log_path,
+        maxBytes=_ENGINE_STDERR_MAX_BYTES,
+        backupCount=_ENGINE_STDERR_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s │ %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    stderr_logger.addHandler(handler)
+    return stderr_logger, handler, log_path
+
+
+def _pump_engine_stderr(pipe: IO[bytes], stderr_logger: logging.Logger) -> None:
+    """Forward engine stderr bytes into the rotating launcher-managed log."""
+    try:
+        for raw_line in iter(pipe.readline, b""):
+            text = raw_line.decode("utf-8", errors="replace").rstrip()
+            if text:
+                stderr_logger.error(text)
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
 
 
 def _make_icon(color: str) -> QIcon:
@@ -125,6 +182,9 @@ class LauncherWindow(QMainWindow):
         self._tray_only = tray_only
         self._lock_fd = lock_fd
         self._engine_proc: subprocess.Popen | None = None
+        self._engine_stderr_handler: logging.Handler | None = None
+        self._engine_stderr_logger: logging.Logger | None = None
+        self._engine_stderr_thread: threading.Thread | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
         # Phase 2b H.3: exponential backoff for engine restart attempts.
         # Without this, a corrupted YAML or persistent EADDRINUSE produces
@@ -300,19 +360,57 @@ class LauncherWindow(QMainWindow):
         if self._mock:
             cmd.append("--mock")
 
-        self._engine_proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
+        stderr_logger, stderr_handler, stderr_path = _create_engine_stderr_logger()
+        self._engine_stderr_logger = stderr_logger
+        self._engine_stderr_handler = stderr_handler
+        try:
+            self._engine_proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+            )
+        except Exception:
+            try:
+                stderr_logger.removeHandler(stderr_handler)
+            except Exception:
+                pass
+            stderr_handler.close()
+            self._engine_stderr_handler = None
+            self._engine_stderr_logger = None
+            raise
+        if self._engine_proc.stderr is not None:
+            self._engine_stderr_thread = threading.Thread(
+                target=_pump_engine_stderr,
+                args=(self._engine_proc.stderr, stderr_logger),
+                name="engine-stderr-pump",
+                daemon=True,
+            )
+            self._engine_stderr_thread.start()
         self._engine_external = False
-        logger.info("Engine запущен, PID=%d", self._engine_proc.pid)
+        logger.info(
+            "Engine запущен, PID=%d (stderr → %s)",
+            self._engine_proc.pid,
+            stderr_path,
+        )
 
         # Ожидание готовности engine — ping command port
         if wait:
             self._wait_engine_ready()
+
+    def _close_engine_stderr_stream(self) -> None:
+        if self._engine_stderr_thread is not None:
+            self._engine_stderr_thread.join(timeout=2.0)
+            self._engine_stderr_thread = None
+        if self._engine_stderr_logger is not None and self._engine_stderr_handler is not None:
+            try:
+                self._engine_stderr_logger.removeHandler(self._engine_stderr_handler)
+            except Exception:
+                pass
+            self._engine_stderr_handler.close()
+        self._engine_stderr_handler = None
+        self._engine_stderr_logger = None
 
     def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
         """Wait for engine to start listening on ZMQ port."""
@@ -337,6 +435,7 @@ class LauncherWindow(QMainWindow):
             self._engine_proc.kill()
             self._engine_proc.wait(timeout=5)
         self._engine_proc = None
+        self._close_engine_stderr_stream()
         logger.info("Engine остановлен")
 
     def _restart_engine(self) -> None:
@@ -709,6 +808,7 @@ class LauncherWindow(QMainWindow):
             )
             self._restart_giving_up = True
             self._engine_proc = None
+            self._close_engine_stderr_stream()
             if not self._config_error_modal_shown:
                 self._config_error_modal_shown = True
                 self._show_config_error_modal()
@@ -722,6 +822,7 @@ class LauncherWindow(QMainWindow):
             )
             self._restart_giving_up = True
             self._engine_proc = None
+            self._close_engine_stderr_stream()
             self._show_crash_loop_modal()
             return
 
@@ -737,6 +838,7 @@ class LauncherWindow(QMainWindow):
         self._restart_attempts += 1
         self._last_restart_time = time.monotonic()
         self._engine_proc = None
+        self._close_engine_stderr_stream()
 
         if not self._tray_only:
             self._engine_label.setText(

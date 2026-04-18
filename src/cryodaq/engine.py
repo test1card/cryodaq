@@ -84,6 +84,8 @@ _DATA_DIR = get_data_dir()
 
 # Интервал самодиагностики (секунды)
 _WATCHDOG_INTERVAL_S = 30.0
+_LOG_GET_TIMEOUT_S = 1.5
+_EXPERIMENT_STATUS_TIMEOUT_S = 1.5
 
 
 async def _run_keithley_command(
@@ -199,12 +201,18 @@ async def _run_operator_log_command(
             if experiment_id is None:
                 return {"ok": True, "entries": []}
 
-        entries = await writer.get_operator_log(
-            experiment_id=str(experiment_id) if experiment_id is not None else None,
-            start_time=_parse_log_time(cmd.get("start_time", cmd.get("start_ts"))),
-            end_time=_parse_log_time(cmd.get("end_time", cmd.get("end_ts"))),
-            limit=int(cmd.get("limit", 100)),
-        )
+        try:
+            entries = await asyncio.wait_for(
+                writer.get_operator_log(
+                    experiment_id=str(experiment_id) if experiment_id is not None else None,
+                    start_time=_parse_log_time(cmd.get("start_time", cmd.get("start_ts"))),
+                    end_time=_parse_log_time(cmd.get("end_time", cmd.get("end_ts"))),
+                    limit=int(cmd.get("limit", 100)),
+                ),
+                timeout=_LOG_GET_TIMEOUT_S,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(f"log_get timeout ({_LOG_GET_TIMEOUT_S:g}s)") from exc
         return {"ok": True, "entries": [entry.to_payload() for entry in entries]}
 
     raise ValueError(f"Unsupported operator log command: {action}")
@@ -1310,12 +1318,32 @@ async def _run_engine(*, mock: bool = False) -> None:
                 "experiment_advance_phase",
                 "experiment_phase_status",
             }:
-                result = await asyncio.to_thread(
+                experiment_call = asyncio.to_thread(
                     _run_experiment_command,
                     action,
                     cmd,
                     experiment_manager,
                 )
+                if action == "experiment_status":
+                    # NOTE: asyncio.wait_for on an asyncio.to_thread() call times out the AWAIT,
+                    # not the worker thread. If get_status_payload() is pathologically slow, the
+                    # background thread keeps running until it returns naturally. This is an
+                    # accepted residual risk — REP is still protected by the outer 2.0s handler
+                    # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
+                    # only gives faster client feedback and frees the REP loop earlier. There is
+                    # no safe way to terminate a Python thread mid-call, so Option C
+                    # ("actually interrupt") is not available. See Codex commit-7 review.
+                    try:
+                        result = await asyncio.wait_for(
+                            experiment_call,
+                            timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
+                        )
+                    except TimeoutError as exc:
+                        raise TimeoutError(
+                            f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)"
+                        ) from exc
+                else:
+                    result = await experiment_call
                 # Hook calibration acquisition on experiment lifecycle
                 if result.get("ok") and action in {"experiment_start", "experiment_create"}:
                     await asyncio.to_thread(
