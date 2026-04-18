@@ -272,6 +272,9 @@ def main() -> None:
     timer.setInterval(10)  # 100 Hz
 
     def _tick() -> None:
+        for reading in bridge.poll_readings():
+            window._dispatch_reading(reading)
+
         # Auto-restart subprocess if it dies or stops sending heartbeats
         if not bridge.is_healthy():
             if bridge.is_alive():
@@ -281,8 +284,10 @@ def main() -> None:
                 logger.warning("ZMQ bridge died, restarting...")
             bridge.start()
             return
-        for reading in bridge.poll_readings():
-            window._dispatch_reading(reading)
+        if bridge.data_flow_stalled():
+            logger.warning("ZMQ bridge not healthy (no readings), restarting...")
+            bridge.shutdown()
+            bridge.start()
 
     timer.timeout.connect(_tick)
     timer.start()

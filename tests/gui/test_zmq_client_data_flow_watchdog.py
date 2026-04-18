@@ -1,9 +1,9 @@
 """Regression tests for the data-flow watchdog on ZmqBridge.
 
-After the 2026-04 stall bug: is_healthy() must flip False when no
-actual reading has arrived for ≥30s, even if heartbeats keep
-flowing. Startup (no readings yet) must NOT trigger a false
-positive restart.
+After the 2026-04 stall bug: heartbeat liveness and data-flow freshness
+are tracked separately. Startup (no readings yet) must NOT trigger a
+false-positive restart, and restarting the bridge must re-arm the
+data-flow watchdog.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import time
 
+from cryodaq.drivers.base import Reading
 from cryodaq.gui.zmq_client import ZmqBridge
 
 
@@ -29,41 +30,49 @@ def _build_bridge_with_fake_proc() -> ZmqBridge:
 
 
 def test_is_healthy_true_during_startup_no_readings_yet():
-    """_last_reading_time == 0.0 (never received a reading) must not
-    trigger false-positive restart at startup."""
+    """_last_reading_time == 0.0 must not trigger false-positive startup restart."""
     bridge = _build_bridge_with_fake_proc()
     bridge._last_heartbeat = time.monotonic()
     bridge._last_reading_time = 0.0
     assert bridge.is_healthy() is True
 
 
-def test_is_healthy_flips_false_after_30s_no_readings():
-    """Once readings have flowed, a 30s gap with no readings trips
-    the watchdog even if heartbeats remain fresh."""
+def test_data_flow_stalled_flips_true_after_30s_no_readings():
+    """Once readings have flowed, a 30s gap trips the data-flow watchdog."""
     bridge = _build_bridge_with_fake_proc()
     now = time.monotonic()
     bridge._last_heartbeat = now
     bridge._last_reading_time = now - 31.0
-    assert bridge.is_healthy() is False
+    assert bridge.is_healthy() is True
+    assert bridge.data_flow_stalled() is True
 
 
 def test_is_healthy_true_when_readings_fresh():
-    """Both heartbeat and reading fresh → healthy."""
+    """Heartbeat freshness governs bridge liveness."""
     bridge = _build_bridge_with_fake_proc()
     now = time.monotonic()
     bridge._last_heartbeat = now
     bridge._last_reading_time = now - 1.0
     assert bridge.is_healthy() is True
+    assert bridge.data_flow_stalled() is False
 
 
 def test_is_healthy_flips_false_after_30s_no_heartbeat():
-    """Heartbeat-staleness check remains in place independently of
-    the new data-flow check."""
+    """Heartbeat-staleness check remains the bridge-health boundary."""
     bridge = _build_bridge_with_fake_proc()
     now = time.monotonic()
     bridge._last_heartbeat = now - 31.0
     bridge._last_reading_time = now
     assert bridge.is_healthy() is False
+    assert bridge.heartbeat_stale() is True
+
+
+def test_data_flow_stalled_false_until_first_reading():
+    """Startup remains disarmed until at least one actual reading arrived."""
+    bridge = _build_bridge_with_fake_proc()
+    bridge._last_heartbeat = time.monotonic()
+    bridge._last_reading_time = 0.0
+    assert bridge.data_flow_stalled() is False
 
 
 def _drain_poll_readings_until(bridge: ZmqBridge, predicate, timeout: float = 2.0):
@@ -125,13 +134,94 @@ def test_is_healthy_false_when_process_dead():
     assert bridge.is_healthy() is False
 
 
+def test_start_resets_last_reading_time(monkeypatch):
+    """Bridge restart must re-arm the data-flow watchdog."""
+
+    class _FakeProcess:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def start(self) -> None:
+            self._alive = True
+
+    class _FakeThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.Process", _FakeProcess)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.threading.Thread", _FakeThread)
+
+    bridge = ZmqBridge()
+    bridge._last_reading_time = time.monotonic() - 123.0
+    bridge.start()
+
+    assert bridge._last_reading_time == 0.0
+
+
+def test_launcher_poll_drains_before_data_stall_restart():
+    """Queued readings must be drained before the stale-data policy fires."""
+    from cryodaq.launcher import LauncherWindow
+
+    reading = Reading.now(channel="T1", value=4.2, unit="K", instrument_id="mock")
+    dispatched: list[Reading] = []
+
+    class _FakeBridge:
+        def __init__(self) -> None:
+            self.restarted = False
+            self._polled = False
+
+        def poll_readings(self):
+            self._polled = True
+            return [reading]
+
+        def is_healthy(self) -> bool:
+            return True
+
+        def is_alive(self) -> bool:
+            return True
+
+        def data_flow_stalled(self) -> bool:
+            return not self._polled
+
+        def shutdown(self) -> None:
+            self.restarted = True
+
+        def start(self) -> None:
+            self.restarted = True
+
+    class _Dummy:
+        def __init__(self) -> None:
+            self._bridge = _FakeBridge()
+
+        def _on_reading_qt(self, item) -> None:
+            dispatched.append(item)
+
+    dummy = _Dummy()
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dispatched == [reading]
+    assert dummy._bridge.restarted is False
+
+
 def test_launcher_poll_logs_reason_distinction():
-    """_poll_bridge_data must log a distinct restart reason depending
-    on whether the heartbeat is stale or readings are stale. Checked
-    by static inspection — avoids spinning up a real LauncherWindow."""
+    """Launcher still distinguishes heartbeat failure from data starvation."""
     from cryodaq.launcher import LauncherWindow
 
     source = inspect.getsource(LauncherWindow._poll_bridge_data)
     assert "no heartbeat" in source
     assert "no readings" in source
-    assert "_last_reading_time" in source
+    assert "poll_readings" in source

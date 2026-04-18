@@ -569,23 +569,21 @@ class LauncherWindow(QMainWindow):
     @Slot()
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
+        for reading in self._bridge.poll_readings():
+            self._on_reading_qt(reading)
+
         if not self._bridge.is_healthy():
             if self._bridge.is_alive():
-                now = time.monotonic()
-                reason = "no heartbeat"
-                if (
-                    self._bridge._last_reading_time != 0.0
-                    and (now - self._bridge._last_reading_time) >= 30.0
-                ):
-                    reason = "no readings"
-                logger.warning("ZMQ bridge not healthy (%s), restarting...", reason)
+                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
                 self._bridge.shutdown()
             else:
                 logger.warning("ZMQ bridge died, restarting...")
             self._bridge.start()
             return
-        for reading in self._bridge.poll_readings():
-            self._on_reading_qt(reading)
+        if self._bridge.data_flow_stalled():
+            logger.warning("ZMQ bridge not healthy (no readings), restarting...")
+            self._bridge.shutdown()
+            self._bridge.start()
 
     @Slot(object)
     def _on_reading_qt(self, reading: Reading) -> None:

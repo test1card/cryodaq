@@ -115,13 +115,13 @@ def test_heartbeat_interval_value():
 
 
 def test_is_healthy_threshold_generous():
-    """is_healthy() threshold must be >= 25s to survive GUI thread blocks."""
+    """Heartbeat threshold must stay generous enough to survive GUI thread blocks."""
     import inspect
 
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    source = inspect.getsource(ZmqBridge.is_healthy)
-    assert "30.0" in source, "is_healthy threshold must be 30s"
+    source = inspect.getsource(ZmqBridge.heartbeat_stale)
+    assert "30.0" in source, "heartbeat threshold must stay at 30s"
 
 
 def test_launcher_poll_checks_is_healthy():

@@ -109,6 +109,7 @@ class ZmqBridge:
         )
         self._process.start()
         self._last_heartbeat = time.monotonic()
+        self._last_reading_time = 0.0
         # Start dedicated reply consumer thread
         self._reply_stop.clear()
         self._reply_consumer = threading.Thread(
@@ -146,30 +147,21 @@ class ZmqBridge:
                 continue
         return readings
 
+    def heartbeat_stale(self, *, timeout_s: float = 30.0) -> bool:
+        """Return True if the bridge heartbeat is older than ``timeout_s``."""
+        return self._last_heartbeat != 0.0 and (
+            time.monotonic() - self._last_heartbeat
+        ) >= timeout_s
+
+    def data_flow_stalled(self, *, timeout_s: float = 30.0) -> bool:
+        """Return True if readings previously flowed but are now stale."""
+        return self._last_reading_time != 0.0 and (
+            time.monotonic() - self._last_reading_time
+        ) >= timeout_s
+
     def is_healthy(self) -> bool:
-        """True if subprocess is alive AND heartbeats AND data are fresh.
-
-        Three conditions:
-        1. subprocess process is still alive
-        2. heartbeat emitted within the last 30s (proves sub_drain thread runs)
-        3. if any reading has ever arrived, one has arrived in the last 30s
-           (proves the data path is actually flowing end-to-end)
-
-        The data-flow check only activates after the first reading, so
-        startup and long between-experiment pauses do not trigger a
-        false restart.
-        """
-        if not self.is_alive():
-            return False
-        now = time.monotonic()
-        if self._last_heartbeat != 0.0 and (now - self._last_heartbeat) >= 30.0:
-            return False
-        if (
-            self._last_reading_time != 0.0
-            and (now - self._last_reading_time) >= 30.0
-        ):
-            return False
-        return True
+        """True if subprocess is alive and bridge heartbeats are fresh."""
+        return self.is_alive() and not self.heartbeat_stale()
 
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""
