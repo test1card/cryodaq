@@ -35,13 +35,13 @@ from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
+from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
-from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
@@ -270,6 +270,13 @@ class MainWindowV2(QMainWindow):
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
             widget.set_current_experiment(self._active_experiment_id())
+        # Phase II.2: replay connection state into Archive overlay.
+        # Archive is global scope — no current_experiment push needed.
+        if name == "archive":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
         # B.8: wire overlay signals
         # AnalyticsView is a primary-view QWidget with no `closed`
         # signal — nothing to wire here (the ToolRail drives navigation
@@ -502,6 +509,9 @@ class MainWindowV2(QMainWindow):
         # Phase II.3: mirror to OperatorLog overlay (same contract).
         if self._operator_log_panel is not None:
             self._operator_log_panel.set_connected(connected)
+        # Phase II.2: mirror to Archive overlay (same contract).
+        if self._archive_panel is not None:
+            self._archive_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher

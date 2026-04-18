@@ -11,6 +11,31 @@
 
 ### Changed
 
+- **Phase II.2 ArchiveOverlay rebuilt + K6 bulk export migration.**
+  Full-featured experiment archive surface in
+  `src/cryodaq/gui/shell/overlays/archive_panel.py` replaces the legacy
+  v1 widget. Filter bar (template combo, operator / sample text, start
+  / end date range, report presence, sort), 9-column list table with
+  FONT_MONO timestamps, details panel with summary / metadata / notes /
+  stats / runs / artifacts / results views, action buttons
+  (folder / PDF / DOCX / regenerate). K6 mandate: bulk CSV / HDF5 /
+  Excel export migrated from the legacy `main_window.py` File menu
+  into a dedicated «Экспорт данных» card at the bottom of the overlay
+  — `MainWindowV2` has no menu bar, so this was the only path to
+  restore global data export. Exports run in a `QThread` worker that
+  wraps the existing `cryodaq.storage.{csv_export,hdf5_export,xlsx_export}`
+  classes verbatim (no exporter re-implementation); GUI never blocks.
+  Emoji pictograms `📊` / `📋` in the legacy artifact view replaced
+  with ASCII bracketed tags `[ДАННЫЕ]` / `[ИЗМЕРЕНИЯ]` / `[УСТАВКИ]`
+  per RULE-COPY-005; report / data column markers switched from ✓ to
+  «Да» for the same reason. DS v1.0.1 tokens exclusively. Host
+  Integration Contract wired via `MainWindowV2._tick_status` connection
+  mirror + `_ensure_overlay("archive")` replay; `on_reading` is a
+  contract no-op (no engine experiment-finalize broker event). Legacy
+  widget at `src/cryodaq/gui/widgets/archive_panel.py` marked
+  DEPRECATED; removal in Phase III.3. `main_window.py` File menu
+  export actions remain intact for the transitional legacy path.
+
 - **Phase II.3 OperatorLog overlay rebuilt.** Full-featured operator
   journal surface in `src/cryodaq/gui/shell/overlays/operator_log_panel.py`
   replaces the legacy v1 widget. Timeline grouped by calendar day,
