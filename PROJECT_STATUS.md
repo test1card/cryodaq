@@ -1,10 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-17
+**Дата:** 2026-04-18
 **Ветка:** master
-**Последний commit:** `05f27d0` (`fix(gui): PhaseStepper active phase ACCENT → STATUS_OK (A.4)`)
-**Тесты:** 1 087 passed, 2 skipped (1 089 collected)
-**Фронтир:** Phase I.1 shell + Design System v1.0.1 merged; Phase II Group 1 **COMPLETE**.
+**Последний commit:** `27dfecb` (`fix(gui): supervise REP task, bound handler timeouts, persist engine stderr`)
+**Тесты:** 1 246 passed, 2 skipped (1 248 collected)
+**Фронтир:** Phase I.1 shell + Design System v1.0.1 shipped; Phase II progress mapped in roadmap; IPC/REP hardening complete (2026-04-18).
 
 ---
 
@@ -12,12 +12,12 @@
 
 | Метрика | Значение |
 |---|---|
-| Python файлы (`src/cryodaq/`) | **133** |
-| Строки кода (`src/cryodaq/`) | **41 397** |
+| Python файлы (`src/cryodaq/`) | **139** |
+| Строки кода (`src/cryodaq/`) | **44 195** |
 | Тестовые файлы (`tests/`) | **150** |
 | Строки тестов (`tests/`) | **24 275** |
-| Тесты | **1 087 passed, 2 skipped** (1 089 collected) |
-| Coverage (full suite) | **66%** (21 522 stmts, 7 305 miss) |
+| Тесты | **1 246 passed, 2 skipped** (1 248 collected) |
+| Coverage (full suite) | **66%** (stale — last measured 2026-04-17; re-run pending) |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
 | Версия пакета | 0.13.0 |
 | Python | 3.12+ (dev: 3.14.3) |
@@ -100,6 +100,61 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 **CI dependency fix (`1e824a7`).** `.github/workflows/main.yml` теперь ставит `.[dev,web]`, чтобы FastAPI / starlette / httpx тесты не скипались.
 
+### Phase II Group 1 — в процессе (2026-04-16 … 2026-04-18)
+
+Пять Phase II блоков приземлились на master в течение второй половины апреля. Полная хронология — `docs/phase-ui-1/phase_ui_v2_roadmap.md` Decision log.
+
+- **B.5.x PhaseAwareWidget** (`468b964`, `a514b69`) — experiment phase stepper + centralized plot styling. Contributes to II.9 partial.
+- **B.6 ExperimentCard dashboard tile** (`8b3a453`) — dashboard composition, no direct II.X mapping.
+- **B.7 Keithley v2** (`920aa97`) — mode-based dual-channel overlay at `shell/overlays/keithley_panel.py`. Functional regression vs v1 (no V/I/R/P plots — v2 has 0 pyqtgraph refs, v1 had 4 — no P-target control, no A+B actions, no debounced spin controls, no K4 custom-command popup). Documented in `docs/legacy-inventory/keithley.md`. Maps to II.6 PARTIAL; scope to be reopened as a second block.
+- **B.8 AnalyticsPanel → AnalyticsView rev 2** (`9a089f9` → `860ecf3`) — primary-view QWidget at `shell/views/analytics_view.py` with plot-dominant layout. Architecturally corrected from rev 1 ModalCard overlay. Bypasses Phase I.2/I.3 primitives deliberately. Maps to II.1 COMPLETE. Follow-ups: actual-trajectory publisher, R_thermal publisher, VacuumTrendPanel DS alignment (non-blocking).
+- **B.8.0.1 / B.8.0.2 ExperimentOverlay polish** (`1850482`, `2d6edc7`, `b0b460b`, `19993ce`) — full phase names, conditional nav buttons, × removed for primary-view semantics, regression tests. Functional parity preserved; visual primitives-based rebuild deferred. Maps to II.9 PARTIAL.
+
+**Phase II block status map** (canonical in roadmap):
+
+| Block | Status |
+|---|---|
+| II.1 AnalyticsView | ✅ COMPLETE |
+| II.2 ArchiveOverlay | ⬜ NOT STARTED |
+| II.3 OperatorLog | ⬜ NOT STARTED |
+| II.4 AlarmOverlay | ⚠️ PARTIAL (badge routing only) |
+| II.5 ConductivityOverlay | ⬜ NOT STARTED |
+| II.6 KeithleyOverlay | ⚠️ PARTIAL (visual only; regression) |
+| II.7 CalibrationOverlay | ⬜ NOT STARTED |
+| II.8 Instruments+SensorDiag | ⬜ NOT STARTED |
+| II.9 ExperimentOverlay v3 | ⚠️ PARTIAL (functional; visual pending) |
+
+**Phase I status** (revised against actual `_design_system/` contents): I.1 COMPLETE; I.2 NOT STARTED (deliberately bypassed for II.1 AnalyticsView); I.3 PARTIAL (widgets exist under `dashboard/phase_content/` but not extracted into `_design_system/`, no StatusBadge / ZmqWorkerField); I.4 PARTIAL (showcase covers only Phase I.1 primitives).
+
+### Runtime theme switcher — shipped 2026-04-18
+
+Infrastructure landing outside the original roadmap. Six bundled YAML theme packs at `config/themes/`: `default_cool`, `warm_stone`, `anthropic_mono`, `ochre_bloom`, `taupe_quiet`, `rose_dusk`. Runtime theme loader at `src/cryodaq/gui/_theme_loader.py` — `theme.py` now reads tokens from YAML packs. Settings → Тема menu with `os.execv` restart pattern. Status palette (STATUS_OK, WARNING, CAUTION, FAULT, INFO, STALE, COLD_HIGHLIGHT) locked across all packs. Legacy hardcoded theme overrides stripped from 9 `apply_panel_frame` callsites.
+
+Commit chain: `ecd447a` (YAML reader) → `e52b17b` (strip hardcoded overrides) → `9ac307e` (ship 5 additional packs) → `77ffc93` (Settings → Тема menu) → `903553a` (operator manual + CHANGELOG).
+
+Palette tuning follow-ups tracked in `HANDOFF_THEME_PALETTES.md` — not blocking.
+
+### IPC/REP hardening — shipped 2026-04-18
+
+Architectural hardening of the engine ↔ GUI command plane after a production wedge revealed the `ZMQCommandServer` REP task crashing silently while the engine subprocess's `stderr=DEVNULL` swallowed the evidence. Ten commits; two Codex review rounds; final verdict PASS at `27dfecb`.
+
+Commits: `5299aa6`, `f5b0f22`, `a38e2fa`, `913b9b3`, `2b1370b`, `abfdf44`, `81e2daa`, `3a16c54`, `ba20f84`, `27dfecb`.
+
+Mechanisms added:
+
+1. Bridge subprocess split — SUB drain + CMD forward on separate owner threads.
+2. Data-flow watchdog independent of heartbeat (stall detection works even when PUB is alive).
+3. Bridge sockets moved to owner threads (prevents cross-thread ZMQ calls).
+4. `log_get` routed to a dedicated read executor (long reads don't block REP).
+5. Transport disconnect recovery bounded (no unbounded cleanup).
+6. `ZMQCommandServer` task supervision — `add_done_callback` detects unexpected exit and spawns a fresh serve loop. Reentrancy-safe.
+7. Per-handler 2.0s timeout envelope. `log_get` and `experiment_status` get 1.5s inner wrappers for faster client feedback.
+8. Inner `TimeoutError` messages preserved in the envelope (not swallowed by the outer catch).
+9. Engine subprocess stderr persisted to `logs/engine.stderr.log` via `RotatingFileHandler` (50MB × 3 backups), with handler lifecycle that survives engine restarts on Windows.
+10. Test isolation for stale reply consumers.
+
+**Residual risk** documented in-code at `engine.py:1328`: `asyncio.wait_for(asyncio.to_thread(...))` cancels the await but not the worker thread. REP is protected by the outer envelope; the inner wrapper gives faster client feedback only.
+
 ### Phase 2d — COMPLETE (до 2026-04-13)
 
 14 commits, +61 tests (829 → 890), zero regressions. Triple-reviewer pipeline (CC tactical + Codex second-opinion + Jules architectural) валидирован на Safety, Persistence и Config Fail-Closed subsystems.
@@ -110,16 +165,24 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 ## В работе
 
-**Phase II UI rebuild — Group 1 COMPLETE (2026-04-17).**
+**Phase II UI rebuild — mixed status (2026-04-16 … 2026-04-18).**
 
-Cleanup + quick wins:
+Block-level status map canonicalized in `docs/phase-ui-1/phase_ui_v2_roadmap.md`. Short version:
 
-- ✅ Repo cleanup (`0d4d386`): root audit-артефакты → `docs/audits/2026-04-09/`, superseded markers на старой design system / wireframe / roadmap, RETRO V1/V2 в архив.
-- ✅ `PROJECT_STATUS.md` refresh (`50ab8c0`).
-- ✅ PhaseStepper ACCENT → STATUS_OK (`05f27d0`, A.4) — active pill теперь `theme.STATUS_OK`; `ACCENT` остаётся только для keyboard focus ring.
-- ✅ Fira Code + Fira Sans bundle + load — **Case D, уже сделано**: 12 .ttf files под `src/cryodaq/gui/resources/fonts/`, `_load_bundled_fonts()` вызывается из `gui/app.py:131` и `launcher.py:825` до любой widget construction, family-names matched theme tokens (`Fira Code` / `Fira Sans` / `Fira Code`).
+- ✅ II.1 AnalyticsView COMPLETE (`860ecf3`, primary-view QWidget)
+- ⚠️ II.4 AlarmOverlay PARTIAL (badge routing only)
+- ⚠️ II.6 KeithleyOverlay PARTIAL (`920aa97`, regression — scope to reopen)
+- ⚠️ II.9 ExperimentOverlay v3 PARTIAL (functional; visual rebuild pending)
+- ⬜ II.2, II.3, II.5, II.7, II.8 NOT STARTED
 
-**Phase II Groups 2–7 — not yet started.**
+Earlier cleanup/quick-win steps that landed between Phase I.1 close-out and Phase II blocks:
+
+- Repo cleanup (`0d4d386`): root audit-артефакты → `docs/audits/2026-04-09/`, superseded markers на старой design system / wireframe / roadmap, RETRO V1/V2 в архив.
+- `PROJECT_STATUS.md` refresh (`50ab8c0`, 2026-04-17).
+- PhaseStepper ACCENT → STATUS_OK (`05f27d0`, A.4) — active pill теперь `theme.STATUS_OK`; `ACCENT` остаётся только для keyboard focus ring.
+- Fira Code + Fira Sans bundle + load — 12 .ttf files под `src/cryodaq/gui/resources/fonts/`, `_load_bundled_fonts()` вызывается из `gui/app.py:131` и `launcher.py:825` до любой widget construction.
+
+**Phase III — not yet started.**
 
 ### Open bugs / deferred work
 

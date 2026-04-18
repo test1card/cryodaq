@@ -1,6 +1,6 @@
 # CryoDAQ Phase UI-1 v2 — Roadmap
 
-**Status:** Living roadmap. Reflects current strategy as of B.8.0.2 commit `968e995`.
+**Status:** Living roadmap. Reflects reality as of HEAD `27dfecb` (2026-04-18). Current strategy line extends from B.8.0.2 (`968e995`) through Phase II Group 1 partial landings, runtime theme switcher, and IPC/REP hardening.
 
 **Companion doc:** `docs/ui_refactor_context.md` — pain points + preserve list + design principles. Read first.
 
@@ -57,6 +57,8 @@ Cuts uncertainty в design decisions. Без этого следующие overl
 
 ### Block I.1 — Modal Card Shell + Drill-Down Navigation
 
+**Status:** ✅ COMPLETE — `ModalCard`, `DrillDownBreadcrumb`, `BentoGrid` landed in `src/cryodaq/gui/shell/overlays/_design_system/` (Phase I.1 complete 2026-04-16; subsequent refinements A.5 focus trap `6010a07`, A.6 BentoGrid 12→8 cols `8a8d189`).
+
 Skill patterns: **Drill-Down Analytics**, **Swiss Modernism 2.0** (12-col grid).
 
 Primitives:
@@ -70,6 +72,8 @@ Tests + visual showcase HTML page (Vladimir reviews before applying).
 **Estimate:** 1 medium block (~2h CC).
 
 ### Block I.2 — Bento Tile Primitives
+
+**Status:** ⬜ NOT STARTED — none of `BentoTile` / `ExecutiveKpi` / `DataDenseTile` / `LiveTile` / `ChartTile` / `EditableField` exist in `_design_system/`. Deliberately bypassed for AnalyticsView (II.1, `860ecf3`): plot-dominant primary views don't benefit from BentoGrid composition, so `QVBoxLayout + QHBoxLayout` + fixed-height chrome strips + direct pyqtgraph wrapping were chosen instead. Primitives remain on the roadmap for data-dense blocks (Archive II.2, OperatorLog II.3, Calibration II.7) where they are structurally useful.
 
 Skill patterns: **Bento Box Grid**, **Real-Time Monitoring** (без pulse).
 
@@ -87,6 +91,8 @@ Tests + visual showcase extension.
 
 ### Block I.3 — Reusable Content Widgets Catalog
 
+**Status:** ⚠️ PARTIAL — `PhaseStepper`, `HeroReadout`, `EtaDisplay`, `MilestoneList` exist under `src/cryodaq/gui/dashboard/phase_content/` (extracted from B.5.5 for dashboard use). This satisfies the B.5.x implementation need but NOT the I.3 extraction goal — classes have not been relocated to the `_design_system/` package and no `StatusBadge` / `ZmqWorkerField` primitives have been built.
+
 Existing primitives + new:
 - `PhaseStepper` (B.5.5) — phase pills row
 - `HeroReadout` (B.5.5) — large numeric readout
@@ -100,6 +106,8 @@ Doc + tests.
 **Estimate:** 1 small block (~1h CC, mostly extraction).
 
 ### Block I.4 — Visual Showcase Page
+
+**Status:** ⚠️ PARTIAL — `_showcase.py` exists in `_design_system/` but covers only Phase I.1 primitives (ModalCard, BentoGrid, DrillDownBreadcrumb). Not extended for I.2/I.3 because those blocks haven't landed.
 
 HTML artifact или Qt-based "storybook" page демонстрирующий все primitives
 вместе. Vladimir reviews и approves design system **before** Phase II применяется.
@@ -126,6 +134,9 @@ popover not standalone overlay.
 ### HIGH priority — uncovered, daily-use
 
 #### Block II.1 — AnalyticsOverlay
+
+**Status:** ✅ COMPLETE — shipped as `AnalyticsView` primary-view QWidget at `src/cryodaq/gui/shell/views/analytics_view.py` (commit `860ecf3`, B.8 revision 2). Revision 1 (`9a089f9`) landed as ModalCard overlay but was architecturally corrected to primary view with plot-dominant layout (`QVBoxLayout + QHBoxLayout` + fixed-height chrome strips + direct pyqtgraph wrapping — bypassed Phase I.2/I.3 primitives deliberately). Follow-ups (non-blocking): actual-trajectory publisher not yet emitting, R_thermal publisher missing, VacuumTrendPanel not yet design-system-aligned.
+
 Skill patterns: Bento + ChartTile + DataDense.
 Uncovered by current dashboard. Highest user value.
 B.5.5 primitives (HeroReadout, EtaDisplay, MilestoneList) finally
@@ -139,6 +150,9 @@ without pulse).
 Estimate: 1 medium block.
 
 #### Block II.2 — ArchiveOverlay
+
+**Status:** ⬜ NOT STARTED.
+
 Skill patterns: Drill-Down + Bento (experiment cards) + DataDense (details).
 Zero coverage in new UI. K2-critical.
 Preserves: K2 archive functionality. Per Phase 0 K6 decision: this overlay also hosts
@@ -149,6 +163,9 @@ Estimate impact: +1 small task within block (button wiring to existing
 Estimate: 1 medium block.
 
 #### Block II.3 — OperatorLog Overlay
+
+**Status:** ⬜ NOT STARTED.
+
 Skill patterns: Drill-Down + DataDense + filter sidebar.
 QuickLogBlock covers only quick entry, full overlay needed.
 Preserves: K1 service log with chronology.
@@ -158,6 +175,9 @@ Estimate: 1 small block.
 ### MEDIUM priority — functional rebuild
 
 #### Block II.4 — AlarmOverlay (with badge popover)
+
+**Status:** ⚠️ PARTIAL — TopWatchBar badge already routes into the registered legacy `AlarmPanel` (Phase I.1 wiring). Visual modernization + acknowledge-workflow polish pending.
+
 Skill patterns: Drill-Down + DataDense (alarm rules table).
 Badge in TopWatchBar already routes into the registered AlarmPanel overlay;
 this block rebuilds that surface with visual modernization and verifies
@@ -166,12 +186,18 @@ Solves: P2 alarm visibility (already partially solved via badge → existing pan
 Estimate: 1 small block.
 
 #### Block II.5 — ConductivityOverlay
+
+**Status:** ⬜ NOT STARTED.
+
 Skill patterns: Drill-Down (auto-measurement workflow) + ChartTile + DataDense.
 Auto-measurement state machine with min_wait safety guard preserved exactly.
 Preserves: K6 export (CSV auto-measurement results).
 Estimate: 1 medium block.
 
 #### Block II.6 — KeithleyOverlay
+
+**Status:** ⚠️ PARTIAL — shipped as `shell/overlays/keithley_panel.py` (B.7, commit `920aa97`) as a mode-based dual-channel overlay. Functional regression vs legacy v1 (`widgets/keithley_panel.py`): no V/I/R/P plots (v2 has 0 pyqtgraph refs; v1 had 4), no P-target control, no A+B actions, no debounced spin controls. K4 custom-command popup NOT shipped. Scope to be reopened as a second block within II.6.
+
 Skill patterns: Bento + Executive (smua/smub readouts) + DataDense (controls).
 Functionally complete in legacy for structured control; this is primarily
 visual modernization of per-channel and A+B control surfaces. A visible
@@ -189,6 +215,9 @@ This is NEW feature, not preserve. Estimate impact: +1 medium task within block.
 Estimate: 1 medium block.
 
 #### Block II.7 — CalibrationOverlay
+
+**Status:** ⬜ NOT STARTED.
+
 Skill patterns: Drill-Down (Setup → Acquisition → Results) + DataDense.
 Three-mode QStackedWidget remains the right structural target, but this is
 not wrap-only work: the visible export/apply controls in legacy source are
@@ -200,6 +229,9 @@ Estimate: 1 medium block.
 ### LOW priority — combined or folded
 
 #### Block II.8 — InstrumentsOverlay + SensorDiag popover
+
+**Status:** ⬜ NOT STARTED.
+
 Combined block:
 - InstrumentsOverlay: per-instrument status cards (theme tokens wrap)
 - SensorDiag: folded into right-click popover on dashboard sensor cell
@@ -209,6 +241,9 @@ Estimate: 1 medium block (combined).
 ### ExperimentOverlay v3 visual rebuild
 
 #### Block II.9 — ExperimentOverlay v3
+
+**Status:** ⚠️ PARTIAL — functional parity shipped in B.8.0.2 (`968e995`). Visual primitives-based rebuild pending. Ergonomic fixes landed 2026-04-18: full phase names in stepper (`1850482`), conditional hide of nav buttons when unavailable (`2d6edc7`), × close button removed to reinforce primary-view semantics (`b0b460b`), regression guards (`19993ce`). B.5.x PhaseAwareWidget integration (`468b964`, `a514b69`) also contributes here.
+
 Apply Phase I primitives to existing B.8.0.2 functional code.
 Functional logic preserved, visual rebuild only.
 Position deferred to last block of Phase II — primitives are mature
@@ -319,6 +354,18 @@ Phase 0 status: COMPLETE.
   ModalCard + DrillDownBreadcrumb + BentoGrid + visual showcase.
   Located at `src/cryodaq/gui/shell/overlays/_design_system/`.
   Tests: 1063 → 1085. Ready for Phase I.2 (content tiles).
+- **2026-04-16** Phase I.1 shell alignment batch (A.1-A.6) — ToolRail (`d2ccb37`), TopWatchBar (`f4146a9`), BottomStatusBar (`4ac620f`), PhaseStepper active ACCENT→STATUS_OK (`05f27d0`), ModalCard focus trap + restoration (`6010a07`), BentoGrid 12→8 columns + overlap validation (`8a8d189`). Group 1 follow-up `e558fd5`.
+- **2026-04-16** Safety A1 fixes — Latin T12 interlock description corrected and `_fault()` re-entry guard added (`eb267c4`). See PROJECT_STATUS §Invariants 18.
+- **2026-04-16** CI / lint hygiene — 587 ruff errors cleaned (`d8ec668`); CI install upgraded to `.[dev,web]` so FastAPI/starlette tests run (`1e824a7`).
+- **2026-04-16** Phase II B.5.x PhaseAwareWidget batch — mode badge Эксперимент/Отладка colors aligned (`468b964`), centralized plot styling with chart-tokens (`a514b69`). Contributes to II.9 functional polish.
+- **2026-04-16** Block B.6 — ExperimentCard dashboard tile (`8b3a453`). Dashboard composition, not an overlay rebuild — no direct II.X mapping.
+- **2026-04-17** Block B.7 — Keithley v2 dual-channel overlay shipped (`920aa97`) as mode-based surface at `src/cryodaq/gui/shell/overlays/keithley_panel.py`. Visual-only rebuild. **Known regression vs v1:** 0 plots (v1 had 4 pyqtgraph plot widgets), no P-target control, no A+B actions, no debounced spin controls. K4 custom-command popup NOT shipped. Maps to II.6 PARTIAL — scope to be reopened as a second block. Legacy regression documented in `docs/legacy-inventory/keithley.md`.
+- **2026-04-17** Block B.8 → B.8 revision 2 — AnalyticsPanel shipped first as ModalCard overlay (`9a089f9`), Codex data-flow adapter follow-up (`53232ea`), then architecturally corrected to **AnalyticsView primary-view QWidget** (spec `3bb0f2b`, implementation `860ecf3`) at `src/cryodaq/gui/shell/views/analytics_view.py`. Plot-dominant layout (QVBoxLayout + QHBoxLayout + fixed-height chrome strips + direct pyqtgraph wrapping) bypasses Phase I.2/I.3 primitives deliberately. Primary-view vs modal-overlay audit: `a5494ee`. Maps to II.1 COMPLETE. Non-blocking follow-ups: actual-trajectory publisher, R_thermal publisher, VacuumTrendPanel design-system alignment.
+- **2026-04-17** Architectural decision — AnalyticsView shipped without Phase I.2/I.3 primitives. Plot-dominant primary views don't benefit from BentoGrid composition; data-dense views (Archive II.2, OperatorLog II.3, Calibration II.7) will still benefit from the primitives library when it's built. The "primitives-first" strategy is softened to "primitives where structurally useful".
+- **2026-04-18** Infrastructure polish — force Fusion style + dark palette globally for Linux deployment parity (`fcc08c0`); TopWatchBar transparent separators + heater removal (`041b1bb`); compact pressure format + RU debug-mode error + defaults (`4d3fff8`); bridge subprocess SUB subscription reliability — connect first + bytes subscription (`d0dbdfc`).
+- **2026-04-18** Runtime theme switcher — shipped. `theme.py` now reads tokens from YAML packs via `_theme_loader` (`ecd447a`); legacy hardcoded overrides stripped from 9 `apply_panel_frame` callsites (`e52b17b`); 5 additional theme packs bundled (`9ac307e`) — total 6 packs at `config/themes/` (`default_cool`, `warm_stone`, `anthropic_mono`, `ochre_bloom`, `taupe_quiet`, `rose_dusk`); Settings → Тема menu with `os.execv` restart (`77ffc93`); operator manual + CHANGELOG (`903553a`). Status palette (STATUS_OK, WARNING, CAUTION, FAULT, INFO, STALE, COLD_HIGHLIGHT) locked across all packs. Not in original roadmap — infrastructure landing. Palette tuning follow-ups tracked in `HANDOFF_THEME_PALETTES.md`.
+- **2026-04-18** ExperimentOverlay B batch polish — full phase names in stepper (`1850482`), nav buttons hidden when unavailable (`2d6edc7`), × close button removed to reinforce primary-view semantics (`b0b460b`), regression guards (`19993ce`). Contributes to II.9 PARTIAL; visual primitives-based rebuild still deferred.
+- **2026-04-18** Infrastructure: IPC/REP hardening — 10-commit architectural hardening of the engine ↔ GUI command plane after a production wedge revealed the REP task crashing silently with engine stderr swallowed by `DEVNULL`. Commits: `5299aa6` (bridge SUB drain + CMD forward split), `f5b0f22` (data-flow watchdog independent of heartbeat), `a38e2fa` (`log_get` routed to dedicated read executor), `913b9b3` (separate bridge heartbeat and data flow), `2b1370b` (bridge sockets moved to owner threads), `abfdf44` (bounded transport disconnect recovery), `81e2daa` (legacy alarm count through MainWindow), `3a16c54` (web sqlite close on errors), `ba20f84` (test isolation for stale reply consumers), `27dfecb` (REP task supervision with auto-restart + per-handler 2.0s timeout envelope + 1.5s inner wrappers for `log_get`/`experiment_status` + inner TimeoutError preservation + engine subprocess stderr persisted to `logs/engine.stderr.log` via RotatingFileHandler 50MB × 3 with handler lifecycle surviving engine restarts on Windows). Two Codex review rounds. Final verdict PASS at `27dfecb`. Residual risk documented in-code at `engine.py:1328`: `asyncio.wait_for(asyncio.to_thread(...))` cancels the await but not the worker thread; REP is protected by the outer envelope, inner wrapper gives faster client feedback only.
 
 ---
 
