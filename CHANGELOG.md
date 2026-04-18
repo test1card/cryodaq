@@ -9,6 +9,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Phase II.6 Keithley overlay rebuilt.** Replaces the dead B.7
+  mode-based shell overlay (never wired into `MainWindowV2`) and
+  supersedes the legacy v1 widget surface visible via Ctrl+K. Full
+  power-control semantics matching the engine ZMQ API (`p_target` +
+  `v_comp` + `i_comp` only; no `mode=current/voltage`). Per channel:
+  P target / V compliance / I compliance `QDoubleSpinBox` with 300 ms
+  debounce, 4 live readouts (V / I / R / P) in Fira Mono with tabular
+  figures, 2×2 rolling plot grid (V / I / R / P), state badge
+  (ВЫКЛ / ВКЛ / АВАРИЯ) driven by
+  `analytics/keithley_channel_state/{smua,smub}`. Panel-level «Старт A+B»
+  / «Стоп A+B» / «АВАР. ОТКЛ. A+B» (single confirmation dialog for
+  A+B emergency), time-window toolbar (10м / 1ч / 6ч) shared across
+  channels, safety gate label, connection indicator, transient status
+  banner. Design System v1.0.1 compliant — legacy `TEXT_PRIMARY` /
+  `QUANTITY_*` tokens replaced throughout; plots use
+  `apply_plot_style()` and `PLOT_LINE_PALETTE[0]` for smua,
+  `PLOT_LINE_PALETTE[1]` for smub. Stale detection applies only when
+  channel state is `"on"`. Emergency confirmation uses
+  `QMessageBox.warning` per RULE-INTER-004 destructive variant.
+  MainWindowV2 now imports the overlay from
+  `cryodaq.gui.shell.overlays.keithley_panel`. Legacy v1 widget at
+  `src/cryodaq/gui/widgets/keithley_panel.py` marked DEPRECATED;
+  removal scheduled for Phase III.3. K4 custom-command popup (FU.4)
+  and HoldConfirm 1 s hold for emergency buttons (FU.5) deliberately
+  deferred. Tests: 30 new cases in
+  `tests/gui/shell/overlays/test_keithley_panel.py`.
+
 ### Добавлено
 
 - **Runtime theme switcher — 6 bundled theme packs.**

@@ -1,547 +1,234 @@
 ---
 title: KeithleyPanel
-keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel, smua, smub, source, measure
-applies_to: Keithley 2604B source-measure unit control panel
+keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel, smua, smub, source, measure, p-target
+applies_to: Keithley 2604B source-measure unit control overlay
 status: active
-implements: src/cryodaq/gui/shell/overlays/keithley_panel.py (Phase B.7 v2); legacy src/cryodaq/gui/widgets/keithley_panel.py retained until Block B.13
-last_updated: 2026-04-17
+implements: src/cryodaq/gui/shell/overlays/keithley_panel.py (Phase II.6 rewrite); legacy src/cryodaq/gui/widgets/keithley_panel.py retained (DEPRECATED) until Phase III.3
+last_updated: 2026-04-18
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
 # KeithleyPanel
 
-Panel for controlling and monitoring the Keithley 2604B source-measure unit (SMU). Dual-channel (smua + smub), TSP-scripted hardware. One of the most complex CryoDAQ widgets because it combines live measurement displays with output control and destructive-level actions (enable/disable current output).
+Operator overlay for controlling and monitoring the Keithley 2604B source-measure unit (SMU). Dual-channel (`smua` + `smub`), TSP-scripted hardware. The most complex CryoDAQ instrument widget because it combines live V/I/R/P measurement displays, live power-control setpoints (debounced), and destructive-level actions (start / stop / emergency-off per channel).
 
-> **Implementation status.** The shipped v2 overlay at
-> `src/cryodaq/gui/shell/overlays/keithley_panel.py` is aligned with
-> this spec: symmetric dual-channel layout («Канал А» / «Канал B»
-> with Cyrillic А per RULE-COPY-002, invariant #11), per-channel
-> mode tabs (Ток / Напряжение / Откл), setpoint input + «Применить»
-> (invariant #3: no auto-apply on typing), live readouts in Fira Mono
-> with tabular figures (RULE-TYPO-003), dot + text output indicator
-> (RULE-A11Y-002 redundant channels), per-channel fault border
-> (3px STATUS_FAULT), safety gating via `set_safety_ready(ready,
-> reason)` with a dedicated reason label, connection header that
-> flips to «Нет связи» and disables controls when disconnected,
-> Dialog confirmation on output-enable (RULE-INTER-004) and on
-> emergency-off / disconnect, emergency-stop always reachable even
-> when gated. Remaining divergences: emergency stop uses a Dialog
-> confirmation today rather than the canonical HoldConfirm 1s hold
-> (invariant #9 — tracked as later work); per-channel V/I history
-> plot from the anatomy sketch is not yet embedded (the plot is
-> optional per spec wording and the dashboard-level temp/pressure
-> plots cover live monitoring). The legacy v1 panel at
-> `src/cryodaq/gui/widgets/keithley_panel.py` stays alive until
-> Block B.13 for the transitional main_window.py path.
+> **Implementation status (2026-04-18).** The shipped overlay at
+> `src/cryodaq/gui/shell/overlays/keithley_panel.py` (Phase II.6)
+> matches this spec: symmetric dual-channel layout «Канал А» / «Канал B»
+> (Cyrillic А per RULE-COPY-002), per-channel P target / V compliance /
+> I compliance `QDoubleSpinBox` controls debounced to 300 ms, 4 live
+> readouts (V / I / R / P) in Fira Mono with tabular figures
+> (RULE-TYPO-003), a 2×2 rolling plot grid per channel (V / I / R / P
+> over time, `apply_plot_style()` from `_plot_style.py`), state badge
+> driven by `analytics/keithley_channel_state/{smua,smub}`, STATUS_FAULT
+> 3px border on a faulted channel block, stale detection applied
+> *only* while state == "on" (if off/fault we don't expect live
+> measurements), safety gating via `set_safety_ready(ok, reason)` with
+> dedicated reason label, connection header that flips to «Нет связи»
+> and disables controls when disconnected, panel-level «Старт A+B»
+> / «Стоп A+B» / «АВАР. ОТКЛ. A+B», time-window toolbar
+> («10м» / «1ч» / «6ч») affecting both channels simultaneously,
+> emergency-off guarded by `QMessageBox.warning` confirmation
+> (RULE-INTER-004 destructive variant), emergency always reachable when
+> connected even if safety blocks normal control.
+>
+> **Known limitations** (tracked as follow-ups, not blocking):
+> - FU.4 — K4 custom-command popup (Keithley TSP/SCPI console) not shipped.
+> - FU.5 — HoldConfirm 1s hold for emergency buttons ships as
+>   `QMessageBox.warning` today. HoldConfirm primitive not yet built.
+> - DS coverage gaps flagged during rewrite: window-toolbar active-state
+>   toggle pattern, connection-indicator dot glyph, state badge —
+>   inline QSS used where a DS primitive was not available. Reconcile
+>   when those primitives are defined.
+>
+> The legacy v1 panel at `src/cryodaq/gui/widgets/keithley_panel.py`
+> is marked DEPRECATED and stays alive for the transitional
+> `main_window.py` path only; removal is tracked under Phase III.3
+> legacy cleanup. `MainWindowV2` imports the overlay from
+> `shell/overlays/keithley_panel.py` exclusively.
 
 **When to use:**
-- Dedicated Keithley panel opened via ToolRail slot 4
-- Inside the experiment overlay when SMU operation is part of the experiment flow
+- Dedicated Keithley overlay opened via ToolRail (slot «Источник», Ctrl+K).
+- Inside the experiment overlay when SMU operation is part of experiment flow (embed the overlay itself, not a compact summary).
 
 **When NOT to use:**
-- Generic form for SMU parameters — Keithley has specific TSP-based behavior that must be respected
-- Historical replay of SMU data — use Analytics panel
-- Non-Keithley instruments — this panel is Keithley-specific; other SMUs need their own specialized panel
+- Generic form for SMU parameters — Keithley has TSP-specific behavior that must be respected.
+- Historical replay of SMU data — use `AnalyticsView`.
+- Non-Keithley instruments — other SMUs need their own specialized panel.
 
 ## Absolute invariants (from CryoDAQ codebase rules)
 
-These are fixed at codebase level and must not be changed by UI code:
+Fixed at codebase level; UI code must not violate:
 
-1. **Keithley uses TSP (Lua), NOT SCPI.** Commands go via `print(...)` TSP invocations. UI emits TSP-appropriate command names; never raw SCPI.
-2. **Dual-channel.** `smua` and `smub` are both active. NOT single-channel. Any UI showing only one channel is wrong.
-3. **Safety disconnect calls emergency_off first.** Disconnecting Keithley triggers safety emergency_off before USB release. UI must not bypass this.
-4. **SafetyManager is the only source on/off authority.** UI cannot directly command hardware to enable output; it requests via SafetyManager which validates preconditions.
-5. **Persistence-first ordering.** SMU readings go through the scheduler which writes to SQLite BEFORE publishing to DataBroker. UI reads via DataBroker only.
+1. **Keithley uses TSP (Lua), NOT SCPI.** Commands go via `print(...)` TSP invocations. UI emits TSP-appropriate command names (`keithley_start`, `keithley_stop`, `keithley_emergency_off`, `keithley_set_target`, `keithley_set_limits`); never raw SCPI.
+2. **Engine API is power-control only.** Accepted payload keys: `p_target` (W), `v_comp` (V compliance), `i_comp` (A compliance). There is no `mode=current/voltage` in the engine. GUI must not invent mode semantics disconnected from the driver. Previous B.7 design violated this and was never wired.
+3. **Dual-channel.** `smua` and `smub` are both active. Any UI showing only one channel is wrong.
+4. **Safety disconnect calls `emergency_off` first.** Disconnecting Keithley triggers safety emergency_off before USB release. UI must not bypass this.
+5. **`SafetyManager` is the only source on/off authority.** UI cannot directly command hardware to enable output; it sends `keithley_start` which the engine routes via `SafetyManager.request_run(...)` with preconditions validated.
+6. **Persistence-first ordering.** SMU readings go through the scheduler which writes to SQLite BEFORE publishing to DataBroker. UI reads via DataBroker only.
 
 ## Anatomy
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                                                                            │
-│  KEITHLEY 2604B                         ● Подключён   ● Канал А   ● Канал B│  ◀── connection + channel state
-│                                                                            │
-│  ┌──────────────────────────┐  ┌──────────────────────────┐                │
-│  │  Канал А (smua)          │  │  Канал B (smub)          │                │  ◀── two channel blocks
-│  │                          │  │                          │                │      side by side
-│  │  Режим:  Ток             │  │  Режим:  Напряжение      │                │
-│  │                          │  │                          │                │
-│  │  Установка:  0.100 А     │  │  Установка:  12.000 В    │                │
-│  │  Измерено:  0.099 А      │  │  Измерено:  11.998 В     │                │
-│  │  Напряжение: 1.23 В      │  │  Ток: 0.050 А            │                │
-│  │  Мощность: 0.122 Вт      │  │  Мощность: 0.600 Вт      │                │
-│  │                          │  │                          │                │
-│  │  [ Вкл выход ]           │  │  [ Вкл выход ]           │                │
-│  │                          │  │                          │                │
-│  └──────────────────────────┘  └──────────────────────────┘                │
-│                                                                            │
-│  [ АВАР. ОТКЛ. ]  (hold-confirm 1s)                     [ Отключить Keithley ] │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  KEITHLEY 2604B                                        ● Подключён            │  ◀── header: title + connection
+│                                                                               │
+│  ( status banner — transient info/warning/error, auto-clear 4s )              │
+│  ( gate reason label — shown when set_safety_ready(False, reason) )           │
+│                                                                               │
+│  Окно:  [10м]  [1ч]  [6ч]                                                     │  ◀── time-window toolbar
+│                                                                               │
+│  ┌──────────────────────────┐     ┌──────────────────────────┐                │
+│  │  Канал А            [ВКЛ]│     │  Канал B           [ВЫКЛ]│                │  ◀── state badge
+│  │                          │     │                          │                │
+│  │  P цель  V пред.  I пред.│     │  P цель  V пред.  I пред.│                │
+│  │  [0.500] [40.00] [1.000] │     │  [0.500] [40.00] [1.000] │                │  ◀── controls card
+│  │  [Старт][Стоп][АВАР.ОТКЛ]│     │  [Старт][Стоп][АВАР.ОТКЛ]│                │
+│  │                          │     │                          │                │
+│  │  Напряжение   Ток        │     │  Напряжение   Ток        │                │
+│  │   12.345 В    0.345 А    │     │   0.000 В    0.000 А     │                │  ◀── readouts card
+│  │  Сопрот.      Мощность   │     │  Сопрот.      Мощность   │                │
+│  │   35.78 Ом    4.256 Вт   │     │   — Ом        0.000 Вт   │                │
+│  │                          │     │                          │                │
+│  │  ┌────────┐  ┌────────┐  │     │  ┌────────┐  ┌────────┐  │                │
+│  │  │   V    │  │   I    │  │     │  │   V    │  │   I    │  │                │
+│  │  ├────────┤  ├────────┤  │     │  ├────────┤  ├────────┤  │  ◀── 2×2 plots
+│  │  │   R    │  │   P    │  │     │  │   R    │  │   P    │  │                │
+│  │  └────────┘  └────────┘  │     │  └────────┘  └────────┘  │                │
+│  └──────────────────────────┘     └──────────────────────────┘                │
+│                                                                               │
+│                          [Старт A+B] [Стоп A+B] [АВАР. ОТКЛ. A+B]             │  ◀── footer: panel-level
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Parts
 
 | Part | Required | Description |
 |---|---|---|
-| **Panel frame** | Yes | Standard Card with panel title header |
-| **Connection indicator** | Yes | smua + smub state indicators + overall connection status |
-| **Channel block** (×2) | Yes | smua + smub — symmetric, both always shown |
-| **Mode selector** | Per channel | Current / Voltage / disabled |
-| **Setpoint input** | Per channel | Numeric input with unit (A or V) |
-| **Live measurements** | Per channel | Multiple readouts (measured, other-quantity, power) |
-| **Output toggle** | Per channel | Enable/disable output — destructive for enable |
-| **Emergency stop** | Yes | АВАР. ОТКЛ. — hold-confirm button, kills both channels immediately |
-| **Disconnect button** | Yes | Safely disconnects Keithley (triggers emergency_off first per invariant 3) |
+| **Panel root** | Yes | `keithleyPanel` frame with background SURFACE_WINDOW |
+| **Header row** | Yes | Title «KEITHLEY 2604B» + connection indicator (● Подключён / ● Нет связи) |
+| **Status banner** | Yes | Transient messages (info / warning / error); auto-clears after 4 s |
+| **Gate reason label** | Yes | Shown when `set_safety_ready(False, reason)` — «Управление заблокировано: {reason}» in STATUS_WARNING |
+| **Window toolbar** | Yes | «10м» / «1ч» / «6ч» time-window buttons (active variant highlighted) |
+| **Channel block** (×2) | Yes | smua + smub — symmetric, always visible |
+| **Channel header** | Per channel | Channel label «Канал А» / «Канал B» + state badge (ВЫКЛ / ВКЛ / АВАРИЯ) |
+| **Controls card** | Per channel | P target + V compliance + I compliance `QDoubleSpinBox` + Старт / Стоп / АВАР. ОТКЛ. |
+| **Readouts card** | Per channel | 4 live value labels (V / I / R / P) in Fira Mono with tabular figures |
+| **Plots grid** | Per channel | 2×2 `pg.PlotWidget` (V / I / R / P), rolling window per panel-level toolbar selection |
+| **Panel-level footer** | Yes | «Старт A+B» / «Стоп A+B» / «АВАР. ОТКЛ. A+B» (single confirmation dialog for A+B emergency) |
 
 ## Invariants
 
-1. **Both channels always visible even if disabled.** Layout symmetry = operator visual parity = fewer mistakes. (Domain rule)
-2. **Output toggle is destructive-level for enable, safe for disable.** Enabling output requires confirmation (hold-confirm or dialog); disabling does not. Operator never accidentally turns OFF something that was active — that's safe — but accidentally turning ON mid-experiment can damage equipment.
-3. **Setpoint changes require explicit «Применить» click.** Don't auto-apply on typing. Operator may be mid-edit, and partial values shouldn't stream to hardware.
-4. **Slew rate limit enforced server-side.** UI does NOT interpolate setpoints. Engine-side slew limiter (part of safety hardening per audit V2) ramps the output; UI just sends final value.
-5. **Values display in SI units with Russian symbols.** Current = «А», Voltage = «В», Power = «Вт», Resistance = «Ом». (RULE-COPY-006)
-6. **Measured value differs from setpoint — this is NORMAL.** Display both; don't alarm on mismatch unless > tolerance (operator configures). Some mismatch is physics, not fault.
-7. **Live values tabular mono.** (RULE-TYPO-003)
-8. **Output ON status via redundant channels.** Color (STATUS_OK green indicator) + text («Выход: вкл»). Not color alone. (RULE-A11Y-002)
-9. **Emergency stop is NEVER a regular button.** HoldConfirmButton pattern with 1s hold. Shortcut: Ctrl+Shift+X global. (RULE-INTER-004)
-10. **No emoji.** (RULE-COPY-005)
-11. **Labels «Канал А» / «Канал B».** Not «smua» / «smub» in operator-facing UI — those are internal identifiers. (RULE-COPY-002)
+1. **Both channels always visible.** Layout symmetry = operator visual parity = fewer mistakes. No collapsing smub, even when disconnected.
+2. **Engine command surface is power-control only.** Controls map 1:1 to engine payload: P target → `p_target` (W), V predel → `v_comp` (V), I predel → `i_comp` (A). No `mode=current/voltage`.
+3. **Spin changes are debounced 300 ms and gated on state == "on".** Spinning P / V / I while the channel is "on" restarts a single-shot `QTimer(300ms)`; on timeout the final value is sent (P → `keithley_set_target`, V/I → `keithley_set_limits`). In state "off" or "fault" spins emit no commands — the channel isn't receiving power, so live limit updates are meaningless.
+4. **Start is the only path to source ON.** `Старт` click sends `keithley_start` which the engine routes through `SafetyManager.request_run(p, v, i)`. If preconditions fail, engine returns an error — UI does not bypass. The GUI never directly commands hardware.
+5. **Slew rate limit enforced server-side.** UI does NOT interpolate setpoints. Engine-side slew limiter ramps the output; UI sends the final target value.
+6. **Values display in SI units with Russian symbols.** V = «В», I = «А», R = «Ом», P = «Вт». (RULE-COPY-006.)
+7. **Live values use FONT_MONO with tabular figures.** `tnum` OpenType feature enabled when the Qt version supports it (graceful fallback). (RULE-TYPO-003.)
+8. **State badge uses redundant channels.** Text label (ВЫКЛ / ВКЛ / АВАРИЯ) + color (MUTED_FOREGROUND / STATUS_OK / STATUS_FAULT). Not color alone. (RULE-A11Y-002.)
+9. **Emergency stop guarded by destructive-variant confirmation.** `QMessageBox.warning` with Ok / Cancel (RULE-INTER-004). FU.5 tracks a future HoldConfirm 1 s hold upgrade. A+B emergency uses a single confirmation covering both channels, not two separate dialogs.
+10. **Emergency button stays enabled whenever connected.** Escape hatch — disabled only on full disconnect. Safety gating blocks Start/Stop/spins, not emergency.
+11. **No emoji.** (RULE-COPY-005.)
+12. **Labels «Канал А» / «Канал B», not «smua» / «smub» in operator-facing UI.** Those identifiers are internal. Cyrillic А (U+0410), Latin B. (RULE-COPY-002.)
+13. **Stale detection only when state == "on".** If channel is off or fault, a stalled reading isn't a symptom — the channel isn't supposed to stream. Stale chrome (STATUS_STALE border + «устар.» suffix) applies only to an "on" channel whose last reading is older than 5 s.
+14. **Fault state draws a 3 px STATUS_FAULT border on the channel block.** Visual coherence with other fault-bearing surfaces.
+15. **Plot line color is channel-coded, not quantity-coded.** smua → `PLOT_LINE_PALETTE[0]`, smub → `PLOT_LINE_PALETTE[1]`. All 4 plots of one channel share the same pen. Quantity distinction comes from the plot's Y-axis label + unit, not pen color. (RULE-COLOR-002 reserves STATUS_* for semantic state.)
 
-## API (proposed)
+## API
 
 ```python
-# src/cryodaq/gui/widgets/keithley_panel.py
+# src/cryodaq/gui/shell/overlays/keithley_panel.py
 
-@dataclass
-class SmuChannelState:
-    key: str                     # "smua" or "smub"
-    label: str                   # "Канал А" or "Канал B"
-    output_enabled: bool
-    mode: str                    # "current" | "voltage" | "disabled"
-    setpoint: float              # A or V depending on mode
-    measured_primary: float      # A if current mode, V if voltage mode
-    measured_secondary: float    # the other quantity
-    power_w: float
-    last_updated_t: float
-    faulted: bool
+from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import Signal
 
-
-@dataclass
-class KeithleyState:
-    connected: bool
-    smua: SmuChannelState
-    smub: SmuChannelState
+from cryodaq.drivers.base import Reading
 
 
 class KeithleyPanel(QWidget):
-    """Keithley 2604B SMU control + monitoring panel."""
-    
-    # Per-channel signals
-    setpoint_apply_requested = Signal(str, float)  # (channel_key, value)
-    mode_change_requested = Signal(str, str)        # (channel_key, mode)
-    output_toggle_requested = Signal(str, bool)     # (channel_key, enable)
-    
+    """Dual-channel Keithley 2604B operator overlay."""
+
+    # Per-channel signals (for shell wiring and tests)
+    channel_start_requested = Signal(str, float, float, float)
+    # args: (channel_key: "smua" | "smub", p_target: W, v_comp: V, i_comp: A)
+
+    channel_stop_requested = Signal(str)               # channel_key
+    channel_emergency_requested = Signal(str)          # channel_key
+    channel_target_updated = Signal(str, float)        # (channel_key, p_target) — debounced
+    channel_limits_updated = Signal(str, float, float) # (channel_key, v_comp, i_comp) — debounced
+
     # Panel-level signals
-    emergency_off_requested = Signal()              # kills both channels
-    disconnect_requested = Signal()                  # safe disconnect
-    
-    def __init__(self, parent: QWidget | None = None) -> None: ...
-    
-    def set_state(self, state: KeithleyState) -> None: ...
+    both_channels_start_requested = Signal()
+    both_channels_stop_requested = Signal()
+    both_channels_emergency_requested = Signal()
+
+    # Public state pushers (called by MainWindowV2 / shell)
+    def on_reading(self, reading: Reading) -> None: ...
+    def set_connected(self, connected: bool) -> None: ...
+    def set_safety_ready(self, ready: bool, reason: str = "") -> None: ...
+
+    # Transient banner
+    def show_info(self, text: str) -> None: ...
+    def show_warning(self, text: str) -> None: ...
+    def show_error(self, text: str) -> None: ...
+    def clear_message(self) -> None: ...
 ```
 
-## Channel block reference
+**Signal semantics.** Per-channel signals are relays from the internal `_SmuChannelBlock` widgets — the panel exposes them so tests and shell code can observe every user intent without running a real ZMQ bridge. Production code path: each click handler also spawns a `ZmqCommandWorker` with the appropriate payload (`keithley_start`, `keithley_stop`, `keithley_emergency_off`, `keithley_set_target`, `keithley_set_limits`). Worker result is logged asynchronously; the UI thread does not block.
 
-```python
-class SmuChannelBlock(QWidget):
-    """One of the two channel blocks (smua or smub)."""
-    
-    setpoint_apply_requested = Signal(float)
-    mode_change_requested = Signal(str)
-    output_toggle_requested = Signal(bool)
-    
-    def __init__(self, channel_key: str, label: str, parent=None):
-        super().__init__(parent)
-        self._channel_key = channel_key
-        
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        
-        # Each channel block uses Card semantics here; PanelCard remains proposed.
-        self._card = Card(surface="elevated")  # PanelCard proposed
-        outer.addWidget(self._card)
-        
-        content = QWidget()
-        col = QVBoxLayout(content)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(theme.SPACE_3)
-        
-        # DESIGN: RULE-COPY-002 label "Канал А" not "smua"
-        self._title = QLabel(label)
-        title_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        title_font.setWeight(theme.FONT_LABEL_WEIGHT)
-        title_font.setLetterSpacing(
-            QFont.SpacingType.AbsoluteSpacing, 0.05 * theme.FONT_LABEL_SIZE
-        )
-        self._title.setFont(title_font)
-        self._title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        col.addWidget(self._title)
-        
-        # Mode selector
-        col.addWidget(self._build_mode_row())
-        
-        # Setpoint input + Apply
-        col.addWidget(self._build_setpoint_row())
-        
-        # Measured values
-        col.addWidget(self._build_measured_grid())
-        
-        # Output toggle
-        col.addWidget(self._build_output_row())
-        
-        self._card.set_content(content)
-    
-    def _build_mode_row(self) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_2)
-        
-        label = QLabel("Режим:")
-        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        label.setFixedWidth(80)
-        layout.addWidget(label)
-        
-        # DESIGN: segmented tab pattern (components/tab-group.md variant 4)
-        self._mode_tabs = TabGroup(
-            [
-                TabDef(label="Ток",         key="current"),
-                TabDef(label="Напряжение",  key="voltage"),
-                TabDef(label="Откл",        key="disabled"),
-            ],
-            compact=True,
-        )
-        self._mode_tabs.selection_changed.connect(self.mode_change_requested)
-        layout.addWidget(self._mode_tabs, 1)
-        return row
-    
-    def _build_setpoint_row(self) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_2)
-        
-        label = QLabel("Установка:")
-        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        label.setFixedWidth(80)
-        layout.addWidget(label)
-        
-        # DESIGN: RULE-COPY-006 (unit inline), RULE-TYPO-003 (tnum)
-        self._setpoint_input = InputField(
-            label="",
-            placeholder="0.000",
-            unit="А",  # dynamically updated per mode
-            validator=QDoubleValidator(0.0, 1.0, 3),  # 0-1 A range for smua
-        )
-        layout.addWidget(self._setpoint_input, 1)
-        
-        # DESIGN: RULE-COPY-007 imperative
-        self._apply_btn = SecondaryButton("Применить")
-        self._apply_btn.clicked.connect(self._on_apply)
-        layout.addWidget(self._apply_btn)
-        
-        return row
-    
-    def _build_measured_grid(self) -> QWidget:
-        row = QWidget()
-        layout = QGridLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(theme.SPACE_5)
-        layout.setVerticalSpacing(theme.SPACE_1)
-        
-        # DESIGN: RULE-TYPO-003 tnum for all measured values
-        measured_font = QFont(theme.FONT_MONO, theme.FONT_MONO_VALUE_SIZE)
-        measured_font.setFeature("tnum", 1)
-        measured_font.setFeature("liga", 0)
-        
-        self._measured_labels: dict[str, QLabel] = {}
-        for i, (key, caption) in enumerate([
-            ("primary",   "Измерено:"),
-            ("secondary", "—"),        # placeholder; label text updates per mode
-            ("power",     "Мощность:"),
-        ]):
-            cap_label = QLabel(caption)
-            cap_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-            layout.addWidget(cap_label, i, 0)
-            
-            val_label = QLabel("—")
-            val_label.setFont(measured_font)
-            val_label.setStyleSheet(f"color: {theme.FOREGROUND};")
-            layout.addWidget(val_label, i, 1)
-            self._measured_labels[key] = val_label
-        
-        return row
-    
-    def _build_output_row(self) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_2)
-        
-        # DESIGN: RULE-A11Y-002 icon + text for output state
-        self._output_indicator = InlineIndicator("Выход: откл", "stale")
-        layout.addWidget(self._output_indicator)
-        
-        layout.addStretch()
-        
-        # DESIGN: RULE-INTER-004 — enable is destructive-level (needs confirmation)
-        # We use SecondaryButton for toggle; confirmation happens at dialog level
-        # on enable only; disable proceeds without confirmation
-        self._output_toggle = SecondaryButton("Вкл выход")
-        self._output_toggle.clicked.connect(self._on_output_toggle)
-        layout.addWidget(self._output_toggle)
-        
-        return row
-    
-    def _on_output_toggle(self) -> None:
-        # DESIGN: RULE-INTER-004 — confirmation on enable only
-        if self._current_state.output_enabled:
-            # Disable = safe direction, proceed
-            self.output_toggle_requested.emit(False)
-        else:
-            # Enable = destructive direction, confirm
-            dialog = Dialog(
-                parent=self.window(),
-                title=f"Включить выход канала {self._title.text()}?",
-                body=(
-                    f"Будет подан {self._current_state.setpoint:.3f} "
-                    f"{'А' if self._current_state.mode == 'current' else 'В'} "
-                    f"на оборудование. Убедитесь, что подключение корректно."
-                ),
-                primary_label="Включить",
-                primary_role="destructive",
-                cancel_label="Отмена",
-                icon_status="warning",
-                default_focus="cancel",
-            )
-            def on_result(result: str):
-                if result == Dialog.ACCEPTED:
-                    self.output_toggle_requested.emit(True)
-            dialog.finished.connect(on_result)
-            dialog.open()
-    
-    def _on_apply(self) -> None:
-        try:
-            value = float(self._setpoint_input.text().replace(",", "."))
-            self.setpoint_apply_requested.emit(value)
-        except ValueError:
-            self._setpoint_input.set_error("Введите число")
-    
-    def set_state(self, state: SmuChannelState) -> None:
-        # DESIGN: RULE-DATA-001 atomic
-        self._current_state = state
-        self._mode_tabs.set_selected(state.mode)
-        
-        # Setpoint — update unit label per mode
-        unit = "А" if state.mode == "current" else "В" if state.mode == "voltage" else ""
-        # (InputField API would need method to update unit; ref only)
-        
-        # Measured — labels + values per mode
-        if state.mode == "current":
-            self._measured_labels["primary"].setText(f"{state.measured_primary:.3f} А")
-            # secondary caption and value become "Напряжение: 1.23 В"
-        elif state.mode == "voltage":
-            self._measured_labels["primary"].setText(f"{state.measured_primary:.3f} В")
-        self._measured_labels["power"].setText(f"{state.power_w:.3f} Вт")
-        
-        # Output state
-        if state.output_enabled:
-            self._output_indicator.set("Выход: вкл", "ok")
-            self._output_toggle.setText("Откл выход")
-        else:
-            self._output_indicator.set("Выход: откл", "stale")
-            self._output_toggle.setText("Вкл выход")
-        
-        # Fault treatment
-        if state.faulted:
-            # Apply fault-chrome via Card style override or an inline banner
-            pass
-```
+**Reading routing.** `on_reading(Reading)` inspects `reading.channel`:
+- `analytics/keithley_channel_state/smua|smub` → `metadata["state"]` drives the channel's state badge and enable/disable logic.
+- `<instrument>/smua|smub/{voltage|current|resistance|power}` → updates the matching readout label and appends `(timestamp, value)` to a per-measurement `deque(maxlen=3600)` for plot rendering.
 
-## Main panel reference (orchestration)
-
-```python
-class KeithleyPanel(QWidget):
-    setpoint_apply_requested = Signal(str, float)
-    mode_change_requested = Signal(str, str)
-    output_toggle_requested = Signal(str, bool)
-    emergency_off_requested = Signal()
-    disconnect_requested = Signal()
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5
-        )
-        outer.setSpacing(theme.SPACE_4)
-        
-        # Header row
-        outer.addWidget(self._build_header())
-        
-        # Two channel blocks side by side
-        channels_row = QHBoxLayout()
-        channels_row.setContentsMargins(0, 0, 0, 0)
-        channels_row.setSpacing(theme.GRID_GAP)
-        
-        self._smua = SmuChannelBlock("smua", "Канал А")
-        self._smub = SmuChannelBlock("smub", "Канал B")
-        
-        for ch in (self._smua, self._smub):
-            ch.setpoint_apply_requested.connect(
-                lambda v, c=ch: self.setpoint_apply_requested.emit(c._channel_key, v)
-            )
-            ch.mode_change_requested.connect(
-                lambda m, c=ch: self.mode_change_requested.emit(c._channel_key, m)
-            )
-            ch.output_toggle_requested.connect(
-                lambda enable, c=ch: self.output_toggle_requested.emit(c._channel_key, enable)
-            )
-        
-        channels_row.addWidget(self._smua, 1)
-        channels_row.addWidget(self._smub, 1)
-        outer.addLayout(channels_row)
-        
-        # Panel-level actions
-        outer.addWidget(self._build_actions_row())
-    
-    def _build_header(self) -> QWidget:
-        # DESIGN: RULE-TYPO-008 UPPERCASE category label
-        # DESIGN: RULE-COPY-002 — "Канал А / Канал B" per invariant 11 (never smua/smub in operator UI)
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_3)
-        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        
-        title = QLabel("KEITHLEY 2604B")
-        title_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        title_font.setWeight(theme.FONT_LABEL_WEIGHT)
-        title_font.setLetterSpacing(
-            QFont.SpacingType.AbsoluteSpacing, 0.05 * theme.FONT_LABEL_SIZE
-        )
-        title.setFont(title_font)
-        title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        layout.addWidget(title)
-        
-        layout.addStretch()
-        
-        # DESIGN: RULE-A11Y-002 — indicator uses dot + label (redundant channels)
-        self._connection_indicator = InlineIndicator("Подключён", "ok")
-        layout.addWidget(self._connection_indicator)
-        
-        self._smua_indicator = InlineIndicator("Канал А", "stale")
-        layout.addWidget(self._smua_indicator)
-        
-        self._smub_indicator = InlineIndicator("Канал B", "stale")
-        layout.addWidget(self._smub_indicator)
-        
-        return row
-    
-    def _build_actions_row(self) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_3)
-        
-        # DESIGN: RULE-INTER-004 — АВАР. ОТКЛ. is hold-confirm
-        # DESIGN: RULE-TYPO-005 Cyrillic uppercase letter-spacing
-        emergency_btn = HoldConfirmButton("АВАР. ОТКЛ.")
-        emergency_btn.triggered.connect(self.emergency_off_requested)
-        emergency_btn.setToolTip("Аварийное отключение обоих каналов (Ctrl+Shift+X)")
-        layout.addWidget(emergency_btn)
-        
-        layout.addStretch()
-        
-        # Disconnect — destructive-ish (triggers emergency_off per invariant 3),
-        # but slower path than АВАР. ОТКЛ.
-        disconnect_btn = GhostButton("Отключить Keithley")
-        disconnect_btn.clicked.connect(self._confirm_disconnect)
-        layout.addWidget(disconnect_btn)
-        
-        return row
-    
-    def _confirm_disconnect(self) -> None:
-        dialog = Dialog(
-            parent=self.window(),
-            title="Отключить Keithley?",
-            body=(
-                "Перед отключением будут выключены оба выхода (emergency_off). "
-                "Активный эксперимент будет прерван."
-            ),
-            primary_label="Отключить",
-            primary_role="destructive",
-            cancel_label="Отмена",
-            icon_status="warning",
-            default_focus="cancel",
-        )
-        def on_result(result: str):
-            if result == Dialog.ACCEPTED:
-                self.disconnect_requested.emit()
-        dialog.finished.connect(on_result)
-        dialog.open()
-```
+A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — reading frequency from the driver is too high for per-event plot updates). Stale check: if state == "on" and `now - last_update_ts > 5 s`, apply STATUS_STALE border + «устар.» suffix.
 
 ## Layout rules specific to this panel
 
-- **Channels side-by-side at ≥ 1100px viewport; stacked below that.** Desktop-only at 1280+ typical — side-by-side is the standard.
+- **Channels side-by-side at ≥ 1100 px viewport; stacked below that.** Desktop-only at 1280+ typical — side-by-side is the standard.
 - **Equal channel widths.** Symmetry matters for operator parity. No asymmetric «bigger smua / smaller smub».
-- **Emergency stop left-anchored, Disconnect right-anchored.** Spatial separation reduces miscick risk.
+- **Footer right-anchored.** Panel-level «Старт A+B» / «Стоп A+B» / «АВАР. ОТКЛ. A+B» all right-aligned with equal spacing.
+- **Window toolbar left-anchored.** Caption «Окно:» + three toggle buttons + stretch.
+- **SPACE_3 padding** inside channel block, **SPACE_2** between controls/readouts/plots, **SPACE_4** around panel root.
 
 ## States
 
 | Panel state | Treatment |
 |---|---|
-| **Disconnected** | All values «—»; mode tabs disabled; setpoint disabled; emergency stop disabled; disconnect → reconnect button |
-| **Connected, both outputs off** | Values show last sampled (likely zero); output toggles visible |
-| **Normal operation (one or both outputs on)** | Live updates ≤ 2Hz; output indicators STATUS_OK |
-| **Faulted** | Faulted channel has STATUS_FAULT border on its block; emergency stop button emphasized; auto-emergency_off already invoked by engine |
-| **During slew** | Setpoint shows target; measured shows current (in-progress) value; no user-visible "ramping" animation — just see measured converge |
+| **Disconnected** | All readouts «— В/А/Ом/Вт»; spins + start/stop disabled; emergency disabled (no link); «Нет связи» in STATUS_FAULT |
+| **Connected, both off** | Controls enabled, readouts show last sampled (likely zero), state badges «ВЫКЛ» in MUTED_FOREGROUND |
+| **Channel "on"** | State badge «ВКЛ» STATUS_OK; start disabled, stop/emergency enabled; spins debounced-live against engine |
+| **Channel "fault"** | State badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border on channel block; start/stop/spins disabled on the faulted channel; emergency still enabled; sibling channel unaffected |
+| **Safety gated** | Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» visible in STATUS_WARNING |
+| **Stale reading (state="on")** | Readouts keep FOREGROUND text color (RULE-DATA-005 — never dim values); readouts card gets STATUS_STALE 1 px border; each readout suffix becomes «12.345 В (устар.)» |
+| **Transient banner** | Thin colored border (STATUS_INFO / STATUS_WARNING / STATUS_FAULT); auto-clear 4 s |
 
 ## Common mistakes
 
-1. **Auto-applying setpoint on typing.** Partial values (e.g., operator typing «0.1» meaning to type «0.15») get streamed to hardware. Require explicit Apply.
-
-2. **Single-channel view.** Showing only smua with «Advanced» expanding smub. Both channels always visible. Dual-channel is the invariant.
-
-3. **Using «smua» / «smub» as operator labels.** Those are TSP identifiers. Operator sees «Канал А» / «Канал B». RULE-COPY-002.
-
-4. **Enable-output as single click.** Operator clicks «Вкл», output goes on. Too dangerous. Require confirmation (Dialog with explicit impact description).
-
-5. **Animating measured values.** Violates RULE-DATA-009. Live values snap.
-
-6. **No confirmation on disconnect.** Disconnect triggers emergency_off and interrupts experiment. Confirm via Dialog.
-
-7. **Emergency stop as regular button.** Single click accidentally triggered. Use HoldConfirmButton. RULE-INTER-004.
-
-8. **Mixing SCPI with TSP commands.** TSP-only. Never emit SCPI from UI.
-
-9. **Proportional font on measured values.** Current/voltage readouts jitter as digits change. Use FONT_MONO_VALUE. RULE-TYPO-003.
-
+1. **Inventing mode semantics.** The engine does not have a `mode` field. `p_target + v_comp + i_comp` is the complete control surface. B.7 (`920aa97`) invented Ток/Напряжение/Откл and was never wired. Do not reintroduce.
+2. **Sending debounce commands in state "off" or "fault".** Channel isn't receiving power; live limit updates are noise. Gate the debounce at both the spin event and timer timeout.
+3. **Showing stale chrome in state "off".** Channel isn't supposed to stream; stalled reading isn't a symptom. Stale only applies when state == "on".
+4. **Collapsing smub into an "advanced" disclosure.** Dual-channel is an invariant. Both always visible.
+5. **Using «smua» / «smub» as operator labels.** Those are TSP identifiers. Operator sees «Канал А» / «Канал B». RULE-COPY-002. Cyrillic А (U+0410), not Latin A.
+6. **Enable-output as single click without confirmation.** All emergency variants require a warning-variant dialog. RULE-INTER-004.
+7. **Animating measured values.** Violates RULE-DATA-009. Live values snap.
+8. **No confirmation on A+B emergency.** Must confirm with a single dialog covering both channels — not two separate confirms, not zero.
+9. **Proportional font on readout values.** Current/voltage readouts jitter as digits change. Use `FONT_MONO` + `FONT_MONO_VALUE_SIZE` + tabular figures. RULE-TYPO-003.
 10. **Ignoring slew rate in UI.** UI interpolating target values sent in frames. Don't. Engine slew-limits; UI sends final target.
-
-11. **Measured value colored STATUS_FAULT at body size.** Fails contrast. Use FOREGROUND + separate fault indicator. RULE-A11Y-003.
+11. **Coloring plot lines by quantity.** RULE-COLOR-002 reserves STATUS_* semantics and discourages per-quantity pen colors. Use `PLOT_LINE_PALETTE[channel_index]` — channel-coded, not quantity-coded.
+12. **Measured value colored STATUS_FAULT at body size.** Fails contrast. Use FOREGROUND + separate fault indicator. RULE-A11Y-003.
+13. **Blocking the GUI thread on a command.** `ZmqCommandWorker` is a `QThread`. Click handlers must spawn a worker and wire its `finished` signal; never call `send_command()` directly from a UI slot.
 
 ## Related components
 
-- `components/dialog.md` — Output enable / disconnect confirmations
-- `components/tab-group.md` — Mode selector (segmented variant)
-- `components/input-field.md` — Setpoint entry
-- `components/button.md` — HoldConfirmButton for АВАР. ОТКЛ.
-- `cryodaq-primitives/experiment-card.md` — Experiment overlay may embed a compact SMU status summary; full control in this panel
+- `components/dialog.md` — Emergency confirmation (warning variant per RULE-INTER-004).
+- `components/button.md` — Primary / Warning / Destructive button variants. Window-toolbar toggle variant is a DS coverage gap flagged in the II.6 rewrite.
+- `components/badge.md` — State badge (ВЫКЛ / ВКЛ / АВАРИЯ) alignment target.
+- `components/card.md` — Controls / readouts cards use card semantics (SURFACE_CARD background + BORDER_SUBTLE 1 px + RADIUS_MD).
+- `components/chart-tile.md` — Future alignment target for the V/I/R/P plots if Phase I.2 ChartTile primitive ships.
+- `cryodaq-primitives/analytics-panel.md` — Analytics surface consumes historical SMU data; live control lives only here.
 
 ## Changelog
 
-- 2026-04-17: Initial version. Documents dual-channel Keithley 2604B control panel. All absolute invariants from CLAUDE.md preserved (TSP-only, dual-channel, emergency-off on disconnect, SafetyManager authority). Enable-output protected by confirmation dialog; АВАР. ОТКЛ. uses hold-confirm. Channel blocks labeled «Канал А» / «Канал B» (not smua/smub) for operator UI.
+- **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec. Replaces legacy v1 surface (`widgets/keithley_panel.py` now DEPRECATED) behind `MainWindowV2` Ctrl+K. Follow-ups FU.4 (K4 custom-command popup) and FU.5 (HoldConfirm 1 s for emergency) explicitly deferred.
+- **2026-04-17 — Initial version.** Documented mode-based Keithley 2604B control panel (B.7 design). Superseded by 2026-04-18 rewrite; entry preserved for historical trace.

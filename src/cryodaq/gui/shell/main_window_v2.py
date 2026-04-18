@@ -35,6 +35,7 @@ from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
+from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
@@ -43,12 +44,42 @@ from cryodaq.gui.widgets.archive_panel import ArchivePanel
 from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.conductivity_panel import ConductivityPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
-from cryodaq.gui.widgets.keithley_panel import KeithleyPanel
 from cryodaq.gui.widgets.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
+
+_SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
+_SAFETY_REASON_MAX_CHARS = 120
+
+
+def _map_safety_state(state: str | None, reason: str) -> tuple[bool, str]:
+    """Translate engine safety state + reason into the Keithley overlay's
+    (ready, reason_text) gate input. Pure function; testable in isolation.
+
+    - Ready states (``ready`` / ``run_permitted`` / ``running``) return
+      ``(True, "")`` — normal control allowed.
+    - Blocked states return ``(False, reason_or_state_name)``. The engine's
+      free-form reason text (e.g. ``"Interlock 'vacuum_lost' tripped: ..."``)
+      is preferred; falls back to the state name when no reason is published.
+    """
+
+    if state in _SAFETY_READY_STATES:
+        return True, ""
+    fallback = state if state else "unknown"
+    text = reason.strip()
+    if not text:
+        text = fallback
+    if len(text) > _SAFETY_REASON_MAX_CHARS:
+        logger.warning(
+            "Safety reason truncated from %d to %d chars: %s",
+            len(text),
+            _SAFETY_REASON_MAX_CHARS,
+            text[:_SAFETY_REASON_MAX_CHARS],
+        )
+        text = text[:_SAFETY_REASON_MAX_CHARS] + "…"
+    return False, text
 
 
 class MainWindowV2(QMainWindow):
@@ -73,6 +104,7 @@ class MainWindowV2(QMainWindow):
         self._last_rate_time = time.monotonic()
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
+        self._last_safety_reason: str = ""
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
@@ -216,6 +248,20 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
+        # II.6 post-review: replay cached connection + safety state into
+        # the Keithley overlay on first construction. Without this the
+        # overlay stays in its default (disconnected, safety_ready=True)
+        # until the next _tick_status / safety_state event arrives.
+        if name == "source":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
+            if self._last_safety_state is not None:
+                ready, reason_text = _map_safety_state(
+                    self._last_safety_state, self._last_safety_reason
+                )
+                widget.set_safety_ready(ready, reason_text)
         # B.8: wire overlay signals
         # AnalyticsView is a primary-view QWidget with no `closed`
         # signal — nothing to wire here (the ToolRail drives navigation
@@ -292,8 +338,15 @@ class MainWindowV2(QMainWindow):
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
                 state_name = reading.metadata.get("state")
+                reason = reading.metadata.get("reason", "") or ""
                 self._last_safety_state = str(state_name) if state_name is not None else None
+                self._last_safety_reason = str(reason) if reason else ""
                 self._bottom_bar.set_safety_state(self._last_safety_state)
+                if self._keithley_panel is not None:
+                    ready, reason_text = _map_safety_state(
+                        self._last_safety_state, self._last_safety_reason
+                    )
+                    self._keithley_panel.set_safety_ready(ready, reason_text)
         if self._instrument_panel is not None:
             self._instrument_panel.on_reading(reading)
 
@@ -434,6 +487,10 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
+        # Mirror connection state onto Keithley overlay. Guard on lazy
+        # construction — panel may not exist yet.
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher

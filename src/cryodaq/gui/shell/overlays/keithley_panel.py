@@ -1,661 +1,1024 @@
-"""KeithleyPanel (v2) — dual-channel SMU control overlay.
+"""KeithleyPanel — dual-channel Keithley 2604B operator overlay (Phase II.6).
 
-Per `docs/design-system/cryodaq-primitives/keithley-panel.md` (B.7):
+Supersedes the dead B.7 mode-based shell overlay. Aligned with engine
+power-control API (``p_target`` + ``v_comp`` + ``i_comp``) and Design
+System v1.0.1 tokens.
 
-- Symmetric dual-channel layout: smua + smub shown side-by-side as
-  «Канал А» / «Канал B» (Cyrillic А per RULE-COPY-002, invariant #11).
-- Each channel: mode selector (Ток / Напряжение / Откл), setpoint
-  input + «Применить», three live readouts (primary measured,
-  secondary, power) in Fira Mono with tabular figures, output
-  indicator + «Вкл / Выкл» toggle.
-- Panel actions: АВАР. ОТКЛ. (Dialog confirmation; spec invariant #9
-  calls for HoldConfirm hold — we ship Dialog today and track
-  HoldConfirm as later work) + «Отключить Keithley» (Dialog confirm).
-- Safety integration: controls disabled when the parent pushes
-  `set_safety_ready(False)`; explanation label shows why.
-- Connection integration: when `connected=False`, all controls
-  disabled and status shows «Нет связи».
+Per channel (smua + smub, shown side-by-side as «Канал А» / «Канал B»,
+Cyrillic А per RULE-COPY-002):
+- P target / V compliance / I compliance QDoubleSpinBox, debounced 300ms
+- Старт / Стоп / АВАР. ОТКЛ. buttons
+- 4 live readouts (V / I / R / P) in Fira Mono with tabular figures
+- 4 rolling pyqtgraph plots (V / I / R / P), 2×2 grid, 10m/1h/6h window
+- State badge (ВЫКЛ / ВКЛ / АВАРИЯ) driven by backend state channel
 
-The widget is stateless beyond `set_state(KeithleyState)` / safety /
-connection pushes from the parent. All user actions fire signals; the
-parent shell routes them to the engine via ZMQ.
+Panel-level:
+- «Старт A+B» / «Стоп A+B» / «АВАР. ОТКЛ. A+B»
+- Time-window toolbar affecting both channels
+- Connection indicator, safety gate label, transient status banner
+
+Public API (MainWindowV2 push points):
+- ``on_reading(reading)``  — route a single Reading into the overlay
+- ``set_connected(ok)``    — mark Keithley connection state
+- ``set_safety_ready(ok, reason="")`` — toggle safety gate
+
+Out of scope (tracked as follow-ups):
+- FU.4: K4 custom-command popup
+- FU.5: HoldConfirm 1s hold for emergency button (shipped with QMessageBox.warning)
+- Phase III.3: removal of legacy ``widgets/keithley_panel.py``
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import math
+import time
+from collections import deque
+from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDoubleValidator, QFont
+import pyqtgraph as pg
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui._plot_style import apply_plot_style
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class SmuChannelState:
-    """Live snapshot of one SMU channel."""
-
-    key: str  # "smua" or "smub"
-    label: str  # "Канал А" or "Канал B"
-    output_enabled: bool
-    mode: str  # "current" | "voltage" | "disabled"
-    setpoint: float
-    measured_primary: float  # A if current mode, V if voltage mode
-    measured_secondary: float
-    power_w: float
-    faulted: bool = False
-
-
-@dataclass
-class KeithleyState:
-    connected: bool
-    smua: SmuChannelState
-    smub: SmuChannelState
-
-
-_MODE_ORDER = ("current", "voltage", "disabled")
-_MODE_LABELS = {
-    "current": "Ток",
+_MEASUREMENTS: tuple[str, ...] = ("voltage", "current", "resistance", "power")
+_MEASUREMENT_LABELS: dict[str, str] = {
     "voltage": "Напряжение",
-    "disabled": "Откл",
+    "current": "Ток",
+    "resistance": "Сопротивление",
+    "power": "Мощность",
 }
-_MODE_UNITS = {
-    "current": "А",
+_MEASUREMENT_UNITS: dict[str, str] = {
     "voltage": "В",
-    "disabled": "",
-}
-# Primary / secondary captions change meaning depending on mode.
-_PRIMARY_CAPTIONS = {
-    "current": "Измерено (ток):",
-    "voltage": "Измерено (напр.):",
-    "disabled": "Измерено:",
-}
-_SECONDARY_CAPTIONS = {
-    "current": "Напряжение:",
-    "voltage": "Ток:",
-    "disabled": "—",
-}
-_PRIMARY_UNITS = {
     "current": "А",
-    "voltage": "В",
-    "disabled": "",
+    "resistance": "Ом",
+    "power": "Вт",
 }
-_SECONDARY_UNITS = {
-    "current": "В",
-    "voltage": "А",
-    "disabled": "",
+
+_WINDOW_OPTIONS: tuple[tuple[str, int], ...] = (
+    ("10м", 600),
+    ("1ч", 3600),
+    ("6ч", 21600),
+)
+_DEFAULT_WINDOW_S = 600
+
+_BUFFER_MAXLEN = 3600
+_DEBOUNCE_MS = 300
+_REFRESH_MS = 500
+_STALE_AFTER_S = 5.0
+_BANNER_AUTO_CLEAR_MS = 4000
+
+_STATE_LABELS: dict[str, str] = {
+    "off": "ВЫКЛ",
+    "on": "ВКЛ",
+    "fault": "АВАРИЯ",
 }
+
+
+def _format_voltage(value: float) -> str:
+    if not math.isfinite(value):
+        return "— В"
+    return f"{value:.3f} В"
+
+
+def _format_current(value: float) -> str:
+    if not math.isfinite(value):
+        return "— А"
+    return f"{value:.4g} А"
+
+
+def _format_resistance(value: float) -> str:
+    if not math.isfinite(value):
+        return "— Ом"
+    return f"{value:.2f} Ом"
+
+
+def _format_power(value: float) -> str:
+    if not math.isfinite(value):
+        return "— Вт"
+    return f"{value:.3f} Вт"
+
+
+_FORMATTERS: dict[str, Callable[[float], str]] = {
+    "voltage": _format_voltage,
+    "current": _format_current,
+    "resistance": _format_resistance,
+    "power": _format_power,
+}
+
+
+def _mono_value_font() -> QFont:
+    """Fira Mono value font with tabular figures enabled when supported."""
+
+    font = QFont(theme.FONT_MONO)
+    font.setPixelSize(theme.FONT_MONO_VALUE_SIZE)
+    font.setWeight(QFont.Weight(theme.FONT_MONO_VALUE_WEIGHT))
+    try:
+        font.setFeature(QFont.Tag("tnum"), 1)
+    except (AttributeError, TypeError):
+        # Qt < 6.7 has no setFeature; tabular figures fall back to default.
+        pass
+    return font
+
+
+def _label_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    font.setPixelSize(theme.FONT_LABEL_SIZE)
+    font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
+    return font
+
+
+def _title_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    font.setPixelSize(theme.FONT_SIZE_LG)
+    font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+    return font
+
+
+def _tick_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    size = max(theme.FONT_LABEL_SIZE - 2, theme.FONT_SIZE_XS)
+    font.setPixelSize(size)
+    return font
+
+
+def _style_button(btn: QPushButton, variant: str) -> None:
+    """Apply DS-v1.0.1 button QSS. No dependence on legacy helpers."""
+
+    radius = theme.RADIUS_MD
+    if variant == "primary":
+        bg, fg = theme.STATUS_OK, theme.ON_PRIMARY
+    elif variant == "warning":
+        bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
+    elif variant == "destructive":
+        bg, fg = theme.STATUS_FAULT, theme.ON_DESTRUCTIVE
+    elif variant == "accent":
+        bg, fg = theme.ACCENT, theme.ON_ACCENT
+    else:  # "neutral"
+        bg, fg = theme.SURFACE_MUTED, theme.FOREGROUND
+    btn.setStyleSheet(
+        f"QPushButton {{"
+        f" background-color: {bg};"
+        f" color: {fg};"
+        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f" border-radius: {radius}px;"
+        f" padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
+        f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        f"}} "
+        f"QPushButton:disabled {{"
+        f" background-color: {theme.SURFACE_MUTED};"
+        f" color: {theme.TEXT_DISABLED};"
+        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f"}}"
+    )
 
 
 class _SmuChannelBlock(QFrame):
-    """Single channel block (smua or smub). Composed inside KeithleyPanel."""
+    """One SMU channel: header + controls + readouts + plots grid."""
 
-    setpoint_apply_requested = Signal(float)
-    mode_change_requested = Signal(str)
-    output_toggle_requested = Signal(bool)
+    channel_start_requested = Signal(str, float, float, float)
+    channel_stop_requested = Signal(str)
+    channel_emergency_requested = Signal(str)
+    channel_target_updated = Signal(str, float)
+    channel_limits_updated = Signal(str, float, float)
 
     def __init__(
-        self,
-        channel_key: str,
-        label: str,
-        parent: QWidget | None = None,
+        self, key: str, label: str, palette_index: int, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self._channel_key = channel_key
+        self._key = key
         self._label_text = label
-        self._current_mode = "disabled"
-        self._output_on = False
-        self._enabled = True
-        self.setObjectName(f"smuBlock_{channel_key}")
+        self._palette_index = palette_index
+        self._channel_state: str = "off"
+        self._connected: bool = False
+        self._safety_ready: bool = True
+        self._window_s: float = float(_DEFAULT_WINDOW_S)
+        self._workers: list[ZmqCommandWorker] = []
+        self._buffers: dict[str, deque[tuple[float, float]]] = {
+            m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS
+        }
+        self._value_labels: dict[str, QLabel] = {}
+        self._plot_widgets: dict[str, pg.PlotWidget] = {}
+        self._plots: dict[str, pg.PlotDataItem] = {}
+        self._last_update_ts: float | None = None
+        self._stale: bool = False
+
+        self.setObjectName(f"smuBlock_{key}")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
         self._build_ui()
-        self._apply_chrome(faulted=False)
-
-    def _build_ui(self) -> None:
-        col = QVBoxLayout(self)
-        col.setContentsMargins(
-            theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4
-        )
-        col.setSpacing(theme.SPACE_3)
-
-        # Title
-        title = QLabel(self._label_text, self)
-        title_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        title_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
-        title.setFont(title_font)
-        title.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        col.addWidget(title)
-
-        # Mode row
-        col.addWidget(self._build_mode_row())
-
-        # Setpoint row
-        col.addWidget(self._build_setpoint_row())
-
-        # Measured readouts
-        col.addWidget(self._build_measured_block())
-
-        # Output toggle row
-        col.addWidget(self._build_output_row())
-
-    def _build_mode_row(self) -> QWidget:
-        row = QWidget(self)
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(theme.SPACE_2)
-
-        caption = QLabel("Режим:", self)
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        caption.setFixedWidth(theme.SPACE_6 + theme.SPACE_5)
-        lay.addWidget(caption)
-
-        self._mode_group = QButtonGroup(self)
-        self._mode_buttons: dict[str, QPushButton] = {}
-        for mode in _MODE_ORDER:
-            btn = QPushButton(_MODE_LABELS[mode], self)
-            btn.setCheckable(True)
-            btn.setObjectName(f"modeTab_{self._channel_key}_{mode}")
-            btn.setStyleSheet(self._mode_tab_qss())
-            btn.clicked.connect(
-                lambda _checked=False, m=mode: self._on_mode_clicked(m)
-            )
-            self._mode_group.addButton(btn)
-            self._mode_buttons[mode] = btn
-            lay.addWidget(btn)
-        lay.addStretch(1)
-        return row
-
-    def _build_setpoint_row(self) -> QWidget:
-        row = QWidget(self)
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(theme.SPACE_2)
-
-        caption = QLabel("Установка:", self)
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        caption.setFixedWidth(theme.SPACE_6 + theme.SPACE_5)
-        lay.addWidget(caption)
-
-        self._setpoint_input = QLineEdit(self)
-        self._setpoint_input.setPlaceholderText("0.000")
-        self._setpoint_input.setObjectName(f"setpoint_{self._channel_key}")
-        self._setpoint_input.setValidator(QDoubleValidator(0.0, 1000.0, 3))
-        sp_font = QFont(theme.FONT_MONO, theme.FONT_LABEL_SIZE)
-        self._setpoint_input.setFont(sp_font)
-        self._setpoint_input.setStyleSheet(
-            f"QLineEdit {{"
-            f"background: {theme.SURFACE_CARD};"
-            f"color: {theme.FOREGROUND};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
-            f"}}"
-        )
-        lay.addWidget(self._setpoint_input, 1)
-
-        self._setpoint_unit = QLabel("А", self)
-        self._setpoint_unit.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        self._setpoint_unit.setFixedWidth(24)
-        lay.addWidget(self._setpoint_unit)
-
-        self._apply_btn = QPushButton("Применить", self)
-        self._apply_btn.setObjectName(f"apply_{self._channel_key}")
-        self._apply_btn.setStyleSheet(self._ghost_button_qss())
-        self._apply_btn.clicked.connect(self._on_apply_clicked)
-        lay.addWidget(self._apply_btn)
-        return row
-
-    def _build_measured_block(self) -> QWidget:
-        block = QFrame(self)
-        block.setObjectName(f"measured_{self._channel_key}")
-        block.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        block.setStyleSheet(
-            f"#measured_{self._channel_key} {{"
-            f"background: {theme.SURFACE_CARD};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"}}"
-        )
-        lay = QVBoxLayout(block)
-        lay.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
-        )
-        lay.setSpacing(theme.SPACE_1)
-
-        val_font = QFont(theme.FONT_MONO, theme.FONT_MONO_VALUE_SIZE)
-        val_font.setWeight(QFont.Weight(theme.FONT_MONO_VALUE_WEIGHT))
-        try:
-            val_font.setFeature(QFont.Tag("tnum"), 1)
-        except (AttributeError, TypeError, ValueError):
-            pass
-
-        def _line(caption_text: str) -> tuple[QLabel, QLabel]:
-            line = QWidget(block)
-            h = QHBoxLayout(line)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(theme.SPACE_3)
-            cap = QLabel(caption_text, line)
-            cap.setStyleSheet(
-                f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-            )
-            h.addWidget(cap, 1)
-            val = QLabel("—", line)
-            val.setFont(val_font)
-            val.setStyleSheet(
-                f"color: {theme.FOREGROUND}; background: transparent;"
-            )
-            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            h.addWidget(val, 0)
-            lay.addWidget(line)
-            return cap, val
-
-        self._primary_caption, self._primary_value = _line("Измерено:")
-        self._secondary_caption, self._secondary_value = _line("—")
-        self._power_caption, self._power_value = _line("Мощность:")
-
-        return block
-
-    def _build_output_row(self) -> QWidget:
-        row = QWidget(self)
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(theme.SPACE_3)
-
-        # RULE-A11Y-002: dot + text, not color alone.
-        self._output_dot = QLabel("●", self)
-        self._output_text = QLabel("Выход: откл", self)
-        self._set_output_indicator(on=False)
-        lay.addWidget(self._output_dot)
-        lay.addWidget(self._output_text)
-        lay.addStretch(1)
-
-        self._output_toggle = QPushButton("Вкл выход", self)
-        self._output_toggle.setObjectName(f"outputToggle_{self._channel_key}")
-        self._output_toggle.setStyleSheet(self._ghost_button_qss())
-        self._output_toggle.clicked.connect(self._on_output_toggle_clicked)
-        lay.addWidget(self._output_toggle)
-        return row
+        self._wire_debounce_timers()
+        self._apply_frame_style()
+        self._apply_state_visuals()
+        self._update_control_enablement()
 
     # ------------------------------------------------------------------
-    # External setters (called by KeithleyPanel)
+    # UI construction
     # ------------------------------------------------------------------
-
-    def apply_state(self, state: SmuChannelState) -> None:
-        self._current_mode = state.mode
-        self._output_on = state.output_enabled
-
-        # Mode buttons
-        for mode, btn in self._mode_buttons.items():
-            btn.setChecked(mode == state.mode)
-
-        # Setpoint: only update text if user isn't mid-edit (not focused)
-        if not self._setpoint_input.hasFocus():
-            self._setpoint_input.setText(f"{state.setpoint:.3f}")
-        self._setpoint_unit.setText(_MODE_UNITS.get(state.mode, ""))
-
-        # Measured readouts
-        self._primary_caption.setText(_PRIMARY_CAPTIONS[state.mode])
-        self._secondary_caption.setText(_SECONDARY_CAPTIONS[state.mode])
-        self._primary_value.setText(
-            self._format_measured(state.measured_primary, _PRIMARY_UNITS[state.mode])
-        )
-        self._secondary_value.setText(
-            self._format_measured(state.measured_secondary, _SECONDARY_UNITS[state.mode])
-        )
-        self._power_value.setText(self._format_measured(state.power_w, "Вт"))
-
-        # Output indicator + toggle label
-        self._set_output_indicator(on=state.output_enabled)
-        self._output_toggle.setText("Выкл выход" if state.output_enabled else "Вкл выход")
-
-        # Fault chrome
-        self._apply_chrome(faulted=state.faulted)
-
-    def set_enabled(self, enabled: bool) -> None:
-        """Enable/disable all interactive controls (safety / connection gate)."""
-        self._enabled = enabled
-        for btn in self._mode_buttons.values():
-            btn.setEnabled(enabled)
-        self._setpoint_input.setEnabled(enabled)
-        self._apply_btn.setEnabled(enabled)
-        self._output_toggle.setEnabled(enabled)
-
-    # ------------------------------------------------------------------
-    # Internal handlers
-    # ------------------------------------------------------------------
-
-    def _on_mode_clicked(self, mode: str) -> None:
-        if mode == self._current_mode:
-            return
-        self.mode_change_requested.emit(mode)
-
-    def _on_apply_clicked(self) -> None:
-        raw = self._setpoint_input.text().strip().replace(",", ".")
-        try:
-            value = float(raw)
-        except ValueError:
-            return  # validator should have blocked non-numeric already
-        self.setpoint_apply_requested.emit(value)
-
-    def _on_output_toggle_clicked(self) -> None:
-        target = not self._output_on
-        if target:
-            # RULE-INTER-004: enabling output is destructive-level — confirm.
-            reply = QMessageBox.question(
-                self.window() or self,
-                "Включить выход?",
-                (
-                    f"Будет включён выход {self._label_text}. "
-                    "Убедись, что установка и режим корректны."
-                ),
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Ok:
-                return
-        # Disable path runs without confirmation (safe direction).
-        self.output_toggle_requested.emit(target)
-
-    def _apply_chrome(self, *, faulted: bool) -> None:
-        base = (
-            f"#smuBlock_{self._channel_key} {{"
-            f"background: {theme.SURFACE_ELEVATED};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_LG}px;"
-        )
-        if faulted:
-            base += f"border-left: 3px solid {theme.STATUS_FAULT};"
-        base += "}"
-        self.setStyleSheet(base)
-
-    def _set_output_indicator(self, *, on: bool) -> None:
-        color = theme.STATUS_OK if on else theme.STATUS_STALE
-        self._output_dot.setStyleSheet(
-            f"color: {color}; background: transparent; font-size: 14px;"
-        )
-        self._output_text.setText("Выход: вкл" if on else "Выход: откл")
-        self._output_text.setStyleSheet(
-            f"color: {color if on else theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-
-    @staticmethod
-    def _format_measured(value: float, unit: str) -> str:
-        if unit == "":
-            return "—"
-        if abs(value) < 1e-3 and value != 0:
-            return f"{value * 1000:.3f} м{unit}"
-        return f"{value:.3f} {unit}"
-
-    def _mode_tab_qss(self) -> str:
-        return (
-            "QPushButton {"
-            f"background: transparent;"
-            f"color: {theme.MUTED_FOREGROUND};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
-            f"font-family: '{theme.FONT_BODY}';"
-            f"font-size: {theme.FONT_LABEL_SIZE}px;"
-            "}"
-            "QPushButton:checked {"
-            f"background: {theme.ACCENT};"
-            f"color: {theme.ON_PRIMARY};"
-            f"border-color: {theme.ACCENT};"
-            "}"
-            "QPushButton:hover:!checked {"
-            f"background: {theme.MUTED};"
-            f"color: {theme.FOREGROUND};"
-            "}"
-        )
-
-    @staticmethod
-    def _ghost_button_qss() -> str:
-        return (
-            "QPushButton {"
-            f"background: transparent;"
-            f"color: {theme.FOREGROUND};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
-            f"font-family: '{theme.FONT_BODY}';"
-            f"font-size: {theme.FONT_LABEL_SIZE}px;"
-            "}"
-            "QPushButton:hover {"
-            f"background: {theme.MUTED};"
-            "}"
-            "QPushButton:disabled {"
-            f"color: {theme.MUTED_FOREGROUND};"
-            f"border-color: {theme.BORDER_SUBTLE};"
-            "}"
-        )
-
-
-class KeithleyPanel(QWidget):
-    """Full dual-channel Keithley 2604B overlay panel (v2)."""
-
-    # Per-channel user actions
-    setpoint_apply_requested = Signal(str, float)  # (channel_key, value)
-    mode_change_requested = Signal(str, str)  # (channel_key, mode)
-    output_toggle_requested = Signal(str, bool)  # (channel_key, enable)
-
-    # Panel-level
-    emergency_off_requested = Signal()
-    disconnect_requested = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("keithleyPanel")
-        self._connected = True
-        self._safety_ready = True
-        self._safety_reason = ""
-        self._build_ui()
-        self._refresh_gate()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5
+        root.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        root.setSpacing(theme.SPACE_2)
+
+        root.addWidget(self._build_header_row())
+        root.addWidget(self._build_controls_card())
+        root.addWidget(self._build_readouts_card())
+        root.addWidget(self._build_plots_grid(), stretch=1)
+
+    def _build_header_row(self) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_2)
+
+        self._title_label = QLabel(self._label_text)
+        self._title_label.setFont(_title_font())
+        self._title_label.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
         )
-        root.setSpacing(theme.SPACE_4)
+        layout.addWidget(self._title_label)
+        layout.addStretch()
 
-        # Header
-        header = QWidget(self)
-        hlay = QHBoxLayout(header)
-        hlay.setContentsMargins(0, 0, 0, 0)
-        hlay.setSpacing(theme.SPACE_4)
+        self._state_badge = QLabel(_STATE_LABELS["off"])
+        badge_font = _label_font()
+        badge_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+        self._state_badge.setFont(badge_font)
+        layout.addWidget(self._state_badge)
 
-        title = QLabel("KEITHLEY 2604B", self)
-        title_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_LG)
-        title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
-        title.setFont(title_font)
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent;"
+        return row
+
+    def _build_controls_card(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName(f"smuControls_{self._key}")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"#smuControls_{self._key} {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            f"}}"
         )
-        hlay.addWidget(title)
 
-        self._connection_label = QLabel("● Подключён", self)
-        self._connection_label.setStyleSheet(
-            f"color: {theme.STATUS_OK}; background: transparent;"
-        )
-        hlay.addStretch(1)
-        hlay.addWidget(self._connection_label)
-        root.addWidget(header)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
+        layout.setSpacing(theme.SPACE_2)
 
-        # Two channel blocks side-by-side
-        channels_row = QWidget(self)
-        chlay = QHBoxLayout(channels_row)
-        chlay.setContentsMargins(0, 0, 0, 0)
-        chlay.setSpacing(theme.SPACE_4)
+        layout.addWidget(self._caption("P цель (Вт):"))
+        self._p_spin = self._spinbox(0.0, 10.0, 0.5, 0.1, 3)
+        layout.addWidget(self._p_spin)
 
-        self._smua_block = _SmuChannelBlock("smua", "Канал А", self)
-        self._smub_block = _SmuChannelBlock("smub", "Канал B", self)
+        layout.addWidget(self._caption("V предел (В):"))
+        self._v_spin = self._spinbox(0.0, 200.0, 40.0, 1.0, 2)
+        layout.addWidget(self._v_spin)
 
-        for block, key in ((self._smua_block, "smua"), (self._smub_block, "smub")):
-            block.setpoint_apply_requested.connect(
-                lambda v, k=key: self.setpoint_apply_requested.emit(k, v)
-            )
-            block.mode_change_requested.connect(
-                lambda m, k=key: self.mode_change_requested.emit(k, m)
-            )
-            block.output_toggle_requested.connect(
-                lambda on, k=key: self.output_toggle_requested.emit(k, on)
-            )
-            chlay.addWidget(block, 1)
-        root.addWidget(channels_row, 1)
+        layout.addWidget(self._caption("I предел (А):"))
+        self._i_spin = self._spinbox(0.0, 3.0, 1.0, 0.1, 3)
+        layout.addWidget(self._i_spin)
 
-        # Safety / connection reason (shown when controls are gated)
-        self._gate_reason_label = QLabel("", self)
-        self._gate_reason_label.setObjectName("keithleyGateReason")
-        self._gate_reason_label.setStyleSheet(
-            f"color: {theme.STATUS_WARNING}; background: transparent;"
-        )
-        self._gate_reason_label.setVisible(False)
-        root.addWidget(self._gate_reason_label)
+        layout.addStretch()
 
-        # Panel-level action row
-        actions = QWidget(self)
-        alay = QHBoxLayout(actions)
-        alay.setContentsMargins(0, 0, 0, 0)
-        alay.setSpacing(theme.SPACE_3)
+        self._start_btn = QPushButton("Старт")
+        _style_button(self._start_btn, "primary")
+        self._start_btn.clicked.connect(self._on_start_clicked)
+        layout.addWidget(self._start_btn)
 
-        self._emergency_btn = QPushButton("АВАР. ОТКЛ.", self)
-        self._emergency_btn.setObjectName("keithleyEmergencyBtn")
-        self._emergency_btn.setStyleSheet(
-            "QPushButton {"
-            f"background: {theme.STATUS_FAULT};"
-            f"color: {theme.ON_DESTRUCTIVE};"
-            f"border: none;"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"padding: {theme.SPACE_2}px {theme.SPACE_4}px;"
-            f"font-family: '{theme.FONT_BODY}';"
-            f"font-size: {theme.FONT_LABEL_SIZE}px;"
-            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
-            "}"
-            "QPushButton:hover {"
-            # DESTRUCTIVE_PRESSED token is a proposed followup (see
-            # MANIFEST #200 DESTRUCTIVE_PRESSED). Until it lands, use
-            # the STATUS_FAULT base colour for the hover state.
-            f"background: {theme.STATUS_FAULT};"
-            "}"
-        )
+        self._stop_btn = QPushButton("Стоп")
+        _style_button(self._stop_btn, "warning")
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        layout.addWidget(self._stop_btn)
+
+        self._emergency_btn = QPushButton("АВАР. ОТКЛ.")
+        _style_button(self._emergency_btn, "destructive")
         self._emergency_btn.clicked.connect(self._on_emergency_clicked)
-        alay.addWidget(self._emergency_btn)
+        layout.addWidget(self._emergency_btn)
 
-        alay.addStretch(1)
+        return card
 
-        self._disconnect_btn = QPushButton("Отключить Keithley", self)
-        self._disconnect_btn.setObjectName("keithleyDisconnectBtn")
-        self._disconnect_btn.setStyleSheet(_SmuChannelBlock._ghost_button_qss())
-        self._disconnect_btn.clicked.connect(self._on_disconnect_clicked)
-        alay.addWidget(self._disconnect_btn)
+    def _build_readouts_card(self) -> QWidget:
+        self._readouts_card = QFrame()
+        self._readouts_card.setObjectName(f"smuReadouts_{self._key}")
+        self._readouts_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._readouts_card_default_style = (
+            f"#smuReadouts_{self._key} {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            f"}}"
+        )
+        self._readouts_card.setStyleSheet(self._readouts_card_default_style)
 
-        root.addWidget(actions)
+        layout = QHBoxLayout(self._readouts_card)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
+        layout.setSpacing(theme.SPACE_2)
+
+        for key in _MEASUREMENTS:
+            tile = self._build_readout_tile(key)
+            layout.addWidget(tile, stretch=1)
+
+        return self._readouts_card
+
+    def _build_readout_tile(self, key: str) -> QWidget:
+        tile = QWidget()
+        tile_layout = QVBoxLayout(tile)
+        tile_layout.setContentsMargins(theme.SPACE_2, theme.SPACE_1, theme.SPACE_2, theme.SPACE_1)
+        tile_layout.setSpacing(theme.SPACE_1)
+
+        title = QLabel(_MEASUREMENT_LABELS[key])
+        title.setFont(_label_font())
+        title.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile_layout.addWidget(title)
+
+        value = QLabel(f"— {_MEASUREMENT_UNITS[key]}")
+        value.setFont(_mono_value_font())
+        value.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile_layout.addWidget(value)
+
+        self._value_labels[key] = value
+        return tile
+
+    def _build_plots_grid(self) -> QWidget:
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(theme.SPACE_2)
+
+        pen_color = theme.PLOT_LINE_PALETTE[self._palette_index % len(theme.PLOT_LINE_PALETTE)]
+        pen = pg.mkPen(color=pen_color, width=theme.PLOT_LINE_WIDTH)
+        tick_font = _tick_font()
+
+        for idx, key in enumerate(_MEASUREMENTS):
+            plot = pg.PlotWidget()
+            apply_plot_style(plot)
+            item = plot.getPlotItem()
+            item.setLabel(
+                "left",
+                _MEASUREMENT_LABELS[key],
+                units=_MEASUREMENT_UNITS[key],
+            )
+            for axis_name in ("left", "bottom"):
+                axis = item.getAxis(axis_name)
+                if axis is not None:
+                    axis.setStyle(tickFont=tick_font)
+            plot_item = plot.plot([], [], pen=pen)
+            self._plot_widgets[key] = plot
+            self._plots[key] = plot_item
+            row, col = divmod(idx, 2)
+            grid.addWidget(plot, row, col)
+
+        return grid_widget
 
     # ------------------------------------------------------------------
-    # Public API — parent pushes state
+    # Styling helpers
     # ------------------------------------------------------------------
 
-    def set_state(self, state: KeithleyState) -> None:
-        self._connected = state.connected
-        if state.connected:
+    def _apply_frame_style(self) -> None:
+        border_color = theme.STATUS_FAULT if self._channel_state == "fault" else theme.BORDER_SUBTLE
+        border_width = 3 if self._channel_state == "fault" else 1
+        self.setStyleSheet(
+            f"#smuBlock_{self._key} {{"
+            f" background-color: {theme.SURFACE_PANEL};"
+            f" border: {border_width}px solid {border_color};"
+            f" border-radius: {theme.RADIUS_LG}px;"
+            f"}}"
+        )
+
+    def _apply_state_visuals(self) -> None:
+        text = _STATE_LABELS.get(self._channel_state, _STATE_LABELS["off"])
+        self._state_badge.setText(text)
+        if self._channel_state == "on":
+            color = theme.STATUS_OK
+        elif self._channel_state == "fault":
+            color = theme.STATUS_FAULT
+        else:
+            color = theme.MUTED_FOREGROUND
+        self._state_badge.setStyleSheet(
+            f"color: {color}; background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        self._apply_frame_style()
+
+    def _apply_readouts_style(self) -> None:
+        if self._stale:
+            self._readouts_card.setStyleSheet(
+                f"#smuReadouts_{self._key} {{"
+                f" background-color: {theme.SURFACE_CARD};"
+                f" border: 1px solid {theme.STATUS_STALE};"
+                f" border-radius: {theme.RADIUS_MD}px;"
+                f"}}"
+            )
+        else:
+            self._readouts_card.setStyleSheet(self._readouts_card_default_style)
+
+    # ------------------------------------------------------------------
+    # Debounce wiring
+    # ------------------------------------------------------------------
+
+    def _wire_debounce_timers(self) -> None:
+        self._p_debounce = QTimer(self)
+        self._p_debounce.setSingleShot(True)
+        self._p_debounce.setInterval(_DEBOUNCE_MS)
+        self._p_debounce.timeout.connect(self._send_p_target)
+
+        self._limits_debounce = QTimer(self)
+        self._limits_debounce.setSingleShot(True)
+        self._limits_debounce.setInterval(_DEBOUNCE_MS)
+        self._limits_debounce.timeout.connect(self._send_limits)
+
+        self._p_spin.valueChanged.connect(self._on_p_spin_changed)
+        self._v_spin.valueChanged.connect(self._on_limit_spin_changed)
+        self._i_spin.valueChanged.connect(self._on_limit_spin_changed)
+
+    # ------------------------------------------------------------------
+    # Primitives
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _caption(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setFont(_label_font())
+        label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        return label
+
+    @staticmethod
+    def _spinbox(
+        minimum: float, maximum: float, value: float, step: float, decimals: int
+    ) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        spin.setValue(value)
+        spin.setFixedWidth(96)
+        return spin
+
+    # ------------------------------------------------------------------
+    # Click handlers
+    # ------------------------------------------------------------------
+
+    def _on_start_clicked(self) -> None:
+        p = float(self._p_spin.value())
+        v = float(self._v_spin.value())
+        i = float(self._i_spin.value())
+        self.channel_start_requested.emit(self._key, p, v, i)
+        self._dispatch_command(
+            {
+                "cmd": "keithley_start",
+                "channel": self._key,
+                "p_target": p,
+                "v_comp": v,
+                "i_comp": i,
+            }
+        )
+
+    def _on_stop_clicked(self) -> None:
+        self.channel_stop_requested.emit(self._key)
+        self._dispatch_command({"cmd": "keithley_stop", "channel": self._key})
+
+    def _on_emergency_clicked(self) -> None:
+        answer = QMessageBox.warning(
+            self,
+            "Аварийное отключение",
+            (
+                f"Подтвердите аварийное отключение канала "
+                f"{self._label_text}. Действие немедленно обрывает "
+                f"подачу питания."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        self.channel_emergency_requested.emit(self._key)
+        self._dispatch_command({"cmd": "keithley_emergency_off", "channel": self._key})
+
+    def _on_p_spin_changed(self, value: float) -> None:
+        if self._channel_state != "on" or value <= 0:
+            return
+        self._p_debounce.start()
+
+    def _on_limit_spin_changed(self, _value: float | None = None) -> None:
+        if self._channel_state != "on":
+            return
+        self._limits_debounce.start()
+
+    def _send_p_target(self) -> None:
+        if self._channel_state != "on":
+            return
+        p = float(self._p_spin.value())
+        if p <= 0:
+            return
+        self.channel_target_updated.emit(self._key, p)
+        self._dispatch_command(
+            {
+                "cmd": "keithley_set_target",
+                "channel": self._key,
+                "p_target": p,
+            }
+        )
+
+    def _send_limits(self) -> None:
+        if self._channel_state != "on":
+            return
+        v = float(self._v_spin.value())
+        i = float(self._i_spin.value())
+        if v <= 0 or i <= 0:
+            return
+        self.channel_limits_updated.emit(self._key, v, i)
+        self._dispatch_command(
+            {
+                "cmd": "keithley_set_limits",
+                "channel": self._key,
+                "v_comp": v,
+                "i_comp": i,
+            }
+        )
+
+    def _dispatch_command(self, cmd: dict) -> None:
+        """Fire-and-forget ZMQ command. Result is logged; UI does not block."""
+
+        worker = ZmqCommandWorker(cmd, parent=self)
+        worker.finished.connect(self._on_command_result)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_command_result(self, result: dict) -> None:
+        if not result.get("ok", False):
+            logger.warning(
+                "Keithley command failed on %s: %s",
+                self._key,
+                result.get("error"),
+            )
+        self._workers = [w for w in self._workers if w.isRunning()]
+
+    # ------------------------------------------------------------------
+    # Public state pushers
+    # ------------------------------------------------------------------
+
+    def apply_state(self, state: str) -> None:
+        normalized = state.lower() if state else "off"
+        if normalized not in _STATE_LABELS:
+            normalized = "off"
+        if normalized == self._channel_state:
+            return
+        self._channel_state = normalized
+        self._apply_state_visuals()
+        self._update_control_enablement()
+        # When not "on", clear stale styling — channel isn't expected to
+        # publish live measurements.
+        if self._channel_state != "on" and self._stale:
+            self._stale = False
+            self._apply_readouts_style()
+            self._strip_stale_suffix()
+
+    def set_connected(self, connected: bool) -> None:
+        if connected == self._connected:
+            return
+        self._connected = connected
+        self._update_control_enablement()
+
+    def set_safety_ready(self, ready: bool) -> None:
+        if ready == self._safety_ready:
+            return
+        self._safety_ready = ready
+        self._update_control_enablement()
+
+    def set_window(self, seconds: float) -> None:
+        self._window_s = max(1.0, float(seconds))
+
+    def _update_control_enablement(self) -> None:
+        interactive_ok = self._connected and self._safety_ready
+        self._p_spin.setEnabled(interactive_ok)
+        self._v_spin.setEnabled(interactive_ok)
+        self._i_spin.setEnabled(interactive_ok)
+        start_enabled = interactive_ok and self._channel_state != "on"
+        stop_enabled = interactive_ok and self._channel_state == "on"
+        self._start_btn.setEnabled(start_enabled)
+        self._stop_btn.setEnabled(stop_enabled)
+        # Emergency stays reachable whenever we have a live link, even if
+        # safety preconditions block normal control. It's the escape hatch.
+        self._emergency_btn.setEnabled(self._connected)
+
+    # ------------------------------------------------------------------
+    # Readings + refresh
+    # ------------------------------------------------------------------
+
+    def handle_reading(self, suffix: str, reading: Reading) -> None:
+        if suffix not in self._buffers:
+            return
+        ts = reading.timestamp.timestamp()
+        self._buffers[suffix].append((ts, reading.value))
+        self._last_update_ts = ts
+        formatter = _FORMATTERS[suffix]
+        self._value_labels[suffix].setText(formatter(reading.value))
+        if self._stale:
+            self._stale = False
+            self._apply_readouts_style()
+
+    def refresh(self, now: float) -> None:
+        self._refresh_plots(now)
+        self._refresh_stale(now)
+
+    def _refresh_plots(self, now: float) -> None:
+        x_min = now - self._window_s
+        visible: list[tuple[str, list[float], list[float]]] = []
+        earliest = now
+        for key in _MEASUREMENTS:
+            buffer = self._buffers[key]
+            xs: list[float] = []
+            ys: list[float] = []
+            for ts, value in buffer:
+                if ts < x_min:
+                    continue
+                xs.append(ts - now)
+                ys.append(value)
+            visible.append((key, xs, ys))
+            if xs:
+                earliest = min(earliest, now + xs[0])
+
+        left = max(-self._window_s, earliest - now)
+        for key, xs, ys in visible:
+            self._plots[key].setData(xs, ys)
+            plot_item = self._plot_widgets[key].getPlotItem()
+            plot_item.setXRange(left, 0, padding=0)
+
+    def _refresh_stale(self, now: float) -> None:
+        should_be_stale = (
+            self._channel_state == "on"
+            and self._last_update_ts is not None
+            and (now - self._last_update_ts) > _STALE_AFTER_S
+        )
+        if should_be_stale == self._stale:
+            return
+        self._stale = should_be_stale
+        self._apply_readouts_style()
+        if self._stale:
+            self._apply_stale_suffix()
+        else:
+            self._strip_stale_suffix()
+
+    def _apply_stale_suffix(self) -> None:
+        for key, label in self._value_labels.items():
+            text = label.text()
+            if "(устар.)" in text:
+                continue
+            label.setText(f"{text} (устар.)")
+
+    def _strip_stale_suffix(self) -> None:
+        for label in self._value_labels.values():
+            text = label.text().replace(" (устар.)", "").replace("(устар.)", "")
+            label.setText(text)
+
+
+class KeithleyPanel(QWidget):
+    """Dual-channel Keithley operator overlay."""
+
+    channel_start_requested = Signal(str, float, float, float)
+    channel_stop_requested = Signal(str)
+    channel_emergency_requested = Signal(str)
+    channel_target_updated = Signal(str, float)
+    channel_limits_updated = Signal(str, float, float)
+    both_channels_start_requested = Signal()
+    both_channels_stop_requested = Signal()
+    both_channels_emergency_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._connected: bool = False
+        self._safety_ready: bool = True
+        self._active_window_s: int = _DEFAULT_WINDOW_S
+        self._window_buttons: dict[int, QPushButton] = {}
+        self._banner_timer = QTimer(self)
+        self._banner_timer.setSingleShot(True)
+        self._banner_timer.setInterval(_BANNER_AUTO_CLEAR_MS)
+        self._banner_timer.timeout.connect(self.clear_message)
+
+        self.setObjectName("keithleyPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"#keithleyPanel {{ background-color: {theme.BACKGROUND}; }}")
+
+        self._smua_block = _SmuChannelBlock("smua", "Канал А", palette_index=0)
+        self._smub_block = _SmuChannelBlock("smub", "Канал B", palette_index=1)
+        self._blocks: dict[str, _SmuChannelBlock] = {
+            "smua": self._smua_block,
+            "smub": self._smub_block,
+        }
+
+        self._build_ui()
+        self._wire_block_signals()
+        self._highlight_active_window(self._active_window_s)
+        self.set_connected(False)
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(_REFRESH_MS)
+        self._refresh_timer.timeout.connect(self._on_refresh_tick)
+        self._refresh_timer.start()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(theme.SPACE_4, theme.SPACE_3, theme.SPACE_4, theme.SPACE_3)
+        root.setSpacing(theme.SPACE_3)
+
+        root.addWidget(self._build_header())
+        root.addWidget(self._build_banner())
+        root.addWidget(self._build_gate_label())
+        root.addWidget(self._build_window_toolbar())
+
+        channels = QHBoxLayout()
+        channels.setContentsMargins(0, 0, 0, 0)
+        channels.setSpacing(theme.SPACE_3)
+        channels.addWidget(self._smua_block, stretch=1)
+        channels.addWidget(self._smub_block, stretch=1)
+        root.addLayout(channels, stretch=1)
+
+        root.addWidget(self._build_footer())
+
+    def _build_header(self) -> QWidget:
+        header = QWidget()
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_2)
+
+        title = QLabel("KEITHLEY 2604B")
+        title_font = _title_font()
+        title_font.setPixelSize(theme.FONT_SIZE_XL)
+        title.setFont(title_font)
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        layout.addWidget(title)
+        layout.addStretch()
+
+        self._connection_label = QLabel("● Нет связи")
+        conn_font = _label_font()
+        conn_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+        self._connection_label.setFont(conn_font)
+        self._connection_label.setStyleSheet(
+            f"color: {theme.STATUS_FAULT}; background: transparent; border: none;"
+        )
+        layout.addWidget(self._connection_label)
+        return header
+
+    def _build_banner(self) -> QWidget:
+        self._banner_label = QLabel("")
+        self._banner_label.setFont(_label_font())
+        self._banner_label.setVisible(False)
+        self._banner_label.setObjectName("keithleyBanner")
+        self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._banner_label.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
+        )
+        return self._banner_label
+
+    def _build_gate_label(self) -> QWidget:
+        self._gate_reason_label = QLabel("")
+        self._gate_reason_label.setFont(_label_font())
+        self._gate_reason_label.setVisible(False)
+        self._gate_reason_label.setStyleSheet(
+            f"color: {theme.STATUS_WARNING};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        return self._gate_reason_label
+
+    def _build_window_toolbar(self) -> QWidget:
+        toolbar = QWidget()
+        layout = QHBoxLayout(toolbar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_1)
+
+        caption = QLabel("Окно:")
+        caption.setFont(_label_font())
+        caption.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        layout.addWidget(caption)
+
+        for label, seconds in _WINDOW_OPTIONS:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedSize(48, 24)
+            btn.clicked.connect(lambda _checked, s=seconds: self._on_window_selected(s))
+            self._window_buttons[seconds] = btn
+            layout.addWidget(btn)
+        layout.addStretch()
+        return toolbar
+
+    def _build_footer(self) -> QWidget:
+        footer = QWidget()
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_2)
+
+        layout.addStretch()
+
+        self._start_both_btn = QPushButton("Старт A+B")
+        _style_button(self._start_both_btn, "primary")
+        self._start_both_btn.clicked.connect(self._on_start_both)
+        layout.addWidget(self._start_both_btn)
+
+        self._stop_both_btn = QPushButton("Стоп A+B")
+        _style_button(self._stop_both_btn, "warning")
+        self._stop_both_btn.clicked.connect(self._on_stop_both)
+        layout.addWidget(self._stop_both_btn)
+
+        self._emergency_both_btn = QPushButton("АВАР. ОТКЛ. A+B")
+        _style_button(self._emergency_both_btn, "destructive")
+        self._emergency_both_btn.clicked.connect(self._on_emergency_both)
+        layout.addWidget(self._emergency_both_btn)
+        return footer
+
+    # ------------------------------------------------------------------
+    # Signal relays from channel blocks
+    # ------------------------------------------------------------------
+
+    def _wire_block_signals(self) -> None:
+        for block in self._blocks.values():
+            block.channel_start_requested.connect(self.channel_start_requested)
+            block.channel_stop_requested.connect(self.channel_stop_requested)
+            block.channel_emergency_requested.connect(self.channel_emergency_requested)
+            block.channel_target_updated.connect(self.channel_target_updated)
+            block.channel_limits_updated.connect(self.channel_limits_updated)
+
+    # ------------------------------------------------------------------
+    # A+B handlers
+    # ------------------------------------------------------------------
+
+    def _on_start_both(self) -> None:
+        self.both_channels_start_requested.emit()
+        for block in self._blocks.values():
+            block._on_start_clicked()
+        self.show_info("Команды запуска отправлены для обоих каналов.")
+
+    def _on_stop_both(self) -> None:
+        self.both_channels_stop_requested.emit()
+        for block in self._blocks.values():
+            block._on_stop_clicked()
+        self.show_info("Команды остановки отправлены для обоих каналов.")
+
+    def _on_emergency_both(self) -> None:
+        answer = QMessageBox.warning(
+            self,
+            "Аварийное отключение A+B",
+            (
+                "Подтвердите аварийное отключение обоих каналов. "
+                "Действие немедленно обрывает подачу питания на smua и smub."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        self.both_channels_emergency_requested.emit()
+        for block in self._blocks.values():
+            # Sub-blocks dispatch the actual command; they skip their own
+            # confirmation because the panel-level dialog already
+            # confirmed both channels.
+            block.channel_emergency_requested.emit(block._key)
+            block._dispatch_command({"cmd": "keithley_emergency_off", "channel": block._key})
+        self.show_warning("Аварийное отключение A+B отправлено. Дождитесь подтверждения состояния.")
+
+    # ------------------------------------------------------------------
+    # Window toolbar
+    # ------------------------------------------------------------------
+
+    def _on_window_selected(self, seconds: int) -> None:
+        self._active_window_s = seconds
+        for block in self._blocks.values():
+            block.set_window(float(seconds))
+        self._highlight_active_window(seconds)
+
+    def _highlight_active_window(self, seconds: int) -> None:
+        for s, btn in self._window_buttons.items():
+            active = s == seconds
+            btn.setChecked(active)
+            variant = "accent" if active else "neutral"
+            _style_button(btn, variant)
+
+    # ------------------------------------------------------------------
+    # Public state pushers
+    # ------------------------------------------------------------------
+
+    def on_reading(self, reading: Reading) -> None:
+        channel = reading.channel
+        if channel.startswith("analytics/keithley_channel_state/"):
+            key = channel.rsplit("/", 1)[-1]
+            block = self._blocks.get(key)
+            if block is not None:
+                state = str(reading.metadata.get("state", "off"))
+                block.apply_state(state)
+            return
+
+        for key, block in self._blocks.items():
+            if f"/{key}/" not in channel:
+                continue
+            for suffix in _MEASUREMENTS:
+                if channel.endswith(f"/{suffix}"):
+                    block.handle_reading(suffix, reading)
+                    return
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        if connected:
             self._connection_label.setText("● Подключён")
             self._connection_label.setStyleSheet(
-                f"color: {theme.STATUS_OK}; background: transparent;"
+                f"color: {theme.STATUS_OK};"
+                f" background: transparent; border: none;"
+                f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
             )
         else:
             self._connection_label.setText("● Нет связи")
             self._connection_label.setStyleSheet(
-                f"color: {theme.STATUS_FAULT}; background: transparent;"
+                f"color: {theme.STATUS_FAULT};"
+                f" background: transparent; border: none;"
+                f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
             )
-        self._smua_block.apply_state(state.smua)
-        self._smub_block.apply_state(state.smub)
-        self._refresh_gate()
+        for block in self._blocks.values():
+            block.set_connected(connected)
+        self._update_both_buttons_enablement()
 
     def set_safety_ready(self, ready: bool, reason: str = "") -> None:
-        """Gate controls on SafetyManager state.
-
-        When `ready=False`, all interactive controls (mode, setpoint,
-        output toggle) are disabled and `reason` is displayed so the
-        operator knows why.
-        """
         self._safety_ready = ready
-        self._safety_reason = reason
-        self._refresh_gate()
-
-    # ------------------------------------------------------------------
-    # Internal gating
-    # ------------------------------------------------------------------
-
-    def _refresh_gate(self) -> None:
-        controls_enabled = self._connected and self._safety_ready
-        self._smua_block.set_enabled(controls_enabled)
-        self._smub_block.set_enabled(controls_enabled)
-
-        # Reason label only for safety gate (not connection — connection
-        # already has the «Нет связи» header indicator).
-        if not self._safety_ready and self._connected:
-            msg = self._safety_reason or "SafetyManager не в состоянии ready"
-            self._gate_reason_label.setText(f"Управление заблокировано: {msg}")
+        for block in self._blocks.values():
+            block.set_safety_ready(ready)
+        if not ready:
+            text = "Управление заблокировано"
+            if reason:
+                text = f"{text}: {reason}"
+            self._gate_reason_label.setText(text)
             self._gate_reason_label.setVisible(True)
         else:
             self._gate_reason_label.setVisible(False)
+            self._gate_reason_label.setText("")
+        self._update_both_buttons_enablement()
 
-        # Emergency stop remains available even when gated — it's the
-        # escape hatch. Disconnect button also stays enabled so operator
-        # can cleanly pull Keithley out if safety is latched.
-        self._emergency_btn.setEnabled(True)
-        self._disconnect_btn.setEnabled(self._connected)
+    def _update_both_buttons_enablement(self) -> None:
+        gated = self._connected and self._safety_ready
+        self._start_both_btn.setEnabled(gated)
+        self._stop_both_btn.setEnabled(gated)
+        self._emergency_both_btn.setEnabled(self._connected)
 
     # ------------------------------------------------------------------
-    # Destructive action handlers
+    # Status banner
     # ------------------------------------------------------------------
 
-    def _on_emergency_clicked(self) -> None:
-        # RULE-INTER-004: destructive, requires confirmation.
-        # Spec invariant #9 calls for HoldConfirm 1s hold; we ship Dialog
-        # confirmation today and track HoldConfirm as later work.
-        reply = QMessageBox.warning(
-            self.window() or self,
-            "Аварийное отключение Keithley",
-            (
-                "Будут немедленно отключены оба канала smua и smub. "
-                "Эксперимент может перейти в fault_latched. Продолжить?"
-            ),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Ok:
-            self.emergency_off_requested.emit()
+    def show_info(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_INFO)
 
-    def _on_disconnect_clicked(self) -> None:
-        reply = QMessageBox.question(
-            self.window() or self,
-            "Отключить Keithley?",
-            (
-                "Будут сначала отключены оба канала (emergency_off), "
-                "затем освобождено USB-соединение. Продолжить?"
-            ),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+    def show_warning(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_WARNING)
+
+    def show_error(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_FAULT)
+
+    def clear_message(self) -> None:
+        self._banner_label.setVisible(False)
+        self._banner_label.setText("")
+        self._banner_timer.stop()
+
+    def _set_banner(self, text: str, color: str) -> None:
+        self._banner_label.setText(text)
+        self._banner_label.setStyleSheet(
+            f"#keithleyBanner {{"
+            f" color: {theme.FOREGROUND};"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {color};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f"}}"
         )
-        if reply == QMessageBox.StandardButton.Ok:
-            self.disconnect_requested.emit()
+        self._banner_label.setVisible(True)
+        self._banner_timer.start()
+
+    # ------------------------------------------------------------------
+    # Refresh loop
+    # ------------------------------------------------------------------
+
+    def _on_refresh_tick(self) -> None:
+        now = time.time()
+        for block in self._blocks.values():
+            block.refresh(now)

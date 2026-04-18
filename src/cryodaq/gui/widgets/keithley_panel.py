@@ -1,4 +1,12 @@
-"""Keithley 2604B operator panel with backend-driven channel status."""
+"""Keithley 2604B operator panel with backend-driven channel status.
+
+DEPRECATED (Phase II.6): Replaced by
+``src/cryodaq/gui/shell/overlays/keithley_panel.py``. This module is
+kept alive for the transitional ``main_window.py`` path only and is
+not wired into ``MainWindowV2``. Scheduled for removal in Phase III.3
+legacy cleanup. Do not add features here; all new work lands in the
+shell overlay.
+"""
 
 from __future__ import annotations
 

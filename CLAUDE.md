@@ -350,6 +350,12 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
 
+## Кодировка файлов
+
+- **Python source / Markdown / YAML source in repo** — UTF-8 **без BOM** (стандарт Python 3; все исходники в `src/`, `tests/`, `docs/`, `config/` свободны от BOM). Проверено `file src/cryodaq/gui/shell/overlays/*.py` и hex-head `head -c 3 file.py` → `"""` / `---`, не `EF BB BF`.
+- **BOM применяется только к** operator-facing CSV-выгрузкам (`storage/csv_export.py`) — Excel на русской Windows корректно читает Cyrillic только при BOM-префиксе. Это per-usecase решение, не общее правило репо.
+- Не добавлять BOM к Python-файлам / markdown-спекам / YAML-конфигам. Если внешний обзор флагует BOM-инвариант для source — это misapplication; ссылка на этот раздел.
+
 ## Дисциплина релизов
 
 Документация курируется на границах релизов, не перезаписывается
