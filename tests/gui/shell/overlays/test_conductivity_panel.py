@@ -719,6 +719,52 @@ def test_prediction_placeholder_returns_on_single_selection(app):
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
 
 
+def test_stability_header_empty_state_instructs_operator(app):
+    """IV.2 A.1 — empty-state text must explain required action, not just dash.
+
+    Before the fix the label rendered 'Стабильность: —' when no sensors
+    were selected. That reads as "stable at an unknown value" rather than
+    "nothing to compute stability on yet" — operators paused waiting for
+    numbers that would never arrive.
+    """
+    panel = ConductivityPanel()
+    assert panel._chain == []
+    panel._update_stability()
+    text = panel._stability_label.text()
+    assert "выберите датчики" in text
+    # No lonely dash that reads as a number.
+    assert text != "Стабильность: —"
+
+
+def test_power_label_shows_waiting_before_first_reading(app):
+    """IV.2 A.1 — idle-at-zero vs feed-dropped must look different."""
+    panel = ConductivityPanel()
+    assert panel._power_received is False
+    panel._update_power_label()
+    assert "ожидание данных" in panel._power_label.text()
+    # Specifically not the broken "P = 0 Вт" shape.
+    assert panel._power_label.text() != "P = 0 Вт"
+
+
+def test_power_label_shows_value_after_first_reading(app):
+    """Once any power reading lands, the label formats normally."""
+    panel = ConductivityPanel()
+    panel.on_reading(_power_reading(0.5))
+    panel._update_power_label()
+    assert "0.5" in panel._power_label.text()
+    assert "Вт" in panel._power_label.text()
+    assert "ожидание" not in panel._power_label.text()
+
+
+def test_power_label_zero_after_reading_is_genuine_zero(app):
+    """P = 0 after a real reading is a legitimate value, not a waiting state."""
+    panel = ConductivityPanel()
+    panel.on_reading(_power_reading(0.0))
+    panel._update_power_label()
+    assert "P = 0" in panel._power_label.text()
+    assert "ожидание" not in panel._power_label.text()
+
+
 def test_prediction_stack_synced_via_refresh_tick_too(app):
     """Refresh path also syncs the stack — guard against chain mutations
     that bypass _on_check (future code paths)."""

@@ -217,6 +217,12 @@ class ConductivityPanel(QWidget):
         self._connected: bool = False
         self._temps: dict[str, float] = {}
         self._power: float = 0.0
+        # IV.2 A.1: distinguish "never received a reading" from "received P=0".
+        # Without this flag the refresh tick renders "P = 0 Вт" from the moment
+        # the panel opens, which is indistinguishable from a genuine zero-power
+        # steady state. The flag is flipped the first time any power reading
+        # lands via on_reading.
+        self._power_received: bool = False
         self._power_channel: str = _POWER_CHANNELS[0]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
         self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
@@ -425,7 +431,7 @@ class ConductivityPanel(QWidget):
         indicator_row.setContentsMargins(0, 0, 0, 0)
         indicator_row.setSpacing(theme.SPACE_3)
 
-        self._stability_label = QLabel("Стабильность: —")
+        self._stability_label = QLabel("Стабильность: выберите датчики")
         self._stability_label.setFont(_label_font())
         self._stability_label.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND};"
@@ -434,7 +440,7 @@ class ConductivityPanel(QWidget):
         )
         indicator_row.addWidget(self._stability_label)
 
-        self._power_label = QLabel("P = — Вт")
+        self._power_label = QLabel("P = ожидание данных")
         self._power_label.setFont(_mono_value_font())
         self._power_label.setStyleSheet(
             f"color: {theme.FOREGROUND}; background: transparent; border: none;"
@@ -801,6 +807,7 @@ class ConductivityPanel(QWidget):
             self._predictor.add_point(ch_id, ts, reading.value)
         if ch == self._power_channel:
             self._power = reading.value
+            self._power_received = True
 
     # ------------------------------------------------------------------
     # Refresh
@@ -815,8 +822,20 @@ class ConductivityPanel(QWidget):
         self._update_stability()
         self._update_banner(all_preds)
         self._update_plot()
-        self._power_label.setText(f"P = {self._power:.6g} Вт")
+        self._update_power_label()
         self._write_flight_log(now, all_preds)
+
+    def _update_power_label(self) -> None:
+        """Render the live power readout with an explicit waiting state.
+
+        IV.2 A.1: until a power reading has actually arrived, the label
+        reads "P = ожидание данных" instead of "P = 0 Вт" — otherwise
+        an idle-at-zero setpoint looks identical to a dropped feed.
+        """
+        if not self._power_received:
+            self._power_label.setText("P = ожидание данных")
+            return
+        self._power_label.setText(f"P = {self._power:.6g} Вт")
 
     def _update_table(self, preds: dict) -> None:
         # IV.1 finding 5: stack state is kept in sync via both the
@@ -987,8 +1006,12 @@ class ConductivityPanel(QWidget):
         )
 
     def _update_stability(self) -> None:
+        # IV.2 A.1: the empty-state text is operator-facing and must
+        # explain the required setup step, not just show an em-dash.
+        # "Стабильность: —" on its own reads as "stable at an unknown
+        # value" — the new copy makes the action explicit.
         if not self._chain:
-            self._stability_label.setText("Стабильность: —")
+            self._stability_label.setText("Стабильность: выберите датчики")
             self._stability_label.setStyleSheet(
                 f"color: {theme.MUTED_FOREGROUND};"
                 f" background: transparent; border: none;"
