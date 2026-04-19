@@ -684,8 +684,8 @@ class LauncherWindow(QMainWindow):
             self,
             "Применить тему",
             f"Применить тему «{pack_name}»?\n\n"
-            "Интерфейс будет перезапущен (≈1 секунда). Engine и запись "
-            "данных не прерываются.",
+            "Engine и интерфейс будут перезапущены (≈3 секунды). "
+            "Активный эксперимент и запись данных возобновятся автоматически.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -713,10 +713,35 @@ class LauncherWindow(QMainWindow):
         make partial reload fragile. A full process replacement is the
         single robust path.
 
-        Engine subprocess persists because it was started via
-        subprocess.Popen without job-object binding; orphaned children
-        reparent to init on POSIX and continue serving the ZMQ ports.
+        Engine + bridge are shut down explicitly before execv. Letting the
+        orphaned engine survive re-parenting was deadlocking the REP port
+        (5556) — the orphaned bridge's mid-flight REQ was never consumed
+        by its dead peer, so every subsequent REQ from the new launcher's
+        bridge queued behind the stranded reply and timed out. Cold-start
+        everything from scratch is the only robust path.
         """
+        logger.info("theme: stopping engine + bridge before exec")
+        # Order matters: shut down the bridge first so no REQ is mid-flight,
+        # then terminate engine. Same sequence as _do_shutdown but without
+        # QApplication.quit().
+        try:
+            self._bridge.shutdown()
+        except Exception:
+            logger.exception("theme: bridge shutdown failed (continuing)")
+        try:
+            self._stop_engine()
+        except Exception:
+            logger.exception("theme: engine stop failed (continuing)")
+
+        # Release launcher lock so the re-execed launcher can re-acquire
+        # it; otherwise it hits the "CryoDAQ Launcher уже запущен" modal.
+        if self._lock_fd is not None:
+            try:
+                release_lock(self._lock_fd, ".launcher.lock")
+            except Exception:
+                logger.exception("theme: launcher lock release failed")
+            self._lock_fd = None
+
         logger.info("theme: re-executing launcher to apply new theme")
         os.execv(sys.executable, [sys.executable, "-m", "cryodaq.launcher", *sys.argv[1:]])
 

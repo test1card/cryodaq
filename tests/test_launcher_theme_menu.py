@@ -39,12 +39,13 @@ def test_theme_menu_calls_loader_helpers() -> None:
 def test_theme_selection_prompts_confirmation() -> None:
     src = LAUNCHER.read_text(encoding="utf-8")
     # The operator must see a confirmation dialog before restart so they
-    # can cancel if the app is in a dangerous state. The confirmation
-    # mentions that engine is not interrupted.
+    # can cancel if the app is in a dangerous state. The dialog now warns
+    # that engine is also restarted (IV.1 finding 1 — the prior "engine
+    # keeps running" claim was incorrect, orphaned engine deadlocked REP).
     assert "QMessageBox.question" in src
     assert "Применить тему" in src
-    assert "Engine и запись" in src
-    assert "не прерываются" in src
+    assert "Engine и интерфейс будут перезапущены" in src
+    assert "возобновятся автоматически" in src
 
 
 def test_theme_selection_writes_before_restart() -> None:
