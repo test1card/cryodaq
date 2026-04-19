@@ -9,6 +9,31 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **Phase II.13 legacy cleanup.** All DEPRECATED-marked Phase I-era
+  widgets deleted now that their shell-v2 overlay replacements
+  (II.1-II.9) ship with Host Integration Contract. Removed source
+  files:
+  - `src/cryodaq/gui/widgets/alarm_panel.py` (superseded by II.4).
+  - `src/cryodaq/gui/widgets/archive_panel.py` (superseded by II.2).
+  - `src/cryodaq/gui/widgets/calibration_panel.py` (superseded by II.7).
+  - `src/cryodaq/gui/widgets/conductivity_panel.py` (superseded by II.5).
+  - `src/cryodaq/gui/widgets/instrument_status.py` (superseded by II.8).
+  - `src/cryodaq/gui/widgets/sensor_diag_panel.py` (superseded by II.8 — folded into `InstrumentsPanel._SensorDiagSection`).
+  - `src/cryodaq/gui/widgets/keithley_panel.py` (superseded by II.6).
+  - `src/cryodaq/gui/widgets/operator_log_panel.py` (superseded by II.3).
+  - `src/cryodaq/gui/widgets/experiment_workspace.py` (superseded by II.9; shell overlay retained at `shell/experiment_overlay.py` per Path A).
+  - `src/cryodaq/gui/widgets/autosweep_panel.py` (pre-Phase-II DEPRECATED).
+  - `src/cryodaq/gui/main_window.py` (v1 tab-based main window; `cryodaq-gui` entry point was already on `MainWindowV2` via `gui/app.py` since Phase I.1).
+  Removed test files: 7 legacy widget-specific tests (archive,
+  calibration, experiment_workspace, keithley_panel_contract,
+  main_window_calibration_integration, operator_log_panel,
+  sensor_diag_panel). `widgets/common.py` retained — still consumed
+  by non-DEPRECATED widgets (shift_handover, pressure_panel,
+  overview_panel, connection_settings, vacuum_trend_panel,
+  analytics_panel, channel_editor, temp_panel, experiment_dialogs).
+
 ### Changed
 
 - **Phase II.9 ExperimentOverlay harmonized — DS v1.0.1 (Path A).**

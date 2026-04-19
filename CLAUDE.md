@@ -258,28 +258,26 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/theme.py` — foundation design tokens (colors, fonts, spacing) — 139 tokens, see design-system v1.0.1
 - `src/cryodaq/gui/zmq_client.py` — ZMQ bridge client for GUI (all ZMQ lives in a subprocess)
 
-**GUI — Legacy panels (v1, pre-Phase-I.1, kept alive until Block B.7)**
+**GUI — Ancillary widgets (non-overlay surfaces)**
 
-- `src/cryodaq/gui/main_window.py` — legacy v1 main window; today's actual shortcut bindings (`Ctrl+L/E/1-9`, `F5`, `Ctrl+Shift+X`); `Ctrl+1-9` is transitional rail-slot scheme being phased out per AD-002
+Remaining widget modules after Phase II.13 legacy cleanup. All
+`MainWindow`-era overlays (alarm / archive / calibration / conductivity
+/ instrument_status / sensor_diag_panel / keithley / operator_log /
+experiment_workspace / autosweep) were deleted in II.13 and replaced by
+shell-v2 overlays under `src/cryodaq/gui/shell/overlays/`. The v1 tab
+main window (`gui/main_window.py`) was also retired in II.13 — the
+`cryodaq-gui` entry point has used `MainWindowV2` via `gui/app.py` since
+Phase I.1.
+
 - `src/cryodaq/gui/tray_status.py` — system-tray status indicator
-- `src/cryodaq/gui/widgets/alarm_panel.py` — панель тревог (AlarmPanel)
 - `src/cryodaq/gui/widgets/analytics_panel.py` — R_thermal + прогноз охлаждения
-- `src/cryodaq/gui/widgets/archive_panel.py`
-- `src/cryodaq/gui/widgets/autosweep_panel.py` — DEPRECATED
-- `src/cryodaq/gui/widgets/calibration_panel.py` — три режима (Setup/Acquisition/Results)
 - `src/cryodaq/gui/widgets/channel_editor.py` — редактор каналов (видимость, имена)
-- `src/cryodaq/gui/widgets/common.py` — shared helpers / mixins for v1 widgets
-- `src/cryodaq/gui/widgets/conductivity_panel.py` — теплопроводность + автоизмерение
+- `src/cryodaq/gui/widgets/common.py` — shared helpers / mixins (retained — consumed by remaining widgets listed below)
 - `src/cryodaq/gui/widgets/connection_settings.py` — диалог настройки подключения приборов
 - `src/cryodaq/gui/widgets/experiment_dialogs.py` — диалоги старта/завершения эксперимента (legacy)
-- `src/cryodaq/gui/widgets/experiment_workspace.py` — фазы, карточка эксперимента
-- `src/cryodaq/gui/widgets/instrument_status.py` — вкладка приборов + адаптивный liveness
-- `src/cryodaq/gui/widgets/keithley_panel.py`
-- `src/cryodaq/gui/widgets/operator_log_panel.py`
 - `src/cryodaq/gui/widgets/overview_panel.py` — двухколоночный: графики + карточки
 - `src/cryodaq/gui/widgets/preflight_dialog.py` — предполётная проверка перед экспериментом
 - `src/cryodaq/gui/widgets/pressure_panel.py` — панель давления (вакуумметр)
-- `src/cryodaq/gui/widgets/sensor_diag_panel.py` — диагностика датчиков
 - `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
 - `src/cryodaq/gui/widgets/temp_panel.py` — панель отображения температурных каналов (24 канала)
 - `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
@@ -349,6 +347,23 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - Operator-facing GUI text should remain in Russian.
 - No numpy/scipy в drivers/core (исключение: core/sensor_diagnostics.py — MAD/корреляция).
 - Scheduler writes to SQLite before publishing to brokers.
+
+## Codex self-review loop (mandatory for block commits)
+
+**Автономный workflow:** после каждого **initial block commit** (новый overlay / новая feature surface / engine wiring) и каждого **amend-fix в ответ на предыдущий Codex FAIL** Claude Code вызывает Codex через slash-команду `/codex`, самостоятельно читает verdict, решает amend или close по правилам `docs/CODEX_SELF_REVIEW_PLAYBOOK.md`, и продолжает до PASS или 3-cycle limit — без ожидания `continue` от architect.
+
+**Полный playbook:** `docs/CODEX_SELF_REVIEW_PLAYBOOK.md` — autonomy mode rules, canonical prompt template, fix-amend template, invocation pattern, model selection (gpt-5.4 high reasoning ОБЯЗАТЕЛЬНО), anti-patterns, max-cycle limit, decision tree для FAIL findings. Читать перед каждым block commit.
+
+**Short version:**
+- **Когда звать Codex:** initial block commit + любой amend после FAIL.
+- **Когда НЕ звать:** doc-only commits, theme/YAML drops, cleanup commits, уже PASS на текущем SHA.
+- **Модель:** `gpt-5.4` с high reasoning effort — ОБЯЗАТЕЛЬНО. `/codex` по умолчанию берёт o3, который слаб для нашего workflow. Всегда указывать в первых строках prompt блока `Model: gpt-5.4 / Reasoning effort: high` + inline flags если plugin их поддерживает. Если Codex ответил как o3 — retry с override.
+- **На FAIL — автономно:** CRITICAL/HIGH → amend без спроса; MEDIUM <3 файлов скоп → amend без спроса; LOW trivial → amend, иначе в residual risks; design-decision FAIL (wine vs blue, layout choice) → STOP + surface to architect.
+- **Когда ОБЯЗАТЕЛЬНО surface к architect:** genuine architectural fork в Stage 0 (missing engine API, duplicate backend); design-decision FAIL; 3 amend cycles без PASS; out-of-scope требования Codex; pre-commit gates fail в чужом коде.
+- **Лимит:** 3 amend cycles на блок. 4-я попытка — STOP, что-то структурное сломано.
+- **Репорт architect’у в конце:** финальный SHA + Codex PASS summary + residual risks list (если есть). Architect видит результат, не процесс.
+
+Это не replacement для architect review — Vladimir finalizes каждый block. Это фильтр первой ступени: Codex ловит очевидные DS leaks / token slips / pattern mismatches до того как они дойдут до architect, освобождая Vladimir'у context для архитектурных вопросов.
 
 ## CI budget discipline
 
