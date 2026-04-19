@@ -1,5 +1,12 @@
 """Calibration v2 panel — three-mode: Setup, Acquisition, Results.
 
+DEPRECATED (Phase II.7): Replaced by
+``src/cryodaq/gui/shell/overlays/calibration_panel.py``. This module
+is kept alive for the transitional ``main_window.py`` path only and
+is not wired into ``MainWindowV2``. Scheduled for removal in Phase
+III.3 legacy cleanup. Do not add features here; all new work lands
+in the shell overlay.
+
 Auto-switches based on calibration_acquisition_status:
 - acquisition active → CalibrationAcquisitionWidget
 - completed data exists → CalibrationResultsWidget

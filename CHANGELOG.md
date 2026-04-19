@@ -9,6 +9,38 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Phase II.7 CalibrationOverlay rebuilt + command wiring.**
+  Three-mode overlay at
+  `src/cryodaq/gui/shell/overlays/calibration_panel.py` replaces the
+  legacy v1 widget. QStackedWidget (Setup / Acquisition / Results)
+  auto-switch preserved verbatim (3 s engine poll on
+  `calibration_acquisition_status`). CoverageBar migrated from
+  hardcoded hex (`#2ECC40` / `#FFDC00` / `#FF851B` / `#333333`) to
+  DS tokens (dense → STATUS_OK, medium → STATUS_CAUTION, sparse →
+  STATUS_WARNING, empty → MUTED_FOREGROUND). **K3 mandate completed:**
+  all six previously-unwired import / export / runtime-apply buttons
+  now dispatch real engine commands via `ZmqCommandWorker`:
+  `calibration_curve_import` (with `QFileDialog.getOpenFileName`
+  picker per format), `calibration_curve_export` (with
+  `QFileDialog.getSaveFileName` picker, format-specific path parameter),
+  `calibration_runtime_set_global`,
+  `calibration_runtime_set_channel_policy` (chained via
+  `calibration_curve_lookup` to resolve `curve_id`). Acquisition
+  widget's `_experiment_label` / `_elapsed_label` now populated from
+  poll result (v1 declared them but never wrote). Public accessors
+  `get_current_mode()` / `is_acquisition_active()` added for future
+  finalize guards. Host Integration Contract wired:
+  `MainWindowV2._tick_status` connection mirror +
+  `_ensure_overlay("calibration")` replay; readings routing (shell
+  dispatches `unit=="K"` to overlay, overlay filters for
+  `_raw` / `sensor_unit` in acquisition mode) preserved from v1. Zero
+  legacy tokens / zero emoji / zero hardcoded hex (pre-commit gates
+  clean). Legacy widget at
+  `src/cryodaq/gui/widgets/calibration_panel.py` marked DEPRECATED;
+  removal in Phase III.3.
+
 ### Added
 
 - **Six new themes: signal, instrument, amber (dark); gost, xcode,

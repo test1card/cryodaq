@@ -36,6 +36,7 @@ from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
 from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
+from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
@@ -43,7 +44,6 @@ from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
 from cryodaq.gui.widgets.alarm_panel import AlarmPanel
-from cryodaq.gui.widgets.calibration_panel import CalibrationPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
@@ -279,6 +279,12 @@ class MainWindowV2(QMainWindow):
             widget.set_connected(derived_connected)
         # Phase II.5: replay connection state into Conductivity overlay.
         if name == "conductivity":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
+        # Phase II.7: replay connection state into Calibration overlay.
+        if name == "calibration":
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
@@ -521,6 +527,9 @@ class MainWindowV2(QMainWindow):
         # Phase II.5: mirror to Conductivity overlay (same contract).
         if self._conductivity_panel is not None:
             self._conductivity_panel.set_connected(connected)
+        # Phase II.7: mirror to Calibration overlay (same contract).
+        if self._calibration_panel is not None:
+            self._calibration_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
