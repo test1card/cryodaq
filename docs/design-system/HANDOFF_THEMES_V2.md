@@ -1,10 +1,20 @@
 # HANDOFF — Themes v2: шесть новых палитр
 
-**Статус:** Spec, ожидает implementation (Settings → Тема menu wiring).
+**Статус:** Landed (`26059fa` data + `e015295` menu wiring, 2026-04-19).
 **Дата:** 2026-04-19
 **ADR:** [001-light-theme-status-unlock.md](./adr/001-light-theme-status-unlock.md)
 **Файлы:** `config/themes/signal.yaml`, `instrument.yaml`, `amber.yaml`,
 `gost.yaml`, `xcode.yaml`, `braun.yaml` (all present, 25 tokens each).
+
+**Empirical note (added post-landing):** при имплементации CC
+подтвердил что из 12 тем в `config/themes/` только три —
+`gost`, `xcode`, `braun` — имеют истинно светлый substrate
+(BG luminance > 0.8). Темы с «warm» в названиях
+(`warm_stone`, `ochre_bloom`, `taupe_quiet`, `rose_dusk`) —
+*dark* по substrate (BG luminance < 0.02). В launcher menu order
+и тестах использована empirical classification, не
+интуитивно-nominal. Shifted-L STATUS-комплект (ADR 001)
+применяется только к трём истинно-light темам.
 
 ---
 

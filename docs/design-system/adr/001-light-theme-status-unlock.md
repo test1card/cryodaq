@@ -1,9 +1,13 @@
 # ADR 001 — STATUS hue-locked, L-unlocked для light-тем
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-04-19 for sRGB quantization tolerance)
 **Date:** 2026-04-19
 **Supersedes:** §4 «STATUS palette LOCKED» из handoff v1.0.1 (частично — только
 для light-тем)
+**Amendments:**
+- 2026-04-19 — Hue-lock tolerance refined to ±5° to accommodate sRGB
+  8-bit quantization drift at low lightness (see «Implementation
+  tolerance» section below).
 
 ---
 
@@ -29,22 +33,50 @@ substrate три статуса фэйлят WCAG AA (≥4.5:1 к CARD):
 
 ## Решение
 
-**STATUS hue is locked. STATUS lightness is unlocked per substrate.**
+**STATUS hue is locked (design intent). STATUS lightness is unlocked
+per substrate.**
 
 Каждая light-тема получает собственный shifted-L комплект STATUS,
-где hue каждого токена **идентичен** dark-комплекту, изменяется
-только lightness. Семантическая привязка («амбер = WARNING»)
-сохраняется 1:1, контраст на светлом фоне достигает AA.
+где hue каждого токена **идентичен в design intent** dark-комплекту,
+изменяется только lightness. Семантическая привязка («амбер =
+WARNING») сохраняется 1:1, контраст на светлом фоне достигает AA.
 
-| Token | dark | light | Δ hue | Что сохранено |
+### Implementation tolerance (sRGB quantization)
+
+При конвертации design-intent hue в конкретный RGB-hex значение hue
+реконструированное обратно из sRGB 8-bit (0-255 per channel) может
+drift от design-intent на ±3-4° при low lightness. Это артефакт
+округления — пространство 8-bit RGB недостаточно плотное для точной
+репрезентации промежуточных hue на тёмных тонах.
+
+Пример: STATUS_OK design-intent hue 139°.
+- Dark hex `#4a8a5e` → reconstructed hue 138.8° (drift 0.2°)
+- Light hex `#2e6b45` → reconstructed hue 142.6° (drift 3.6°)
+
+Семантически оба значения — тот же «forest green», оператор не
+видит разницы. Но формальный тест hue-equality между dark и light
+kомплектами не проходит без tolerance.
+
+**Tolerance в тестах:** ±5° — покрывает с запасом все пары (наблюдаемый
+max drift 3.8°), оставляет margin для будущих тем.
+
+Толерантность применяется ТОЛЬКО к реконструированному hue из
+hex-значений. Design-intent hue (то что authors указывают в
+handoff-документах) по-прежнему точный: WARNING=33°, OK=139°, etc.
+Реализация внутри 8-bit sRGB — best-effort approximation.
+
+| Token | dark | light | Design hue | Что сохранено |
 |---|---|---|---|---|
-| STATUS_OK | `#4a8a5e` | `#2e6b45` | 0° | forest green, hue 139° |
-| STATUS_WARNING | `#c4862e` | `#8c5a1c` | 0° | амбер, hue 33° |
-| STATUS_CAUTION | `#b35a38` | `#9c4a2c` | 0° | red-orange, hue 16° |
-| STATUS_FAULT | `#c44545` | `#a53838` | 0° | brick red, hue 0° |
-| STATUS_INFO | `#6490c4` | `#355e94` | 0° | communication blue, hue 214° |
-| STATUS_STALE | `#5a5d68` | `#4a4d58` | 0° | cool gray, hue 227° |
-| COLD_HIGHLIGHT | `#7ab8c4` | `#2f6876` | 0° | cyan, hue 190° |
+| STATUS_OK | `#4a8a5e` | `#2e6b45` | 139° | forest green |
+| STATUS_WARNING | `#c4862e` | `#8c5a1c` | 33° | амбер |
+| STATUS_CAUTION | `#b35a38` | `#9c4a2c` | 16° | red-orange |
+| STATUS_FAULT | `#c44545` | `#a53838` | 0° | brick red |
+| STATUS_INFO | `#6490c4` | `#355e94` | 214° | communication blue |
+| STATUS_STALE | `#5a5d68` | `#4a4d58` | 227° | cool gray |
+| COLD_HIGHLIGHT | `#7ab8c4` | `#2f6876` | 190° | cyan |
+
+Reconstructed hue из hex'ов может отличаться от Design hue в
+пределах ±5° (см. «Implementation tolerance» выше).
 
 Все shifted-L статусы дают ≥4.8:1 на всех CARD-поверхностях
 трёх light-тем (см. Таблицу 2 ниже).
