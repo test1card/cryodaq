@@ -315,7 +315,7 @@ class AlarmPanel(QWidget):
         layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         layout.setSpacing(theme.SPACE_2)
 
-        title = QLabel("Текущие тревоги (v1)")
+        title = QLabel("Пороговые тревоги")
         title.setFont(_section_title_font())
         title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(title)
@@ -346,7 +346,7 @@ class AlarmPanel(QWidget):
         layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         layout.setSpacing(theme.SPACE_2)
 
-        title = QLabel("Физические тревоги (v2)")
+        title = QLabel("Фазо-зависимые тревоги")
         title.setFont(_section_title_font())
         title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(title)

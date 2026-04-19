@@ -611,6 +611,69 @@ rg -n "QGraphicsDropShadowEffect" src/cryodaq/gui/
 
 ---
 
+## RULE-SURF-011: Empty-state surface must explain, not just be blank
+
+**TL;DR:** A data container (table, chart, tile, widget) with no content MUST render an explicit instructional placeholder that tells the operator which setup step unlocks the data. A lone dash, a header-only table, or an empty plot reads as broken or loading forever.
+
+**Statement:** Whenever a data container reaches a genuine empty state — before the operator selects sensors, before a reading arrives, before an experiment starts — the container MUST swap its body for a placeholder element that:
+
+1. Acknowledges the empty state explicitly (don't render silence).
+2. Names the action the operator needs to take next (imperative verb per RULE-COPY-007).
+3. Uses muted foreground + italic styling to distinguish the placeholder from live data.
+
+A bare em-dash ("Стабильность: —") reads as "stable at an unknown value" — the operator waits for numbers that will never arrive. A QTableWidget rendering only its header row reads as "loading" — the operator assumes a request is in flight and eventually asks the architect if something broke. A blank chart frame reads as "engine feed dropped." All three patterns actively mislead.
+
+**Applies to:** overlay content regions, dashboard tiles, prediction tables, analytics charts, archive lists — any surface whose entire purpose is to show runtime data and which has an observable "no data yet" state.
+
+**Example (bad):**
+
+```python
+# Prediction table header remains visible, body is empty rows.
+# Reads as "loading" forever.
+self._table = QTableWidget(0, len(_COL_HEADERS))
+self._table.setHorizontalHeaderLabels(list(_COL_HEADERS))
+layout.addWidget(self._table)
+# ... no stack, no placeholder, no instruction ...
+```
+
+```python
+# Stability label with lonely em-dash — indistinguishable from "stable at ?".
+self._stability_label = QLabel("Стабильность: —")
+```
+
+**Example (good):**
+
+```python
+# QStackedWidget: instructional placeholder + live table.
+self._placeholder = QLabel(
+    "Здесь появится прогноз теплопроводности.\n\n"
+    "Выберите пары датчиков и источник мощности,\n"
+    "затем запустите автоизмерение."
+)
+self._placeholder.setAlignment(Qt.AlignCenter)
+self._placeholder.setStyleSheet(
+    f"color: {theme.MUTED_FOREGROUND}; font-style: italic; ..."
+)
+self._stack = QStackedWidget()
+self._stack.addWidget(self._placeholder)
+self._stack.addWidget(self._table)
+self._stack.setCurrentWidget(self._placeholder)
+```
+
+```python
+# Explicit instruction for the label empty state.
+self._stability_label = QLabel("Стабильность: выберите датчики")
+```
+
+**Trigger for the swap:** both the interactive path (checkbox / dropdown change) AND the refresh tick path (periodic poll) must re-evaluate the container state. Wiring only the refresh tick introduces a visible lag between the operator's click and the UI update.
+
+**Detection:** no purely syntactic grep catches this — it's a pattern lint. Reviewers check during overlay reviews; targeted tests per surface should assert `_placeholder.isVisible()` / stack `currentWidget()` across (empty → populated → empty) transitions.
+
+**Related rules:** RULE-COPY-007 (imperative for actions), RULE-COPY-003 (sentence case).
+
+---
+
 ## Changelog
 
 - 2026-04-17: Initial version. 10 rules: 6 extracted from Phase I.1 regressions (commits `e25bbd9`, `d87c24b`, `cf72942`), 4 newly formalized (SURF-007 transparent wrapper explicit, SURF-008 max nesting depth, SURF-009 overlay max width, SURF-010 zero-shadow policy).
+- 2026-04-19 (IV.2.B.3): Added RULE-SURF-011 — empty-state surfaces must render an instructional placeholder, not a bare header or lonely em-dash. Driven by conductivity prediction table and stability label smoke findings.

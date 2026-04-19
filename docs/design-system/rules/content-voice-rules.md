@@ -546,7 +546,49 @@ QLabel("0.5 K")  # UI readout, point decimal
 
 ---
 
+## RULE-COPY-009: No internal versioning in operator-facing copy
+
+**TL;DR:** Operator-facing widget text must never embed internal schema or engine versioning suffixes like "(v1)", "(v2)", "v3", "legacy", etc. Operators don't run git; they run experiments.
+
+**Statement:** Labels, headers, tooltips, table titles, status messages, and dialog text MUST describe what the operator is looking at in domain language, not which internal engine revision powered it. Implementation generations (`AlarmEngine` v1 vs `AlarmEngine` v2, `ChannelManager` v1 vs v2, etc.) are invisible to the physical operator sitting at the workstation at 4 AM — leaking them through the UI turns every screen into an archaeological exhibit and trains operators to guess which subsystem is "the real one".
+
+**Applies to:** any QLabel / QPushButton / QGroupBox title / window title / tooltip / status banner / menu action text surfaced through the shell. Does NOT apply to: engine command names (`alarm_v2_ack` stays — that's an internal contract), log messages (`logger.info("Alarm v2 ...")`), code comments, test fixtures, or docstrings.
+
+**Example (bad):**
+
+```python
+# operator-facing header leaking schema version
+title = QLabel("Текущие тревоги (v1)")
+title = QLabel("Физические тревоги (v2)")
+```
+
+**Example (good):**
+
+```python
+# domain names — operator sees what's being measured, not which implementation
+title = QLabel("Аппаратные тревоги")      # threshold-based, legacy engine
+title = QLabel("Физические тревоги")      # phase-aware engine
+# If differentiation is genuinely needed, prefix with the semantic distinction,
+# not the version number:
+title = QLabel("Пороговые тревоги")       # v1 was threshold-based
+title = QLabel("Фазо-зависимые тревоги")  # v2 is phase-aware
+```
+
+**Detection:**
+
+```bash
+# Catch operator-facing strings with "(v1)" / "(v2)" suffix.
+rg -n '"[^"]*\\(v[0-9]+\\)[^"]*"' src/cryodaq/gui/
+```
+
+The operator-facing string literal matches this pattern exactly; engine command strings like `"alarm_v2_ack"` don't (no parentheses).
+
+**Related rules:** RULE-COPY-001 (Cyrillic channel names), RULE-COPY-002 (Russian vocabulary), RULE-COPY-007 (imperative/descriptive).
+
+---
+
 ## Changelog
 
 - 2026-04-17: Initial version. 8 rules covering Cyrillic Т, Russian vocabulary, sentence case, error style, emoji prohibition, SI units, imperative/descriptive, decimal convention. RULE-COPY-004 fills the previously-reserved gap.
 - 2026-04-17 (v1.0.1): Verified canonical operator-facing pressure unit is `мбар` per RULE-COPY-006 (FR-016). No content change here — this file already states the canonical unit; downstream files (typography.md, chart-tokens.md, top-watch-bar.md, data-display-rules.md) updated to match.
+- 2026-04-19 (IV.2.B.3): Added RULE-COPY-009 — operator-facing text must not embed internal version suffixes like "(v1)"/"(v2)". Driven by alarm panel leakage noted in smoke sessions.
