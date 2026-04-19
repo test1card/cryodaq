@@ -301,38 +301,61 @@ class _SmuChannelBlock(QFrame):
             f"}}"
         )
 
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
-        layout.setSpacing(theme.SPACE_2)
+        # Two-row layout (IV.1 finding 4). Row 1 — numeric inputs,
+        # Row 2 — actions. Previously every control sat on a single
+        # horizontal row; spin arrows bled into the next label
+        # ("V⬍редел") on narrower widths, and the inputs/actions mix
+        # forced the operator to visually re-group "set parameters"
+        # vs "run". Two rows separate the concerns explicitly and let
+        # each row breathe.
+        root = QVBoxLayout(card)
+        root.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
+        root.setSpacing(theme.SPACE_2)
 
-        layout.addWidget(self._caption("P цель (Вт):"))
+        inputs_row = QHBoxLayout()
+        inputs_row.setContentsMargins(0, 0, 0, 0)
+        # Generous spacing between input groups so the spin arrows at
+        # the right edge of each spinbox never reach the next caption.
+        inputs_row.setSpacing(theme.SPACE_4)
+
         self._p_spin = self._spinbox(0.0, 10.0, 0.5, 0.1, 3)
-        layout.addWidget(self._p_spin)
+        inputs_row.addWidget(self._caption("P цель (Вт):"))
+        inputs_row.addWidget(self._p_spin)
 
-        layout.addWidget(self._caption("V предел (В):"))
         self._v_spin = self._spinbox(0.0, 200.0, 40.0, 1.0, 2)
-        layout.addWidget(self._v_spin)
+        inputs_row.addWidget(self._caption("V предел (В):"))
+        inputs_row.addWidget(self._v_spin)
 
-        layout.addWidget(self._caption("I предел (А):"))
         self._i_spin = self._spinbox(0.0, 3.0, 1.0, 0.1, 3)
-        layout.addWidget(self._i_spin)
+        inputs_row.addWidget(self._caption("I предел (А):"))
+        inputs_row.addWidget(self._i_spin)
 
-        layout.addStretch()
+        inputs_row.addStretch()
+        root.addLayout(inputs_row)
+        self._controls_inputs_row = inputs_row
+
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(theme.SPACE_2)
 
         self._start_btn = QPushButton("Старт")
         _style_button(self._start_btn, "primary")
         self._start_btn.clicked.connect(self._on_start_clicked)
-        layout.addWidget(self._start_btn)
+        actions_row.addWidget(self._start_btn)
 
         self._stop_btn = QPushButton("Стоп")
         _style_button(self._stop_btn, "warning")
         self._stop_btn.clicked.connect(self._on_stop_clicked)
-        layout.addWidget(self._stop_btn)
+        actions_row.addWidget(self._stop_btn)
 
         self._emergency_btn = QPushButton("АВАР. ОТКЛ.")
         _style_button(self._emergency_btn, "destructive")
         self._emergency_btn.clicked.connect(self._on_emergency_clicked)
-        layout.addWidget(self._emergency_btn)
+        actions_row.addWidget(self._emergency_btn)
+
+        actions_row.addStretch()
+        root.addLayout(actions_row)
+        self._controls_actions_row = actions_row
 
         return card
 

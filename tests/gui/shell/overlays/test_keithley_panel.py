@@ -573,3 +573,65 @@ def test_connected_no_reading_shows_placeholder_and_refresh_is_safe(app):
     for key in ("voltage", "current", "resistance", "power"):
         assert panel._smua_block._value_labels[key].text().startswith("—")
     assert len(panel._smua_block._buffers["voltage"]) == 0
+
+
+# ----------------------------------------------------------------------
+# IV.1 finding 4 — two-row control layout
+# ----------------------------------------------------------------------
+
+
+def test_keithley_two_row_layout(app):
+    """Inputs row and actions row are distinct QHBoxLayout instances.
+
+    Previously the controls card was a single QHBoxLayout with all six
+    widgets side-by-side; spin arrows bled into the next caption on
+    narrower widths and the inputs/actions mix forced visual re-grouping.
+    """
+    from PySide6.QtWidgets import QHBoxLayout
+
+    block = KeithleyPanel()._smua_block
+    assert isinstance(block._controls_inputs_row, QHBoxLayout)
+    assert isinstance(block._controls_actions_row, QHBoxLayout)
+    assert block._controls_inputs_row is not block._controls_actions_row
+
+
+def test_keithley_inputs_in_row_1(app):
+    """P / V / I spin boxes live in the inputs row."""
+    block = KeithleyPanel()._smua_block
+    inputs_widgets = [
+        block._controls_inputs_row.itemAt(i).widget()
+        for i in range(block._controls_inputs_row.count())
+    ]
+    assert block._p_spin in inputs_widgets
+    assert block._v_spin in inputs_widgets
+    assert block._i_spin in inputs_widgets
+    # None of the action buttons leak into the inputs row.
+    assert block._start_btn not in inputs_widgets
+    assert block._stop_btn not in inputs_widgets
+    assert block._emergency_btn not in inputs_widgets
+
+
+def test_keithley_actions_in_row_2(app):
+    """Старт / Стоп / АВАР. ОТКЛ. live in the actions row."""
+    block = KeithleyPanel()._smua_block
+    actions_widgets = [
+        block._controls_actions_row.itemAt(i).widget()
+        for i in range(block._controls_actions_row.count())
+    ]
+    assert block._start_btn in actions_widgets
+    assert block._stop_btn in actions_widgets
+    assert block._emergency_btn in actions_widgets
+    # No numeric spinboxes in the actions row.
+    assert block._p_spin not in actions_widgets
+    assert block._v_spin not in actions_widgets
+    assert block._i_spin not in actions_widgets
+
+
+def test_keithley_spin_box_has_padding_right(app):
+    """Spin stylesheet reserves horizontal room so arrows never hit labels."""
+    block = KeithleyPanel()._smua_block
+    # The spinbox stylesheet was set during construction; it must
+    # still reserve padding-right (≥ the width of the up/down
+    # button column) so the inline value cannot collide with them.
+    ss = block._p_spin.styleSheet()
+    assert "padding-right" in ss
