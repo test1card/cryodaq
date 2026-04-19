@@ -708,13 +708,41 @@ class LauncherWindow(QMainWindow):
             if checked
             else "\u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u044b"
         )  # noqa: E501
+        # IV.4 F2 amend: when the launcher attached to an already-running
+        # external engine (e.g. `cryodaq-engine` started separately in
+        # headless mode), restarting the launcher alone does NOT rebuild
+        # the engine's logging handlers — the env-var propagation only
+        # fires when the launcher spawns its own engine child. Make the
+        # two cases explicit so the operator doesn't assume a silent fix
+        # for the engine logs in the external-engine deployment.
+        engine_external = bool(getattr(self, "_engine_external", False))
+        if engine_external:
+            body = (
+                f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
+                "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u041b\u0430\u0443\u043d\u0447"
+                "\u0435\u0440\u0430 \u0438 GUI \u043f\u0440\u0438\u043c\u0435\u043d\u044f\u0442\u0441"
+                "\u044f \u043f\u043e\u0441\u043b\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0437"
+                "\u0430\u043f\u0443\u0441\u043a\u0430. Engine \u0437\u0430\u043f\u0443\u0449\u0435\u043d "
+                "\u0432\u043d\u0435\u0448\u043d\u0435 \u2014 \u043f\u0435\u0440\u0435\u0437\u0430\u043f"
+                "\u0443\u0441\u0442\u0438\u0442\u0435 \u0435\u0433\u043e \u043e\u0442\u0434\u0435\u043b"
+                "\u044c\u043d\u043e, \u0438\u043b\u0438 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438"
+                "\u0442\u0435 CRYODAQ_LOG_LEVEL=DEBUG \u0432 \u0435\u0433\u043e \u043e\u043a\u0440\u0443"
+                "\u0436\u0435\u043d\u0438\u0438."
+            )
+        else:
+            body = (
+                f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
+                "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0440\u0438\u043c\u0435"
+                "\u043d\u044f\u0442\u0441\u044f \u043a launcher / gui / engine \u043f\u043e\u0441\u043b"
+                "\u0435 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a\u0430 "
+                "\u041b\u0430\u0443\u043d\u0447\u0435\u0440\u0430 (engine \u043f\u0435\u0440\u0435"
+                "\u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u0432\u043c\u0435\u0441"
+                "\u0442\u0435 \u0441 \u043d\u0438\u043c)."
+            )
         QMessageBox.information(
             self,
             "\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438",
-            f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
-            "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0440\u0438\u043c\u0435"
-            "\u043d\u044f\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u043f\u0435\u0440\u0435"
-            "\u0437\u0430\u043f\u0443\u0441\u043a\u0430 \u041b\u0430\u0443\u043d\u0447\u0435\u0440\u0430.",
+            body,
         )
 
     @Slot(str)
