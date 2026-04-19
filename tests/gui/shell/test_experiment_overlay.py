@@ -293,6 +293,65 @@ def test_set_connected_idempotent(app):
     assert overlay._connected is True
 
 
+def test_save_result_respects_connection_gate(app):
+    """II.9 Codex fix: _on_save_result must not re-enable the save
+    button if the host disconnected while the save was in flight."""
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    overlay.set_connected(False)
+    # Simulate: host disconnects mid-save. Worker completes.
+    overlay._on_save_result({"ok": True})
+    assert overlay._save_btn.isEnabled() is False
+
+
+def test_finalize_result_respects_connection_gate(app):
+    """II.9 Codex fix: _on_finalize_result must not re-enable the
+    finalize button if the host disconnected mid-command."""
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    overlay.set_connected(False)
+    overlay._on_finalize_result({"ok": False, "error": "disconnected"})
+    assert overlay._finalize_btn.isEnabled() is False
+
+
+def test_save_result_reenables_when_connected(app):
+    """Positive-path regression: when host stays connected, completion
+    handler must still restore the button."""
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    # Disabled by save in flight.
+    overlay._save_btn.setEnabled(False)
+    overlay._on_save_result({"ok": True})
+    assert overlay._save_btn.isEnabled() is True
+
+
 def test_refresh_display_respects_connection_state(app):
     overlay = ExperimentOverlay()
     overlay.set_connected(False)

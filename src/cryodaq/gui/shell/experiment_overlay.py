@@ -589,7 +589,11 @@ class ExperimentOverlay(QWidget):
         self._update_worker.start()
 
     def _on_save_result(self, result: dict) -> None:
-        self._save_btn.setEnabled(True)
+        # II.9 Codex fix: restore state through the gate rather than
+        # hardcoding True — if the host flipped to disconnected while
+        # the save was in flight, this completion callback must not
+        # re-enable a command button.
+        self._apply_connection_gate()
         if result.get("ok"):
             self._save_status.setText(
                 "\u2713 \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e"
@@ -741,7 +745,10 @@ class ExperimentOverlay(QWidget):
         worker.start()
 
     def _on_finalize_result(self, result: dict) -> None:
-        self._finalize_btn.setEnabled(True)
+        # II.9 Codex fix: restore state through the gate rather than
+        # hardcoding True — completion callbacks must not re-enable
+        # command buttons if the host is currently disconnected.
+        self._apply_connection_gate()
         if not result.get("ok"):
             logger.warning("finalize/abort failed: %s", result.get("error"))
             return
