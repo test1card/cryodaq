@@ -454,3 +454,31 @@ def test_load_more_increments_limit(app):
     start = panel._limit
     panel._on_load_more_clicked()
     assert panel._limit == start + 50
+
+
+# ----------------------------------------------------------------------
+# IV.3 F3 — composer minimum height halved
+# ----------------------------------------------------------------------
+
+
+def test_composer_message_edit_minimum_height_is_40(app):
+    """IV.3 F3: composer minimum height halved from 80 to 40 px so the
+    timeline below gets most of the vertical room by default."""
+    panel = OperatorLogPanel()
+    assert panel._message_edit.minimumHeight() == 40
+
+
+def test_composer_message_edit_remains_expandable(app):
+    """The operator must still be able to drag the splitter for more
+    composition space — only the default is smaller."""
+    from PySide6.QtWidgets import QSizePolicy
+
+    panel = OperatorLogPanel()
+    policy = panel._message_edit.sizePolicy()
+    # Vertical policy must not regress to Fixed / Minimum; Qt's default
+    # for QPlainTextEdit is Expanding and the addWidget(..., stretch=1)
+    # binding preserves growth under available room.
+    assert policy.verticalPolicy() not in (
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Minimum,
+    )

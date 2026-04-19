@@ -300,7 +300,12 @@ class OperatorLogPanel(QWidget):
 
         self._message_edit = QPlainTextEdit()
         self._message_edit.setPlaceholderText("Введите запись")
-        self._message_edit.setMinimumHeight(80)
+        # IV.3 F3: composer claimed ~1/3 of the overlay by default,
+        # squeezing the timeline below. Halve the minimum height; the
+        # stretch=1 and Expanding size policy below still let the
+        # operator drag the splitter for more composition room when
+        # they need it.
+        self._message_edit.setMinimumHeight(40)
         self._message_edit.setMaximumBlockCount(2000)
         _style_input(self._message_edit)
         layout.addWidget(self._message_edit, stretch=1)
