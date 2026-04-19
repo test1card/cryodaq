@@ -387,6 +387,23 @@ class ZMQCommandServer:
         if self._handler is None:
             return {"ok": False, "error": "no handler"}
 
+        # IV.3 Finding 7 amend: _serve_loop forwards any valid JSON,
+        # not only objects. A scalar or list payload (valid JSON, wrong
+        # shape) previously raised AttributeError on cmd.get(...) and
+        # fell out to the outer serve-loop catch — still sent a reply
+        # so REP was not wedged, but the failure path was accidental.
+        # Validate the shape here so _run_handler's "always returns a
+        # dict" contract is explicit rather than luck-dependent.
+        if not isinstance(cmd, dict):
+            logger.warning(
+                "ZMQ command payload is %s, not dict — rejecting.",
+                type(cmd).__name__,
+            )
+            return {
+                "ok": False,
+                "error": f"invalid payload: expected object, got {type(cmd).__name__}",
+            }
+
         action = str(cmd.get("cmd", ""))
         timeout = (
             self._handler_timeout_override_s

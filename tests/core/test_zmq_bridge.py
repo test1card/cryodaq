@@ -276,6 +276,25 @@ async def test_no_handler_returns_error_not_hang() -> None:
     assert reply == {"ok": False, "error": "no handler"}
 
 
+@pytest.mark.asyncio
+async def test_valid_json_non_dict_payload_returns_error_reply() -> None:
+    """IV.3 F7 amend: valid JSON scalars / lists reach _run_handler when
+    _serve_loop passes through the decoded payload. Previously those
+    raised AttributeError on cmd.get() and relied on the outer serve
+    loop catch. Now _run_handler validates the shape itself so the
+    "always returns a dict" contract is explicit."""
+
+    async def handler(cmd: dict) -> dict:
+        return {"ok": True}
+
+    server = ZMQCommandServer(handler=handler, handler_timeout_s=1.0)
+    for bad in ("just-a-string", 42, [1, 2, 3], None):
+        reply = await server._run_handler(bad)
+        assert isinstance(reply, dict)
+        assert reply["ok"] is False
+        assert "invalid payload" in reply["error"].lower()
+
+
 def test_gui_client_cmd_reply_timeout_exceeds_server_slow_ceiling() -> None:
     """Client future wait outlasts the server's slow ceiling so a slow
     reply is never lost because the client gave up first."""

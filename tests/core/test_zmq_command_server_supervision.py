@@ -89,7 +89,13 @@ async def test_command_server_times_out_slow_handler_and_keeps_serving(caplog) -
         slow_reply = await _send_command(address, {"cmd": "slow"})
         fast_reply = await _send_command(address, {"cmd": "fast"})
 
-        assert slow_reply == {"ok": False, "error": "handler timeout (2s)"}
+        # IV.3 F7: timeout reply now includes the _handler_timeout marker
+        # and the "operation may still be running." suffix so callers
+        # can distinguish envelope timeout from a handler-reported error.
+        assert slow_reply["ok"] is False
+        assert slow_reply.get("_handler_timeout") is True
+        assert "handler timeout (2s)" in slow_reply["error"]
+        assert "operation may still be running" in slow_reply["error"]
         assert fast_reply == {"ok": True, "cmd": "fast"}
         assert "action=slow" in caplog.text
     finally:
@@ -108,7 +114,12 @@ async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
     await server.start()
     try:
         reply = await _send_command(address, {"cmd": "log_get"})
-        assert reply == {"ok": False, "error": "log_get timeout (1.5s)"}
+        # IV.3 F7: inner-wrapper message still wins, but the reply now
+        # also carries the _handler_timeout marker since this is still
+        # a timeout path.
+        assert reply["ok"] is False
+        assert reply["error"] == "log_get timeout (1.5s)"
+        assert reply.get("_handler_timeout") is True
         assert "log_get timeout (1.5s)" in caplog.text
         assert "handler timeout (2s)" not in caplog.text
     finally:
