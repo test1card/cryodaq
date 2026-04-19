@@ -28,12 +28,12 @@ def test_main_dispatches_experiment_advance_phase_cmd():
 
     def fake_send(cmd, *, address, timeout_s):
         captured.append(cmd)
-        return {"ok": True, "phase": cmd["target"]}
+        return {"ok": True, "phase": cmd["phase"]}
 
     with patch("tools.force_phase.send_command", side_effect=fake_send):
         rc = force_phase.main(["cooldown"])
     assert rc == 0
-    assert captured == [{"cmd": "experiment_advance_phase", "target": "cooldown"}]
+    assert captured == [{"cmd": "experiment_advance_phase", "phase": "cooldown"}]
 
 
 def test_main_returns_nonzero_on_engine_reject():

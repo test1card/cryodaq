@@ -26,14 +26,15 @@ def test_vacuum_pressure_decays_into_range():
 
 
 def test_cooldown_reaches_liquid_helium():
+    """IV.3 F5 amend: cosine easing hits exact 290 K start and 4 K
+    end (within the ±0.1 K random jitter applied to each tick)."""
     readings = _collect(mock_scenario.generate_cooldown, 40.0)
     t1s = [r.value for r in readings if r.channel == "T1"]
     assert t1s, "no T1 readings emitted"
-    # Tanh easing leaves the boundary values a few K inside the
-    # stated [4, 290] range; widen the tolerance to match the curve.
     assert t1s[0] > t1s[-1], "cooldown must end colder than it starts"
-    assert t1s[0] > 270.0, f"start too cold: {t1s[0]}"
-    assert t1s[-1] < 20.0, f"end too warm: {t1s[-1]}"
+    # Jitter is ±0.1 K; generator's endpoint is pinned exactly.
+    assert 289.85 < t1s[0] < 290.15, f"start not pinned to 290 K: {t1s[0]}"
+    assert 3.85 < t1s[-1] < 4.15, f"end not pinned to 4 K: {t1s[-1]}"
 
 
 def test_warmup_mirrors_cooldown():
@@ -41,8 +42,8 @@ def test_warmup_mirrors_cooldown():
     t1s = [r.value for r in readings if r.channel == "T1"]
     assert t1s
     assert t1s[0] < t1s[-1], "warmup must end warmer than it starts"
-    assert t1s[0] < 20.0, f"start too warm: {t1s[0]}"
-    assert t1s[-1] > 270.0, f"end too cold: {t1s[-1]}"
+    assert 3.85 < t1s[0] < 4.15, f"start not pinned to 4 K: {t1s[0]}"
+    assert 289.85 < t1s[-1] < 290.15, f"end not pinned to 290 K: {t1s[-1]}"
 
 
 def test_measurement_r_thermal_in_range():

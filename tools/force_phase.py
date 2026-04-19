@@ -69,7 +69,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     )
-    cmd = {"cmd": "experiment_advance_phase", "target": args.phase}
+    # IV.3 F5 amend: engine handler reads cmd["phase"], not "target".
+    # See src/cryodaq/engine.py::experiment_advance_phase. Also the
+    # shape the rest of the shell uses.
+    cmd = {"cmd": "experiment_advance_phase", "phase": args.phase}
     try:
         reply = send_command(cmd, address=args.address, timeout_s=args.timeout)
     except TimeoutError as exc:

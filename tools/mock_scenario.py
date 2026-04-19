@@ -75,12 +75,19 @@ def _reading(
 def _tanh_ramp(p: float, start: float, end: float) -> float:
     """Smoothed ramp from ``start`` to ``end`` as ``p`` goes 0→1.
 
-    Uses tanh(4·(p-0.5)) remapped to [0, 1] so the midpoint derivative
-    is large but the endpoints ease out — a reasonable cryostat
-    cool/warm approximation without modelling real physics.
+    Uses a cosine easing that hits exactly ``start`` at p=0 and
+    exactly ``end`` at p=1, with a tanh-like S-shape between — a
+    reasonable cryostat cool/warm approximation without modelling
+    real physics. (Name retained for import stability; the older
+    tanh-only form asymptotes and never reaches the stated endpoints,
+    which the docstring contract and tests both rely on.)
     """
-    raw = (math.tanh(4.0 * (p - 0.5)) + 1.0) * 0.5
-    return start + (end - start) * raw
+    if p <= 0.0:
+        return start
+    if p >= 1.0:
+        return end
+    eased = (1.0 - math.cos(math.pi * p)) * 0.5
+    return start + (end - start) * eased
 
 
 def _exp_decay(p: float, start: float, end: float) -> float:
