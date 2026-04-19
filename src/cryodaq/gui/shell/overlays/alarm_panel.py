@@ -366,7 +366,12 @@ class AlarmPanel(QWidget):
         header_v2.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._v2_table)
 
-        self._v2_empty_label = QLabel("Нет активных алармов")
+        # Phase III.D Item 17: empty state carries an action hint so
+        # the operator knows this is normal, not a broken widget.
+        self._v2_empty_label = QLabel(
+            "Нет активных алармов. Система отслеживает все каналы "
+            "автоматически."
+        )
         self._v2_empty_label.setFont(_body_font())
         self._v2_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._v2_empty_label.setStyleSheet(

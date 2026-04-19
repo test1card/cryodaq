@@ -163,6 +163,29 @@ def test_conductivity_progress_chunk_uses_accent():
     assert "ACCENT" in token_expr, "conductivity_panel QProgressBar::chunk should use ACCENT"
 
 
+def test_fusion_palette_highlight_uses_selection_bg_not_status_ok():
+    """Item 20 regression: QPalette.ColorRole.Highlight — the
+    background Qt paints behind selected rows / items — must come
+    from SELECTION_BG. Prior config used ACCENT, which for themes
+    where ACCENT==STATUS_OK (warm_stone / taupe_quiet pre-III.A)
+    rendered selected alarm rows green and misled operators reading
+    a CRIT row as "green = ok"."""
+    app_src = (_REPO_ROOT / "src" / "cryodaq" / "gui" / "app.py").read_text(encoding="utf-8")
+    # Look for the Highlight setColor line — must reference SELECTION_BG.
+    match = re.search(
+        r"palette\.setColor\(\s*QPalette\.ColorRole\.Highlight\s*,\s*QColor\(([^)]+)\)",
+        app_src,
+    )
+    assert match is not None, "could not locate Highlight palette setColor"
+    token = match.group(1).strip()
+    assert "SELECTION_BG" in token, (
+        f"Fusion palette Highlight uses {token!r} — Item 20 contract requires "
+        f"SELECTION_BG (neutral) so safety-green can never render as selection"
+    )
+    assert "STATUS_OK" not in token
+    assert "ACCENT" not in token
+
+
 def test_status_ok_still_used_in_status_display_contexts():
     """Sanity guard: the migration should NOT have stripped STATUS_OK
     from legitimate status contexts (engine label, connection label,

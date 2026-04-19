@@ -57,8 +57,13 @@ def test_apply_fusion_dark_palette_pins_all_primary_roles(app):
         QPalette.ColorRole.ButtonText: theme.FOREGROUND,
         QPalette.ColorRole.ToolTipBase: theme.SURFACE_CARD,
         QPalette.ColorRole.ToolTipText: theme.FOREGROUND,
-        QPalette.ColorRole.Highlight: theme.ACCENT,
-        QPalette.ColorRole.HighlightedText: theme.ON_DESTRUCTIVE,
+        # Phase III.D Item 20: selected rows use the neutral
+        # SELECTION_BG token, not ACCENT. Prior contract had
+        # Highlight=ACCENT which, for themes where ACCENT==STATUS_OK
+        # (warm_stone / taupe_quiet pre-III.A), rendered selected
+        # alarm rows green and misled operators.
+        QPalette.ColorRole.Highlight: theme.SELECTION_BG,
+        QPalette.ColorRole.HighlightedText: theme.FOREGROUND,
         QPalette.ColorRole.BrightText: theme.STATUS_FAULT,
         QPalette.ColorRole.Link: theme.ACCENT,
     }

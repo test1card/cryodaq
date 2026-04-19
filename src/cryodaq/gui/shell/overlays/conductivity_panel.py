@@ -382,7 +382,10 @@ class ConductivityPanel(QWidget):
         self._down_btn.setToolTip("Переместить сфокусированный датчик вниз по цепочке.")
         btn_row.addWidget(self._down_btn)
         self._export_btn = QPushButton("Экспорт CSV")
-        _style_button(self._export_btn, "primary")
+        # Phase III.D Item 18: CSV export is a secondary action — the
+        # primary autosweep actions («Старт», «Стоп») own the ACCENT
+        # slot; export should be neutral.
+        _style_button(self._export_btn, "neutral")
         self._export_btn.clicked.connect(self._on_export)
         btn_row.addWidget(self._export_btn)
         layout.addLayout(btn_row)

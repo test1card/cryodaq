@@ -273,17 +273,24 @@ class ExperimentOverlay(QWidget):
             "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
         )
         self._finalize_btn.setObjectName("expFinalizeBtn")
+        # Phase III.D Item 9: «Завершить эксперимент» is the normal
+        # concluding action, not a destructive abort. Previously styled
+        # as outlined STATUS_FAULT red (reserved for abort / discard-
+        # data semantics); now ACCENT (primary UI activation). Abort
+        # semantics live in the ⋯ More menu, not in the footer button.
         self._finalize_btn.setStyleSheet(
             f"#expFinalizeBtn {{ "
-            f"background-color: transparent; "
-            f"color: {theme.STATUS_FAULT}; "
-            f"border: 1px solid {theme.STATUS_FAULT}; "
+            f"background-color: {theme.ACCENT}; "
+            f"color: {theme.ON_ACCENT}; "
+            f"border: 1px solid {theme.ACCENT}; "
             f"border-radius: {theme.RADIUS_SM}px; "
             f"padding: 8px 16px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
             f"}} "
-            f"#expFinalizeBtn:hover {{ "
-            f"background-color: {theme.STATUS_FAULT}; "
-            f"color: {theme.FOREGROUND}; "
+            f"#expFinalizeBtn:disabled {{ "
+            f"background-color: {theme.SURFACE_MUTED}; "
+            f"color: {theme.MUTED_FOREGROUND}; "
+            f"border-color: {theme.BORDER_SUBTLE}; "
             f"}}"
         )
         self._finalize_btn.clicked.connect(self._on_finalize_clicked)
@@ -841,12 +848,31 @@ class ExperimentOverlay(QWidget):
 
     @staticmethod
     def _format_time(raw: str) -> str:
+        """Format timeline entry timestamp with day context.
+
+        Phase III.D Item 11: a 21-hour experiment's chronicle showed
+        only "HH:MM" — operator could not tell which calendar day an
+        event belonged to. Now:
+
+        - Same calendar day (local) → "HH:MM"
+        - Yesterday → "вчера HH:MM"
+        - Older → "DD.MM HH:MM"
+        """
         if not raw:
             return "--:--"
         try:
             text = raw
             if text.endswith("Z"):
                 text = f"{text[:-1]}+00:00"
-            return datetime.fromisoformat(text).strftime("%H:%M")
+            ts = datetime.fromisoformat(text)
+            now = datetime.now(ts.tzinfo) if ts.tzinfo is not None else datetime.now()
+            ts_date = ts.date()
+            now_date = now.date()
+            if ts_date == now_date:
+                return ts.strftime("%H:%M")
+            days_ago = (now_date - ts_date).days
+            if days_ago == 1:
+                return ts.strftime("вчера %H:%M")
+            return ts.strftime("%d.%m %H:%M")
         except (ValueError, TypeError):
             return "--:--"

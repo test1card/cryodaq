@@ -369,6 +369,58 @@ def test_refresh_display_respects_connection_state(app):
     assert overlay._finalize_btn.isEnabled() is False
 
 
+# ----------------------------------------------------------------------
+# Phase III.D Item 9 + Item 11 polish
+# ----------------------------------------------------------------------
+
+
+def test_finalize_button_uses_accent_not_status_fault(app):
+    """Item 9: «Завершить эксперимент» is the normal concluding
+    action, not a destructive abort. Styled ACCENT (primary), not
+    STATUS_FAULT (reserved for abort/discard)."""
+    from cryodaq.gui import theme
+
+    overlay = ExperimentOverlay()
+    ss = overlay._finalize_btn.styleSheet()
+    assert theme.ACCENT in ss
+    assert theme.ON_ACCENT in ss
+    assert theme.STATUS_FAULT not in ss
+
+
+def test_format_time_same_day_returns_hh_mm(app):
+    """Item 11: same calendar day timeline entry uses HH:MM only."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    same_day = now - timedelta(hours=2)
+    text = ExperimentOverlay._format_time(same_day.isoformat())
+    assert len(text) == 5
+    assert text[2] == ":"
+
+
+def test_format_time_yesterday_prefixed(app):
+    """Item 11: yesterday's entries prefixed with «вчера»."""
+    from datetime import UTC, datetime, timedelta
+
+    # Use noon local time to avoid day-boundary flakiness.
+    base = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    yesterday = base - timedelta(days=1)
+    text = ExperimentOverlay._format_time(yesterday.isoformat())
+    assert text.startswith("вчера ")
+
+
+def test_format_time_older_than_yesterday_shows_date(app):
+    """Item 11: entries older than yesterday show DD.MM prefix."""
+    from datetime import UTC, datetime, timedelta
+
+    base = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    old = base - timedelta(days=5)
+    text = ExperimentOverlay._format_time(old.isoformat())
+    # Format "DD.MM HH:MM" — 11 chars total.
+    assert len(text) == 11
+    assert text[2] == "." and text[5] == " " and text[8] == ":"
+
+
 def test_no_close_button_on_experiment_overlay(app):
     """Regression (Batch B commit b0b460b): the × close button was removed
     because ExperimentOverlay is a primary view, not a modal overlay.

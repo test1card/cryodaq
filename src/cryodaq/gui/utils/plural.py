@@ -1,8 +1,9 @@
 """Russian plural forms for UI strings.
 
-Phase III.D helper — replaces ad-hoc «1 критических» mistakes across
-the overlays. Always goes through :func:`ru_plural`; never format a
-Russian count phrase with a single hardcoded suffix.
+Phase III.D helper — replaces ad-hoc plural mistakes across the
+overlays (n=1 was incorrectly rendered with the genitive-plural
+suffix on severity counts). Always goes through :func:`ru_plural`;
+never format a Russian count phrase with a single hardcoded suffix.
 """
 
 from __future__ import annotations

@@ -157,9 +157,14 @@ def apply_fusion_dark_palette(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.FOREGROUND))
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme.SURFACE_CARD))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor(theme.FOREGROUND))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.ACCENT))
+    # Phase III.A/III.D Item 20: selected rows use the neutral
+    # SELECTION_BG token, not ACCENT. Prior config set Highlight to
+    # ACCENT which — for themes where ACCENT==STATUS_OK (warm_stone,
+    # taupe_quiet pre-III.A) — rendered selected alarm rows green and
+    # misled operators reading a CRIT row as "green = ok".
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.SELECTION_BG))
     palette.setColor(
-        QPalette.ColorRole.HighlightedText, QColor(theme.ON_DESTRUCTIVE)
+        QPalette.ColorRole.HighlightedText, QColor(theme.FOREGROUND)
     )
     palette.setColor(QPalette.ColorRole.BrightText, QColor(theme.STATUS_FAULT))
     palette.setColor(QPalette.ColorRole.Link, QColor(theme.ACCENT))

@@ -420,7 +420,11 @@ class _HeroStrip(QFrame):
 
     def set_cooldown(self, data: CooldownData | None) -> None:
         if data is None:
-            self._eta_label.setText("Охлаждение не активно")
+            # Phase III.D Item 17: add action hint to empty state.
+            self._eta_label.setText(
+                "Охлаждение не активно. "
+                "Запустите эксперимент с фазой захолаживания."
+            )
             self._phase_label.setText("")
             self._progress.setValue(0)
             self._progress.setVisible(False)
