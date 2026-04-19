@@ -535,6 +535,96 @@ def test_reconnected_reenables_start(app):
     assert panel._auto_start_btn.isEnabled()
 
 
+def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
+    """Safety-relevant: if engine connection drops while auto-sweep is
+    stabilizing, the Stop button MUST remain enabled so the operator
+    can abort the sweep and send keithley_stop. Start must stay
+    disabled (no new sweeps on dead link). Codex II.5 residual fix.
+    """
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    class _StubWorker:
+        def __init__(self, *a, **kw) -> None:
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            return None
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    assert panel._auto_state == "stabilizing"
+    assert panel._auto_start_btn.isEnabled() is False
+    assert panel._auto_stop_btn.isEnabled() is True
+
+    panel.set_connected(False)
+
+    assert panel._auto_stop_btn.isEnabled() is True, (
+        "Stop button must stay enabled during stabilizing even if "
+        "engine disconnects — operator must be able to abort."
+    )
+    assert panel._auto_start_btn.isEnabled() is False
+
+
+def test_empty_state_not_hidden_by_power_only_reading(app):
+    """Power reading before any temperature arrives must NOT hide the
+    empty-state overlay — plot has no data yet, so the hint should
+    remain up. Codex II.5 residual fix.
+    """
+    from datetime import UTC, datetime
+
+    from PySide6.QtCore import QCoreApplication
+
+    from cryodaq.drivers.base import Reading
+
+    # Offscreen Qt quirk: isVisible() reports False for a widget whose
+    # top-level isn't shown. Use isHidden() — False iff the widget has
+    # NOT had setVisible(False) called on it. That matches the semantic
+    # we actually care about (has the empty-state placeholder been
+    # explicitly dismissed).
+    panel = ConductivityPanel()
+    assert panel._empty_label.isHidden() is False
+
+    power_reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="Keithley_1",
+        channel="Keithley_1/smua/power",
+        value=0.005,
+        unit="W",
+        metadata={},
+    )
+    panel.on_reading(power_reading)
+    QCoreApplication.processEvents()
+    assert panel._empty_label.isHidden() is False
+
+    # Register T1 and subscribe so the temp reading actually routes.
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    temp_reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LakeShore_1",
+        channel="Т1",
+        value=77.3,
+        unit="K",
+        metadata={},
+    )
+    panel.on_reading(temp_reading)
+    QCoreApplication.processEvents()
+    assert panel._empty_label.isHidden() is True
+
+
 # ----------------------------------------------------------------------
 # Public accessor for finalize guard
 # ----------------------------------------------------------------------
