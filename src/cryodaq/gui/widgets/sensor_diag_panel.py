@@ -1,4 +1,10 @@
-"""Панель диагностики датчиков (SensorDiagPanel).
+"""Панель диагностики датчиков (SensorDiagPanel) — DEPRECATED (Phase II.8).
+
+Supersession: sensor diagnostics table lives inside
+``src/cryodaq/gui/shell/overlays/instruments_panel.py`` as the
+``_SensorDiagSection`` subsection. This legacy widget is retained
+only for the legacy ``MainWindow`` tab surface; deletion slated for
+Phase II.13.
 
 Таблица здоровья датчиков с цветовой индикацией.
 Встраивается в InstrumentStatusPanel как секция внизу.

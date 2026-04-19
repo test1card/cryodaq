@@ -1,4 +1,10 @@
-"""Панель статуса приборов (InstrumentStatusPanel).
+"""Панель статуса приборов (InstrumentStatusPanel) — DEPRECATED (Phase II.8).
+
+Supersession: `src/cryodaq/gui/shell/overlays/instruments_panel.py`
+(``InstrumentsPanel``) merges this widget with ``SensorDiagPanel``
+into a single DS v1.0.1-compliant overlay wired into ``MainWindowV2``.
+This legacy widget is retained only for the legacy ``MainWindow`` tab
+surface; deletion slated for Phase II.13.
 
 Отображает карточки для каждого подключённого прибора с индикацией
 состояния: зелёный (норма), жёлтый (предупреждение), красный (ошибка).

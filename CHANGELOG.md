@@ -11,6 +11,27 @@
 
 ### Changed
 
+- **Phase II.8 InstrumentsOverlay (cards + SensorDiag) — DS v1.0.1.**
+  Merged two legacy modules (`instrument_status.py` +
+  `sensor_diag_panel.py`) into a single overlay at
+  `src/cryodaq/gui/shell/overlays/instruments_panel.py`. Both sections
+  preserved verbatim: instrument card grid with adaptive liveness
+  (median × 5 timeout, 10 s floor, 300 s default, 3-reading adaptive
+  threshold), sensor diagnostics table with 10 s polling of
+  `get_sensor_diagnostics`. Unicode circle (⬤) in card status
+  indicator replaced by painted `_StatusIndicator` (QFrame with QSS
+  `border-radius` — no glyph dependency). Summary emoji (✓ ⚠ ✘)
+  replaced by `SeverityChip` widgets imported from the II.4 alarm
+  overlay, using DS status tokens and Russian labels («N ОК / N ПРЕД
+  / N КРИТ»). Hardcoded `QColor(r, g, b, a)` row tints replaced by
+  `QColor(theme.STATUS_*)` + alpha. `apply_panel_frame_style` helper
+  and deprecated `TEXT_MUTED` / `TEXT_PRIMARY` tokens removed. Host
+  Integration Contract wired: `MainWindowV2._tick_status` connection
+  mirror + `_ensure_overlay("instruments")` replay. Adaptive liveness
+  constants NOT tuned — verified against real instruments. Legacy
+  widgets marked DEPRECATED in module docstrings; deletion slated
+  for Phase II.13. Tests: 41 overlay cases + 7 host-wiring cases.
+
 - **Phase II.4 AlarmOverlay rebuilt (K1 safety surface).** New
   overlay at `src/cryodaq/gui/shell/overlays/alarm_panel.py` replaces
   the legacy v1 widget in `MainWindowV2`. Dual-engine layout preserved:

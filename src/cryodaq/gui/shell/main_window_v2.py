@@ -39,12 +39,12 @@ from cryodaq.gui.shell.overlays.alarm_panel import AlarmPanel
 from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
+from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
@@ -133,7 +133,7 @@ class MainWindowV2(QMainWindow):
         "analytics": ("_analytics_view", lambda self: AnalyticsView()),
         "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
-        "instruments": ("_instrument_panel", lambda self: InstrumentStatusPanel()),
+        "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
         "archive": ("_archive_panel", lambda self: ArchivePanel()),
         "calibration": ("_calibration_panel", lambda self: CalibrationPanel()),
     }
@@ -152,7 +152,7 @@ class MainWindowV2(QMainWindow):
         self._analytics_view: AnalyticsView | None = None
         self._conductivity_panel: ConductivityPanel | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
-        self._instrument_panel: InstrumentStatusPanel | None = None
+        self._instrument_panel: InstrumentsPanel | None = None
         self._archive_panel: ArchivePanel | None = None
         self._calibration_panel: CalibrationPanel | None = None
 
@@ -285,6 +285,12 @@ class MainWindowV2(QMainWindow):
             widget.set_connected(derived_connected)
         # Phase II.7: replay connection state into Calibration overlay.
         if name == "calibration":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
+        # Phase II.8: replay connection state into Instruments overlay.
+        if name == "instruments":
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
@@ -533,6 +539,9 @@ class MainWindowV2(QMainWindow):
         # Phase II.4: mirror to Alarm overlay (gates v2 polling + ACK buttons).
         if self._alarm_panel is not None:
             self._alarm_panel.set_connected(connected)
+        # Phase II.8: mirror to Instruments overlay (gates 10 s diag polling).
+        if self._instrument_panel is not None:
+            self._instrument_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
