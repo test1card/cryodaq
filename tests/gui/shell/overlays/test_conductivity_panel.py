@@ -684,29 +684,30 @@ def test_prediction_placeholder_text_mentions_key_terms(app):
 
 
 def test_prediction_table_visible_after_pair_selected(app):
-    """Once ≥ 2 sensors are on the chain, the table replaces the placeholder."""
+    """Once ≥ 2 sensors are on the chain, the table replaces the placeholder
+    IMMEDIATELY — not on the next refresh tick."""
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    # Check through the checkbox state change signal only — do NOT call
+    # _update_table directly. The interaction path must drive the swap
+    # synchronously so the operator sees the UI update without a 1s lag.
     panel._checkboxes["Т1"].setChecked(True)
     panel._checkboxes["Т2"].setChecked(True)
-    # _update_table is what drives the stack switch; invoke via the
-    # refresh path so the test exercises the real code.
-    panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._table
 
 
 def test_prediction_placeholder_returns_on_all_cleared(app):
-    """After deselecting back to <2 pairs, the placeholder is restored."""
+    """After deselecting back to <2 pairs, the placeholder is restored
+    immediately, without waiting for the refresh tick."""
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2"])
     panel._checkboxes["Т1"].setChecked(True)
     panel._checkboxes["Т2"].setChecked(True)
-    panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._table
-    # Uncheck both — chain empties, stack returns to placeholder.
+    # Uncheck — chain empties, stack returns to placeholder on the
+    # interaction path, not on a delayed refresh tick.
     panel._checkboxes["Т1"].setChecked(False)
     panel._checkboxes["Т2"].setChecked(False)
-    panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
 
 
@@ -715,5 +716,19 @@ def test_prediction_placeholder_returns_on_single_selection(app):
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2"])
     panel._checkboxes["Т1"].setChecked(True)
+    assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
+
+
+def test_prediction_stack_synced_via_refresh_tick_too(app):
+    """Refresh path also syncs the stack — guard against chain mutations
+    that bypass _on_check (future code paths)."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    # Mutate _chain directly, bypassing _on_check.
+    panel._chain = ["Т1", "Т2"]
+    # The refresh tick's _update_table call must catch up.
+    panel._update_table({})
+    assert panel._prediction_stack.currentWidget() is panel._table
+    panel._chain = ["Т1"]
     panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder

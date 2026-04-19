@@ -688,6 +688,19 @@ class ConductivityPanel(QWidget):
                 self._chain.remove(ch_name)
             if ch_name in self._plot_items:
                 self._plot.removeItem(self._plot_items.pop(ch_name))
+        # Flip the prediction stack immediately on each selection change
+        # instead of waiting for the next 1 s refresh tick. The
+        # placeholder ↔ table swap is pure UI state, so driving it
+        # synchronously from the interaction path is safe and gives
+        # the operator immediate feedback.
+        self._sync_prediction_stack()
+
+    def _sync_prediction_stack(self) -> None:
+        """Set the prediction stack to placeholder or table per chain length."""
+        if len(self._chain) < 2:
+            self._prediction_stack.setCurrentWidget(self._prediction_placeholder)
+        else:
+            self._prediction_stack.setCurrentWidget(self._table)
 
     def _on_move_up(self) -> None:
         for i, ch in enumerate(self._chain):
@@ -806,15 +819,15 @@ class ConductivityPanel(QWidget):
         self._write_flight_log(now, all_preds)
 
     def _update_table(self, preds: dict) -> None:
+        # IV.1 finding 5: stack state is kept in sync via both the
+        # interactive path (_on_check → _sync_prediction_stack) and
+        # the refresh tick (this method). Keeping the call here too
+        # guards against any future mutation of _chain that bypasses
+        # _on_check.
+        self._sync_prediction_stack()
         if len(self._chain) < 2:
             self._table.setRowCount(0)
-            # IV.1 finding 5: show the "pick pairs + source" placeholder
-            # whenever there is no pair to render a prediction for. A
-            # non-empty chain with <2 entries yields zero pairs; treat it
-            # the same as a completely empty chain.
-            self._prediction_stack.setCurrentWidget(self._prediction_placeholder)
             return
-        self._prediction_stack.setCurrentWidget(self._table)
         pairs = list(zip(self._chain[:-1], self._chain[1:], strict=False))
         self._table.setRowCount(len(pairs) + 1)
         total_r = 0.0
