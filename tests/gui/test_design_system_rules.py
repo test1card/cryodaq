@@ -76,13 +76,16 @@ def _looks_operator_facing(text: str) -> bool:
     """Only flag matches that live alongside operator-visible copy.
 
     Accepts strings with Cyrillic characters, or the handful of
-    hardware labels that appear uppercase-English in UI (KEITHLEY,
-    LAKESHORE, THYRACONT). A maintainer-facing `"legacy_smb_map"`
-    identifier in code will not match.
+    hardware vendor labels that appear in UI (Keithley / LakeShore /
+    Thyracont, any case). Case-insensitive match — operator-facing
+    copy uses "Keithley" / "LakeShore" / "Thyracont" in mixed case,
+    all-caps in headers only ("KEITHLEY 2604B"). A maintainer-facing
+    `"legacy_smb_map"` identifier in code will not match.
     """
     if any("\u0400" <= ch <= "\u04ff" for ch in text):
         return True
-    return any(token in text for token in ("KEITHLEY", "LAKESHORE", "THYRACONT"))
+    lowered = text.lower()
+    return any(token in lowered for token in ("keithley", "lakeshore", "thyracont"))
 
 
 def test_rule_copy_009_no_internal_versioning_in_operator_strings() -> None:
