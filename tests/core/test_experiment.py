@@ -265,6 +265,48 @@ async def test_report_disabled_template_is_stored(
     assert payload["template"]["report_enabled"] is False
 
 
+async def test_create_experiment_respects_report_enabled_override_true(
+    manager: ExperimentManager,
+) -> None:
+    """IV.4 F6: per-experiment report_enabled=True overrides a template
+    that ships report_enabled=False."""
+    info = manager.create_experiment(
+        name="Override enable",
+        operator="Vladimir",
+        template_id="debug_checkout",  # template report_enabled=False
+        report_enabled=True,
+    )
+    assert info.report_enabled is True
+
+
+async def test_create_experiment_respects_report_enabled_override_false(
+    manager: ExperimentManager,
+) -> None:
+    """Per-experiment report_enabled=False overrides a template that
+    ships report_enabled=True."""
+    info = manager.create_experiment(
+        name="Override skip",
+        operator="Vladimir",
+        template_id="thermal_conductivity",  # template report_enabled=True
+        report_enabled=False,
+    )
+    assert info.report_enabled is False
+
+
+async def test_create_experiment_defaults_to_template_when_override_is_none(
+    manager: ExperimentManager,
+) -> None:
+    """report_enabled=None (operator didn't touch the checkbox) falls
+    back to the template's configured value."""
+    info = manager.create_experiment(
+        name="Default path",
+        operator="Vladimir",
+        template_id="thermal_conductivity",
+        report_enabled=None,
+    )
+    assert info.report_enabled is True
+
+
 async def test_retroactive_experiment_creates_completed_artifact(
     manager: ExperimentManager,
     tmp_path: Path,
@@ -331,9 +373,7 @@ def test_no_english_debug_switch_string_remains_in_src() -> None:
         text=True,
         check=False,
     )
-    assert result.stdout == "", (
-        f"English debug-switch string still present:\n{result.stdout}"
-    )
+    assert result.stdout == "", f"English debug-switch string still present:\n{result.stdout}"
 
 
 async def test_stop_without_active_raises(manager: ExperimentManager) -> None:

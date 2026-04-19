@@ -10,6 +10,7 @@ import logging
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QCompleter,
     QDialog,
@@ -52,6 +53,10 @@ class NewExperimentDialog(QDialog):
         self._preferences = UserPreferences(get_data_dir() / "user_preferences.json")
         self._build_ui()
         self._apply_preferences()
+        # IV.4 F6: seed the report-enabled checkbox from the initially
+        # selected template so the first open matches what the
+        # template declares.
+        self._sync_report_enabled_default()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -114,6 +119,24 @@ class NewExperimentDialog(QDialog):
         self._notes_edit.setMaximumHeight(60)
         form.addRow("\u0417\u0430\u043c\u0435\u0442\u043a\u0438:", self._notes_edit)
 
+        # IV.4 F6: per-experiment report_enabled override. Defaults
+        # to the current template's report_enabled; operator can
+        # untick to skip auto-report on finalize for this run without
+        # editing template YAML. If unchecked the payload carries
+        # report_enabled=False; otherwise the key is omitted so the
+        # engine falls back to the template value.
+        self._report_enabled_check = QCheckBox(
+            "\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 "
+            "\u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043e\u0442\u0447\u0451\u0442"
+        )
+        self._report_enabled_check.setToolTip(
+            "DOCX/PDF отчёт будет создан после завершения эксперимента."
+        )
+        form.addRow(
+            "\u041e\u0442\u0447\u0451\u0442:",
+            self._report_enabled_check,
+        )
+
         root.addLayout(form)
 
         # Custom fields (dynamic per template)
@@ -168,6 +191,24 @@ class NewExperimentDialog(QDialog):
     def _on_template_changed(self) -> None:
         self._rebuild_custom_fields()
         self._suggest_name()
+        self._sync_report_enabled_default()
+
+    def _sync_report_enabled_default(self) -> None:
+        """Track the current template's report_enabled value.
+
+        Initial state + every template switch resets the checkbox to
+        the template default. Operator explicit toggles are NOT
+        overwritten during a single dialog session — if the checkbox
+        was touched after the last template change, the operator's
+        choice survives further template swaps. Simpler heuristic: we
+        always sync on template change (the operator rarely flips
+        template after setting the override). Update if smoke feedback
+        says otherwise.
+        """
+        tid = self._template_combo.currentData() or "custom"
+        template = self._templates_by_id.get(tid, {})
+        default = bool(template.get("report_enabled", True))
+        self._report_enabled_check.setChecked(default)
 
     def _suggest_name(self) -> None:
         if self._name_edit.text().strip():
@@ -227,6 +268,8 @@ class NewExperimentDialog(QDialog):
                 for fid, edit in self._custom_edits.items()
                 if edit.text().strip()
             },
+            # IV.4 F6: per-experiment report_enabled override.
+            "report_enabled": self._report_enabled_check.isChecked(),
         }
 
         # Save preferences

@@ -600,6 +600,7 @@ class ExperimentManager:
         notes: str = "",
         custom_fields: dict[str, Any] | None = None,
         start_time: datetime | str | None = None,
+        report_enabled: bool | None = None,
     ) -> ExperimentInfo:
         self._require_experiment_mode()
         if self._active is not None:
@@ -612,6 +613,15 @@ class ExperimentManager:
         now = _parse_time(start_time) or datetime.now(UTC)
         config_snapshot = self._read_config_snapshot()
         normalized_custom_fields = _normalize_custom_fields(custom_fields)
+
+        # IV.4 F6: per-experiment report_enabled override. The new
+        # NewExperimentDialog checkbox passes this through so operators
+        # can turn off the auto-report for a one-off run without
+        # editing the template YAML. None (default) keeps the
+        # template's configured value.
+        effective_report_enabled = (
+            template.report_enabled if report_enabled is None else bool(report_enabled)
+        )
 
         info = ExperimentInfo(
             experiment_id=experiment_id,
@@ -628,7 +638,7 @@ class ExperimentManager:
             status=ExperimentStatus.RUNNING,
             config_snapshot=config_snapshot,
             custom_fields=normalized_custom_fields,
-            report_enabled=template.report_enabled,
+            report_enabled=effective_report_enabled,
             sections=template.sections,
             artifact_dir=self._artifact_dir(experiment_id),
             metadata_path=self._metadata_path(experiment_id),

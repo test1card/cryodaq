@@ -460,6 +460,11 @@ def _run_experiment_command(
         }
 
     if action in {"experiment_start", "experiment_create"}:
+        # IV.4 F6: per-experiment report_enabled override. The GUI
+        # dialog passes a bool when the operator flips the checkbox,
+        # otherwise the key is absent and the template default wins.
+        raw_report_enabled = cmd.get("report_enabled")
+        report_override = bool(raw_report_enabled) if raw_report_enabled is not None else None
         info = experiment_manager.create_experiment(
             name=str(cmd.get("name", "")).strip() or str(cmd.get("title", "")).strip(),
             operator=str(cmd.get("operator", "")).strip(),
@@ -471,6 +476,7 @@ def _run_experiment_command(
             notes=str(cmd.get("notes", "")).strip(),
             custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
             start_time=_parse_experiment_time(cmd.get("start_time")),
+            report_enabled=report_override,
         )
         return {
             "ok": True,
