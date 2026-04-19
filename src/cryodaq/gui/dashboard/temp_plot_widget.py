@@ -22,7 +22,11 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
-from cryodaq.gui.dashboard.time_window import TimeWindow
+from cryodaq.gui.state.time_window import (
+    TimeWindow,
+    get_time_window_controller,
+)
+from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 
 _MAX_POINTS = 2000
 
@@ -54,32 +58,29 @@ class TempPlotWidget(QWidget):
         self._buffer = buffer_store
         self._channel_mgr = channel_manager
         self._plot_items: dict[str, pg.PlotDataItem] = {}
-        self._current_window = TimeWindow.default()
+        # Phase III.B: single source of truth is the global controller;
+        # no local TimeWindow state. `_current_window` is a cached
+        # mirror refreshed from the broadcast.
+        self._current_window = get_time_window_controller().get_window()
         self._is_log_y = False
         self._build_ui()
         self._rebuild_curves()
         self._channel_mgr.on_change(self._on_channels_changed)
+        get_time_window_controller().window_changed.connect(
+            self._on_global_window_changed
+        )
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(2)
 
-        # Toolbar
+        # Toolbar — Phase III.B: TimeWindowSelector drives the global
+        # controller; this plot subscribes to the broadcast.
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(4, 2, 4, 2)
-
-        self._time_buttons: dict[TimeWindow, QPushButton] = {}
-        for tw in TimeWindow.all_options():
-            btn = QPushButton(tw.label)
-            btn.setCheckable(True)
-            btn.setChecked(tw == self._current_window)
-            btn.setFixedHeight(24)
-            btn.clicked.connect(lambda checked, w=tw: self._on_time_window_clicked(w))
-            self._time_buttons[tw] = btn
-            self._style_time_button(btn, tw == self._current_window)
-            toolbar.addWidget(btn)
-
+        self._time_selector = TimeWindowSelector(show_6h=True)
+        toolbar.addWidget(self._time_selector)
         toolbar.addStretch()
 
         self._log_button = QPushButton("Lin Y")
@@ -174,11 +175,9 @@ class TempPlotWidget(QWidget):
     # Time picker
     # ------------------------------------------------------------------
 
-    def _on_time_window_clicked(self, window: TimeWindow) -> None:
+    def _on_global_window_changed(self, window: TimeWindow) -> None:
+        """Receive broadcast from GlobalTimeWindowController."""
         self._current_window = window
-        for tw, btn in self._time_buttons.items():
-            btn.setChecked(tw == window)
-            self._style_time_button(btn, tw == window)
         self.time_window_changed.emit(window)
         self.refresh()
 

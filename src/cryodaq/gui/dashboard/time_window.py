@@ -1,39 +1,11 @@
-"""Time window selector enum for dashboard plots.
+"""Dashboard re-export of the global :class:`TimeWindow` enum.
 
-Shared between TempPlotWidget (interactive picker) and TopWatchBar
-(read-only echo). Modifying this single source updates both surfaces.
+Original location moved to :mod:`cryodaq.gui.state.time_window` in
+Phase III.B (one-source-of-truth controller). This shim preserves
+existing import paths while repo consumers migrate to the canonical
+module.
 """
 
-from __future__ import annotations
+from cryodaq.gui.state.time_window import TimeWindow
 
-from enum import Enum
-
-
-class TimeWindow(Enum):
-    """Time window options for plot X-axis range."""
-
-    MIN_1 = ("1мин", 60.0)
-    HOUR_1 = ("1ч", 3600.0)
-    HOUR_6 = ("6ч", 21600.0)
-    HOUR_24 = ("24ч", 86400.0)
-    ALL = ("Всё", float("inf"))
-
-    @property
-    def label(self) -> str:
-        return self.value[0]
-
-    @property
-    def seconds(self) -> float:
-        return self.value[1]
-
-    @classmethod
-    def default(cls) -> TimeWindow:
-        # Cryo experiments run for hours/days; the operator's default
-        # question is "how has this trended since we started running"
-        # (especially for pressure, which moves over decades). "1ч" as
-        # the initial window hid the long-horizon signal.
-        return cls.ALL
-
-    @classmethod
-    def all_options(cls) -> list[TimeWindow]:
-        return [cls.MIN_1, cls.HOUR_1, cls.HOUR_6, cls.HOUR_24, cls.ALL]
+__all__ = ["TimeWindow"]

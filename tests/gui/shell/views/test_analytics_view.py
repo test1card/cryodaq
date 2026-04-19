@@ -128,7 +128,9 @@ def test_analytics_view_no_data_shows_placeholders(app):
     view = AnalyticsView()
     view.set_cooldown(None)
     view.set_r_thermal(None)
-    assert view._hero._eta_label.text() == "Охлаждение не активно"
+    # Phase III.D Item 17: empty state now carries an action hint.
+    assert view._hero._eta_label.text().startswith("Охлаждение не активно")
+    assert "захолаживания" in view._hero._eta_label.text()
     assert view._hero._progress.value() == 0
     assert view._rthermal_tile._value_label.text() == "—"
 

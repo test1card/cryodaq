@@ -11,6 +11,31 @@
 
 ### Changed
 
+- **Phase III.B — GlobalTimeWindow + shared PressurePlot +
+  PredictionWidget.** `TimeWindow` enum promoted from dashboard-local
+  to `cryodaq.gui.state.time_window` with a
+  `GlobalTimeWindowController` singleton. Every historical plot
+  subscribes — clicking 1мин / 1ч / 6ч / 24ч / Всё on any plot's
+  selector updates every subscribed plot across the app. Prediction
+  plots do NOT subscribe; they have their own forward horizon
+  (1/3/6/12/24/48ч) with uncertainty bands.
+  New shared `cryodaq.gui.widgets.shared.PressurePlot` with
+  `ScientificLogAxisItem` — scientific-notation log-Y tick labels
+  (fixes the missing Y labels in the compact dashboard pressure
+  panel). Dashboard `PressurePlotWidget` now delegates to the shared
+  component (composition — `_plot` proxy preserved for the
+  dashboard-view `setXLink` wiring). Dashboard `TempPlotWidget`
+  migrated to `TimeWindowSelector` — local state removed; single
+  broadcast-driven controller is the source of truth.
+  New shared `cryodaq.gui.widgets.shared.PredictionWidget` skeleton:
+  always-full history + 6-button forward horizon + CI band rendered
+  as `FillBetweenItem` with `STATUS_INFO` at ~25 % alpha (neutral
+  informational tint, never safety colors). «Через N ч» readout
+  updates from interpolated central/lower/upper CI series. Full
+  analytics integration deferred to III.C — III.B only ships the
+  components + tests. ACCENT decoupling (III.A) preserved: selector
+  and horizon buttons render checked state in ACCENT, not STATUS_OK.
+
 - **Phase III.A — DS accent/status decoupling.** Fixed semantic
   collision where `STATUS_OK` (safety-green) rendered UI states
   (selected rows, active tabs, primary buttons, mode badge) and read
