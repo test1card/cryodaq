@@ -309,6 +309,12 @@ class MainWindowV2(QMainWindow):
         if name == "experiment" and hasattr(widget, "closed"):
             widget.closed.connect(lambda: self._on_tool_clicked("home"))
             widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
+            # IV.2 B.1: overlay landing page delegates experiment
+            # creation to the shell's existing NewExperimentDialog —
+            # same dialog as TopWatchBar click path, so there is only
+            # one creation flow regardless of entry point.
+            if hasattr(widget, "experiment_create_requested"):
+                widget.experiment_create_requested.connect(self._show_new_experiment_dialog)
             # B.8.0.1: overlay handles phase transitions via own ZMQ calls
             # Populate with latest state
             if self._latest_experiment_status:
@@ -581,9 +587,7 @@ class MainWindowV2(QMainWindow):
         # dynamic layout can swap to the phase-appropriate widget set.
         if self._analytics_view is not None:
             current_phase = status.get("current_phase")
-            self._analytics_view.set_phase(
-                str(current_phase) if current_phase else None
-            )
+            self._analytics_view.set_phase(str(current_phase) if current_phase else None)
 
     def _active_experiment_id(self) -> str | None:
         """Return the cached active experiment id, or None."""

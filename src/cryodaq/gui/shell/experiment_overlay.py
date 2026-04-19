@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +44,11 @@ class ExperimentOverlay(QWidget):
     experiment_finalized = Signal()
     experiment_updated = Signal()
     closed = Signal()
+    # IV.2 B.1: landing state emits this when the operator clicks
+    # "Создать эксперимент". MainWindowV2 wires it to the existing
+    # NewExperimentDialog flow so the overlay does not build a new
+    # creation path — same dialog, same ZMQ command, same lifecycle.
+    experiment_create_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,7 +79,29 @@ class ExperimentOverlay(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # IV.2 B.1: two-page stack. Page 0 = landing (no active
+        # experiment) with an explicit "Создать эксперимент" call-to-
+        # action. Page 1 = mid-experiment detail view (the original
+        # layout). set_experiment() swaps pages based on whether an
+        # experiment is live; the landing page emits a signal so the
+        # host (MainWindowV2) can open its existing
+        # NewExperimentDialog — this overlay never owns the creation
+        # flow, only the entry point.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack)
+
+        self._landing_page = self._build_landing_page()
+        self._stack.addWidget(self._landing_page)
+
+        content = QWidget()
+        self._content_page = content
+        self._stack.addWidget(content)
+        self._stack.setCurrentWidget(self._landing_page)
+
+        root = QVBoxLayout(content)
         root.setContentsMargins(theme.SPACE_5, theme.SPACE_4, theme.SPACE_5, theme.SPACE_4)
         root.setSpacing(theme.SPACE_3)
 
@@ -301,6 +329,99 @@ class ExperimentOverlay(QWidget):
             self.styleSheet() + f"#ExperimentOverlay {{ background-color: {theme.BACKGROUND}; }}"
         )
 
+    def _build_landing_page(self) -> QWidget:
+        """Build the 'no active experiment' landing widget.
+
+        Centered instructional copy + a primary "Создать эксперимент"
+        button. The button emits experiment_create_requested; the host
+        reuses its existing NewExperimentDialog flow. No inline form —
+        the dialog already owns template selection, validation, and
+        the experiment_create ZMQ command.
+        """
+        page = QWidget()
+        page.setObjectName("ExperimentLandingPage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5)
+        outer.setSpacing(theme.SPACE_4)
+        outer.addStretch(1)
+
+        inner = QVBoxLayout()
+        inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        inner.setSpacing(theme.SPACE_3)
+
+        heading = QLabel(
+            "\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e "
+            "\u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430"
+        )
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setObjectName("expLandingHeading")
+        heading.setStyleSheet(
+            f"#expLandingHeading {{ "
+            f"color: {theme.FOREGROUND}; "
+            f"font-family: '{theme.FONT_DISPLAY}'; "
+            f"font-size: {theme.FONT_SIZE_2XL}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+            f"}}"
+        )
+        inner.addWidget(heading)
+
+        body = QLabel(
+            "\u0417\u0434\u0435\u0441\u044c \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f "
+            "\u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u044d\u043a\u0441\u043f\u0435\u0440"
+            "\u0438\u043c\u0435\u043d\u0442\u0430 \u043f\u043e\u0441\u043b\u0435 \u0441\u043e"
+            "\u0437\u0434\u0430\u043d\u0438\u044f.\n\n"
+            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0448\u0430\u0431\u043b\u043e\u043d "
+            "\u0438\u043b\u0438 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u0442\u0435 "
+            "\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0432\u0440\u0443\u0447"
+            "\u043d\u0443\u044e, \u0437\u0430\u0442\u0435\u043c \u0437\u0430\u043f\u0443\u0441"
+            "\u0442\u0438\u0442\u0435 \u043d\u043e\u0432\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a."
+        )
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setWordWrap(True)
+        body.setObjectName("expLandingBody")
+        body.setStyleSheet(
+            f"#expLandingBody {{ "
+            f"color: {theme.MUTED_FOREGROUND}; "
+            f"font-family: '{theme.FONT_BODY}'; "
+            f"font-size: {theme.FONT_SIZE_BASE}px; "
+            f"font-style: italic; "
+            f"}}"
+        )
+        body.setMaximumWidth(640)
+        inner.addWidget(body)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._landing_create_btn = QPushButton(
+            "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"
+        )
+        self._landing_create_btn.setObjectName("expLandingCreateBtn")
+        self._landing_create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._landing_create_btn.setStyleSheet(
+            f"#expLandingCreateBtn {{ "
+            f"background-color: {theme.ACCENT}; "
+            f"color: {theme.ON_ACCENT}; "
+            f"border: 1px solid {theme.ACCENT}; "
+            f"border-radius: {theme.RADIUS_SM}px; "
+            f"padding: 12px 24px; "
+            f"font-size: {theme.FONT_SIZE_LG}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+            f"}} "
+            f"#expLandingCreateBtn:disabled {{ "
+            f"background-color: {theme.SURFACE_MUTED}; "
+            f"color: {theme.MUTED_FOREGROUND}; "
+            f"border-color: {theme.BORDER_SUBTLE}; "
+            f"}}"
+        )
+        self._landing_create_btn.clicked.connect(self.experiment_create_requested)
+        btn_row.addWidget(self._landing_create_btn)
+        btn_row.addStretch()
+        inner.addLayout(btn_row)
+
+        outer.addLayout(inner)
+        outer.addStretch(1)
+        return page
+
     @staticmethod
     def _make_divider() -> QFrame:
         line = QFrame()
@@ -372,6 +493,13 @@ class ExperimentOverlay(QWidget):
     ) -> None:
         self._experiment = experiment
         self._phase_history = phase_history or []
+        # IV.2 B.1: swap stack page on experiment lifecycle boundary.
+        # None → landing (operator must create one); dict → content
+        # (full card view).
+        if experiment is None:
+            self._stack.setCurrentWidget(self._landing_page)
+        else:
+            self._stack.setCurrentWidget(self._content_page)
         self._refresh_display()
 
     def set_templates(self, templates: list[dict]) -> None:
@@ -412,6 +540,11 @@ class ExperimentOverlay(QWidget):
             self._prev_btn.setEnabled(self._connected)
         if hasattr(self, "_next_btn"):
             self._next_btn.setEnabled(self._connected)
+        # IV.2 B.1: the landing page's create button dispatches the
+        # existing experiment_create ZMQ command; it must gate on
+        # connection just like the other action buttons.
+        if hasattr(self, "_landing_create_btn"):
+            self._landing_create_btn.setEnabled(self._connected)
 
     def _displayed_name(self) -> str:
         return self._name_label.text()
@@ -422,9 +555,12 @@ class ExperimentOverlay(QWidget):
 
     def _refresh_display(self) -> None:
         if self._experiment is None:
-            self._name_label.setText(
-                "\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430"  # noqa: E501
-            )
+            # IV.2 B.1: the content page is no longer visible when there
+            # is no active experiment — the stack shows the landing
+            # page instead. Keep the content-page widgets in a clean
+            # state so a back-and-forth create / abort cycle doesn't
+            # leak stale data when the page is re-shown.
+            self._name_label.setText("")
             self._passport_label.setText("")
             self._finalize_btn.setEnabled(False)
             self._prev_btn.setVisible(False)

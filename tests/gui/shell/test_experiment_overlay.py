@@ -442,6 +442,68 @@ def test_no_close_button_on_experiment_overlay(app):
     )
 
 
+def test_landing_page_visible_on_empty_overlay(app):
+    """IV.2 B.1 — fresh overlay (no active experiment) shows landing page."""
+    overlay = ExperimentOverlay()
+    assert overlay._stack.currentWidget() is overlay._landing_page
+
+
+def test_landing_page_has_create_button(app):
+    """Landing page exposes a primary create-experiment CTA."""
+    overlay = ExperimentOverlay()
+    btn = overlay._landing_create_btn
+    assert btn is not None
+    assert btn.text().startswith("Создать")
+
+
+def test_landing_page_text_mentions_required_action(app):
+    """Landing body must name the required operator action (create)."""
+    overlay = ExperimentOverlay()
+    body = overlay._landing_page.findChild(QLabel, "expLandingBody")
+    assert body is not None
+    text = body.text()
+    assert "карточка" in text.lower() or "эксперимента" in text.lower()
+    assert "шаблон" in text.lower() or "параметры" in text.lower()
+
+
+def test_create_button_click_emits_signal(app):
+    """Clicking the landing CTA fires experiment_create_requested."""
+    overlay = ExperimentOverlay()
+    received: list[None] = []
+    overlay.experiment_create_requested.connect(lambda: received.append(None))
+    overlay._landing_create_btn.click()
+    assert len(received) == 1
+
+
+def test_stack_switches_to_content_page_on_set_experiment(app):
+    """Live experiment → content page; None → landing."""
+    overlay = ExperimentOverlay()
+    assert overlay._stack.currentWidget() is overlay._landing_page
+    overlay.set_experiment(
+        {
+            "name": "E1",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "current_phase": "cooldown",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        }
+    )
+    assert overlay._stack.currentWidget() is overlay._content_page
+    # And back to landing on finalize (experiment becomes None).
+    overlay.set_experiment(None)
+    assert overlay._stack.currentWidget() is overlay._landing_page
+
+
+def test_create_button_disabled_when_disconnected(app):
+    """Create CTA dispatches a ZMQ command — gate on connection like others."""
+    overlay = ExperimentOverlay()
+    overlay.set_connected(True)
+    assert overlay._landing_create_btn.isEnabled() is True
+    overlay.set_connected(False)
+    assert overlay._landing_create_btn.isEnabled() is False
+
+
 def test_current_phase_pill_uses_accent_not_status_ok(app):
     """IV.2 B.2 — phase pill current-state tier is ACCENT (UI activation),
     not STATUS_OK (reserved for safety/running-status)."""
