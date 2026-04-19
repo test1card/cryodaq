@@ -116,3 +116,90 @@ def test_left_axis_auto_si_prefix_disabled(app):
     plot = PressurePlot()
     left_axis = plot.plot_item.getPlotItem().getAxis("left")
     assert left_axis.autoSIPrefix is False
+
+
+def test_tick_values_decade_only_on_compact_panel():
+    """IV.1 finding 3 — short panel must drop the 5× midpoints.
+
+    Dashboard panel is ~80 px tall; pyqtgraph's default tick generator
+    piled 6-8 labels (8e0 / 7e0 / …) that overlapped completely. The
+    compact panel path returns only decade majors, no minor ticks.
+    """
+    axis = ScientificLogAxisItem(orientation="left")
+    major, minor = axis.tickValues(-7.0, -5.0, size=80)
+    assert major == (1.0, [-7.0, -6.0, -5.0])
+    assert minor == (0.2, [])
+
+
+def test_tick_values_include_midpoints_on_tall_panel():
+    """Tall panel (>150 px) gets the 5× midpoints back."""
+    axis = ScientificLogAxisItem(orientation="left")
+    major, minor = axis.tickValues(-7.0, -5.0, size=400)
+    assert major[1] == [-7.0, -6.0, -5.0]
+    mid_values = minor[1]
+    assert len(mid_values) == 2
+    import math as _math
+
+    for v in mid_values:
+        # Midpoint = decade + log10(5), e.g. -6.3010
+        frac = v - _math.floor(v)
+        assert abs(frac - _math.log10(5.0)) < 1e-6
+
+
+def test_pressure_autorange_excludes_sentinel_values(app):
+    """IV.1 finding 3 — Y range must come from positive values only.
+
+    Mix of legitimate ~1e-6 pressure readings and zero sentinels (pump
+    warmup, sensor fault). The autorange bound must reflect 1e-6, not
+    the 1e-12 replacement sentinel that would drag the viewport six
+    decades too low and hide the trace.
+    """
+    plot = PressurePlot()
+    times = [float(i) for i in range(5)]
+    values = [1.0e-6, 0.0, 1.2e-6, -1.0, 1.1e-6]
+    plot.set_series(times, values)
+    pi = plot.plot_item.getPlotItem()
+    view_range = pi.viewRange()
+    y_lo_log, y_hi_log = view_range[1]
+    import math as _math
+
+    # 1e-6 should be well inside the viewport.
+    assert y_lo_log < _math.log10(1e-6) < y_hi_log
+    # 1e-12 sentinel must NOT be inside the viewport (that's the bug
+    # signature — it would be if autorange was sentinel-contaminated).
+    assert y_lo_log > _math.log10(1e-11)
+
+
+def test_pressure_trace_visible_at_1e_minus_6(app):
+    """Integration: a 1.2e-6 trace lands inside the configured Y range."""
+    plot = PressurePlot()
+    times = [float(i) for i in range(3)]
+    values = [1.2e-6, 1.2e-6, 1.2e-6]
+    plot.set_series(times, values)
+    pi = plot.plot_item.getPlotItem()
+    (_, (y_lo_log, y_hi_log)) = pi.viewRange()
+    import math as _math
+
+    assert y_lo_log < _math.log10(1.2e-6) < y_hi_log
+
+
+def test_pressure_set_series_all_non_positive_does_not_crash(app):
+    """Edge: all values zero → fallback sentinel path, no exception."""
+    plot = PressurePlot()
+    # Must not raise. Autorange is skipped (no positive values to base
+    # it on) and the curve gets the 1e-12 fallback so log-Y does not
+    # produce -inf.
+    plot.set_series([0.0, 1.0, 2.0], [0.0, 0.0, 0.0])
+
+
+def test_dashboard_pressure_uses_shared_component():
+    """IV.1 finding 3 — dashboard pressure plot composes the shared plot."""
+    import inspect
+
+    from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
+
+    src = inspect.getsource(PressurePlotWidget)
+    assert "PressurePlot" in src
+    assert "from cryodaq.gui.widgets.shared.pressure_plot import PressurePlot" in inspect.getsource(
+        inspect.getmodule(PressurePlotWidget)
+    )
