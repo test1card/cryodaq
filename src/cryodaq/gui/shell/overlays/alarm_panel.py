@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -281,8 +282,55 @@ class AlarmPanel(QWidget):
         root.setSpacing(theme.SPACE_3)
 
         root.addWidget(self._build_header())
-        root.addWidget(self._build_v1_card())
-        root.addWidget(self._build_v2_card(), stretch=1)
+
+        # IV.3 F2: body is a QStackedWidget. Page 0 is the unified
+        # "both lists empty" message — a single centered line rather
+        # than two cards rendering their own empty tables side-by-side.
+        # Page 1 is the existing two-card layout, preserved verbatim.
+        self._body_stack = QStackedWidget()
+
+        self._body_empty_page = self._build_unified_empty_page()
+        self._body_stack.addWidget(self._body_empty_page)
+
+        cards_page = QWidget()
+        cards_layout = QVBoxLayout(cards_page)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(theme.SPACE_3)
+        cards_layout.addWidget(self._build_v1_card())
+        cards_layout.addWidget(self._build_v2_card(), stretch=1)
+        self._body_stack.addWidget(cards_page)
+
+        self._body_stack.setCurrentWidget(self._body_empty_page)
+        root.addWidget(self._body_stack, stretch=1)
+
+    def _build_unified_empty_page(self) -> QWidget:
+        """Full-overlay centered empty state when both alarm lists are empty."""
+        page = QWidget()
+        page.setObjectName("alarmUnifiedEmpty")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5)
+        layout.setSpacing(theme.SPACE_2)
+        layout.addStretch(1)
+
+        title = QLabel("Нет активных тревог.")
+        title.setFont(_section_title_font())
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Система отслеживает все каналы автоматически.")
+        subtitle.setFont(_body_font())
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background: transparent; border: none;"
+            f" font-style: italic;"
+        )
+        layout.addWidget(subtitle)
+
+        layout.addStretch(1)
+        return page
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -335,6 +383,21 @@ class AlarmPanel(QWidget):
         header_v.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._table)
 
+        # IV.3 F2: inline per-card empty hint. Rendered only when the
+        # body stack is on page 1 (i.e. the OTHER card has data); the
+        # unified empty page handles the both-empty state.
+        self._v1_empty_label = QLabel("Нет пороговых тревог")
+        self._v1_empty_label.setFont(_body_font())
+        self._v1_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._v1_empty_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background: transparent; border: none;"
+            f" padding: {theme.SPACE_2}px;"
+            f" font-style: italic;"
+        )
+        self._v1_empty_label.setVisible(False)
+        layout.addWidget(self._v1_empty_label)
+
         return card
 
     def _build_v2_card(self) -> QWidget:
@@ -366,20 +429,23 @@ class AlarmPanel(QWidget):
         header_v2.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._v2_table)
 
-        # Phase III.D Item 17: empty state carries an action hint so
-        # the operator knows this is normal, not a broken widget.
-        self._v2_empty_label = QLabel(
-            "Нет активных алармов. Система отслеживает все каналы автоматически."
-        )
+        # IV.3 F2: inline per-card empty hint. Rendered only when the
+        # body stack is on page 1 (i.e. v1 has data but v2 doesn't);
+        # the unified empty page owns the both-empty case. This label
+        # replaces the old "Нет активных алармов. Система отслеживает
+        # все каналы автоматически." text which is now carried by the
+        # unified empty page.
+        self._v2_empty_label = QLabel("Нет фазо-зависимых тревог")
         self._v2_empty_label.setFont(_body_font())
         self._v2_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._v2_empty_label.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND};"
             f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_3}px;"
+            f" padding: {theme.SPACE_2}px;"
+            f" font-style: italic;"
         )
+        self._v2_empty_label.setVisible(False)
         layout.addWidget(self._v2_empty_label)
-        self._v2_empty_label.setVisible(True)
 
         return card
 
@@ -486,6 +552,9 @@ class AlarmPanel(QWidget):
             )
 
         self._refresh_table()
+        # IV.3 F2: body-stack state depends on both v1 and v2 counts;
+        # v1 changes through _handle_reading must also trigger the swap.
+        self._update_body_stack_state()
         self._refresh_summary()
 
     # ------------------------------------------------------------------
@@ -601,8 +670,29 @@ class AlarmPanel(QWidget):
                 self._v2_ack_buttons.append(btn)
                 self._v2_table.setCellWidget(row_idx, 5, btn)
 
-        has_alarms = len(sorted_items) > 0
-        self._v2_empty_label.setVisible(not has_alarms)
+        # IV.3 F2: v2_empty_label visibility is now owned by
+        # _update_body_stack_state; don't toggle it here.
+        self._update_body_stack_state()
+
+    def _update_body_stack_state(self) -> None:
+        """Swap the body stack between unified empty and two-card layout.
+
+        IV.3 F2: when both v1 and v2 are empty, show a single centered
+        "Нет активных тревог." message across the overlay body. When
+        at least one list has entries, show the two-card layout; the
+        card whose table has zero rows gets its inline
+        «Нет <...> тревог» hint so the operator can tell the empty
+        card from a broken one.
+        """
+        v1_count = self.get_active_v1_count()
+        v2_count = len(self._v2_alarms)
+        both_empty = v1_count == 0 and v2_count == 0
+        target_idx = 0 if both_empty else 1
+        if self._body_stack.currentIndex() != target_idx:
+            self._body_stack.setCurrentIndex(target_idx)
+        # Inline per-card hint only when the OTHER card has data.
+        self._v1_empty_label.setVisible(not both_empty and v1_count == 0)
+        self._v2_empty_label.setVisible(not both_empty and v2_count == 0)
 
     def _refresh_summary(self) -> None:
         v1_active = self.get_active_v1_count()

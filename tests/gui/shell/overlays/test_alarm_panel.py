@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -116,9 +116,14 @@ def test_poll_timer_not_active_on_construction(app):
     assert panel._v2_poll_timer.isActive() is False
 
 
-def test_empty_label_visible_by_default(app):
+def test_unified_empty_page_visible_by_default(app):
+    """IV.3 F2: with both v1 and v2 empty, the body stack shows the
+    unified centered "Нет активных тревог." page, and the per-card
+    inline hints are hidden (no asymmetric state yet)."""
     panel = AlarmPanel()
-    assert panel._v2_empty_label.isHidden() is False
+    assert panel._body_stack.currentWidget() is panel._body_empty_page
+    assert panel._v1_empty_label.isHidden() is True
+    assert panel._v2_empty_label.isHidden() is True
 
 
 def test_summary_label_hidden_when_no_alarms(app):
@@ -321,10 +326,13 @@ def test_set_connected_enables_v1_ack_buttons(app):
 
 
 def test_update_v2_status_empty_payload_clears(app):
+    """Empty payload with empty v1 → unified empty page remains shown."""
     panel = AlarmPanel()
     panel.update_v2_status({"ok": True, "active": {}})
     assert panel._v2_alarms == {}
-    assert panel._v2_empty_label.isHidden() is False
+    assert panel._body_stack.currentWidget() is panel._body_empty_page
+    # Inline hint stays hidden — we're in the both-empty case.
+    assert panel._v2_empty_label.isHidden() is True
 
 
 def test_update_v2_status_populates_table(app):
@@ -343,6 +351,8 @@ def test_update_v2_status_populates_table(app):
     panel.update_v2_status(payload)
     assert panel._v2_alarms == payload["active"]
     assert panel._v2_table.rowCount() == 1
+    # v2 has data → stack on two-card page, v2 hint hidden.
+    assert panel._body_stack.currentIndex() == 1
     assert panel._v2_empty_label.isHidden() is True
 
 
@@ -655,3 +665,79 @@ def test_elapsed_text_minutes():
 
 def test_elapsed_text_hours():
     assert _elapsed_text(3660.0) == "1.0 ч"
+
+
+# ----------------------------------------------------------------------
+# IV.3 F2 — unified empty state / per-card inline hints
+# ----------------------------------------------------------------------
+
+
+def test_alarm_panel_shows_unified_empty_state_when_both_empty(app):
+    """Fresh panel with neither v1 nor v2 populated → unified empty page."""
+    panel = AlarmPanel()
+    panel.update_v2_status({"ok": True, "active": {}})
+    assert panel.get_active_v1_count() == 0
+    assert panel._body_stack.currentWidget() is panel._body_empty_page
+    # Unified page text asserts the expected copy so the operator
+    # recognises the empty state rather than reading a broken layout.
+    labels = panel._body_empty_page.findChildren(QLabel)
+    assert any("Нет активных тревог" in lbl.text() for lbl in labels)
+    assert any("отслеживает все каналы автоматически" in lbl.text() for lbl in labels)
+
+
+def test_alarm_panel_shows_cards_when_only_v1_has_data(app):
+    """v1 has an active row, v2 empty → two-card layout, v2 inline hint on."""
+    panel = AlarmPanel()
+    panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
+    assert panel._body_stack.currentIndex() == 1
+    assert panel._v1_empty_label.isHidden() is True
+    # v2 card has no rows; its inline hint explains the asymmetry.
+    assert panel._v2_empty_label.isHidden() is False
+    assert "фазо-зависим" in panel._v2_empty_label.text().lower()
+
+
+def test_alarm_panel_shows_cards_when_only_v2_has_data(app):
+    """v2 has a row, v1 empty → two-card layout, v1 inline hint on."""
+    panel = AlarmPanel()
+    panel.update_v2_status(
+        {
+            "ok": True,
+            "active": {
+                "cold_plate": {
+                    "level": "CRITICAL",
+                    "message": "m",
+                    "triggered_at": time.time(),
+                }
+            },
+        }
+    )
+    assert panel._body_stack.currentIndex() == 1
+    assert panel._v2_empty_label.isHidden() is True
+    assert panel._v1_empty_label.isHidden() is False
+    assert "пороговы" in panel._v1_empty_label.text().lower()
+
+
+def test_alarm_panel_returns_to_unified_empty_when_all_clear(app):
+    """Clearing both sides after a populated state restores the unified page."""
+    panel = AlarmPanel()
+    panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
+    assert panel._body_stack.currentIndex() == 1
+    panel._handle_reading(_alarm_reading("a", "CRITICAL", "cleared"))
+    # v1 row still present but in "cleared" state — active count 0.
+    assert panel.get_active_v1_count() == 0
+    panel.update_v2_status({"ok": True, "active": {}})
+    assert panel._body_stack.currentWidget() is panel._body_empty_page
+    # Inline hints off — we're back to the symmetric both-empty case.
+    assert panel._v1_empty_label.isHidden() is True
+    assert panel._v2_empty_label.isHidden() is True
+
+
+def test_alarm_panel_inline_empty_hint_in_zero_card_when_other_has_data(app):
+    """Explicit regression: inline hint ONLY in the zero card, not in both."""
+    panel = AlarmPanel()
+    panel._handle_reading(_alarm_reading("a", "WARNING", "activated"))
+    panel.update_v2_status({"ok": True, "active": {}})
+    assert panel._body_stack.currentIndex() == 1
+    # v1 has a row; v2 is the zero card. Only v2 inline hint visible.
+    assert panel._v1_empty_label.isHidden() is True
+    assert panel._v2_empty_label.isHidden() is False
