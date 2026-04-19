@@ -72,18 +72,25 @@ def _iter_operator_string_constants(py_file: Path):
             yield node.lineno, node.value
 
 
+_IDENTIFIER_LIKE = re.compile(r"^[a-z0-9_./-]+$")
+
+
 def _looks_operator_facing(text: str) -> bool:
     """Only flag matches that live alongside operator-visible copy.
 
-    Accepts strings with Cyrillic characters, or the handful of
-    hardware vendor labels that appear in UI (Keithley / LakeShore /
-    Thyracont, any case). Case-insensitive match — operator-facing
-    copy uses "Keithley" / "LakeShore" / "Thyracont" in mixed case,
-    all-caps in headers only ("KEITHLEY 2604B"). A maintainer-facing
-    `"legacy_smb_map"` identifier in code will not match.
+    Accepts strings with Cyrillic characters (definitionally operator-
+    facing since this codebase's engine contracts are all ASCII), or
+    mixed-case vendor names that appear in UI (Keithley / LakeShore /
+    Thyracont). Rejects strings that look like internal code
+    identifiers — all-lowercase ASCII with underscores / slashes /
+    dots (e.g. ``keithley_2604b``, ``keithley_set_target``,
+    ``alarm_v2/acknowledged``) are ZMQ command keys or config keys,
+    not operator copy.
     """
     if any("\u0400" <= ch <= "\u04ff" for ch in text):
         return True
+    if _IDENTIFIER_LIKE.fullmatch(text):
+        return False
     lowered = text.lower()
     return any(token in lowered for token in ("keithley", "lakeshore", "thyracont"))
 
