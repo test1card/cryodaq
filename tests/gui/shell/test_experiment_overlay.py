@@ -219,6 +219,97 @@ def test_nav_buttons_hidden_when_unavailable(app):
     assert overlay._next_btn.isHidden(), "next button must be hidden on last phase"
 
 
+# ----------------------------------------------------------------------
+# Phase II.9: set_connected Host Integration Contract
+# ----------------------------------------------------------------------
+
+
+def test_set_connected_default_true(app):
+    overlay = ExperimentOverlay()
+    # Default keeps actions functional until host pushes the first tick.
+    assert overlay._connected is True
+
+
+def test_set_connected_false_disables_finalize_when_active(app):
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    overlay.set_connected(False)
+    assert overlay._finalize_btn.isEnabled() is False
+
+
+def test_set_connected_false_disables_save_btn(app):
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    overlay.set_connected(False)
+    assert overlay._save_btn.isEnabled() is False
+
+
+def test_set_connected_false_disables_nav_buttons(app):
+    overlay = ExperimentOverlay()
+    overlay.set_connected(False)
+    assert overlay._prev_btn.isEnabled() is False
+    assert overlay._next_btn.isEnabled() is False
+
+
+def test_set_connected_reconnect_restores_finalize(app):
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    overlay.set_connected(False)
+    overlay.set_connected(True)
+    assert overlay._finalize_btn.isEnabled() is True
+
+
+def test_set_connected_idempotent(app):
+    overlay = ExperimentOverlay()
+    overlay.set_connected(True)  # already True
+    overlay.set_connected(True)
+    assert overlay._connected is True
+
+
+def test_refresh_display_respects_connection_state(app):
+    overlay = ExperimentOverlay()
+    overlay.set_connected(False)
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    # Refresh re-applies the connection gate.
+    assert overlay._finalize_btn.isEnabled() is False
+
+
 def test_no_close_button_on_experiment_overlay(app):
     """Regression (Batch B commit b0b460b): the × close button was removed
     because ExperimentOverlay is a primary view, not a modal overlay.

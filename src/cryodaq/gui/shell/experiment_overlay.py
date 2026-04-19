@@ -54,6 +54,11 @@ class ExperimentOverlay(QWidget):
         self._is_editing_name = False
         self._custom_edits: dict[str, QLineEdit] = {}
         self._templates_by_id: dict[str, dict] = {}
+        # Phase II.9 harmonization: action buttons gate on connection
+        # state per Host Integration Contract. Default True keeps the
+        # overlay functional when MainWindowV2 has not yet pushed the
+        # first status tick.
+        self._connected: bool = True
 
         self._finalize_worker = None
         self._abort_worker = None
@@ -373,6 +378,30 @@ class ExperimentOverlay(QWidget):
             if exp_id and exp_id == active_id:
                 self._reload_timeline()
 
+    def set_connected(self, connected: bool) -> None:
+        """Host Integration Contract — gate action buttons on connection.
+
+        Disconnects disable create / save / phase-advance / finalize
+        actions (all of which dispatch ZMQ commands). Timeline keeps
+        rendering from already-received readings — it is push-based
+        via the broker, not command-driven.
+        """
+        if connected == self._connected:
+            return
+        self._connected = connected
+        self._apply_connection_gate()
+
+    def _apply_connection_gate(self) -> None:
+        has_experiment = self._experiment is not None
+        self._save_btn.setEnabled(self._connected and has_experiment)
+        self._finalize_btn.setEnabled(self._connected and has_experiment)
+        # Phase nav buttons are also visibility-gated by _refresh_display;
+        # _connected just overlays an enabled/disabled state on top.
+        if hasattr(self, "_prev_btn"):
+            self._prev_btn.setEnabled(self._connected)
+        if hasattr(self, "_next_btn"):
+            self._next_btn.setEnabled(self._connected)
+
     def _displayed_name(self) -> str:
         return self._name_label.text()
 
@@ -393,7 +422,7 @@ class ExperimentOverlay(QWidget):
 
         exp = self._experiment
         self._name_label.setText(exp.get("name", exp.get("title", "\u2014")))
-        self._finalize_btn.setEnabled(True)
+        self._finalize_btn.setEnabled(self._connected)
 
         # Passport line
         eid = exp.get("experiment_id", "")

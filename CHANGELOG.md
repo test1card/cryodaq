@@ -11,6 +11,26 @@
 
 ### Changed
 
+- **Phase II.9 ExperimentOverlay harmonized — DS v1.0.1 (Path A).**
+  Stage 0 audit of `src/cryodaq/gui/shell/experiment_overlay.py`
+  showed the overlay was already DS v1.0.1-compliant (zero forbidden
+  tokens, zero emoji, zero hardcoded hex — shipped clean from B.8).
+  Path A surgical harmonization delivered the one remaining gap:
+  Host Integration Contract. New `set_connected(bool)` method
+  disables `_save_btn`, `_finalize_btn`, `_prev_btn`, `_next_btn`
+  on engine silence; `_refresh_display` now respects the connected
+  flag when re-rendering after `set_experiment`. Default state is
+  connected=True (preserves pre-first-tick functionality). Host
+  wiring: `MainWindowV2._tick_status` mirrors connection state;
+  `_ensure_overlay("experiment")` replays it on first open (same
+  pattern as II.4 / II.8 and earlier overlays). Zero engine command
+  signature changes, zero callback interface changes, zero layout
+  reordering — Path A diff is mechanically reversible. Path choice
+  rationale (Path A over Path B) recorded in
+  `docs/design-system/cryodaq-primitives/experiment-panel.md`.
+  Tests: 7 new cases in `test_experiment_overlay.py` (17 total) +
+  6 new wiring cases.
+
 - **Phase II.8 InstrumentsOverlay (cards + SensorDiag) — DS v1.0.1.**
   Merged two legacy modules (`instrument_status.py` +
   `sensor_diag_panel.py`) into a single overlay at

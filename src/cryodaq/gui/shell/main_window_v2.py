@@ -295,6 +295,12 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
+        # Phase II.9: replay connection state into Experiment overlay.
+        if name == "experiment":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
         # B.8: wire overlay signals
         # AnalyticsView is a primary-view QWidget with no `closed`
         # signal — nothing to wire here (the ToolRail drives navigation
@@ -542,6 +548,9 @@ class MainWindowV2(QMainWindow):
         # Phase II.8: mirror to Instruments overlay (gates 10 s diag polling).
         if self._instrument_panel is not None:
             self._instrument_panel.set_connected(connected)
+        # Phase II.9: mirror to Experiment overlay (gates action buttons).
+        if self._experiment_overlay is not None:
+            self._experiment_overlay.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
