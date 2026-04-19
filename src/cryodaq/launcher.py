@@ -53,6 +53,34 @@ logger = logging.getLogger("cryodaq.launcher")
 _ZMQ_PORT = 5555
 _WEB_PORT = 8080
 
+# Settings → Тема menu: curated display order. Dark group first, then
+# a visual separator, then light group. Packs not listed here fall
+# through to a trailing alphabetical extras block — keeps the menu
+# forward-compatible with locally-dropped dev packs without a code
+# edit. See docs/design-system/HANDOFF_THEMES_V2.md for the rationale.
+#
+# Classification is empirical (BACKGROUND luminance > 0.5 → light) —
+# the handoff doc groups warm_stone / ochre_bloom / taupe_quiet /
+# rose_dusk as "light" but their BG hexes are all dark. Only
+# gost / xcode / braun are actual light substrates.
+_THEME_DISPLAY_ORDER: tuple[str, ...] = (
+    # Dark
+    "default_cool",
+    "warm_stone",
+    "anthropic_mono",
+    "ochre_bloom",
+    "taupe_quiet",
+    "rose_dusk",
+    "signal",
+    "instrument",
+    "amber",
+    # Light (ADR 001 shifted-L STATUS set)
+    "gost",
+    "xcode",
+    "braun",
+)
+_LIGHT_THEME_IDS: frozenset[str] = frozenset({"gost", "xcode", "braun"})
+
 # Флаги создания процесса без окна (Windows)
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _ENGINE_STDERR_LOG_NAME = "engine.stderr.log"
@@ -576,7 +604,15 @@ class LauncherWindow(QMainWindow):
         source_bar.setVisible(False)
 
     def _build_settings_menu(self) -> None:
-        """Построить меню «Настройки → Тема» на menuBar лаунчера."""
+        """Построить меню «Настройки → Тема» на menuBar лаунчера.
+
+        Order: dark group (with a visual separator), then light group.
+        Within each group the order is fixed by ``_THEME_DISPLAY_ORDER``
+        below rather than alphabetical filename sort — the display order
+        is curated, not data-driven, so that related palettes (e.g.
+        Сигнал / Приборный / Янтарь) sit together regardless of their
+        filename spelling.
+        """
         from cryodaq.gui._theme_loader import (
             _selected_theme_name,
             available_themes,
@@ -586,18 +622,41 @@ class LauncherWindow(QMainWindow):
         theme_menu = settings_menu.addMenu("Тема")
 
         current = _selected_theme_name()
+        packs_by_id = {pack["id"]: pack for pack in available_themes()}
+        ordered_ids = [pid for pid in _THEME_DISPLAY_ORDER if pid in packs_by_id]
+        # Any pack not in the curated order (e.g. local dev pack dropped
+        # in config/themes/) appears at the end, alphabetical. Keeps
+        # the menu forward-compatible without requiring a code edit.
+        extras = sorted(pid for pid in packs_by_id if pid not in _THEME_DISPLAY_ORDER)
+
         group = QActionGroup(self)
         group.setExclusive(True)
-        for pack in available_themes():
+
+        def _add_entry(pid: str) -> None:
+            pack = packs_by_id[pid]
             action = QAction(pack["name"], self, checkable=True)
             if pack.get("description"):
                 action.setToolTip(pack["description"])
             action.setChecked(pack["id"] == current)
             action.triggered.connect(
-                lambda _checked=False, pid=pack["id"]: self._on_theme_selected(pid)
+                lambda _checked=False, p=pack["id"]: self._on_theme_selected(p)
             )
             group.addAction(action)
             theme_menu.addAction(action)
+
+        added_any_dark = False
+        for pid in ordered_ids:
+            if pid in _LIGHT_THEME_IDS and added_any_dark:
+                theme_menu.addSeparator()
+                added_any_dark = False
+            elif pid not in _LIGHT_THEME_IDS:
+                added_any_dark = True
+            _add_entry(pid)
+
+        if extras:
+            theme_menu.addSeparator()
+            for pid in extras:
+                _add_entry(pid)
 
     @Slot(str)
     def _on_theme_selected(self, theme_id: str) -> None:

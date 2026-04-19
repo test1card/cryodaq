@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Six new themes: signal, instrument, amber (dark); gost, xcode,
+  braun (light).** STATUS palette hue-locked with lightness unlocked
+  for light substrates per ADR 001
+  (`docs/design-system/adr/001-light-theme-status-unlock.md`). Dark
+  packs continue to ship the verbatim STATUS hex set; new light packs
+  (gost / xcode / braun) ship a shifted-lightness variant that
+  preserves hue and restores WCAG AA (≥4.5:1) contrast against their
+  light `SURFACE_CARD`. Semantic identity («amber = WARNING, red =
+  FAULT») preserved 1:1 across mode switches. Settings → Тема menu
+  now surfaces all 12 bundled packs in a dark-group / light-group
+  layout with a visual separator between groups. Full rationale,
+  per-pack design axis, metrics, and pre-release smoke points:
+  `docs/design-system/HANDOFF_THEMES_V2.md`.
+
 ### Changed
 
 - **Phase II.5 ConductivityOverlay rebuilt.** Full-featured thermal

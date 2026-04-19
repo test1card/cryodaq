@@ -78,6 +78,16 @@ See `rules/surface-rules.md` for surface composition constraints.
 
 Semantic colors with locked meaning. Cross-use is a specification violation.
 
+> **Hue-locked, lightness-unlocked for light substrates (ADR 001, 2026-04-19).**
+> Dark packs ship the hex values in the table below verbatim. Light
+> packs (`gost`, `xcode`, `braun`) ship a shifted-lightness variant of
+> the same HUE to restore WCAG AA contrast (≥4.5:1) against a light
+> `SURFACE_CARD`. Semantic identity («amber = WARNING, red = FAULT»)
+> is preserved 1:1 across mode switches; only lightness adapts to
+> substrate. See
+> [`docs/design-system/adr/001-light-theme-status-unlock.md`](../adr/001-light-theme-status-unlock.md)
+> for the rationale and the dark↔light hex correspondence table.
+
 | Token | Hex | Meaning | Use | Anti-use |
 |---|---|---|---|---|
 | `STATUS_OK` | `#4a8a5e` | Normal operating, within spec, healthy | "Норма" badge, active phase border, safety READY, successful confirmation | Any non-healthy meaning, decorative |
