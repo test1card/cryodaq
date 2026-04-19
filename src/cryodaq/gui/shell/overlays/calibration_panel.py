@@ -153,7 +153,8 @@ def _mono_value_font() -> QFont:
 
 def _style_button(btn: QPushButton, variant: str) -> None:
     if variant == "primary":
-        bg, fg = theme.STATUS_OK, theme.ON_PRIMARY
+        # Phase III.A: primary uses ACCENT (UI activation), not STATUS_OK.
+        bg, fg = theme.ACCENT, theme.ON_ACCENT
     elif variant == "warning":
         bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
     elif variant == "accent":

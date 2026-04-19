@@ -38,10 +38,12 @@ def _write_pack(path: Path, overrides: dict[str, str] | None = None) -> None:
         "TEXT_SECONDARY": "#cccccc",
         "MUTED_FOREGROUND": "#999999",
         "TEXT_DISABLED": "#666666",
-        "ACCENT": "#4a8a5e",
-        "ACCENT_300": "#3a6e48",
-        "ACCENT_500": "#68a77c",
-        "ACCENT_600": "#8bc49b",
+        "ACCENT": "#b89e7a",
+        "ACCENT_300": "#9a8462",
+        "ACCENT_500": "#c9b391",
+        "ACCENT_600": "#dac7a8",
+        "SELECTION_BG": "#2c2723",
+        "FOCUS_RING": "#6b5d4d",
         "ON_PRIMARY": "#000000",
         "ON_DESTRUCTIVE": "#ffffff",
         "STATUS_OK": "#4a8a5e",
@@ -134,7 +136,7 @@ def test_invalid_hex_falls_back(monkeypatch, tmp_path, caplog):
     with caplog.at_level("ERROR"):
         pack = loader.load_theme()
 
-    assert pack["ACCENT"] == "#4a8a5e"
+    assert pack["ACCENT"] == "#b89e7a"
     assert any("ACCENT" in rec.message for rec in caplog.records)
 
 
@@ -145,7 +147,7 @@ def test_short_hex_rejected(monkeypatch, tmp_path):
     settings_file.write_text("theme: shorthex\n")
 
     pack = loader.load_theme()
-    assert pack["ACCENT"] == "#4a8a5e"  # fell back
+    assert pack["ACCENT"] == "#b89e7a"  # fell back to stub
 
 
 def test_missing_default_pack_raises(monkeypatch, tmp_path):
@@ -430,3 +432,119 @@ def test_new_theme_loads_with_required_tokens(real_themes_dir, theme_id):
     assert set(loader.REQUIRED_TOKENS).issubset(pack.keys())
     # Meta keys are optional but present in the bundled packs.
     assert "__meta_name__" in pack
+
+
+# =============================================================================
+# Phase III.A — neutral interaction tokens
+# =============================================================================
+
+# default_cool is a historical exception — its ACCENT is pre-switcher
+# indigo (hue ≈230°) and the invariant ≥60° vs STATUS_OK (140°) holds
+# at 90° distance naturally; but the «warm-neutral recalibration» target
+# does not apply. taupe_quiet used to have an identical ACCENT == STATUS_OK
+# (documented as "by design"); III.A decoupled it to warm taupe.
+_III_A_PACKS = frozenset(
+    {
+        "default_cool",
+        "warm_stone",
+        "anthropic_mono",
+        "ochre_bloom",
+        "taupe_quiet",
+        "rose_dusk",
+        "signal",
+        "instrument",
+        "amber",
+        "gost",
+        "xcode",
+        "braun",
+    }
+)
+
+
+def test_selection_bg_present_in_all_themes(real_themes_dir):
+    """III.A neutral token invariant — SELECTION_BG is required."""
+    for pack_file in real_themes_dir.glob("*.yaml"):
+        pack = loader._load_theme_pack(pack_file.stem)
+        assert "SELECTION_BG" in pack, f"{pack_file.stem} missing SELECTION_BG"
+        assert isinstance(pack["SELECTION_BG"], str)
+        assert pack["SELECTION_BG"].startswith("#")
+
+
+def test_focus_ring_present_in_all_themes(real_themes_dir):
+    """III.A neutral token invariant — FOCUS_RING is required."""
+    for pack_file in real_themes_dir.glob("*.yaml"):
+        pack = loader._load_theme_pack(pack_file.stem)
+        assert "FOCUS_RING" in pack, f"{pack_file.stem} missing FOCUS_RING"
+        assert isinstance(pack["FOCUS_RING"], str)
+        assert pack["FOCUS_RING"].startswith("#")
+
+
+def test_neutral_tokens_distinct_from_status_ok(real_themes_dir):
+    """III.A: SELECTION_BG and FOCUS_RING must be chromatically
+    distinct from STATUS_OK — either ≥30° hue distance OR ≥0.15
+    luminance distance. Both are neutrals (near-achromatic), so the
+    luminance path is the dominant one."""
+    for pack_file in real_themes_dir.glob("*.yaml"):
+        pack = loader._load_theme_pack(pack_file.stem)
+        ok_hue = _hue(pack["STATUS_OK"])
+        ok_lum = _relative_luminance(pack["STATUS_OK"])
+        for token in ("SELECTION_BG", "FOCUS_RING"):
+            tok_hue = _hue(pack[token])
+            tok_lum = _relative_luminance(pack[token])
+            hue_delta = min(abs(ok_hue - tok_hue), 360.0 - abs(ok_hue - tok_hue))
+            lum_delta = abs(ok_lum - tok_lum)
+            assert hue_delta >= 30.0 or lum_delta >= 0.15, (
+                f"{pack_file.stem}.{token} too close to STATUS_OK: "
+                f"hue Δ{hue_delta:.1f}°, lum Δ{lum_delta:.3f}"
+            )
+
+
+def test_accent_hue_distance_from_status_ok_all_themes(real_themes_dir):
+    """III.A global invariant — every bundled theme (except
+    default_cool's historical baseline) keeps ACCENT hue ≥60° away
+    from STATUS_OK. default_cool's indigo at ≈230° satisfies the check
+    naturally; it is listed here for clarity and to guard against a
+    future edit that breaks it."""
+    for pack_file in real_themes_dir.glob("*.yaml"):
+        name = pack_file.stem
+        if name not in _III_A_PACKS:
+            continue
+        pack = loader._load_theme_pack(name)
+        accent_hue = _hue(pack["ACCENT"])
+        ok_hue = _hue(pack["STATUS_OK"])
+        delta = min(abs(accent_hue - ok_hue), 360.0 - abs(accent_hue - ok_hue))
+        assert delta >= 60.0, (
+            f"{name}: ACCENT {pack['ACCENT']} hue {accent_hue:.1f}° only "
+            f"{delta:.1f}° from STATUS_OK {pack['STATUS_OK']} hue "
+            f"{ok_hue:.1f}° (III.A requires ≥60°)"
+        )
+
+
+def test_default_cool_accent_preserved_as_indigo():
+    """III.A historical baseline — default_cool keeps pre-switcher
+    indigo. Explicit guard against any rename back to the accidental
+    STATUS_OK green that the other presets had."""
+    pack = loader._load_theme_pack("default_cool")
+    assert pack["ACCENT"] == "#7c8cff", (
+        "default_cool ACCENT changed from historical indigo #7c8cff — "
+        "if intentional, update this test + ADR 002"
+    )
+
+
+def test_warm_stone_accent_decoupled_from_status_ok():
+    """III.A fix: warm_stone previously had ACCENT == STATUS_OK
+    (#4a8a5e) which caused semantic collision across every primary
+    button and mode badge. Guard against regression."""
+    pack = loader._load_theme_pack("warm_stone")
+    assert pack["ACCENT"] != pack["STATUS_OK"], (
+        "warm_stone ACCENT == STATUS_OK — III.A decoupling lost"
+    )
+
+
+def test_taupe_quiet_accent_decoupled_from_status_ok():
+    """III.A fix: taupe_quiet deliberately set ACCENT == STATUS_OK
+    with a «by design» comment; III.A decoupled."""
+    pack = loader._load_theme_pack("taupe_quiet")
+    assert pack["ACCENT"] != pack["STATUS_OK"], (
+        "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"
+    )

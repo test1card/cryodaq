@@ -49,6 +49,9 @@ REQUIRED_TOKENS = frozenset(
         "ACCENT_300",
         "ACCENT_500",
         "ACCENT_600",
+        # Neutral interaction (Phase III.A — decoupled from status semantics)
+        "SELECTION_BG",
+        "FOCUS_RING",
         # Inverse text
         "ON_PRIMARY",
         "ON_DESTRUCTIVE",

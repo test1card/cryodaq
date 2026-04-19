@@ -51,22 +51,30 @@ def test_experiment_card_no_active_experiment_shows_placeholder(app):
     assert "Нет активного эксперимента" in card._empty_label.text()
 
 
-def test_experiment_card_active_shows_mode_badge_status_ok(app):
+def test_experiment_card_active_shows_mode_badge_surface_elevated(app):
+    # Phase III.A: Эксперимент mode badge is low-emphasis chip
+    # (SURFACE_ELEVATED + FOREGROUND + BORDER_SUBTLE), not STATUS_OK
+    # safety-green which collided with status-display semantics.
     card = ExperimentCard()
     card.set_experiment(_make_data(mode="experiment"))
     assert not card._mode_badge.isHidden()
     assert card._mode_badge.text() == "Эксперимент"
     ss = card._mode_badge.styleSheet()
-    assert theme.STATUS_OK in ss
-    assert theme.ON_DESTRUCTIVE in ss
+    assert theme.SURFACE_ELEVATED in ss
+    assert theme.FOREGROUND in ss
+    assert theme.BORDER_SUBTLE in ss
+    assert theme.STATUS_OK not in ss
 
 
 def test_experiment_card_debug_shows_status_caution(app):
+    # Phase III.A: Отладка keeps STATUS_CAUTION colour (operator-
+    # attention signal) but renders as bordered chip on SURFACE_ELEVATED.
     card = ExperimentCard()
     card.set_experiment(_make_data(mode="debug"))
     assert card._mode_badge.text() == "Отладка"
     ss = card._mode_badge.styleSheet()
     assert theme.STATUS_CAUTION in ss
+    assert theme.SURFACE_ELEVATED in ss
     assert theme.STATUS_OK not in ss  # no mix
 
 

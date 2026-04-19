@@ -19,6 +19,10 @@ TEXT_SECONDARY: "#9aa0a8"
 MUTED_FOREGROUND: "#60646b"
 TEXT_DISABLED: "#35383e"
 
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#2a2a32"
+FOCUS_RING: "#6a6a82"
+
 # Accent — hot magenta 325°, единственный signal color в монохромной среде
 ACCENT: "#e046a0"
 ACCENT_300: "#b8307e"

@@ -19,6 +19,10 @@ TEXT_SECONDARY: "#4d5361"
 MUTED_FOREGROUND: "#7c8290"
 TEXT_DISABLED: "#adb1ba"
 
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#e8e6e3"
+FOCUS_RING: "#8b8374"
+
 # Accent — indigo 260° (сдвинут от Apple-native 210° для запаса ≥30° до STATUS_INFO)
 ACCENT: "#6839c6"
 ACCENT_300: "#5229a3"

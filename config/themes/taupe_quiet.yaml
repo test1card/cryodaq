@@ -19,11 +19,15 @@ TEXT_SECONDARY: "#aaa59e"
 MUTED_FOREGROUND: "#7a7670"
 TEXT_DISABLED: "#5d5a55"
 
-# Accent (forest green — matches STATUS_OK by design) + scale
-ACCENT: "#4a8a5e"
-ACCENT_300: "#3a6e48"
-ACCENT_500: "#68a77c"
-ACCENT_600: "#8bc49b"
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#2b2a27"
+FOCUS_RING: "#6a6762"
+
+# Accent (warm taupe — Phase III.A decoupled from STATUS_OK) + scale
+ACCENT: "#a39482"
+ACCENT_300: "#877968"
+ACCENT_500: "#b8a994"
+ACCENT_600: "#c9bcaa"
 
 # Text on colored backgrounds
 ON_PRIMARY: "#141210"

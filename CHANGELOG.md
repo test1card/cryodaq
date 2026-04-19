@@ -9,6 +9,37 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Phase III.A — DS accent/status decoupling.** Fixed semantic
+  collision where `STATUS_OK` (safety-green) rendered UI states
+  (selected rows, active tabs, primary buttons, mode badge) and read
+  to operators as «this is healthy» when the actual meaning was
+  «this is selected / active». Introduced two neutral interaction
+  tokens: `SELECTION_BG` (subtle tint for selected rows) and
+  `FOCUS_RING` (neutral outline for focused elements). Added to all
+  12 bundled theme packs and required by `_theme_loader.REQUIRED_TOKENS`.
+  Migrated sites: `_style_button("primary")` helpers in 5 overlays
+  (operator_log, archive, calibration, conductivity, keithley) now
+  use `ACCENT + ON_ACCENT` instead of `STATUS_OK + ON_PRIMARY`;
+  `TopWatchBar` mode badge «Эксперимент» now renders as low-emphasis
+  `SURFACE_ELEVATED` chip with `FOREGROUND` text + `BORDER_SUBTLE`
+  outline (prior filled `STATUS_OK` pill); `ExperimentCard` mode
+  badge mirrors TopWatchBar; «Отладка» keeps `STATUS_CAUTION` colour
+  because it IS an operator-attention signal but renders as bordered
+  chip; `conductivity_panel` auto-sweep progress chunk migrated to
+  `ACCENT`. Per-theme ACCENT recalibrated: `warm_stone` `#4a8a5e`
+  (identical to STATUS_OK) → `#b89e7a` warm sand; `taupe_quiet`
+  `#4a8a5e` (with obsolete «matches STATUS_OK by design» comment) →
+  `#a39482` warm taupe (comment removed); `braun` `#476f20` (olive
+  hue ≈90°, violated ≥60° invariant) → `#6a7530` moss-olive ≈70°.
+  `default_cool` kept at `#7c8cff` indigo (historical baseline).
+  All 9 other themes' ACCENT verified hue-distant from STATUS_OK
+  and preserved. New tool `python -m tools.theme_previewer` renders
+  all 12 themes side-by-side for architect visual review. ADR 002
+  captures the decoupling rationale + hue-distance invariants. No
+  operator-facing API changes; all Phase II wiring preserved.
+
 ### Removed
 
 - **Phase II.13 legacy cleanup.** All DEPRECATED-marked Phase I-era

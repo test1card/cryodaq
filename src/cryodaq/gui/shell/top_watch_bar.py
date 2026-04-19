@@ -523,13 +523,13 @@ class TopWatchBar(QWidget):
             self._mode_badge.setVisible(False)
             return
         # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge reference +
-        # invariant #5 "Mode badge always visible" + spec color table
-        # (Эксперимент = STATUS_OK operational; Отладка = STATUS_CAUTION
-        # amber operator-attention). Text is sentence case per RULE-COPY-003.
-        # Both modes use ON_DESTRUCTIVE as foreground (the canonical
-        # on-solid-status-color text token).
+        # invariant #5 "Mode badge always visible".
+        # Phase III.A: "Эксперимент" renders as low-emphasis identifier
+        # (SURFACE_ELEVATED chip with BORDER_SUBTLE) — mode badge is a
+        # state identifier, not a safety indicator. "Отладка" keeps
+        # STATUS_CAUTION foreground because it IS an operator-attention
+        # signal (data are not archived).
         base_style = (
-            f"border: none; "
             f"border-radius: {theme.RADIUS_SM}px; "
             f"padding: {theme.SPACE_1}px {theme.SPACE_3}px; "
             f"font-family: '{theme.FONT_BODY}'; "
@@ -540,8 +540,9 @@ class TopWatchBar(QWidget):
             self._mode_badge.setText("Эксперимент")
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
-                f"background-color: {theme.STATUS_OK}; "
-                f"color: {theme.ON_DESTRUCTIVE}; "
+                f"background-color: {theme.SURFACE_ELEVATED}; "
+                f"color: {theme.FOREGROUND}; "
+                f"border: 1px solid {theme.BORDER_SUBTLE}; "
                 f"{base_style}"
                 f"}}"
             )
@@ -550,8 +551,9 @@ class TopWatchBar(QWidget):
             self._mode_badge.setText("Отладка")
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
-                f"background-color: {theme.STATUS_CAUTION}; "
-                f"color: {theme.ON_DESTRUCTIVE}; "
+                f"background-color: {theme.SURFACE_ELEVATED}; "
+                f"color: {theme.STATUS_CAUTION}; "
+                f"border: 1px solid {theme.STATUS_CAUTION}; "
                 f"{base_style}"
                 f"}}"
             )

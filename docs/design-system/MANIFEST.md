@@ -105,8 +105,8 @@ design-system/
 - **9 cross-surface patterns** specified (Batch 5)
 - **5 accessibility documents** (Batch 6)
 - **6 governance documents** (Batch 6)
-- **74 color tokens** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions)
-- **139 tokens total** (colors 74 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
+- **74 color tokens** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions; Phase III.A added SELECTION_BG + FOCUS_RING neutral-interaction tokens to every bundled theme pack — see `adr/002-accent-status-decoupling.md`)
+- **141 tokens total** (colors 76 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
 
 ## Cross-reference health
 
@@ -118,7 +118,7 @@ design-system/
 ## Key design decisions encoded
 
 1. **Desaturated industrial dark palette** — NOT Tailwind-like. STATUS_OK=#4a8a5e forest green, not green-500.
-2. **ACCENT #7c8cff locked to focus/selection only** — per Phase 0 product decision. NOT for status, phase, hover, primary button. Exception: selected TabGroup tab (which IS selection affordance).
+2. **ACCENT is UI-activation affordance** (Phase III.A decoupling; prior: «locked to focus/selection only»). Primary button background, active tab underline, active ToolRail slot indicator, progress chunks for user-triggered tasks, focused-input border. NOT a status (use STATUS_*), NOT a phase indicator (phase active = STATUS_OK border via phase_stepper), NOT a hover state (use MUTED background). `SELECTION_BG` / `FOCUS_RING` (Phase III.A neutrals) carry selection / focus when accent bleed would collide with chrome. See `adr/002-accent-status-decoupling.md`.
 3. **STONE_* legacy tokens — read-only in new code** — zero breaking change policy.
 4. **3 surface brightness levels max** — BACKGROUND, CARD, SECONDARY. No 4th level.
 5. **Radius scale tight** — NONE=0, SM=4, MD=6, LG=8, FULL=9999. No RADIUS_XL.
@@ -130,7 +130,7 @@ design-system/
 11. **Cyrillic Т (U+0422) in user-facing temperature channel IDs** — never Latin T.
 12. **No emoji in UI chrome** — per Phase 0 decision after bell emoji removal.
 13. **Point decimal, space thousands** — technical consistency over pure Russian convention.
-14. **No filled-ACCENT "primary button"** — CryoDAQ button hierarchy: Secondary / Ghost / Destructive / Icon-only / Hold-confirm. Attempting to add filled-ACCENT primary reintroduces RULE-COLOR-004 violation.
+14. **Filled-ACCENT primary button is canonical** (Phase III.A; prior decision «no filled-ACCENT primary button» is retired — it was a consequence of ACCENT-as-focus-only which collapsed primary actions onto STATUS_OK and caused the safety-green UI collision ADR 002 fixes). CryoDAQ primary actions («Сохранить», «Экспорт CSV», «Применить», etc) now render filled `ACCENT` + `ON_ACCENT`. Destructive actions continue to use STATUS_FAULT + HoldConfirm (never filled ACCENT).
 15. **Destructive actions never single-click** — Hold-confirm OR modal confirmation (RULE-INTER-004).
 16. **Toasts never for faults** — faults use Dialog or persistent banner (RULE-INTER-006).
 17. **Pressure plots mandatory log-scale** — RULE-DATA-008.
@@ -185,6 +185,7 @@ Batch 6 — accessibility + governance:
 63. **STONE_* deprecated in v1.0.0, removed in v2.0.0** — ~15 call sites being migrated at each panel's next refactor.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate for v1.x** — Claude drafts + Codex audits + Vladimir approves + Claude Code implements. No self-approval.
+66. **ACCENT ≠ STATUS_OK — Phase III.A decoupling** — per `adr/002-accent-status-decoupling.md`. Primary buttons, mode badges, progress chunks, active tab indicators use ACCENT (UI activation). STATUS_OK reserved for safety / health / channel-OK indicators. `SELECTION_BG` + `FOCUS_RING` added as neutral interaction tokens. Per-theme ACCENT recalibrated to warm-neutral (11 themes; `default_cool` indigo preserved as historical baseline).
 
 ## Status
 

@@ -19,11 +19,19 @@ TEXT_SECONDARY: "#4a4739"
 MUTED_FOREGROUND: "#7a7664"
 TEXT_DISABLED: "#afab97"
 
-# Accent — olive-moss 90° (компромисс: yellow/orange/red Braun-native заняты status-hues)
-ACCENT: "#476f20"
-ACCENT_300: "#335214"
-ACCENT_500: "#669933"
-ACCENT_600: "#8abb58"
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#e6e0d8"
+FOCUS_RING: "#8a7d65"
+
+# Accent — moss-olive (Phase III.A recalibrated from olive-moss #476f20.
+# Prior hue 90° violated the ≥60° invariant vs STATUS_OK 143° at 53°.
+# New hue ≈70° (yellow-olive): 73° from STATUS_OK, 37° from WARNING,
+# satisfies both III.A ≥60°/STATUS_OK and ADR 001 ≥30°/all-status
+# invariants. Keeps Braun-native industrial moss-olive feel.)
+ACCENT: "#6a7530"
+ACCENT_300: "#505720"
+ACCENT_500: "#828e45"
+ACCENT_600: "#a4ae6b"
 
 # Text on colored backgrounds
 ON_PRIMARY: "#ffffff"

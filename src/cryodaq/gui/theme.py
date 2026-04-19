@@ -56,6 +56,17 @@ ACCENT = _pack["ACCENT"]
 RING = ACCENT
 BORDER_FOCUS = ACCENT
 
+# =============================================================================
+# COLORS — Neutral interaction (Phase III.A, decoupled from status)
+# =============================================================================
+# For UI states that are NOT safety indicators: selected rows, focused
+# inputs, active tabs. Using STATUS_OK here creates semantic collision
+# (operator reads green as "safe" when it means "selected"). These
+# tokens are hue-neutral / luminance-shifted from surface.
+
+SELECTION_BG = _pack["SELECTION_BG"]
+FOCUS_RING = _pack["FOCUS_RING"]
+
 ON_PRIMARY = _pack["ON_PRIMARY"]
 ON_SECONDARY = FOREGROUND
 ON_ACCENT = BACKGROUND

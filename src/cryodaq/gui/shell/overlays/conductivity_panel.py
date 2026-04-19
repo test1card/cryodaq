@@ -161,7 +161,8 @@ def _mono_cell_font() -> QFont:
 
 def _style_button(btn: QPushButton, variant: str) -> None:
     if variant == "primary":
-        bg, fg = theme.STATUS_OK, theme.ON_PRIMARY
+        # Phase III.A: primary uses ACCENT (UI activation), not STATUS_OK.
+        bg, fg = theme.ACCENT, theme.ON_ACCENT
     elif variant == "warning":
         bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
     elif variant == "accent":
@@ -605,7 +606,9 @@ class ConductivityPanel(QWidget):
             f" text-align: center;"
             f"}} "
             f"QProgressBar::chunk {{"
-            f" background-color: {theme.STATUS_OK};"
+            # Phase III.A: progress chunk uses ACCENT (task progress is
+            # UI activation, not safety status).
+            f" background-color: {theme.ACCENT};"
             f" border-radius: {theme.RADIUS_SM}px;"
             f"}}"
         )

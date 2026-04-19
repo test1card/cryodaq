@@ -19,6 +19,10 @@ TEXT_SECONDARY: "#8a8f9b"
 MUTED_FOREGROUND: "#8a8f9b"
 TEXT_DISABLED: "#555a66"
 
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#2a2d38"
+FOCUS_RING: "#5a6380"
+
 # Accent (indigo) + scale — from pre-switcher theme.py
 ACCENT: "#7c8cff"
 ACCENT_300: "#6470d9"

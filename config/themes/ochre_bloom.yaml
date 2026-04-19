@@ -19,7 +19,11 @@ TEXT_SECONDARY: "#aca294"
 MUTED_FOREGROUND: "#7a7060"
 TEXT_DISABLED: "#605748"
 
-# Accent (olive) + scale
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#2a251e"
+FOCUS_RING: "#6b5c42"
+
+# Accent (olive, 90° from STATUS_OK — verified Phase III.A) + scale
 ACCENT: "#a39450"
 ACCENT_300: "#887a40"
 ACCENT_500: "#baa866"

@@ -95,32 +95,31 @@ def test_mode_badge_shows_debug() -> None:
     assert "Отладка" in bar._mode_badge.text()
 
 
-def test_mode_badge_uses_status_ok_for_experiment() -> None:
-    # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge spec —
-    # Эксперимент = STATUS_OK (operational green) on ON_DESTRUCTIVE text.
+def test_mode_badge_uses_surface_elevated_for_experiment() -> None:
+    # Phase III.A: Эксперимент mode badge is a low-emphasis identifier
+    # (SURFACE_ELEVATED chip + FOREGROUND text + BORDER_SUBTLE outline),
+    # not a pseudo-CTA. Previously used STATUS_OK which collided with
+    # safety-state semantics.
     bar = _make_bar()
     bar._update_mode_badge("experiment")
     ss = bar._mode_badge.styleSheet()
-    assert theme.STATUS_OK in ss, f"Эксперимент badge missing STATUS_OK: {ss!r}"
-    assert theme.ON_DESTRUCTIVE in ss
-    # ACCENT must NOT leak into the mode badge — that's reserved for
-    # focus/selection per RULE-COLOR-004. Hex-substring check is only
-    # meaningful when ACCENT ≠ STATUS_OK (some packs, e.g. warm_stone,
-    # adopt a forest-green accent equal to STATUS_OK).
-    if theme.ACCENT != theme.STATUS_OK:
-        assert theme.ACCENT not in ss, f"Mode badge leaked ACCENT: {ss!r}"
+    assert theme.SURFACE_ELEVATED in ss, f"Эксперимент badge missing SURFACE_ELEVATED: {ss!r}"
+    assert theme.FOREGROUND in ss
+    assert theme.BORDER_SUBTLE in ss
+    # STATUS_OK must NOT leak into a UI-state badge — that's reserved
+    # for safety indicators.
+    assert theme.STATUS_OK not in ss, f"Эксперимент badge leaked STATUS_OK: {ss!r}"
 
 
 def test_mode_badge_uses_status_caution_for_debug() -> None:
-    # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge spec —
-    # Отладка = STATUS_CAUTION (amber operator-attention).
+    # Phase III.A: Отладка badge keeps STATUS_CAUTION colour because
+    # it IS an operator-attention signal (data are not archived), but
+    # renders as a bordered chip on SURFACE_ELEVATED, not a filled pill.
     bar = _make_bar()
     bar._update_mode_badge("debug")
     ss = bar._mode_badge.styleSheet()
     assert theme.STATUS_CAUTION in ss, f"Отладка badge missing STATUS_CAUTION: {ss!r}"
-    assert theme.ON_DESTRUCTIVE in ss
-    if theme.ACCENT != theme.STATUS_CAUTION:
-        assert theme.ACCENT not in ss
+    assert theme.SURFACE_ELEVATED in ss
 
 
 def test_mode_badge_hides_on_unknown_value() -> None:

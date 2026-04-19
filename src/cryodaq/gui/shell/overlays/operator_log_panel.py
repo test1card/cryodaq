@@ -107,7 +107,9 @@ def _title_font() -> QFont:
 def _style_button(btn: QPushButton, variant: str) -> None:
     radius = theme.RADIUS_MD
     if variant == "primary":
-        bg, fg = theme.STATUS_OK, theme.ON_PRIMARY
+        # Phase III.A: primary uses ACCENT (UI activation), not STATUS_OK
+        # (safety-green, reserved for status display only).
+        bg, fg = theme.ACCENT, theme.ON_ACCENT
     elif variant == "warning":
         bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
     elif variant == "accent":

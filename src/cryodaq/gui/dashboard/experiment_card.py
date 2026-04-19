@@ -3,8 +3,10 @@
 Per `docs/design-system/cryodaq-primitives/experiment-card.md` (B.6):
 
 - Header row: UPPERCASE category label + experiment name + mode badge
-  (STATUS_OK for «Эксперимент», STATUS_CAUTION for «Отладка») + elapsed
-  time in tabular monospace.
+  (Phase III.A: SURFACE_ELEVATED chip + FOREGROUND for «Эксперимент»,
+  SURFACE_ELEVATED chip + STATUS_CAUTION for «Отладка» — see
+  `adr/002-accent-status-decoupling.md`) + elapsed time in tabular
+  monospace.
 - Compact `PhaseStepper` (reused from `gui/dashboard/phase_stepper.py`).
 - Two-line vitals row: target channel value (Т11 / Т12 — positionally
   fixed reference channels) and pressure in Cyrillic «мбар».
@@ -294,22 +296,27 @@ class ExperimentCard(QFrame):
             )
 
     def _set_mode_badge_style(self, mode: str) -> None:
-        # DESIGN: ExperimentCard mode badge mirrors TopWatchBar ModeBadge
-        # source of truth — STATUS_OK for Эксперимент (operational),
-        # STATUS_CAUTION for Отладка (operator attention). Sentence case
-        # per RULE-COPY-003.
+        # DESIGN: mirrors TopWatchBar ModeBadge (Phase III.A decoupled
+        # from STATUS_OK — mode is a state identifier, not a safety
+        # indicator). "Эксперимент" renders as low-emphasis chip;
+        # "Отладка" keeps STATUS_CAUTION because it IS operator-
+        # attention (data are not archived).
         if mode == "debug":
-            bg = theme.STATUS_CAUTION
+            bg = theme.SURFACE_ELEVATED
+            fg = theme.STATUS_CAUTION
+            border_color = theme.STATUS_CAUTION
             text = "Отладка"
         else:
-            bg = theme.STATUS_OK
+            bg = theme.SURFACE_ELEVATED
+            fg = theme.FOREGROUND
+            border_color = theme.BORDER_SUBTLE
             text = "Эксперимент"
         self._mode_badge.setText(text)
         self._mode_badge.setStyleSheet(
             f"#experimentCardModeBadge {{"
             f"background-color: {bg};"
-            f"color: {theme.ON_DESTRUCTIVE};"
-            f"border: none;"
+            f"color: {fg};"
+            f"border: 1px solid {border_color};"
             f"border-radius: {theme.RADIUS_SM}px;"
             f"padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
             f"font-family: '{theme.FONT_BODY}';"

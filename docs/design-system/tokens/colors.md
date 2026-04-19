@@ -137,22 +137,34 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 
 ## Interaction palette
 
-| Token | Hex | Semantic role | Use |
+| Token | Hex (default_cool) | Semantic role | Use |
 |---|---|---|---|
-| `ACCENT` | `#7c8cff` | Focus / selection affordance | Keyboard focus ring, selected tab indicator, focused input border, link color, selected nav item background |
-| `RING` | `#7c8cff` | Focus ring (same as ACCENT) | Explicit focus ring stylesheet usage |
-| `ON_ACCENT` | `#0d0e12` | Text color on ACCENT background | When ACCENT used as background (e.g., selected tab background) |
-| `ON_PRIMARY` | `#e8eaf0` | Text on PRIMARY surfaces | Reserved for inversion scenarios |
-| `ON_SECONDARY` | `#e8eaf0` | Text on SECONDARY surfaces | Reserved for inversion scenarios |
-| `ON_DESTRUCTIVE` | `#e8eaf0` | Text on destructive button background | АВАР. ОТКЛ. button label |
+| `ACCENT` | `#7c8cff` | UI activation affordance | Primary buttons («Сохранить», «Экспорт CSV», «Применить»), active ToolRail slot indicator, active tab underline, progress-bar chunk for running tasks, focused-input border. Per-theme recalibrated Phase III.A — see `adr/002-accent-status-decoupling.md`. |
+| `RING` | `#7c8cff` | Focus ring alias for ACCENT | Legacy — prefer `FOCUS_RING` (neutral) for new focus outlines to avoid accent bleed. |
+| `SELECTION_BG` | per-theme | Selected-row background (neutral) | QTableWidget selected row highlight, selected list item background. Phase III.A neutral — decoupled from STATUS semantics so safety-green never signals "selected". |
+| `FOCUS_RING` | per-theme | Focused-element outline (neutral) | `:focus` QSS border on inputs / buttons when accent bleed would collide with surrounding UI chrome. |
+| `ON_ACCENT` | `#0d0e12` | Text color on ACCENT background | When ACCENT used as button/chip background. |
+| `ON_PRIMARY` | `#e8eaf0` | Text on PRIMARY surfaces | Reserved for inversion scenarios. |
+| `ON_SECONDARY` | `#e8eaf0` | Text on SECONDARY surfaces | Reserved for inversion scenarios. |
+| `ON_DESTRUCTIVE` | `#e8eaf0` | Text on destructive button background | АВАР. ОТКЛ. button label. |
 
-**ACCENT semantic is LOCKED to focus/selection.** Per Phase 0 product decision, ACCENT is NOT:
-- A status color (use STATUS_*)
-- A phase indicator (phase active = STATUS_OK border)
-- A hover state (use MUTED background)
-- A primary button color (no "primary CTA" style in CryoDAQ)
+**STATUS_OK — DO NOT use for UI activation** (Phase III.A decoupling,
+ADR 002):
+- ✗ Primary button background → use `ACCENT`.
+- ✗ Mode badge «Эксперимент» → use `SURFACE_ELEVATED` + `FOREGROUND` +
+  `BORDER_SUBTLE` (low-emphasis identifier chip).
+- ✗ Progress-bar chunk for user-triggered task → use `ACCENT`.
+- ✗ Active tab / selected ToolRail slot → use `ACCENT`.
+- ✗ Selected table row background → use `SELECTION_BG`.
+- ✓ Safety-state labels (engine/connection/running/permitted) — keep.
+- ✓ Channel-health indicators (ChannelStatus.OK, `_health_color`
+  ≥80 threshold, stability-ok, steady-state-reached banners) — keep.
+- ✓ CoverageBar dense segment, SeverityChip("OK") — keep.
+- ✓ Current-phase pill border in phase stepper — keep (phase is a
+  state indicator, not user activation).
 
-See `rules/color-rules.md` RULE-COLOR-004 for full ACCENT semantic lock.
+See `rules/color-rules.md` RULE-COLOR-004 and
+`adr/002-accent-status-decoupling.md`.
 
 ## Domain-semantic palette (physics quantities)
 

@@ -19,6 +19,10 @@ TEXT_SECONDARY: "#c4a5ac"
 MUTED_FOREGROUND: "#8a6a71"
 TEXT_DISABLED: "#6a5156"
 
+# Neutral interaction tokens (Phase III.A — decoupled from status semantics)
+SELECTION_BG: "#2b2326"
+FOCUS_RING: "#6b5560"
+
 # Accent (dusty rose) + scale
 ACCENT: "#d07890"
 ACCENT_300: "#b05c74"
