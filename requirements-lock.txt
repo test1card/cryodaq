@@ -123,6 +123,10 @@ pyqtdarktheme-fork==2.3.6
     # sha256:876dc8cc0e01468a3f7fe5a860dfd422ccab48b33beef18dfdecb6312c20c556
 pyqtgraph==0.13.7
     # via cryodaq (pyproject.toml)
+qtawesome==1.4.2
+    # via cryodaq (pyproject.toml)
+qtpy==2.4.3
+    # via qtawesome
 pyserial==3.5
     # via pyserial-asyncio
 pyserial-asyncio==0.6
