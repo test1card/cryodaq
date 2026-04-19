@@ -440,3 +440,28 @@ def test_no_close_button_on_experiment_overlay(app):
     assert not hasattr(overlay, "_close_btn"), (
         "_close_btn attribute re-introduced on ExperimentOverlay"
     )
+
+
+def test_current_phase_pill_uses_accent_not_status_ok(app):
+    """IV.2 B.2 — phase pill current-state tier is ACCENT (UI activation),
+    not STATUS_OK (reserved for safety/running-status)."""
+    from cryodaq.gui import theme
+
+    overlay = ExperimentOverlay()
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "operator": "V",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "current_phase": "cooldown",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        },
+        phase_history=[],
+    )
+    ss = overlay._phase_pills["cooldown"].styleSheet()
+    assert theme.ACCENT in ss, f"current phase pill missing ACCENT: {ss!r}"
+    if theme.ACCENT != theme.STATUS_OK:
+        assert theme.STATUS_OK not in ss, (
+            f"current phase pill leaked STATUS_OK (reserved for safety): {ss!r}"
+        )

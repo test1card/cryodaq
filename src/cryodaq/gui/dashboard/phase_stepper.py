@@ -74,10 +74,14 @@ class PhaseStepper(QWidget):
     def _style_pill(self, pill: QFrame, state: str) -> None:
         pid = pill.objectName()
         if state == "current":
-            # DESIGN: RULE-COLOR-002, RULE-COLOR-004 — active phase uses
-            # STATUS_OK (running-status green), NOT ACCENT (reserved for
-            # focus/selection affordance per design system v1.0.1).
-            border, bg, fg = theme.STATUS_OK, theme.SECONDARY, theme.FOREGROUND
+            # IV.2 B.2: current phase pill marks UI state ("which phase
+            # are we in right now"), NOT safety state. STATUS_OK is
+            # reserved for running-status green (engine healthy,
+            # safety SAFE); reusing it for the stepper created semantic
+            # collision — a fault-latched run with the same phase pill
+            # still showed green. ACCENT is the tier for UI activation
+            # per Phase III.A convention.
+            border, bg, fg = theme.ACCENT, theme.SECONDARY, theme.FOREGROUND
         elif state == "past":
             border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
         else:

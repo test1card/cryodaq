@@ -343,7 +343,11 @@ class ExperimentOverlay(QWidget):
         pill = self._phase_pills[phase]
         pid = pill.objectName()
         if state == "current":
-            border = f"2px solid {theme.STATUS_OK}"
+            # IV.2 B.2: phase pill marks the UI "which phase are we in"
+            # state, not safety. STATUS_OK is reserved for
+            # safety/running-status semantics; ACCENT is the tier for
+            # UI activation per Phase III.A.
+            border = f"2px solid {theme.ACCENT}"
             fg = theme.FOREGROUND
         elif state == "past":
             border = f"1px solid {theme.BORDER}"

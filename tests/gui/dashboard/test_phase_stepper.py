@@ -44,22 +44,23 @@ def test_pill_height_compact(app):
         assert pill.maximumHeight() == 24
 
 
-def test_active_phase_uses_status_ok_not_accent(app):
-    # DESIGN: RULE-COLOR-002, RULE-COLOR-004 — active phase is a running
-    # status (STATUS_OK green), not a selection affordance (ACCENT).
-    # Guard against regression — the code does `border, bg, fg = theme.STATUS_OK, ...`
-    # for the "current" pill state, so the rendered stylesheet must contain
-    # STATUS_OK and must NOT contain ACCENT anywhere in the active pill chrome.
+def test_active_phase_uses_accent_not_status_ok(app):
+    # IV.2 B.2 flipped the tier convention: STATUS_OK is reserved for
+    # safety/running-status semantics (engine healthy, safety SAFE).
+    # The "current phase" pill marks UI state ("which phase are we in
+    # right now"), not safety — semantic collision with STATUS_OK
+    # meant a fault-latched run with the same phase still showed green.
+    # ACCENT is the tier for UI activation per Phase III.A.
     s = PhaseStepper()
     s.set_current_phase("cooldown")
     active_ss = s._pills["cooldown"].styleSheet()
-    assert theme.STATUS_OK in active_ss, f"active phase stylesheet missing STATUS_OK: {active_ss!r}"
+    assert theme.ACCENT in active_ss, f"active phase stylesheet missing ACCENT: {active_ss!r}"
     # Hex-substring check only meaningful when ACCENT and STATUS_OK differ.
-    # Some themes (e.g. warm_stone) adopt a forest-green accent that equals
-    # STATUS_OK; the distinction the rule guards is then not expressible
-    # via stylesheet grep — the source-level check above (`STATUS_OK in active_ss`)
-    # still proves the correct token was read.
+    # Some themes (e.g. warm_stone) may adopt a forest-green accent equal
+    # to STATUS_OK; the distinction the rule guards is then not
+    # expressible via stylesheet grep — the source-level check above
+    # (`ACCENT in active_ss`) still proves the correct token was read.
     if theme.ACCENT != theme.STATUS_OK:
-        assert theme.ACCENT not in active_ss, (
-            f"active phase stylesheet leaked ACCENT (reserved for focus ring): {active_ss!r}"
+        assert theme.STATUS_OK not in active_ss, (
+            f"active phase stylesheet leaked STATUS_OK (reserved for safety): {active_ss!r}"
         )
