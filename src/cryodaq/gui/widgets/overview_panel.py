@@ -1222,6 +1222,11 @@ class OverviewPanel(QWidget):
             units="\u041a",
             color="#AAAAAA",
         )
+        # IV.1 finding 2 post-amend: overview panel left axis must not
+        # auto-rescale К → mК when the 300→4 K cooldown range crosses
+        # decades. See widgets/shared/prediction_widget.py for the
+        # operator-visible failure mode.
+        pi.getAxis("left").enableAutoSIPrefix(False)
         pi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.enableAutoRange(axis="y", enable=True)
@@ -1256,6 +1261,10 @@ class OverviewPanel(QWidget):
             units="mbar",
             color="#AAAAAA",
         )
+        # IV.1 finding 2 post-amend: overview pressure axis must stay
+        # in mbar, not auto-rescale to µbar / mbar prefix combinations
+        # when the log-Y range spans decades.
+        ppi.getAxis("left").enableAutoSIPrefix(False)
         ppi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
         ppi.setLogMode(x=False, y=True)
         ppi.showGrid(x=True, y=True, alpha=0.3)

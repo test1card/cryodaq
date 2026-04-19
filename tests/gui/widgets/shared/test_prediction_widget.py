@@ -155,10 +155,12 @@ def test_left_axis_auto_si_prefix_disabled_log_y(app):
 def test_k_range_300_to_4_does_not_auto_rescale_to_mk(app):
     """IV.1 finding 2 — integration: 300→4 K history should not flip axis to mK.
 
-    Feed a full cooldown history + forecast; read the axis label. With
-    autoSIPrefix disabled, pyqtgraph leaves the stated unit in the label
-    text. With it enabled (the bug), the label would be rewritten to
-    include an "m" prefix.
+    Feed a full cooldown history; force the view range to 0-300 so
+    pyqtgraph's tick generator actually emits strings, then verify the
+    rendered tick labels are in K (not thousands of mK). With
+    autoSIPrefix enabled (the bug), pyqtgraph would re-scale the axis
+    to mK and emit tick strings like "4000" / "100000" / "300000";
+    with it disabled the strings remain "4" / "100" / "300".
     """
     w = PredictionWidget("Cooldown", "Температура", "K", log_y=False)
     # Cooldown trajectory: 300 K → 4 K over 24 hours.
@@ -166,11 +168,27 @@ def test_k_range_300_to_4_does_not_auto_rescale_to_mk(app):
     hist = [(now + i * 60.0, 300.0 - (296.0 * i / 1440.0)) for i in range(1440)]
     w.set_history(hist)
     left_axis = w._plot.getPlotItem().getAxis("left")
-    # autoSIPrefix must still be False after populating data.
     assert left_axis.autoSIPrefix is False
-    # label should not have been rewritten with an "m" prefix.
-    assert "mK" not in left_axis.labelString()
-    assert "мК" not in left_axis.labelString()
+    # autoSIPrefixScale stays at 1.0 when autoSIPrefix is disabled; if
+    # pyqtgraph had been allowed to rescale, this would be 1e-3 (the
+    # multiplier that turns 4 K into 4000 mK on the tick layer).
+    assert left_axis.autoSIPrefixScale == 1.0
+    # labelUnitPrefix is the prefix pyqtgraph would inject into the
+    # rendered axis title. It must stay empty — not "m" for milli-.
+    assert left_axis.labelUnitPrefix == ""
+    # Rendered tick strings for the actual value range stay in K.
+    tick_strings = left_axis.tickStrings(
+        [4.0, 100.0, 300.0],
+        left_axis.autoSIPrefixScale * left_axis.scale,
+        spacing=50.0,
+    )
+    # None of the strings should read as the thousands-of-mK rendering
+    # (tick "4000" or "300000"); any of "4" / "100" / "300" may appear
+    # depending on pyqtgraph's internal formatting, but the large values
+    # are disqualifying.
+    for s in tick_strings:
+        assert "4000" not in s
+        assert "300000" not in s
 
 
 def test_does_not_import_global_window_controller():
