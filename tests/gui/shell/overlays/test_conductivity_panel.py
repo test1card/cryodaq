@@ -741,7 +741,8 @@ def test_stability_header_shows_readout_with_pair(app):
 
 
 def test_stability_header_returns_to_prognosis_on_deselect(app):
-    """Dropping back to < 2 sensors restores the Прогноз header."""
+    """Full select → deselect → reselect cycle returns to the correct state
+    at each step, guarding the transition contract."""
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2"])
     panel._checkboxes["Т1"].setChecked(True)
@@ -749,6 +750,9 @@ def test_stability_header_returns_to_prognosis_on_deselect(app):
     assert panel._indicator_stack.currentIndex() == 1
     panel._checkboxes["Т2"].setChecked(False)
     assert panel._indicator_stack.currentIndex() == 0
+    # Reselect — must flip back to the readout, not stick on the header.
+    panel._checkboxes["Т2"].setChecked(True)
+    assert panel._indicator_stack.currentIndex() == 1
 
 
 def test_power_label_shows_waiting_before_first_reading(app):
@@ -814,8 +818,11 @@ def test_stability_header_collecting_data_branch(app):
 
 
 def test_prediction_stack_synced_via_refresh_tick_too(app):
-    """Refresh path also syncs the stack — guard against chain mutations
-    that bypass _on_check (future code paths)."""
+    """Refresh path syncs BOTH stacks — guard against chain mutations
+    that bypass _on_check (future code paths). IV.3 F1 amend:
+    _sync_prediction_stack now drives both the prediction stack and
+    the indicator stack, so the refresh-tick regression test checks
+    both stacks to catch indicator desync."""
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2"])
     # Mutate _chain directly, bypassing _on_check.
@@ -823,6 +830,8 @@ def test_prediction_stack_synced_via_refresh_tick_too(app):
     # The refresh tick's _update_table call must catch up.
     panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._table
+    assert panel._indicator_stack.currentIndex() == 1
     panel._chain = ["Т1"]
     panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
+    assert panel._indicator_stack.currentIndex() == 0
