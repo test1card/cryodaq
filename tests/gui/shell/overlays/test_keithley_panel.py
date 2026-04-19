@@ -204,6 +204,67 @@ def test_emergency_cancel_suppresses_signal(app, monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# Phase III.D Item 1: resistance / power guard at |I| ≈ 0
+# ----------------------------------------------------------------------
+
+
+def test_resistance_shows_dash_at_zero_current(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.handle_reading("current", _reading("Keithley_1/smua/current", 0.0, "А"))
+    # Even if the engine emits a stale R value, display collapses to "—".
+    block.handle_reading("resistance", _reading("Keithley_1/smua/resistance", 2.32, "Ом"))
+    assert block._value_labels["resistance"].text() == "— Ом"
+
+
+def test_resistance_shows_value_at_nonzero_current(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.handle_reading("current", _reading("Keithley_1/smua/current", 0.01, "А"))
+    block.handle_reading("resistance", _reading("Keithley_1/smua/resistance", 2.32, "Ом"))
+    assert block._value_labels["resistance"].text() == "2.32 Ом"
+
+
+def test_power_shows_dash_at_zero_current(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.handle_reading("current", _reading("Keithley_1/smua/current", 0.0, "А"))
+    block.handle_reading("power", _reading("Keithley_1/smua/power", 0.0, "Вт"))
+    assert block._value_labels["power"].text() == "— Вт"
+
+
+# ----------------------------------------------------------------------
+# Phase III.D Item 10: Combined «Старт A+B» is caution-outlined
+# ----------------------------------------------------------------------
+
+
+def test_combined_start_button_uses_caution_outlined_style(app):
+    panel = KeithleyPanel()
+    ss = panel._start_both_btn.styleSheet()
+    # Caution colour in both fg and border, transparent bg.
+    assert theme.STATUS_CAUTION in ss
+    assert "transparent" in ss
+    # Must NOT be identical to per-channel Start (ACCENT-filled).
+    per_channel_ss = panel._smua_block._start_btn.styleSheet()
+    assert ss != per_channel_ss
+
+
+# ----------------------------------------------------------------------
+# Phase III.D Item 8: Keithley X axis has explicit time unit label
+# ----------------------------------------------------------------------
+
+
+def test_x_axis_has_time_label(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    plot = block._plot_widgets["voltage"]
+    bottom = plot.getPlotItem().getAxis("bottom")
+    label_text = bottom.labelText
+    # Label should mention "Время" (time).
+    assert "Время" in label_text or "с" in label_text
+
+
+# ----------------------------------------------------------------------
 # Debounce semantics
 # ----------------------------------------------------------------------
 

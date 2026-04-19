@@ -123,6 +123,15 @@ _FORMATTERS: dict[str, Callable[[float], str]] = {
     "power": _format_power,
 }
 
+# Dash placeholder per suffix — used by handle_reading when a
+# derived quantity is meaningless (e.g. R at I≈0).
+_DASH_BY_UNIT: dict[str, str] = {
+    "voltage": "— В",
+    "current": "— А",
+    "resistance": "— Ом",
+    "power": "— Вт",
+}
+
 
 def _mono_value_font() -> QFont:
     """Fira Mono value font with tabular figures enabled when supported."""
@@ -166,19 +175,33 @@ def _style_button(btn: QPushButton, variant: str) -> None:
     if variant == "primary":
         # Phase III.A: primary uses ACCENT (UI activation), not STATUS_OK.
         bg, fg = theme.ACCENT, theme.ON_ACCENT
+        border_color = theme.BORDER_SUBTLE
     elif variant == "warning":
         bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
+        border_color = theme.BORDER_SUBTLE
     elif variant == "destructive":
         bg, fg = theme.STATUS_FAULT, theme.ON_DESTRUCTIVE
+        border_color = theme.BORDER_SUBTLE
     elif variant == "accent":
         bg, fg = theme.ACCENT, theme.ON_ACCENT
+        border_color = theme.BORDER_SUBTLE
+    elif variant == "caution_outlined":
+        # Phase III.D Item 10: combined «Старт A+B» is more
+        # consequential than per-channel Старт (two heaters at once).
+        # Render as outlined STATUS_CAUTION rather than filled ACCENT
+        # so it never reads as an identical twin of the per-channel
+        # primary button.
+        bg = "transparent"
+        fg = theme.STATUS_CAUTION
+        border_color = theme.STATUS_CAUTION
     else:  # "neutral"
         bg, fg = theme.SURFACE_MUTED, theme.FOREGROUND
+        border_color = theme.BORDER_SUBTLE
     btn.setStyleSheet(
         f"QPushButton {{"
         f" background-color: {bg};"
         f" color: {fg};"
-        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f" border: 1px solid {border_color};"
         f" border-radius: {radius}px;"
         f" padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
         f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
@@ -378,6 +401,10 @@ class _SmuChannelBlock(QFrame):
                 _MEASUREMENT_LABELS[key],
                 units=_MEASUREMENT_UNITS[key],
             )
+            # Phase III.D Item 8: X axis was tick-only ("-35 -30 … 0") with
+            # no units; operator could not tell seconds from minutes. The
+            # domain is seconds before now — label explicitly.
+            item.setLabel("bottom", "Время", units="с")
             for axis_name in ("left", "bottom"):
                 axis = item.getAxis(axis_name)
                 if axis is not None:
@@ -474,6 +501,17 @@ class _SmuChannelBlock(QFrame):
         spin.setDecimals(decimals)
         spin.setValue(value)
         spin.setFixedWidth(96)
+        # Phase III.D Item 3: arrows were bleeding into the preceding
+        # label ("V⬍редел (В)"). Anchor the up/down buttons to the
+        # right edge of the input rectangle and reserve horizontal
+        # padding inside so the numeric value never collides with them.
+        spin.setStyleSheet(
+            "QDoubleSpinBox { padding-right: 22px; padding-left: 4px; }"
+            " QDoubleSpinBox::up-button {"
+            " subcontrol-position: right top; width: 18px; }"
+            " QDoubleSpinBox::down-button {"
+            " subcontrol-position: right bottom; width: 18px; }"
+        )
         return spin
 
     # ------------------------------------------------------------------
@@ -634,10 +672,33 @@ class _SmuChannelBlock(QFrame):
         self._buffers[suffix].append((ts, reading.value))
         self._last_update_ts = ts
         formatter = _FORMATTERS[suffix]
-        self._value_labels[suffix].setText(formatter(reading.value))
+        # Phase III.D Item 1: resistance is meaningless at |I| ≈ 0
+        # (engine sometimes carries the last-valid R forward; operator
+        # sees a stale 2.32 Ω on a zero-current channel). Collapse it
+        # to "—" at display time regardless of the engine's numeric
+        # value. Power gets the same treatment — P = V·I is exactly
+        # zero at zero current, but a stale cached value would mislead.
+        if suffix in ("resistance", "power") and self._current_is_effectively_zero():
+            self._value_labels[suffix].setText(_DASH_BY_UNIT[suffix])
+        else:
+            self._value_labels[suffix].setText(formatter(reading.value))
         if self._stale:
             self._stale = False
             self._apply_readouts_style()
+
+    def _current_is_effectively_zero(self) -> bool:
+        """Return True if the most recent current reading is <1 nA.
+
+        1 nA is several decades below any realistic SMU operating
+        current; anything under that is either zero or noise floor."""
+        buf = self._buffers.get("current")
+        if not buf:
+            return False
+        _ts, last_i = buf[-1]
+        try:
+            return abs(float(last_i)) < 1e-9
+        except (TypeError, ValueError):
+            return False
 
     def refresh(self, now: float) -> None:
         self._refresh_plots(now)
@@ -839,7 +900,9 @@ class KeithleyPanel(QWidget):
         layout.addStretch()
 
         self._start_both_btn = QPushButton("Старт A+B")
-        _style_button(self._start_both_btn, "primary")
+        # Phase III.D Item 10: outlined caution — distinct from
+        # per-channel filled Старт buttons.
+        _style_button(self._start_both_btn, "caution_outlined")
         self._start_both_btn.clicked.connect(self._on_start_both)
         layout.addWidget(self._start_both_btn)
 
