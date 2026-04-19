@@ -1,4 +1,9 @@
-"""Панель тревог (AlarmPanel).
+"""Панель тревог (AlarmPanel) — DEPRECATED (Phase II.4).
+
+Supersession: `src/cryodaq/gui/shell/overlays/alarm_panel.py` is the
+DS v1.0.1-compliant replacement wired into `MainWindowV2`. This
+legacy v1 widget remains alive only for the legacy `MainWindow` tab
+surface; slated for deletion in Phase II.13 legacy cleanup.
 
 Отображает таблицу тревог с цветовой индикацией по severity.
 Позволяет оператору подтверждать тревоги (acknowledge).

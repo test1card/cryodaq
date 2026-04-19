@@ -11,6 +11,30 @@
 
 ### Changed
 
+- **Phase II.4 AlarmOverlay rebuilt (K1 safety surface).** New
+  overlay at `src/cryodaq/gui/shell/overlays/alarm_panel.py` replaces
+  the legacy v1 widget in `MainWindowV2`. Dual-engine layout preserved:
+  v1 threshold-based table (fed via `on_reading` + `metadata["alarm_name"]`
+  filter) and v2 YAML-driven phase-aware table (populated via 3 s
+  polling of `alarm_v2_status`). Emoji severity icons (🔴 / 🟡 / 🔵)
+  replaced by in-module `SeverityChip` widget using DS status tokens
+  (`STATUS_FAULT` / `STATUS_WARNING` / `STATUS_INFO`) with Russian short
+  labels (`КРИТ` / `ПРЕД` / `ИНФО`). ACK button styling migrated from
+  deprecated `STONE_400` / `TEXT_INVERSE` to `SURFACE_MUTED` /
+  `MUTED_FOREGROUND` (disabled) and status-colored active state.
+  Host Integration Contract wired: `MainWindowV2._tick_status` mirrors
+  connection state into the overlay (pauses v2 polling + disables
+  ACK buttons on disconnect). `_dispatch_reading` routes readings
+  through `on_reading`. `v2_alarm_count_changed = Signal(int)`
+  signature preserved — still consumed by `TopWatchBar.set_alarm_count`.
+  New public API: `update_v2_status(payload)`, `get_active_v1_count()`,
+  `get_active_v2_count()`. Fail-OPEN preserved (disconnect keeps rows
+  visible; engine errors preserve last-known v2 map). Legacy widget
+  at `src/cryodaq/gui/widgets/alarm_panel.py` marked DEPRECATED in
+  its module docstring; slated for deletion in Phase II.13. Zero legacy
+  tokens / zero emoji / zero hardcoded hex (pre-commit gates pass).
+  Tests: 51 overlay cases + 7 host-wiring cases.
+
 - **Phase II.7 CalibrationOverlay rebuilt + command wiring.**
   Three-mode overlay at
   `src/cryodaq/gui/shell/overlays/calibration_panel.py` replaces the

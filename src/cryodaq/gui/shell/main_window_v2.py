@@ -35,6 +35,7 @@ from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
+from cryodaq.gui.shell.overlays.alarm_panel import AlarmPanel
 from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
@@ -43,7 +44,6 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.widgets.alarm_panel import AlarmPanel
 from cryodaq.gui.widgets.instrument_status import InstrumentStatusPanel
 from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
@@ -530,6 +530,9 @@ class MainWindowV2(QMainWindow):
         # Phase II.7: mirror to Calibration overlay (same contract).
         if self._calibration_panel is not None:
             self._calibration_panel.set_connected(connected)
+        # Phase II.4: mirror to Alarm overlay (gates v2 polling + ACK buttons).
+        if self._alarm_panel is not None:
+            self._alarm_panel.set_connected(connected)
 
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
