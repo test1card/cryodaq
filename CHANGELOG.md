@@ -11,6 +11,44 @@
 
 ### Changed
 
+- **Phase III.C — Phase-aware AnalyticsView rebuild.** Rewrote
+  `src/cryodaq/gui/shell/views/analytics_view.py` around a
+  2 × 2 QGridLayout (main slot `rowspan=2, colspan=1, col=0`;
+  top_right and bottom_right 1/4 each). Layout swaps per experiment
+  phase according to a new config file `config/analytics_layout.yaml`
+  — preparation → temperature overview; vacuum → прогноз вакуума
+  (main), temperature + pressure (right column); cooldown → прогноз
+  охлаждения (main); measurement → R_тепл live + keithley power;
+  warmup / disassembly have their own mappings; unknown / missing
+  phase falls back to temperature + pressure + sensor health.
+  New widget registry at
+  `src/cryodaq/gui/shell/views/analytics_widgets.py`:
+  `TemperatureOverviewWidget` (subscribes to the III.B global time
+  controller), `VacuumPredictionWidget` + `CooldownPredictionWidget`
+  (wrap III.B `PredictionWidget`), `RThermalLiveWidget`,
+  `PressureCurrentWidget` (wraps III.B shared `PressurePlot`),
+  `SensorHealthSummaryWidget` (reuses II.4 `SeverityChip`),
+  `KeithleyPowerWidget`, plus 4 placeholder cards for the widget IDs
+  whose data pipelines are not wired yet. Shell wiring: phase string
+  from `current_phase` in `TopWatchBar.experiment_status_received`
+  propagates into `AnalyticsView.set_phase` via
+  `MainWindowV2._on_experiment_status_received`. Public setters
+  preserved (`set_cooldown`, `set_r_thermal`, `set_fault`) plus new
+  ones (`set_temperature_readings`, `set_pressure_reading`,
+  `set_keithley_readings`, `set_instrument_health`,
+  `set_vacuum_prediction`). Data forwarding uses duck-typing — each
+  setter iterates active widgets and calls a matching method if
+  present; inactive widgets are discarded on layout swap. Last
+  pushes are cached and replayed into fresh widgets on phase
+  transition so the new layout never starts empty. ACCENT / status
+  decoupling (III.A) preserved across new widgets; no widget hits
+  the legacy status tier in non-status contexts. Tests: 37 new
+  cases across `test_analytics_view_phase_aware.py` (17) and
+  `test_analytics_widgets.py` (20) plus 2 new wiring cases in
+  `test_main_window_v2_analytics_adapter.py` (9 total). Deletes
+  obsolete `test_analytics_view.py` (28 hero/rthermal/vacuum-strip
+  geometry cases, rendered meaningless by the rebuild).
+
 - **Phase III.B — GlobalTimeWindow + shared PressurePlot +
   PredictionWidget.** `TimeWindow` enum promoted from dashboard-local
   to `cryodaq.gui.state.time_window` with a

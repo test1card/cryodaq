@@ -577,6 +577,13 @@ class MainWindowV2(QMainWindow):
         # Phase II.3: push current experiment id to OperatorLog overlay.
         if self._operator_log_panel is not None:
             self._operator_log_panel.set_current_experiment(self._active_experiment_id())
+        # Phase III.C: propagate current phase into AnalyticsView so its
+        # dynamic layout can swap to the phase-appropriate widget set.
+        if self._analytics_view is not None:
+            current_phase = status.get("current_phase")
+            self._analytics_view.set_phase(
+                str(current_phase) if current_phase else None
+            )
 
     def _active_experiment_id(self) -> str | None:
         """Return the cached active experiment id, or None."""

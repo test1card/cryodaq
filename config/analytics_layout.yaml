@@ -1,0 +1,47 @@
+# Phase → analytics layout mapping (Phase III.C).
+#
+# Each phase defines which widget occupies the large (1/2 screen) slot
+# and which two fill the right column (1/4 each). Widget IDs map to
+# factories registered in src/cryodaq/gui/shell/views/analytics_widgets.py.
+#
+# Changes to this file do NOT require code changes — new phases can be
+# added by extending the mapping (assuming the widget IDs already exist
+# in the registry). Hot-reload is NOT supported; a GUI restart is
+# required after editing.
+
+phases:
+  preparation:
+    main: temperature_overview
+    top_right: pressure_current
+    bottom_right: sensor_health_summary
+
+  vacuum:
+    main: vacuum_prediction
+    top_right: temperature_overview
+    bottom_right: pressure_current
+
+  cooldown:
+    main: cooldown_prediction
+    top_right: temperature_overview
+    bottom_right: r_thermal_placeholder
+
+  measurement:
+    main: r_thermal_live
+    top_right: temperature_overview
+    bottom_right: keithley_power
+
+  warmup:
+    main: temperature_trajectory
+    top_right: pressure_current
+    bottom_right: cooldown_history
+
+  disassembly:
+    main: experiment_summary
+    top_right: null
+    bottom_right: null
+
+# Fallback when phase unknown or before an experiment starts.
+fallback:
+  main: temperature_overview
+  top_right: pressure_current
+  bottom_right: sensor_health_summary

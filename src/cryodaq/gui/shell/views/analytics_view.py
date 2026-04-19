@@ -1,68 +1,77 @@
-"""Analytics primary view (B.8 revision 2) — QWidget, not ModalCard.
+"""Analytics primary view — phase-aware dynamic layout (Phase III.C).
 
-Hosted as a page in the shell's main content stack (OverlayContainer).
-Activated from ToolRail Ctrl+A. No backdrop, no close button, no focus
-trap, no Escape-to-dismiss — primary-view invariants per
-docs/design-system/cryodaq-primitives/analytics-panel.md (revision 2).
+Consumes ``config/analytics_layout.yaml`` to decide which widget goes
+in the 1/2-screen main slot + top-right 1/4 + bottom-right 1/4 per
+experiment phase. Layout swaps when :meth:`set_phase` is called by the
+shell.
 
-Layout is plot-dominant. The cooldown trajectory plot receives the
-largest continuous block of screen space; hero strip (ETA + phase +
-progress) and vacuum trend strip are thin chrome, R_thermal tile +
-mini plot occupy a compact right column.
+Connects to:
+- :class:`GlobalTimeWindowController` (indirectly via embedded
+  historical widgets; AnalyticsView itself holds no TimeWindow state).
+- Experiment phase string forwarded from
+  :class:`MainWindowV2._on_experiment_status_received` via
+  :meth:`set_phase`.
 
-Data flow (preserved from B.8 follow-up 53232ea):
-- `set_cooldown(CooldownData | None)`
-- `set_r_thermal(RThermalData | None)`
-- `set_fault(faulted: bool, reason: str)`
+Data flow:
+- Shell routes data via setter methods preserved from the B.8
+  contract (:meth:`set_cooldown`, :meth:`set_r_thermal`,
+  :meth:`set_fault`) plus new III.C setters
+  (:meth:`set_temperature_readings`, :meth:`set_pressure_reading`,
+  :meth:`set_keithley_readings`, :meth:`set_instrument_health`,
+  :meth:`set_vacuum_prediction`).
+- Each setter iterates the active widget instances and forwards to
+  those that expose a matching method (duck-typing). Inactive
+  widgets are discarded when the layout swaps.
 
-The view does not import zmq or subscribe directly. The shell
-(`main_window_v2.py`) adapts `analytics/cooldown_predictor/cooldown_eta`
-readings into `CooldownData` via `_cooldown_reading_to_data()` and
-pushes via the setters.
+Public API preserved for existing wiring tests; new setters additive.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
-import pyqtgraph as pg
+import yaml
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QProgressBar,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QWidget
 
+from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
-from cryodaq.gui._plot_style import (
-    apply_plot_style,
-    series_pen,
-    warn_region_brush,
-)
+from cryodaq.gui.shell.views import analytics_widgets
 
-# ─── Data models (preserved from B.8 follow-up 53232ea) ───────────────
+_LAYOUT_CONFIG_PATH = Path(__file__).resolve().parents[5] / "config" / "analytics_layout.yaml"
+_FALLBACK_KEY = "__fallback__"
+
+# Phase label aliases — forward compatibility between
+# `core.phase_labels.PHASE_ORDER` string IDs and YAML keys.
+_PHASE_ALIASES: dict[str, str] = {
+    # Engine/ExperimentPhase.value → YAML phase key
+    "preparation": "preparation",
+    "vacuum": "vacuum",
+    "cooldown": "cooldown",
+    "measurement": "measurement",
+    "warmup": "warmup",
+    "teardown": "disassembly",
+    "disassembly": "disassembly",
+}
+
+
+# ─── Data contracts preserved from B.8 ────────────────────────────────
 
 
 @dataclass
 class CooldownData:
     """Snapshot of cooldown predictor output.
 
-    The shell-side adapter `MainWindowV2._cooldown_reading_to_data()`
-    translates the live broker reading (channel
-    `analytics/cooldown_predictor/cooldown_eta`, metadata shape
-    documented in `src/cryodaq/analytics/cooldown_service.py:400-433`)
-    into this dataclass before pushing into `AnalyticsView.set_cooldown`.
+    Pushed by ``MainWindowV2._cooldown_reading_to_data`` from the
+    ``analytics/cooldown_predictor/cooldown_eta`` broker channel.
+    Field set preserved for wiring compatibility.
     """
 
     t_hours: float
     ci_hours: float
-    phase: str  # "phase1" | "transition" | "phase2" | "stabilizing" | "complete"
-    progress_pct: float  # 0..100, overall cooldown progress
+    phase: str
+    progress_pct: float
     actual_trajectory: list[tuple[float, float]] = field(default_factory=list)
     predicted_trajectory: list[tuple[float, float]] = field(default_factory=list)
     ci_trajectory: list[tuple[float, float, float]] = field(default_factory=list)
@@ -71,8 +80,8 @@ class CooldownData:
 
 @dataclass
 class RThermalData:
-    """Thermal resistance snapshot. No plugin publishes this today;
-    `set_r_thermal()` remains part of the contract for future wiring."""
+    """Thermal resistance snapshot. Pushed when a downstream plugin
+    eventually emits R_thermal data."""
 
     current_value: float | None
     delta_per_minute: float | None
@@ -80,526 +89,225 @@ class RThermalData:
     history: list[tuple[float, float]] = field(default_factory=list)
 
 
-# ─── Phase labels + ETA formatter (preserved from legacy v1) ──────────
-
-_PHASE_LABELS: dict[str, str] = {
-    "phase1": "Фаза 1 (295K→50K)",
-    "transition": "Переход (S-bend)",
-    "phase2": "Фаза 2 (50K→4K)",
-    "stabilizing": "Стабилизация",
-    "complete": "Завершено",
-}
+# ─── Layout config loader ─────────────────────────────────────────────
 
 
-def _format_eta(t_hours: float, ci_hours: float) -> str:
-    """Format ETA as «Nч Mмин ±Kмин» — same semantics as legacy v1."""
-    hours = int(t_hours)
-    mins = int(round((t_hours - hours) * 60))
-    ci_mins = int(round(ci_hours * 60))
-    return f"{hours}ч {mins}мин ±{ci_mins}мин"
+def _load_layout_config() -> dict:
+    if not _LAYOUT_CONFIG_PATH.exists():
+        return {"phases": {}, "fallback": {"main": None, "top_right": None, "bottom_right": None}}
+    with _LAYOUT_CONFIG_PATH.open(encoding="utf-8") as f:
+        return yaml.safe_load(f) or {"phases": {}, "fallback": {}}
 
 
-_R_THERMAL_STALE_S = 60.0
+def _resolve_phase_key(phase: str | None, config: dict) -> str:
+    """Map a phase string (engine ID or alias) onto a YAML key."""
+    if phase is None:
+        return _FALLBACK_KEY
+    alias = _PHASE_ALIASES.get(phase, phase)
+    phases = config.get("phases") or {}
+    return alias if alias in phases else _FALLBACK_KEY
 
-# Fixed Y range for cooldown plot per spec invariant #8 (never autoscale).
-_COOLDOWN_Y_RANGE = (0.0, 310.0)
 
-# Fixed pixel heights per spec anatomy (B.8 revision 2).
-_HERO_STRIP_HEIGHT_PX = 56
-_VACUUM_STRIP_HEIGHT_PX = 140
-_RTHERMAL_TILE_HEIGHT_PX = 72
+def _slots_for(phase_key: str, config: dict) -> dict[str, str | None]:
+    phases = config.get("phases") or {}
+    if phase_key == _FALLBACK_KEY or phase_key not in phases:
+        cfg = config.get("fallback") or {}
+    else:
+        cfg = phases[phase_key]
+    return {
+        "main": cfg.get("main"),
+        "top_right": cfg.get("top_right"),
+        "bottom_right": cfg.get("bottom_right"),
+    }
+
+
+# ─── View ─────────────────────────────────────────────────────────────
 
 
 class AnalyticsView(QWidget):
-    """Analytics primary view — plot-dominant page hosted in the shell
-    main content stack.
-
-    Instance lifecycle: constructed once by the shell on first Ctrl+A;
-    stays alive across switches. `set_cooldown` / `set_r_thermal` /
-    `set_fault` are idempotent — safe to call repeatedly with the same
-    payload.
-    """
+    """Phase-aware primary analytics view (Phase III.C)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("analyticsView")
-        self._cooldown: CooldownData | None = None
-        self._r_thermal: RThermalData | None = None
-        self._faulted = False
-        self._fault_reason = ""
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"#analyticsView {{ background-color: {theme.BACKGROUND}; }}")
 
-        # Tile handles — populated in _build_layout().
-        self._hero: _HeroStrip | None = None
-        self._cooldown_plot: pg.PlotWidget | None = None
-        self._cooldown_curves: dict = {}
-        self._rthermal_tile: _RThermalTile | None = None
-        self._rthermal_mini: pg.PlotWidget | None = None
-        self._rthermal_curve: pg.PlotDataItem | None = None
-        self._vacuum_strip: _VacuumStrip | None = None
+        self._phase: str | None = None
+        self._layout_config = _load_layout_config()
+        self._active: dict[str, QWidget] = {}
 
-        self._build_layout()
+        # Cached last pushes — replayed into new widgets on phase swap
+        # so a fresh layout reflects the current state immediately.
+        self._last_cooldown: CooldownData | None = None
+        self._last_r_thermal: RThermalData | None = None
+        # None sentinel = set_fault never called. Empty-default tuple
+        # would otherwise skip replay after an explicit `set_fault(False, "")`
+        # clear, which III.C Codex flagged as a latent replay-contract hole.
+        self._last_fault: tuple[bool, str] | None = None
+        self._last_temperature_readings: dict[str, Reading] = {}
+        self._last_pressure_reading: Reading | None = None
+        self._last_keithley_readings: dict[str, Reading] = {}
+        self._last_instrument_health: dict[str, str] | None = None
+        self._last_vacuum_prediction: dict | None = None
 
-        # Initial empty state.
-        self.set_cooldown(None)
-        self.set_r_thermal(None)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        self._grid.setSpacing(theme.SPACE_3)
 
-    # ------------------------------------------------------------------
-    # Layout construction
-    # ------------------------------------------------------------------
-
-    def _build_layout(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # Hero strip — compact fixed height, stretch 0.
-        self._hero = _HeroStrip(self)
-        self._hero.setFixedHeight(_HERO_STRIP_HEIGHT_PX)
-        root.addWidget(self._hero, 0)
-
-        # Middle region — stretch 1, plot + right column.
-        middle = QWidget(self)
-        middle_row = QHBoxLayout(middle)
-        middle_row.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3
-        )
-        middle_row.setSpacing(theme.SPACE_3)
-
-        # Cooldown plot — dominant width (stretch 5).
-        self._cooldown_plot, self._cooldown_curves = self._build_cooldown_plot()
-        middle_row.addWidget(self._cooldown_plot, 5)
-
-        # Right column — stretch 2.
-        right_col_wrap = QWidget(middle)
-        right_col = QVBoxLayout(right_col_wrap)
-        right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(theme.SPACE_2)
-
-        self._rthermal_tile = _RThermalTile(right_col_wrap)
-        self._rthermal_tile.setFixedHeight(_RTHERMAL_TILE_HEIGHT_PX)
-        right_col.addWidget(self._rthermal_tile, 0)
-
-        self._rthermal_mini, self._rthermal_curve = self._build_rthermal_mini()
-        right_col.addWidget(self._rthermal_mini, 1)
-
-        middle_row.addWidget(right_col_wrap, 2)
-        root.addWidget(middle, 1)
-
-        # Vacuum trend strip — compact fixed height, stretch 0.
-        self._vacuum_strip = _VacuumStrip(self)
-        self._vacuum_strip.setFixedHeight(_VACUUM_STRIP_HEIGHT_PX)
-        root.addWidget(self._vacuum_strip, 0)
-
-    def _build_cooldown_plot(self) -> tuple[pg.PlotWidget, dict]:
-        plot = pg.PlotWidget()
-        plot.setObjectName("analyticsCooldownPlot")
-        apply_plot_style(plot)
-
-        # Compact tick fonts — spec: FONT_LABEL_SIZE - 2.
-        small_tick_size = max(theme.FONT_LABEL_SIZE - 2, 8)
-        small_tick_font = QFont(theme.FONT_BODY, small_tick_size)
-        for axis_name in ("left", "bottom"):
-            plot.getAxis(axis_name).setStyle(tickFont=small_tick_font)
-
-        pi = plot.getPlotItem()
-        pi.setLabel("left", "T", units="K", color=theme.PLOT_LABEL_COLOR)
-        pi.setLabel(
-            "bottom", "Время от старта", units="ч", color=theme.PLOT_LABEL_COLOR
-        )
-
-        # Fixed Y range per invariant #8 — do not autoscale.
-        pi.getViewBox().setYRange(*_COOLDOWN_Y_RANGE, padding=0)
-        pi.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-
-        pi.addLegend(offset=(-10, 10))
-
-        actual = pi.plot([], [], pen=series_pen(0), name="Измерено")
-        predicted = pi.plot(
-            [], [], pen=series_pen(1, style=Qt.PenStyle.DashLine), name="Прогноз"
-        )
-        ci_lower = pi.plot(
-            [], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0)
-        )
-        ci_upper = pi.plot(
-            [], [], pen=pg.mkPen(color=theme.PLOT_GRID_COLOR, width=0)
-        )
-        ci_fill = pg.FillBetweenItem(ci_lower, ci_upper, brush=warn_region_brush())
-        pi.addItem(ci_fill)
-
-        return plot, {
-            "actual": actual,
-            "predicted": predicted,
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper,
-            "phase_lines": [],
-        }
-
-    def _build_rthermal_mini(self) -> tuple[pg.PlotWidget, pg.PlotDataItem]:
-        plot = pg.PlotWidget()
-        plot.setObjectName("analyticsRThermalMini")
-        apply_plot_style(plot)
-        small_tick_size = max(theme.FONT_LABEL_SIZE - 2, 8)
-        small_tick_font = QFont(theme.FONT_BODY, small_tick_size)
-        pi = plot.getPlotItem()
-        pi.setLabel("left", "R", units="K/W", color=theme.PLOT_LABEL_COLOR)
-        pi.setLabel("bottom", "t", units="мин", color=theme.PLOT_LABEL_COLOR)
-        for axis_name in ("left", "bottom"):
-            pi.getAxis(axis_name).setStyle(tickFont=small_tick_font)
-        curve = pi.plot([], [], pen=series_pen(0))
-        return plot, curve
+        self._apply_layout(_FALLBACK_KEY)
 
     # ------------------------------------------------------------------
-    # Public setters
+    # Public API — phase
+    # ------------------------------------------------------------------
+
+    def set_phase(self, phase: str | None) -> None:
+        if phase == self._phase:
+            return
+        self._phase = phase
+        key = _resolve_phase_key(phase, self._layout_config)
+        self._apply_layout(key)
+
+    def current_phase(self) -> str | None:
+        return self._phase
+
+    # ------------------------------------------------------------------
+    # Public API — data setters (forward to active widgets via duck-typing)
     # ------------------------------------------------------------------
 
     def set_cooldown(self, data: CooldownData | None) -> None:
-        self._cooldown = data
-        self._hero.set_cooldown(data)
-        self._apply_cooldown_plot(data)
+        self._last_cooldown = data
+        self._forward("set_cooldown_data", data)
 
     def set_r_thermal(self, data: RThermalData | None) -> None:
-        self._r_thermal = data
-        self._rthermal_tile.set_data(data)
-        self._apply_rthermal_mini(data)
+        self._last_r_thermal = data
+        self._forward("set_r_thermal_data", data)
 
     def set_fault(self, faulted: bool, reason: str = "") -> None:
-        self._faulted = faulted
-        self._fault_reason = reason if faulted else ""
-        self._hero.set_fault(faulted)
-        self._apply_cooldown_fault_chrome(faulted)
+        self._last_fault = (faulted, reason)
+        self._forward("set_fault", faulted, reason)
+
+    def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
+        # Keep the latest value per channel for replay on layout swap.
+        self._last_temperature_readings.update(readings)
+        self._forward("set_temperature_readings", readings)
+
+    def set_pressure_reading(self, reading: Reading) -> None:
+        self._last_pressure_reading = reading
+        self._forward("set_pressure_reading", reading)
+
+    def set_keithley_readings(self, readings: dict[str, Reading]) -> None:
+        self._last_keithley_readings.update(readings)
+        self._forward("set_keithley_readings", readings)
+
+    def set_instrument_health(self, health: dict[str, str] | None) -> None:
+        self._last_instrument_health = health
+        self._forward("set_instrument_health", health)
+
+    def set_vacuum_prediction(self, prediction: dict | None) -> None:
+        self._last_vacuum_prediction = prediction
+        self._forward("set_vacuum_prediction", prediction)
 
     # ------------------------------------------------------------------
-    # Plot update helpers
+    # Layout management
     # ------------------------------------------------------------------
 
-    def _apply_cooldown_plot(self, data: CooldownData | None) -> None:
-        curves = self._cooldown_curves
-        if data is None:
-            curves["actual"].setData([], [])
-            curves["predicted"].setData([], [])
-            curves["ci_lower"].setData([], [])
-            curves["ci_upper"].setData([], [])
-            self._clear_phase_lines()
+    def active_widgets(self) -> dict[str, QWidget]:
+        """Snapshot of current slot → widget mapping (for tests)."""
+        return dict(self._active)
+
+    def _apply_layout(self, phase_key: str) -> None:
+        new_slots = _slots_for(phase_key, self._layout_config)
+
+        # Drop widgets whose slot now wants a different ID (or is empty).
+        for slot, widget in list(self._active.items()):
+            desired_id = new_slots.get(slot)
+            if analytics_widgets.id_of(widget) != desired_id:
+                self._grid.removeWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+                del self._active[slot]
+
+        # Instantiate missing widgets — track which ones are fresh so
+        # the replay step below only targets them (replaying into a
+        # preserved append-style widget would duplicate samples).
+        fresh: list[QWidget] = []
+        for slot, widget_id in new_slots.items():
+            if slot in self._active:
+                continue
+            if widget_id is None:
+                continue
+            widget = analytics_widgets.create(widget_id)
+            if widget is None:
+                continue
+            self._active[slot] = widget
+            self._place_in_slot(slot, widget)
+            fresh.append(widget)
+
+        # Column / row stretch — two-column layout, main slot takes
+        # the full left column (both rows), right column 1/3 width.
+        self._grid.setColumnStretch(0, 2)
+        self._grid.setColumnStretch(1, 1)
+        self._grid.setRowStretch(0, 1)
+        self._grid.setRowStretch(1, 1)
+
+        # Replay cached pushes into the freshly-mounted widgets only.
+        self._replay_cached_into(fresh)
+
+    def _place_in_slot(self, slot: str, widget: QWidget) -> None:
+        if slot == "main":
+            # row=0, col=0, rowspan=2, colspan=1
+            self._grid.addWidget(widget, 0, 0, 2, 1)
+        elif slot == "top_right":
+            self._grid.addWidget(widget, 0, 1, 1, 1)
+        elif slot == "bottom_right":
+            self._grid.addWidget(widget, 1, 1, 1, 1)
+
+    def _forward(self, method: str, *args) -> None:
+        """Call ``method(*args)`` on every active widget that defines it."""
+        for widget in self._active.values():
+            fn = getattr(widget, method, None)
+            if callable(fn):
+                fn(*args)
+
+    @staticmethod
+    def _forward_to(widgets: list[QWidget], method: str, *args) -> None:
+        for widget in widgets:
+            fn = getattr(widget, method, None)
+            if callable(fn):
+                fn(*args)
+
+    def _replay_cached_into(self, widgets: list[QWidget]) -> None:
+        """Push the last known data into freshly-mounted widgets only.
+
+        Replaying into preserved (already-active-in-prior-layout)
+        widgets would duplicate samples in append-style consumers like
+        :class:`TemperatureOverviewWidget` and
+        :class:`PressureCurrentWidget`. Phase III.C Codex fix.
+        """
+        if not widgets:
             return
-
-        if data.actual_trajectory:
-            xs = [pt[0] for pt in data.actual_trajectory]
-            ys = [pt[1] for pt in data.actual_trajectory]
-            curves["actual"].setData(xs, ys)
-        else:
-            curves["actual"].setData([], [])
-
-        if data.predicted_trajectory:
-            xs = [pt[0] for pt in data.predicted_trajectory]
-            ys = [pt[1] for pt in data.predicted_trajectory]
-            curves["predicted"].setData(xs, ys)
-        else:
-            curves["predicted"].setData([], [])
-
-        if data.ci_trajectory:
-            xs = [pt[0] for pt in data.ci_trajectory]
-            lower_ys = [pt[1] for pt in data.ci_trajectory]
-            upper_ys = [pt[2] for pt in data.ci_trajectory]
-            curves["ci_lower"].setData(xs, lower_ys)
-            curves["ci_upper"].setData(xs, upper_ys)
-        else:
-            curves["ci_lower"].setData([], [])
-            curves["ci_upper"].setData([], [])
-
-        self._render_phase_lines(data.phase_boundaries_hours)
-
-    def _clear_phase_lines(self) -> None:
-        pi = self._cooldown_plot.getPlotItem()
-        for line in self._cooldown_curves["phase_lines"]:
-            pi.removeItem(line)
-        self._cooldown_curves["phase_lines"] = []
-
-    def _render_phase_lines(self, boundaries_hours: list[float]) -> None:
-        self._clear_phase_lines()
-        if not boundaries_hours:
-            return
-        pi = self._cooldown_plot.getPlotItem()
-        pen = pg.mkPen(
-            color=theme.PLOT_GRID_COLOR, width=1, style=Qt.PenStyle.DashLine
-        )
-        for hours in boundaries_hours:
-            line = pg.InfiniteLine(pos=hours, angle=90, pen=pen)
-            pi.addItem(line)
-            self._cooldown_curves["phase_lines"].append(line)
-
-    def _apply_rthermal_mini(self, data: RThermalData | None) -> None:
-        if data is None or not data.history:
-            self._rthermal_curve.setData([], [])
-            return
-        now = time.time()
-        xs = [(ts - now) / 60.0 for ts, _ in data.history]
-        ys = [v for _, v in data.history]
-        self._rthermal_curve.setData(xs, ys)
-
-    def _apply_cooldown_fault_chrome(self, faulted: bool) -> None:
-        """Spec: cooldown plot gets STATUS_FAULT outer border on fault."""
-        if faulted:
-            self._cooldown_plot.setStyleSheet(
-                f"#analyticsCooldownPlot "
-                f"{{ border: 2px solid {theme.STATUS_FAULT}; }}"
+        if self._last_cooldown is not None:
+            self._forward_to(widgets, "set_cooldown_data", self._last_cooldown)
+        if self._last_r_thermal is not None:
+            self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)
+        if self._last_fault is not None:
+            self._forward_to(widgets, "set_fault", *self._last_fault)
+        if self._last_temperature_readings:
+            self._forward_to(
+                widgets, "set_temperature_readings", self._last_temperature_readings
             )
-        else:
-            self._cooldown_plot.setStyleSheet("")
-
-
-# ─── Hero strip ───────────────────────────────────────────────────────
-
-
-class _HeroStrip(QFrame):
-    """Thin horizontal chrome at the top of AnalyticsView.
-
-    Three items in a row: ETA (FONT_TITLE_SIZE), phase label
-    (FONT_LABEL_SIZE muted), progress bar (flex width). No card
-    background; a bottom 1px BORDER (or STATUS_FAULT in fault state)
-    serves as the separator.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("analyticsHero")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._faulted = False
-        self._build_ui()
-        self._apply_chrome(faulted=False)
-
-    def _build_ui(self) -> None:
-        row = QHBoxLayout(self)
-        row.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
-        )
-        row.setSpacing(theme.SPACE_4)
-
-        # ETA label — title-size, bold.
-        self._eta_label = QLabel("—", self)
-        eta_font = QFont(theme.FONT_BODY, theme.FONT_TITLE_SIZE)
-        eta_font.setWeight(QFont.Weight(theme.FONT_TITLE_WEIGHT))
-        try:
-            eta_font.setFeature(QFont.Tag("tnum"), 1)
-        except (AttributeError, TypeError, ValueError):
-            pass
-        self._eta_label.setFont(eta_font)
-        self._eta_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent;"
-        )
-        row.addWidget(self._eta_label, 0)
-
-        # Phase label — label-size, muted foreground.
-        self._phase_label = QLabel("—", self)
-        phase_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        phase_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
-        self._phase_label.setFont(phase_font)
-        self._phase_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        row.addWidget(self._phase_label, 0)
-
-        # Progress bar — flex width, thin.
-        self._progress = QProgressBar(self)
-        self._progress.setObjectName("analyticsHeroProgress")
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(8)
-        self._progress.setStyleSheet(
-            f"#analyticsHeroProgress {{"
-            f"background: {theme.SURFACE_SUNKEN};"
-            f"border: 1px solid {theme.BORDER};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"}}"
-            f"#analyticsHeroProgress::chunk {{"
-            f"background: {theme.ACCENT};"
-            f"border-radius: {theme.RADIUS_SM}px;"
-            f"}}"
-        )
-        row.addWidget(self._progress, 1)
-
-    def set_cooldown(self, data: CooldownData | None) -> None:
-        if data is None:
-            # Phase III.D Item 17: add action hint to empty state.
-            self._eta_label.setText(
-                "Охлаждение не активно. "
-                "Запустите эксперимент с фазой захолаживания."
+        if self._last_pressure_reading is not None:
+            self._forward_to(widgets, "set_pressure_reading", self._last_pressure_reading)
+        if self._last_keithley_readings:
+            self._forward_to(
+                widgets, "set_keithley_readings", self._last_keithley_readings
             )
-            self._phase_label.setText("")
-            self._progress.setValue(0)
-            self._progress.setVisible(False)
-            return
-        self._progress.setVisible(True)
-        self._eta_label.setText(_format_eta(data.t_hours, data.ci_hours))
-        self._phase_label.setText(_PHASE_LABELS.get(data.phase, data.phase))
-        self._progress.setValue(int(round(max(0.0, min(100.0, data.progress_pct)))))
-
-    def set_fault(self, faulted: bool) -> None:
-        if faulted == self._faulted:
-            return
-        self._faulted = faulted
-        self._apply_chrome(faulted=faulted)
-
-    def _apply_chrome(self, *, faulted: bool) -> None:
-        """Hero has no card background — just a bottom border separator.
-        Fault flips the separator to STATUS_FAULT (spec §States)."""
-        border_color = theme.STATUS_FAULT if faulted else theme.BORDER
-        self.setStyleSheet(
-            f"#analyticsHero {{"
-            f"background-color: transparent;"
-            f"border: none;"
-            f"border-bottom: 1px solid {border_color};"
-            f"}}"
-        )
-
-
-# ─── R_thermal metric tile ────────────────────────────────────────────
-
-
-class _RThermalTile(QFrame):
-    """Compact card: current R_thermal + delta per minute.
-
-    Stale state uses BORDER color change («STATUS_STALE») + «(устар.)»
-    text suffix; value text stays FOREGROUND per RULE-DATA-005.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("analyticsRThermalTile")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._stale = False
-        self._build_ui()
-        self._apply_chrome()
-
-    def _build_ui(self) -> None:
-        col = QVBoxLayout(self)
-        col.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
-        )
-        col.setSpacing(theme.SPACE_1)
-
-        caption = QLabel("R_тепл", self)
-        cap_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        cap_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
-        caption.setFont(cap_font)
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        col.addWidget(caption)
-
-        self._value_label = QLabel("—", self)
-        val_font = QFont(theme.FONT_MONO, theme.FONT_MONO_VALUE_SIZE)
-        val_font.setWeight(QFont.Weight(theme.FONT_MONO_VALUE_WEIGHT))
-        try:
-            val_font.setFeature(QFont.Tag("tnum"), 1)
-        except (AttributeError, TypeError, ValueError):
-            pass
-        self._value_label.setFont(val_font)
-        # RULE-DATA-005: value text never dims — stays FOREGROUND even
-        # when stale. Stale is signalled via border + text suffix.
-        self._value_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent;"
-        )
-        col.addWidget(self._value_label)
-
-        self._delta_label = QLabel("", self)
-        delta_font = QFont(theme.FONT_MONO, theme.FONT_LABEL_SIZE)
-        try:
-            delta_font.setFeature(QFont.Tag("tnum"), 1)
-        except (AttributeError, TypeError, ValueError):
-            pass
-        self._delta_label.setFont(delta_font)
-        self._delta_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-        )
-        col.addWidget(self._delta_label)
-
-    def _apply_chrome(self) -> None:
-        border = theme.STATUS_STALE if self._stale else theme.BORDER
-        self.setStyleSheet(
-            f"#analyticsRThermalTile {{"
-            f"background-color: {theme.SURFACE_CARD};"
-            f"border: 1px solid {border};"
-            f"border-radius: {theme.RADIUS_MD}px;"
-            f"}}"
-        )
-
-    # ------------------------------------------------------------------
-
-    def set_data(self, data: RThermalData | None) -> None:
-        if data is None or data.current_value is None:
-            self._value_label.setText("—")
-            self._delta_label.setText("")
-            if self._stale:
-                self._stale = False
-                self._apply_chrome()
-            return
-
-        # 3-decimal precision per RULE-DATA-004.
-        text = f"{data.current_value:.3f} K/W"
-        age = time.time() - data.last_updated_ts
-        stale_now = age > _R_THERMAL_STALE_S
-        if stale_now:
-            text += " (устар.)"
-        self._value_label.setText(text)
-
-        if data.delta_per_minute is None:
-            self._delta_label.setText("")
-        else:
-            sign = "+" if data.delta_per_minute > 0 else ""
-            self._delta_label.setText(
-                f"Δ {sign}{data.delta_per_minute:.3f} K/W/мин"
+        if self._last_instrument_health is not None:
+            self._forward_to(
+                widgets, "set_instrument_health", self._last_instrument_health
             )
-
-        if stale_now != self._stale:
-            self._stale = stale_now
-            self._apply_chrome()
-
-
-# ─── Vacuum trend strip ───────────────────────────────────────────────
-
-
-class _VacuumStrip(QFrame):
-    """Bottom chrome strip hosting the legacy VacuumTrendPanel.
-
-    VacuumTrendPanel is NOT rewritten in B.8 revision 2 — bringing it
-    into design-system alignment (apply_plot_style, Cyrillic мбар axis
-    label, log-Y) is a separate follow-up per the spec §Vacuum trend
-    B.8 scope note. This wrapper just provides the fixed-height frame
-    and top-border separator.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("analyticsVacuumStrip")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._panel: QWidget | None = None
-        self._build_ui()
-        self._apply_chrome()
-
-    def _build_ui(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2
-        )
-        lay.setSpacing(0)
-        try:
-            from cryodaq.gui.widgets.vacuum_trend_panel import VacuumTrendPanel
-
-            self._panel = VacuumTrendPanel()
-            lay.addWidget(self._panel, 1)
-        except Exception as exc:  # pragma: no cover — fallback path
-            fallback = QLabel(f"[VacuumTrendPanel недоступен: {exc!s}]", self)
-            fallback.setStyleSheet(
-                f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
+        if self._last_vacuum_prediction is not None:
+            self._forward_to(
+                widgets, "set_vacuum_prediction", self._last_vacuum_prediction
             )
-            lay.addWidget(fallback, 1)
-
-    def _apply_chrome(self) -> None:
-        self.setStyleSheet(
-            f"#analyticsVacuumStrip {{"
-            f"background-color: {theme.SURFACE_CARD};"
-            f"border: none;"
-            f"border-top: 1px solid {theme.BORDER};"
-            f"}}"
-        )

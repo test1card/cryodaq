@@ -90,7 +90,7 @@ def test_cooldown_eta_reading_populates_analytics_view():
 
     w._dispatch_reading(reading)
     # Panel's stored snapshot matches the translated CooldownData.
-    snap = w._analytics_view._cooldown
+    snap = w._analytics_view._last_cooldown
     assert isinstance(snap, CooldownData)
     assert snap.t_hours == 7.33
     # conservative ±: max(7.85 - 7.33, 7.33 - 6.83) = 0.52
@@ -131,8 +131,8 @@ def test_cooldown_eta_phase_steady_remaps_to_stabilizing():
         },
     )
     w._dispatch_reading(reading)
-    assert w._analytics_view._cooldown is not None
-    assert w._analytics_view._cooldown.phase == "stabilizing"
+    assert w._analytics_view._last_cooldown is not None
+    assert w._analytics_view._last_cooldown.phase == "stabilizing"
     # 'complete' is never emitted today — plugin can't distinguish it.
 
 
@@ -157,7 +157,7 @@ def test_cooldown_eta_without_future_trajectory_stays_empty():
         },
     )
     w._dispatch_reading(reading)
-    snap = w._analytics_view._cooldown
+    snap = w._analytics_view._last_cooldown
     assert snap is not None
     assert snap.predicted_trajectory == []
     assert snap.ci_trajectory == []
@@ -172,7 +172,7 @@ def test_unknown_analytics_channel_is_silently_dropped():
     _stop_timers(w)
     w._ensure_overlay("analytics")
     # Prior state: panel was initialised in empty state.
-    assert w._analytics_view._cooldown is None
+    assert w._analytics_view._last_cooldown is None
 
     for channel in (
         "analytics/safety_state",
@@ -187,7 +187,7 @@ def test_unknown_analytics_channel_is_silently_dropped():
         )
 
     # Panel's snapshot is untouched — adapter dropped the readings.
-    assert w._analytics_view._cooldown is None
+    assert w._analytics_view._last_cooldown is None
 
 
 def test_analytics_reading_without_panel_opened_does_not_crash():
@@ -231,7 +231,7 @@ def test_cooldown_adapter_tolerates_malformed_metadata():
             metadata={"progress": 0.5, "phase": "phase1"},
         )
     )
-    snap = w._analytics_view._cooldown
+    snap = w._analytics_view._last_cooldown
     assert snap is not None and snap.t_hours == 3.3
     assert snap.ci_hours == 0.0  # missing CI → zero, not crash
 
@@ -248,8 +248,42 @@ def test_cooldown_adapter_tolerates_malformed_metadata():
             },
         )
     )
-    snap = w._analytics_view._cooldown
+    snap = w._analytics_view._last_cooldown
     assert snap is not None and snap.ci_hours == 0.0
+
+
+def test_experiment_status_propagates_phase_to_analytics():
+    """Phase III.C: the current experiment phase broadcast arriving in
+    `_on_experiment_status_received` must be forwarded to the
+    AnalyticsView via `set_phase`, driving its dynamic layout."""
+    _app()
+    w = MainWindowV2()
+    try:
+        # Force analytics lazy factory before the status tick.
+        w._ensure_overlay("analytics")
+        w._on_experiment_status_received(
+            {"active_experiment": {}, "current_phase": "vacuum"}
+        )
+        assert w._analytics_view.current_phase() == "vacuum"
+    finally:
+        w._status_timer.stop()
+
+
+def test_experiment_status_missing_phase_clears_analytics_phase():
+    """No current_phase field → AnalyticsView phase resets to None
+    (falls back to the fallback layout)."""
+    _app()
+    w = MainWindowV2()
+    try:
+        w._ensure_overlay("analytics")
+        w._on_experiment_status_received(
+            {"active_experiment": {}, "current_phase": "vacuum"}
+        )
+        assert w._analytics_view.current_phase() == "vacuum"
+        w._on_experiment_status_received({"active_experiment": None})
+        assert w._analytics_view.current_phase() is None
+    finally:
+        w._status_timer.stop()
 
 
 def test_static_adapter_method_is_pure():
