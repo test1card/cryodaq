@@ -661,3 +661,59 @@ def test_get_auto_state_after_start(app, monkeypatch):
     panel._on_auto_start()
     assert panel.get_auto_state() == "stabilizing"
     assert panel.is_auto_sweep_active() is True
+
+
+# ----------------------------------------------------------------------
+# IV.1 finding 5 — prediction table empty-state placeholder
+# ----------------------------------------------------------------------
+
+
+def test_prediction_placeholder_visible_initially(app):
+    """Before any pair selection the empty-state placeholder is shown."""
+    panel = ConductivityPanel()
+    assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
+
+
+def test_prediction_placeholder_text_mentions_key_terms(app):
+    """Placeholder text must mention sensors + power source + auto-measure."""
+    panel = ConductivityPanel()
+    text = panel._prediction_placeholder.text()
+    assert "датчиков" in text
+    assert "источник мощности" in text
+    assert "автоизмерение" in text
+
+
+def test_prediction_table_visible_after_pair_selected(app):
+    """Once ≥ 2 sensors are on the chain, the table replaces the placeholder."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    # _update_table is what drives the stack switch; invoke via the
+    # refresh path so the test exercises the real code.
+    panel._update_table({})
+    assert panel._prediction_stack.currentWidget() is panel._table
+
+
+def test_prediction_placeholder_returns_on_all_cleared(app):
+    """After deselecting back to <2 pairs, the placeholder is restored."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._update_table({})
+    assert panel._prediction_stack.currentWidget() is panel._table
+    # Uncheck both — chain empties, stack returns to placeholder.
+    panel._checkboxes["Т1"].setChecked(False)
+    panel._checkboxes["Т2"].setChecked(False)
+    panel._update_table({})
+    assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
+
+
+def test_prediction_placeholder_returns_on_single_selection(app):
+    """One sensor alone yields zero pairs — placeholder, not a headers-only table."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._update_table({})
+    assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder

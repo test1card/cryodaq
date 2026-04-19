@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -467,7 +468,35 @@ class ConductivityPanel(QWidget):
             f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
             f"}}"
         )
-        layout.addWidget(self._table)
+
+        # IV.1 finding 5: prediction table reads as "broken / loading"
+        # when no sensor pairs are selected — the header row shows but
+        # the body is empty. Swap in an explicit placeholder via
+        # QStackedWidget so the empty state is unambiguous.
+        self._prediction_placeholder = QLabel(
+            "Здесь появится прогноз теплопроводности.\n\n"
+            "Выберите пары датчиков и источник мощности,\n"
+            "затем запустите автоизмерение."
+        )
+        self._prediction_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._prediction_placeholder.setWordWrap(True)
+        placeholder_font = _label_font()
+        placeholder_font.setItalic(True)
+        self._prediction_placeholder.setFont(placeholder_font)
+        self._prediction_placeholder.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f" padding: {theme.SPACE_4}px;"
+        )
+        self._prediction_placeholder.setMinimumHeight(120)
+
+        self._prediction_stack = QStackedWidget()
+        self._prediction_stack.addWidget(self._prediction_placeholder)
+        self._prediction_stack.addWidget(self._table)
+        self._prediction_stack.setCurrentWidget(self._prediction_placeholder)
+        layout.addWidget(self._prediction_stack)
 
         # Plot
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
@@ -779,7 +808,13 @@ class ConductivityPanel(QWidget):
     def _update_table(self, preds: dict) -> None:
         if len(self._chain) < 2:
             self._table.setRowCount(0)
+            # IV.1 finding 5: show the "pick pairs + source" placeholder
+            # whenever there is no pair to render a prediction for. A
+            # non-empty chain with <2 entries yields zero pairs; treat it
+            # the same as a completely empty chain.
+            self._prediction_stack.setCurrentWidget(self._prediction_placeholder)
             return
+        self._prediction_stack.setCurrentWidget(self._table)
         pairs = list(zip(self._chain[:-1], self._chain[1:], strict=False))
         self._table.setRowCount(len(pairs) + 1)
         total_r = 0.0
