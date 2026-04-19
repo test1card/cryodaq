@@ -20,7 +20,7 @@ hidden alarms); engine errors keep last-known state (no table wipe).
 Public API (host push points):
 - ``on_reading(reading)`` — v1 reading sink; filters by
   ``metadata["alarm_name"]``.
-- ``set_connected(bool)`` — gates ACK buttons; pauses v2 polling.
+- ``set_connected(bool)`` — gates acknowledge buttons; pauses v2 polling.
 - ``update_v2_status(payload)`` — public path for host or tests.
 - ``get_active_v1_count() / get_active_v2_count()`` — accessors for
   future finalize guards.
@@ -96,7 +96,7 @@ _V1_COLUMNS: tuple[str, ...] = (
 
 _V2_COLUMNS: tuple[str, ...] = (
     "Уровень",
-    "Alarm ID",
+    "Идентификатор",
     "Сообщение",
     "Каналы",
     "Время",
@@ -194,7 +194,7 @@ class SeverityChip(QLabel):
 
 
 def _make_ack_button(severity: str, label: str = "ПОДТВЕРДИТЬ") -> QPushButton:
-    """Build an ACK button colored by severity. No hardcoded hex —
+    """Build an acknowledge button colored by severity. No hardcoded hex —
     the color comes from the DS status token for the severity.
     """
     btn = QPushButton(label)
@@ -571,7 +571,7 @@ class AlarmPanel(QWidget):
             self._v2_table.setItem(row_idx, 3, _cell(channels_text))
             self._v2_table.setItem(row_idx, 4, _cell(time_text))
 
-            btn = _make_ack_button(level, label="ACK")
+            btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
             btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
             btn.setEnabled(self._connected)
             self._v2_ack_buttons.append(btn)
@@ -618,7 +618,7 @@ class AlarmPanel(QWidget):
         self._summary_label.setVisible(True)
 
     # ------------------------------------------------------------------
-    # ACK dispatch
+    # Acknowledge dispatch
     # ------------------------------------------------------------------
 
     def _acknowledge(self, alarm_name: str) -> None:
