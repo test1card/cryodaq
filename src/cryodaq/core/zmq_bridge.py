@@ -28,6 +28,51 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
+# IV.3 Finding 7: per-command tiered handler timeout.
+# A flat 2 s envelope was wrong for stateful transitions —
+# experiment_finalize / abort / create and calibration curve
+# import/export/fit routinely exceed 2 s (SQLite writes + DOCX/PDF
+# report generation). When they timed out the outer REP reply path
+# still fired (the original code already returned {ok: False}), but
+# the operator saw a "handler timeout (2s)" error that was a lie:
+# the operation usually completed a few seconds later. Fast status
+# polls stay on the 2 s envelope; known-slow commands get 30 s.
+HANDLER_TIMEOUT_FAST_S = 2.0
+HANDLER_TIMEOUT_SLOW_S = 30.0
+
+_SLOW_COMMANDS: frozenset[str] = frozenset(
+    {
+        "experiment_finalize",
+        "experiment_stop",
+        "experiment_abort",
+        "experiment_create",
+        "experiment_create_retroactive",
+        "experiment_start",
+        "experiment_generate_report",
+        "calibration_curve_import",
+        "calibration_curve_export",
+        "calibration_v2_fit",
+        "calibration_v2_extract",
+    }
+)
+
+
+def _timeout_for(cmd: Any) -> float:
+    """Return the handler timeout envelope for ``cmd``.
+
+    Slow commands get ``HANDLER_TIMEOUT_SLOW_S``; everything else
+    gets ``HANDLER_TIMEOUT_FAST_S``. Unknown / malformed payloads
+    fall back to fast — a cmd that isn't in the slow set must not
+    trigger the longer wait by accident.
+    """
+    if not isinstance(cmd, dict):
+        return HANDLER_TIMEOUT_FAST_S
+    action = cmd.get("cmd")
+    if isinstance(action, str) and action in _SLOW_COMMANDS:
+        return HANDLER_TIMEOUT_SLOW_S
+    return HANDLER_TIMEOUT_FAST_S
+
+
 # Phase 2b H.4: bind with EADDRINUSE retry. On Windows the socket from a
 # SIGKILL'd engine can hold the port for up to 240s (TIME_WAIT). Linux is
 # usually fine due to SO_REUSEADDR but the same logic protects both.
@@ -275,11 +320,15 @@ class ZMQCommandServer:
         address: str = DEFAULT_CMD_ADDR,
         *,
         handler: Callable[[dict[str, Any]], Any] | None = None,
-        handler_timeout_s: float = 2.0,
+        handler_timeout_s: float | None = None,
     ) -> None:
         self._address = address
         self._handler = handler
-        self._handler_timeout_s = handler_timeout_s
+        # IV.3 Finding 7: honour an explicit override (tests supply one
+        # to exercise the timeout path without sleeping for 2 s), but
+        # the production path uses the tiered ``_timeout_for(cmd)``
+        # helper so slow commands get 30 s and fast commands 2 s.
+        self._handler_timeout_override_s = handler_timeout_s
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task[None] | None = None
@@ -325,11 +374,25 @@ class ZMQCommandServer:
         loop.call_soon(self._start_serve_task)
 
     async def _run_handler(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Execute the command handler with a bounded wall-clock timeout."""
+        """Execute the command handler with a bounded wall-clock timeout.
+
+        IV.3 Finding 7: always returns a dict. REP sockets require exactly
+        one send() per recv(); any path that silently raises here would
+        leave REP wedged and cascade every subsequent command into
+        timeouts. Timeout fired or unexpected handler exception both
+        yield an ``ok=False`` reply with the failure reason and — on
+        timeout — the ``_handler_timeout`` marker so callers can tell
+        the difference from a normal handler-reported error.
+        """
         if self._handler is None:
             return {"ok": False, "error": "no handler"}
 
         action = str(cmd.get("cmd", ""))
+        timeout = (
+            self._handler_timeout_override_s
+            if self._handler_timeout_override_s is not None
+            else _timeout_for(cmd)
+        )
 
         async def _invoke() -> Any:
             result = self._handler(cmd)
@@ -338,16 +401,17 @@ class ZMQCommandServer:
             return result
 
         try:
-            result = await asyncio.wait_for(_invoke(), timeout=self._handler_timeout_s)
+            result = await asyncio.wait_for(_invoke(), timeout=timeout)
         except TimeoutError as exc:
-            # Preserve inner wrapper message when present (e.g. "log_get timeout (1.5s)",
-            # "experiment_status timeout (1.5s)"). Falls back to the generic envelope
-            # message when the timeout fired at the outer asyncio.wait_for layer.
+            # Preserve inner wrapper message when present (e.g.
+            # "log_get timeout (1.5s)"). Falls back to the generic
+            # envelope message when the timeout fired at the outer
+            # asyncio.wait_for layer.
             inner_message = str(exc).strip()
             error_message = (
                 inner_message
                 if inner_message
-                else f"handler timeout ({self._handler_timeout_s:g}s)"
+                else f"handler timeout ({timeout:g}s); operation may still be running."
             )
             logger.error(
                 "ZMQ command handler timeout: action=%s error=%s payload=%r",
@@ -355,7 +419,27 @@ class ZMQCommandServer:
                 error_message,
                 cmd,
             )
-            return {"ok": False, "error": error_message}
+            return {
+                "ok": False,
+                "error": error_message,
+                "_handler_timeout": True,
+            }
+        except asyncio.CancelledError:
+            # Cancellation is not a handler failure — propagate so the
+            # serve loop can still try to send its own short error
+            # reply before the task itself tears down.
+            raise
+        except Exception as exc:
+            # Belt-and-suspenders: the outer serve loop already catches
+            # exceptions and sends an error reply, but pushing the
+            # dict back through the normal return path keeps the REP
+            # state-machine handling uniform with the timeout branch.
+            logger.exception(
+                "ZMQ command handler failed: action=%s payload=%r",
+                action,
+                cmd,
+            )
+            return {"ok": False, "error": str(exc) or type(exc).__name__}
 
         return result if isinstance(result, dict) else {"ok": True}
 

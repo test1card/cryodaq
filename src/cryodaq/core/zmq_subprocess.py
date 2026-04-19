@@ -155,11 +155,19 @@ def zmq_bridge_main(
         data_queue so the GUI can distinguish data starvation from
         command-channel starvation.
         """
+
         def _new_req_socket():
             req = ctx.socket(zmq.REQ)
             req.setsockopt(zmq.LINGER, 0)
-            req.setsockopt(zmq.RCVTIMEO, 3000)
-            req.setsockopt(zmq.SNDTIMEO, 3000)
+            # IV.3 Finding 7: REQ timeout raised from 3 s to 35 s so a
+            # slow server-side handler (experiment_finalize / report
+            # generation, now tiered at 30 s) has room to reply before
+            # the REQ side gives up. Server's 30 s ceiling + 5 s slack
+            # stays inside the client's 35 s future wait
+            # (_CMD_REPLY_TIMEOUT_S), so timeouts at each layer fire
+            # in predictable order: server → subprocess → GUI future.
+            req.setsockopt(zmq.RCVTIMEO, 35000)
+            req.setsockopt(zmq.SNDTIMEO, 35000)
             req.setsockopt(zmq.REQ_RELAXED, 1)
             req.setsockopt(zmq.REQ_CORRELATE, 1)
             req.connect(cmd_addr)
@@ -207,12 +215,8 @@ def zmq_bridge_main(
         finally:
             req.close(linger=0)
 
-    sub_thread = threading.Thread(
-        target=sub_drain_loop, name="zmq-sub-drain", daemon=True
-    )
-    cmd_thread = threading.Thread(
-        target=cmd_forward_loop, name="zmq-cmd-forward", daemon=True
-    )
+    sub_thread = threading.Thread(target=sub_drain_loop, name="zmq-sub-drain", daemon=True)
+    cmd_thread = threading.Thread(target=cmd_forward_loop, name="zmq-cmd-forward", daemon=True)
 
     try:
         sub_thread.start()

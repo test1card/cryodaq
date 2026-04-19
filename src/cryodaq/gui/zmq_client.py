@@ -28,7 +28,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
 
-_CMD_REPLY_TIMEOUT_S = 5.0
+_CMD_REPLY_TIMEOUT_S = 35.0  # IV.3 Finding 7: exceeds server 30 s ceiling
 
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
@@ -153,15 +153,16 @@ class ZmqBridge:
 
     def heartbeat_stale(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if the bridge heartbeat is older than ``timeout_s``."""
-        return self._last_heartbeat != 0.0 and (
-            time.monotonic() - self._last_heartbeat
-        ) >= timeout_s
+        return (
+            self._last_heartbeat != 0.0 and (time.monotonic() - self._last_heartbeat) >= timeout_s
+        )
 
     def data_flow_stalled(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if readings previously flowed but are now stale."""
-        return self._last_reading_time != 0.0 and (
-            time.monotonic() - self._last_reading_time
-        ) >= timeout_s
+        return (
+            self._last_reading_time != 0.0
+            and (time.monotonic() - self._last_reading_time) >= timeout_s
+        )
 
     def is_healthy(self) -> bool:
         """True if subprocess is alive and bridge heartbeats are fresh."""
