@@ -32,18 +32,33 @@ _OPERATOR_FACING_DIRS: tuple[Path, ...] = (
     _GUI_ROOT / "widgets",
 )
 
-# RULE-COPY-009 patterns. The rule's written contract covers three
-# operator-facing shapes:
+# RULE-COPY-009 patterns. The rule's written contract covers:
 #   1. Parenthesized suffix: "(v1)", "(v2)", "(v10)".
 #   2. Bare version token: " v1 ", " v3 ", " v10.".
-#   3. Explicit "legacy" marker.
+#   3. Engineering lifecycle labels: legacy / deprecated /
+#      experimental / beta / alpha.
+#   4. Russian engineering lineage phrasing: "новая версия" /
+#      "старая версия".
 # Each pattern requires a boundary so "v" inside a legitimate word
 # (like "Vacuum", "SMU-v3-channel" internal identifier) is not flagged
 # on its own — the filters downstream still require operator-facing
 # Cyrillic / uppercase-English context before declaring a violation.
+#
+# IV.3 F6: this set intentionally mirrors the AST scanner's
+# ``_FORBIDDEN_PATTERN`` in
+# ``tests/design_system/test_no_internal_versioning_ast.py`` so the
+# two gates (AST primary / regex redundancy) accept or reject the
+# same vocabulary.
 _VERSION_SUFFIX = re.compile(r"\(v\d+\)")
 _BARE_VERSION = re.compile(r"(?:^|[\s])v\d+(?:$|[\s.,:])", re.IGNORECASE)
-_LEGACY_WORD = re.compile(r"\blegacy\b", re.IGNORECASE)
+_LIFECYCLE_WORD = re.compile(
+    r"\b(legacy|deprecated|experimental|beta|alpha)\b",
+    re.IGNORECASE,
+)
+_RU_VERSION_PHRASE = re.compile(
+    r"\b(новая|старая)\s+версия\b",
+    re.IGNORECASE,
+)
 
 
 def _iter_operator_string_constants(py_file: Path):
@@ -111,7 +126,12 @@ def test_rule_copy_009_no_internal_versioning_in_operator_strings() -> None:
             for lineno, text in _iter_operator_string_constants(py_file):
                 if not _looks_operator_facing(text):
                     continue
-                for pattern in (_VERSION_SUFFIX, _BARE_VERSION, _LEGACY_WORD):
+                for pattern in (
+                    _VERSION_SUFFIX,
+                    _BARE_VERSION,
+                    _LIFECYCLE_WORD,
+                    _RU_VERSION_PHRASE,
+                ):
                     if pattern.search(text):
                         violations.append(f"{py_file.relative_to(_REPO_ROOT)}:{lineno}: {text!r}")
                         break

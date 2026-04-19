@@ -3,7 +3,7 @@
 Walks every ``*.py`` under ``src/cryodaq/gui/`` and flags string
 literals passed to known operator-facing Qt methods when the string
 matches forbidden versioning vocabulary (``v1`` / ``v2`` / ``legacy``
-/ ``устар*`` / …).
+/ …).
 
 IV.3 Finding 6: replaces the regex-based module scan shipped in
 IV.2 B.3 (``tests/gui/test_design_system_rules.py``) which relied on
@@ -19,13 +19,17 @@ Handles:
   are deliberately not introspected — the rule is about authored
   copy, not runtime values)
 - ``ast.BinOp + ast.Add`` string concatenation (``"A " + "v1"``)
+- ``ast.List`` / ``ast.Tuple`` elements for list-valued methods
+  (``addItems`` / ``setHorizontalHeaderLabels`` etc.)
 - Both positional and keyword args
 
 Deliberately omits class / attribute type inference — a plain
 ``widget.setText("...")`` is treated as operator-facing even though
 ``widget`` might technically be a non-UI object. The project
 convention is that ``setText`` is a Qt method, not a custom one,
-so false-positive risk is low.
+so false-positive risk is low. If a real collision ever appears,
+add the offending receiver type to an ignore set rather than
+loosening the rule.
 """
 
 from __future__ import annotations
@@ -96,6 +100,15 @@ class _OperatorTextVisitor(ast.NodeVisitor):
         return None
 
     def _check_arg(self, call_node: ast.Call, method: str, arg: ast.expr) -> None:
+        # IV.3 F6 amend: list/tuple literals passed to list-valued
+        # methods (addItems, setHorizontalHeaderLabels, setLabels,
+        # setVerticalHeaderLabels) must be recursed so each element is
+        # inspected. Otherwise a violation inside a header list slips
+        # past because the top-level arg is an ast.List, not a string.
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            for elt in arg.elts:
+                self._check_arg(call_node, method, elt)
+            return
         text = self._extract_string(arg)
         if text is None:
             return
@@ -211,6 +224,21 @@ def test_ast_only_flags_operator_facing_methods() -> None:
     """A non-UI method call with the same word does NOT match."""
     src = "config.set_legacy_mode('v1')\nsome.log('legacy token')\n"
     assert _collect_violations_in_source(src) == []
+
+
+def test_ast_recurses_into_list_args() -> None:
+    """addItems / setHorizontalHeaderLabels take a list; inner elements
+    must be inspected (IV.3 F6 amend)."""
+    src = (
+        "table.setHorizontalHeaderLabels(['Колонка (v1)', 'OK'])\n"
+        "combo.addItems(['legacy', 'current'])\n"
+        "other.setLabels(('beta build', 'stable'))\n"
+    )
+    violations = _collect_violations_in_source(src)
+    methods = [v[1] for v in violations]
+    assert "setHorizontalHeaderLabels" in methods
+    assert "addItems" in methods
+    assert "setLabels" in methods
 
 
 # ----------------------------------------------------------------------
