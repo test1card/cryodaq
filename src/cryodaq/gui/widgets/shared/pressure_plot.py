@@ -117,7 +117,16 @@ class PressurePlot(QWidget):
         self._show_date_axis = bool(show_date_axis)
         self._title = title
         self._curve: pg.PlotDataItem | None = None
+        # Cache the last series so we can recompute Y when X changes
+        # (time-window switch) without requiring the caller to re-push.
+        self._last_times: list[float] = []
+        self._last_values: list[float] = []
         self._build_ui()
+        # Recompute Y whenever the visible X range changes. Dashboard
+        # links X to the temperature plot (setXLink), and the time-window
+        # selector broadcasts through _apply_window — both paths land
+        # here as sigXRangeChanged.
+        self._plot.getPlotItem().getViewBox().sigXRangeChanged.connect(self._on_x_range_changed)
         if not self._forward_looking:
             controller = get_time_window_controller()
             self._apply_window(controller.get_window())
@@ -162,40 +171,76 @@ class PressurePlot(QWidget):
     def set_series(self, times: list[float], values: list[float]) -> None:
         """Update the main curve. Guards non-positive values for log-Y.
 
-        Y autorange is computed from positive values only. The historical
-        sentinel (1e-12 replacement for ≤ 0 readings) otherwise dragged
-        the autorange lower bound to 1e-12 even though the actual vacuum
-        line sat around 1e-6, rendering the trace invisible in a viewport
-        spanning six extra unused decades. Non-positive values are still
-        clamped to the smallest observed positive (or 1e-12 as a last
-        resort) so the curve can be plotted on log-Y without -inf.
+        Y autorange is computed from positive values whose X is inside
+        the currently visible window. Two historical bugs lived here:
+
+        1. The sentinel (1e-12 replacement for ≤ 0 readings) dragged
+           the autorange lower bound to 1e-12 even though the actual
+           vacuum line sat around 1e-6, rendering the trace invisible
+           in a viewport spanning six extra unused decades.
+        2. Y was computed across the *entire* buffered series even
+           though X is linked to the temperature plot and constrained
+           by the time-window selector — an old off-screen 1e-2 spike
+           still forced the Y viewport to span four unused decades
+           above the current 1e-6 trace.
+
+        Non-positive values are still clamped (to the smallest observed
+        positive in-window, or 1e-12 as a last resort) so the curve
+        can be plotted on log-Y without -inf.
         """
         if self._curve is None:
             return
-        positive = [v for v in values if v > 0]
+        self._last_times = list(times)
+        self._last_values = list(values)
+        fallback = self._compute_and_apply_y_range()
+        clamped_values = [v if v > 0 else fallback for v in self._last_values]
+        self._curve.setData(x=self._last_times, y=clamped_values)
+
+    def _compute_and_apply_y_range(self) -> float:
+        """Set Y range from values inside the visible X window.
+
+        Returns the fallback value used to clamp ≤ 0 samples into
+        positive territory for log-Y plotting.
+        """
+        pi = self._plot.getPlotItem()
+        vb = pi.getViewBox()
+        x_lo, x_hi = vb.viewRange()[0]
+        in_window_positive: list[float] = []
+        for t, v in zip(self._last_times, self._last_values, strict=False):
+            if v > 0 and x_lo <= t <= x_hi:
+                in_window_positive.append(v)
+        # Fall back to any positive sample in the full series if the
+        # visible window has none (startup, or window lies entirely
+        # in a stretch of ≤ 0 readings). Better to show something
+        # than to cling to the previous Y range silently.
+        positive = in_window_positive or [v for v in self._last_values if v > 0]
+
         if positive:
             y_min = min(positive)
             y_max = max(positive)
             fallback = y_min
-            # Half-decade padding on either side so the trace is not
-            # pressed against the viewport edge.
             y_lo_log = math.log10(y_min) - 0.5
             y_hi_log = math.log10(y_max) + 0.5
-            # Guarantee at least one decade of visible range — a flat
-            # trace (y_min == y_max) otherwise collapses to a zero-height
-            # Y range, which pyqtgraph interprets unhelpfully.
             if y_hi_log - y_lo_log < 1.0:
                 mid = 0.5 * (y_lo_log + y_hi_log)
                 y_lo_log = mid - 0.5
                 y_hi_log = mid + 0.5
-            pi = self._plot.getPlotItem()
-            # Explicit Y range overrides pyqtgraph's default auto-range,
-            # which on log-Y with sentinel contamination was unreliable.
             pi.setYRange(y_lo_log, y_hi_log, padding=0)
-        else:
-            fallback = 1e-12
-        clamped_values = [v if v > 0 else fallback for v in values]
-        self._curve.setData(x=list(times), y=clamped_values)
+            return fallback
+        # No positive samples anywhere. Explicitly pin a sensible
+        # default (eight decades centered on the sentinel) so the
+        # fallback-clamped 1e-12 curve lands inside the viewport
+        # rather than getting stranded at whatever Y range the plot
+        # happened to hold before.
+        pi.setYRange(math.log10(1e-12) - 0.5, math.log10(1e-4) + 0.5, padding=0)
+        return 1e-12
+
+    def _on_x_range_changed(self, _viewbox: object, _x_range: tuple[float, float]) -> None:
+        # Re-evaluate Y only — data is unchanged. Skip if no series has
+        # landed yet.
+        if not self._last_times:
+            return
+        self._compute_and_apply_y_range()
 
     def set_title(self, text: str) -> None:
         self._title = text

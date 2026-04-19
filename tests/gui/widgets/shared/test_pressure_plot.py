@@ -171,25 +171,71 @@ def test_pressure_autorange_excludes_sentinel_values(app):
 
 
 def test_pressure_trace_visible_at_1e_minus_6(app):
-    """Integration: a 1.2e-6 trace lands inside the configured Y range."""
+    """Integration: a 1.2e-6 trace lands inside BOTH X and Y ranges.
+
+    The prior version only checked Y inclusion; an off-screen sample
+    in X would still have "passed" under that assertion. Now we
+    explicitly verify at least one plotted point's (x, y) coordinates
+    lie inside the viewport.
+    """
     plot = PressurePlot()
     times = [float(i) for i in range(3)]
     values = [1.2e-6, 1.2e-6, 1.2e-6]
     plot.set_series(times, values)
+    # Force an explicit X range that contains all samples so the test
+    # does not depend on whatever default viewport pyqtgraph picks.
+    pi = plot.plot_item.getPlotItem()
+    pi.setXRange(-1.0, 3.0, padding=0)
+    # Y range is recomputed on X-range change; drain any pending
+    # signals synchronously.
+    QApplication.processEvents()
+    (x_lo, x_hi), (y_lo_log, y_hi_log) = pi.viewRange()
+    import math as _math
+
+    y_log = _math.log10(1.2e-6)
+    # Some plotted sample must lie strictly inside the viewport.
+    assert any(x_lo <= t <= x_hi and y_lo_log < y_log < y_hi_log for t in times), (
+        f"no sample inside view rect ({x_lo},{x_hi}) × ({y_lo_log},{y_hi_log})"
+    )
+
+
+def test_pressure_y_range_excludes_offscreen_outlier(app):
+    """Old off-screen outlier (1e-2 @ x=0) must not squash current 1e-6 trace."""
+    plot = PressurePlot()
+    # Off-screen high value at t=0, current readings near 1e-6 at
+    # t=100..102. Dashboard's X range will cover only the recent tail.
+    xs = [0.0, 100.0, 101.0, 102.0]
+    ys = [1e-2, 1.0e-6, 1.1e-6, 1.2e-6]
+    plot.set_series(xs, ys)
+    pi = plot.plot_item.getPlotItem()
+    pi.setXRange(99.0, 103.0, padding=0)
+    QApplication.processEvents()
+    (_, (y_lo_log, y_hi_log)) = pi.viewRange()
+    import math as _math
+
+    # The 1e-6 trace must be inside the viewport.
+    assert y_lo_log < _math.log10(1e-6) < y_hi_log
+    # The off-screen 1e-2 spike must NOT drag the Y range up with it
+    # (that was the exact bug — Y computed across full buffer).
+    assert y_hi_log < _math.log10(1e-3)
+
+
+def test_pressure_set_series_all_non_positive_does_not_crash(app):
+    """Edge: all values zero → explicit default Y range, no exception.
+
+    Prior amend skipped setYRange when positive was empty, which left
+    the plot clinging to whatever Y range pyqtgraph defaulted to (or
+    the previous positive-data range). Now the empty case pins an
+    explicit default so the fallback-clamped curve is visible.
+    """
+    plot = PressurePlot()
+    plot.set_series([0.0, 1.0, 2.0], [0.0, 0.0, 0.0])
     pi = plot.plot_item.getPlotItem()
     (_, (y_lo_log, y_hi_log)) = pi.viewRange()
     import math as _math
 
-    assert y_lo_log < _math.log10(1.2e-6) < y_hi_log
-
-
-def test_pressure_set_series_all_non_positive_does_not_crash(app):
-    """Edge: all values zero → fallback sentinel path, no exception."""
-    plot = PressurePlot()
-    # Must not raise. Autorange is skipped (no positive values to base
-    # it on) and the curve gets the 1e-12 fallback so log-Y does not
-    # produce -inf.
-    plot.set_series([0.0, 1.0, 2.0], [0.0, 0.0, 0.0])
+    # Fallback 1e-12 curve must be inside the viewport.
+    assert y_lo_log < _math.log10(1e-12) < y_hi_log
 
 
 def test_dashboard_pressure_uses_shared_component():
