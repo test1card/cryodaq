@@ -765,6 +765,39 @@ def test_power_label_zero_after_reading_is_genuine_zero(app):
     assert "ожидание" not in panel._power_label.text()
 
 
+def test_power_label_waiting_after_channel_switch(app):
+    """After switching источник P, label must fall back to ожидание данных
+    until the NEW channel delivers a reading."""
+    panel = ConductivityPanel()
+    # First channel receives a reading — normal rendering.
+    first_channel = panel._power_channel
+    panel.on_reading(_power_reading(0.42, channel=first_channel))
+    panel._update_power_label()
+    assert "0.42" in panel._power_label.text()
+    # Switch to a different channel — label must reset.
+    other_channel = "Keithley_1/smub/power"
+    assert other_channel != first_channel
+    panel._on_power_changed(other_channel)
+    assert "ожидание данных" in panel._power_label.text()
+    # Once the new channel sends something, normal rendering resumes.
+    panel.on_reading(_power_reading(0.7, channel=other_channel))
+    panel._update_power_label()
+    assert "0.7" in panel._power_label.text()
+
+
+def test_stability_header_collecting_data_branch(app):
+    """'Стабильность: сбор данных...' appears once chain has sensors but
+    rate buffers haven't filled to the 10-point threshold yet."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    # Chain is populated but rate buffers are empty — stability is
+    # collecting data.
+    panel._update_stability()
+    assert "сбор данных" in panel._stability_label.text()
+
+
 def test_prediction_stack_synced_via_refresh_tick_too(app):
     """Refresh path also syncs the stack — guard against chain mutations
     that bypass _on_check (future code paths)."""

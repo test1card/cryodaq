@@ -721,7 +721,15 @@ class ConductivityPanel(QWidget):
                 break
 
     def _on_power_changed(self, text: str) -> None:
+        # Reset the waiting-state flag so switching the power source
+        # doesn't leave the stale last-channel value on screen. The
+        # operator must see "P = ожидание данных" until a reading on
+        # the NEW channel actually lands.
+        if text != self._power_channel:
+            self._power = 0.0
+            self._power_received = False
         self._power_channel = text
+        self._update_power_label()
 
     def _smu_channel(self) -> str:
         parts = self._power_channel.split("/")
