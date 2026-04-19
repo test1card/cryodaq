@@ -7,7 +7,9 @@ complaint three commits later.
 
 Rules with automatable signatures:
 - RULE-COPY-009 (no internal versioning in operator-facing copy):
-  `"...(v1)..."`, `"...(v2)..."`, etc. string literals in shell/overlays/.
+  any `(v\\d+)` / ` vN ` / `legacy` token in string literals across
+  shell/, dashboard/, widgets/. Docstrings are excluded to match the
+  written rule text (maintainer-facing prose, not operator copy).
 - Anything else in this file is reviewer-enforced.
 """
 
@@ -30,56 +32,84 @@ _OPERATOR_FACING_DIRS: tuple[Path, ...] = (
     _GUI_ROOT / "widgets",
 )
 
-# Matches the exact "(vN)" suffix shape that leaked to operators in
-# alarm_panel.py prior to IV.2.B.3. Deliberately narrow — Keithley
-# 2604B stays; alarm_v2_ack command name stays; only the operator-
-# facing "(v1)" / "(v2)" shape in a string literal is flagged.
+# RULE-COPY-009 patterns. The rule's written contract covers three
+# operator-facing shapes:
+#   1. Parenthesized suffix: "(v1)", "(v2)", "(v10)".
+#   2. Bare version token: " v1 ", " v3 ", " v10.".
+#   3. Explicit "legacy" marker.
+# Each pattern requires a boundary so "v" inside a legitimate word
+# (like "Vacuum", "SMU-v3-channel" internal identifier) is not flagged
+# on its own — the filters downstream still require operator-facing
+# Cyrillic / uppercase-English context before declaring a violation.
 _VERSION_SUFFIX = re.compile(r"\(v\d+\)")
+_BARE_VERSION = re.compile(r"(?:^|[\s])v\d+(?:$|[\s.,:])", re.IGNORECASE)
+_LEGACY_WORD = re.compile(r"\blegacy\b", re.IGNORECASE)
 
 
-def _iter_string_constants(py_file: Path):
-    """Yield (lineno, str_value) for every string constant in the module."""
+def _iter_operator_string_constants(py_file: Path):
+    """Yield (lineno, str_value) for every string constant that is NOT a docstring.
+
+    Module / class / function / async function docstrings are the first
+    statement in their respective bodies. They are developer-facing
+    prose and the rule text explicitly exempts them. This walker skips
+    them so the CI contract matches the written rule.
+    """
     tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    docstring_nodes: set[int] = set()
+    for parent in ast.walk(tree):
+        if isinstance(
+            parent,
+            ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+        ):
+            body = getattr(parent, "body", None) or []
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                if isinstance(body[0].value.value, str):
+                    docstring_nodes.add(id(body[0].value))
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstring_nodes:
+                continue
             yield node.lineno, node.value
 
 
-def test_rule_copy_009_no_internal_versioning_in_operator_strings() -> None:
-    """Operator-facing UI text must not contain '(v1)' / '(v2)' suffixes.
+def _looks_operator_facing(text: str) -> bool:
+    """Only flag matches that live alongside operator-visible copy.
 
-    Prior to IV.2.B.3 the alarm panel's two section titles leaked
-    schema versioning directly to the operator. The RULE-COPY-009
-    guidance is that operators see domain names, not engine
-    generations. Docstrings and comments are exempt — this check
-    walks string *constants* in the AST, so block docstrings land in
-    a Constant node but most internal engine identifiers
-    (alarm_v2_ack, etc.) don't match the parenthesized suffix shape
-    anyway.
+    Accepts strings with Cyrillic characters, or the handful of
+    hardware labels that appear uppercase-English in UI (KEITHLEY,
+    LAKESHORE, THYRACONT). A maintainer-facing `"legacy_smb_map"`
+    identifier in code will not match.
+    """
+    if any("\u0400" <= ch <= "\u04ff" for ch in text):
+        return True
+    return any(token in text for token in ("KEITHLEY", "LAKESHORE", "THYRACONT"))
+
+
+def test_rule_copy_009_no_internal_versioning_in_operator_strings() -> None:
+    """Operator-facing UI text must not contain '(vN)' / ' vN ' / 'legacy' tokens.
+
+    RULE-COPY-009's written contract is broader than just '(v1)' — it
+    also covers bare version markers like 'v3' and the 'legacy'
+    label. Docstrings are exempt (maintainer-facing prose), which
+    is why this check walks non-docstring string constants only.
     """
     violations: list[str] = []
     for root in _OPERATOR_FACING_DIRS:
         for py_file in root.rglob("*.py"):
             if "__pycache__" in py_file.parts:
                 continue
-            for lineno, text in _iter_string_constants(py_file):
-                if _VERSION_SUFFIX.search(text):
-                    # Require the match to land alongside content that
-                    # looks like operator UI text: either Cyrillic
-                    # letters or one of a handful of operator-visible
-                    # English labels. Rule-text / comment-like strings
-                    # with "(v1)" embedded in prose explaining the rule
-                    # itself do not match that filter.
-                    has_operator_text = (
-                        any("\u0400" <= ch <= "\u04ff" for ch in text) or "KEITHLEY" in text
-                    )
-                    if not has_operator_text:
-                        continue
-                    violations.append(f"{py_file.relative_to(_REPO_ROOT)}:{lineno}: {text!r}")
+            for lineno, text in _iter_operator_string_constants(py_file):
+                if not _looks_operator_facing(text):
+                    continue
+                for pattern in (_VERSION_SUFFIX, _BARE_VERSION, _LEGACY_WORD):
+                    if pattern.search(text):
+                        violations.append(f"{py_file.relative_to(_REPO_ROOT)}:{lineno}: {text!r}")
+                        break
     assert not violations, (
         "RULE-COPY-009: operator-facing strings must not embed internal "
-        "version suffixes. Use domain names (e.g. 'Аппаратные тревоги' / "
-        "'Физические тревоги') instead. Violations:\n" + "\n".join(violations)
+        "version suffixes or 'legacy' labels. Use domain names (e.g. "
+        "'Пороговые тревоги' / 'Фазо-зависимые тревоги') instead. "
+        "Violations:\n" + "\n".join(violations)
     )
 
 
