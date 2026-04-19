@@ -1278,6 +1278,33 @@ async def _run_engine(*, mock: bool = False) -> None:
                     },
                     "history": alarm_v2_state_mgr.get_history(limit=20),
                 }
+            if action == "alarm_v2_history":
+                # IV.4 F11: time-range slice of the existing alarm-v2
+                # history deque. Used by the shift-end dialog to fill
+                # the «Тревоги за смену» section; the state manager's
+                # own 1000-entry ring buffer is the source of truth
+                # (no persistence layer for alarm transitions yet).
+                raw_start = cmd.get("start_ts")
+                raw_end = cmd.get("end_ts")
+                try:
+                    start_ts = float(raw_start) if raw_start is not None else None
+                    end_ts = float(raw_end) if raw_end is not None else None
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "start_ts / end_ts must be numeric"}
+                limit = int(cmd.get("limit", 500))
+                history = alarm_v2_state_mgr.get_history(limit=1000)
+                filtered: list[dict[str, Any]] = []
+                for entry in history:
+                    at = float(entry.get("at", 0.0) or 0.0)
+                    if start_ts is not None and at < start_ts:
+                        continue
+                    if end_ts is not None and at > end_ts:
+                        continue
+                    filtered.append(entry)
+                return {
+                    "ok": True,
+                    "history": filtered[:limit],
+                }
             if action == "alarm_v2_ack":
                 name = cmd.get("alarm_name", "")
                 operator = cmd.get("operator", "")

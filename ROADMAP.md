@@ -33,7 +33,7 @@
 | F8 | Cooldown ML prediction upgrade | 🔬 | L | M |
 | F9 | Thermal conductivity auto-report (TIM) | 🔬 | M | H |
 | F10 | Sensor diagnostics → alarm integration | ⬜ | M | M |
-| F11 | Shift handover enrichment | 🔧 basic shipped, missing auto-sections | S | H |
+| F11 | Shift handover enrichment | ✅ DONE (IV.4.F11, Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
 | F13 | Vacuum leak rate estimator | ⬜ | M | M |
 | F14 | Remote command approval (Telegram) | ⬜ | M | L |
