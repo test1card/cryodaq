@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style
+from cryodaq.gui.state.time_window import TimeWindow, get_time_window_controller
+from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
@@ -71,13 +73,6 @@ _MEASUREMENT_UNITS: dict[str, str] = {
     "resistance": "Ом",
     "power": "Вт",
 }
-
-_WINDOW_OPTIONS: tuple[tuple[str, int], ...] = (
-    ("10м", 600),
-    ("1ч", 3600),
-    ("6ч", 21600),
-)
-_DEFAULT_WINDOW_S = 600
 
 _BUFFER_MAXLEN = 3600
 _DEBOUNCE_MS = 300
@@ -233,7 +228,11 @@ class _SmuChannelBlock(QFrame):
         self._channel_state: str = "off"
         self._connected: bool = False
         self._safety_ready: bool = True
-        self._window_s: float = float(_DEFAULT_WINDOW_S)
+        # IV.2 A.3: default to the longest per-block buffer so the
+        # first tick before _apply_global_window lands renders the
+        # full available history. Parent panel overwrites this the
+        # moment the TimeWindow controller fires.
+        self._window_s: float = float(_BUFFER_MAXLEN)
         self._workers: list[ZmqCommandWorker] = []
         self._buffers: dict[str, deque[tuple[float, float]]] = {
             m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS
@@ -800,8 +799,6 @@ class KeithleyPanel(QWidget):
         super().__init__(parent)
         self._connected: bool = False
         self._safety_ready: bool = True
-        self._active_window_s: int = _DEFAULT_WINDOW_S
-        self._window_buttons: dict[int, QPushButton] = {}
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
         self._banner_timer.setInterval(_BANNER_AUTO_CLEAR_MS)
@@ -820,7 +817,14 @@ class KeithleyPanel(QWidget):
 
         self._build_ui()
         self._wire_block_signals()
-        self._highlight_active_window(self._active_window_s)
+        # IV.2 A.3: Keithley panel uses the shared global time-window
+        # controller instead of a private per-panel toolbar. Seed each
+        # channel block with the current global window and subscribe
+        # to future changes so operators don't re-set the window
+        # separately per view.
+        controller = get_time_window_controller()
+        self._apply_global_window(controller.get_window())
+        controller.window_changed.connect(self._apply_global_window)
         self.set_connected(False)
 
         self._refresh_timer = QTimer(self)
@@ -898,6 +902,12 @@ class KeithleyPanel(QWidget):
         return self._gate_reason_label
 
     def _build_window_toolbar(self) -> QWidget:
+        # IV.2 A.3: delegate to the shared TimeWindowSelector so the
+        # global controller drives this panel's X range — same
+        # selector used by dashboard and analytics. "10м" is NOT in
+        # the global TimeWindow enum (it was a Keithley-local
+        # expedient); drop it and use the canonical 1мин/1ч/6ч/24ч/Всё
+        # via show_6h=True.
         toolbar = QWidget()
         layout = QHBoxLayout(toolbar)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -910,13 +920,8 @@ class KeithleyPanel(QWidget):
         )
         layout.addWidget(caption)
 
-        for label, seconds in _WINDOW_OPTIONS:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setFixedSize(48, 24)
-            btn.clicked.connect(lambda _checked, s=seconds: self._on_window_selected(s))
-            self._window_buttons[seconds] = btn
-            layout.addWidget(btn)
+        self._time_selector = TimeWindowSelector(show_6h=True, parent=self)
+        layout.addWidget(self._time_selector)
         layout.addStretch()
         return toolbar
 
@@ -1000,18 +1005,19 @@ class KeithleyPanel(QWidget):
     # Window toolbar
     # ------------------------------------------------------------------
 
-    def _on_window_selected(self, seconds: int) -> None:
-        self._active_window_s = seconds
+    def _apply_global_window(self, window: TimeWindow) -> None:
+        # IV.2 A.3: receive the global window and forward to every
+        # channel block. TimeWindow.ALL maps to the full buffer
+        # (_BUFFER_MAXLEN seconds — effectively the whole session).
+        # The shared selector UI itself is already synced via the
+        # controller's broadcast; we only need to push the seconds
+        # into the per-block refresh math.
+        if window is TimeWindow.ALL:
+            seconds = float(_BUFFER_MAXLEN)
+        else:
+            seconds = window.seconds
         for block in self._blocks.values():
-            block.set_window(float(seconds))
-        self._highlight_active_window(seconds)
-
-    def _highlight_active_window(self, seconds: int) -> None:
-        for s, btn in self._window_buttons.items():
-            active = s == seconds
-            btn.setChecked(active)
-            variant = "accent" if active else "neutral"
-            _style_button(btn, variant)
+            block.set_window(seconds)
 
     # ------------------------------------------------------------------
     # Public state pushers

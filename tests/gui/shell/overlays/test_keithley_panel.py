@@ -475,14 +475,43 @@ def test_plot_buffer_receives_readings(app):
     assert len(ys) == 3
 
 
-def test_window_toolbar_propagates_to_blocks(app):
+def test_window_toolbar_wires_global_controller(app):
+    """IV.2 A.3 — Keithley panel listens to the global TimeWindowController.
+
+    Changing the global window propagates into every channel block's
+    _window_s. The old private `_WINDOW_OPTIONS` / `_window_buttons`
+    path is gone; plots follow the dashboard / analytics selector
+    instead.
+    """
+    from cryodaq.gui.state.time_window import (
+        TimeWindow,
+        get_time_window_controller,
+        reset_time_window_controller,
+    )
+
+    reset_time_window_controller()
+    try:
+        panel = KeithleyPanel()
+        get_time_window_controller().set_window(TimeWindow.HOUR_1)
+        assert panel._smua_block._window_s == TimeWindow.HOUR_1.seconds
+        assert panel._smub_block._window_s == TimeWindow.HOUR_1.seconds
+        # ALL maps to the full buffer (infinity is nonsensical for per-
+        # tick X-range math); _BUFFER_MAXLEN is the sensible upper bound.
+        get_time_window_controller().set_window(TimeWindow.ALL)
+        assert panel._smua_block._window_s == 3600.0  # == _BUFFER_MAXLEN
+    finally:
+        reset_time_window_controller()
+
+
+def test_keithley_panel_has_shared_time_selector(app):
+    """The panel now embeds the shared TimeWindowSelector, not a private row."""
+    from cryodaq.gui.state.time_window_selector import TimeWindowSelector
+
     panel = KeithleyPanel()
-    # Find 1h button and click it.
-    btn_1h = panel._window_buttons[3600]
-    btn_1h.click()
-    assert panel._smua_block._window_s == 3600.0
-    assert panel._smub_block._window_s == 3600.0
-    assert btn_1h.isChecked()
+    assert isinstance(panel._time_selector, TimeWindowSelector)
+    # Private-per-panel state gone.
+    assert not hasattr(panel, "_window_buttons")
+    assert not hasattr(panel, "_active_window_s")
 
 
 # ----------------------------------------------------------------------
@@ -589,7 +618,8 @@ def test_keithley_two_row_layout(app):
     """
     from PySide6.QtWidgets import QHBoxLayout
 
-    block = KeithleyPanel()._smua_block
+    panel = KeithleyPanel()
+    block = panel._smua_block
     assert isinstance(block._controls_inputs_row, QHBoxLayout)
     assert isinstance(block._controls_actions_row, QHBoxLayout)
     assert block._controls_inputs_row is not block._controls_actions_row
@@ -597,7 +627,12 @@ def test_keithley_two_row_layout(app):
 
 def test_keithley_inputs_in_row_1(app):
     """P / V / I spin boxes live in the inputs row."""
-    block = KeithleyPanel()._smua_block
+    # IV.2 A.3: retain the panel reference — KeithleyPanel now subscribes
+    # to the global TimeWindowController, and without a strong reference
+    # Python can GC the panel before the test body runs, taking Qt
+    # child widgets with it ("C++ object already deleted").
+    panel = KeithleyPanel()
+    block = panel._smua_block
     inputs_widgets = [
         block._controls_inputs_row.itemAt(i).widget()
         for i in range(block._controls_inputs_row.count())
@@ -613,7 +648,8 @@ def test_keithley_inputs_in_row_1(app):
 
 def test_keithley_actions_in_row_2(app):
     """Старт / Стоп / АВАР. ОТКЛ. live in the actions row."""
-    block = KeithleyPanel()._smua_block
+    panel = KeithleyPanel()
+    block = panel._smua_block
     actions_widgets = [
         block._controls_actions_row.itemAt(i).widget()
         for i in range(block._controls_actions_row.count())
@@ -629,9 +665,7 @@ def test_keithley_actions_in_row_2(app):
 
 def test_keithley_spin_box_has_padding_right(app):
     """Spin stylesheet reserves horizontal room so arrows never hit labels."""
-    block = KeithleyPanel()._smua_block
-    # The spinbox stylesheet was set during construction; it must
-    # still reserve padding-right (≥ the width of the up/down
-    # button column) so the inline value cannot collide with them.
+    panel = KeithleyPanel()
+    block = panel._smua_block
     ss = block._p_spin.styleSheet()
     assert "padding-right" in ss
