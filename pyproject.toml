@@ -41,7 +41,9 @@ dependencies = [
     # whenever the lab PC missed the extras. UI gains an explicit
     # Parquet export button in the same commit, so the feature must
     # work out of the box. Adds ~60 MB to the install footprint.
-    "pyarrow>=15,<22",
+    # Upper bound set to <25 so the lockfile's pyarrow 23.x pin
+    # resolves cleanly from the declared spec.
+    "pyarrow>=15,<25",
 ]
 
 [project.optional-dependencies]
