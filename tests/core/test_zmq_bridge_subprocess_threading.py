@@ -121,9 +121,7 @@ def test_sub_drain_continues_when_rep_is_dead(_bridge_fixture):
     pub.close(linger=0)
     ctx.term()
 
-    assert len(readings) >= 5, (
-        f"SUB drain starved while REP is dead (got {len(readings)} readings)"
-    )
+    assert len(readings) >= 5, f"SUB drain starved while REP is dead (got {len(readings)} readings)"
 
 
 def test_heartbeat_still_emitted_even_without_data(_bridge_fixture):
@@ -169,8 +167,12 @@ def test_cmd_timeout_emits_warning(_bridge_fixture):
 
     cmd_q.put({"type": "safety_status", "_rid": "r1"})
 
-    # REQ RCVTIMEO is 3s — warning should appear within ~5s.
-    deadline = time.monotonic() + 6.0
+    # IV.3 F7 raised REQ RCVTIMEO from 3 s to 35 s so slow server-side
+    # handlers (experiment_finalize / report generation) have room to
+    # reply. Warning still appears — just after the full envelope
+    # elapses. Deadline extended with 5 s slack so intermittent
+    # jitter doesn't flake this.
+    deadline = time.monotonic() + 40.0
     got_warning = False
     while time.monotonic() < deadline and not got_warning:
         try:
@@ -200,7 +202,9 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
 
     # First command times out because no REP is bound yet.
     cmd_q.put({"type": "safety_status", "_rid": "t1"})
-    deadline = time.monotonic() + 6.0
+    # IV.3 F7: subprocess REQ RCVTIMEO is 35 s; deadline bumped so
+    # the initial timeout reply arrives before the assertion fails.
+    deadline = time.monotonic() + 40.0
     saw_timeout_reply = False
     while time.monotonic() < deadline and not saw_timeout_reply:
         try:
