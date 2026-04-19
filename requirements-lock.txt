@@ -112,6 +112,8 @@ pyinstaller==6.19.0
     # via cryodaq (pyproject.toml)
 pyinstaller-hooks-contrib==2026.4
     # via pyinstaller
+pyarrow==23.0.1
+    # via cryodaq (pyproject.toml)
 pyparsing==3.3.2
     # via matplotlib
 pyproject-hooks==1.2.0

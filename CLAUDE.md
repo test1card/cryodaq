@@ -287,7 +287,7 @@ Phase I.1.
 **Storage**
 
 - `src/cryodaq/storage/sqlite_writer.py` — WAL-mode SQLite, daily rotation, persistence-first
-- `src/cryodaq/storage/parquet_archive.py` — Parquet export/read для архива экспериментов (pyarrow optional)
+- `src/cryodaq/storage/parquet_archive.py` — Parquet export/read для архива экспериментов (pyarrow теперь базовая зависимость, IV.4 F1)
 - `src/cryodaq/storage/csv_export.py` — экспорт данных из SQLite в CSV
 - `src/cryodaq/storage/hdf5_export.py` — экспорт данных из SQLite в HDF5
 - `src/cryodaq/storage/xlsx_export.py` — экспорт данных в Excel (.xlsx) через openpyxl

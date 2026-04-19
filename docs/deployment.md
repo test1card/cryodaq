@@ -23,21 +23,25 @@ cd cryodaq
 
 ## 3. Установка пакета
 
+С IV.4 F1 `pyarrow` входит в базовые зависимости, extra `[archive]`
+сохранён как no-op alias для обратной совместимости со старыми
+install-строками:
+
 ```powershell
-pip install -e ".[dev,web,archive]"
+pip install -e ".[dev,web]"
 ```
 
 Минимальная runtime-установка без dev/web extras:
 
 ```powershell
-pip install -e .          # без Parquet архива
-pip install -e ".[archive]"  # + Parquet (рекомендуется)
+pip install -e .                     # Parquet поддержка в базе
+pip install -e ".[dev,web,archive]"  # старая строка — по-прежнему работает
 ```
 
 Если нужен только web dashboard, используйте:
 
 ```powershell
-pip install -e ".[web,archive]"
+pip install -e ".[web]"
 ```
 
 Эта установка подтягивает и GUI dependencies, включая:
@@ -200,7 +204,7 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web,archive]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
+Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"` (или старая строка `.[dev,web,archive]` — работает так же, extra-alias без эффекта). GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
 
