@@ -1,0 +1,573 @@
+"""Tests for ConductivityPanel (Phase II.5 overlay)."""
+
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtWidgets import QApplication
+
+from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
+from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
+
+
+@pytest.fixture(scope="session")
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+class _StubPrediction:
+    """Plain-Python stand-in for SteadyStatePrediction. Avoids PySide +
+    MagicMock interactions (we learned this in II.2)."""
+
+    def __init__(
+        self,
+        *,
+        valid: bool = True,
+        percent_settled: float = 50.0,
+        tau_s: float = 120.0,
+        t_predicted: float = 100.0,
+        t_current: float = 100.0,
+        confidence: float = 0.9,
+    ) -> None:
+        self.valid = valid
+        self.percent_settled = percent_settled
+        self.tau_s = tau_s
+        self.t_predicted = t_predicted
+        self.t_current = t_current
+        self.confidence = confidence
+
+
+def _temp_reading(channel: str, value: float) -> Reading:
+    return Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LakeShore_1",
+        channel=channel,
+        value=value,
+        unit="K",
+        metadata={},
+    )
+
+
+def _power_reading(value: float, *, channel: str = "Keithley_1/smua/power") -> Reading:
+    return Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="Keithley_1",
+        channel=channel,
+        value=value,
+        unit="W",
+        metadata={},
+    )
+
+
+def _stub_channels(panel: ConductivityPanel, ids: list[str]) -> None:
+    """Pre-populate checkboxes so tests don't depend on ChannelManager state."""
+    from PySide6.QtWidgets import QCheckBox
+
+    # Clear any existing
+    while panel._ch_layout.count():
+        item = panel._ch_layout.takeAt(0)
+        w = item.widget()
+        if w:
+            w.setParent(None)
+            w.deleteLater()
+    panel._checkboxes.clear()
+    panel._chain = []
+    panel._plot_items.clear()
+    panel._buffers.clear()
+    panel._rate_buffers.clear()
+    for ch_id in ids:
+        cb = QCheckBox(ch_id)
+        cb.stateChanged.connect(lambda state, cid=ch_id: panel._on_check(cid, state))
+        panel._checkboxes[ch_id] = cb
+        panel._ch_layout.addWidget(cb)
+    panel._ch_layout.addStretch()
+
+
+# ----------------------------------------------------------------------
+# Structure
+# ----------------------------------------------------------------------
+
+
+def test_panel_constructs_and_exposes_core_surfaces(app):
+    panel = ConductivityPanel()
+    assert panel.objectName() == "conductivityPanel"
+    assert panel._plot is not None
+    assert panel._table is not None
+    assert panel._auto_start_btn is not None
+    assert panel._auto_stop_btn is not None
+    assert panel._power_combo is not None
+
+
+def test_panel_header_cyrillic_uppercase(app):
+    from PySide6.QtWidgets import QLabel
+
+    panel = ConductivityPanel()
+    titles = [
+        label.text()
+        for label in panel.findChildren(QLabel)
+        if label.text().startswith("ТЕПЛОПРОВОДНОСТЬ")
+    ]
+    assert "ТЕПЛОПРОВОДНОСТЬ" in titles
+
+
+def test_table_has_eleven_columns(app):
+    panel = ConductivityPanel()
+    assert panel._table.columnCount() == 11
+
+
+# ----------------------------------------------------------------------
+# Chain selection
+# ----------------------------------------------------------------------
+
+
+def test_chain_add_on_check(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    panel._checkboxes["Т1"].setChecked(True)
+    assert panel._chain == ["Т1"]
+    panel._checkboxes["Т2"].setChecked(True)
+    assert panel._chain == ["Т1", "Т2"]
+
+
+def test_chain_remove_on_uncheck(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._checkboxes["Т1"].setChecked(False)
+    assert panel._chain == ["Т2"]
+
+
+def test_reorder_up(app, monkeypatch):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    for ch in ("Т1", "Т2", "Т3"):
+        panel._checkboxes[ch].setChecked(True)
+    # Offscreen Qt reports hasFocus()=False even after setFocus() because
+    # there's no visible top-level window. Monkeypatch hasFocus on Т3 only.
+    monkeypatch.setattr(panel._checkboxes["Т3"], "hasFocus", lambda: True)
+    panel._on_move_up()
+    assert panel._chain == ["Т1", "Т3", "Т2"]
+
+
+def test_reorder_down(app, monkeypatch):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    for ch in ("Т1", "Т2", "Т3"):
+        panel._checkboxes[ch].setChecked(True)
+    monkeypatch.setattr(panel._checkboxes["Т1"], "hasFocus", lambda: True)
+    panel._on_move_down()
+    assert panel._chain == ["Т2", "Т1", "Т3"]
+
+
+# ----------------------------------------------------------------------
+# Readings routing
+# ----------------------------------------------------------------------
+
+
+def test_temperature_reading_updates_temps_and_buffer(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._handle_reading(_temp_reading("Т1", 123.456))
+    assert panel._temps["Т1"] == 123.456
+    assert len(panel._buffers["Т1"]) == 1
+
+
+def test_power_reading_updates_power_channel(app):
+    panel = ConductivityPanel()
+    # Default power channel is smua.
+    panel._handle_reading(_power_reading(0.025))
+    assert panel._power == 0.025
+
+
+def test_unknown_channel_is_noop(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    initial_temps = dict(panel._temps)
+    panel._handle_reading(_temp_reading("Т99", 42.0))
+    assert panel._temps == initial_temps
+
+
+def test_malformed_channel_is_noop(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._handle_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="x",
+            channel="garbage",
+            value=1.0,
+            unit="K",
+            metadata={},
+        )
+    )
+    assert panel._temps == {}
+
+
+# ----------------------------------------------------------------------
+# Table calculation (physics)
+# ----------------------------------------------------------------------
+
+
+def test_table_calculates_R_and_G_correctly(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._temps = {"Т1": 110.0, "Т2": 100.0}
+    panel._power = 0.005
+    panel._update_table({})
+    # R = dT / P = 10 / 0.005 = 2000
+    assert "2000" in panel._table.item(0, 4).text()
+    # G = P / dT = 0.005 / 10 = 0.0005
+    assert "0.0005" in panel._table.item(0, 5).text()
+
+
+def test_table_total_row_present(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    for ch in ("Т1", "Т2", "Т3"):
+        panel._checkboxes[ch].setChecked(True)
+    panel._temps = {"Т1": 120.0, "Т2": 110.0, "Т3": 100.0}
+    panel._power = 0.01
+    panel._update_table({})
+    # 2 pairs + 1 total row = 3 rows
+    assert panel._table.rowCount() == 3
+    assert panel._table.item(2, 0).text() == "ИТОГО"
+
+
+def test_table_empty_when_chain_too_small(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._update_table({})
+    assert panel._table.rowCount() == 0
+
+
+# ----------------------------------------------------------------------
+# Stability indicator
+# ----------------------------------------------------------------------
+
+
+def test_stability_stable_text(app):
+    import time as _time
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    now = _time.time()
+    # 30 points with constant value → rate = 0
+    for i in range(30):
+        panel._rate_buffers["Т1"].append((now + i, 100.0))
+    panel._update_stability()
+    assert "Стабильно" in panel._stability_label.text()
+    assert theme.STATUS_OK in panel._stability_label.styleSheet()
+
+
+def test_stability_unstable_text(app):
+    import time as _time
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    now = _time.time()
+    # Rate 1 K per second → 60 K/min, wildly unstable
+    for i in range(30):
+        panel._rate_buffers["Т1"].append((now + i, 100.0 + i))
+    panel._update_stability()
+    assert "Нестабильно" in panel._stability_label.text()
+    assert theme.STATUS_WARNING in panel._stability_label.styleSheet()
+
+
+# ----------------------------------------------------------------------
+# Steady-state banner
+# ----------------------------------------------------------------------
+
+
+def test_banner_empty_when_chain_too_small(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._update_banner({})
+    assert panel._steady_banner_label.text() == ""
+
+
+def test_banner_ready_at_99_percent(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    preds = {
+        "Т1": _StubPrediction(percent_settled=99.5),
+        "Т2": _StubPrediction(percent_settled=99.5),
+    }
+    panel._update_banner(preds)
+    assert "ГОТОВО" in panel._steady_banner_label.text()
+    assert theme.STATUS_OK in panel._steady_banner_label.styleSheet()
+
+
+def test_banner_at_95_percent(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    preds = {
+        "Т1": _StubPrediction(percent_settled=96.0),
+        "Т2": _StubPrediction(percent_settled=96.0),
+    }
+    panel._update_banner(preds)
+    assert "96%" in panel._steady_banner_label.text()
+    assert theme.STATUS_WARNING in panel._steady_banner_label.styleSheet()
+
+
+def test_banner_at_50_percent(app):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    preds = {
+        "Т1": _StubPrediction(percent_settled=50.0),
+        "Т2": _StubPrediction(percent_settled=50.0),
+    }
+    panel._update_banner(preds)
+    assert "50%" in panel._steady_banner_label.text()
+    assert theme.STATUS_INFO in panel._steady_banner_label.styleSheet()
+
+
+# ----------------------------------------------------------------------
+# Auto-sweep FSM
+# ----------------------------------------------------------------------
+
+
+def test_auto_start_rejects_short_chain(app, monkeypatch):
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1"])
+    panel._checkboxes["Т1"].setChecked(True)
+
+    from PySide6.QtWidgets import QMessageBox
+
+    warnings: list = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a) or 0)
+    )
+    panel._on_auto_start()
+    assert warnings, "Expected QMessageBox.warning to fire"
+    assert panel._auto_state == "idle"
+
+
+def test_auto_start_generates_power_list(app, monkeypatch):
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_start_spin.setValue(0.001)
+    panel._power_step_spin.setValue(0.005)
+    panel._power_count_spin.setValue(5)
+
+    # Stub ZmqCommandWorker so no real ZMQ traffic.
+    started: list = []
+
+    class _StubWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            self._cmd = cmd
+
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            started.append(self._cmd)
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    panel._on_auto_start()
+    assert panel._auto_state == "stabilizing"
+    assert panel._auto_power_list == [0.001, 0.006, 0.011, 0.016, 0.021]
+    # First keithley_set_target sent with start power.
+    assert started == [{"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.001}]
+
+
+def test_auto_stop_transitions_to_idle_and_sends_keithley_stop(app, monkeypatch):
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+
+    started: list = []
+
+    class _StubWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            self._cmd = cmd
+
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            started.append(self._cmd)
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    # Bring up to stabilizing first.
+    panel._on_auto_start()
+    started.clear()
+    panel._on_auto_stop()
+    assert panel._auto_state == "idle"
+    assert started == [{"cmd": "keithley_stop", "channel": "smua"}]
+
+
+def test_auto_tick_does_not_advance_before_min_wait(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._min_wait_spin.setValue(600)  # 10 minutes — effectively blocks advance
+    panel._settled_pct_spin.setValue(50.0)
+
+    class _StubWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            return None
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    panel._on_auto_start()
+    initial_step = panel._auto_step
+
+    # Monkeypatch predictor so percent_settled easily clears the threshold,
+    # but min_wait has not elapsed — tick must not advance.
+    def _fake_get_prediction(ch: str):
+        return _StubPrediction(percent_settled=99.0)
+
+    panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic()  # fresh start
+    panel._auto_tick()
+    assert panel._auto_step == initial_step
+
+
+def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    class _StubWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            return None
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    panel._on_auto_start()
+
+    def _fake_get_prediction(ch: str):
+        return _StubPrediction(percent_settled=99.0)
+
+    panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
+    # Pretend min_wait elapsed.
+    panel._auto_step_start = _time.monotonic() - 60.0
+    # Feed temps so _auto_record_point has data.
+    panel._temps = {"Т1": 110.0, "Т2": 100.0}
+    panel._auto_tick()
+    # Should have advanced to step 1 and recorded a point.
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+
+
+# ----------------------------------------------------------------------
+# Connection gating
+# ----------------------------------------------------------------------
+
+
+def test_disconnected_disables_start(app):
+    panel = ConductivityPanel()
+    panel.set_connected(False)
+    assert not panel._auto_start_btn.isEnabled()
+
+
+def test_reconnected_reenables_start(app):
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    assert panel._auto_start_btn.isEnabled()
+
+
+# ----------------------------------------------------------------------
+# Public accessor for finalize guard
+# ----------------------------------------------------------------------
+
+
+def test_get_auto_state_initially_idle(app):
+    panel = ConductivityPanel()
+    assert panel.get_auto_state() == "idle"
+    assert panel.is_auto_sweep_active() is False
+
+
+def test_get_auto_state_after_start(app, monkeypatch):
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    class _StubWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            class _FakeSignal:
+                def connect(self, *_a) -> None:
+                    return None
+
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            return None
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._on_auto_start()
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel.is_auto_sweep_active() is True

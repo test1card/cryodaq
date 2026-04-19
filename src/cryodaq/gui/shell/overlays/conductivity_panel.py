@@ -1,17 +1,33 @@
-"""Панель измерения теплопроводности с предсказанием стационара.
+"""ConductivityPanel — Phase II.5 thermal conductivity overlay.
 
-DEPRECATED (Phase II.5): Replaced by
-``src/cryodaq/gui/shell/overlays/conductivity_panel.py``. This module
-is kept alive for the transitional ``main_window.py`` path only and
-is not wired into ``MainWindowV2``. Scheduled for removal in Phase
-III.3 legacy cleanup. Do not add features here; all new work lands
-in the shell overlay.
+Supersedes the v1 widget at ``src/cryodaq/gui/widgets/conductivity_panel.py``.
+Aligned with Design System v1.0.1 tokens. Preserves the auto-sweep
+state machine verbatim (operationally critical — drives real
+power-stepping experiments), preserves the flight recorder CSV schema
+(operators rely on it for post-hoc analysis), exposes
+``get_auto_state()`` / ``is_auto_sweep_active()`` as public accessors
+for the ExperimentOverlay finalize guard (II.9 follow-up wiring).
 
-Позволяет выбрать цепочку температурных датчиков, отображает R и G
-между соседними парами, прогнозирует стационарные значения T∞
-и показывает степень стабилизации (percent_settled).
+Layout (top to bottom):
+    Header (ТЕПЛОПРОВОДНОСТЬ)
+    Status banner (transient info/warning/error, auto-clear 4 s)
+    Main split: Chain card | Live card (banner + indicators + R/G table + plot)
+    Auto-sweep card (P parameters + Start/Stop + progress + status)
 
-Включает встроенное автоизмерение (развёртка мощности Keithley).
+Public API (host push points):
+- ``on_reading(reading)`` — handles T-prefixed K readings AND
+  ``/smu*/power`` readings per existing shell routing contract.
+- ``set_connected(bool)`` — gates auto-sweep Start + shows banner.
+  Chain selection / CSV export stay enabled (local work).
+- ``get_auto_state() -> str`` — returns ``"idle"`` / ``"stabilizing"`` /
+  ``"done"`` for external finalize guards. Mirrors legacy
+  ``_auto_state`` accessor but via a stable public API.
+- ``is_auto_sweep_active() -> bool`` — convenience (state == "stabilizing").
+
+Out of scope (follow-ups):
+- Additional export formats (HDF5, Parquet).
+- Per-chain-pair independent power sweeps.
+- Auto-sweep resume after restart (power list regenerated on each Start).
 """
 
 from __future__ import annotations
@@ -22,6 +38,7 @@ import math
 import time
 from collections import deque
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
@@ -31,8 +48,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -41,7 +58,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -52,51 +68,19 @@ from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
-from cryodaq.gui.widgets.common import (
-    PanelHeader,
-    StatusBanner,
-    apply_button_style,
-    apply_group_box_style,
-    apply_status_label_style,
-    build_action_row,
-    create_panel_root,
-)
+from cryodaq.gui._plot_style import apply_plot_style, series_pen
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
 _BUFFER_MAXLEN = 3600
+_RATE_BUFFER_MAXLEN = 120
+_STABILITY_THRESHOLD = 0.01  # К/мин
+_BANNER_AUTO_CLEAR_MS = 4000
+_REFRESH_INTERVAL_MS = 1000
+_AUTO_TIMER_INTERVAL_MS = 1000
 
-_STABILITY_THRESHOLD = 0.01
-
-
-def _get_temperature_channels() -> list[tuple[str, str]]:
-    """Динамический список видимых температурных каналов через ChannelManager.
-
-    Returns list of (channel_id, display_name) tuples keyed by canonical ID.
-    """
-    mgr = get_channel_manager()
-    return [
-        (ch_id, mgr.get_display_name(ch_id))
-        for ch_id in mgr.get_all_visible()
-        if ch_id.startswith("Т")
-    ]
-
-
-_LINE_COLORS = [
-    "#58a6ff",
-    "#3fb950",
-    "#f0883e",
-    "#f85149",
-    "#bc8cff",
-    "#ff7b72",
-    "#79c0ff",
-    "#56d364",
-    "#ffa657",
-    "#d2a8ff",
-]
-
-_COL_HEADERS = [
+_COL_HEADERS: tuple[str, ...] = (
     "Пара",
     "T гор. (К)",
     "T хол. (К)",
@@ -108,7 +92,22 @@ _COL_HEADERS = [
     "Готово %",
     "R прогноз",
     "G прогноз",
-]
+)
+
+_POWER_CHANNELS: tuple[str, ...] = (
+    "Keithley_1/smua/power",
+    "Keithley_1/smub/power",
+)
+
+
+def _get_temperature_channels() -> list[tuple[str, str]]:
+    """List visible T-prefixed channels as (id, display_name) tuples."""
+    mgr = get_channel_manager()
+    return [
+        (ch_id, mgr.get_display_name(ch_id))
+        for ch_id in mgr.get_all_visible()
+        if ch_id.startswith("Т")
+    ]
 
 
 def _pct_color(pct: float) -> str:
@@ -119,33 +118,119 @@ def _pct_color(pct: float) -> str:
     return theme.STATUS_FAULT
 
 
+def _label_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    font.setPixelSize(theme.FONT_LABEL_SIZE)
+    font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
+    return font
+
+
+def _body_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    font.setPixelSize(theme.FONT_BODY_SIZE)
+    return font
+
+
+def _title_font() -> QFont:
+    font = QFont(theme.FONT_BODY)
+    font.setPixelSize(theme.FONT_SIZE_XL)
+    font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+    return font
+
+
+def _mono_value_font() -> QFont:
+    font = QFont(theme.FONT_MONO)
+    font.setPixelSize(theme.FONT_MONO_VALUE_SIZE)
+    font.setWeight(QFont.Weight(theme.FONT_MONO_VALUE_WEIGHT))
+    try:
+        font.setFeature(QFont.Tag("tnum"), 1)
+    except (AttributeError, TypeError):
+        pass
+    return font
+
+
+def _mono_cell_font() -> QFont:
+    font = QFont(theme.FONT_MONO)
+    font.setPixelSize(theme.FONT_LABEL_SIZE)
+    try:
+        font.setFeature(QFont.Tag("tnum"), 1)
+    except (AttributeError, TypeError):
+        pass
+    return font
+
+
+def _style_button(btn: QPushButton, variant: str) -> None:
+    if variant == "primary":
+        bg, fg = theme.STATUS_OK, theme.ON_PRIMARY
+    elif variant == "warning":
+        bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
+    elif variant == "accent":
+        bg, fg = theme.ACCENT, theme.ON_ACCENT
+    else:  # "neutral"
+        bg, fg = theme.SURFACE_MUTED, theme.FOREGROUND
+    btn.setStyleSheet(
+        f"QPushButton {{"
+        f" background-color: {bg};"
+        f" color: {fg};"
+        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f" border-radius: {theme.RADIUS_MD}px;"
+        f" padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
+        f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        f"}}"
+        f" QPushButton:disabled {{"
+        f" background-color: {theme.SURFACE_MUTED};"
+        f" color: {theme.MUTED_FOREGROUND};"
+        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f"}}"
+    )
+
+
+def _style_input(widget: QDoubleSpinBox | QSpinBox | QComboBox) -> None:
+    widget.setStyleSheet(
+        f"QDoubleSpinBox, QSpinBox, QComboBox {{"
+        f" background-color: {theme.SURFACE_SUNKEN};"
+        f" color: {theme.FOREGROUND};"
+        f" border: 1px solid {theme.BORDER_SUBTLE};"
+        f" border-radius: {theme.RADIUS_SM}px;"
+        f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
+        f"}}"
+        f" QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabled {{"
+        f" color: {theme.MUTED_FOREGROUND};"
+        f"}}"
+    )
+
+
 class ConductivityPanel(QWidget):
-    """Панель измерения теплопроводности с предсказанием стационара."""
+    """Thermal conductivity overlay (Phase II.5)."""
 
     _reading_signal = Signal(object)
+
+    auto_sweep_started = Signal()
+    auto_sweep_completed = Signal(int)
+    auto_sweep_aborted = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
+        self._connected: bool = False
         self._temps: dict[str, float] = {}
         self._power: float = 0.0
-        self._power_channel: str = ""
+        self._power_channel: str = _POWER_CHANNELS[0]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
+        self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
         self._chain: list[str] = []
         self._checkboxes: dict[str, QCheckBox] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
-        self._pred_lines: dict[str, pg.PlotDataItem] = {}
-        self._rate_buffers: dict[str, deque[tuple[float, float]]] = {}
 
-        # Предсказатель стационара
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
 
-        # Авто-развёртка state
-        self._auto_state: str = "idle"  # "idle" / "stabilizing" / "done"
+        # Auto-sweep FSM state (preserved verbatim from v1)
+        self._auto_state: str = "idle"
         self._auto_power_list: list[float] = []
         self._auto_step: int = 0
         self._auto_step_start: float = 0.0
         self._auto_results: list[dict] = []
+        self._auto_workers: list[ZmqCommandWorker] = []
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -154,144 +239,321 @@ class ConductivityPanel(QWidget):
         self._flight_log = None
         self._flight_log_writer = None
 
+        self.setObjectName("conductivityPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"#conductivityPanel {{ background-color: {theme.BACKGROUND}; }}")
+
+        self._banner_timer = QTimer(self)
+        self._banner_timer.setSingleShot(True)
+        self._banner_timer.setInterval(_BANNER_AUTO_CLEAR_MS)
+        self._banner_timer.timeout.connect(self.clear_message)
+
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
+        self._update_control_enablement()
 
         self._timer = QTimer(self)
-        self._timer.setInterval(1000)
+        self._timer.setInterval(_REFRESH_INTERVAL_MS)
         self._timer.timeout.connect(self._refresh)
         self._timer.start()
 
-        # Авто-развёртка timer (1 s tick)
         self._auto_timer = QTimer(self)
-        self._auto_timer.setInterval(1000)
+        self._auto_timer.setInterval(_AUTO_TIMER_INTERVAL_MS)
         self._auto_timer.timeout.connect(self._auto_tick)
-        self._auto_cmd_worker: ZmqCommandWorker | None = None
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        outer = create_panel_root(self)
-        outer.addWidget(
-            PanelHeader(
-                "Теплопроводность",
-                "Оценка R и G по выбранной цепочке датчиков с прогнозом стационарных значений.",
-            )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(theme.SPACE_4, theme.SPACE_3, theme.SPACE_4, theme.SPACE_3)
+        root.setSpacing(theme.SPACE_3)
+
+        root.addWidget(self._build_header())
+        root.addWidget(self._build_banner())
+
+        main_split = QHBoxLayout()
+        main_split.setContentsMargins(0, 0, 0, 0)
+        main_split.setSpacing(theme.SPACE_3)
+        main_split.addWidget(self._build_chain_card(), stretch=1)
+        main_split.addWidget(self._build_live_card(), stretch=3)
+        root.addLayout(main_split, stretch=1)
+
+        root.addWidget(self._build_auto_card())
+
+    def _build_header(self) -> QWidget:
+        header = QWidget()
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_2)
+        title = QLabel("ТЕПЛОПРОВОДНОСТЬ")
+        title.setFont(_title_font())
+        title.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+            f" letter-spacing: 1px;"
         )
-        root = QHBoxLayout()
-        root.setSpacing(8)
+        layout.addWidget(title)
+        layout.addStretch()
+        return header
 
-        # --- Левая панель (splitter: ручные контролы / автоизмерение) ---
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-        left_splitter.setFixedWidth(240)
+    def _build_banner(self) -> QWidget:
+        self._banner_label = QLabel("")
+        self._banner_label.setFont(_label_font())
+        self._banner_label.setObjectName("conductivityBanner")
+        self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._banner_label.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
+        )
+        self._banner_label.setVisible(False)
+        return self._banner_label
 
-        title_font = QFont()
-        title_font.setPointSize(10)
-        title_font.setBold(True)
+    def _build_chain_card(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("chainCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"#chainCard {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            f"}}"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        layout.setSpacing(theme.SPACE_2)
 
-        # --- Верхняя секция: выбор датчиков + ручные контролы ---
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(4)
-
-        t = QLabel("Выбор датчиков")
-        t.setFont(title_font)
-        apply_status_label_style(t, "accent", bold=True)
-        top_layout.addWidget(t)
+        caption = QLabel("Цепочка датчиков")
+        caption.setFont(_label_font())
+        caption.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        layout.addWidget(caption)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         ch_container = QWidget()
         ch_container.setStyleSheet("background: transparent;")
-        ch_layout = QVBoxLayout(ch_container)
-        self._ch_layout = ch_layout
-        ch_layout.setContentsMargins(4, 4, 4, 4)
-        ch_layout.setSpacing(2)
-
+        self._ch_layout = QVBoxLayout(ch_container)
+        self._ch_layout.setContentsMargins(0, 0, 0, 0)
+        self._ch_layout.setSpacing(theme.SPACE_1)
         for ch_id, display_name in self._all_channels:
             cb = QCheckBox(display_name)
+            cb.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
             cb.stateChanged.connect(lambda state, cid=ch_id: self._on_check(cid, state))
             self._checkboxes[ch_id] = cb
-            ch_layout.addWidget(cb)
-
-        ch_layout.addStretch()
+            self._ch_layout.addWidget(cb)
+        self._ch_layout.addStretch()
         scroll.setWidget(ch_container)
-        top_layout.addWidget(scroll, stretch=1)
+        layout.addWidget(scroll, stretch=1)
 
-        src_lbl = QLabel("Источник P:")
-        apply_status_label_style(src_lbl, "info")
-        top_layout.addWidget(src_lbl)
+        # Power source selector
+        src_cap = QLabel("Источник P:")
+        src_cap.setFont(_label_font())
+        src_cap.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        layout.addWidget(src_cap)
 
         self._power_combo = QComboBox()
-        self._power_combo.addItems(
-            [
-                "Keithley_1/smua/power",
-                "Keithley_1/smub/power",
-            ]
-        )
+        self._power_combo.addItems(list(_POWER_CHANNELS))
         self._power_combo.currentTextChanged.connect(self._on_power_changed)
         self._power_channel = self._power_combo.currentText()
-        top_layout.addWidget(self._power_combo)
+        _style_input(self._power_combo)
+        layout.addWidget(self._power_combo)
 
-        up_btn = QPushButton("Вверх")
-        apply_button_style(up_btn, "neutral", compact=True)
-        up_btn.clicked.connect(self._on_move_up)
+        # Reorder + export
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(theme.SPACE_1)
+        self._up_btn = QPushButton("↑")
+        _style_button(self._up_btn, "neutral")
+        self._up_btn.clicked.connect(self._on_move_up)
+        self._up_btn.setToolTip("Переместить сфокусированный датчик вверх по цепочке.")
+        btn_row.addWidget(self._up_btn)
+        self._down_btn = QPushButton("↓")
+        _style_button(self._down_btn, "neutral")
+        self._down_btn.clicked.connect(self._on_move_down)
+        self._down_btn.setToolTip("Переместить сфокусированный датчик вниз по цепочке.")
+        btn_row.addWidget(self._down_btn)
+        self._export_btn = QPushButton("Экспорт CSV")
+        _style_button(self._export_btn, "primary")
+        self._export_btn.clicked.connect(self._on_export)
+        btn_row.addWidget(self._export_btn)
+        layout.addLayout(btn_row)
 
-        down_btn = QPushButton("Вниз")
-        apply_button_style(down_btn, "neutral", compact=True)
-        down_btn.clicked.connect(self._on_move_down)
-        top_layout.addLayout(build_action_row(up_btn, down_btn))
+        return card
 
-        export_btn = QPushButton("Экспорт CSV")
-        apply_button_style(export_btn, "primary")
-        export_btn.clicked.connect(self._on_export)
-        top_layout.addWidget(export_btn)
+    def _build_live_card(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("liveCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"#liveCard {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            f"}}"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        layout.setSpacing(theme.SPACE_2)
 
-        left_splitter.addWidget(top_widget)
+        # Steady-state banner (separate from the transient status banner)
+        self._steady_banner_label = QLabel("")
+        self._steady_banner_label.setFont(_label_font())
+        self._steady_banner_label.setObjectName("steadyBanner")
+        self._steady_banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._steady_banner_label.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
+        )
+        self._steady_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._set_steady_banner("", None)
+        layout.addWidget(self._steady_banner_label)
 
-        # --- Нижняя секция: Автоизмерение ---
-        auto_box = QGroupBox("Автоизмерение")
-        auto_box.setCheckable(True)
-        auto_box.setChecked(False)
-        apply_group_box_style(auto_box, "#f0883e")
-        auto_layout = QGridLayout(auto_box)
+        # Indicator row
+        indicator_row = QHBoxLayout()
+        indicator_row.setContentsMargins(0, 0, 0, 0)
+        indicator_row.setSpacing(theme.SPACE_3)
 
-        auto_layout.addWidget(QLabel("Начальная P:"), 0, 0)
+        self._stability_label = QLabel("Стабильность: —")
+        self._stability_label.setFont(_label_font())
+        self._stability_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        indicator_row.addWidget(self._stability_label)
+
+        self._power_label = QLabel("P = — Вт")
+        self._power_label.setFont(_mono_value_font())
+        self._power_label.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+        )
+        indicator_row.addWidget(self._power_label)
+        indicator_row.addStretch()
+        layout.addLayout(indicator_row)
+
+        # R/G table
+        self._table = QTableWidget(0, len(_COL_HEADERS))
+        self._table.setHorizontalHeaderLabels(list(_COL_HEADERS))
+        self._table.setAlternatingRowColors(False)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setMaximumHeight(260)
+        self._table.setFont(_body_font())
+        self._table.setStyleSheet(
+            f"QTableWidget {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" color: {theme.FOREGROUND};"
+            f" gridline-color: {theme.BORDER_SUBTLE};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f"}} "
+            f"QHeaderView::section {{"
+            f" background-color: {theme.SURFACE_MUTED};"
+            f" color: {theme.MUTED_FOREGROUND};"
+            f" border: 0px;"
+            f" border-bottom: 1px solid {theme.BORDER_SUBTLE};"
+            f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
+            f"}}"
+        )
+        layout.addWidget(self._table)
+
+        # Plot
+        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        apply_plot_style(self._plot)
+        pi = self._plot.getPlotItem()
+        pi.setLabel("left", "Температура", units="К")
+        pi.setLabel("bottom", "Время")
+        pi.enableAutoRange(axis="y", enable=True)
+        layout.addWidget(self._plot, stretch=1)
+
+        # Empty state overlay (anchored over the plot widget)
+        self._empty_label = QLabel(
+            "Нет данных. Выберите датчики и запустите эксперимент.", self._plot
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        self._empty_label.setGeometry(0, 0, 400, 80)
+        return card
+
+    def _build_auto_card(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("autoSweepCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"#autoSweepCard {{"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            f"}}"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        layout.setSpacing(theme.SPACE_2)
+
+        caption = QLabel("Автоизмерение")
+        caption.setFont(_label_font())
+        caption.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        layout.addWidget(caption)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(theme.SPACE_3)
+        grid.setVerticalSpacing(theme.SPACE_1)
+
+        grid.addWidget(self._caption("Начальная P:"), 0, 0)
         self._power_start_spin = QDoubleSpinBox()
         self._power_start_spin.setRange(0.0001, 10.0)
         self._power_start_spin.setValue(0.001)
         self._power_start_spin.setDecimals(4)
         self._power_start_spin.setSuffix(" Вт")
         self._power_start_spin.setSingleStep(0.001)
-        auto_layout.addWidget(self._power_start_spin, 0, 1)
+        _style_input(self._power_start_spin)
+        grid.addWidget(self._power_start_spin, 0, 1)
 
-        auto_layout.addWidget(QLabel("Шаг P:"), 1, 0)
+        grid.addWidget(self._caption("Шаг P:"), 0, 2)
         self._power_step_spin = QDoubleSpinBox()
         self._power_step_spin.setRange(0.0001, 10.0)
         self._power_step_spin.setValue(0.005)
         self._power_step_spin.setDecimals(4)
         self._power_step_spin.setSuffix(" Вт")
         self._power_step_spin.setSingleStep(0.001)
-        auto_layout.addWidget(self._power_step_spin, 1, 1)
+        _style_input(self._power_step_spin)
+        grid.addWidget(self._power_step_spin, 0, 3)
 
-        auto_layout.addWidget(QLabel("Кол-во шагов:"), 2, 0)
+        grid.addWidget(self._caption("Шагов:"), 0, 4)
         self._power_count_spin = QSpinBox()
         self._power_count_spin.setRange(2, 100)
         self._power_count_spin.setValue(10)
-        auto_layout.addWidget(self._power_count_spin, 2, 1)
+        _style_input(self._power_count_spin)
+        grid.addWidget(self._power_count_spin, 0, 5)
 
         self._power_preview = QLabel("")
-        self._power_preview.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 9pt;")
+        self._power_preview.setFont(_label_font())
+        self._power_preview.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         self._power_preview.setWordWrap(True)
-        auto_layout.addWidget(self._power_preview, 3, 0, 1, 2)
+        grid.addWidget(self._power_preview, 1, 0, 1, 6)
 
         self._power_start_spin.valueChanged.connect(self._update_power_preview)
         self._power_step_spin.valueChanged.connect(self._update_power_preview)
         self._power_count_spin.valueChanged.connect(self._update_power_preview)
 
-        auto_layout.addWidget(QLabel("Стабилизация:"), 4, 0)
+        grid.addWidget(self._caption("Порог стабилизации:"), 2, 0)
         self._settled_pct_spin = QDoubleSpinBox()
         self._settled_pct_spin.setRange(80.0, 99.9)
         self._settled_pct_spin.setValue(95.0)
@@ -301,115 +563,73 @@ class ConductivityPanel(QWidget):
             "Процент стабилизации по экстраполяции SteadyState.\n"
             "95% = температура в пределах 5% от предсказанного стационара."
         )
-        auto_layout.addWidget(self._settled_pct_spin, 4, 1)
+        _style_input(self._settled_pct_spin)
+        grid.addWidget(self._settled_pct_spin, 2, 1)
 
-        auto_layout.addWidget(QLabel("Мин. ожидание:"), 5, 0)
+        grid.addWidget(self._caption("Мин. ожидание:"), 2, 2)
         self._min_wait_spin = QDoubleSpinBox()
         self._min_wait_spin.setRange(10, 600)
         self._min_wait_spin.setValue(30)
         self._min_wait_spin.setSuffix(" с")
-        self._min_wait_spin.setToolTip("Минимальное время перед проверкой стабилизации")
-        auto_layout.addWidget(self._min_wait_spin, 5, 1)
+        self._min_wait_spin.setToolTip("Минимальное время перед проверкой стабилизации.")
+        _style_input(self._min_wait_spin)
+        grid.addWidget(self._min_wait_spin, 2, 3)
 
-        btn_row = QHBoxLayout()
+        layout.addLayout(grid)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(theme.SPACE_2)
         self._auto_start_btn = QPushButton("Старт")
-        apply_button_style(self._auto_start_btn, "primary")
+        _style_button(self._auto_start_btn, "primary")
         self._auto_start_btn.clicked.connect(self._on_auto_start)
-        btn_row.addWidget(self._auto_start_btn)
-
+        action_row.addWidget(self._auto_start_btn)
         self._auto_stop_btn = QPushButton("Стоп")
-        apply_button_style(self._auto_stop_btn, "neutral")
+        _style_button(self._auto_stop_btn, "warning")
         self._auto_stop_btn.setEnabled(False)
         self._auto_stop_btn.clicked.connect(self._on_auto_stop)
-        btn_row.addWidget(self._auto_stop_btn)
-        auto_layout.addLayout(btn_row, 6, 0, 1, 2)
+        action_row.addWidget(self._auto_stop_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
 
         self._auto_progress = QProgressBar()
         self._auto_progress.setRange(0, 100)
         self._auto_progress.setValue(0)
         self._auto_progress.setVisible(False)
-        auto_layout.addWidget(self._auto_progress, 7, 0, 1, 2)
+        self._auto_progress.setStyleSheet(
+            f"QProgressBar {{"
+            f" background-color: {theme.SURFACE_SUNKEN};"
+            f" color: {theme.FOREGROUND};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f" text-align: center;"
+            f"}} "
+            f"QProgressBar::chunk {{"
+            f" background-color: {theme.STATUS_OK};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f"}}"
+        )
+        layout.addWidget(self._auto_progress)
 
         self._auto_status_label = QLabel("")
-        apply_status_label_style(self._auto_status_label, "muted")
-        auto_layout.addWidget(self._auto_status_label, 8, 0, 1, 2)
+        self._auto_status_label.setFont(_label_font())
+        self._auto_status_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        self._auto_status_label.setVisible(False)
+        layout.addWidget(self._auto_status_label)
 
         self._update_power_preview()
+        return card
 
-        left_splitter.addWidget(auto_box)
-
-        # 60% manual, 40% auto
-        left_splitter.setStretchFactor(0, 3)
-        left_splitter.setStretchFactor(1, 2)
-
-        root.addWidget(left_splitter)
-
-        # --- Правая панель ---
-        right = QVBoxLayout()
-        right.setSpacing(8)
-
-        # Баннер стационара
-        self._banner = StatusBanner()
-        self._banner.setFont(QFont("", 11, QFont.Weight.Bold))
-        self._banner.setAlignment(Qt.AlignCenter)
-        self._banner.show_info(" ")
-        right.addWidget(self._banner)
-
-        # Индикаторы
-        stab_row = QHBoxLayout()
-        self._stability_label = QLabel("Стабильность: —")
-        self._stability_label.setFont(title_font)
-        apply_status_label_style(self._stability_label, "muted")
-        stab_row.addWidget(self._stability_label)
-
-        self._power_label = QLabel("P = — Вт")
-        self._power_label.setFont(title_font)
-        apply_status_label_style(self._power_label, "warning", bold=True)
-        stab_row.addWidget(self._power_label)
-        stab_row.addStretch()
-        right.addLayout(stab_row)
-
-        # Таблица R и G + прогноз
-        self._table = QTableWidget(0, len(_COL_HEADERS))
-        self._table.setHorizontalHeaderLabels(_COL_HEADERS)
-        self._table.setAlternatingRowColors(True)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setMaximumHeight(280)
-        right.addWidget(self._table)
-
-        # График
-        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
-        # Background provided by gui.theme global pyqtgraph config.
-
-        # Empty state overlay
-        from PySide6.QtWidgets import QLabel as _Label
-
-        self._empty_overlay = _Label(
-            "Нет данных для теплопроводности.\nНачните эксперимент.", self._plot
+    @staticmethod
+    def _caption(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setFont(_label_font())
+        label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
         )
-        self._empty_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_overlay.setStyleSheet(
-            f"color: {theme.TEXT_DISABLED}; font-size: 14pt; background: transparent;"
-        )
-        self._empty_overlay.setGeometry(0, 0, 400, 100)
-
-        pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
-        pi.setLabel("bottom", "Время", color="#AAAAAA")
-        pi.showGrid(x=True, y=True, alpha=0.3)
-        pi.enableAutoRange(axis="y", enable=True)
-        for ax_name in ("left", "bottom"):
-            ax = pi.getAxis(ax_name)
-            if ax:
-                ax.setPen(pg.mkPen(color="#444444"))
-                ax.setTextPen(pg.mkPen(color="#AAAAAA"))
-
-        right.addWidget(self._plot, stretch=1)
-        root.addLayout(right, stretch=1)
-        outer.addLayout(root, 1)
+        return label
 
     # ------------------------------------------------------------------
     # Channel selection
@@ -421,19 +641,17 @@ class ConductivityPanel(QWidget):
                 self._chain.append(ch_name)
                 if ch_name not in self._buffers:
                     self._buffers[ch_name] = deque(maxlen=_BUFFER_MAXLEN)
-                    self._rate_buffers[ch_name] = deque(maxlen=120)
+                    self._rate_buffers[ch_name] = deque(maxlen=_RATE_BUFFER_MAXLEN)
                 idx = len(self._plot_items)
-                color = _LINE_COLORS[idx % len(_LINE_COLORS)]
+                pen = series_pen(idx)
                 display = get_channel_manager().get_display_name(ch_name)
-                item = self._plot.plot([], [], pen=pg.mkPen(color=color, width=2), name=display)
+                item = self._plot.plot([], [], pen=pen, name=display)
                 self._plot_items[ch_name] = item
         else:
             if ch_name in self._chain:
                 self._chain.remove(ch_name)
             if ch_name in self._plot_items:
                 self._plot.removeItem(self._plot_items.pop(ch_name))
-            if ch_name in self._pred_lines:
-                self._plot.removeItem(self._pred_lines.pop(ch_name))
 
     def _on_move_up(self) -> None:
         for i, ch in enumerate(self._chain):
@@ -451,24 +669,19 @@ class ConductivityPanel(QWidget):
         self._power_channel = text
 
     def _smu_channel(self) -> str:
-        """Extract SMU channel (smua/smub) from power source path."""
         parts = self._power_channel.split("/")
         return parts[1] if len(parts) >= 2 else "smua"
 
     def _on_channels_changed(self) -> None:
-        """Refresh channel list when ChannelManager changes."""
         new_channels = _get_temperature_channels()
         new_ids = {ch_id for ch_id, _ in new_channels}
         old_ids = set(self._checkboxes.keys())
-
+        name_map = dict(new_channels)
         if new_ids == old_ids:
-            # Only names changed — update labels
-            name_map = dict(new_channels)
             for ch_id, cb in self._checkboxes.items():
                 new_name = name_map.get(ch_id, ch_id)
                 if cb.text() != new_name:
                     cb.setText(new_name)
-            # Update plot legend names
             for ch_id, item in self._plot_items.items():
                 new_name = name_map.get(ch_id, ch_id)
                 if item.opts.get("name") != new_name:
@@ -476,36 +689,24 @@ class ConductivityPanel(QWidget):
             self._all_channels = new_channels
             return
 
-        # Channel set changed — rebuild checkboxes
         checked = {ch_id for ch_id, cb in self._checkboxes.items() if cb.isChecked()}
         self._all_channels = new_channels
-
-        # Remove stale checkboxes from layout
-        if hasattr(self, "_ch_layout"):
-            while self._ch_layout.count():
-                item = self._ch_layout.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.setParent(None)
-                    w.deleteLater()
-
-        # Rebuild checkboxes
+        while self._ch_layout.count():
+            item = self._ch_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
         self._checkboxes.clear()
         for ch_id, display_name in self._all_channels:
             cb = QCheckBox(display_name)
-            was_checked = ch_id in checked
-            cb.setChecked(was_checked)
+            cb.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
+            cb.setChecked(ch_id in checked)
             cb.stateChanged.connect(lambda state, cid=ch_id: self._on_check(cid, state))
             self._checkboxes[ch_id] = cb
-            if hasattr(self, "_ch_layout"):
-                self._ch_layout.addWidget(cb)
-        if hasattr(self, "_ch_layout"):
-            self._ch_layout.addStretch()
-
-        # Validate chain — remove stale entries
+            self._ch_layout.addWidget(cb)
+        self._ch_layout.addStretch()
         self._chain = [ch for ch in self._chain if ch in new_ids]
-
-        # Remove orphan plot items and buffers
         for ch_id in list(self._plot_items.keys()):
             if ch_id not in new_ids:
                 self._plot.removeItem(self._plot_items.pop(ch_id))
@@ -515,21 +716,16 @@ class ConductivityPanel(QWidget):
         for ch_id in list(self._rate_buffers.keys()):
             if ch_id not in new_ids:
                 del self._rate_buffers[ch_id]
-        for ch_id in list(self._pred_lines.keys()):
-            if ch_id not in new_ids:
-                self._plot.removeItem(self._pred_lines.pop(ch_id))
-
         logger.info("ConductivityPanel: rebuilt (%d channels)", len(new_channels))
 
     # ------------------------------------------------------------------
-    # Data input
+    # Readings
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
         self._reading_signal.emit(reading)
 
     def _resolve_channel_id(self, channel: str) -> str | None:
-        """Resolve reading channel to canonical checkbox key."""
         if channel in self._checkboxes:
             return channel
         short = channel.split(" ")[0] if " " in channel else channel
@@ -539,26 +735,22 @@ class ConductivityPanel(QWidget):
 
     @Slot(object)
     def _handle_reading(self, reading: Reading) -> None:
-        if self._empty_overlay.isVisible():
-            self._empty_overlay.setVisible(False)
-
+        if self._empty_label.isVisible():
+            self._empty_label.setVisible(False)
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
         ts = reading.timestamp.timestamp()
-
         if ch_id is not None and reading.unit == "K":
             self._temps[ch_id] = reading.value
             if ch_id in self._buffers:
                 self._buffers[ch_id].append((ts, reading.value))
                 self._rate_buffers[ch_id].append((ts, reading.value))
-            # Кормить предсказатель
             self._predictor.add_point(ch_id, ts, reading.value)
-
         if ch == self._power_channel:
             self._power = reading.value
 
     # ------------------------------------------------------------------
-    # Periodic refresh
+    # Refresh
     # ------------------------------------------------------------------
 
     @Slot()
@@ -566,7 +758,6 @@ class ConductivityPanel(QWidget):
         now = time.time()
         self._predictor.update(now)
         all_preds = self._predictor.get_all_predictions()
-
         self._update_table(all_preds)
         self._update_stability()
         self._update_banner(all_preds)
@@ -578,28 +769,31 @@ class ConductivityPanel(QWidget):
         if len(self._chain) < 2:
             self._table.setRowCount(0)
             return
-
-        pairs = list(zip(self._chain[:-1], self._chain[1:]))
+        pairs = list(zip(self._chain[:-1], self._chain[1:], strict=False))
         self._table.setRowCount(len(pairs) + 1)
-
         total_r = 0.0
         total_r_pred = 0.0
         P = self._power
+
+        mono_font = _mono_cell_font()
+
+        def _cell(text: str) -> QTableWidgetItem:
+            item = QTableWidgetItem(text)
+            item.setFont(mono_font)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            return item
 
         for row, (hot_ch, cold_ch) in enumerate(pairs):
             t_hot = self._temps.get(hot_ch, float("nan"))
             t_cold = self._temps.get(cold_ch, float("nan"))
             dt = t_hot - t_cold
-
             R = dt / P if P != 0 and math.isfinite(dt) else float("nan")
             G = P / dt if dt != 0 and P != 0 else float("nan")
             if math.isfinite(R):
                 total_r += R
 
-            # Прогноз
             p_hot = preds.get(hot_ch)
             p_cold = preds.get(cold_ch)
-
             t_inf_str = ""
             tau_str = ""
             pct_str = ""
@@ -616,7 +810,6 @@ class ConductivityPanel(QWidget):
                 tau_str = f"{tau_avg / 60:.1f}"
                 pct_val = min(p_hot.percent_settled, p_cold.percent_settled)
                 pct_str = f"{pct_val:.0f}%"
-
                 if P != 0 and abs(dt_inf) > 1e-10:
                     r_pred = dt_inf / P
                     g_pred = P / dt_inf
@@ -625,23 +818,23 @@ class ConductivityPanel(QWidget):
                     if math.isfinite(r_pred):
                         total_r_pred += r_pred
 
-            self._table.setItem(row, 0, QTableWidgetItem(f"{hot_ch} → {cold_ch}"))
-            self._table.setItem(row, 1, QTableWidgetItem(f"{t_hot:.4f}"))
-            self._table.setItem(row, 2, QTableWidgetItem(f"{t_cold:.4f}"))
-            self._table.setItem(row, 3, QTableWidgetItem(f"{dt:.4f}" if math.isfinite(dt) else "—"))
-            self._table.setItem(row, 4, QTableWidgetItem(f"{R:.4g}" if math.isfinite(R) else "—"))
-            self._table.setItem(row, 5, QTableWidgetItem(f"{G:.4g}" if math.isfinite(G) else "—"))
-            self._table.setItem(row, 6, QTableWidgetItem(t_inf_str))
-            self._table.setItem(row, 7, QTableWidgetItem(tau_str))
-
-            pct_item = QTableWidgetItem(pct_str)
+            hot_display = get_channel_manager().get_display_name(hot_ch)
+            cold_display = get_channel_manager().get_display_name(cold_ch)
+            self._table.setItem(row, 0, _cell(f"{hot_display} → {cold_display}"))
+            self._table.setItem(row, 1, _cell(f"{t_hot:.4f}"))
+            self._table.setItem(row, 2, _cell(f"{t_cold:.4f}"))
+            self._table.setItem(row, 3, _cell(f"{dt:.4f}" if math.isfinite(dt) else "—"))
+            self._table.setItem(row, 4, _cell(f"{R:.4g}" if math.isfinite(R) else "—"))
+            self._table.setItem(row, 5, _cell(f"{G:.4g}" if math.isfinite(G) else "—"))
+            self._table.setItem(row, 6, _cell(t_inf_str))
+            self._table.setItem(row, 7, _cell(tau_str))
+            pct_item = _cell(pct_str)
             if pct_str:
                 pct_item.setForeground(QColor(_pct_color(pct_val)))
             self._table.setItem(row, 8, pct_item)
-            self._table.setItem(row, 9, QTableWidgetItem(r_pred_str))
-            self._table.setItem(row, 10, QTableWidgetItem(g_pred_str))
+            self._table.setItem(row, 9, _cell(r_pred_str))
+            self._table.setItem(row, 10, _cell(g_pred_str))
 
-        # Total row
         total_row = len(pairs)
         t_first = self._temps.get(self._chain[0], float("nan"))
         t_last = self._temps.get(self._chain[-1], float("nan"))
@@ -649,34 +842,33 @@ class ConductivityPanel(QWidget):
         total_G = P / total_dt if total_dt != 0 and P != 0 else float("nan")
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
 
-        self._table.setItem(total_row, 0, QTableWidgetItem("ИТОГО"))
+        self._table.setItem(total_row, 0, _cell("ИТОГО"))
         self._table.setItem(
-            total_row, 1, QTableWidgetItem(f"{t_first:.4f}" if math.isfinite(t_first) else "—")
+            total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—")
         )
+        self._table.setItem(total_row, 2, _cell(f"{t_last:.4f}" if math.isfinite(t_last) else "—"))
         self._table.setItem(
-            total_row, 2, QTableWidgetItem(f"{t_last:.4f}" if math.isfinite(t_last) else "—")
-        )
-        self._table.setItem(
-            total_row, 3, QTableWidgetItem(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—")
+            total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—")
         )
         self._table.setItem(
             total_row,
             4,
-            QTableWidgetItem(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"),
+            _cell(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"),
         )
         self._table.setItem(
-            total_row, 5, QTableWidgetItem(f"{total_G:.4g}" if math.isfinite(total_G) else "—")
+            total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—")
+        )
+        self._table.setItem(total_row, 6, _cell(""))
+        self._table.setItem(total_row, 7, _cell(""))
+        self._table.setItem(total_row, 8, _cell(""))
+        self._table.setItem(
+            total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—")
         )
         self._table.setItem(
-            total_row, 9, QTableWidgetItem(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—")
-        )
-        self._table.setItem(
-            total_row,
-            10,
-            QTableWidgetItem(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—"),
+            total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—")
         )
 
-        bold_font = QFont()
+        bold_font = _mono_cell_font()
         bold_font.setBold(True)
         for col in range(len(_COL_HEADERS)):
             item = self._table.item(total_row, col)
@@ -685,29 +877,48 @@ class ConductivityPanel(QWidget):
 
     def _update_banner(self, preds: dict) -> None:
         if len(self._chain) < 2:
-            self._banner.setText("")
-            self._banner.clear_message()
+            self._set_steady_banner("", None)
             return
-
         valid_preds = [preds.get(ch) for ch in self._chain if preds.get(ch) and preds[ch].valid]
         if not valid_preds:
-            self._banner.show_info("Прогноз: сбор данных...")
+            self._set_steady_banner("Прогноз: сбор данных...", theme.STATUS_INFO)
             return
-
         min_pct = min(p.percent_settled for p in valid_preds)
         max_tau = max(p.tau_s for p in valid_preds) if valid_preds else 0
-
         if min_pct >= 99.0:
-            self._banner.show_success("ГОТОВО — стационар достигнут")
+            self._set_steady_banner("ГОТОВО — стационар достигнут", theme.STATUS_OK)
         elif min_pct >= 95.0:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
-            self._banner.show_warning(f"Стабилизация {min_pct:.0f}% — ещё ~{remaining:.0f} мин")
+            self._set_steady_banner(
+                f"Стабилизация {min_pct:.0f}% — ещё ~{remaining:.0f} мин",
+                theme.STATUS_WARNING,
+            )
         else:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
-            self._banner.show_info(f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин")
+            self._set_steady_banner(
+                f"Стабилизация {min_pct:.0f}% — прогноз ~{remaining:.0f} мин",
+                theme.STATUS_INFO,
+            )
 
-    def _is_good_pred(self, p) -> bool:
-        """Check if prediction is physically meaningful for display."""
+    def _set_steady_banner(self, text: str, color: str | None) -> None:
+        self._steady_banner_label.setText(text)
+        if not text or color is None:
+            self._steady_banner_label.setStyleSheet(
+                f"#steadyBanner {{ background: transparent; border: none;"
+                f" color: {theme.MUTED_FOREGROUND}; }}"
+            )
+            return
+        self._steady_banner_label.setStyleSheet(
+            f"#steadyBanner {{"
+            f" color: {theme.FOREGROUND};"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {color};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f"}}"
+        )
+
+    @staticmethod
+    def _is_good_pred(p) -> bool:
         return (
             p is not None
             and p.valid
@@ -716,27 +927,27 @@ class ConductivityPanel(QWidget):
             and abs(p.t_predicted - p.t_current) < 50.0
         )
 
-    def _update_pred_lines(self, preds: dict) -> None:
-        """Clear prediction curves — steady-state chart doesn't need forecast."""
-        for ch in list(self._pred_lines.keys()):
-            self._plot.removeItem(self._pred_lines.pop(ch))
-
     def _update_stability(self) -> None:
         if not self._chain:
             self._stability_label.setText("Стабильность: —")
-            apply_status_label_style(self._stability_label, "muted")
+            self._stability_label.setStyleSheet(
+                f"color: {theme.MUTED_FOREGROUND};"
+                f" background: transparent; border: none;"
+                f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            )
             return
-
         stable = True
         max_rate = 0.0
-
         for ch in self._chain:
             buf = self._rate_buffers.get(ch)
             if not buf or len(buf) < 10:
                 self._stability_label.setText("Стабильность: сбор данных...")
-                apply_status_label_style(self._stability_label, "muted")
+                self._stability_label.setStyleSheet(
+                    f"color: {theme.MUTED_FOREGROUND};"
+                    f" background: transparent; border: none;"
+                    f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+                )
                 return
-
             t0, v0 = buf[0]
             t1, v1 = buf[-1]
             dt_s = t1 - t0
@@ -745,78 +956,73 @@ class ConductivityPanel(QWidget):
                 max_rate = max(max_rate, rate)
                 if rate > _STABILITY_THRESHOLD:
                     stable = False
-
         if stable:
             self._stability_label.setText(f"Стабильно (dT/dt = {max_rate:.4f} К/мин)")
-            apply_status_label_style(self._stability_label, "success", bold=True)
+            color = theme.STATUS_OK
         else:
             self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
-            apply_status_label_style(self._stability_label, "warning", bold=True)
+            color = theme.STATUS_WARNING
+        self._stability_label.setStyleSheet(
+            f"color: {color};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
 
     def _update_plot(self) -> None:
-        """Update plot: full history + 25% extrapolation zone."""
         now = time.time()
-
         t_start = now
         for ch in self._chain:
             buf = self._buffers.get(ch)
             if buf and len(buf) > 0:
                 t_start = min(t_start, buf[0][0])
-
         for ch, item in self._plot_items.items():
             buf = self._buffers.get(ch)
             if not buf:
                 item.setData([], [])
                 continue
             xs = [t for t, _ in buf]
-            ys = [v for t, v in buf]
+            ys = [v for _, v in buf]
             item.setData(xs, ys)
-
         if self._plot_items and t_start < now:
             forecast_s = (now - t_start) / 3.0
             self._plot.getPlotItem().setXRange(t_start, now + forecast_s, padding=0.02)
 
     # ------------------------------------------------------------------
-    # Auto-sweep (Автоизмерение)
+    # Auto-sweep (preserved verbatim from v1 semantics)
     # ------------------------------------------------------------------
 
     def _generate_power_list(self) -> list[float]:
-        """Generate power list from start/step/count."""
         start = self._power_start_spin.value()
         step = self._power_step_spin.value()
         count = self._power_count_spin.value()
         return [round(start + i * step, 6) for i in range(count)]
 
     def _update_power_preview(self) -> None:
-        """Show generated power list in preview label."""
         powers = self._generate_power_list()
         if len(powers) <= 6:
             text = ", ".join(f"{p:.4g}" for p in powers)
         else:
             first3 = ", ".join(f"{p:.4g}" for p in powers[:3])
             text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
-        self._power_preview.setText(text)
+        self._power_preview.setText("Список мощностей: " + text)
 
     def _send_auto_cmd(self, cmd: dict) -> None:
-        """Fire-and-forget Keithley command via worker thread (non-blocking)."""
         worker = ZmqCommandWorker(cmd, parent=self)
         worker.finished.connect(self._on_auto_cmd_result)
-        self._auto_cmd_worker = worker
+        self._auto_workers.append(worker)
         worker.start()
 
     @Slot(dict)
     def _on_auto_cmd_result(self, result: dict) -> None:
-        """Log failures from async Keithley commands."""
+        self._auto_workers = [w for w in self._auto_workers if w.isRunning()]
         if not result.get("ok"):
             logger.warning("Авто-команда Keithley: %s", result.get("error", "?"))
 
     @Slot()
     def _on_auto_start(self) -> None:
-        """Запуск автоматической развёртки по мощности."""
         if len(self._chain) < 2:
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
             return
-
         powers = self._generate_power_list()
         if not powers:
             QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
@@ -827,15 +1033,13 @@ class ConductivityPanel(QWidget):
         self._auto_results = []
         self._auto_state = "stabilizing"
 
-        # UI
         self._auto_start_btn.setEnabled(False)
         self._auto_stop_btn.setEnabled(True)
         self._auto_progress.setVisible(True)
         self._auto_progress.setValue(0)
+        self._auto_status_label.setVisible(True)
         self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
-        apply_status_label_style(self._auto_status_label, "info")
 
-        # Send first power command
         self._auto_step_start = time.monotonic()
         self._send_auto_cmd(
             {
@@ -845,35 +1049,30 @@ class ConductivityPanel(QWidget):
             }
         )
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
-
         self._auto_timer.start()
+        self.auto_sweep_started.emit()
 
     @Slot()
     def _on_auto_stop(self) -> None:
-        """Прервать автоизмерение."""
         self._auto_state = "idle"
         self._auto_timer.stop()
         self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
-
-        self._auto_start_btn.setEnabled(True)
+        self._auto_start_btn.setEnabled(self._connected)
         self._auto_stop_btn.setEnabled(False)
         self._auto_progress.setVisible(False)
         self._auto_status_label.setText("Остановлено оператором")
-        apply_status_label_style(self._auto_status_label, "warning")
         logger.info("Автоизмерение: остановлено оператором")
+        self.auto_sweep_aborted.emit("operator_stop")
 
     @Slot()
     def _auto_tick(self) -> None:
-        """Check stabilization using SteadyStatePredictor's percent_settled."""
         if self._auto_state != "stabilizing":
             return
-
         elapsed = time.monotonic() - self._auto_step_start
         step_total = len(self._auto_power_list)
         step_idx = self._auto_step
         P = self._auto_power_list[step_idx]
 
-        # Collect percent_settled for all chain channels
         settled_values: list[float] = []
         for ch in self._chain:
             pred = self._predictor.get_prediction(ch)
@@ -881,22 +1080,15 @@ class ConductivityPanel(QWidget):
                 settled_values.append(pred.percent_settled)
             else:
                 settled_values.append(0.0)
-
         min_settled = min(settled_values) if settled_values else 0.0
-
-        # Check stabilization:
-        # 1. Minimum wait time elapsed (avoid false positive from initial transient)
-        # 2. All channels above threshold percent_settled
         threshold = self._settled_pct_spin.value()
         min_wait = self._min_wait_spin.value()
         is_stable = elapsed >= min_wait and min_settled >= threshold
 
-        # Progress bar
         step_progress = min(min_settled / threshold, 1.0) if threshold > 0 else 1.0
         pct = int(((step_idx + step_progress) / step_total) * 100)
         self._auto_progress.setValue(min(pct, 99))
 
-        # Status label with live percent_settled
         settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
         self._auto_status_label.setText(
             f"Шаг {step_idx + 1}/{step_total} — "
@@ -927,11 +1119,9 @@ class ConductivityPanel(QWidget):
                 )
 
     def _auto_record_point(self) -> None:
-        """Записать текущие R/G для данного шага."""
         P = self._auto_power_list[self._auto_step]
         if len(self._chain) < 2:
             return
-
         hot_ch = self._chain[0]
         cold_ch = self._chain[-1]
         T_hot = self._temps.get(hot_ch, float("nan"))
@@ -939,14 +1129,12 @@ class ConductivityPanel(QWidget):
         dT = T_hot - T_cold
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
-
         settled_values = []
         for ch in self._chain:
             pred = self._predictor.get_prediction(ch)
             if pred and pred.valid:
                 settled_values.append(pred.percent_settled)
         min_settled = min(settled_values) if settled_values else 0.0
-
         self._auto_results.append(
             {
                 "P": P,
@@ -968,38 +1156,32 @@ class ConductivityPanel(QWidget):
         )
 
     def _auto_complete(self) -> None:
-        """Завершить развёртку."""
         self._auto_state = "done"
         self._auto_timer.stop()
         self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
-
-        self._auto_start_btn.setEnabled(True)
+        self._auto_start_btn.setEnabled(self._connected)
         self._auto_stop_btn.setEnabled(False)
         self._auto_progress.setValue(100)
-
         n = len(self._auto_results)
         self._auto_status_label.setText(f"Завершено: {n} точек измерено")
-        apply_status_label_style(self._auto_status_label, "success", bold=True)
         logger.info("Автоизмерение: завершено, %d точек", n)
-
         if self._auto_results:
             summary_lines = ["Автоизмерение завершено:\n"]
-            for r in self._auto_results:
+            for i, pt in enumerate(self._auto_results, 1):
                 summary_lines.append(
-                    f"  P={r['P']:.4g} Вт  dT={r['dT']:.4f} К  "
-                    f"R={r['R']:.4g} К/Вт  G={r['G']:.4g} Вт/К"
+                    f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, "
+                    f"R={pt['R']:.4g}, G={pt['G']:.4g}"
                 )
             QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
+        self.auto_sweep_completed.emit(n)
 
     # ------------------------------------------------------------------
     # Flight recorder
     # ------------------------------------------------------------------
 
     def _write_flight_log(self, now: float, preds: dict) -> None:
-        """Append one row to the conductivity flight log CSV."""
-        if not self._chain or len(self._chain) < 2:
+        if len(self._chain) < 2:
             return
-
         if self._flight_log is None:
             from cryodaq.paths import get_data_dir
 
@@ -1031,14 +1213,12 @@ class ConductivityPanel(QWidget):
                     "auto_sweep_power",
                 ]
             )
-
         hot_ch = self._chain[0]
         cold_ch = self._chain[-1]
         T_hot = self._temps.get(hot_ch, float("nan"))
         T_cold = self._temps.get(cold_ch, float("nan"))
         dT = T_hot - T_cold
         P = self._power
-
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
 
@@ -1047,7 +1227,6 @@ class ConductivityPanel(QWidget):
         R_pred = G_pred = float("nan")
         pct_hot = pct_cold = 0.0
         tau_hot = tau_cold = T_inf_hot = T_inf_cold = float("nan")
-
         if p_hot and p_hot.valid:
             pct_hot = p_hot.percent_settled
             tau_hot = p_hot.tau_s
@@ -1056,7 +1235,6 @@ class ConductivityPanel(QWidget):
             pct_cold = p_cold.percent_settled
             tau_cold = p_cold.tau_s
             T_inf_cold = p_cold.t_predicted
-
         if self._is_good_pred(p_hot) and self._is_good_pred(p_cold):
             dt_pred = T_inf_hot - T_inf_cold
             if P != 0 and math.isfinite(dt_pred) and dt_pred != 0:
@@ -1069,7 +1247,6 @@ class ConductivityPanel(QWidget):
             if self._auto_state == "stabilizing" and self._auto_step < len(self._auto_power_list)
             else 0
         )
-
         elapsed = now - self._buffers[hot_ch][0][0] if self._buffers.get(hot_ch) else 0
 
         self._flight_log_writer.writerow(
@@ -1103,28 +1280,25 @@ class ConductivityPanel(QWidget):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
-    # Export
+    # Manual CSV export
     # ------------------------------------------------------------------
 
     @Slot()
     def _on_export(self) -> None:
         if len(self._chain) < 2:
+            self.show_warning("Выберите минимум 2 датчика в цепочке.")
             return
-
         path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Экспорт теплопроводности",
-            "",
-            "CSV файлы (*.csv)",
+            self, "Экспорт теплопроводности", "", "CSV файлы (*.csv)"
         )
         if not path:
             return
-
+        out = Path(path)
         now = datetime.now(UTC)
         P = self._power
         preds = self._predictor.get_all_predictions()
 
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        with out.open("w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow(
                 [
@@ -1142,16 +1316,13 @@ class ConductivityPanel(QWidget):
                     "settled_%",
                 ]
             )
-
-            for hot_ch, cold_ch in zip(self._chain[:-1], self._chain[1:]):
+            for hot_ch, cold_ch in zip(self._chain[:-1], self._chain[1:], strict=False):
                 t_hot = self._temps.get(hot_ch, float("nan"))
                 t_cold = self._temps.get(cold_ch, float("nan"))
                 dt = t_hot - t_cold
                 R = dt / P if P != 0 else float("nan")
                 G = P / dt if dt != 0 else float("nan")
                 t_values = [self._temps.get(ch, float("nan")) for ch in self._chain]
-
-                # Prediction data
                 p_hot = preds.get(hot_ch)
                 p_cold = preds.get(cold_ch)
                 t_inf_hot = p_hot.t_predicted if p_hot and p_hot.valid else float("nan")
@@ -1163,7 +1334,6 @@ class ConductivityPanel(QWidget):
                     p_hot.percent_settled if p_hot and p_hot.valid else 0,
                     p_cold.percent_settled if p_cold and p_cold.valid else 0,
                 )
-
                 w.writerow(
                     [
                         now.isoformat(),
@@ -1180,5 +1350,74 @@ class ConductivityPanel(QWidget):
                         settled,
                     ]
                 )
+        self.show_info(f"Экспортировано: {out}")
 
-        logger.info("Теплопроводность экспортирована: %s", path)
+    # ------------------------------------------------------------------
+    # Public state pushers / accessors
+    # ------------------------------------------------------------------
+
+    def set_connected(self, connected: bool) -> None:
+        if connected == self._connected:
+            return
+        self._connected = connected
+        self._update_control_enablement()
+        if not connected:
+            self.show_error("Нет связи с engine")
+        else:
+            self.clear_message()
+
+    def _update_control_enablement(self) -> None:
+        # Auto-sweep Start gated on connection. Stop stays enabled while
+        # stabilizing so operator can always abort. Chain selection +
+        # CSV export stay enabled regardless (local work).
+        start_ok = self._connected and self._auto_state != "stabilizing"
+        self._auto_start_btn.setEnabled(start_ok)
+        self._auto_stop_btn.setEnabled(self._auto_state == "stabilizing")
+
+    def get_auto_state(self) -> str:
+        """Public accessor for the auto-sweep FSM state.
+
+        Returns one of ``"idle"``, ``"stabilizing"``, ``"done"``.
+
+        Intended for external finalize guards (e.g. ExperimentOverlay v3,
+        II.9 follow-up) that must block experiment finalization while
+        the auto-sweep is actively stabilizing — closing the panel or
+        ending the experiment mid-sweep would leave Keithley powered.
+        """
+
+        return self._auto_state
+
+    def is_auto_sweep_active(self) -> bool:
+        """True iff the auto-sweep FSM is actively stabilizing."""
+        return self._auto_state == "stabilizing"
+
+    # ------------------------------------------------------------------
+    # Banner
+    # ------------------------------------------------------------------
+
+    def show_info(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_INFO)
+
+    def show_warning(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_WARNING)
+
+    def show_error(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_FAULT)
+
+    def clear_message(self) -> None:
+        self._banner_label.setText("")
+        self._banner_label.setVisible(False)
+        self._banner_timer.stop()
+
+    def _set_banner(self, text: str, color: str) -> None:
+        self._banner_label.setText(text)
+        self._banner_label.setStyleSheet(
+            f"#conductivityBanner {{"
+            f" color: {theme.FOREGROUND};"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {color};"
+            f" border-radius: {theme.RADIUS_SM}px;"
+            f"}}"
+        )
+        self._banner_label.setVisible(True)
+        self._banner_timer.start()

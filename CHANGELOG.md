@@ -11,6 +11,34 @@
 
 ### Changed
 
+- **Phase II.5 ConductivityOverlay rebuilt.** Full-featured thermal
+  conductivity surface in
+  `src/cryodaq/gui/shell/overlays/conductivity_panel.py` replaces the
+  legacy v1 widget. Auto-sweep state machine preserved verbatim
+  (`idle` / `stabilizing` / `done`, 1 Hz tick, `SteadyStatePredictor`
+  driving settling detection with `percent_settled` threshold +
+  `min_wait` gate, Keithley power stepping via `ZmqCommandWorker`
+  against `keithley_set_target` / `keithley_stop` — unchanged from v1).
+  R/G table (11 columns with ИТОГО summary row), stability indicator
+  (`dT/dt > 0.01 К/мин` threshold), steady-state banner adapting to
+  predictor output, chain selection with reorder buttons + manual
+  CSV export. Flight recorder schema preserved (18 columns,
+  `utf-8-sig`, `get_data_dir() / conductivity_logs /
+  conductivity_<ts>.csv`). Public accessors
+  `get_auto_state() -> str` + `is_auto_sweep_active() -> bool`
+  replace direct `_auto_state` attribute access for external finalize
+  guards (II.9 follow-up wiring). DS v1.0.1 tokens throughout — zero
+  legacy tokens, zero emoji, zero hardcoded hex colors (plot pens come
+  from `PLOT_LINE_PALETTE` via `series_pen` indexing). Host
+  Integration Contract wired: `MainWindowV2._tick_status` connection
+  mirror + `_ensure_overlay("conductivity")` replay; readings routing
+  (T-prefix + `/smu*/power`) unchanged from v1 shell contract.
+  Plugin-duplication concern from project memory: investigated — no
+  engine-side R/G publisher exists (grep returns zero matches),
+  GUI-side compute is the only path. Legacy widget at
+  `src/cryodaq/gui/widgets/conductivity_panel.py` marked DEPRECATED;
+  removal in Phase III.3.
+
 - **Phase II.2 ArchiveOverlay rebuilt + K6 bulk export migration.**
   Full-featured experiment archive surface in
   `src/cryodaq/gui/shell/overlays/archive_panel.py` replaces the legacy
