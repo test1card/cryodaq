@@ -35,6 +35,13 @@ dependencies = [
     # 1200+ icons vs. 10 SVGs previously; theming falls out naturally
     # because qta.icon(color=...) renders fresh on each call.
     "qtawesome>=1.4,<2",
+    # IV.4 Finding 1: pyarrow promoted from [archive] extra to base.
+    # Backend already exports Parquet best-effort on finalize; optional
+    # install meant silent skip with "pyarrow not installed" warning
+    # whenever the lab PC missed the extras. UI gains an explicit
+    # Parquet export button in the same commit, so the feature must
+    # work out of the box. Adds ~60 MB to the install footprint.
+    "pyarrow>=15,<22",
 ]
 
 [project.optional-dependencies]
@@ -51,9 +58,11 @@ web = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
 ]
-archive = [
-    "pyarrow>=15.0",
-]
+# IV.4 Finding 1: archive extra retained as a no-op alias so any
+# deployment / CI script pinned to `pip install -e ".[archive]"` keeps
+# working. pyarrow now ships in base deps (see above); this list is
+# intentionally empty.
+archive = []
 
 [project.scripts]
 cryodaq-engine = "cryodaq.engine:main"

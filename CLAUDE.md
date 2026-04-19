@@ -50,7 +50,9 @@ Python 3.12+, asyncio, PySide6. Current package metadata: `0.13.0`.
 
 ```bash
 pip install -e ".[dev,web]"    # Install runtime, dev, and optional web dependencies
-pip install -e ".[dev,web,archive]"  # + Parquet archive support (pyarrow)
+# (Parquet archive support ships by default since IV.4 — pyarrow is a
+#  base dep. The legacy `archive` extra is retained as a no-op alias
+#  so older install lines keep working: `pip install -e ".[dev,web,archive]"`.)
 cryodaq                        # Operator launcher
 cryodaq-engine                 # Run engine headless (real instruments)
 cryodaq-engine --mock          # Run engine with simulated data

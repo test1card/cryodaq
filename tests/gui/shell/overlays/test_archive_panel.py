@@ -97,6 +97,7 @@ def test_panel_renders_core_surfaces(app):
     assert panel._export_csv_btn is not None
     assert panel._export_hdf5_btn is not None
     assert panel._export_xlsx_btn is not None
+    assert panel._export_parquet_btn is not None
     assert panel._refresh_btn is not None
     assert panel._regenerate_btn is not None
 
@@ -373,6 +374,100 @@ def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     assert not panel._export_in_flight
 
 
+def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
+    """IV.4 F1: cancelling the Parquet QFileDialog does not spawn a worker."""
+    panel = ArchivePanel()
+    panel.set_connected(True)
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
+    seen: list[str] = []
+    panel.export_requested.connect(seen.append)
+    panel._on_export_parquet_clicked()
+    assert seen == ["parquet"]
+    assert not panel._export_in_flight
+    assert panel._export_parquet_btn.isEnabled()
+
+
+def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
+    """IV.4 F1: picking a path fires up the in-process worker and
+    marks the export in flight. The worker itself runs synchronously
+    in the monkeypatched runner, so we only observe state transitions."""
+    panel = ArchivePanel()
+    panel.set_connected(True)
+    from PySide6.QtWidgets import QFileDialog
+
+    output = tmp_path / "export.parquet"
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: (str(output), "Parquet файлы (*.parquet)")),
+    )
+
+    started: list[tuple[str, str]] = []
+
+    def fake_start(self_panel, kind: str, runner, *, unit: str) -> None:
+        started.append((kind, unit))
+
+    monkeypatch.setattr(ArchivePanel, "_start_export_worker", fake_start)
+    panel._on_export_parquet_clicked()
+    assert started == [("parquet", "строк")]
+
+
+def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
+    """The runner closure passed to _start_export_worker invokes the
+    parquet_archive helper with the chosen output path and bulk
+    [2000, now] range."""
+    panel = ArchivePanel()
+    panel.set_connected(True)
+    from PySide6.QtWidgets import QFileDialog
+
+    output = tmp_path / "export.parquet"
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: (str(output), "Parquet файлы (*.parquet)")),
+    )
+
+    captured: dict = {}
+
+    def fake_export(*, experiment_id, start_time, end_time, sqlite_root, output_path):
+        captured.update(
+            experiment_id=experiment_id,
+            start_time=start_time,
+            end_time=end_time,
+            output_path=output_path,
+        )
+
+        class _R:
+            rows_written = 123
+
+        return _R()
+
+    import cryodaq.storage.parquet_archive as pa_mod
+
+    monkeypatch.setattr(pa_mod, "export_experiment_readings_to_parquet", fake_export)
+
+    captured_runner: list = []
+
+    def capture_runner(self_panel, kind: str, runner, *, unit: str) -> None:
+        captured_runner.append((kind, runner, unit))
+
+    monkeypatch.setattr(ArchivePanel, "_start_export_worker", capture_runner)
+    panel._on_export_parquet_clicked()
+    assert captured_runner
+    _, runner, _ = captured_runner[0]
+    rows = runner()
+    assert rows == 123
+    assert captured["experiment_id"] == "bulk_export"
+    assert captured["output_path"] == output
+    assert captured["start_time"].year == 2000
+    # end_time is "now" within a few seconds.
+    from datetime import UTC, datetime
+
+    assert (datetime.now(UTC) - captured["end_time"]).total_seconds() < 5.0
+
+
 def test_export_in_flight_disables_all_export_buttons(app):
     panel = ArchivePanel()
     panel.set_connected(True)
@@ -382,9 +477,11 @@ def test_export_in_flight_disables_all_export_buttons(app):
     assert not panel._export_csv_btn.isEnabled()
     assert not panel._export_hdf5_btn.isEnabled()
     assert not panel._export_xlsx_btn.isEnabled()
+    assert not panel._export_parquet_btn.isEnabled()
     panel._export_in_flight = False
     panel._update_control_enablement()
     assert panel._export_csv_btn.isEnabled()
+    assert panel._export_parquet_btn.isEnabled()
 
 
 # ----------------------------------------------------------------------
@@ -401,6 +498,7 @@ def test_disconnected_disables_refresh_regenerate_export(app):
     assert not panel._export_csv_btn.isEnabled()
     assert not panel._export_hdf5_btn.isEnabled()
     assert not panel._export_xlsx_btn.isEnabled()
+    assert not panel._export_parquet_btn.isEnabled()
 
 
 def test_reconnect_reenables_controls(app):

@@ -702,6 +702,17 @@ class ArchivePanel(QWidget):
         _style_button(self._export_xlsx_btn, "neutral")
         self._export_xlsx_btn.clicked.connect(self._on_export_xlsx_clicked)
         row.addWidget(self._export_xlsx_btn)
+        # IV.4 F1: fourth format — Parquet (Snappy-compressed columnar).
+        # Backend already exports Parquet best-effort on experiment
+        # finalize; this is the first UI surface for arbitrary-range
+        # bulk export.
+        self._export_parquet_btn = QPushButton("Parquet...")
+        _style_button(self._export_parquet_btn, "neutral")
+        self._export_parquet_btn.setToolTip(
+            "Экспорт всех SQLite данных в Parquet (Snappy compression)"
+        )
+        self._export_parquet_btn.clicked.connect(self._on_export_parquet_clicked)
+        row.addWidget(self._export_parquet_btn)
         row.addStretch()
         layout.addLayout(row)
         return card
@@ -1015,6 +1026,52 @@ class ArchivePanel(QWidget):
 
         self._start_export_worker("xlsx", runner, unit="записей")
 
+    def _on_export_parquet_clicked(self) -> None:
+        """Bulk Parquet export — IV.4 F1.
+
+        Mirrors CSV / HDF5 / Excel handlers: emits export_requested,
+        opens QFileDialog, and runs the exporter in an in-process
+        _ExportWorker thread. The underlying helper (Phase 2e stage 1)
+        streams daily SQLite files chunk by chunk via
+        ``pyarrow.ParquetWriter`` so large archives don't load into
+        memory all at once.
+        """
+        self.export_requested.emit("parquet")
+        from datetime import UTC, datetime
+
+        default_name = f"cryodaq_export_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.parquet"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт в Parquet",
+            default_name,
+            "Parquet файлы (*.parquet)",
+        )
+        if not path_str:
+            return
+        output = Path(path_str)
+
+        from cryodaq.paths import get_data_dir
+        from cryodaq.storage.parquet_archive import (
+            export_experiment_readings_to_parquet,
+        )
+
+        data_dir = get_data_dir()
+
+        def runner() -> int:
+            # Bulk export — no per-experiment scoping. [2000-01-01, now]
+            # covers the full historical range; the exporter skips
+            # missing daily DBs cleanly.
+            result = export_experiment_readings_to_parquet(
+                experiment_id="bulk_export",
+                start_time=datetime(2000, 1, 1, tzinfo=UTC),
+                end_time=datetime.now(UTC),
+                sqlite_root=data_dir,
+                output_path=output,
+            )
+            return result.rows_written
+
+        self._start_export_worker("parquet", runner, unit="строк")
+
     def _start_export_worker(self, kind: str, runner: Callable[[], int], *, unit: str) -> None:
         self._export_in_flight = True
         self._update_control_enablement()
@@ -1061,12 +1118,7 @@ class ArchivePanel(QWidget):
         # no longer fires a refresh from __init__(), so this is the
         # entry point that populates the timeline once the shell has
         # confirmed the engine is reachable.
-        if (
-            connected
-            and not was_connected
-            and not self._entries
-            and not self._refresh_in_flight
-        ):
+        if connected and not was_connected and not self._entries and not self._refresh_in_flight:
             self.refresh_archive()
 
     def _update_control_enablement(self) -> None:
@@ -1080,6 +1132,7 @@ class ArchivePanel(QWidget):
         self._export_csv_btn.setEnabled(export_ok)
         self._export_hdf5_btn.setEnabled(export_ok)
         self._export_xlsx_btn.setEnabled(export_ok)
+        self._export_parquet_btn.setEnabled(export_ok)
 
     # ------------------------------------------------------------------
     # Banner

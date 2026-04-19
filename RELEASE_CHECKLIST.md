@@ -20,6 +20,10 @@
 - [ ] `pytest` запускается из того же environment, где выполнен `pip install -e ...`
 - [ ] GUI/test workflow не проверяется без установленных `PySide6` и `pyqtgraph`
 - [ ] Web dashboard не считается частью базового smoke path без extra `web`
+- [ ] Parquet-экспорт работает из коробки — начиная с IV.4 `pyarrow>=15`
+      входит в базовые зависимости, дополнительно ставить `[archive]`
+      не требуется. Extra `archive` сохранён как no-op alias для
+      обратной совместимости со старыми install-строками.
 
 ## 3. Обязательный regression matrix
 
