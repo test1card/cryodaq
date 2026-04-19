@@ -189,6 +189,12 @@ class PredictionWidget(QWidget):
         pi = plot.getPlotItem()
         if self._y_unit:
             pi.setLabel("left", self._y_label, units=self._y_unit, color=theme.PLOT_LABEL_COLOR)
+            # Disable pyqtgraph's auto SI prefix. For physics plots with a
+            # unit in the label, axis values must stay in the stated unit —
+            # never auto-scaled to mK / µK / kK etc. Cooldown went 300→4 K
+            # and the default rescaled to "4000 mK", misreadable by 1000×.
+            left_axis = pi.getAxis("left")
+            left_axis.enableAutoSIPrefix(False)
         else:
             pi.setLabel("left", self._y_label, color=theme.PLOT_LABEL_COLOR)
         pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
@@ -363,8 +369,7 @@ class PredictionWidget(QWidget):
             # interval). Keeps operator-facing copy consistent with
             # the rest of the overlay.
             self._ci_label.setText(
-                f"± {self._format_value(abs(half_ci))}, "
-                f"{self._ci_level_pct:.0f}% ДИ"
+                f"± {self._format_value(abs(half_ci))}, {self._ci_level_pct:.0f}% ДИ"
             )
         else:
             self._ci_label.setText("")

@@ -133,6 +133,46 @@ def test_log_y_readout_uses_scientific_notation(app):
     assert "мбар" in text
 
 
+def test_left_axis_auto_si_prefix_disabled_linear_y(app):
+    """IV.1 finding 2 — cooldown Y axis must stay in K across 300→4 K range.
+
+    Before the fix pyqtgraph auto-rescaled the axis to mK when the value
+    range exceeded ~1000× contrast, so "4 K" rendered as "4000 mK" and
+    operators misread the absolute temperature by 1000×.
+    """
+    w = PredictionWidget("Cooldown", "Температура", "K", log_y=False)
+    left_axis = w._plot.getPlotItem().getAxis("left")
+    assert left_axis.autoSIPrefix is False
+
+
+def test_left_axis_auto_si_prefix_disabled_log_y(app):
+    """IV.1 finding 2 — vacuum prediction must not auto-prefix мбар either."""
+    w = PredictionWidget("Vacuum", "Давление", "мбар", log_y=True)
+    left_axis = w._plot.getPlotItem().getAxis("left")
+    assert left_axis.autoSIPrefix is False
+
+
+def test_k_range_300_to_4_does_not_auto_rescale_to_mk(app):
+    """IV.1 finding 2 — integration: 300→4 K history should not flip axis to mK.
+
+    Feed a full cooldown history + forecast; read the axis label. With
+    autoSIPrefix disabled, pyqtgraph leaves the stated unit in the label
+    text. With it enabled (the bug), the label would be rewritten to
+    include an "m" prefix.
+    """
+    w = PredictionWidget("Cooldown", "Температура", "K", log_y=False)
+    # Cooldown trajectory: 300 K → 4 K over 24 hours.
+    now = 1_700_000_000.0
+    hist = [(now + i * 60.0, 300.0 - (296.0 * i / 1440.0)) for i in range(1440)]
+    w.set_history(hist)
+    left_axis = w._plot.getPlotItem().getAxis("left")
+    # autoSIPrefix must still be False after populating data.
+    assert left_axis.autoSIPrefix is False
+    # label should not have been rewritten with an "m" prefix.
+    assert "mK" not in left_axis.labelString()
+    assert "мК" not in left_axis.labelString()
+
+
 def test_does_not_import_global_window_controller():
     """Prediction widget is forward-looking; must NOT subscribe."""
     from pathlib import Path

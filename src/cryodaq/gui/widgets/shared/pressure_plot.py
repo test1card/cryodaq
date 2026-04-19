@@ -102,13 +102,20 @@ class PressurePlot(QWidget):
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Давление", units="мбар", color=theme.PLOT_LABEL_COLOR)
-        pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
+        left_axis = pi.getAxis("left")
+        # Log-Y pressure uses ScientificLogAxisItem.tickStrings to render
+        # its own "1e-6" style labels; pyqtgraph's autoSIPrefix would
+        # additionally re-scale the axis to µбар / mбар. Force it off so
+        # the unit label in the axis title is always honored.
+        left_axis.enableAutoSIPrefix(False)
+        left_axis.setWidth(theme.PLOT_AXIS_WIDTH_PX)
         if self._show_date_axis and not self._forward_looking:
             pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
             date_axis = pg.DateAxisItem(orientation="bottom")
             self._plot.setAxisItems({"bottom": date_axis})
         else:
             pi.setLabel("bottom", "Время", units="с", color=theme.PLOT_LABEL_COLOR)
+            pi.getAxis("bottom").enableAutoSIPrefix(False)
         pi.setLogMode(x=False, y=True)
         if self._title:
             pi.setTitle(self._title)

@@ -66,9 +66,7 @@ class TempPlotWidget(QWidget):
         self._build_ui()
         self._rebuild_curves()
         self._channel_mgr.on_change(self._on_channels_changed)
-        get_time_window_controller().window_changed.connect(
-            self._on_global_window_changed
-        )
+        get_time_window_controller().window_changed.connect(self._on_global_window_changed)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -115,7 +113,11 @@ class TempPlotWidget(QWidget):
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Температура", units="K", color=theme.PLOT_LABEL_COLOR)
-        pi.getAxis("left").setWidth(theme.PLOT_AXIS_WIDTH_PX)
+        left_axis = pi.getAxis("left")
+        # Cryogenic plots must read absolute K; forbid pyqtgraph's default
+        # auto-rescale to mK / µK when the value range crosses decades.
+        left_axis.enableAutoSIPrefix(False)
+        left_axis.setWidth(theme.PLOT_AXIS_WIDTH_PX)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.getAxis("bottom").setStyle(showValues=False)

@@ -112,6 +112,7 @@ class PressurePanel(QWidget):
         # Background provided by gui.theme global pyqtgraph config.
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Давление", units="мбар", color="#AAAAAA")
+        pi.getAxis("left").enableAutoSIPrefix(False)
         pi.setLabel("bottom", "Время", color="#AAAAAA")
         pi.showGrid(x=True, y=True, alpha=0.3)
         # Логарифмическая ось Y

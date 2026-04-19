@@ -103,3 +103,16 @@ def test_set_title_updates(app):
     plot = PressurePlot(title="A")
     plot.set_title("B")
     assert plot.plot_item.getPlotItem().titleLabel.text == "B"
+
+
+def test_left_axis_auto_si_prefix_disabled(app):
+    """IV.1 finding 2 — left-axis must NOT auto-rescale to µбар / mбар.
+
+    ScientificLogAxisItem renders its own "1e-6" style ticks; pyqtgraph's
+    autoSIPrefix would re-scale on top of that and prefix labels with
+    SI multipliers. The left axis must stay in the stated unit at all
+    value ranges.
+    """
+    plot = PressurePlot()
+    left_axis = plot.plot_item.getPlotItem().getAxis("left")
+    assert left_axis.autoSIPrefix is False

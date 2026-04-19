@@ -291,6 +291,7 @@ class TemperaturePanel(QWidget):
 
         plot_item = pw.getPlotItem()
         plot_item.setLabel("left", "Температура", units="К", color="#AAAAAA")
+        plot_item.getAxis("left").enableAutoSIPrefix(False)
         plot_item.setLabel("bottom", "Время", color="#AAAAAA")
         plot_item.showGrid(x=True, y=True, alpha=0.3)
         plot_item.enableAutoRange(axis="y", enable=True)

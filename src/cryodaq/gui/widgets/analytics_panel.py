@@ -246,6 +246,10 @@ class AnalyticsPanel(QWidget):
 
         # Метки осей по умолчанию (режим R_thermal)
         pi.setLabel("left", "R_thermal", units="К/Вт", color="#AAAAAA")
+        # Disable pyqtgraph autoSIPrefix for the whole axis lifetime.
+        # Both modes (R_thermal К/Вт and Температура К) reuse this same
+        # left-axis object; setting once in _init_plot is enough.
+        pi.getAxis("left").enableAutoSIPrefix(False)
         pi.setLabel("bottom", "Время", color="#AAAAAA")
 
         # --- Линии ---

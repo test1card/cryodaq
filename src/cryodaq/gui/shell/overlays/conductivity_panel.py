@@ -474,6 +474,7 @@ class ConductivityPanel(QWidget):
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Температура", units="К")
+        pi.getAxis("left").enableAutoSIPrefix(False)
         pi.setLabel("bottom", "Время")
         pi.enableAutoRange(axis="y", enable=True)
         layout.addWidget(self._plot, stretch=1)

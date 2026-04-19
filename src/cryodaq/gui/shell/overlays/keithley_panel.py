@@ -401,10 +401,16 @@ class _SmuChannelBlock(QFrame):
                 _MEASUREMENT_LABELS[key],
                 units=_MEASUREMENT_UNITS[key],
             )
+            # Keithley measurements (V / I / P / R) must stay in their
+            # stated base units; autoSIPrefix would turn 0.5 V into
+            # 500 mV silently, confusing the operator about setpoint
+            # vs. measurement magnitude.
+            item.getAxis("left").enableAutoSIPrefix(False)
             # Phase III.D Item 8: X axis was tick-only ("-35 -30 … 0") with
             # no units; operator could not tell seconds from minutes. The
             # domain is seconds before now — label explicitly.
             item.setLabel("bottom", "Время", units="с")
+            item.getAxis("bottom").enableAutoSIPrefix(False)
             for axis_name in ("left", "bottom"):
                 axis = item.getAxis(axis_name)
                 if axis is not None:
