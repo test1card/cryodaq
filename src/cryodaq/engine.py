@@ -1879,9 +1879,9 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Kill existing engine and take over")
     args = parser.parse_args()
 
-    from cryodaq.logging_setup import setup_logging
+    from cryodaq.logging_setup import resolve_log_level, setup_logging
 
-    setup_logging("engine")
+    setup_logging("engine", level=resolve_log_level())
 
     if args.force:
         _force_kill_existing()

@@ -382,6 +382,14 @@ class LauncherWindow(QMainWindow):
         env["PYTHONUNBUFFERED"] = "1"
         if self._mock:
             env["CRYODAQ_MOCK"] = "1"
+        # IV.4 F2: propagate the GUI-persisted debug-mode flag to the
+        # engine subprocess so the engine uses DEBUG logging without
+        # having to re-read QSettings from its own process. Env var is
+        # the same one honoured by ``cryodaq.logging_setup.resolve_log_level``.
+        from cryodaq.logging_setup import read_debug_mode_from_qsettings
+
+        if read_debug_mode_from_qsettings():
+            env["CRYODAQ_LOG_LEVEL"] = "DEBUG"
 
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -657,6 +665,57 @@ class LauncherWindow(QMainWindow):
             theme_menu.addSeparator()
             for pid in extras:
                 _add_entry(pid)
+
+        # IV.4 F2: operator-level debug-logging toggle. Sits directly
+        # under «Настройки» alongside «Тема» so it shares the same
+        # menu location; state is persisted in QSettings and read by
+        # ``logging_setup.resolve_log_level`` on next startup. Launcher
+        # propagates the flag to the engine subprocess via
+        # CRYODAQ_LOG_LEVEL env var (see _start_engine).
+        settings_menu.addSeparator()
+        from cryodaq.logging_setup import read_debug_mode_from_qsettings
+
+        self._debug_logging_action = QAction(
+            "\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438",
+            self,
+            checkable=True,
+        )
+        self._debug_logging_action.setChecked(read_debug_mode_from_qsettings())
+        self._debug_logging_action.setStatusTip(
+            "\u0417\u0430\u043f\u0438\u0441\u044c DEBUG \u043b\u043e\u0433\u043e\u0432"
+            " \u0432 launcher / gui / engine \u0444\u0430\u0439\u043b\u044b."
+        )
+        self._debug_logging_action.triggered.connect(self._on_debug_logging_toggled)
+        settings_menu.addAction(self._debug_logging_action)
+
+    @Slot(bool)
+    def _on_debug_logging_toggled(self, checked: bool) -> None:
+        """Persist the debug-mode flag to QSettings and inform operator.
+
+        IV.4 F2: the flag is read on every launcher / gui / engine
+        start-up via ``resolve_log_level``. Applying the change requires
+        a launcher restart — existing root-logger handlers keep their
+        previously-configured level until a fresh ``setup_logging``
+        call fires. Dialog text is explicit about that.
+        """
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QMessageBox
+
+        settings = QSettings("FIAN", "CryoDAQ")
+        settings.setValue("logging/debug_mode", bool(checked))
+        state_ru = (
+            "\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b"
+            if checked
+            else "\u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u044b"
+        )  # noqa: E501
+        QMessageBox.information(
+            self,
+            "\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438",
+            f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
+            "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0440\u0438\u043c\u0435"
+            "\u043d\u044f\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u043f\u0435\u0440\u0435"
+            "\u0437\u0430\u043f\u0443\u0441\u043a\u0430 \u041b\u0430\u0443\u043d\u0447\u0435\u0440\u0430.",
+        )
 
     @Slot(str)
     def _on_theme_selected(self, theme_id: str) -> None:
@@ -1091,9 +1150,9 @@ def main() -> None:
     )
     args, remaining = parser.parse_known_args()
 
-    from cryodaq.logging_setup import setup_logging
+    from cryodaq.logging_setup import resolve_log_level, setup_logging
 
-    setup_logging("launcher")
+    setup_logging("launcher", level=resolve_log_level())
 
     mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
 

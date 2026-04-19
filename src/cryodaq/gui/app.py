@@ -146,13 +146,9 @@ def apply_fusion_dark_palette(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.Window, QColor(theme.BACKGROUND))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(theme.FOREGROUND))
     palette.setColor(QPalette.ColorRole.Base, QColor(theme.SURFACE_CARD))
-    palette.setColor(
-        QPalette.ColorRole.AlternateBase, QColor(theme.SURFACE_SUNKEN)
-    )
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(theme.SURFACE_SUNKEN))
     palette.setColor(QPalette.ColorRole.Text, QColor(theme.FOREGROUND))
-    palette.setColor(
-        QPalette.ColorRole.PlaceholderText, QColor(theme.MUTED_FOREGROUND)
-    )
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(theme.MUTED_FOREGROUND))
     palette.setColor(QPalette.ColorRole.Button, QColor(theme.SURFACE_CARD))
     palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.FOREGROUND))
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme.SURFACE_CARD))
@@ -163,9 +159,7 @@ def apply_fusion_dark_palette(app: QApplication) -> None:
     # taupe_quiet pre-III.A) — rendered selected alarm rows green and
     # misled operators reading a CRIT row as "green = ok".
     palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.SELECTION_BG))
-    palette.setColor(
-        QPalette.ColorRole.HighlightedText, QColor(theme.FOREGROUND)
-    )
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.FOREGROUND))
     palette.setColor(QPalette.ColorRole.BrightText, QColor(theme.STATUS_FAULT))
     palette.setColor(QPalette.ColorRole.Link, QColor(theme.ACCENT))
 
@@ -222,9 +216,9 @@ def main() -> None:
     # Do not add it here — too late for Windows spawn bootloader because
     # PySide6 is already imported at module load time above.
 
-    from cryodaq.logging_setup import setup_logging
+    from cryodaq.logging_setup import resolve_log_level, setup_logging
 
-    setup_logging("gui")
+    setup_logging("gui", level=resolve_log_level())
 
     app = QApplication(sys.argv)
 

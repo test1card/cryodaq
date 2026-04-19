@@ -24,7 +24,7 @@
 | # | Feature | Status | Effort | ROI |
 |---|---|---|---|---|
 | F1 | Parquet archive wire-up | ✅ DONE (UI + base dep, IV.4.F1) | S | H |
-| F2 | Debug mode toggle (verbose logging) | ⬜ | S | H |
+| F2 | Debug mode toggle (verbose logging) | ✅ DONE (IV.4.F2) | S | H |
 | F3 | Analytics placeholder widgets → data wiring | ⬜ | M | M |
 | F4 | Analytics lazy-open snapshot replay | ⬜ | S | M |
 | F5 | Engine events → Hermes webhook | ⬜ | M | M |

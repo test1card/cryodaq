@@ -7,16 +7,30 @@ and gui with a single configurable entry point that writes to both stderr
 Also applies a filter that redacts Telegram bot tokens (Phase 2b K.1
 defence-in-depth — combined with the SecretStr wrapper, prevents accidental
 token leaks via aiohttp debug logs or exception traces).
+
+IV.4 Finding 2: ``resolve_log_level()`` is the unified entry point for
+picking the logging level across launcher / GUI / engine. Priority:
+
+1. ``CRYODAQ_LOG_LEVEL`` environment variable (subprocess propagation
+   + operator shell override).
+2. GUI-persisted QSettings flag ``logging/debug_mode``.
+3. ``logging.INFO`` default.
 """
 
 from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 import re
 import sys
 
 from cryodaq.paths import get_logs_dir
+
+_QSETTINGS_ORG = "FIAN"
+_QSETTINGS_APP = "CryoDAQ"
+_QSETTINGS_DEBUG_KEY = "logging/debug_mode"
+_ENV_VAR = "CRYODAQ_LOG_LEVEL"
 
 # Telegram bot tokens follow ``botID:secret`` shape — 8+ digit bot ID +
 # colon + ~35-char base64-ish secret. The token can leak in TWO forms:
@@ -141,3 +155,49 @@ def setup_logging(
             root.addHandler(file_handler)
         except Exception as exc:
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
+
+
+def read_debug_mode_from_qsettings() -> bool:
+    """Read the debug-mode flag from QSettings, or False if unavailable.
+
+    Returns False if PySide6 is not importable (CLI-only engine runs
+    invoked without a GUI process ever having created the QSettings
+    file). Caller is also expected to check the ``CRYODAQ_LOG_LEVEL``
+    env var — this lets the launcher propagate the GUI choice to the
+    engine subprocess without having the engine re-read QSettings from
+    its own process.
+    """
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:
+        return False
+    try:
+        settings = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        value = settings.value(_QSETTINGS_DEBUG_KEY, False, type=bool)
+    except Exception:
+        return False
+    return bool(value)
+
+
+def resolve_log_level() -> int:
+    """Unified log-level resolver.
+
+    Priority:
+
+    1. ``CRYODAQ_LOG_LEVEL`` env var (explicit override, also used by
+       the launcher to propagate the GUI choice to the engine
+       subprocess).
+    2. QSettings ``logging/debug_mode`` flag.
+    3. ``logging.INFO`` default.
+
+    Values recognised on the env var (case-insensitive): ``DEBUG`` /
+    ``INFO``. Unrecognised values fall through to QSettings.
+    """
+    env = os.environ.get(_ENV_VAR, "").upper()
+    if env == "DEBUG":
+        return logging.DEBUG
+    if env == "INFO":
+        return logging.INFO
+    if read_debug_mode_from_qsettings():
+        return logging.DEBUG
+    return logging.INFO
