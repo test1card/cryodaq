@@ -1,0 +1,40 @@
+__meta_name__: "ГОСТ"
+__meta_description__: "Светлая — кремовая инженерная бумага с чёрной типографикой и винно-вишнёвым акцентом печати. Эстетика технической документации."
+
+# Surfaces — hue 47° sat 30–40% (тёплая бумажность, не желтушность)
+BACKGROUND: "#ece7d5"
+SURFACE_PANEL: "#e2dcc8"
+SURFACE_CARD: "#f5f1e2"
+SURFACE_ELEVATED: "#fffcf1"
+SURFACE_SUNKEN: "#d8d1b9"
+SURFACE_MUTED: "#e6e0cc"
+
+# Borders — 2.64:1 к CARD, видимая «линия линейки»
+BORDER: "#9e957c"
+BORDER_SUBTLE: "#c8c0a8"
+
+# Text — warm near-black (типографская краска, не pure black)
+FOREGROUND: "#1a1711"
+TEXT_SECONDARY: "#4e4838"
+MUTED_FOREGROUND: "#7c745e"
+TEXT_DISABLED: "#adaa96"
+
+# Accent — wine-maroon 315° (сургучная печать / восковый штамп)
+ACCENT: "#772262"
+ACCENT_300: "#5a1649"
+ACCENT_500: "#99337f"
+ACCENT_600: "#bc4ea0"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#ffffff"
+ON_DESTRUCTIVE: "#ffffff"
+
+# Status palette (LIGHT-SHIFTED — hue identical to dark, L decreased для AA на CARD)
+# См. ADR 001: docs/design-system/adr/001-light-theme-status-unlock.md
+STATUS_OK: "#2e6b45"
+STATUS_WARNING: "#8c5a1c"
+STATUS_CAUTION: "#9c4a2c"
+STATUS_FAULT: "#a53838"
+STATUS_INFO: "#355e94"
+STATUS_STALE: "#4a4d58"
+COLD_HIGHLIGHT: "#2f6876"

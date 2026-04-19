@@ -1,0 +1,39 @@
+__meta_name__: "Сигнал"
+__meta_description__: "Почти чёрная нейтральная база без видимой лестницы поверхностей и бордюров. Один сигнальный акцент на монохромном поле. Эстетика data-art."
+
+# Surfaces — плоская лестница, шаги 0.06–0.15% между уровнями
+BACKGROUND: "#070809"
+SURFACE_PANEL: "#090a0c"
+SURFACE_CARD: "#0c0d10"
+SURFACE_ELEVATED: "#0f1013"
+SURFACE_SUNKEN: "#030304"
+SURFACE_MUTED: "#0b0c0e"
+
+# Borders — минимально видимые (BORDER/CARD ≈ 1.08:1)
+BORDER: "#16171a"
+BORDER_SUBTLE: "#0e0f12"
+
+# Text — амплитуда FG↔BG 82%
+FOREGROUND: "#e8eaec"
+TEXT_SECONDARY: "#9aa0a8"
+MUTED_FOREGROUND: "#60646b"
+TEXT_DISABLED: "#35383e"
+
+# Accent — hot magenta 325°, единственный signal color в монохромной среде
+ACCENT: "#e046a0"
+ACCENT_300: "#b8307e"
+ACCENT_500: "#e96ab7"
+ACCENT_600: "#f19fd0"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#0c0308"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED for dark themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

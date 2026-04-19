@@ -1,0 +1,39 @@
+__meta_name__: "Янтарь"
+__meta_description__: "Обожжённая амбровая база со сниженной контрастной амплитудой и винно-фиолетовым акцентом. Тёплый медитативный long-session режим."
+
+# Surfaces — hue 30° sat 23% (обожжённый амбер)
+BACKGROUND: "#1c1611"
+SURFACE_PANEL: "#241d16"
+SURFACE_CARD: "#2d251c"
+SURFACE_ELEVATED: "#362c22"
+SURFACE_SUNKEN: "#15100c"
+SURFACE_MUTED: "#1f1813"
+
+# Borders
+BORDER: "#3d3124"
+BORDER_SUBTLE: "#2a2219"
+
+# Text — амплитуда FG↔BG 60% (ключевое отличие: медитативный режим)
+FOREGROUND: "#d6ccbd"
+TEXT_SECONDARY: "#a89d8c"
+MUTED_FOREGROUND: "#8a7c68"
+TEXT_DISABLED: "#4a4238"
+
+# Accent — wine-plum 291°, холодная нота на тёплой базе (читается warm)
+ACCENT: "#a878b0"
+ACCENT_300: "#8a5c92"
+ACCENT_500: "#bc91c2"
+ACCENT_600: "#cdafd0"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#1c1611"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED for dark themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"

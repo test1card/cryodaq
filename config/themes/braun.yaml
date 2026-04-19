@@ -1,0 +1,40 @@
+__meta_name__: "Braun"
+__meta_description__: "Светлая — кремовая продуктовая поверхность с геометрическими бордюрами и оливково-мховым акцентом. Немецкий индустриальный функционализм."
+
+# Surfaces — hue 43–45° sat 25–27% (industrial product surface, не бумага)
+BACKGROUND: "#ece8de"
+SURFACE_PANEL: "#e0dbcc"
+SURFACE_CARD: "#faf6ea"
+SURFACE_ELEVATED: "#fffcf1"
+SURFACE_SUNKEN: "#d4cdb8"
+SURFACE_MUTED: "#e4dfcf"
+
+# Borders — 2.42:1, Rams-характерная геометрическая линия
+BORDER: "#a6a08e"
+BORDER_SUBTLE: "#c8c0ab"
+
+# Text — precise near-black, слегка тёплый (качественная печать на corporate surface)
+FOREGROUND: "#151412"
+TEXT_SECONDARY: "#4a4739"
+MUTED_FOREGROUND: "#7a7664"
+TEXT_DISABLED: "#afab97"
+
+# Accent — olive-moss 90° (компромисс: yellow/orange/red Braun-native заняты status-hues)
+ACCENT: "#476f20"
+ACCENT_300: "#335214"
+ACCENT_500: "#669933"
+ACCENT_600: "#8abb58"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#ffffff"
+ON_DESTRUCTIVE: "#ffffff"
+
+# Status palette (LIGHT-SHIFTED — hue identical to dark, L decreased для AA на CARD)
+# См. ADR 001: docs/design-system/adr/001-light-theme-status-unlock.md
+STATUS_OK: "#2e6b45"
+STATUS_WARNING: "#8c5a1c"
+STATUS_CAUTION: "#9c4a2c"
+STATUS_FAULT: "#a53838"
+STATUS_INFO: "#355e94"
+STATUS_STALE: "#4a4d58"
+COLD_HIGHLIGHT: "#2f6876"

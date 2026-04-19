@@ -1,0 +1,40 @@
+__meta_name__: "Xcode"
+__meta_description__: "Светлая — прохладный off-white с белой рабочей областью и индиго-акцентом. Apple pro-tool строгость."
+
+# Surfaces — hue 215° sat 20–30% (микроскопический cool shift)
+BACKGROUND: "#f5f7fa"
+SURFACE_PANEL: "#eef1f5"
+SURFACE_CARD: "#ffffff"
+SURFACE_ELEVATED: "#ffffff"
+SURFACE_SUNKEN: "#e6e9ee"
+SURFACE_MUTED: "#eef1f5"
+
+# Borders
+BORDER: "#d0d4db"
+BORDER_SUBTLE: "#e2e5ea"
+
+# Text — neutral cool near-black
+FOREGROUND: "#1d2128"
+TEXT_SECONDARY: "#4d5361"
+MUTED_FOREGROUND: "#7c8290"
+TEXT_DISABLED: "#adb1ba"
+
+# Accent — indigo 260° (сдвинут от Apple-native 210° для запаса ≥30° до STATUS_INFO)
+ACCENT: "#6839c6"
+ACCENT_300: "#5229a3"
+ACCENT_500: "#8866cc"
+ACCENT_600: "#a790d5"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#ffffff"
+ON_DESTRUCTIVE: "#ffffff"
+
+# Status palette (LIGHT-SHIFTED — hue identical to dark, L decreased для AA на CARD)
+# См. ADR 001: docs/design-system/adr/001-light-theme-status-unlock.md
+STATUS_OK: "#2e6b45"
+STATUS_WARNING: "#8c5a1c"
+STATUS_CAUTION: "#9c4a2c"
+STATUS_FAULT: "#a53838"
+STATUS_INFO: "#355e94"
+STATUS_STALE: "#4a4d58"
+COLD_HIGHLIGHT: "#2f6876"

@@ -1,0 +1,39 @@
+__meta_name__: "Приборный"
+__meta_description__: "Стальные нейтрали с видимой лестницей и выраженными бордюрами. Наследник приборной панели: HP, Tektronix, LakeShore."
+
+# Surfaces — архитектурная лестница, шаги 0.44–1.28% (в 2–3 раза крупнее других dark-тем)
+BACKGROUND: "#1a1c20"
+SURFACE_PANEL: "#23262c"
+SURFACE_CARD: "#2c3037"
+SURFACE_ELEVATED: "#363a42"
+SURFACE_SUNKEN: "#13141a"
+SURFACE_MUTED: "#1f2127"
+
+# Borders — выраженная геометрия, 1.44:1 к CARD («ridge» на powder-coated панели)
+BORDER: "#44484f"
+BORDER_SUBTLE: "#2e3239"
+
+# Text — hue 220° sat 10% (steel, не graphite)
+FOREGROUND: "#e6e8ec"
+TEXT_SECONDARY: "#a2a6ac"
+MUTED_FOREGROUND: "#848890"
+TEXT_DISABLED: "#484c52"
+
+# Accent — сдержанный violet 270°, функциональный, не эмоциональный
+ACCENT: "#ad85d6"
+ACCENT_300: "#8f5cc1"
+ACCENT_500: "#c2a0e3"
+ACCENT_600: "#d6c2eb"
+
+# Text on colored backgrounds
+ON_PRIMARY: "#14111a"
+ON_DESTRUCTIVE: "#faf9f5"
+
+# Status palette (LOCKED for dark themes)
+STATUS_OK: "#4a8a5e"
+STATUS_WARNING: "#c4862e"
+STATUS_CAUTION: "#b35a38"
+STATUS_FAULT: "#c44545"
+STATUS_INFO: "#6490c4"
+STATUS_STALE: "#5a5d68"
+COLD_HIGHLIGHT: "#7ab8c4"
