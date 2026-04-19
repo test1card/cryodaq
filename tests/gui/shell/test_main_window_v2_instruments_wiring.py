@@ -104,6 +104,31 @@ def test_keithley_reading_creates_card():
         _stop_timers(w)
 
 
+def test_analytics_reading_does_not_create_card():
+    """II.8 Codex fix: analytics/* readings must not create instrument
+    cards. _extract_instrument_id drops analytics prefix before the "/"
+    split."""
+    _app()
+    w = MainWindowV2()
+    try:
+        w._ensure_overlay("instruments")
+        w._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={},
+            )
+        )
+        QCoreApplication.processEvents()
+        assert "analytics" not in w._instrument_panel._cards
+        assert w._instrument_panel.get_instrument_count() == 0
+    finally:
+        _stop_timers(w)
+
+
 # ----------------------------------------------------------------------
 # Lazy replay on first open
 # ----------------------------------------------------------------------

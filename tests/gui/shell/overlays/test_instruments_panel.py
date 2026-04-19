@@ -144,10 +144,23 @@ def test_extract_lakeshore_t17_to_ls218_3(app):
     assert InstrumentsPanel._extract_instrument_id(_reading("Т20")) == "LS218_3"
 
 
+def test_extract_analytics_channel_dropped(app):
+    """Codex II.8 fix: analytics/* readings must NOT create instrument cards
+    (legacy v1 had a latent bug where startswith("analytics/") ran after the
+    "/" split and was unreachable). Fixed by checking the analytics prefix
+    before the slash split."""
+    r = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="",
+        channel="analytics/safety_state",
+        value=0.0,
+        unit="",
+        metadata={},
+    )
+    assert InstrumentsPanel._extract_instrument_id(r) == ""
+
+
 def test_extract_bare_analytics_channel_dropped(app):
-    """Legacy parity: `analytics/…` falls through the prefix-split branch
-    (returns "analytics"); only a bare analytics-less non-T channel
-    returns empty. Verbatim from v1 — do not tune."""
     r = Reading(
         timestamp=datetime.now(UTC),
         instrument_id="",
@@ -289,8 +302,8 @@ def test_poll_skipped_when_disconnected(app):
 def test_poll_dispatches_get_sensor_diagnostics(app):
     panel = InstrumentsPanel()
     panel.set_connected(True)
-    _StubWorker.dispatched = []
-    panel._poll_diagnostics()
+    # set_connected(True) now fires one immediate poll (II.8 Codex fix) —
+    # verify that AND the 10 s timer is armed.
     assert _StubWorker.dispatched == [{"cmd": "get_sensor_diagnostics"}]
     panel._diag_poll_timer.stop()
 
@@ -299,22 +312,35 @@ def test_poll_in_flight_guard(app):
     panel = InstrumentsPanel()
     panel.set_connected(True)
     _StubWorker.dispatched = []
+    # After set_connected(True), _diag_poll_in_flight is True (stub did
+    # not deliver result). Clear it and verify the guard on two sequential
+    # polls in isolation.
+    panel._diag_poll_in_flight = False
     panel._poll_diagnostics()
-    panel._poll_diagnostics()  # skipped
+    panel._poll_diagnostics()  # skipped by in-flight guard
     assert len(_StubWorker.dispatched) == 1
     panel._diag_poll_timer.stop()
 
 
 def test_poll_result_populates_table(app):
     panel = InstrumentsPanel()
-    panel.set_connected(True)
     _StubWorker.next_result = {
         "ok": True,
         "channels": {"Т1": {"channel_name": "Т1 Plate", "health_score": 95}},
         "summary": {"healthy": 1, "warning": 0, "critical": 0},
     }
-    panel._poll_diagnostics()
+    panel.set_connected(True)  # fires the immediate poll which consumes next_result
     assert panel.sensor_diag_section.row_count == 1
+    panel._diag_poll_timer.stop()
+
+
+def test_set_connected_fires_immediate_poll(app):
+    """II.8 Codex fix: False → True transition must not leave the K2
+    diagnostics table blank for up to 10 s."""
+    panel = InstrumentsPanel()
+    _StubWorker.dispatched = []
+    panel.set_connected(True)
+    assert _StubWorker.dispatched == [{"cmd": "get_sensor_diagnostics"}]
     panel._diag_poll_timer.stop()
 
 

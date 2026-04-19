@@ -691,6 +691,11 @@ class InstrumentsPanel(QWidget):
         if connected:
             if not self._diag_poll_timer.isActive():
                 self._diag_poll_timer.start()
+            # Immediate first fetch on False → True so the K2 diagnostics
+            # table is not blank / stale for up to 10 s on open or
+            # reconnect. Same behavior the legacy v1 had via
+            # QTimer.singleShot(500, self._poll_diagnostics).
+            self._poll_diagnostics()
         else:
             self._diag_poll_timer.stop()
 
@@ -747,20 +752,25 @@ class InstrumentsPanel(QWidget):
     def _extract_instrument_id(reading: Reading) -> str:
         """Extract the instrument_id for a Reading.
 
-        Priority (preserved verbatim from legacy v1):
+        Priority:
         1. ``reading.instrument_id`` (first-class field).
-        2. Channel prefix before "/" (Keithley style).
-        3. LakeShore T-channel → LS218 number mapping.
+        2. Drop ``analytics/*`` channels (they are not instruments) — this
+           guard runs before the prefix split so analytics readings do
+           not create bogus "analytics" cards. Legacy v1 split first and
+           then checked startswith, which was an unreachable branch and
+           a latent bug.
+        3. Channel prefix before "/" (Keithley style).
+        4. LakeShore T-channel → LS218 number mapping.
         """
         inst_id = reading.instrument_id
         if inst_id:
             return inst_id
 
         channel = reading.channel
+        if channel.startswith("analytics/") or channel == "analytics":
+            return ""
         if "/" in channel:
             return channel.split("/")[0]
-        if channel.startswith("analytics/"):
-            return ""
         if channel.startswith("Т"):
             try:
                 num = int(channel[1:].split(" ")[0])
