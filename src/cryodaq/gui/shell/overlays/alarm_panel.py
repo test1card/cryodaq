@@ -369,8 +369,7 @@ class AlarmPanel(QWidget):
         # Phase III.D Item 17: empty state carries an action hint so
         # the operator knows this is normal, not a broken widget.
         self._v2_empty_label = QLabel(
-            "Нет активных алармов. Система отслеживает все каналы "
-            "автоматически."
+            "Нет активных алармов. Система отслеживает все каналы автоматически."
         )
         self._v2_empty_label.setFont(_body_font())
         self._v2_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -569,6 +568,7 @@ class AlarmPanel(QWidget):
                 time_text = _elapsed_text(max(0.0, elapsed))
             else:
                 time_text = "—"
+            acknowledged = bool(info.get("acknowledged", False))
 
             chip = SeverityChip(level)
             self._v2_table.setCellWidget(row_idx, 0, chip)
@@ -577,11 +577,29 @@ class AlarmPanel(QWidget):
             self._v2_table.setItem(row_idx, 3, _cell(channels_text))
             self._v2_table.setItem(row_idx, 4, _cell(time_text))
 
-            btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
-            btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
-            btn.setEnabled(self._connected)
-            self._v2_ack_buttons.append(btn)
-            self._v2_table.setCellWidget(row_idx, 5, btn)
+            # IV.2 A.2: v2 rendering previously left the "ПОДТВЕРДИТЬ"
+            # button in place even after the engine had recorded the
+            # acknowledgement — operators perceived the action as having
+            # no effect and clicked repeatedly. Mirror the v1 branch:
+            # once engine reports acknowledged=True, replace the button
+            # with a static label so it's clear the action landed.
+            #
+            # QTableWidget does not auto-evict a cellWidget when setItem
+            # is called on the same cell, so the previous button would
+            # persist visually across the unack → ack transition. Clear
+            # it explicitly before each render.
+            self._v2_table.removeCellWidget(row_idx, 5)
+            self._v2_table.setItem(row_idx, 5, None)
+            if acknowledged:
+                operator = str(info.get("acknowledged_by") or "").strip()
+                ack_text = "Подтв." if not operator else f"Подтв. ({operator})"
+                self._v2_table.setItem(row_idx, 5, _cell(ack_text))
+            else:
+                btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
+                btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
+                btn.setEnabled(self._connected)
+                self._v2_ack_buttons.append(btn)
+                self._v2_table.setCellWidget(row_idx, 5, btn)
 
         has_alarms = len(sorted_items) > 0
         self._v2_empty_label.setVisible(not has_alarms)
@@ -617,14 +635,10 @@ class AlarmPanel(QWidget):
 
         parts: list[str] = []
         if total_critical:
-            word = ru_plural(
-                total_critical, "критический", "критических", "критических"
-            )
+            word = ru_plural(total_critical, "критический", "критических", "критических")
             parts.append(f"{total_critical} {word}")
         if total_warning:
-            word = ru_plural(
-                total_warning, "предупреждение", "предупреждения", "предупреждений"
-            )
+            word = ru_plural(total_warning, "предупреждение", "предупреждения", "предупреждений")
             parts.append(f"{total_warning} {word}")
         self._summary_label.setText(", ".join(parts))
         self._summary_label.setVisible(True)

@@ -401,6 +401,101 @@ def test_v2_row_ack_button_enabled_after_connect(app):
     panel._v2_poll_timer.stop()
 
 
+def test_v2_acknowledged_row_replaces_button_with_label(app):
+    """IV.2 A.2 — once engine marks alarm as acknowledged, the operator
+    must see clear visual feedback: the ПОДТВЕРДИТЬ button is replaced
+    with a 'Подтв.' label, matching the v1 table's behavior.
+
+    Before the fix, v2 left the button in place even after ack — the
+    operator perceived the action as having no effect and clicked
+    repeatedly. K1-relevant: safety-critical interaction lost feedback.
+    """
+    panel = AlarmPanel()
+    panel.update_v2_status(
+        {
+            "ok": True,
+            "active": {
+                "cold_plate": {
+                    "level": "CRITICAL",
+                    "message": "Cold plate overheat",
+                    "acknowledged": True,
+                    "acknowledged_by": "operator1",
+                    "triggered_at": time.time(),
+                }
+            },
+        }
+    )
+    # No button in the ACK column — it's replaced by a text cell.
+    assert panel._v2_table.cellWidget(0, 5) is None
+    cell = panel._v2_table.item(0, 5)
+    assert cell is not None
+    assert "Подтв." in cell.text()
+    # Operator name appears when engine provides it.
+    assert "operator1" in cell.text()
+    # No entry registered in the button list — keep the indexing consistent.
+    assert len(panel._v2_ack_buttons) == 0
+
+
+def test_v2_unacknowledged_row_keeps_ack_button(app):
+    """Unacknowledged row must still render the interactive button."""
+    panel = AlarmPanel()
+    panel.update_v2_status(
+        {
+            "ok": True,
+            "active": {
+                "cold_plate": {
+                    "level": "CRITICAL",
+                    "message": "Cold plate overheat",
+                    "acknowledged": False,
+                    "triggered_at": time.time(),
+                }
+            },
+        }
+    )
+    assert panel._v2_table.cellWidget(0, 5) is not None
+    assert panel._v2_table.item(0, 5) is None
+    assert len(panel._v2_ack_buttons) == 1
+
+
+def test_v2_ack_button_transitions_to_label_on_engine_update(app):
+    """Engine flips acknowledged flag on next poll → row transitions."""
+    panel = AlarmPanel()
+    # First poll: unack.
+    panel.update_v2_status(
+        {
+            "ok": True,
+            "active": {
+                "cold_plate": {
+                    "level": "CRITICAL",
+                    "message": "x",
+                    "acknowledged": False,
+                    "triggered_at": time.time(),
+                }
+            },
+        }
+    )
+    assert panel._v2_table.cellWidget(0, 5) is not None
+    # Second poll: engine reports acked.
+    panel.update_v2_status(
+        {
+            "ok": True,
+            "active": {
+                "cold_plate": {
+                    "level": "CRITICAL",
+                    "message": "x",
+                    "acknowledged": True,
+                    "acknowledged_by": "vlad",
+                    "triggered_at": time.time(),
+                }
+            },
+        }
+    )
+    assert panel._v2_table.cellWidget(0, 5) is None
+    cell = panel._v2_table.item(0, 5)
+    assert cell is not None
+    assert "Подтв." in cell.text()
+
+
 # ----------------------------------------------------------------------
 # Summary label
 # ----------------------------------------------------------------------
