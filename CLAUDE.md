@@ -222,7 +222,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 **GUI — Shell (Phase I.1 chrome)**
 
-- `src/cryodaq/gui/shell/main_window_v2.py` — v2 shell: TopWatchBar + ToolRail + BottomStatusBar + main content area; canonical mnemonic shortcuts (`Ctrl+L/E/A/K/M/R/C/D`, `F5`, `Ctrl+Shift+X`) per AD-002 — registry migration tracked, today shortcuts still bind in `gui/main_window.py`
+- `src/cryodaq/gui/shell/main_window_v2.py` — v2 shell: TopWatchBar + ToolRail + BottomStatusBar + main content area; canonical mnemonic shortcuts (`Ctrl+L/E/A/K/M/R/C/D`, `F5`, `Ctrl+Shift+X`) per AD-002 — sole owner of shortcut bindings after the v1 `gui/main_window.py` was retired in Phase II.13
 - `src/cryodaq/gui/shell/top_watch_bar.py` — top bar: 4 vitals + mode badge (Эксперимент / Отладка)
 - `src/cryodaq/gui/shell/tool_rail.py` — left-side icon navigation (9 slots, Ctrl+[1-9] transitional)
 - `src/cryodaq/gui/shell/bottom_status_bar.py` — bottom safety-state strip
