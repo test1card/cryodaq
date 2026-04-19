@@ -426,12 +426,35 @@ class ConductivityPanel(QWidget):
         self._set_steady_banner("", None)
         layout.addWidget(self._steady_banner_label)
 
-        # Indicator row
-        indicator_row = QHBoxLayout()
+        # IV.3 Finding 1: before a sensor pair is selected, the stability
+        # row previously read "Стабильность: выберите датчики · P = 0 Вт"
+        # — awkward imperative mixed with a zero-valued readout. Swap
+        # the row via a QStackedWidget: page 0 renders only a muted
+        # «Прогноз» header (the instructional body below the table
+        # already carries the "выберите пары датчиков..." guidance from
+        # IV.1.5), page 1 renders the full stability + power pair.
+        self._indicator_stack = QStackedWidget()
+
+        prognosis_page = QWidget()
+        prognosis_layout = QHBoxLayout(prognosis_page)
+        prognosis_layout.setContentsMargins(0, 0, 0, 0)
+        prognosis_layout.setSpacing(0)
+        self._prognosis_header = QLabel("Прогноз")
+        self._prognosis_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._prognosis_header.setFont(_label_font())
+        self._prognosis_header.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        prognosis_layout.addWidget(self._prognosis_header)
+
+        indicator_page = QWidget()
+        indicator_row = QHBoxLayout(indicator_page)
         indicator_row.setContentsMargins(0, 0, 0, 0)
         indicator_row.setSpacing(theme.SPACE_3)
 
-        self._stability_label = QLabel("Стабильность: выберите датчики")
+        self._stability_label = QLabel("Стабильность: —")
         self._stability_label.setFont(_label_font())
         self._stability_label.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND};"
@@ -447,7 +470,15 @@ class ConductivityPanel(QWidget):
         )
         indicator_row.addWidget(self._power_label)
         indicator_row.addStretch()
-        layout.addLayout(indicator_row)
+
+        self._indicator_stack.addWidget(prognosis_page)  # index 0
+        self._indicator_stack.addWidget(indicator_page)  # index 1
+        self._indicator_stack.setCurrentIndex(0)
+        # Fix the row height to the indicator page's sizeHint so the
+        # layout does not jump when the stack swaps — the Прогноз
+        # header is taller than a single-line indicator by default.
+        self._indicator_stack.setFixedHeight(indicator_page.sizeHint().height())
+        layout.addWidget(self._indicator_stack)
 
         # R/G table
         self._table = QTableWidget(0, len(_COL_HEADERS))
@@ -702,11 +733,19 @@ class ConductivityPanel(QWidget):
         self._sync_prediction_stack()
 
     def _sync_prediction_stack(self) -> None:
-        """Set the prediction stack to placeholder or table per chain length."""
+        """Set the prediction stack to placeholder or table per chain length.
+
+        IV.3 Finding 1: also swap the indicator row's stack — before a
+        pair is selected the stability/power readout is meaningless, so
+        render only a muted «Прогноз» header instead of the imperative
+        phrase + zeroed readout pair.
+        """
         if len(self._chain) < 2:
             self._prediction_stack.setCurrentWidget(self._prediction_placeholder)
+            self._indicator_stack.setCurrentIndex(0)
         else:
             self._prediction_stack.setCurrentWidget(self._table)
+            self._indicator_stack.setCurrentIndex(1)
 
     def _on_move_up(self) -> None:
         for i, ch in enumerate(self._chain):

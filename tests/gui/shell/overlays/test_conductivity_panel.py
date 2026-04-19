@@ -719,21 +719,36 @@ def test_prediction_placeholder_returns_on_single_selection(app):
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
 
 
-def test_stability_header_empty_state_instructs_operator(app):
-    """IV.2 A.1 — empty-state text must explain required action, not just dash.
-
-    Before the fix the label rendered 'Стабильность: —' when no sensors
-    were selected. That reads as "stable at an unknown value" rather than
-    "nothing to compute stability on yet" — operators paused waiting for
-    numbers that would never arrive.
-    """
+def test_stability_header_shows_prognosis_label_without_pair(app):
+    """IV.3 F1 — before any sensor pair, the indicator row renders only
+    a muted «Прогноз» header instead of 'Стабильность: выберите датчики
+    · P = 0 Вт'. The instructional body below the table already carries
+    the "выберите пары датчиков..." guidance (from IV.1.5)."""
     panel = ConductivityPanel()
     assert panel._chain == []
-    panel._update_stability()
-    text = panel._stability_label.text()
-    assert "выберите датчики" in text
-    # No lonely dash that reads as a number.
-    assert text != "Стабильность: —"
+    assert panel._indicator_stack.currentIndex() == 0
+    assert panel._prognosis_header.text() == "Прогноз"
+
+
+def test_stability_header_shows_readout_with_pair(app):
+    """Once ≥ 2 sensors on the chain, the full stability + power
+    indicator pair replaces the Прогноз header."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    assert panel._indicator_stack.currentIndex() == 1
+
+
+def test_stability_header_returns_to_prognosis_on_deselect(app):
+    """Dropping back to < 2 sensors restores the Прогноз header."""
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    assert panel._indicator_stack.currentIndex() == 1
+    panel._checkboxes["Т2"].setChecked(False)
+    assert panel._indicator_stack.currentIndex() == 0
 
 
 def test_power_label_shows_waiting_before_first_reading(app):
