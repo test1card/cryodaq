@@ -576,12 +576,19 @@ title = QLabel("Фазо-зависимые тревоги")  # v2 is phase-awar
 
 **Detection:**
 
+Primary enforcement lives in `tests/design_system/test_no_internal_versioning_ast.py` — an AST scanner that walks every `.py` file under `src/cryodaq/gui/` and inspects string literals passed to operator-facing Qt methods (`setText`, `addItem`, `setPlaceholderText`, `setToolTip`, `setTitle`, `setWindowTitle`, etc.). More precise than grep because it decides "operator-facing" by the method name at the call site rather than by the literal's shape; docstrings, imports, variable assignments, and internal comparisons never produce false positives.
+
+The AST scanner catches every forbidden shape listed above: `(vN)` suffix, bare `vN` token, and the English labels (`legacy` / `deprecated` / `experimental` / `beta` / `alpha`). It also handles f-string constant fragments and string concatenation so a split `"старая " + "версия"` literal is still flagged.
+
+The legacy regex-based grep scan in `tests/gui/test_design_system_rules.py` (IV.2 B.3) is retained as a redundant second gate — it applies the same forbidden-token set with a different detection strategy.
+
+As a quick local check outside pytest:
+
 ```bash
-# Catch operator-facing strings with "(v1)" / "(v2)" suffix.
 rg -n '"[^"]*\\(v[0-9]+\\)[^"]*"' src/cryodaq/gui/
 ```
 
-The operator-facing string literal matches this pattern exactly; engine command strings like `"alarm_v2_ack"` don't (no parentheses).
+Engine command strings like `"alarm_v2_ack"` don't match (no parentheses).
 
 **Related rules:** RULE-COPY-001 (Cyrillic channel names), RULE-COPY-002 (Russian vocabulary), RULE-COPY-007 (imperative/descriptive).
 
@@ -592,3 +599,4 @@ The operator-facing string literal matches this pattern exactly; engine command 
 - 2026-04-17: Initial version. 8 rules covering Cyrillic Т, Russian vocabulary, sentence case, error style, emoji prohibition, SI units, imperative/descriptive, decimal convention. RULE-COPY-004 fills the previously-reserved gap.
 - 2026-04-17 (v1.0.1): Verified canonical operator-facing pressure unit is `мбар` per RULE-COPY-006 (FR-016). No content change here — this file already states the canonical unit; downstream files (typography.md, chart-tokens.md, top-watch-bar.md, data-display-rules.md) updated to match.
 - 2026-04-19 (IV.2.B.3): Added RULE-COPY-009 — operator-facing text must not embed internal version suffixes like "(v1)"/"(v2)". Driven by alarm panel leakage noted in smoke sessions.
+- 2026-04-20 (IV.3.F6): RULE-COPY-009 primary enforcement moved to an AST-based scanner (`tests/design_system/test_no_internal_versioning_ast.py`). Decides operator-facing-ness by call-site method rather than literal shape; closes the residual gap from IV.2.B.3 where identifier-like literals could slip the regex filter. The legacy regex scanner is retained as a redundant gate.
