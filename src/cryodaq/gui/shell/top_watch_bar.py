@@ -21,6 +21,7 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+from cryodaq.gui.utils.plural import ru_plural
 
 logger = logging.getLogger(__name__)
 
@@ -471,8 +472,20 @@ class TopWatchBar(QWidget):
         if non_ok > 0:
             text += f" · {non_ok} вне нормы"
         if waiting > 0:
-            text += f" · {waiting} ожидают"
+            waits = ru_plural(waiting, "ожидает", "ожидают", "ожидают")
+            text += f" · {waiting} {waits}"
+        # Item 13: tooltip explains the count breakdown.
+        tooltip_parts = [f"{total} каналов температуры"]
+        tooltip_parts.append(f"{ok_count} в норме")
+        if waiting:
+            tooltip_parts.append(
+                f"{waiting} {ru_plural(waiting, 'ожидает', 'ожидают', 'ожидают')}"
+                " первого показания"
+            )
+        if non_ok:
+            tooltip_parts.append(f"{non_ok} вне нормы")
         self._channel_label.setText(text)
+        self._channel_label.setToolTip(", ".join(tooltip_parts))
         self._channel_label.setStyleSheet(f"color: {color};")
 
     def _poll_alarms(self) -> None:
@@ -495,7 +508,8 @@ class TopWatchBar(QWidget):
             self._alarms_label.setText("Тревоги: 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"Тревоги: {n} актив.")
+            verb = ru_plural(n, "активна", "активны", "активны")
+            self._alarms_label.setText(f"Тревоги: {n} {verb}")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
     # ------------------------------------------------------------------
@@ -642,5 +656,6 @@ class TopWatchBar(QWidget):
             self._alarms_label.setText("Тревоги: 0")
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
-            self._alarms_label.setText(f"Тревоги: {self._alarm_count} актив.")
+            verb = ru_plural(self._alarm_count, "активна", "активны", "активны")
+            self._alarms_label.setText(f"Тревоги: {self._alarm_count} {verb}")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")

@@ -410,6 +410,7 @@ def test_summary_shows_criticals(app):
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
     panel._handle_reading(_alarm_reading("b", "CRITICAL", "activated"))
+    # Phase III.D plural: n=2 → "критических" (few = genitive singular).
     assert "критических" in panel._summary_label.text()
     assert panel._summary_label.isHidden() is False
 
@@ -417,7 +418,16 @@ def test_summary_shows_criticals(app):
 def test_summary_shows_warnings(app):
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("a", "WARNING", "activated"))
-    assert "предупреждений" in panel._summary_label.text()
+    # Phase III.D plural: n=1 → "предупреждение" (singular nominative).
+    assert "предупреждение" in panel._summary_label.text()
+
+
+def test_summary_shows_warnings_genitive_plural_for_five(app):
+    panel = AlarmPanel()
+    for i in range(5):
+        panel._handle_reading(_alarm_reading(f"warn_{i}", "WARNING", "activated"))
+    # Phase III.D plural: n=5 → "предупреждений" (genitive plural).
+    assert "5 предупреждений" in panel._summary_label.text()
 
 
 def test_summary_hidden_when_only_cleared(app):

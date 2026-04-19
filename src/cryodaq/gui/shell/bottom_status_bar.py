@@ -63,8 +63,13 @@ class BottomStatusBar(QWidget):
 
         layout.addWidget(_separator())
 
-        self._uptime_label = QLabel("Аптайм 00:00:00")
+        # Phase III.D Item 16: explicit what-is-counted — it is the
+        # launcher process uptime, not engine or experiment runtime.
+        self._uptime_label = QLabel("Лаунчер 00:00:00")
         self._uptime_label.setStyleSheet(muted)
+        self._uptime_label.setToolTip(
+            "Время работы операторского интерфейса с момента запуска"
+        )
         layout.addWidget(self._uptime_label)
 
         layout.addWidget(_separator())
@@ -135,7 +140,7 @@ class BottomStatusBar(QWidget):
         uptime_s = int(time.monotonic() - self._start_time)
         h, rem = divmod(uptime_s, 3600)
         m, s = divmod(rem, 60)
-        self._uptime_label.setText(f"Аптайм {h:02d}:{m:02d}:{s:02d}")
+        self._uptime_label.setText(f"Лаунчер {h:02d}:{m:02d}:{s:02d}")
 
         # Disk
         try:

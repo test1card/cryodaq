@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui.utils.plural import ru_plural
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
@@ -611,9 +612,15 @@ class AlarmPanel(QWidget):
 
         parts: list[str] = []
         if total_critical:
-            parts.append(f"{total_critical} критических")
+            word = ru_plural(
+                total_critical, "критический", "критических", "критических"
+            )
+            parts.append(f"{total_critical} {word}")
         if total_warning:
-            parts.append(f"{total_warning} предупреждений")
+            word = ru_plural(
+                total_warning, "предупреждение", "предупреждения", "предупреждений"
+            )
+            parts.append(f"{total_warning} {word}")
         self._summary_label.setText(", ".join(parts))
         self._summary_label.setVisible(True)
 
