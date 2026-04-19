@@ -315,7 +315,12 @@ class AlarmPanel(QWidget):
         title = QLabel("Нет активных тревог.")
         title.setFont(_section_title_font())
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        # IV.3 F2 amend: unified empty-state title uses MUTED_FOREGROUND
+        # per the DS empty-state convention — a full-weight FOREGROUND
+        # here competes visually with the actual alarm rows.
+        title.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         layout.addWidget(title)
 
         subtitle = QLabel("Система отслеживает все каналы автоматически.")
