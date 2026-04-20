@@ -224,6 +224,69 @@ def test_start_stops_stale_reply_consumer_before_restart(monkeypatch):
     assert bridge._reply_consumer is not old_consumer
 
 
+def test_command_channel_not_stalled_on_fresh_bridge():
+    """Before any cmd_timeout has arrived, the command-channel watchdog
+    must stay disarmed — otherwise the launcher would restart the bridge
+    during startup while it's still establishing the REQ/REP path."""
+    bridge = _build_bridge_with_fake_proc()
+    assert bridge._last_cmd_timeout == 0.0
+    assert bridge.command_channel_stalled(timeout_s=10.0) is False
+
+
+def test_command_channel_stalled_after_recent_timeout():
+    """Injecting a ``cmd_timeout`` control message via data_queue must
+    flip ``command_channel_stalled`` to True inside the watchdog window."""
+    bridge = _build_bridge_with_fake_proc()
+    bridge._last_heartbeat = time.monotonic()
+    bridge._data_queue.put(
+        {
+            "__type": "cmd_timeout",
+            "cmd": "safety_status",
+            "ts": time.monotonic(),
+            "message": "REP timeout on safety_status (Resource temporarily unavailable)",
+        }
+    )
+    _drain_poll_readings_until(bridge, lambda b: b._last_cmd_timeout > 0.0)
+
+    assert bridge._last_cmd_timeout > 0.0
+    assert bridge.command_channel_stalled(timeout_s=10.0) is True
+
+
+def test_command_channel_not_stalled_after_window_expires(monkeypatch):
+    """Once the configured window has elapsed past the last timeout,
+    the watchdog must disarm so a single old blip doesn't trap the
+    bridge in a restart loop."""
+    bridge = _build_bridge_with_fake_proc()
+    now = time.monotonic()
+    bridge._last_cmd_timeout = now
+
+    monkeypatch.setattr(
+        "cryodaq.gui.zmq_client.time.monotonic", lambda: now + 15.0
+    )
+    assert bridge.command_channel_stalled(timeout_s=10.0) is False
+
+
+def test_poll_readings_handles_cmd_timeout_type():
+    """poll_readings must consume ``cmd_timeout`` envelopes without
+    returning them as Readings and must update ``_last_cmd_timeout``
+    in the process."""
+    bridge = _build_bridge_with_fake_proc()
+    bridge._data_queue.put(
+        {
+            "__type": "cmd_timeout",
+            "cmd": "safety_status",
+            "ts": time.monotonic(),
+            "message": "REP timeout on safety_status (test)",
+        }
+    )
+    readings = _drain_poll_readings_until(
+        bridge, lambda b: b._last_cmd_timeout > 0.0
+    )
+
+    assert readings == [], "cmd_timeout envelope must not surface as a Reading"
+    assert bridge._last_cmd_timeout > 0.0
+
+
 def test_launcher_poll_drains_before_data_stall_restart():
     """Queued readings must be drained before the stale-data policy fires."""
     from cryodaq.launcher import LauncherWindow
@@ -248,6 +311,9 @@ def test_launcher_poll_drains_before_data_stall_restart():
 
         def data_flow_stalled(self) -> bool:
             return not self._polled
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return False
 
         def shutdown(self) -> None:
             self.restarted = True
@@ -277,3 +343,95 @@ def test_launcher_poll_logs_reason_distinction():
     assert "no heartbeat" in source
     assert "no readings" in source
     assert "poll_readings" in source
+
+
+def test_launcher_restarts_bridge_on_command_channel_stalled():
+    """Launcher must restart the bridge when the command channel is
+    stalled but heartbeats and data flow are otherwise healthy —
+    that's the B1 failure shape (command plane dead, data plane alive)."""
+    from cryodaq.launcher import LauncherWindow
+
+    class _StalledCommandBridge:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self) -> bool:
+            return True
+
+        def is_alive(self) -> bool:
+            return True
+
+        def data_flow_stalled(self) -> bool:
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return True
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    class _Dummy:
+        def __init__(self) -> None:
+            self._bridge = _StalledCommandBridge()
+
+        def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+    dummy = _Dummy()
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dummy._bridge.shutdown_calls == 1
+    assert dummy._bridge.start_calls == 1
+
+
+def test_launcher_does_not_restart_on_healthy_bridge():
+    """When every liveness check passes, the launcher must not restart
+    the bridge. A spurious restart here would drop in-flight commands
+    and reset timers for no reason."""
+    from cryodaq.launcher import LauncherWindow
+
+    class _HealthyBridge:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self) -> bool:
+            return True
+
+        def is_alive(self) -> bool:
+            return True
+
+        def data_flow_stalled(self) -> bool:
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    class _Dummy:
+        def __init__(self) -> None:
+            self._bridge = _HealthyBridge()
+
+        def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+    dummy = _Dummy()
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dummy._bridge.shutdown_calls == 0
+    assert dummy._bridge.start_calls == 0

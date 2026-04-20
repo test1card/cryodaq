@@ -79,6 +79,12 @@ class ZmqBridge:
         # the first reading arrives so startup and between-experiment
         # pauses don't trigger false-positive restarts.
         self._last_reading_time: float = 0.0
+        # IV.6 B1 fix: timestamp of the most recent cmd_timeout control
+        # message emitted by the subprocess. Launcher watchdog uses
+        # ``command_channel_stalled()`` to detect command-channel-only
+        # failures where the data plane is still healthy but REQ/REP
+        # has entered a bad state.
+        self._last_cmd_timeout: float = 0.0
         # Future-per-request command routing
         self._pending: dict[str, Future] = {}
         self._pending_lock = threading.Lock()
@@ -139,6 +145,18 @@ class ZmqBridge:
                 if msg_type == "heartbeat":
                     self._last_heartbeat = time.monotonic()
                     continue
+                if msg_type == "cmd_timeout":
+                    # IV.6 B1 fix: structured timeout marker used by the
+                    # launcher's command-channel watchdog. Separate from
+                    # "warning" because the launcher must restart the
+                    # bridge on this specific failure shape, not on
+                    # generic queue-overflow warnings.
+                    self._last_cmd_timeout = time.monotonic()
+                    logger.warning(
+                        "ZMQ bridge: %s",
+                        d.get("message", "command timeout"),
+                    )
+                    continue
                 if msg_type == "warning":
                     logger.warning("ZMQ bridge: %s", d.get("message", ""))
                     continue
@@ -163,6 +181,19 @@ class ZmqBridge:
             self._last_reading_time != 0.0
             and (time.monotonic() - self._last_reading_time) >= timeout_s
         )
+
+    def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+        """Return True if a command timeout occurred within the last
+        ``timeout_s`` seconds.
+
+        IV.6 B1 fix: used by launcher watchdog to detect command-channel-
+        only failures (data plane still healthy but commands fail). Single
+        recent timeout is enough to trigger — streak-count threshold may
+        be introduced later if field testing shows false positives.
+        """
+        if self._last_cmd_timeout == 0.0:
+            return False
+        return (time.monotonic() - self._last_cmd_timeout) < timeout_s
 
     def is_healthy(self) -> bool:
         """True if subprocess is alive and bridge heartbeats are fresh."""

@@ -152,9 +152,15 @@ def test_heartbeat_still_emitted_even_without_data(_bridge_fixture):
 
 
 def test_cmd_timeout_emits_warning(_bridge_fixture):
-    """A command to a dead REP should produce a warning control message
-    on data_queue (so the GUI can distinguish command-channel failure
-    from data starvation)."""
+    """A command to a dead REP should produce a ``cmd_timeout`` control
+    message on data_queue (so the GUI's launcher watchdog can distinguish
+    command-channel failure from data starvation).
+
+    IV.6 B1 fix: the subprocess now emits a structured
+    ``{"__type": "cmd_timeout", ...}`` envelope instead of a plain
+    ``"warning"`` string so the launcher can restart the bridge on
+    this specific failure shape without reacting to benign warnings.
+    """
     pub_addr, cmd_addr, data_q, cmd_q, reply_q, shutdown, proc_holder = _bridge_fixture
 
     proc = mp.Process(
@@ -165,25 +171,25 @@ def test_cmd_timeout_emits_warning(_bridge_fixture):
     proc_holder.append(proc)
     proc.start()
 
-    cmd_q.put({"type": "safety_status", "_rid": "r1"})
+    cmd_q.put({"cmd": "safety_status", "_rid": "r1"})
 
     # IV.3 F7 raised REQ RCVTIMEO from 3 s to 35 s so slow server-side
     # handlers (experiment_finalize / report generation) have room to
-    # reply. Warning still appears — just after the full envelope
-    # elapses. Deadline extended with 5 s slack so intermittent
+    # reply. cmd_timeout envelope still appears — just after the full
+    # envelope elapses. Deadline extended with 5 s slack so intermittent
     # jitter doesn't flake this.
     deadline = time.monotonic() + 40.0
-    got_warning = False
-    while time.monotonic() < deadline and not got_warning:
+    got_cmd_timeout = False
+    while time.monotonic() < deadline and not got_cmd_timeout:
         try:
             msg = data_q.get(timeout=0.5)
         except stdlib_queue.Empty:
             continue
-        if isinstance(msg, dict) and msg.get("__type") == "warning":
+        if isinstance(msg, dict) and msg.get("__type") == "cmd_timeout":
             if "REP timeout" in str(msg.get("message", "")):
-                got_warning = True
+                got_cmd_timeout = True
 
-    assert got_warning, "cmd_forward did not emit a REP-timeout warning"
+    assert got_cmd_timeout, "cmd_forward did not emit a REP-timeout cmd_timeout envelope"
 
 
 def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
@@ -201,9 +207,13 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
     proc.start()
 
     # First command times out because no REP is bound yet.
-    cmd_q.put({"type": "safety_status", "_rid": "t1"})
+    cmd_q.put({"cmd": "safety_status", "_rid": "t1"})
     # IV.3 F7: subprocess REQ RCVTIMEO is 35 s; deadline bumped so
     # the initial timeout reply arrives before the assertion fails.
+    # IV.6 B1 fix: timeout error now reads "Engine не отвечает (<exc>)"
+    # — the <exc> part comes straight from pyzmq (e.g. "Resource
+    # temporarily unavailable"), so assert on the stable Russian prefix
+    # rather than the OS-specific tail.
     deadline = time.monotonic() + 40.0
     saw_timeout_reply = False
     while time.monotonic() < deadline and not saw_timeout_reply:
@@ -212,7 +222,7 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
         except stdlib_queue.Empty:
             continue
         if reply.get("_rid") == "t1" and reply.get("ok") is False:
-            saw_timeout_reply = "таймаут" in str(reply.get("error", ""))
+            saw_timeout_reply = "не отвечает" in str(reply.get("error", ""))
 
     assert saw_timeout_reply, "initial timed-out command did not produce timeout reply"
 
@@ -223,14 +233,14 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
 
     def serve_once():
         raw = rep.recv_string()
-        rep.send_string(json.dumps({"ok": True, "echo": json.loads(raw).get("type")}))
+        rep.send_string(json.dumps({"ok": True, "echo": json.loads(raw).get("cmd")}))
 
     import json
 
     server = threading.Thread(target=serve_once, daemon=True)
     server.start()
 
-    cmd_q.put({"type": "safety_status", "_rid": "t2"})
+    cmd_q.put({"cmd": "safety_status", "_rid": "t2"})
     deadline = time.monotonic() + 6.0
     recovered_reply = None
     while time.monotonic() < deadline and recovered_reply is None:

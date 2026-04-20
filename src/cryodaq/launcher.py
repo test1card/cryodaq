@@ -877,6 +877,19 @@ class LauncherWindow(QMainWindow):
             logger.warning("ZMQ bridge not healthy (no readings), restarting...")
             self._bridge.shutdown()
             self._bridge.start()
+            return
+        # IV.6 B1 fix: command-channel watchdog. Detects the case where
+        # the subprocess is alive, heartbeats flow, readings flow, but
+        # a recent REQ/REP timeout indicates the command plane has
+        # entered a bad state. Restart bridge to cycle the ephemeral
+        # REQ / REP connection and recover command path.
+        if self._bridge.command_channel_stalled(timeout_s=10.0):
+            logger.warning(
+                "ZMQ bridge: command channel unhealthy "
+                "(recent command timeout). Restarting bridge."
+            )
+            self._bridge.shutdown()
+            self._bridge.start()
 
     @Slot(object)
     def _on_reading_qt(self, reading: Reading) -> None:

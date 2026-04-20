@@ -155,86 +155,88 @@ def zmq_bridge_main(
             sub.close(linger=0)
 
     def cmd_forward_loop() -> None:
-        """Own REQ socket; forward GUI commands, return replies.
+        """Forward GUI commands via a fresh REQ socket per command.
 
-        May block up to 3s per timed-out REQ. That does not starve
+        IV.6 B1 fix: each command creates, uses, and closes its own REQ
+        socket. Shared long-lived REQ accumulated state across commands
+        and became permanently unrecoverable after a platform-specific
+        trigger (macOS sparse cadence within ~minutes, Ubuntu 120 s
+        deterministic). Ephemeral REQ per command matches ZeroMQ Guide
+        ch.4 canonical "poll / timeout / close / reopen" reliable
+        request-reply pattern.
+
+        May block up to 35 s per timed-out REQ. That does not starve
         the data path because SUB drain runs on a separate thread.
-        A timed-out REQ emits a ``warning`` control message via
-        data_queue so the GUI can distinguish data starvation from
-        command-channel starvation.
+        A timed-out REQ emits a structured ``cmd_timeout`` control
+        message via data_queue so the launcher watchdog can detect
+        command-channel-only failures and restart the bridge.
         """
 
         def _new_req_socket():
+            """Build a fresh per-command REQ socket.
+
+            IV.6: REQ_RELAXED / REQ_CORRELATE dropped — they were only
+            useful for stateful recovery on a shared socket, which the
+            ephemeral model has eliminated. TCP_KEEPALIVE dropped from
+            the command path (reverting the f5f9039 partial fix) —
+            Codex revised analysis confirmed idle-reap was not the
+            actual cause; keepalive is a no-op here and clutters
+            debugging of the real socket state.
+            """
             req = ctx.socket(zmq.REQ)
             req.setsockopt(zmq.LINGER, 0)
-            # IV.3 Finding 7: REQ timeout raised from 3 s to 35 s so a
-            # slow server-side handler (experiment_finalize / report
-            # generation, now tiered at 30 s) has room to reply before
+            # IV.3 Finding 7: REQ timeout stays at 35 s so a slow
+            # server-side handler (experiment_finalize / report
+            # generation, tiered at 30 s) has room to reply before
             # the REQ side gives up. Server's 30 s ceiling + 5 s slack
             # stays inside the client's 35 s future wait
             # (_CMD_REPLY_TIMEOUT_S), so timeouts at each layer fire
             # in predictable order: server → subprocess → GUI future.
             req.setsockopt(zmq.RCVTIMEO, 35000)
             req.setsockopt(zmq.SNDTIMEO, 35000)
-            req.setsockopt(zmq.REQ_RELAXED, 1)
-            req.setsockopt(zmq.REQ_CORRELATE, 1)
-            # 2026-04-20 idle-death fix: enable TCP keepalive so the
-            # macOS kernel does NOT reap idle loopback connections
-            # after ~30 s. Without this, REQ hangs on first use after
-            # any idle period > ~30 s — all subsequent commands fail
-            # because recreated socket inherits the degraded kernel
-            # peer state. Confirmed via tools/diag_zmq_idle_hypothesis.py:
-            # 5 Hz (200 ms idle): 291/291 OK; 0.33 Hz (3 s idle): 9 OK
-            # then permanent failure. Cross-platform: options are
-            # no-ops on systems that don't support them.
-            req.setsockopt(zmq.TCP_KEEPALIVE, 1)
-            req.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
-            req.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
-            req.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
             req.connect(cmd_addr)
             return req
 
-        req = _new_req_socket()
-        try:
-            while not shutdown_event.is_set():
-                try:
-                    cmd = cmd_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
+        while not shutdown_event.is_set():
+            try:
+                cmd = cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
+            cmd_type = cmd.get("cmd", "?") if isinstance(cmd, dict) else "?"
+
+            # Fresh socket per command — no shared state across commands.
+            req = _new_req_socket()
+            try:
                 try:
                     req.send_string(json.dumps(cmd))
                     reply_raw = req.recv_string()
                     reply = json.loads(reply_raw)
                 except zmq.ZMQError as exc:
-                    reply = {"ok": False, "error": "Engine не отвечает (таймаут)"}
+                    reply = {"ok": False, "error": f"Engine не отвечает ({exc})"}
                     with contextlib.suppress(queue.Full):
-                        cmd_type = cmd.get("type") if isinstance(cmd, dict) else None
-                        if cmd_type is None and isinstance(cmd, dict):
-                            cmd_type = cmd.get("cmd", "?")
                         data_queue.put_nowait(
                             {
-                                "__type": "warning",
+                                "__type": "cmd_timeout",
+                                "cmd": cmd_type,
+                                "ts": time.monotonic(),
                                 "message": f"REP timeout on {cmd_type} ({exc})",
                             }
                         )
-                    req.close(linger=0)
-                    if shutdown_event.is_set():
-                        break
-                    req = _new_req_socket()
                 except Exception as exc:  # noqa: BLE001
                     reply = {"ok": False, "error": str(exc)}
-                if rid is not None:
-                    reply["_rid"] = rid
-                try:
-                    reply_queue.put(reply, timeout=2.0)
-                except queue.Full:
-                    with contextlib.suppress(queue.Full):
-                        data_queue.put_nowait(
-                            {"__type": "warning", "message": "Reply queue overflow"}
-                        )
-        finally:
-            req.close(linger=0)
+            finally:
+                req.close(linger=0)
+
+            if rid is not None:
+                reply["_rid"] = rid
+            try:
+                reply_queue.put(reply, timeout=2.0)
+            except queue.Full:
+                with contextlib.suppress(queue.Full):
+                    data_queue.put_nowait(
+                        {"__type": "warning", "message": "Reply queue overflow"}
+                    )
 
     sub_thread = threading.Thread(target=sub_drain_loop, name="zmq-sub-drain", daemon=True)
     cmd_thread = threading.Thread(target=cmd_forward_loop, name="zmq-cmd-forward", daemon=True)

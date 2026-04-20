@@ -476,6 +476,54 @@ regression testing):
 - `tools/diag_zmq_bridge_extended.py` — 180s past-first-failure
 - `tools/diag_zmq_idle_hypothesis.py` — rate-dependence
 
+#### IV.6 partial mitigation outcome (2026-04-20)
+
+IV.6 landed the full Codex-proposed fix plan: per-command ephemeral
+REQ socket in `zmq_subprocess.cmd_forward_loop`, launcher-side
+`command_channel_stalled()` watchdog in `_poll_bridge_data`, and
+`TCP_KEEPALIVE` reverted on the command + PUB paths (kept on
+`sub_drain_loop` as orthogonal safeguard). 60/60 unit tests green,
+full subtree 1775/1776 (1 unrelated flaky). Committed as partial
+mitigation rather than a fix.
+
+**Shared-REQ-state hypothesis FALSIFIED.** Post-fix diag runs on
+macOS reproduce B1 with structurally identical timing to pre-fix
+master:
+
+- `diag_zmq_idle_hypothesis.py` SPARSE_0.33HZ: cmd #8 FAIL at
+  uptime 56 s (pre-fix was cmd #10 FAIL at ~30 s).
+- `diag_zmq_bridge_extended.py`: cmd #48 FAIL at uptime 82 s,
+  0/3 recovery thereafter (pre-fix was cmd #28 FAIL at 92 s).
+- RAPID_5HZ path still clean (295/295), matching pre-fix behaviour
+  — rate-dependence preserved.
+
+Removing shared REQ state did NOT eliminate the failure. Engine
+REP goes silently unresponsive after ~30-90 s of bridge uptime
+while the asyncio loop, data-plane PUB, heartbeats, scheduler
+writes, and plugin ticks all remain healthy. Root cause is
+elsewhere — likely libzmq loopback-TCP handling, pyzmq 25.x +
+Python 3.14 asyncio integration, or engine-side REP task state
+under rapid REQ connect/disconnect churn.
+
+Diag logs preserved at `/tmp/diag_iv6_idle.log`,
+`/tmp/diag_iv6_extended.log`, and `/tmp/engine_iv6_debug.log`
+for architect review.
+
+**Status:** still 🔧. B1 remains OPEN and blocks `0.34.0`.
+
+**Next:** IV.7 `ipc://` transport experiment. Spec's originally-
+listed fallback (a) from `docs/bug_B1_zmq_idle_death_handoff.md`
+is now the working hypothesis — Unix-domain sockets bypass the
+TCP-loopback layer entirely, which is the most likely remaining
+culprit given everything above the transport has been ruled out.
+
+IV.6 code stays in master as defense-in-depth: matches ZeroMQ
+Guide ch.4 canonical poll/timeout/close/reopen pattern, removes
+a real brittle point (shared REQ accumulated state), and gives
+the launcher a genuine command-channel watchdog for any future
+command-only failure shape — independent of whether B1 is
+ultimately resolved at the transport layer.
+
 **Related but SEPARATE bug:** TopWatchBar pressure display shows
 em-dash instead of value. Reading-driven path, not command path.
 Not caused by B1. Separate investigation needed (likely
