@@ -192,6 +192,14 @@ class ZMQPublisher:
         # after close — relevant on Windows where TIME_WAIT can keep
         # 5555 occupied for 240s after a SIGKILL'd engine.
         self._socket.setsockopt(zmq.LINGER, 0)
+        # 2026-04-20 idle-death fix: TCP keepalive on the engine side
+        # mirror of the GUI subprocess. Without this pairing the
+        # connection can be reaped by the kernel from either end after
+        # ~30 s idle, hanging the next send/recv until RCVTIMEO.
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE, 1)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
         _bind_with_retry(self._socket, self._address)
         self._running = True
         self._task = asyncio.create_task(self._publish_loop(queue), name="zmq_publisher")
@@ -519,6 +527,13 @@ class ZMQCommandServer:
         self._socket = self._ctx.socket(zmq.REP)
         # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
         self._socket.setsockopt(zmq.LINGER, 0)
+        # 2026-04-20 idle-death fix: TCP keepalive on REP so the
+        # connection to the GUI subprocess REQ survives idle periods
+        # > 30 s without the kernel reaping the loopback TCP session.
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE, 1)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
+        self._socket.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
         _bind_with_retry(self._socket, self._address)
         self._running = True
         self._shutdown_requested = False

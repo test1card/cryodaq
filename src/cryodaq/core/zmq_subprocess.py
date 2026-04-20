@@ -100,6 +100,14 @@ def zmq_bridge_main(
         sub = ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.LINGER, 0)
         sub.setsockopt(zmq.RCVTIMEO, 100)
+        # 2026-04-20 idle-death fix: same keepalive as REQ side to
+        # survive macOS kernel idle reaping. SUB normally gets a
+        # stream of readings so idle is rare, but between-experiment
+        # quiet periods exist (scheduler paused, no active polls).
+        sub.setsockopt(zmq.TCP_KEEPALIVE, 1)
+        sub.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
+        sub.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
+        sub.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
         sub.connect(pub_addr)
         sub.subscribe(DEFAULT_TOPIC)
         last_heartbeat = time.monotonic()
@@ -170,6 +178,19 @@ def zmq_bridge_main(
             req.setsockopt(zmq.SNDTIMEO, 35000)
             req.setsockopt(zmq.REQ_RELAXED, 1)
             req.setsockopt(zmq.REQ_CORRELATE, 1)
+            # 2026-04-20 idle-death fix: enable TCP keepalive so the
+            # macOS kernel does NOT reap idle loopback connections
+            # after ~30 s. Without this, REQ hangs on first use after
+            # any idle period > ~30 s — all subsequent commands fail
+            # because recreated socket inherits the degraded kernel
+            # peer state. Confirmed via tools/diag_zmq_idle_hypothesis.py:
+            # 5 Hz (200 ms idle): 291/291 OK; 0.33 Hz (3 s idle): 9 OK
+            # then permanent failure. Cross-platform: options are
+            # no-ops on systems that don't support them.
+            req.setsockopt(zmq.TCP_KEEPALIVE, 1)
+            req.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
+            req.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
+            req.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
             req.connect(cmd_addr)
             return req
 
