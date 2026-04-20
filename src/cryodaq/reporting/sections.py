@@ -23,6 +23,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Inches, Mm, Pt
 
 from cryodaq.reporting.data import HistoricalReading, ReportDataset
+from cryodaq.utils.xml_safe import xml_safe
 
 SectionRenderer = Callable[[Document, ReportDataset, Path], None]
 
@@ -147,10 +148,10 @@ def _add_kv_table(document: Document, rows: list[tuple[str, str]]) -> None:
     table.style = "Table Grid"
     for i, (label, value) in enumerate(rows):
         cell_l = table.cell(i, 0)
-        cell_l.text = label
+        cell_l.text = xml_safe(label)
         for run in cell_l.paragraphs[0].runs:
             run.bold = True
-        table.cell(i, 1).text = value
+        table.cell(i, 1).text = xml_safe(value)
 
 
 def _existing_artifact(
@@ -203,7 +204,7 @@ def _add_table_preview(document: Document, path: Path, *, title: str, limit: int
     num = _next_table()
     cap = document.add_paragraph()
     cap.paragraph_format.first_line_indent = Cm(0)
-    run = cap.add_run(f"Таблица {num} — {title} ({total:,} строк{suffix})")
+    run = cap.add_run(xml_safe(f"Таблица {num} — {title} ({total:,} строк{suffix})"))
     run.font.size = Pt(12)
     run.bold = True
     if not header:
@@ -213,14 +214,14 @@ def _add_table_preview(document: Document, path: Path, *, title: str, limit: int
     table.style = "Table Grid"
     for index, value in enumerate(header):
         cell = table.cell(0, index)
-        cell.text = value
+        cell.text = xml_safe(value)
         for r in cell.paragraphs[0].runs:
             r.bold = True
             r.font.size = Pt(12)
     for row_index, row in enumerate(rows, start=1):
         for col_index, value in enumerate(row):
             cell = table.cell(row_index, col_index)
-            cell.text = value
+            cell.text = xml_safe(value)
             for r in cell.paragraphs[0].runs:
                 r.font.size = Pt(12)
 
@@ -235,7 +236,7 @@ def _add_plot(
     ylabel: str = "",
 ) -> None:
     if not readings:
-        document.add_paragraph(f"{title}: данные за интервал эксперимента отсутствуют.")
+        document.add_paragraph(xml_safe(f"{title}: данные за интервал эксперимента отсутствуют."))
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
     xs = [item.timestamp for item in readings]
@@ -256,7 +257,7 @@ def _add_plot(
     cap = document.add_paragraph()
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     cap.paragraph_format.first_line_indent = Cm(0)
-    run = cap.add_run(f"Рисунок {_next_figure()} — {title}")
+    run = cap.add_run(xml_safe(f"Рисунок {_next_figure()} — {title}"))
     run.font.size = Pt(12)
 
 
@@ -271,7 +272,7 @@ def _add_multichannel_plot(
 ) -> None:
     """Plot multiple channels with legend (not one blob)."""
     if not readings:
-        document.add_paragraph(f"{title}: данные отсутствуют.")
+        document.add_paragraph(xml_safe(f"{title}: данные отсутствуют."))
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
     series: dict[str, list[tuple[Any, float]]] = {}
@@ -299,7 +300,7 @@ def _add_multichannel_plot(
     cap = document.add_paragraph()
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     cap.paragraph_format.first_line_indent = Cm(0)
-    cap.add_run(f"Рисунок {_next_figure()} — {title}").font.size = Pt(12)
+    cap.add_run(xml_safe(f"Рисунок {_next_figure()} — {title}")).font.size = Pt(12)
 
 
 def _add_archived_or_multichannel(
@@ -318,7 +319,7 @@ def _add_archived_or_multichannel(
         cap = document.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
         cap.paragraph_format.first_line_indent = Cm(0)
-        cap.add_run(f"Рисунок {_next_figure()} — {title}").font.size = Pt(12)
+        cap.add_run(xml_safe(f"Рисунок {_next_figure()} — {title}")).font.size = Pt(12)
     else:
         _add_multichannel_plot(document, title, readings, fallback_path, **kwargs)
 
@@ -375,11 +376,11 @@ def render_title_page(document: Document, dataset: ReportDataset, _assets_dir: P
     experiment = dataset.metadata["experiment"]
     template = dataset.metadata["template"]
     template_name = template.get("name", template.get("id", "Эксперимент"))
-    document.add_heading(f"Отчёт: {template_name}", 0)
+    document.add_heading(xml_safe(f"Отчёт: {template_name}"), 0)
 
     title = str(experiment.get("title") or experiment.get("name") or "").strip()
     if title and title != template_name and title not in ("1", ""):
-        document.add_paragraph(title).italic = True
+        document.add_paragraph(xml_safe(title)).italic = True
 
     _add_kv_table(
         document,
@@ -400,7 +401,7 @@ def render_title_page(document: Document, dataset: ReportDataset, _assets_dir: P
 
     if experiment.get("notes"):
         document.add_paragraph("")
-        document.add_paragraph(f"Заметки: {experiment['notes']}")
+        document.add_paragraph(xml_safe(f"Заметки: {experiment['notes']}"))
 
 
 def render_experiment_metadata_section(
@@ -438,7 +439,7 @@ def render_experiment_metadata_section(
         if "artifact_count" in summary:
             parts.append(f"Артефактов: {summary['artifact_count']}")
         if parts:
-            document.add_paragraph(" │ ".join(parts))
+            document.add_paragraph(xml_safe(" │ ".join(parts)))
 
 
 def render_run_timeline_section(
@@ -456,10 +457,10 @@ def render_run_timeline_section(
     for idx, item in enumerate(dataset.run_records, 1):
         source = _SOURCE_TAB_RU.get(item.get("source_tab", ""), item.get("source_tab", "—"))
         table.cell(idx, 0).text = str(idx)
-        table.cell(idx, 1).text = _format_dt(item.get("started_at"), time_only=True)
-        table.cell(idx, 2).text = _format_dt(item.get("finished_at"), time_only=True)
-        table.cell(idx, 3).text = source
-        table.cell(idx, 4).text = _status_ru(item.get("status", ""))
+        table.cell(idx, 1).text = xml_safe(_format_dt(item.get("started_at"), time_only=True))
+        table.cell(idx, 2).text = xml_safe(_format_dt(item.get("finished_at"), time_only=True))
+        table.cell(idx, 3).text = xml_safe(source)
+        table.cell(idx, 4).text = xml_safe(_status_ru(item.get("status", "")))
 
 
 def render_run_parameters_section(
@@ -474,7 +475,7 @@ def render_run_parameters_section(
         if not params:
             continue
         run_type = item.get("run_type", "")
-        document.add_heading(f"Прогон {idx}: {run_type}", level=2)
+        document.add_heading(xml_safe(f"Прогон {idx}: {run_type}"), level=2)
         rows = [(str(k), _display_value(v)) for k, v in params.items()]
         _add_kv_table(document, rows)
 
@@ -510,9 +511,9 @@ def render_conductivity_section(
         cap = document.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
         cap.paragraph_format.first_line_indent = Cm(0)
-        cap.add_run(f"Рисунок {_next_figure()} — Теплопроводность vs температура").font.size = Pt(
-            12
-        )
+        cap.add_run(
+            xml_safe(f"Рисунок {_next_figure()} — Теплопроводность vs температура")
+        ).font.size = Pt(12)
         return
     path = _find_table_path(dataset, "conductivity_vs_temperature")
     if path is None:
@@ -538,7 +539,9 @@ def render_conductivity_section(
     plt.close()
     document.add_picture(str(plot_path), width=Inches(6.2))
     document.add_paragraph(
-        f"Диапазон: {min(temps):.1f} — {max(temps):.1f} К, максимум: {max(conds):.3g} Вт/К"
+        xml_safe(
+            f"Диапазон: {min(temps):.1f} — {max(temps):.1f} К, максимум: {max(conds):.3g} Вт/К"
+        )
     )
 
 
@@ -557,12 +560,12 @@ def render_artifact_manifest_section(
 
     cat_names = {"table": "Таблицы", "plot": "Графики", "summary": "Сводки", "other": "Прочее"}
     for cat, items in by_category.items():
-        document.add_paragraph(cat_names.get(cat, cat), style="List Bullet")
+        document.add_paragraph(xml_safe(cat_names.get(cat, cat)), style="List Bullet")
         for item in items:
             role = str(item.get("role", "")).strip()
             name_ru = _ROLE_RU.get(role, role)
             path = Path(str(item.get("path", "")))
-            document.add_paragraph(f"    {name_ru} — {path.name}")
+            document.add_paragraph(xml_safe(f"    {name_ru} — {path.name}"))
 
 
 def render_cooldown_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
@@ -600,7 +603,10 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
                 target_k = float(target)
                 reached = t_final <= target_k * 1.05  # 5% tolerance
                 document.add_paragraph(
-                    f"Целевая: {target_k:.1f} К — {'достигнута ✓' if reached else 'не достигнута'}"
+                    xml_safe(
+                        f"Целевая: {target_k:.1f} К — "
+                        f"{'достигнута ✓' if reached else 'не достигнута'}"
+                    )
                 )
             except (ValueError, TypeError):
                 pass
@@ -629,9 +635,9 @@ def render_thermal_section(document: Document, dataset: ReportDataset, assets_di
         for i, hdr in enumerate(["Канал", "Средняя мощность", "Макс. мощность"]):
             table.cell(0, i).text = hdr
         for idx, (channel, values) in enumerate(sorted(by_channel.items()), 1):
-            table.cell(idx, 0).text = _channel_display(channel)
-            table.cell(idx, 1).text = f"{mean(values):.4g} Вт"
-            table.cell(idx, 2).text = f"{max(values):.4g} Вт"
+            table.cell(idx, 0).text = xml_safe(_channel_display(channel))
+            table.cell(idx, 1).text = xml_safe(f"{mean(values):.4g} Вт")
+            table.cell(idx, 2).text = xml_safe(f"{max(values):.4g} Вт")
 
 
 def render_pressure_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
@@ -685,16 +691,22 @@ def render_operator_log_section(
         who = item.author or item.source or "система"
         tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
         document.add_paragraph(
-            f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}",
+            xml_safe(
+                f"{_format_dt(item.timestamp, time_only=True)} │ "
+                f"{who}: {item.message}{tag_suffix}"
+            ),
             style="List Bullet",
         )
     if skipped > 0:
-        document.add_paragraph(f"... ещё {skipped} записей ...")
+        document.add_paragraph(xml_safe(f"... ещё {skipped} записей ..."))
         for item in show[15:]:
             who = item.author or item.source or "система"
             tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
             document.add_paragraph(
-                f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}",
+                xml_safe(
+                    f"{_format_dt(item.timestamp, time_only=True)} │ "
+                    f"{who}: {item.message}{tag_suffix}"
+                ),
                 style="List Bullet",
             )
 
@@ -706,8 +718,10 @@ def render_alarms_section(document: Document, dataset: ReportDataset, _assets_di
         return
     for item in dataset.alarm_readings[-20:]:
         document.add_paragraph(
-            f"{_format_dt(item.timestamp, time_only=True)} │ "
-            f"{_channel_display(item.channel)} = {item.value:g} {item.unit} [{item.status}]",
+            xml_safe(
+                f"{_format_dt(item.timestamp, time_only=True)} │ "
+                f"{_channel_display(item.channel)} = {item.value:g} {item.unit} [{item.status}]"
+            ),
             style="List Bullet",
         )
 
@@ -739,9 +753,13 @@ def render_config_section(document: Document, dataset: ReportDataset, _assets_di
                 if "COM" in resource.upper()
                 else "—"
             )
-            table.cell(idx, 0).text = name
-            table.cell(idx, 1).text = iface
-            table.cell(idx, 2).text = resource
+            table.cell(idx, 0).text = xml_safe(name)
+            table.cell(idx, 1).text = xml_safe(iface)
+            # xml_safe critical here: Keithley VISA resource strings legitimately
+            # contain \x00 (serial terminator per NI-VISA Keithley spec) and
+            # python-docx rejects that. This was the production report-gen bug
+            # on the Ubuntu lab PC when a real Keithley 2604B was connected.
+            table.cell(idx, 2).text = xml_safe(resource)
 
     # Safety limits
     safety = config_snapshot.get("safety", {})

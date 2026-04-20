@@ -777,9 +777,9 @@ class ExperimentManager:
                 from cryodaq.reporting.generator import ReportGenerator
 
                 ReportGenerator(self.data_dir).generate(finished.experiment_id)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to auto-generate reports for %s: %s", finished.experiment_id, exc
+            except Exception:
+                logger.exception(
+                    "Failed to auto-generate reports for %s", finished.experiment_id
                 )
 
         # Phase 2e stage 1: Parquet archive — best-effort
