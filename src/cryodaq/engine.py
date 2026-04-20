@@ -763,7 +763,8 @@ def _load_drivers(
             from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
 
             baudrate = int(entry.get("baudrate", 9600))
-            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, mock=mock)
+            validate_checksum = bool(entry.get("validate_checksum", True))
+            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock)
         else:
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
