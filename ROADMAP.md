@@ -420,73 +420,66 @@ packaging).
 
 ## Known broken (blocking next tag)
 
-### B1 — ZMQ subprocess REQ socket dies after idle > 30s
+### B1 — ZMQ subprocess command channel dies (not idle-related)
 
-**Status:** 🔥 TCP_KEEPALIVE fix did NOT resolve (delayed failure
-from 4s → 55s uptime but still occurs), Codex handoff prepared.
+**Status:** 🔧 root cause identified, fix spec prepared
+(`CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`), awaiting implementation.
 Blocks `0.34.0` tag.
 
-**Symptom:** GUI sends commands via `ZmqBridge`, works for some time
-(first command after bridge start always OK), then after >30s idle
-any subsequent command hangs for exactly 35s (= `RCVTIMEO`). After
-that **every subsequent command** hangs the same 35s. Subprocess
-doesn't recover.
+**Symptom:** GUI command plane (REQ/REP on `tcp://127.0.0.1:5556`)
+works for some time then hangs permanently. Data plane (SUB on 5555)
+unaffected — readings continue flowing.
 
-**Diagnostic timeline (2026-04-20):**
-1. `diag_zmq_subprocess.py` — raw subprocess works fine.
-2. `diag_zmq_bridge.py` — phase 1 (5 seq), phase 2 (10 concurrent)
-   all OK; phase 3 (1 Hz soak) → first FAIL at cmd #28.
-3. `diag_zmq_bridge_extended.py` — commands 1-4 OK (1s interval),
-   cmd #5 FAIL at uptime=39s, then 0/5 recovery.
-4. `diag_zmq_idle_hypothesis.py` — **SMOKING GUN**:
-   - 5 Hz (200ms idle): **291/291 OK** over 60s
-   - 0.33 Hz (3s idle): 9 OK, cmd #10 FAIL
-   - 5 Hz after sparse: 1/1 FAIL immediately — socket permanently dead
+- macOS: first failure at 4-92s uptime (stochastic, rate-dependent)
+- Ubuntu: first failure at **exactly 120s** after subprocess start
+  (deterministic — single data point, may vary)
 
-**Root cause CONFIRMED:** macOS kernel reaps idle loopback TCP
-connections after ~30s inactivity. Once reaped, REQ socket is
-permanently degraded because the pyzmq ZMQ context retains the
-dead peer mapping — recreating the Python socket object doesn't
-reset the kernel-side TCP state.
+**NOT macOS-specific.** Confirmed on Ubuntu 22.04 lab machine
+(Python 3.12.13, pyzmq 26.4.0, libzmq 4.3.5). Reproduces in live
+`./start.sh` run, not just diagnostic tools.
 
-**Fix applied (2026-04-20, uncommitted):**
+**Root cause (Codex-confirmed 2026-04-20 afternoon):** single
+long-lived REQ socket in `cmd_forward_loop()` eventually enters
+unrecoverable state. Shared state across all commands means one
+bad socket poisons the entire command channel permanently.
 
-TCP keepalive on ALL four sockets so the kernel does not reap
-the connection:
+**Original "macOS idle-reap" hypothesis proved WRONG:**
+- Linux default `tcp_keepalive_time = 7200s` rules out kernel reaping.
+- Active polling at 1 Hz never goes idle for 10s (our keepalive
+  threshold), so probes never fire — TCP_KEEPALIVE fix doesn't
+  participate in failure mode.
+- TCP_KEEPALIVE fix (commit `f5f9039`) will be **reverted** on
+  command path in IV.6 batch; maybe helped with failure delay on
+  macOS by coincidence, not by mechanism.
 
-```python
-sock.setsockopt(zmq.TCP_KEEPALIVE, 1)
-sock.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)   # probe every 10s
-sock.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)   # retry interval 5s
-sock.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)     # 3 fails = dead
-```
+**Agreed fix plan:**
+1. **Primary:** per-command ephemeral REQ socket in
+   `zmq_subprocess.py::cmd_forward_loop()`. Remove `REQ_RELAXED`,
+   `REQ_CORRELATE`, `TCP_KEEPALIVE*` (all unnecessary with
+   ephemeral sockets). Matches ZeroMQ Guide ch.4 canonical
+   "poll / timeout / close / reopen" pattern.
+2. **Secondary:** command-channel watchdog in `launcher.py`.
+   Current watchdog restarts bridge on data-plane failure but
+   not command-only failure. Add `command_channel_stalled()`
+   check.
 
-Applied to:
-- `src/cryodaq/core/zmq_subprocess.py` — SUB (`sub_drain_loop`) + REQ
-  (`_new_req_socket`)
-- `src/cryodaq/core/zmq_bridge.py` — `ZMQPublisher` PUB + `ZMQCommandServer` REP
-
-Kernel-reap happens from either side of a TCP connection, so the
-fix must be mirrored on engine + subprocess sockets. `zmq_bridge.py::
-ZMQSubscriber` (legacy, unused in production) NOT patched.
-
-**Verification result (2026-04-20):** TCP_KEEPALIVE partially helped
-but bug persists:
-- Run A: cmds 1-55 OK (55s), cmd #58 FAIL at uptime 92s, 0/3 recovery
-- Run B: cmds 1-20 OK (20s), cmd #22 FAIL at uptime 56s, 0/4 recovery
-
-Keepalive moved the failure point later but didn't eliminate it.
-First-failure time is stochastic (variable across runs). Something
-other than simple idle reaping is at play.
-
-**Next step:** Codex review with full handoff doc in
+**Full evidence + Codex analysis:**
 `docs/bug_B1_zmq_idle_death_handoff.md`.
 
-**Fallback candidates after Codex weighs in:**
-- Switch loopback transport `tcp://127.0.0.1:5555/5556` → `ipc:///tmp/...`
-  (Unix domain sockets, no TCP kernel layer, no idle reaping)
-- Or: replace `mp.Process` + `mp.Queue` architecture with in-process
-  threads (Windows libzmq-crash rationale doesn't apply on macOS/Linux)
+**Implementation spec:**
+`CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`.
+
+**Diagnostics kept in tree** (will remain after fix for
+regression testing):
+- `tools/diag_zmq_subprocess.py` — subprocess alone
+- `tools/diag_zmq_bridge.py` — full ZmqBridge 60s soak
+- `tools/diag_zmq_bridge_extended.py` — 180s past-first-failure
+- `tools/diag_zmq_idle_hypothesis.py` — rate-dependence
+
+**Related but SEPARATE bug:** TopWatchBar pressure display shows
+em-dash instead of value. Reading-driven path, not command path.
+Not caused by B1. Separate investigation needed (likely
+`config/channels.yaml` channel ID change).
 
 ---
 

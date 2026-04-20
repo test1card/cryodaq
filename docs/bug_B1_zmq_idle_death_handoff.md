@@ -1,8 +1,15 @@
-# Bug B1 — ZMQ subprocess REQ socket dies after idle — Codex handoff
+# Bug B1 — ZMQ subprocess command channel dies — Codex handoff
 
-> Purpose: complete evidence dump for external expert review (Codex).
-> Local architect (Claude) applied TCP_KEEPALIVE fix; it helped but
-> did not resolve the issue. Needs fresh eyes.
+> Purpose: complete evidence dump + Codex analysis + agreed fix plan.
+>
+> **Status 2026-04-20 afternoon:** Codex review completed. Original
+> "idle-death" hypothesis proved WRONG. Revised root cause: single
+> long-lived REQ socket accumulates state and becomes unrecoverable
+> after platform-specific trigger. Fix plan: per-command ephemeral
+> REQ socket + launcher watchdog for command-channel-only failure.
+> Implementation batch spec: `CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`.
+>
+> See section "Codex revised analysis" below for details.
 
 ---
 
@@ -329,3 +336,214 @@ CRYODAQ_MOCK=1 .venv/bin/cryodaq-engine --mock > /tmp/engine_debug.log 2>&1 &
 *Prepared by Claude (architect) for Codex review, 2026-04-20.*
 *After 4 diag iterations + 1 fix attempt. Ready for architectural*
 *review / alternative transport exploration.*
+
+---
+
+# Codex revised analysis (2026-04-20 afternoon)
+
+## Ubuntu data point
+
+During lab session 2026-04-20:
+
+- **Real system** (`./start.sh`, not diag tool) — first REP timeout on
+  `experiment_status` at **exactly 120s** after subprocess start.
+- Ubuntu 22.04, Linux 5.15.0-173, Python 3.12.13, pyzmq 26.4.0,
+  libzmq 4.3.5.
+- TCP_KEEPALIVE fix already applied (commit `f5f9039`).
+- Linux kernel defaults `net.ipv4.tcp_keepalive_time = 7200s` mean
+  kernel would NOT reap idle loopback for 2 hours by default
+  — the 120s failure cannot be kernel idle reaping.
+
+## Revised root cause
+
+NOT idle death. NOT loopback TCP kernel reaping.
+
+**Actual root cause:** the GUI-side subprocess command plane uses
+**one long-lived REQ socket** in `cmd_forward_loop()`:
+
+- Created once at `src/cryodaq/core/zmq_subprocess.py` in
+  `_new_req_socket()` helper
+- Configured with `REQ_RELAXED` + `REQ_CORRELATE`
+- Reused indefinitely across ALL commands
+
+On both platforms, something eventually pushes that single connection
+into a bad state — on macOS sparse cadence triggers it faster, on
+Ubuntu it appears connection-age or socket-state related rather than
+idle-related. Once one REQ connection goes bad, the **entire command
+plane degrades** because every GUI command shares it.
+
+ZeroMQ's own reliable request-reply guidance is explicitly
+**"poll / timeout / close / reopen"** on failure (Guide ch.4). Our
+current design violates that: we trust one long-lived REQ socket.
+
+## TCP_KEEPALIVE fix assessment
+
+The TCP_KEEPALIVE fix applied at commit `f5f9039` is **NOT
+participating** in the observed failure modes:
+
+- Active diagnostics run at 1 Hz or 5 Hz — socket never sits idle
+  for 10s (our `TCP_KEEPALIVE_IDLE`) so probes never fire.
+- Linux kernel wouldn't reap idle loopback for 7200s anyway —
+  aggressive 25s keepalive cannot help.
+- Partial delay of failure on macOS (4s→55s uptime) may be coincidence
+  or benign side-effect of socket configuration churn.
+
+Recommendation: **remove TCP_KEEPALIVE from the command path** in
+the same fix batch. Can keep on PUB/SUB path (orthogonal, unused
+during active polling).
+
+## Pressure display bug is SEPARATE from B1
+
+TopWatchBar pressure display is **reading-driven** (`on_reading()`
+matching `ch.endswith("/pressure")`), not command-driven. It flows
+via the SUB path, which continues working even when command path
+is dead.
+
+The "pressure shows em-dash" observation does NOT help diagnose B1.
+Separate investigation needed — most likely:
+- Channel ID renamed in `config/channels.yaml` (uncommitted edits)
+- MainWindowV2 reading dispatch broken by recent overlay rewrites
+
+## Agreed fix plan
+
+### Primary fix: per-command ephemeral REQ socket
+
+**Change:** `cmd_forward_loop()` in `zmq_subprocess.py`:
+
+BEFORE (current):
+```python
+req = _new_req_socket()  # created ONCE, outer scope
+try:
+    while not shutdown_event.is_set():
+        cmd = cmd_queue.get(timeout=0.5)
+        try:
+            req.send_string(json.dumps(cmd))
+            reply_raw = req.recv_string()
+            reply = json.loads(reply_raw)
+        except zmq.ZMQError:
+            # recover: close + recreate on same context
+            req.close(linger=0)
+            req = _new_req_socket()
+        ...
+finally:
+    req.close(linger=0)
+```
+
+AFTER (proposed):
+```python
+while not shutdown_event.is_set():
+    cmd = cmd_queue.get(timeout=0.5)
+    req = _new_req_socket()  # fresh for EACH command
+    try:
+        req.send_string(json.dumps(cmd))
+        reply_raw = req.recv_string()
+        reply = json.loads(reply_raw)
+    except zmq.ZMQError as exc:
+        reply = {"ok": False, "error": str(exc)}
+        # emit structured cmd_timeout control message
+    finally:
+        req.close(linger=0)
+    # reply routing unchanged
+```
+
+Plus:
+- Remove `REQ_RELAXED` and `REQ_CORRELATE` from `_new_req_socket()`
+  (only needed for stateful recovery — unnecessary with ephemeral).
+- Remove `TCP_KEEPALIVE*` from command-path REQ + engine-side REP.
+- Emit structured `{"__type": "cmd_timeout", ...}` message to
+  `data_queue` on any command failure (not just string warning).
+
+### Secondary fix: command-channel watchdog in launcher
+
+**Change:** `src/cryodaq/launcher.py` `_poll_bridge_data()` periodic
+check:
+
+Current logic restarts bridge on:
+- Dead subprocess
+- Stale heartbeat (>30s)
+- Stalled data flow (>30s)
+
+Missing: **command timeouts while data flow is healthy.** Add
+`bridge.command_channel_stalled(timeout_s=10.0)` check; on true,
+restart bridge.
+
+### GUI-side infrastructure
+
+**Change:** `src/cryodaq/gui/zmq_client.py`:
+
+- Add `_last_cmd_timeout: float = 0.0` field.
+- In `poll_readings()` handle `__type == "cmd_timeout"` separately
+  (not just as warning string).
+- Add `command_channel_stalled(timeout_s: float) -> bool` method.
+
+## Why this works cross-platform
+
+The fix **removes shared accumulated state entirely**. Each command
+gets a fresh TCP connection, fresh ZMTP handshake, fresh REQ
+state machine. There is no long-lived socket to degrade.
+
+- macOS: even if something in pyzmq 25.x loopback TCP has a subtle
+  state bug, fresh socket-per-command never hits it.
+- Ubuntu: even if libzmq 4.3.5 has some 120s internal timer on
+  persistent REQ sockets, fresh socket resets that clock per command.
+- Windows: subprocess crash-isolation model preserved (ipc:// or
+  threads would break that).
+
+## Costs
+
+- Slight TCP connect/close churn per command. At 1 Hz command rate
+  this is trivially cheap (loopback connect is microseconds).
+- Very minor per-command latency bump (likely <1ms).
+- Re-establishes TCP connection per call — irrelevant on loopback,
+  would matter on real network but we never plan to go off loopback.
+
+## Risks
+
+- Watchdog too aggressive → false restarts on transient slow
+  commands. Mitigation: short streak / recent-window threshold.
+- Missing edge case where ephemeral REQ creation itself fails
+  under sustained load. Mitigation: error handling around
+  `_new_req_socket()` with fallback to structured error reply.
+
+## Verification plan
+
+### macOS
+```bash
+CRYODAQ_MOCK=1 .venv/bin/cryodaq-engine --mock &
+.venv/bin/python tools/diag_zmq_idle_hypothesis.py
+# Expected: all 3 phases 0 failures
+
+.venv/bin/python tools/diag_zmq_bridge_extended.py
+# Expected: 180/180 OK
+
+.venv/bin/cryodaq   # real launcher
+# Leave idle 15+ min, verify no REP timeout warnings
+```
+
+### Ubuntu
+```bash
+./start.sh
+# Leave idle 15+ min, verify experiment_status continues
+# No timeout at 120s mark
+
+.venv/bin/python tools/diag_zmq_bridge_extended.py
+# Expected: 180/180 OK
+```
+
+### Watchdog validation
+After primary fix, inject synthetic cmd_timeout via test harness:
+- Data path stays alive (readings continue)
+- Launcher detects command-channel stalled
+- Bridge restarts
+- Commands resume
+
+## References
+
+- ZeroMQ Guide ch.4 reliable request-reply: https://zguide.zeromq.org/docs/chapter4/
+- libzmq zmq_setsockopt REQ_RELAXED/REQ_CORRELATE: https://libzmq.readthedocs.io/en/latest/zmq_setsockopt.html
+- libzmq issue #4673 (sparse-traffic oddities): https://github.com/zeromq/libzmq/issues/4673
+
+---
+
+*Codex analysis reviewed and endorsed by architect (Claude) 2026-04-20.*
+*Implementation handed to CC via `CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`.*
