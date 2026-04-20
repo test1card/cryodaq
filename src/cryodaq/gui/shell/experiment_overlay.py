@@ -715,7 +715,8 @@ class ExperimentOverlay(QWidget):
         for entry in entries:
             ts = self._format_time(entry.get("timestamp", ""))
             author = str(entry.get("author", "") or entry.get("source", "") or "")
-            msg = str(entry.get("message", ""))
+            msg_raw = str(entry.get("message", ""))
+            msg = msg_raw.splitlines()[0] if msg_raw else ""
             text = f"{ts}  {msg}" if not author else f"{ts}  {author}: {msg}"
             self._timeline_list.addItem(QListWidgetItem(text))
 

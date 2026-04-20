@@ -168,7 +168,8 @@ class QuickLogBlock(QWidget):
         except (ValueError, TypeError):
             ts_text = "--:--"
 
-        message = entry.get("message", "")
+        message_raw = entry.get("message", "")
+        message = message_raw.splitlines()[0] if message_raw else ""
         if len(message) > 60:
             message = message[:57] + "\u2026"
 

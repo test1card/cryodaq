@@ -1035,7 +1035,7 @@ class QuickLogWidget(QFrame):
             ts = str(entry.get("timestamp", ""))
             if "T" in ts:
                 ts = ts.split("T")[1][:8]
-            msg = str(entry.get("message", ""))
+            msg = str(entry.get("message", "")).splitlines()[0] if entry.get("message") else ""
             if len(msg) > 80:
                 msg = msg[:77] + "..."
             lines.append(f"{ts} — {msg}")

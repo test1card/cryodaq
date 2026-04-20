@@ -135,6 +135,35 @@ def test_quick_log_widget_initializes() -> None:
     assert widget._input.placeholderText() == "Заметка оператора..."
 
 
+def test_quick_log_widget_renders_only_first_line_of_multiline_message() -> None:
+    """IV.4 F11: shift_end log entries embed a full Markdown body in the
+    message field. The compact recent-logs widget must render only the
+    first line so it doesn't dump the Markdown summary into its label."""
+    _app()
+    from cryodaq.gui.widgets.overview_panel import QuickLogWidget
+
+    widget = QuickLogWidget()
+    widget._on_refresh_result(
+        {
+            "ok": True,
+            "entries": [
+                {
+                    "timestamp": "2026-04-20T12:00:00",
+                    "message": (
+                        "Сдача смены: Vladimir | OK\n\n"
+                        "# Сдача смены — Vladimir\nsection body"
+                    ),
+                }
+            ],
+        }
+    )
+    rendered = widget._recent_label.text()
+    assert "Сдача смены: Vladimir | OK" in rendered
+    # Markdown body must not leak into the compact widget.
+    assert "# Сдача смены" not in rendered
+    assert "section body" not in rendered
+
+
 # ---------------------------------------------------------------------------
 # CompactTempCard click-toggle
 # ---------------------------------------------------------------------------
