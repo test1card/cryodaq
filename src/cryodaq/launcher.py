@@ -815,6 +815,20 @@ class LauncherWindow(QMainWindow):
 
         self._restart_gui_with_theme_change()
 
+    def _wait_engine_stopped(self, timeout: float = 15.0, interval: float = 0.2) -> bool:
+        """Poll until engine ports are free (engine fully terminated).
+
+        Returns True if ports are confirmed free, False if timeout exceeded.
+        This prevents race conditions where execv happens while the engine
+        is still releasing its ZMQ sockets.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not _is_port_busy(_ZMQ_PORT):
+                return True
+            time.sleep(interval)
+        return False
+
     def _restart_gui_with_theme_change(self) -> None:
         """Re-exec the launcher process with the same arguments.
 
@@ -842,6 +856,21 @@ class LauncherWindow(QMainWindow):
             self._stop_engine()
         except Exception:
             logger.exception("theme: engine stop failed (continuing)")
+
+        # Wait for engine ports to be fully released before execv.
+        # Prevents race where new launcher starts while old engine
+        # still holds port 5556 in TIME_WAIT or is mid-termination.
+        # Skip for external engines — we didn't stop them, so waiting is
+        # futile and would just add a 15s UI hang.
+        if not self._engine_external:
+            logger.info("theme: waiting for engine ports to release...")
+            ports_free = self._wait_engine_stopped(timeout=5.0)
+            if not ports_free:
+                logger.warning("theme: engine ports still busy after 5s, proceeding anyway")
+            else:
+                logger.info("theme: engine ports confirmed free")
+        else:
+            logger.info("theme: engine external, skipping port wait")
 
         # Release launcher lock so the re-execed launcher can re-acquire
         # it; otherwise it hits the "CryoDAQ Launcher уже запущен" modal.

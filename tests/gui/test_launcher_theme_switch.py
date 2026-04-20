@@ -18,13 +18,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-def _make_window(lock_fd: int | None = 42) -> object:
+def _make_window(lock_fd: int | None = 42, engine_external: bool = False) -> object:
     """Construct a LauncherWindow-shaped stub without spawning subprocesses.
 
     LauncherWindow.__init__ spawns the engine subprocess, acquires file
     locks, and builds Qt widgets — far too heavy for a unit test. The
     re-exec sequence only reads ``self._bridge``, ``self._stop_engine``,
-    and ``self._lock_fd``, so a minimal stub is sufficient.
+    ``self._lock_fd``, and ``self._engine_external``, so a minimal stub is sufficient.
     """
     from cryodaq.launcher import LauncherWindow
 
@@ -32,6 +32,7 @@ def _make_window(lock_fd: int | None = 42) -> object:
     stub._bridge = MagicMock(name="bridge")
     stub._stop_engine = MagicMock(name="stop_engine")
     stub._lock_fd = lock_fd
+    stub._engine_external = engine_external
     return stub
 
 
