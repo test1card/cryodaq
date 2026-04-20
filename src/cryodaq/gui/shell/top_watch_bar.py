@@ -253,8 +253,11 @@ class TopWatchBar(QWidget):
 
         ctx.addWidget(self._make_ctx_dot())
 
-        # T_min
-        self._ctx_tmin_label = QLabel("\u0422 \u043c\u0438\u043d")  # Т мин
+        # T_2st (2-я ступень) — Т11, physically second stage of the
+        # cryocooler. Label is positional rather than comparative
+        # because Т11/Т12 are the locked quantitative reference
+        # pair for cold zone monitoring (design system invariant #21).
+        self._ctx_tmin_label = QLabel("\u0422 2\u0441\u0442.")  # Т 2ст.
         self._ctx_tmin_label.setStyleSheet(label_style)
         self._ctx_tmin_value = QLabel("\u2014")
         self._ctx_tmin_value.setStyleSheet(value_style)
@@ -263,8 +266,10 @@ class TopWatchBar(QWidget):
 
         ctx.addWidget(self._make_ctx_dot())
 
-        # T_max
-        self._ctx_tmax_label = QLabel("\u0422 \u043c\u0430\u043a\u0441")  # Т макс
+        # T_N2 (азотная плита) — Т12, physically nitrogen plate side
+        # of the second stage. Subscript 2 via U+2082 (₂) keeps the
+        # chemical formula form N₂ instead of the ambiguous N2.
+        self._ctx_tmax_label = QLabel("\u0422 N\u2082")  # Т N₂
         self._ctx_tmax_label.setStyleSheet(label_style)
         self._ctx_tmax_value = QLabel("\u2014")
         self._ctx_tmax_value.setStyleSheet(value_style)
