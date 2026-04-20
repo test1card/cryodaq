@@ -53,7 +53,10 @@ Ordered by when we intend to ship them. Status at 2026-04-20.
 
 ### IV.4 — Safe features batch
 
-**Target:** tag `0.17.0` after IV.3 closes and deep smoke passes.
+**Target:** tag `0.34.0` (next increment after current `0.33.0`).
+
+**Status:** ✅ CLOSED at HEAD `7cb5634` (2026-04-20).
+All 4 findings PASS. Pending: real `git tag` command.
 
 Scope:
 - **F1** — Parquet UI export button + default pyarrow install
@@ -61,13 +64,23 @@ Scope:
 - **F6** — Auto-report verification + report_enabled UI toggle
 - **F11** — Shift handover auto-sections
 
-Estimated: ~700-800 LOC, 4 commits, ~5-6h CC. No engine refactor.
+Shipped: ~800 LOC, 4 commits, 5 amend cycles total, 863 GUI tests
+passing. No engine refactor.
 
-Spec: `CC_PROMPT_IV_4_BATCH.md` (pending IV.3 PASS).
+Spec: `CC_PROMPT_IV_4_BATCH.md` (closed).
+
+Commit SHAs:
+- F1 Parquet UI: `bf584ed` (2 amends)
+- F6 auto-report verify: `0ec842f` (0 amends)
+- F2 debug mode: `5f8b394` (2 amends)
+- F11 shift handover: `7cb5634` (2 amends)
+
+Telegram export in F11 deferred (out of IV.4 scope per Rule 4).
 
 ### IV.5 — Stretch features batch
 
-**Target:** tag `0.18.0` after IV.4 closes.
+**Target:** tag `0.35.0` after IV.4 closes, smoke passes, and ZMQ
+subprocess bug (see "Known broken" below) resolved.
 
 Scope:
 - **F3** — Analytics placeholder widgets data wiring
@@ -402,6 +415,78 @@ F13, F14, F16, F17, F18.
 
 **Infrastructure collab (deployment side):** F5 (Hermes), F15 (Linux
 packaging).
+
+---
+
+## Known broken (blocking next tag)
+
+### B1 — ZMQ subprocess REQ socket dies after idle > 30s
+
+**Status:** 🔥 TCP_KEEPALIVE fix did NOT resolve (delayed failure
+from 4s → 55s uptime but still occurs), Codex handoff prepared.
+Blocks `0.34.0` tag.
+
+**Symptom:** GUI sends commands via `ZmqBridge`, works for some time
+(first command after bridge start always OK), then after >30s idle
+any subsequent command hangs for exactly 35s (= `RCVTIMEO`). After
+that **every subsequent command** hangs the same 35s. Subprocess
+doesn't recover.
+
+**Diagnostic timeline (2026-04-20):**
+1. `diag_zmq_subprocess.py` — raw subprocess works fine.
+2. `diag_zmq_bridge.py` — phase 1 (5 seq), phase 2 (10 concurrent)
+   all OK; phase 3 (1 Hz soak) → first FAIL at cmd #28.
+3. `diag_zmq_bridge_extended.py` — commands 1-4 OK (1s interval),
+   cmd #5 FAIL at uptime=39s, then 0/5 recovery.
+4. `diag_zmq_idle_hypothesis.py` — **SMOKING GUN**:
+   - 5 Hz (200ms idle): **291/291 OK** over 60s
+   - 0.33 Hz (3s idle): 9 OK, cmd #10 FAIL
+   - 5 Hz after sparse: 1/1 FAIL immediately — socket permanently dead
+
+**Root cause CONFIRMED:** macOS kernel reaps idle loopback TCP
+connections after ~30s inactivity. Once reaped, REQ socket is
+permanently degraded because the pyzmq ZMQ context retains the
+dead peer mapping — recreating the Python socket object doesn't
+reset the kernel-side TCP state.
+
+**Fix applied (2026-04-20, uncommitted):**
+
+TCP keepalive on ALL four sockets so the kernel does not reap
+the connection:
+
+```python
+sock.setsockopt(zmq.TCP_KEEPALIVE, 1)
+sock.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)   # probe every 10s
+sock.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)   # retry interval 5s
+sock.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)     # 3 fails = dead
+```
+
+Applied to:
+- `src/cryodaq/core/zmq_subprocess.py` — SUB (`sub_drain_loop`) + REQ
+  (`_new_req_socket`)
+- `src/cryodaq/core/zmq_bridge.py` — `ZMQPublisher` PUB + `ZMQCommandServer` REP
+
+Kernel-reap happens from either side of a TCP connection, so the
+fix must be mirrored on engine + subprocess sockets. `zmq_bridge.py::
+ZMQSubscriber` (legacy, unused in production) NOT patched.
+
+**Verification result (2026-04-20):** TCP_KEEPALIVE partially helped
+but bug persists:
+- Run A: cmds 1-55 OK (55s), cmd #58 FAIL at uptime 92s, 0/3 recovery
+- Run B: cmds 1-20 OK (20s), cmd #22 FAIL at uptime 56s, 0/4 recovery
+
+Keepalive moved the failure point later but didn't eliminate it.
+First-failure time is stochastic (variable across runs). Something
+other than simple idle reaping is at play.
+
+**Next step:** Codex review with full handoff doc in
+`docs/bug_B1_zmq_idle_death_handoff.md`.
+
+**Fallback candidates after Codex weighs in:**
+- Switch loopback transport `tcp://127.0.0.1:5555/5556` → `ipc:///tmp/...`
+  (Unix domain sockets, no TCP kernel layer, no idle reaping)
+- Or: replace `mp.Process` + `mp.Queue` architecture with in-process
+  threads (Windows libzmq-crash rationale doesn't apply on macOS/Linux)
 
 ---
 
