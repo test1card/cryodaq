@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -148,10 +147,11 @@ def test_periodic_prompt_submits_log_entry() -> None:
 
 
 def test_shift_end_dialog_generates_summary() -> None:
-    """IV.4 F11: dialog now dispatches 4 async section queries at open
-    time plus the log_entry on save. We patch the worker before the
-    constructor fires so both paths go through the capture list, then
-    filter to the log_entry payload for the save assertion."""
+    """IV.4 F11: dialog dispatches 4 async section queries on open plus a
+    log_entry on save. The operator_log schema has no metadata column, so
+    the compiled Markdown body is embedded in the ``message`` field — the
+    header line carries the operator + free-form comment and is followed
+    by the full Markdown summary."""
     _app()
     import time
 
@@ -176,12 +176,16 @@ def test_shift_end_dialog_generates_summary() -> None:
     assert len(log_entries) == 1
     payload = log_entries[0]
     assert "shift_end" in payload["tags"]
-    metadata = json.loads(payload["metadata"])
-    assert metadata["periodic_count"] == 3
-    assert metadata["missed_count"] == 1
-    assert metadata["comment"] == "Штатно, система стабильна"
-    assert "markdown_body" in metadata
-    assert "Сдача смены" in metadata["markdown_body"]
+    assert payload["author"] == "Фоменко В.Н."
+    assert payload["source"] == "shift_handover"
+    assert "metadata" not in payload
+    message = payload["message"]
+    # Header line — one-liner with operator + comment.
+    header, _, body = message.partition("\n\n")
+    assert header.startswith("Сдача смены: Фоменко В.Н.")
+    assert "Штатно, система стабильна" in header
+    # Body is the full Markdown summary.
+    assert body.startswith("# Сдача смены — Фоменко В.Н.")
     assert len(received) == 1
 
 
@@ -347,7 +351,9 @@ def test_shift_end_dialog_markdown_export_format() -> None:
 
 
 def test_shift_end_dialog_saves_markdown_body_to_operator_log() -> None:
-    """_on_end includes the compiled Markdown in the log entry's metadata."""
+    """_on_end embeds the compiled Markdown in the log entry's ``message``
+    field (operator_log has no metadata column — the engine handler would
+    silently drop anything passed there)."""
     _app()
     import time
 
@@ -369,11 +375,15 @@ def test_shift_end_dialog_saves_markdown_body_to_operator_log() -> None:
         dialog._on_end()
     log_payloads = [p for p in captured if p.get("cmd") == "log_entry"]
     assert log_payloads
-    metadata = json.loads(log_payloads[0]["metadata"])
-    assert "markdown_body" in metadata
-    assert "событие" in metadata["markdown_body"]
-    assert metadata["shift_start_ts"]
-    assert metadata["shift_end_ts"]
+    payload = log_payloads[0]
+    assert "metadata" not in payload
+    message = payload["message"]
+    # Markdown body is appended after the header line.
+    assert "# Сдача смены — Vladimir" in message
+    assert "событие" in message
+    assert "эксперимент X" in message
+    # Shift window is rendered as an italic line right under the title.
+    assert "*Окно смены:*" in message
 
 
 # ---------------------------------------------------------------------------
@@ -411,3 +421,52 @@ def test_shift_bar_activate_deactivate() -> None:
     assert "не активна" in bar._status_label.text()
     assert not bar._start_btn.isHidden()
     assert bar._end_btn.isHidden()
+
+
+def test_shift_bar_activation_records_wall_clock_start() -> None:
+    """IV.4 F11: ShiftBar must capture wall-clock start and hand it to
+    ShiftEndDialog so the summary query window matches the actual shift,
+    not the 8-hour fallback."""
+    _app()
+    import time
+
+    bar = ShiftBar()
+    before = time.time()
+    bar._activate_shift("Vladimir", "shift-20260420-10")
+    after = time.time()
+
+    assert before <= bar._start_epoch_s <= after
+    # Monotonic clock is still tracked for elapsed-time display.
+    assert bar._start_mono > 0
+
+
+def test_shift_bar_end_dialog_receives_wall_clock_start() -> None:
+    """_on_end_shift must pass start_epoch into ShiftEndDialog so the
+    dialog's query window isn't forced onto the 8-hour fallback."""
+    _app()
+
+    from cryodaq.gui.widgets import shift_handover as module
+
+    bar = ShiftBar()
+    bar._activate_shift("Vladimir", "shift-20260420-10")
+    expected_epoch = bar._start_epoch_s
+    assert expected_epoch > 0
+
+    captured: dict[str, object] = {}
+
+    class _DialogStub:
+        shift_ended = MagicMock()
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.shift_ended = MagicMock()
+            self.shift_ended.connect = MagicMock()
+
+        def exec(self):
+            return 0
+
+    with patch.object(module, "ShiftEndDialog", _DialogStub):
+        bar._on_end_shift()
+
+    assert captured["start_epoch"] == expected_epoch
+    assert captured["start_time"] == bar._start_mono

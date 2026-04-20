@@ -334,6 +334,44 @@ _SHIFT_FALLBACK_WINDOW_S = 8 * 3600
 _SHIFT_EVENT_TAGS: frozenset[str] = frozenset({"phase", "experiment", "safety_fault", "alarm_ack"})
 
 
+def _parse_epoch_or_iso(raw: object) -> float | None:
+    """Accept either a numeric epoch (seconds, int/float) or an ISO 8601 string.
+
+    log_get and experiment_status both return timestamps as ISO strings
+    (``OperatorLogEntry.to_payload`` + metadata reader), while the
+    alarm_v2 history deque stores numeric epoch floats directly. Unify
+    handling here so every section formatter works against either
+    shape.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        # Allow numeric strings first (back-compat with older tests /
+        # fixtures that pass epoch seconds as strings).
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        # ISO 8601 with trailing Z needs the +00:00 suffix substitution
+        # because fromisoformat only accepts full UTC offsets.
+        iso = text
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(iso).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
 def format_shift_events_section(entries: list[dict]) -> str:
     """Render the events section of the shift handover as Markdown lines.
 
@@ -347,12 +385,13 @@ def format_shift_events_section(entries: list[dict]) -> str:
     lines: list[str] = []
     for entry in entries:
         raw_ts = entry.get("timestamp")
+        epoch = _parse_epoch_or_iso(raw_ts)
         when = "—"
-        try:
-            if raw_ts is not None:
-                when = datetime.fromtimestamp(float(raw_ts), tz=UTC).strftime("%H:%M")
-        except (TypeError, ValueError, OSError):
-            when = "—"
+        if epoch is not None:
+            try:
+                when = datetime.fromtimestamp(epoch, tz=UTC).strftime("%H:%M")
+            except (TypeError, ValueError, OSError):
+                when = "—"
         tags = entry.get("tags") or []
         if isinstance(tags, str):
             tag_text = tags
@@ -452,19 +491,16 @@ def format_shift_experiment_section(payload: dict | None) -> str:
             phase_name = str(phase.get("phase", "")).strip() or "—"
             started = phase.get("started_at")
             ended = phase.get("ended_at")
-            try:
-                # 0.0 is a legitimate epoch (UTC epoch origin in tests),
-                # so use `is not None` rather than truthiness.
-                started_f = float(started) if started is not None else None
-                ended_f = float(ended) if ended is not None else None
-                if started_f is not None and ended_f is not None:
-                    duration_min = int(round((ended_f - started_f) / 60.0))
-                    phase_bits.append(f"{phase_name} ({duration_min} мин)")
-                elif started_f is not None:
-                    phase_bits.append(f"{phase_name} (активная)")
-                else:
-                    phase_bits.append(phase_name)
-            except (TypeError, ValueError):
+            # Accept both numeric epoch and ISO 8601 — experiment_status
+            # returns ISO strings from metadata; tests pass floats.
+            started_f = _parse_epoch_or_iso(started)
+            ended_f = _parse_epoch_or_iso(ended)
+            if started_f is not None and ended_f is not None:
+                duration_min = int(round((ended_f - started_f) / 60.0))
+                phase_bits.append(f"{phase_name} ({duration_min} мин)")
+            elif started_f is not None:
+                phase_bits.append(f"{phase_name} (активная)")
+            else:
                 phase_bits.append(phase_name)
         if phase_bits:
             lines.append("- Фазы: " + " → ".join(phase_bits))
@@ -525,8 +561,8 @@ class ShiftEndDialog(QDialog):
     Operator still types free-form comments + a handover note; the
     «Скопировать в Markdown» button ships the full summary to the
     clipboard and the «Сдать смену» button writes it to the operator
-    log under tag ``shift_end`` with the Markdown body preserved in
-    the entry metadata.
+    log under tag ``shift_end`` with the Markdown body embedded in
+    the entry ``message`` field (operator_log has no metadata column).
     """
 
     shift_ended = Signal()
@@ -677,8 +713,12 @@ class ShiftEndDialog(QDialog):
         _dispatch(
             {
                 "cmd": "readings_history",
-                "start_ts": self._start_epoch,
-                "end_ts": self._end_epoch,
+                # IV.4 F11 amend: engine handler uses from_ts/to_ts, not
+                # start_ts/end_ts — sending the wrong keys made the
+                # query effectively unbounded and temperatures section
+                # leaked data from outside the shift window.
+                "from_ts": self._start_epoch,
+                "to_ts": self._end_epoch,
                 "channels": None,
             },
             self._on_temperatures_reply,
@@ -772,28 +812,24 @@ class ShiftEndDialog(QDialog):
         comment = self._comment.toPlainText().strip()
         markdown_body = self._compose_markdown()
 
+        # IV.4 F11 amend: the operator_log schema has no metadata column
+        # and the engine's log_entry handler ignores that field, so the
+        # compiled Markdown summary is stored as the message body itself.
+        # Format: one-line header + blank line + full Markdown so
+        # log_get consumers (shift handover history, archive viewer)
+        # still see the compiled summary verbatim.
+        header_line = f"Сдача смены: {self._operator}"
+        if comment:
+            header_line = f"{header_line} | {comment}"
+        message = f"{header_line}\n\n{markdown_body}"
+
         _send_log_fire_and_forget(
             {
                 "cmd": "log_entry",
-                "message": f"Сдача смены: {self._operator}" + (f" | {comment}" if comment else ""),
+                "message": message,
                 "author": self._operator,
                 "source": "shift_handover",
                 "tags": ["shift_end"],
-                "metadata": json.dumps(
-                    {
-                        "shift_id": self._shift_id,
-                        "operator": self._operator,
-                        "duration_h": self._elapsed_h,
-                        "duration_m": self._elapsed_m,
-                        "periodic_count": self._periodic_count,
-                        "missed_count": self._missed_count,
-                        "comment": comment,
-                        "handover_note": self._handover_note.toPlainText().strip(),
-                        "shift_start_ts": self._start_epoch,
-                        "shift_end_ts": self._end_epoch,
-                        "markdown_body": markdown_body,
-                    }
-                ),
             },
             parent=self,
         )
@@ -823,6 +859,7 @@ class ShiftBar(QFrame):
         self._operator = ""
         self._shift_id = ""
         self._start_mono = 0.0
+        self._start_epoch_s = 0.0
         self._periodic_count = 0
         self._missed_count = 0
 
@@ -905,6 +942,7 @@ class ShiftBar(QFrame):
         self._operator = operator
         self._shift_id = shift_id
         self._start_mono = time.monotonic()
+        self._start_epoch_s = time.time()
         self._periodic_count = 0
         self._missed_count = 0
 
@@ -925,6 +963,7 @@ class ShiftBar(QFrame):
             start_time=self._start_mono,
             periodic_count=self._periodic_count,
             missed_count=self._missed_count,
+            start_epoch=self._start_epoch_s,
             parent=self,
         )
         dialog.shift_ended.connect(self._deactivate_shift)
