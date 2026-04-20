@@ -50,3 +50,6 @@ DEEP_AUDIT_*.md
 graphify-out/
 graphify-out.stale-pre-merge/
 logs/
+
+# Runtime SQLite databases (per-machine, not portable)
+data/
