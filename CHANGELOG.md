@@ -732,10 +732,10 @@ closure. This is the correct current version line for the repo state above
 
 ## [0.35.0] — 2026-04-20
 
-This tranche reworked the shell’s analytics and interaction model, then closed
-the IV.4 operator-facing feature batch on top of the Phase II overlay
-migration. It is a distinct release-sized step after `0.34.0`, not just an
-appendix to it.
+This tranche reworked the shell’s analytics and interaction model, completed
+the IV.3 operator-facing cleanup set, and set up the later IV.4 batch that
+landed in `0.36.0`. It is a distinct release-sized step after `0.34.0`, not
+just an appendix to it.
 
 ### Added
 
@@ -743,10 +743,10 @@ appendix to it.
   (`6ddd255`) backed by shared time-window and prediction primitives
   (`2720cbe`), allowing analytics layouts to switch by experiment phase instead
   of staying locked to a single static dashboard composition.
-- **IV.3 and IV.4 operator features.** Added mock-scenario and replay tooling
-  (`e05e14b`, `badce0a`), AST-based copy-rule scanning (`e94cae6`, `b06c657`),
-  ToolRail icon migration to `qtawesome`/Phosphor (`e3fcace`, `c03cc7e`), and
-  the full IV.4 safe feature set that later carried into `0.36.0`.
+- **IV.3 operator tooling and UI cleanup.** Added mock-scenario and replay
+  tooling (`e05e14b`, `badce0a`), AST-based copy-rule scanning
+  (`e94cae6`, `b06c657`), and ToolRail icon migration to
+  `qtawesome`/Phosphor (`e3fcace`, `c03cc7e`).
 
 ### Changed
 
@@ -784,7 +784,9 @@ appendix to it.
 - `2720cbe` feat(ui): III.B GlobalTimeWindow + shared PressurePlot + PredictionWidget
 - `e6cdf7a` feat(ui): III.A accent/status decoupling + neutral interaction tokens
 - `e3fcace` refactor(ui): IV.3.F4 ToolRail — migrate to Phosphor icons via qtawesome
-- `466fb7f` through `7cb5634` IV.4 safe feature batch
+- `e05e14b` tools: IV.3.F5 mock_scenario + force_phase + replay_session
+- `e94cae6` ds: IV.3.F6 AST-based scanner for RULE-COPY-009
+- `e05bfb9` fix(zmq): IV.3.F7 tier handler timeout + always reply on timeout
 
 ---
 
