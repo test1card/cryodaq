@@ -6,9 +6,10 @@ Role: Codex architecture-owner handoff for next-phase work
 
 ## Baseline State
 
-This document is written against the current working tree, not only committed `HEAD`.
+This document is written against the current working tree at authoring time, not
+only the baseline committed `HEAD`.
 
-- Current `HEAD`: `256da7a` (`docs: sync B1 status and next-phase control plane`)
+- Baseline committed `HEAD` at authoring time: `256da7a` (`docs: sync B1 status and next-phase control plane`)
 - Relevant B1/watchdog/alarm hardening is now committed on `master`, not only present in a working tree.
 - Relevant working-tree drift vs `HEAD` exists in:
   - `src/cryodaq/launcher.py`
@@ -251,7 +252,7 @@ All of these are downstream of evidence, not substitutes for evidence.
 - No transport migration presented as a cleanup task.
 - No broad refactor justified by file size or aesthetics.
 - No operator-facing wording that suggests command-path health from the current discrepancy log.
-- No `0.34.0` release claim while B1 remains unresolved.
+- No `0.36.0` release claim while B1 remains unresolved.
 
 ## 9. Human Checkpoints
 

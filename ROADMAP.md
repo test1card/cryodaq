@@ -53,7 +53,9 @@ Ordered by when we intend to ship them. Status at 2026-04-20.
 
 ### IV.4 — Safe features batch
 
-**Target:** tag `0.34.0` (next increment after current `0.33.0`).
+**Target:** retroactive release line `0.34.0` within the reconstructed
+post-`v0.33.0` history. The next formal version line now continues from
+`0.36.0`; see `CHANGELOG.md`.
 
 **Status:** ✅ CLOSED at HEAD `7cb5634` (2026-04-20).
 All 4 findings PASS. Pending: real `git tag` command.
@@ -423,7 +425,7 @@ packaging).
 ### B1 — ZMQ subprocess command channel dies (not idle-related)
 
 **Status:** 🔧 IV.6 partial mitigation shipped, root cause still unresolved.
-Blocks `0.34.0` tag and therefore blocks IV.5 feature execution as the
+Blocks the next formal tag line (`0.36.0`) and therefore blocks IV.5 feature execution as the
 next safe repo phase.
 
 **Current master includes:**
@@ -514,7 +516,7 @@ Diag logs preserved at `/tmp/diag_iv6_idle.log`,
 `/tmp/diag_iv6_extended.log`, and `/tmp/engine_iv6_debug.log`
 for architect review.
 
-**Status:** still 🔧. B1 remains OPEN and blocks `0.34.0`.
+**Status:** still 🔧. B1 remains OPEN and blocks the next formal tag line (`0.36.0`).
 
 **Next:** IV.7 `ipc://` transport experiment (spec
 `CC_PROMPT_IV_7_IPC_TRANSPORT.md`). Fallback (a) from the original

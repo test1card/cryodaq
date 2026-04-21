@@ -1,7 +1,7 @@
 # B1 Current-Master Runbook
 
 This runbook exists to gather runtime truth on current `master` before any
-IV.7 transport decision or `0.34.0` release discussion.
+IV.7 transport decision or next-formal-tag (`0.36.0`) release discussion.
 
 ## Baseline capture
 
@@ -57,4 +57,4 @@ Real lab path:
 
 - Do not claim IV.6 closed B1.
 - Do not treat IV.7 as approved because the runbook exists.
-- Do not say `0.34.0` is ready unless B1 is closed by fresh runtime evidence.
+- Do not say the next formal tag line (`0.36.0`) is ready unless B1 is closed by fresh runtime evidence.
