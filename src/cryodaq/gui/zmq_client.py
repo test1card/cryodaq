@@ -90,6 +90,8 @@ class ZmqBridge:
         self._pending_lock = threading.Lock()
         self._reply_stop = threading.Event()
         self._reply_consumer: threading.Thread | None = None
+        # Hardening 2026-04-21: restart counter for B1 diagnostic correlation
+        self._restart_count: int = 0
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -128,7 +130,12 @@ class ZmqBridge:
             name="zmq-reply-consumer",
         )
         self._reply_consumer.start()
-        logger.info("ZMQ bridge subprocess started (PID=%d)", self._process.pid)
+        self._restart_count += 1
+        logger.info(
+            "ZMQ bridge subprocess started (PID=%d, restart_count=%d)",
+            self._process.pid,
+            self._restart_count,
+        )
 
     def is_alive(self) -> bool:
         """Check if the subprocess is still running."""
@@ -199,6 +206,10 @@ class ZmqBridge:
         """True if subprocess is alive and bridge heartbeats are fresh."""
         return self.is_alive() and not self.heartbeat_stale()
 
+    def restart_count(self) -> int:
+        """Return the number of bridge restarts since launcher start."""
+        return self._restart_count
+
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""
         if not self.is_alive():
@@ -265,8 +276,15 @@ class ZmqBridge:
                 logger.warning("ZMQ bridge subprocess did not exit, killing")
                 self._process.kill()
                 self._process.join(timeout=2)
+            # Hardening 2026-04-21: log exit code for B1 diagnostic
+            exit_code = self._process.exitcode
+            if exit_code is not None:
+                logger.info("ZMQ bridge subprocess stopped (exitcode=%s)", exit_code)
+            else:
+                logger.warning("ZMQ bridge subprocess stopped (exitcode=None after kill)")
             self._process = None
-        logger.info("ZMQ bridge subprocess stopped")
+        else:
+            logger.info("ZMQ bridge subprocess stopped")
 
 
 def _drain(q: mp.Queue) -> None:

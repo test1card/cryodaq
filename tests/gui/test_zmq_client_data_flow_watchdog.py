@@ -9,6 +9,7 @@ data-flow watchdog.
 from __future__ import annotations
 
 import inspect
+import logging
 import time
 
 from cryodaq.drivers.base import Reading
@@ -19,8 +20,21 @@ class _FakeAliveProcess:
     """Minimal stand-in for a live mp.Process so we can drive is_healthy()
     without actually starting the subprocess."""
 
+    pid = 12345
+
+    def __init__(self) -> None:
+        self._alive = True
+        self.exitcode = None
+
     def is_alive(self) -> bool:
-        return True
+        return self._alive
+
+    def join(self, timeout=None) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self.exitcode = -9
+        self._alive = False
 
 
 def _build_bridge_with_fake_proc() -> ZmqBridge:
@@ -170,6 +184,50 @@ def test_start_resets_last_reading_time(monkeypatch):
     bridge.start()
 
     assert bridge._last_reading_time == 0.0
+
+
+def test_bridge_restart_count_increments_on_start(monkeypatch):
+    class _FakeProcess:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def start(self) -> None:
+            self._alive = True
+
+    class _FakeThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.Process", _FakeProcess)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.threading.Thread", _FakeThread)
+
+    bridge = ZmqBridge()
+    assert bridge.restart_count() == 0
+    bridge.start()
+    assert bridge.restart_count() == 1
+
+
+def test_shutdown_logs_exitcode(caplog):
+    caplog.set_level(logging.INFO, logger="cryodaq.gui.zmq_client")
+    bridge = _build_bridge_with_fake_proc()
+    bridge._reply_consumer = None
+    bridge._process.exitcode = 0
+    bridge.shutdown()
+    assert "exitcode=0" in caplog.text
 
 
 def test_start_stops_stale_reply_consumer_before_restart(monkeypatch):
