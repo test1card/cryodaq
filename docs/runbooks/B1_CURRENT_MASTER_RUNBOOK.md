@@ -1,62 +1,60 @@
-# Runbook - B1 current-master truth recovery
+# B1 Current-Master Runbook
 
-## Purpose
+This runbook exists to gather runtime truth on current `master` before any
+IV.7 transport decision or `0.34.0` release discussion.
 
-Use this runbook to capture the current-master B1 behavior without changing transport, launcher, engine, or safety configuration. The goal is to record the command-channel shape on the code that is actually checked out, not to change the diagnosis.
+## Baseline capture
 
-The canonical capture tool is `tools/diag_zmq_b1_capture.py`. It runs three phases in order:
-
-1. Sequential command burst
-2. Concurrent command burst
-3. 1 Hz soak
-
-Those phases are implemented through the shared helpers in `tools/_b1_diagnostics.py` so the CLI and any future tooling stay aligned.
-
-## Preconditions
-
-- Start the engine first.
-- Use the same environment you want to diagnose.
-- Do not rely on bridge startup or heartbeats as proof that B1 is gone; this incident is about command replies.
-
-Typical mock-engine setup:
+Run these first and paste their output into the run note:
 
 ```bash
-CRYODAQ_MOCK=1 /Users/vladimir/Projects/cryodaq/.venv/bin/cryodaq-engine --mock
+git rev-parse HEAD
+git status --short
 ```
 
-## Capture
+Expected:
+- `HEAD` is the commit under test
+- only intentional local artifacts are dirty
 
-Run the canonical capture from the project venv:
+## Engine startup
+
+Mock path:
 
 ```bash
-/Users/vladimir/Projects/cryodaq/.venv/bin/python -m tools.diag_zmq_b1_capture
+CRYODAQ_MOCK=1 .venv/bin/cryodaq-engine --mock
 ```
 
-Default capture parameters:
+Real lab path:
 
-- 5 sequential commands
-- 10 concurrent commands
-- 60 second soak
-- 1 second interval between soak commands
+```bash
+./start.sh
+```
 
-If you need a shorter evidence pass while iterating, keep the sequence structure intact and only shorten the counts or soak window for the local transcript.
+## Canonical capture
 
-## What To Look For
+```bash
+.venv/bin/python tools/diag_zmq_b1_capture.py \
+  --duration 180 \
+  --interval 1.0 \
+  --output artifacts/diagnostics/b1-current-master.jsonl
+```
 
-- `sequential` lines should show the first burst and their reply summaries.
-- `concurrent` lines should show the parallel burst and whether one command starts failing earlier than the others.
-- `soak` lines should show the long-run command behavior. This is the phase that usually exposes the current-master B1 shape.
-- The final `summary` section counts total, ok, failed, slow, and the maximum elapsed time for each phase.
+## Corroboration tools
 
-Interpretation:
+```bash
+.venv/bin/python tools/diag_zmq_bridge.py
+.venv/bin/python tools/diag_zmq_bridge_extended.py
+.venv/bin/python tools/diag_zmq_idle_hypothesis.py
+```
 
-- If the soak starts returning `ok=False` or timeouts after a period of otherwise healthy replies, record the first failing phase and index.
-- If all three phases stay clean on a supposed current-master reproduction, treat that as environment-specific until you have reproduced the same result twice.
-- A healthy data plane does not clear B1 by itself. This runbook is only about the command channel.
+## Result classification
 
-## Notes For Evidence Capture
+- If `bridge_reply` fails while `direct_reply` stays healthy: bridge/subprocess path is still the primary suspect.
+- If `bridge_reply` and `direct_reply` fail together: engine REP path or lower transport is still implicated; do not claim the bridge is uniquely at fault.
+- If neither path fails during the full 180 s run: do not declare B1 fixed. Repeat on Ubuntu lab hardware before changing roadmap status.
 
-- Save the full terminal transcript, not just the final summary.
-- Keep the CLI defaults unless you are explicitly creating a shorter operator note.
-- Use the same runbook command for future regressions so the transcript shape stays comparable.
+## Explicit no-go conclusions
 
+- Do not claim IV.6 closed B1.
+- Do not treat IV.7 as approved because the runbook exists.
+- Do not say `0.34.0` is ready unless B1 is closed by fresh runtime evidence.
