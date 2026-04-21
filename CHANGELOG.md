@@ -9,6 +9,91 @@
 
 ## [Unreleased]
 
+### Today — 2026-04-20 session (handoff → GLM-5.1)
+
+This is a tight working record, not a formal release. Full
+handoff context is in `HANDOFF_2026-04-20_GLM.md`; next formal
+release is `0.34.0` once B1 is resolved via IV.7.
+
+**Fixed / shipped:**
+
+- `aabd75f` — `engine: wire validate_checksum through Thyracont
+  driver loader`. Fixes TopWatchBar pressure em-dash on Ubuntu lab
+  PC when VSP206 hardware is connected. `_create_instruments()`
+  was ignoring the YAML key entirely; driver defaulted to strict
+  checksum validation regardless of config. One-line loader fix;
+  config-side `validate_checksum: false` in
+  `instruments.local.yaml` now actually applies.
+
+- `74dbbc7` — `reporting: xml_safe sanitizer for python-docx
+  compatibility`. Fixes `experiment_generate_report` failure when
+  real Keithley 2604B is connected (VISA resource contains `\x00`
+  per NI-VISA spec; python-docx rejects XML 1.0 control chars).
+  New `src/cryodaq/utils/xml_safe.py` with 10 unit tests. Applied
+  at all `add_paragraph()` / `cell.text` sites in
+  `src/cryodaq/reporting/sections.py`. `core/experiment.py:782`
+  logger upgraded from `log.warning` to `log.exception` — future
+  report-gen failures will include tracebacks (how this bug
+  survived: only the exception message was ever logged).
+
+- `be51a24` — `zmq: ephemeral REQ per command + cmd-channel
+  watchdog (IV.6 partial B1 mitigation)`. Landed the full
+  Codex-proposed B1 fix plan: per-command ephemeral REQ socket in
+  `zmq_subprocess.cmd_forward_loop`, launcher-side
+  `command_channel_stalled()` watchdog in `_poll_bridge_data`,
+  `TCP_KEEPALIVE` reverted on command + PUB paths (kept on
+  `sub_drain_loop` as orthogonal safeguard). 60/60 unit tests
+  green, full subtree 1775/1776 (1 pre-existing flaky).
+  **Does NOT fix B1 — Stage 3 diag tools still reproduce it.**
+  Committed anyway as architectural improvement matching ZeroMQ
+  Guide ch.4 canonical reliable req-reply pattern. Codex's
+  shared-REQ-state hypothesis falsified by this experiment.
+
+- Config edits on Ubuntu lab PC (some in git, some local):
+  - `interlocks.yaml` — `overheat_cryostat` regex tightened from
+    `Т[1-8] .*` to `Т(1|2|3|5|6|7|8) .*`. Т4 sensor is physically
+    disconnected (reads 380 K open-circuit), was triggering
+    `emergency_off` on Keithley during normal operation.
+  - `alarms_v3.yaml` — Т4 added to `uncalibrated` and `all_temp`
+    channel groups so `sensor_fault` still publishes WARNING
+    without hardware lockout.
+  - `instruments.local.yaml` — `validate_checksum: false` on
+    Thyracont block (per-machine override; NOT in git).
+
+- Operational on Ubuntu lab PC: `ModemManager` disabled
+  (was transiently grabbing `/dev/ttyUSB0`).
+
+**Open / known issues carrying into 0.34.0:**
+
+- **B1 still unresolved.** GUI command channel silently dies
+  ~30-120 s after bridge startup on both platforms. IV.7 `ipc://`
+  transport experiment is the next attempt — spec at
+  `CC_PROMPT_IV_7_IPC_TRANSPORT.md`. Workaround in place:
+  watchdog cooldown (TBD commit) prevents the IV.6 restart storm
+  regression, system works in 60-120 s cycles with single
+  restarts between.
+
+- `alarm_v2.py::_eval_condition` raises `KeyError 'threshold'`
+  when evaluating `cooldown_stall` composite. One sub-condition
+  is missing a `threshold` field. Log spam, not crash. Pending
+  mini-fix.
+
+- Thyracont `_try_v1_probe` probe-vs-read inconsistency. Probe
+  always succeeds; read checksum-validates. Driver can "connect"
+  and emit NaN forever on non-VSP63D hardware. Pending
+  hardening fix.
+
+**Infrastructure:**
+
+- Multi-model development stack adopted (2026-04-20 afternoon).
+  Anthropic weekly limit exhausted. Claude Code now routes
+  through `claude-code-router` proxy to Chutes (GLM-5.1 primary,
+  DeepSeek-V3.2 background, Kimi-K2.5 long-context) for the
+  coming ~4-5 days. Codex (ChatGPT subscription) and Gemini
+  (Google subscription) remain on their own quotas for
+  delegation. See `HANDOFF_2026-04-20_GLM.md` for operational
+  details and identity-leakage warnings.
+
 ### Changed
 
 - **Phase III.C — Phase-aware AnalyticsView rebuild.** Rewrote

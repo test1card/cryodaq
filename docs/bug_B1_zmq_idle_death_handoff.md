@@ -547,3 +547,128 @@ After primary fix, inject synthetic cmd_timeout via test harness:
 
 *Codex analysis reviewed and endorsed by architect (Claude) 2026-04-20.*
 *Implementation handed to CC via `CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`.*
+
+---
+
+# 2026-04-20 evening update — IV.6 outcome + IV.7 plan
+
+## IV.6 landed at `be51a24` but did NOT fix B1
+
+Per-command ephemeral REQ socket + launcher command-channel
+watchdog shipped as Codex recommended. 60/60 unit tests green.
+Full pytest subtree 1775/1776 (1 unrelated flaky). Ran Stage 3
+diag tools against mock engine on macOS — **B1 still reproduces
+with structurally identical timing**:
+
+- `diag_zmq_idle_hypothesis.py` SPARSE_0.33HZ: cmd #8 FAIL at
+  uptime 56 s (pre-fix was cmd #10 at ~30 s).
+- `diag_zmq_bridge_extended.py`: cmd #48 FAIL at uptime 82 s,
+  0/3 recovery thereafter (pre-fix was cmd #28 at 92 s).
+- RAPID_5 Hz path still clean (295/295), matching pre-fix rate
+  dependence.
+
+**Codex's shared-REQ-state hypothesis FALSIFIED.** Removing the
+long-lived socket did not eliminate the failure. Engine REP goes
+silently unresponsive after ~30-90 s of bridge uptime while the
+asyncio loop, data-plane PUB, heartbeats, scheduler writes, and
+plugin ticks all remain healthy. Root cause is elsewhere.
+
+IV.6 was still committed as `be51a24` on Vladimir's explicit
+directive — the architectural improvement stands regardless of
+whether it individually closed B1.
+
+## IV.6 watchdog regression: restart storm
+
+`_last_cmd_timeout` persisted across watchdog-triggered bridge
+restart. Fresh subprocess immediately saw stale signal on next
+`_poll_bridge_data` tick → another restart → storm (30-40 /min
+on Ubuntu). Hotfix: 60 s cooldown + missing `return` after
+restart. See `src/cryodaq/launcher.py`, commit TBD (watchdog
+cooldown hotfix).
+
+## Next attempt: IV.7 `ipc://` transport
+
+Original handoff's fallback (a) becomes the working hypothesis.
+Given:
+
+- idle TCP reaping ruled out (Linux default keepalive 7200 s,
+  active polling never idled past 1 s)
+- shared-REQ accumulated state ruled out (IV.6 eliminated it
+  without fixing B1)
+- everything above the transport verified healthy during failure
+  window
+
+The remaining candidate is the TCP-loopback layer itself — libzmq
+handling, pyzmq asyncio integration, or kernel loopback state
+under rapid connect/disconnect churn. Unix domain sockets via
+`ipc://` bypass TCP entirely and are libzmq's recommended
+transport for same-host IPC.
+
+**IV.7 spec:** `CC_PROMPT_IV_7_IPC_TRANSPORT.md`. Change two
+constants + add stale-socket cleanup helper + update diag tools
+to import the new defaults. Single commit, ~20 LOC source. If
+both diag tools show 0 failures post-change on macOS **and**
+Ubuntu → tag `0.34.0`. If failures persist → B1 is higher than
+the transport; consider in-process threading or pyzmq
+replacement as next strategy.
+
+## Related fixes shipped during B1 investigation (2026-04-20)
+
+### `aabd75f` — pressure display fix
+
+`engine.py::_create_instruments()` was silently dropping the
+`validate_checksum` YAML key when constructing `ThyracontVSP63D`.
+Driver default (`True`, flipped in Phase 2c Codex F.2) then
+rejected every VSP206 read as checksum mismatch → NaN →
+TopWatchBar silently dropped. Root cause was a loader-wiring
+gap, not a driver bug. Single-line fix:
+
+```python
+driver = ThyracontVSP63D(
+    name, resource,
+    baudrate=baudrate,
+    validate_checksum=bool(entry.get("validate_checksum", True)),
+    mock=mock,
+)
+```
+
+Operator opt-out path via `instruments.local.yaml` now actually
+works.
+
+### `74dbbc7` — xml_safe sanitizer
+
+Keithley VISA resource strings contain `\x00` per NI-VISA spec.
+python-docx rejected them as XML 1.0 incompatible when embedded
+in auto-reports. Fix:
+
+- `src/cryodaq/utils/xml_safe.py` strips XML-illegal control
+  chars (NULL, 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F); preserves
+  Tab/LF/CR.
+- Applied at all `add_paragraph()` / `cell.text` sites in
+  `src/cryodaq/reporting/sections.py`.
+- `src/cryodaq/core/experiment.py:782` logger upgraded from
+  `log.warning` to `log.exception` so future report-generation
+  failures carry tracebacks (that's how the bug survived this
+  long — only the exception message was logged).
+
+## Still-open orthogonal bugs (not B1, not blocking 0.34.0)
+
+1. `alarm_v2.py::_eval_condition` raises `KeyError 'threshold'`
+   when evaluating `cooldown_stall` composite — one sub-condition
+   is missing a `threshold` field (probably stale/rate-type).
+   Log spam every ~2 s. Engine does not crash. Mini-fix:
+   `cond.get("threshold")` defensive access OR config audit.
+
+2. Thyracont `_try_v1_probe` (lines 157-166) only checks response
+   prefix `<addr>M`, does NOT validate checksum even when
+   `self._validate_checksum=True`. Read path DOES validate. Driver
+   can "successfully connect" and then emit NaN-sensor_error
+   forever. That's what bit us this morning. Proper hardening:
+   make probe consistent with read path. ~5 LOC.
+
+---
+
+*Evening update by architect (Claude Opus 4.7, web), handing off to*
+*GLM-5.1 via CCR for the coming days while Vladimir's Anthropic*
+*weekly limit recovers. See `HANDOFF_2026-04-20_GLM.md` for full*
+*context transfer.*

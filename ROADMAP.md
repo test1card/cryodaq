@@ -483,8 +483,8 @@ REQ socket in `zmq_subprocess.cmd_forward_loop`, launcher-side
 `command_channel_stalled()` watchdog in `_poll_bridge_data`, and
 `TCP_KEEPALIVE` reverted on the command + PUB paths (kept on
 `sub_drain_loop` as orthogonal safeguard). 60/60 unit tests green,
-full subtree 1775/1776 (1 unrelated flaky). Committed as partial
-mitigation rather than a fix.
+full subtree 1775/1776 (1 unrelated flaky). Committed as `be51a24`
+as partial mitigation rather than a fix.
 
 **Shared-REQ-state hypothesis FALSIFIED.** Post-fix diag runs on
 macOS reproduce B1 with structurally identical timing to pre-fix
@@ -511,10 +511,10 @@ for architect review.
 
 **Status:** still 🔧. B1 remains OPEN and blocks `0.34.0`.
 
-**Next:** IV.7 `ipc://` transport experiment. Spec's originally-
-listed fallback (a) from `docs/bug_B1_zmq_idle_death_handoff.md`
-is now the working hypothesis — Unix-domain sockets bypass the
-TCP-loopback layer entirely, which is the most likely remaining
+**Next:** IV.7 `ipc://` transport experiment (spec
+`CC_PROMPT_IV_7_IPC_TRANSPORT.md`). Fallback (a) from the original
+handoff is now the working hypothesis — Unix-domain sockets bypass
+the TCP-loopback layer entirely, which is the most likely remaining
 culprit given everything above the transport has been ruled out.
 
 IV.6 code stays in master as defense-in-depth: matches ZeroMQ
@@ -524,10 +524,52 @@ the launcher a genuine command-channel watchdog for any future
 command-only failure shape — independent of whether B1 is
 ultimately resolved at the transport layer.
 
-**Related but SEPARATE bug:** TopWatchBar pressure display shows
-em-dash instead of value. Reading-driven path, not command path.
-Not caused by B1. Separate investigation needed (likely
-`config/channels.yaml` channel ID change).
+#### IV.6 watchdog regression + cooldown hotfix (2026-04-20 evening)
+
+The IV.6 `command_channel_stalled()` watchdog had a regression:
+`_last_cmd_timeout` persisted across watchdog-triggered subprocess
+restart, so the fresh subprocess immediately saw a stale
+cmd_timeout signal on the very next `_poll_bridge_data` tick and
+was restarted again — restart storm (30-40 restarts/minute
+observed on Ubuntu lab PC).
+
+Hotfix applied in `src/cryodaq/launcher.py`: 60 s cooldown between
+command-watchdog restarts via `_last_cmd_watchdog_restart`
+timestamp, plus missing `return` after restart so no further
+checks run in the same poll cycle. Does not resolve B1 itself —
+only prevents the watchdog from pathologically amplifying it.
+System returns to "works ~60-120 s, one restart, works again"
+cycle which is a usable workaround until IV.7 `ipc://` ships.
+
+#### Related fixes shipped alongside IV.6 (2026-04-20)
+
+- `aabd75f` — `engine: wire validate_checksum through Thyracont
+  driver loader`. `_create_instruments()` was ignoring the YAML
+  key; driver defaulted to `True` regardless of config. Fix
+  resolves TopWatchBar pressure em-dash on Ubuntu lab PC (VSP206
+  hardware has different checksum formula than VSP63D).
+- `74dbbc7` — `reporting: xml_safe sanitizer for python-docx
+  compatibility`. Keithley VISA resource strings contain `\x00`
+  per NI-VISA spec; python-docx rejected them as XML 1.0
+  incompatible when embedded in auto-reports. New
+  `src/cryodaq/utils/xml_safe.py` strips XML-illegal control chars;
+  applied at all `add_paragraph()` / `cell.text` sites in
+  `src/cryodaq/reporting/sections.py`; `core/experiment.py:782`
+  logger upgraded from `log.warning` to `log.exception` so future
+  report-gen failures carry tracebacks.
+
+**No-longer-broken bugs:** TopWatchBar pressure display (was
+reading-driven, not B1-caused) is now resolved by `aabd75f` +
+Ubuntu-side config (`validate_checksum: false` in
+`instruments.local.yaml`).
+
+**Orthogonal issue still open:** `alarm_v2.py:252` raises
+`KeyError: 'threshold'` when evaluating the `cooldown_stall`
+composite alarm (one sub-condition is missing a `threshold`
+field — probably stale/rate-type where `threshold` is spurious).
+Log spam every ~2 s. Engine does not crash. Fix candidate: config
+adjustment in `config/alarms_v3.yaml` OR defensive
+`cond.get("threshold")` check in `_eval_condition`.
 
 ---
 
