@@ -422,9 +422,20 @@ packaging).
 
 ### B1 — ZMQ subprocess command channel dies (not idle-related)
 
-**Status:** 🔧 root cause identified, fix spec prepared
-(`CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`), awaiting implementation.
-Blocks `0.34.0` tag.
+**Status:** 🔧 IV.6 partial mitigation shipped, root cause still unresolved.
+Blocks `0.34.0` tag and therefore blocks IV.5 feature execution as the
+next safe repo phase.
+
+**Current master includes:**
+- `be51a24` — per-command ephemeral REQ + command-channel watchdog
+  (IV.6 partial mitigation, not a fix)
+- `af0b2a0` — watchdog cooldown preventing restart storm
+- `c3a4a49` — bridge restart-count / exit-code diagnostics
+- `256da7a` — docs + control-plane sync for the next phase
+
+**Next step:** run a disciplined evidence pass against current `master`
+using the canonical B1 capture tool and runbook. IV.7 `ipc://` remains
+an experiment candidate, not a committed migration path.
 
 **Symptom:** GUI command plane (REQ/REP on `tcp://127.0.0.1:5556`)
 works for some time then hangs permanently. Data plane (SUB on 5555)
@@ -448,20 +459,14 @@ bad socket poisons the entire command channel permanently.
 - Active polling at 1 Hz never goes idle for 10s (our keepalive
   threshold), so probes never fire — TCP_KEEPALIVE fix doesn't
   participate in failure mode.
-- TCP_KEEPALIVE fix (commit `f5f9039`) will be **reverted** on
-  command path in IV.6 batch; maybe helped with failure delay on
-  macOS by coincidence, not by mechanism.
+- TCP_KEEPALIVE fix (commit `f5f9039`) was not the failure mechanism;
+  IV.6 shipped the mitigation package instead.
 
-**Agreed fix plan:**
+**IV.6 mitigation package:**
 1. **Primary:** per-command ephemeral REQ socket in
-   `zmq_subprocess.py::cmd_forward_loop()`. Remove `REQ_RELAXED`,
-   `REQ_CORRELATE`, `TCP_KEEPALIVE*` (all unnecessary with
-   ephemeral sockets). Matches ZeroMQ Guide ch.4 canonical
-   "poll / timeout / close / reopen" pattern.
-2. **Secondary:** command-channel watchdog in `launcher.py`.
-   Current watchdog restarts bridge on data-plane failure but
-   not command-only failure. Add `command_channel_stalled()`
-   check.
+   `zmq_subprocess.py::cmd_forward_loop()`. Shipped in `be51a24`.
+2. **Secondary:** command-channel watchdog in `launcher.py` with
+   restart cooldown. Shipped in `af0b2a0`.
 
 **Full evidence + Codex analysis:**
 `docs/bug_B1_zmq_idle_death_handoff.md`.
@@ -478,13 +483,13 @@ regression testing):
 
 #### IV.6 partial mitigation outcome (2026-04-20)
 
-IV.6 landed the full Codex-proposed fix plan: per-command ephemeral
-REQ socket in `zmq_subprocess.cmd_forward_loop`, launcher-side
-`command_channel_stalled()` watchdog in `_poll_bridge_data`, and
-`TCP_KEEPALIVE` reverted on the command + PUB paths (kept on
-`sub_drain_loop` as orthogonal safeguard). 60/60 unit tests green,
-full subtree 1775/1776 (1 unrelated flaky). Committed as `be51a24`
-as partial mitigation rather than a fix.
+IV.6 shipped the Codex-proposed mitigation package: per-command
+ephemeral REQ socket in `zmq_subprocess.cmd_forward_loop`,
+launcher-side `command_channel_stalled()` watchdog in
+`_poll_bridge_data`, and `TCP_KEEPALIVE` adjustments on the command +
+PUB paths (kept on `sub_drain_loop` as orthogonal safeguard). 60/60
+unit tests green, full subtree 1775/1776 (1 unrelated flaky).
+Committed as `be51a24` as partial mitigation rather than a fix.
 
 **Shared-REQ-state hypothesis FALSIFIED.** Post-fix diag runs on
 macOS reproduce B1 with structurally identical timing to pre-fix

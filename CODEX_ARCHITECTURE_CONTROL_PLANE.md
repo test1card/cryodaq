@@ -8,7 +8,8 @@ Role: Codex architecture-owner handoff for next-phase work
 
 This document is written against the current working tree, not only committed `HEAD`.
 
-- Current `HEAD`: `9b047a4` (`launcher: wait for engine port release before execv on theme change`)
+- Current `HEAD`: `256da7a` (`docs: sync B1 status and next-phase control plane`)
+- Relevant B1/watchdog/alarm hardening is now committed on `master`, not only present in a working tree.
 - Relevant working-tree drift vs `HEAD` exists in:
   - `src/cryodaq/launcher.py`
   - `src/cryodaq/gui/zmq_client.py`
@@ -80,7 +81,7 @@ Only the findings that still matter for decisions survive.
 6. The bridge subprocess still shares one `zmq.Context()` across SUB and per-command REQ sockets. Shared REQ state is gone; shared context is not.
 7. `threshold_expr` is still unsupported in `alarm_v2`. The current config change is a workaround, not a feature completion.
 8. T4 config reality is still unresolved at repo level. The git-tracked repo still allows T4 to participate in cryostat emergency interlock matching.
-9. Current hardening changes are working-tree-only. Treat them as uncommitted operational drift until intentionally published.
+9. Current hardening changes are committed on `master`. Future reviews must still distinguish code truth from inherited runtime claims, but they must no longer describe the cooldown / restart-count / config mitigation tranche as unpublished drift.
 
 ## 3. State-Drift Reconciliation
 
@@ -133,7 +134,7 @@ Only the findings that still matter for decisions survive.
 | Treat current working tree as baseline for next phase | Decide now | Relevant code and docs differ from `HEAD`; pretending otherwise will contaminate every review. |
 | Use current discrepancy logs as proof of direct engine reachability | Decide now: reject | Current code does not perform that runtime ping in `_check_engine_health()`. |
 | B1 root-cause conclusion | Diagnose now | The remaining uncertainty is still too large for architecture-level closure. |
-| IV.7 `ipc://` as default direction | Diagnose now, not decide | It is still a bounded experiment, not an approved migration. |
+| IV.7 `ipc://` as default direction | Diagnose now, not decide | It is still a bounded experiment, not a committed migration path. |
 | T4 interlock / alarm semantics | Human checkpoint required | This changes operator-facing safety behavior. Repo and lab claims diverge. |
 | Dynamic `threshold_expr` support in `alarm_v2` | Defer | Current static config is enough for now; this is not the next-phase B1 blocker. |
 | Broad transport abstraction cleanup | Defer | Premature before deciding whether transport migration even survives diagnostics. |
@@ -245,12 +246,12 @@ All of these are downstream of evidence, not substitutes for evidence.
 - No `rm`, no `git clean`, no destructive reset.
 - No claim that B1 is fixed without fresh runtime evidence on the current working tree.
 - No reverting IV.6 because it did not fully resolve B1.
-- No treating working-tree-only hardening as if it were committed repository truth.
+- No treating the mitigation tranche as if it were still unpublished drift.
 - No safety-semantic config edits without Vladimir approval.
 - No transport migration presented as a cleanup task.
 - No broad refactor justified by file size or aesthetics.
 - No operator-facing wording that suggests command-path health from the current discrepancy log.
-- No `0.34.0` readiness claim while B1 remains unresolved.
+- No `0.34.0` release claim while B1 remains unresolved.
 
 ## 9. Human Checkpoints
 
