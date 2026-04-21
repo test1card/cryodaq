@@ -59,6 +59,39 @@ def test_sample_once_merges_bridge_and_direct_probe(monkeypatch):
     assert sample["direct_reply"] == {"ok": True, "source": "direct"}
 
 
+def test_sample_once_records_direct_probe_timeout(monkeypatch):
+    bridge = _FakeBridge()
+
+    monkeypatch.setattr(
+        diag_zmq_b1_capture,
+        "bridge_snapshot",
+        lambda bridge, *, now=None: {"restart_count": 3, "bridge_alive": True},
+    )
+
+    def raise_timeout(*, address, timeout_s):
+        raise TimeoutError("Engine did not reply within 5s")
+
+    monkeypatch.setattr(
+        diag_zmq_b1_capture,
+        "direct_engine_probe",
+        raise_timeout,
+    )
+
+    sample = diag_zmq_b1_capture._sample_once(
+        bridge,
+        address="tcp://127.0.0.1:5556",
+        direct_timeout_s=5.0,
+        skip_direct_probe=False,
+    )
+
+    assert sample["bridge_reply"] == {"ok": True, "source": "bridge"}
+    assert sample["direct_reply"] == {
+        "ok": False,
+        "error": "Engine did not reply within 5s",
+        "exception_type": "TimeoutError",
+    }
+
+
 def test_run_capture_writes_jsonl(tmp_path, monkeypatch):
     bridge = _FakeBridge()
     output = tmp_path / "capture.jsonl"

@@ -51,11 +51,20 @@ def _sample_once(
     sample = bridge_snapshot(bridge)
     sample["ts_utc"] = datetime.now(UTC).isoformat()
     sample["bridge_reply"] = bridge.send_command({"cmd": "safety_status"})
-    sample["direct_reply"] = (
-        None
-        if skip_direct_probe
-        else direct_engine_probe(address=address, timeout_s=direct_timeout_s)
-    )
+    if skip_direct_probe:
+        sample["direct_reply"] = None
+    else:
+        try:
+            sample["direct_reply"] = direct_engine_probe(
+                address=address,
+                timeout_s=direct_timeout_s,
+            )
+        except TimeoutError as exc:
+            sample["direct_reply"] = {
+                "ok": False,
+                "error": str(exc),
+                "exception_type": type(exc).__name__,
+            }
     return sample
 
 
