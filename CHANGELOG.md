@@ -9,11 +9,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Post-`v0.33.0` history is reconstructed below into three retroactive internal
+  release lines: `0.34.0`, `0.35.0`, `0.36.0`.
+- The next formal version line should continue from `0.36.0`, not from
+  `0.34.0`, because two additional release-sized batches already landed after
+  `v0.33.0`.
+- The raw session notes below are preserved for traceability, but they are no
+  longer the authoritative release summary.
+
 ### Today — 2026-04-20 session (handoff → GLM-5.1)
 
 This is a tight working record, not a formal release. Full
-handoff context is in `HANDOFF_2026-04-20_GLM.md`; next formal
-release is `0.34.0` once B1 is resolved via IV.7.
+handoff context is in `HANDOFF_2026-04-20_GLM.md`. The structured
+post-`v0.33.0` release reconstruction is listed below and supersedes
+the old `0.34.0` planning target.
 
 **Fixed / shipped:**
 
@@ -649,6 +660,204 @@ release is `0.34.0` once B1 is resolved via IV.7.
 - `c4396a8` ui(phase-1-v2): block B.3 — DynamicSensorGrid
 
 ---
+
+## [0.36.0] — 2026-04-21
+
+IV.4 safe features were delivered, reporting and driver hardening landed, and
+the B1 investigation produced real defensive changes but not a root-cause
+closure. This is the correct current version line for the repo state above
+`v0.33.0`, even though no formal tag has been cut yet.
+
+### Added
+
+- **IV.4 safe feature batch completed.** Added Parquet archive export from the
+  UI with bundled `pyarrow` install (`466fb7f`, `6f0261e`, `bf584ed`), debug
+  mode toggle with env propagation and restart-dialog guidance (`15ec161`,
+  `39b34fe`, `5f8b394`), auto-report verification plus per-experiment override
+  (`0ec842f`), and shift-handover auto-summary generation with compact-log
+  polish (`bc02a9a`, `4c25be6`, `7cb5634`).
+- **Dedicated B1 diagnostics entered the tree.** Added bridge-side
+  investigation tooling and handoff material for the command-plane failure
+  (`f29bdd8`, `362431b`, `9339d9f`).
+
+### Changed
+
+- **IV.6 partial B1 mitigation shipped.** `be51a24` moved the bridge command
+  path to per-command ephemeral REQ sockets, added launcher-side
+  `command_channel_stalled()` watchdog handling, and removed the earlier
+  keepalive-heavy command-path approach as the primary mechanism. This improved
+  the architecture and closed a real brittle point, but did **not** close B1.
+- **Launcher hardening around failure and restart paths.** `9b047a4` waits for
+  engine port release before theme-switch `execv`; `af0b2a0` adds a 60-second
+  cooldown to prevent watchdog restart storms after command-channel failure;
+  `c3a4a49` records bridge restart diagnostics for future B1 evidence runs.
+- **Repo truth was synchronized to actual code state.** `747f80e` mitigated the
+  `cooldown_stall` config gap by replacing unsupported `threshold_expr` with a
+  static threshold, and `256da7a` added the architecture control-plane sync so
+  the repo stops claiming IV.6 solved B1.
+
+### Fixed
+
+- **Report generation now survives XML-illegal device strings.** `74dbbc7`
+  added `xml_safe` sanitization for `python-docx` so Keithley VISA resource
+  strings containing `\x00` no longer break auto-report generation.
+- **TopWatchBar pressure display on VSP206 hardware.** `aabd75f` correctly
+  routes `validate_checksum` through the Thyracont driver loader, allowing
+  machine-local config to disable strict checksum validation where required.
+- **Theme-switch relaunch edge case.** `9b047a4` closes the port-release race
+  where the relaunched GUI could collide with the just-exiting engine process.
+
+### Known Issues
+
+- **B1 is still open.** The GUI command plane can still become unresponsive
+  while the data plane remains alive. IV.6 reduced collateral fragility but did
+  not resolve the root cause.
+- **T4 safety semantics remain unresolved repo-vs-lab truth.** The repo still
+  needs an explicit Vladimir checkpoint before any interlock-semantic change is
+  treated as committed truth.
+
+### Selected commits in this release line
+
+- `466fb7f` archive: IV.4.F1 Parquet UI export + default pyarrow install
+- `15ec161` logging: IV.4.F2 debug-mode toggle + env-var propagation
+- `0ec842f` reporting: IV.4.F6 verify auto-report + per-experiment override
+- `bc02a9a` shift_handover: IV.4.F11 auto-populated end-of-shift summary
+- `be51a24` zmq: ephemeral REQ per command + cmd-channel watchdog
+- `74dbbc7` reporting: xml_safe sanitizer for python-docx compatibility
+- `aabd75f` engine: wire validate_checksum through Thyracont driver loader
+- `af0b2a0` launcher: watchdog cooldown prevents restart storm
+- `256da7a` docs: sync B1 status and next-phase control plane
+
+---
+
+## [0.35.0] — 2026-04-20
+
+This tranche reworked the shell’s analytics and interaction model, then closed
+the IV.4 operator-facing feature batch on top of the Phase II overlay
+migration. It is a distinct release-sized step after `0.34.0`, not just an
+appendix to it.
+
+### Added
+
+- **Phase III analytics rebuild.** Added a phase-aware `AnalyticsView`
+  (`6ddd255`) backed by shared time-window and prediction primitives
+  (`2720cbe`), allowing analytics layouts to switch by experiment phase instead
+  of staying locked to a single static dashboard composition.
+- **IV.3 and IV.4 operator features.** Added mock-scenario and replay tooling
+  (`e05e14b`, `badce0a`), AST-based copy-rule scanning (`e94cae6`, `b06c657`),
+  ToolRail icon migration to `qtawesome`/Phosphor (`e3fcace`, `c03cc7e`), and
+  the full IV.4 safe feature set that later carried into `0.36.0`.
+
+### Changed
+
+- **Accent/status semantics were decoupled.** `e6cdf7a` stopped using
+  `STATUS_OK` as a generic “selected / active” color and introduced neutral
+  interaction tokens, which then propagated through the rebuilt overlays and
+  analytics widgets.
+- **UI polish and empty-state consistency.** `d45edb3`, `ffad3cc`, `2edf0fc`,
+  `f7e93f8`, `1452fe8`, `9fa657d`, and `3b00751` normalized copy, button tone,
+  caution treatment, and empty-state rendering across the shell and analytics
+  surfaces.
+- **ZMQ supervision tests were tightened.** `e05bfb9`, `320fc42`, and
+  `45b524a` hardened timeout handling and follow-up test coverage around the
+  subprocess tier-handler path.
+
+### Fixed
+
+- **Theme-switch process lifecycle.** `9b54580` made the launcher shut down
+  engine and bridge before `execv` on theme change, reducing one class of
+  double-process restart hazard before the later port-release wait was added.
+- **Physics-unit and plot correctness issues.** `b555dec`, `541c092`,
+  `503707e`, `58ea1a4`, `c8f7b71`, and `25706e2` fixed axis behavior, autorange
+  handling, prediction stack updates, and layout consistency in key analytics
+  panels.
+
+### Known Issues
+
+- **B1 was already under active investigation by the end of this tranche.**
+  The feature work closed, but the release line could not be formally tagged
+  forward because the command-plane bug persisted into the next batch.
+
+### Selected commits in this release line
+
+- `6ddd255` feat(ui): III.C phase-aware AnalyticsView rebuild
+- `2720cbe` feat(ui): III.B GlobalTimeWindow + shared PressurePlot + PredictionWidget
+- `e6cdf7a` feat(ui): III.A accent/status decoupling + neutral interaction tokens
+- `e3fcace` refactor(ui): IV.3.F4 ToolRail — migrate to Phosphor icons via qtawesome
+- `466fb7f` through `7cb5634` IV.4 safe feature batch
+
+---
+
+## [0.34.0] — 2026-04-19
+
+This was the first large post-`v0.33.0` integration tranche: the shell became
+themeable at runtime, the old Phase II overlays were rebuilt or replaced, and
+the GUI/bridge runtime picked up a substantial stability pass. Treating all of
+that as “still 0.33.x” would collapse too much shipped work.
+
+### Added
+
+- **Runtime theme system and 12 bundled theme packs.** Added YAML-backed theme
+  loading (`ecd447a`), runtime selection from the launcher/settings menu
+  (`77ffc93`, `e015295`), five additional bundled packs (`9ac307e`) and then
+  six more dark/light palettes with light-theme status unlock (`26059fa`).
+- **Overlay design system and Phase II rebuilds.** Added ModalCard/BentoGrid
+  primitives (`e25bbd9`, `6010a07`, `8a8d189`), DynamicSensorGrid and context
+  strip (`c4396a8`, `4212153`), ModeBadge and QuickLog/Experiment card work
+  (`f57cb64`, `ad9fab8`, `8b3a453`), plus rebuilt Archive, OperatorLog,
+  Conductivity, Calibration, Alarm, Instruments, and Keithley overlays
+  (`e4a60f3`, `9676acc`, `886c049`, `2f36c30`, `6641191`, `e719d9f`,
+  `96adf5a`).
+- **Analytics promoted to a primary shell view.** `860ecf3` reimplemented the
+  earlier analytics overlay as `AnalyticsView`, which is the direct precursor
+  to the Phase III analytics tranche.
+
+### Changed
+
+- **Experiment overlay path was finalized.** `b6b3844`, `01969b5`, `968e995`,
+  and `991cc65` moved experiment flow off the legacy workspace path and into
+  the shell overlay model with explicit connection-state handling.
+- **Theme tokens became the single source of UI color truth.** Hardcoded panel
+  overrides were stripped (`e52b17b`), design-system v1.0.1 corrections were
+  applied (`7a1b206` through `8d37c7f`), and top-level shell chrome was aligned
+  to the token set (`d2ccb37`, `f4146a9`, `4ac620f`, `05f27d0`).
+- **Phase II officially closed.** `7870879` deleted the deprecated widget
+  stack after their shell-v2 replacements were in place, ending the long
+  dual-surface transition for those panels.
+
+### Fixed
+
+- **Bridge/runtime stability pass.** `5299aa6`, `f5b0f22`, `913b9b3`,
+  `2b1370b`, `27dfecb`, and `ba20f84` split bridge responsibilities across
+  threads, separated heartbeat from data-flow semantics, supervised the REP
+  task, and refreshed teardown tests to stop stale consumers from contaminating
+  later runs.
+- **Platform and storage edge cases.** `abfdf44` bounded transport disconnect
+  recovery, `3a16c54` closed SQLite history connections on web errors, and
+  `fcc08c0` forced a consistent Fusion/dark-palette startup path for Linux
+  deployment.
+- **Safety/config hardening at the repo layer.** `eb267c4`, `d8ec668`, and
+  `1e824a7` tightened interlock fault handling, brought CI back to a green
+  state, and ensured the dev/web dependency set was installed in CI.
+
+### Known Issues
+
+- **The Phase II shell migration was complete, but B1 had not been resolved.**
+  The repo was ready for the next feature tranche, but not for a stable formal
+  tag path without further runtime hardening.
+
+### Selected commits in this release line
+
+- `ecd447a` refactor(gui): theme.py reads tokens from YAML packs via _theme_loader
+- `77ffc93` feat(gui): Settings menu «Тема» for runtime theme switching
+- `e4a60f3` feat(ui): II.2 ArchiveOverlay + K6 bulk export migration
+- `9676acc` feat(ui): II.3 OperatorLog overlay rebuild
+- `886c049` feat(ui): II.5 ConductivityOverlay rebuild
+- `2f36c30` feat(ui): II.7 CalibrationOverlay rebuild + wire import/export/apply
+- `6641191` feat(ui): II.4 AlarmOverlay rebuild
+- `e719d9f` feat(ui): II.8 InstrumentsOverlay + SensorDiag merge
+- `991cc65` style(ui): II.9 ExperimentOverlay harmonized
+- `7870879` chore(ui): II.13 Phase II closure — legacy cleanup
 
 ## [0.33.0] — 2026-04-14
 
