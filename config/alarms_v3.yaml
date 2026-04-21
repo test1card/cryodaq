@@ -234,7 +234,7 @@ phase_alarms:
           rate_window_s: 900     # 15 мин
         - channel: Т12
           check: above
-          threshold_expr: "T12_setpoint + 50"
+          threshold: 150  # threshold_expr not implemented; using static threshold (~100K setpoint + 50K)
       level: WARNING
       message: "Охлаждение остановилось, Т12 далеко от setpoint."
       notify: [gui, telegram]
