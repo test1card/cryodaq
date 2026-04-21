@@ -1,99 +1,94 @@
-"""Tests for tools.diag_zmq_b1_capture."""
-
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
 
-from tools import diag_zmq_b1_capture as capture
+from tools import diag_zmq_b1_capture
 
 
 class _FakeBridge:
-    def __init__(self, pub_addr: str, cmd_addr: str):
-        self.pub_addr = pub_addr
-        self.cmd_addr = cmd_addr
+    def __init__(self) -> None:
         self.started = False
-        self.shutdown_called = False
+        self.stopped = False
 
     def start(self) -> None:
         self.started = True
 
     def shutdown(self) -> None:
-        self.shutdown_called = True
+        self.stopped = True
+
+    def poll_readings(self):
+        return []
+
+    def send_command(self, cmd):
+        assert cmd == {"cmd": "safety_status"}
+        return {"ok": True, "source": "bridge"}
 
 
-def test_parse_args_exposes_capture_controls():
-    args = capture._parse_args(
-        [
-            "--sequential-count",
-            "2",
-            "--concurrent-count",
-            "4",
-            "--soak-seconds",
-            "3",
-            "--soak-interval",
-            "0.5",
-            "--start-delay",
-            "0",
-        ]
+def test_parse_args_defaults(tmp_path):
+    output = tmp_path / "capture.jsonl"
+    args = diag_zmq_b1_capture._parse_args(["--output", str(output)])
+    assert args.duration == 180.0
+    assert args.interval == 1.0
+    assert args.output == output
+    assert args.skip_direct_probe is False
+
+
+def test_sample_once_merges_bridge_and_direct_probe(monkeypatch):
+    bridge = _FakeBridge()
+
+    monkeypatch.setattr(
+        diag_zmq_b1_capture,
+        "bridge_snapshot",
+        lambda bridge, *, now=None: {"restart_count": 3, "bridge_alive": True},
     )
-    assert args.sequential_count == 2
-    assert args.concurrent_count == 4
-    assert args.soak_seconds == 3.0
-    assert args.soak_interval == 0.5
-    assert args.start_delay == 0.0
-
-
-def test_main_bridges_cli_to_capture(monkeypatch, capsys):
-    fake_bridge = _FakeBridge("pub://a", "cmd://b")
-    captured_kwargs: dict | None = None
-
-    def fake_capture(bridge, **kwargs):
-        nonlocal captured_kwargs
-        captured_kwargs = kwargs
-        assert bridge is fake_bridge
-        return SimpleNamespace(samples=[], summaries=[], has_failures=False)
-
-    monkeypatch.setattr(capture, "ZmqBridge", lambda pub_addr, cmd_addr: fake_bridge)
-    monkeypatch.setattr(capture, "capture_b1_truth", fake_capture)
-
-    rc = capture.main(
-        [
-            "--pub-address",
-            "pub://a",
-            "--cmd-address",
-            "cmd://b",
-            "--start-delay",
-            "0",
-            "--sequential-count",
-            "1",
-            "--concurrent-count",
-            "1",
-            "--soak-seconds",
-            "1",
-            "--soak-interval",
-            "1",
-        ]
+    monkeypatch.setattr(
+        diag_zmq_b1_capture,
+        "direct_engine_probe",
+        lambda *, address, timeout_s: {"ok": True, "source": "direct"},
     )
 
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert fake_bridge.started is True
-    assert fake_bridge.shutdown_called is True
-    assert captured_kwargs == {
-        "sequential_count": 1,
-        "concurrent_count": 1,
-        "soak_seconds": 1.0,
-        "soak_interval_s": 1.0,
-        "start_delay_s": 0.0,
-        "emit": print,
-    }
-    assert "B1 capture" in out
+    sample = diag_zmq_b1_capture._sample_once(
+        bridge,
+        address="tcp://127.0.0.1:5556",
+        direct_timeout_s=5.0,
+        skip_direct_probe=False,
+    )
+
+    assert sample["restart_count"] == 3
+    assert sample["bridge_reply"] == {"ok": True, "source": "bridge"}
+    assert sample["direct_reply"] == {"ok": True, "source": "direct"}
 
 
-def test_main_runs_help_without_touching_bridge(capsys):
-    try:
-        capture._parse_args(["--help"])
-    except SystemExit as exc:
-        assert exc.code == 0
-    out = capsys.readouterr().out
-    assert "B1" in out
+def test_run_capture_writes_jsonl(tmp_path, monkeypatch):
+    bridge = _FakeBridge()
+    output = tmp_path / "capture.jsonl"
+
+    samples = iter(
+        [
+            {"seq": 1, "bridge_reply": {"ok": True}},
+            {"seq": 2, "bridge_reply": {"ok": False}},
+        ]
+    )
+    timeline = iter([0.0, 0.0, 1.0, 1.0, 2.1])
+
+    monkeypatch.setattr(
+        diag_zmq_b1_capture,
+        "_sample_once",
+        lambda *args, **kwargs: next(samples),
+    )
+
+    count = diag_zmq_b1_capture.run_capture(
+        bridge,
+        duration_s=2.0,
+        interval_s=1.0,
+        output_path=output,
+        address="tcp://127.0.0.1:5556",
+        direct_timeout_s=5.0,
+        skip_direct_probe=False,
+        now_fn=lambda: next(timeline),
+        sleep_fn=lambda _: None,
+    )
+
+    assert count == 2
+    lines = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [line["seq"] for line in lines] == [1, 2]
