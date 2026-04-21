@@ -1,100 +1,121 @@
-"""Canonical B1 truth-recovery capture CLI."""
-
 from __future__ import annotations
 
 import argparse
-import logging
+import json
 import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 
-from cryodaq.gui.zmq_client import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR, ZmqBridge
-from tools._b1_diagnostics import capture_b1_truth
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-logger = logging.getLogger("diag_zmq_b1_capture")
+from cryodaq.gui.zmq_client import ZmqBridge
+from tools._b1_diagnostics import bridge_snapshot, direct_engine_probe
+from tools._zmq_helpers import DEFAULT_CMD_ADDR
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Capture the canonical current-master B1 diagnostic sequence.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Example: python -m tools.diag_zmq_b1_capture "
-            "--pub-address tcp://127.0.0.1:5555 --cmd-address tcp://127.0.0.1:5556"
-        ),
+        description=(
+            "Canonical B1 capture against current master. Records bridge-side "
+            "and direct-engine command health into JSONL."
+        )
     )
+    parser.add_argument("--output", type=Path, required=True, help="JSONL artifact path.")
+    parser.add_argument("--duration", type=float, default=180.0, help="Capture length in seconds.")
+    parser.add_argument("--interval", type=float, default=1.0, help="Sample interval in seconds.")
+    parser.add_argument("--address", default=DEFAULT_CMD_ADDR, help="Direct engine REQ address.")
     parser.add_argument(
-        "--pub-address",
-        default=DEFAULT_PUB_ADDR,
-        help=f"GUI SUB address for readings (default: {DEFAULT_PUB_ADDR}).",
-    )
-    parser.add_argument(
-        "--cmd-address",
-        default=DEFAULT_CMD_ADDR,
-        help=f"GUI REQ address for commands (default: {DEFAULT_CMD_ADDR}).",
-    )
-    parser.add_argument(
-        "--sequential-count",
-        type=int,
-        default=5,
-        help="How many sequential commands to send first.",
-    )
-    parser.add_argument(
-        "--concurrent-count",
-        type=int,
-        default=10,
-        help="How many concurrent commands to send next.",
-    )
-    parser.add_argument(
-        "--soak-seconds",
+        "--direct-timeout",
         type=float,
-        default=60.0,
-        help="How long to run the final soak phase.",
+        default=5.0,
+        help="Seconds to wait for the direct engine probe.",
     )
     parser.add_argument(
-        "--soak-interval",
-        type=float,
-        default=1.0,
-        help="Interval between soak commands in seconds.",
-    )
-    parser.add_argument(
-        "--start-delay",
-        type=float,
-        default=1.0,
-        help="Delay after starting the bridge before sending commands.",
+        "--skip-direct-probe",
+        action="store_true",
+        help="Only record bridge-side command health.",
     )
     return parser.parse_args(argv)
 
 
+def _sample_once(
+    bridge: ZmqBridge,
+    *,
+    address: str,
+    direct_timeout_s: float,
+    skip_direct_probe: bool,
+) -> dict:
+    bridge.poll_readings()
+    sample = bridge_snapshot(bridge)
+    sample["ts_utc"] = datetime.now(UTC).isoformat()
+    sample["bridge_reply"] = bridge.send_command({"cmd": "safety_status"})
+    sample["direct_reply"] = (
+        None
+        if skip_direct_probe
+        else direct_engine_probe(address=address, timeout_s=direct_timeout_s)
+    )
+    return sample
+
+
+def run_capture(
+    bridge: ZmqBridge,
+    *,
+    duration_s: float,
+    interval_s: float,
+    output_path: Path,
+    address: str,
+    direct_timeout_s: float,
+    skip_direct_probe: bool,
+    now_fn=time.monotonic,
+    sleep_fn=time.sleep,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = now_fn() + duration_s
+    count = 0
+
+    with output_path.open("w", encoding="utf-8") as fh:
+        while True:
+            if now_fn() >= deadline:
+                break
+            sample = _sample_once(
+                bridge,
+                address=address,
+                direct_timeout_s=direct_timeout_s,
+                skip_direct_probe=skip_direct_probe,
+            )
+            count += 1
+            sample["seq"] = count
+            fh.write(json.dumps(sample, ensure_ascii=False) + "\n")
+            fh.flush()
+            if now_fn() >= deadline:
+                break
+            sleep_fn(interval_s)
+
+    return count
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
-    print("[b1] B1 capture starting")
-    logger.info(
-        "B1 capture starting: pub=%s cmd=%s",
-        args.pub_address,
-        args.cmd_address,
-    )
-
-    bridge = ZmqBridge(pub_addr=args.pub_address, cmd_addr=args.cmd_address)
+    bridge = ZmqBridge()
+    bridge.start()
+    time.sleep(1.0)
     try:
-        bridge.start()
-        logger.info("bridge started")
-        capture_b1_truth(
+        samples = run_capture(
             bridge,
-            sequential_count=args.sequential_count,
-            concurrent_count=args.concurrent_count,
-            soak_seconds=args.soak_seconds,
-            soak_interval_s=args.soak_interval,
-            start_delay_s=args.start_delay,
-            emit=print,
+            duration_s=args.duration,
+            interval_s=args.interval,
+            output_path=args.output,
+            address=args.address,
+            direct_timeout_s=args.direct_timeout,
+            skip_direct_probe=args.skip_direct_probe,
         )
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.error("B1 capture failed: %s", exc)
-        return 1
     finally:
         bridge.shutdown()
-        logger.info("bridge stopped")
+    print(f"Wrote {samples} samples to {args.output}")
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     sys.exit(main())
