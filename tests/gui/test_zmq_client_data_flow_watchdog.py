@@ -391,6 +391,98 @@ def test_launcher_restarts_bridge_on_command_channel_stalled():
     assert dummy._bridge.start_calls == 1
 
 
+def test_launcher_watchdog_cooldown_blocks_repeat_restart(monkeypatch):
+    from cryodaq.launcher import LauncherWindow
+
+    class _Bridge:
+        def __init__(self):
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self):
+            return True
+
+        def is_alive(self):
+            return True
+
+        def data_flow_stalled(self):
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0):
+            return True
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+        def start(self):
+            self.start_calls += 1
+
+    dummy = type(
+        "D",
+        (),
+        {
+            "_bridge": _Bridge(),
+            "_last_cmd_watchdog_restart": 100.0,
+            "_on_reading_qt": lambda self, item: None,
+        },
+    )()
+
+    monkeypatch.setattr("cryodaq.launcher.time.monotonic", lambda: 120.0)
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dummy._bridge.shutdown_calls == 0
+    assert dummy._bridge.start_calls == 0
+
+
+def test_launcher_watchdog_cooldown_allows_restart_after_60s(monkeypatch):
+    from cryodaq.launcher import LauncherWindow
+
+    class _Bridge:
+        def __init__(self):
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self):
+            return True
+
+        def is_alive(self):
+            return True
+
+        def data_flow_stalled(self):
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0):
+            return True
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+        def start(self):
+            self.start_calls += 1
+
+    dummy = type(
+        "D",
+        (),
+        {
+            "_bridge": _Bridge(),
+            "_last_cmd_watchdog_restart": 100.0,
+            "_on_reading_qt": lambda self, item: None,
+        },
+    )()
+
+    monkeypatch.setattr("cryodaq.launcher.time.monotonic", lambda: 161.0)
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dummy._bridge.shutdown_calls == 1
+    assert dummy._bridge.start_calls == 1
+
+
 def test_launcher_does_not_restart_on_healthy_bridge():
     """When every liveness check passes, the launcher must not restart
     the bridge. A spurious restart here would drop in-flight commands

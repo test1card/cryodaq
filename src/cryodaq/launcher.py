@@ -913,12 +913,19 @@ class LauncherWindow(QMainWindow):
         # entered a bad state. Restart bridge to cycle the ephemeral
         # REQ / REP connection and recover command path.
         if self._bridge.command_channel_stalled(timeout_s=10.0):
-            logger.warning(
-                "ZMQ bridge: command channel unhealthy "
-                "(recent command timeout). Restarting bridge."
-            )
-            self._bridge.shutdown()
-            self._bridge.start()
+            # Hardening 2026-04-21: 60s cooldown prevents restart storm
+            # when fresh subprocess immediately sees stale cmd_timeout.
+            now = time.monotonic()
+            last_cmd_restart = getattr(self, "_last_cmd_watchdog_restart", 0.0)
+            if now - last_cmd_restart >= 60.0:
+                logger.warning(
+                    "ZMQ bridge: command channel unhealthy "
+                    "(recent command timeout). Restarting bridge."
+                )
+                self._last_cmd_watchdog_restart = now
+                self._bridge.shutdown()
+                self._bridge.start()
+                return
 
     @Slot(object)
     def _on_reading_qt(self, reading: Reading) -> None:
