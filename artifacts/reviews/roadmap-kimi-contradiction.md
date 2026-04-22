@@ -24,6 +24,19 @@
 
 ---
 
+## Evidence Gap Update
+
+**B1 Current-Master Runbook execution status:** NOT RUN
+
+Per `artifacts/diagnostics/b1-devmac-run-note.md`:
+- Runtime environment unavailable (no running CryoDAQ engine)
+- 180s canonical capture was not executed
+- Placeholder JSONL created to document the gap
+
+**Impact:** B1 status remains "open, insufficient evidence" - no runtime data to change classification.
+
+---
+
 ## False Positives
 
 None identified. Both reviewers correctly distinguished:
@@ -43,17 +56,15 @@ None identified. Both reviewers correctly distinguished:
 
 ---
 
-## Final Uncertainties
+## Final Uncertainties (Updated)
 
-1. **Runtime evidence:** No fresh B1 diagnostic run on current master exists yet
+1. **Runtime evidence:** B1_CURRENT_MASTER_RUNBOOK.md NOT EXECUTED - requires manual dev-Mac run
 2. **T4 config:** Repo vs lab reality still diverges (CODEX_ARCHITECTURE_CONTROL_PLANE.md:140-141)
 3. **threshold_expr:** alarm_v2 still doesn't implement it; static config is workaround
 
 ---
 
 ## Ledger Update
-
-Updated `docs/decisions/ROADMAP_RESOLUTION_LEDGER.md`:
 
 | Question | Codex | Gemini | Kimi | Final |
 |----------|-------|--------|------|-------|
@@ -67,7 +78,7 @@ Updated `docs/decisions/ROADMAP_RESOLUTION_LEDGER.md`:
 | IV.5 | blocked | blocked | blocked | **blocked by B1** |
 | IV.6 | partial mitigation | architect. improvement | arch. improvement, not fix | **research - keep but don't claim fix** |
 | IV.7 | bounded experiment | bounded experiment | bounded experiment | **research** |
-| B1 | unresolved | unresolved | unresolved, needs runtime | **blocked - needs evidence** |
+| B1 | unresolved | unresolved | unresolved, insufficient evidence | **blocked - insufficient evidence** |
 
 ---
 
@@ -75,4 +86,10 @@ Updated `docs/decisions/ROADMAP_RESOLUTION_LEDGER.md`:
 
 - **Codex reliability:** A - grounded findings with file:line evidence
 - **Gemini reliability:** A - appropriately adversarial on wording without fabricating disagreement
-- **Output trust level:** HIGH - reviewers agree on all material conclusions
+- **Kimi update:** Evidence gap documented, B1 status downgraded to "insufficient evidence"
+
+**Updated B1 status:** open, insufficient evidence (not just "open" - the specific lack of runtime proof is now explicit)
+
+---
+
+*Review updated with evidence gap documentation. Manual dev-Mac execution required to close the uncertainty.*

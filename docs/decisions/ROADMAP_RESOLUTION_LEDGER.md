@@ -12,23 +12,23 @@
 |------|----------|--------|--------|--------|
 | 1 | Codex | `ROADMAP_REVIEW_PROMPT_CODEX.md` | `roadmap-codex-primary.md` | **complete** |
 | 2 | Gemini | `ROADMAP_REVIEW_PROMPT_GEMINI.md` | `roadmap-gemini-primary.md` | **complete** |
-| 3 | Dev-Mac Run | `B1_CURRENT_MASTER_RUNBOOK.md` | `b1-devmac-*.jsonl`, `b1-devmac-run-note.md` | **pending** |
-| 4 | Kimi | `ROADMAP_REVIEW_PROMPT_KIMI.md` | `roadmap-kimi-contradiction.md` | **complete** |
-| 5 | Metaswarm | `ROADMAP_REVIEW_PROMPT_METASWARM.md` | `roadmap-metaswarm-arbitration.md` | **complete** |
+| 3 | Dev-Mac Run | `B1_CURRENT_MASTER_RUNBOOK.md` | `b1-devmac-run-note.md` (NOT RUN - env unavailable) | **complete** |
+| 4 | Kimi | `ROADMAP_REVIEW_PROMPT_KIMI.md` | `roadmap-kimi-contradiction.md` (**updated**) | **complete** |
+| 5 | Metaswarm | `ROADMAP_REVIEW_PROMPT_METASWARM.md` | `roadmap-metaswarm-arbitration.md` (**updated**) | **complete** |
 
 ---
 
-## Resolution Matrix
+## Resolution Matrix (Final)
 
 | Question | Codex | Gemini | Kimi | Final |
 |----------|-------|--------|------|-------|
 | Repo mode: hardening or feature-ready? | hardening | hardening | hardening | **hardening** |
-| B1 status: open/insufficient/closed? | open | open | open, needs runtime | **open** |
+| B1 status: open/insufficient/closed? | open | open | open, insufficient evidence | **open, insufficient evidence** |
 | IV.7 status: justified or premature? | justified as bounded experiment | appropriately scoped | appropriately scoped | **justified as bounded experiment** |
 
 ---
 
-## Item Classifications
+## Item Classifications (Final)
 
 | Item | Current Claim | Codex | Gemini | Kimi | Final Class |
 |------|---------------|-------|--------|------|-------------|
@@ -36,7 +36,18 @@
 | IV.5 | blocked by B1 | blocked | blocked | blocked | **blocked by B1** |
 | IV.6 | partial mitigation | architectural improvement | architectural improvement | arch improvement, not fix | **research - keep but don't claim fix** |
 | IV.7 | research/bounded experiment | bounded experiment justified | bounded experiment | bounded experiment | **research** |
-| B1 | unresolved | unresolved | unresolved | unresolved, needs runtime | **blocked - needs fresh evidence** |
+| B1 | unresolved | unresolved | unresolved | unresolved, insufficient evidence | **blocked - insufficient evidence** |
+
+---
+
+## Evidence Assessment
+
+| Evidence Type | Status | Artifact |
+|---------------|--------|----------|
+| Code review (IV.4 commits) | present | `roadmap-codex-primary.md` |
+| Architecture docs (B1 status) | present | `CODEX_ARCHITECTURE_CONTROL_PLANE.md` |
+| Diagnostic tooling | present | `tools/diag_zmq_b1_capture.py` |
+| **180s B1 runtime capture** | **NOT RUN** | `b1-devmac-run-note.md` documents gap |
 
 ---
 
@@ -63,15 +74,15 @@
 
 ## Final Arbitration
 
-**Status:** COMPLETE
+**Status:** COMPLETE (no longer provisional)
 
 ### Repo Mode
 - **Decision:** hardening
 - **Rationale:** B1 blocks next formal tag (0.36.0), IV.5 feature work gated, active hardening artifacts present
 
 ### B1 Status
-- **Decision:** open
-- **Rationale:** ROADMAP.md:519 and CODEX_ARCHITECTURE_CONTROL_PLANE.md:77 confirm; IV.6 did not fix; fresh runtime evidence pending
+- **Decision:** open, insufficient evidence
+- **Rationale:** ROADMAP.md:519 and CODEX_ARCHITECTURE_CONTROL_PLANE.md:77 confirm unresolved; IV.6 was architectural improvement not fix; **B1_CURRENT_MASTER_RUNBOOK.md was not executed** - no 180s runtime evidence exists; status downgraded from "open" to "open, insufficient evidence" to be precise about the evidence gap
 
 ### IV.7 Status
 - **Decision:** justified next as bounded experiment
@@ -79,11 +90,50 @@
 
 ---
 
-## Pending Evidence
+## Required Actions (Blocking B1 Status Change)
 
-**Dev-Mac B1 Run Required:**
-- Execute `B1_CURRENT_MASTER_RUNBOOK.md`
-- Generate `artifacts/diagnostics/b1-devmac-current-master.jsonl`
-- Document in `artifacts/diagnostics/b1-devmac-run-note.md`
+**CRITICAL:** Execute B1_CURRENT_MASTER_RUNBOOK.md on dev-Mac with running engine:
+```bash
+# Terminal 1: Start engine
+CRYODAQ_MOCK=1 .venv/bin/cryodaq-engine --mock
 
-This evidence may update B1 status classification.
+# Terminal 2: Run 180s capture
+.venv/bin/python tools/diag_zmq_b1_capture.py \
+  --duration 180 \
+  --interval 1.0 \
+  --output artifacts/diagnostics/b1-devmac-current-master.jsonl
+```
+
+After this execution:
+- Update `b1-devmac-run-note.md` with actual results
+- Commit `b1-devmac-current-master.jsonl`
+- Re-run Kimi contradiction
+- Re-run Metaswarm arbitration
+- Update this ledger
+
+---
+
+## No-Go List (Binding)
+
+- ❌ No IV.5 feature work until B1 has sufficient runtime evidence
+- ❌ No transport migration as default
+- ❌ No safety-semantic config changes without Vladimir approval
+- ❌ No claim B1 is fixed without fresh 180s runtime evidence
+- ❌ No broad launcher/bridge redesign before evidence
+
+---
+
+## Approved Next Work (Per Arbitration)
+
+1. **IV.7 bounded experiment branch preparation** - AUTHORIZED
+   - ipc:// transport implementation
+   - Launcher TCP-coupling cleanup
+   - Execute B1 runbook on IV.7 branch for comparative evidence
+
+2. **Manual B1 runbook execution** - REQUIRED before any B1 status change
+
+3. **IV.5 feature work** - BLOCKED pending B1 evidence
+
+---
+
+*Final arbitration complete. Hardening mode confirmed. B1 status explicitly documented as "open, insufficient evidence." IV.7 branch preparation authorized.*
