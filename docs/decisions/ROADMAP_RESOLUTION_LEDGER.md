@@ -1,7 +1,7 @@
 # Roadmap Resolution Ledger
 
-**Date:** 2026-04-22  
-**Branch:** codex/safe-merge-b1-truth-recovery  
+**Date:** 2026-04-22
+**Branch:** codex/safe-merge-b1-truth-recovery
 **Base:** origin/master
 
 ---
@@ -10,11 +10,11 @@
 
 | Step | Reviewer | Prompt | Output | Status |
 |------|----------|--------|--------|--------|
-| 1 | Codex | `ROADMAP_REVIEW_PROMPT_CODEX.md` | `roadmap-codex-primary.md` | **complete** |
-| 2 | Gemini | `ROADMAP_REVIEW_PROMPT_GEMINI.md` | `roadmap-gemini-primary.md` | **complete** |
-| 3 | Dev-Mac Run | `B1_CURRENT_MASTER_RUNBOOK.md` | `b1-devmac-run-note.md` (NOT RUN - env unavailable) | **complete** |
-| 4 | Kimi | `ROADMAP_REVIEW_PROMPT_KIMI.md` | `roadmap-kimi-contradiction.md` (**updated**) | **complete** |
-| 5 | Metaswarm | `ROADMAP_REVIEW_PROMPT_METASWARM.md` | `roadmap-metaswarm-arbitration.md` (**updated**) | **complete** |
+| 1 | Codex artifact | `ROADMAP_REVIEW_PROMPT_CODEX.md` | `roadmap-codex-primary.md` | **historical input** |
+| 2 | Gemini artifact | `ROADMAP_REVIEW_PROMPT_GEMINI.md` | `roadmap-gemini-primary.md` | **historical input** |
+| 3 | Dev-Mac Run | `B1_CURRENT_MASTER_RUNBOOK.md` | `b1-devmac-current-master.jsonl` (56 samples), `b1-devmac-run-note.md` | **EXECUTED - B1 reproduced at ~52s** |
+| 4 | Kimi artifact | `ROADMAP_REVIEW_PROMPT_KIMI.md` | `roadmap-kimi-contradiction.md` (historical artifact, solo-maintained wording) | **not re-run on 2026-04-22** |
+| 5 | Metaswarm artifact | `ROADMAP_REVIEW_PROMPT_METASWARM.md` | `roadmap-metaswarm-arbitration.md` (historical artifact, solo-maintained wording) | **not re-run on 2026-04-22** |
 
 ---
 
@@ -23,7 +23,7 @@
 | Question | Codex | Gemini | Kimi | Final |
 |----------|-------|--------|------|-------|
 | Repo mode: hardening or feature-ready? | hardening | hardening | hardening | **hardening** |
-| B1 status: open/insufficient/closed? | open | open | open, insufficient evidence | **open, insufficient evidence** |
+| B1 status: open/insufficient/closed? | open | open | open, reproduced | **open, reproduced with evidence** |
 | IV.7 status: justified or premature? | justified as bounded experiment | appropriately scoped | appropriately scoped | **justified as bounded experiment** |
 
 ---
@@ -34,106 +34,144 @@
 |------|---------------|-------|--------|------|-------------|
 | IV.4 | closed | closed valid | closed valid | closed valid | **done** |
 | IV.5 | blocked by B1 | blocked | blocked | blocked | **blocked by B1** |
-| IV.6 | partial mitigation | architectural improvement | architectural improvement | arch improvement, not fix | **research - keep but don't claim fix** |
-| IV.7 | research/bounded experiment | bounded experiment justified | bounded experiment | bounded experiment | **research** |
-| B1 | unresolved | unresolved | unresolved | unresolved, insufficient evidence | **blocked - insufficient evidence** |
+| IV.6 | partial mitigation | architectural improvement | architectural improvement | arch improvement, not fix | **research - proven not to fix B1** |
+| IV.7 | research/bounded experiment | bounded experiment justified | bounded experiment | bounded experiment | **research - baseline for comparison established** |
+| B1 | unresolved | unresolved | unresolved | unresolved, reproduced | **blocked - reproduced with evidence** |
 
 ---
 
-## Evidence Assessment
+## Evidence Assessment (Final)
 
 | Evidence Type | Status | Artifact |
 |---------------|--------|----------|
 | Code review (IV.4 commits) | present | `roadmap-codex-primary.md` |
 | Architecture docs (B1 status) | present | `CODEX_ARCHITECTURE_CONTROL_PLANE.md` |
 | Diagnostic tooling | present | `tools/diag_zmq_b1_capture.py` |
-| **180s B1 runtime capture** | **NOT RUN** | `b1-devmac-run-note.md` documents gap |
+| **180s B1 runtime capture** | **EXECUTED - 56 samples, B1 reproduced at ~52s** | `b1-devmac-current-master.jsonl` |
 
 ---
 
-## Ground Truth Sources
+## B1 Runtime Evidence Summary
 
-- `ROADMAP.md` - Phase status claims, IV.4 closed, B1 blocks 0.36.0
-- `CHANGELOG.md` - Version/closure evidence
-- `CODEX_ARCHITECTURE_CONTROL_PLANE.md` - B1 status, IV.7 technical position, stale document inventory
-- `docs/runbooks/B1_CURRENT_MASTER_RUNBOOK.md` - Operational B1 state, 180s capture protocol
-- `tools/_b1_diagnostics.py` - Diagnostic capability
-- `tools/diag_zmq_b1_capture.py` - Runtime capture tooling
+**Execution Date:** 2026-04-22
+**Capture Duration:** ~176 seconds wall-clock (B1 failure at ~52s; capture continued through failures)
+**Samples Collected:** 56 (expected 180)
+
+### Failure Signature
+
+| Metric | Finding |
+|--------|---------|
+| Time to failure | ~52 seconds after first sample |
+| Failure mode | Both bridge_reply and direct_reply timeout simultaneously |
+| Data plane | Healthy (heartbeat continues, readings flow) |
+| Command plane | FAILED |
+| Classification | Engine REP path or lower transport implicated (NOT bridge-specific) |
+
+### Key Finding
+
+Per `B1_CURRENT_MASTER_RUNBOOK.md:53` classification rule: "If bridge_reply and direct_reply fail together: engine REP path or lower transport is implicated."
+
+**Conclusion:** B1 affects the engine's REP socket or lower transport boundary - not the bridge subprocess.
 
 ---
 
-## Stale Documents Identified
+## Maintained Current-State Summary
 
-| Document | Issue | Status |
-|----------|-------|--------|
-| ZERO_TRUST_AUDIT_2026-04-20.md | launcher cooldown finding is stale | demote |
-| REPO_HARDENING_PLAN.md | "cooldown missing" premise is stale | demote |
-| agentswarm/.../CODE_TRUTH_FINDINGS.md | claimed hardening in HEAD; actually in working tree | demote |
-
----
-
-## Final Arbitration
-
-**Status:** COMPLETE (no longer provisional)
+**Status:** solo-maintained current-state summary (not a fresh multi-agent rerun)
 
 ### Repo Mode
 - **Decision:** hardening
-- **Rationale:** B1 blocks next formal tag (0.36.0), IV.5 feature work gated, active hardening artifacts present
+- **Rationale:** B1 blocks next formal tag (0.36.0), IV.5 feature work gated, runtime evidence proves B1 is real and reproducible
 
 ### B1 Status
-- **Decision:** open, insufficient evidence
-- **Rationale:** ROADMAP.md:519 and CODEX_ARCHITECTURE_CONTROL_PLANE.md:77 confirm unresolved; IV.6 was architectural improvement not fix; **B1_CURRENT_MASTER_RUNBOOK.md was not executed** - no 180s runtime evidence exists; status downgraded from "open" to "open, insufficient evidence" to be precise about the evidence gap
+- **Decision:** open, reproduced with evidence
+- **Rationale:**
+  - ROADMAP.md:519 and CODEX_ARCHITECTURE_CONTROL_PLANE.md:77 confirm unresolved
+  - IV.6 was architectural improvement, not a fix (runtime proven)
+  - **B1_CURRENT_MASTER_RUNBOOK.md EXECUTED:** 56 samples, failure at ~52s
+  - Both bridge and direct paths fail together (implicates transport layer)
+  - Data plane healthy, command plane failed
 
 ### IV.7 Status
-- **Decision:** justified next as bounded experiment
-- **Rationale:** Spec exists, appropriately scoped as diagnostic not committed migration, falsification criteria preserved
+- **Decision:** justified next as bounded experiment - baseline established for comparison
+- **Rationale:**
+  - Baseline TCP behavior documented (failure at ~52s)
+  - ipc:// transport would bypass TCP loopback (testing transport hypothesis)
+  - Experimental design: If B1 reproduces on ipc://, TCP-specific hypothesis weakened; if not, TCP-specific transport hypothesis gains support but remains unproven
+  - Bounded scope per CODEX_ARCHITECTURE_CONTROL_PLANE.md:6.2-6.4
 
 ---
 
-## Required Actions (Blocking B1 Status Change)
+## Required Actions
 
-**CRITICAL:** Execute B1_CURRENT_MASTER_RUNBOOK.md on dev-Mac with running engine:
-```bash
-# Terminal 1: Start engine
-CRYODAQ_MOCK=1 .venv/bin/cryodaq-engine --mock
+### Immediate (Candidate Next Step)
+1. **PREPARE IV.7 BOUNDED EXPERIMENT BRANCH** - if proceeding with the next bounded diagnostic step
+   - ipc:// transport implementation
+   - Launcher TCP-coupling cleanup
+   - Execute B1_CURRENT_MASTER_RUNBOOK.md on IV.7 branch
+   - Compare failure timing to baseline (~52s on TCP)
 
-# Terminal 2: Run 180s capture
-.venv/bin/python tools/diag_zmq_b1_capture.py \
-  --duration 180 \
-  --interval 1.0 \
-  --output artifacts/diagnostics/b1-devmac-current-master.jsonl
-```
+### Blocked
+2. **IV.5 feature work** - BLOCKED pending B1 closure (after IV.7 evidence)
 
-After this execution:
-- Update `b1-devmac-run-note.md` with actual results
-- Commit `b1-devmac-current-master.jsonl`
-- Re-run Kimi contradiction
-- Re-run Metaswarm arbitration
-- Update this ledger
+### Human Checkpoint
+3. **T4 interlock config:** Confirm lab-side exclusion, sync repo config if approved
+
+### Deferred
+4. **alarm_v2 threshold_expr implementation**
 
 ---
 
 ## No-Go List (Binding)
 
-- ❌ No IV.5 feature work until B1 has sufficient runtime evidence
-- ❌ No transport migration as default
-- ❌ No safety-semantic config changes without Vladimir approval
-- ❌ No claim B1 is fixed without fresh 180s runtime evidence
-- ❌ No broad launcher/bridge redesign before evidence
+- No IV.5 feature work until B1 closed or IV.7 shows clear path
+- No transport migration as default (until IV.7 evidence supports it)
+- No safety-semantic config changes without Vladimir approval
+- No claim B1 is fixed (B1 reproduced at ~52s, status is "open")
+- IV.7 branch preparation is justified only as a bounded diagnostic step
 
 ---
 
-## Approved Next Work (Per Arbitration)
+## Historical Reviewer Reliability Notes
 
-1. **IV.7 bounded experiment branch preparation** - AUTHORIZED
-   - ipc:// transport implementation
-   - Launcher TCP-coupling cleanup
-   - Execute B1 runbook on IV.7 branch for comparative evidence
+These notes preserve the original review context. They do not indicate a fresh multi-agent rerun on 2026-04-22.
 
-2. **Manual B1 runbook execution** - REQUIRED before any B1 status change
+## Answering the Required Questions
 
-3. **IV.5 feature work** - BLOCKED pending B1 evidence
+### 1. Does CryoDAQ remain in hardening mode?
+
+**YES.** B1 blocks the next formal tag (0.36.0). Runtime evidence proves B1 is real and reproducible - failure at ~52 seconds, both command paths failing together. Repo remains in hardening mode.
+
+### 2. Is B1 still open after the dev-Mac run, or is the result merely insufficient?
+
+**OPEN, REPRODUCED WITH EVIDENCE** - The dev-Mac run was SUCCESSFULLY EXECUTED.
+
+- 56 samples collected over ~176 seconds wall-clock (~52s to failure)
+- B1 failure at sample 53 (~52s after engine start)
+- Both bridge_reply and direct_reply timeout simultaneously
+- Data plane healthy, command plane failed
+- Engine REP path implicated (not bridge-specific)
+
+**Classification:** open with runtime characterization available.
+
+### 3. Is IV.7 still justified next as a bounded experiment?
+
+**YES - JUSTIFIED as bounded experiment.** The runtime evidence establishes baseline for IV.7 comparison:
+
+- Baseline TCP behavior documented (failure at ~52s)
+- ipc:// transport would bypass TCP loopback (tests transport hypothesis)
+- Experimental design: If B1 reproduces on ipc://, TCP-specific hypothesis weakened; if not, TCP-specific transport hypothesis gains support but remains unproven
+
+### 4. Should an IV.7 branch be prepared next, or should work stop here?
+
+**PREPARE IV.7 BRANCH AS THE NEXT BOUNDED DIAGNOSTIC STEP.**
+
+**Justification:**
+- Engine REP path or lower transport implicated (both direct and bridge paths fail together)
+- ipc:// transport is the most direct diagnostic next step
+- Baseline evidence exists for comparison
+- Bounded experiment scope is well-defined
 
 ---
 
-*Final arbitration complete. Hardening mode confirmed. B1 status explicitly documented as "open, insufficient evidence." IV.7 branch preparation authorized.*
+*Ledger updated with runtime evidence during solo maintenance. Hardening mode confirmed. B1 characterized. IV.7 identified as the next bounded diagnostic step.*

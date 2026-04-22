@@ -1,5 +1,18 @@
 # Bug B1 — ZMQ subprocess command channel dies — Codex handoff
 
+> **⚠️ HISTORICAL DOCUMENT — NOT CURRENT AUTHORITY (2026-04-22)**
+>
+> This document captures the 2026-04-20 handoff state. Since then:
+> - IV.6 ephemeral REQ shipped but did NOT resolve B1 (runtime proven)
+> - B1 reproduced at ~52s with both bridge and direct paths failing
+> - Evidence implicates engine REP path or lower transport (not bridge-specific)
+> - TCP is one hypothesis; root cause remains unknown
+>
+> **For current authoritative guidance, see:**
+> - `docs/B1_NEXT_PHASE_HANDOFF.md`
+> - `CODEX_ARCHITECTURE_CONTROL_PLANE.md`
+> - `docs/runbooks/B1_CURRENT_MASTER_RUNBOOK.md`
+
 > Purpose: complete evidence dump + Codex analysis + agreed fix plan.
 >
 > **Status 2026-04-20 afternoon:** Codex review completed. Original

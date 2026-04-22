@@ -451,10 +451,7 @@ unaffected — readings continue flowing.
 (Python 3.12.13, pyzmq 26.4.0, libzmq 4.3.5). Reproduces in live
 `./start.sh` run, not just diagnostic tools.
 
-**Root cause (Codex-confirmed 2026-04-20 afternoon):** single
-long-lived REQ socket in `cmd_forward_loop()` eventually enters
-unrecoverable state. Shared state across all commands means one
-bad socket poisons the entire command channel permanently.
+**Earlier working theory (2026-04-20):** single long-lived REQ socket in `cmd_forward_loop()` was suspected. Current runtime evidence did not isolate that as the root cause; the strongest supported claim remains that the engine REP path or lower transport boundary is implicated.
 
 **Original "macOS idle-reap" hypothesis proved WRONG:**
 - Linux default `tcp_keepalive_time = 7200s` rules out kernel reaping.
@@ -507,10 +504,10 @@ master:
 Removing shared REQ state did NOT eliminate the failure. Engine
 REP goes silently unresponsive after ~30-90 s of bridge uptime
 while the asyncio loop, data-plane PUB, heartbeats, scheduler
-writes, and plugin ticks all remain healthy. Root cause is
-elsewhere — likely libzmq loopback-TCP handling, pyzmq 25.x +
-Python 3.14 asyncio integration, or engine-side REP task state
-under rapid REQ connect/disconnect churn.
+writes, and plugin ticks all remain healthy. Current evidence
+implicates the engine REP path or lower transport boundary, but
+does not isolate a specific culprit under rapid REQ connect/
+disconnect churn.
 
 Diag logs preserved at `/tmp/diag_iv6_idle.log`,
 `/tmp/diag_iv6_extended.log`, and `/tmp/engine_iv6_debug.log`
@@ -520,9 +517,9 @@ for architect review.
 
 **Next:** IV.7 `ipc://` transport experiment (spec
 `CC_PROMPT_IV_7_IPC_TRANSPORT.md`). Fallback (a) from the original
-handoff is now the working hypothesis — Unix-domain sockets bypass
-the TCP-loopback layer entirely, which is the most likely remaining
-culprit given everything above the transport has been ruled out.
+handoff is a testable hypothesis — Unix-domain sockets would bypass
+TCP-loopback transport, testing whether the implicated layer is TCP-specific.
+Other hypotheses (shared ZMQ context, REP state, FD exhaustion) remain possible.
 
 IV.6 code stays in master as defense-in-depth: matches ZeroMQ
 Guide ch.4 canonical poll/timeout/close/reopen pattern, removes
