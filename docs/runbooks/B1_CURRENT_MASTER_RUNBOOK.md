@@ -36,7 +36,7 @@ Real lab path:
 .venv/bin/python tools/diag_zmq_b1_capture.py \
   --duration 180 \
   --interval 1.0 \
-  --output artifacts/diagnostics/b1-current-master.jsonl
+  --output artifacts/diagnostics/b1-devmac-current-master.jsonl
 ```
 
 ## Corroboration tools
