@@ -33,8 +33,20 @@ export/
 config/*.local.yaml
 config/*.local.yaml.yaml
 
-# Claude Code
-.claude/
+# Claude Code — user-local state except skills which are shared
+# repo-level agent behavior contract. Architect decision 2026-04-23:
+# .claude/skills/ is versioned (auto-loading skills need to exist
+# for every agent in the team, not just the user who created them).
+# Other .claude/ paths (settings.local.json, hooks/, commands/,
+# session state) remain user-local until a future policy decision.
+#
+# Pattern note: use .claude/* (content level) not .claude/ (dir
+# level) so Git will descend into the directory and the negation
+# below can re-include the skills/ subtree. With .claude/ as a
+# whole-directory ignore, Git skips descent and !.claude/skills/
+# has no effect.
+.claude/*
+!.claude/skills/
 
 # OS
 .DS_Store
