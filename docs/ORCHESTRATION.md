@@ -260,6 +260,7 @@ At **repo root**, the only `.md` files permitted are:
 - `README.md`
 - `CLAUDE.md`
 - `CHANGELOG.md`
+- `CODEX_ARCHITECTURE_CONTROL_PLANE.md` — Codex technical dossier (commit 256da7a)
 - `ROADMAP.md`
 - `PROJECT_STATUS.md`
 - `RELEASE_CHECKLIST.md`
