@@ -68,6 +68,14 @@ def _sample_once(
     return sample
 
 
+def _validate_bridge_startup(bridge: ZmqBridge) -> None:
+    if not bridge.is_alive():
+        raise RuntimeError("ZMQ bridge subprocess failed to start")
+    reply = bridge.send_command({"cmd": "safety_status"})
+    if not reply or reply.get("ok") is not True:
+        raise RuntimeError(f"Bridge startup probe failed: {reply!r}")
+
+
 def run_capture(
     bridge: ZmqBridge,
     *,
@@ -111,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
     bridge.start()
     time.sleep(1.0)
     try:
+        try:
+            _validate_bridge_startup(bridge)
+        except RuntimeError as exc:
+            print(f"B1 capture aborted: {exc}", file=sys.stderr)
+            return 1
         samples = run_capture(
             bridge,
             duration_s=args.duration,
