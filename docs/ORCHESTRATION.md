@@ -190,8 +190,9 @@ conflict chain exceeds any value the branch still holds.
 
 ### 5.4 Worktree naming
 
-Worktrees live in `.worktrees/` (already gitignored). The
-worktree directory name MUST match the branch name exactly:
+Worktrees live in `.worktrees/` (enforced invariant — gitignored
+per commit `587bea8`, 2026-04-23). The worktree directory name MUST
+match the branch name exactly:
 
     .worktrees/feat-<slug>/          checked out on feat/<slug>
     .worktrees/experiment-<slug>/    checked out on experiment/<slug>
@@ -380,7 +381,15 @@ At the start of every CC session on this repo:
 - [ ] Read this file end-to-end
 - [ ] Read `CLAUDE.md` (repo-level invariants)
 - [ ] `git status` — note any uncommitted state
+- [ ] **If tracked files are modified and not explicitly covered
+  by the current plan, STOP with a diff summary.** Plans must be
+  built against known-clean state; surprise modifications mean
+  recon was stale.
 - [ ] `git branch --show-current` — confirm current branch
+- [ ] **If current branch does NOT match what architect's plan
+  assumes, STOP.** Do not `git checkout` to the planned branch
+  silently — plans are annotated with their starting branch for
+  a reason. Report the mismatch and wait.
 - [ ] `git worktree list` — note active worktrees and branches
 - [ ] Check `artifacts/consultations/` for pending response files
   that haven't been synthesized
@@ -400,13 +409,14 @@ At the end of every CC session:
 
 ---
 
-## 11. Known active plans (as of 2026-04-23)
+## 11. Known active plans (as of 2026-04-23 evening)
 
 | Plan | Spec file | Status |
 |------|-----------|--------|
-| IV.7 | `CC_PROMPT_IV_7_IPC_TRANSPORT.md` | Failed runtime 2026-04-23; likely blocked by unrelated hardening (`b2b4fb5`); needs debug, not re-attempt |
-| Repo cleanup | this document, §§ 6, 5.2 | Pending — archive agent-swarm bloat, prune duplicate branches |
+| IV.7 | `CC_PROMPT_IV_7_IPC_TRANSPORT.md` | Failed runtime 2026-04-23; likely blocked by unrelated hardening (`b2b4fb5`); **next architect action**: test the hypothesis — revert hardening on iv7 worktree, rerun diag, see if ipc:// was actually healthy |
+| Repo cleanup | this document, §§ 6, 5.2 | ✅ DONE (commits `adb49fe`..`8ebc893`, 2026-04-23) — 12 root .md archived (11 to audits, 1 preserved as blessed dossier), agent workspaces gitignored, duplicate branches pruned, worktree naming aligned |
 | Т4 interlock | no spec; see `HANDOFF_2026-04-20_GLM.md` §4 | Pending — commit config changes if not already |
+| Orchestration v1.1 | this document update, 2026-04-23 | ✅ DONE — incorporates calibration lessons from cleanup baseline session |
 
 No other plans are active. If a consultant or agent claims to
 be working on something, it must be referenceable as a plan
@@ -451,10 +461,127 @@ why the rules exist:
    extended by convention to untracked architect-authored files
    that start with `SESSION_DETAIL_` or `HANDOFF_`).
 
+6. **Over-strict stopping.** 2026-04-23 cleanup-baseline session:
+   CC stopped 4 times on mechanical inaccuracies in the
+   architect's plan (file count off by one, `.worktrees/`
+   gitignore assumption wrong, untracked file in worktree that
+   would be lost on force-remove, stray plan document in
+   secondary worktree). Each stop was correctly justified by
+   the then-current rules. But the cumulative architect
+   round-trip cost exceeded the value of the caution. Rule
+   preventing it: §13 (STOP discipline + autonomy band,
+   introduced retroactively after this session).
+
 Rules exist because specific failures happened. The failures are
 enumerated above so that when a future agent is tempted to think
 "the rule is too strict, I know better" — check if their
 situation matches one of these and remember why we wrote this.
+
+---
+
+## 13. STOP discipline and autonomy band
+
+Added 2026-04-23 evening after cleanup-baseline session exposed
+that §§ 2-12 under-specified when to stop vs when to adapt. Four
+mid-session stops revealed the gap. Rules below codify what
+architect directed in-band.
+
+### 13.1 When CC MUST stop
+
+- Irreversible data loss or git history rewrite is at risk
+- Semantic ambiguity where two reasonable interpretations produce
+  materially different outcomes (not "the file count differs by 1")
+- Architect-domain decision required: whitelist membership change,
+  branch strategy, policy change, commit message intent, scope
+  boundary for a task
+- File content suggests sensitive material (credentials, secrets,
+  keys, PII) before any mv/copy
+- A file > 100 KB is about to be silently discarded
+- Test failure during verification (not a warning, an actual fail)
+- Consultant response is junk (§4.2 criteria)
+
+### 13.2 When CC should NOT stop — adapt and ledger instead
+
+- Plan has factual inaccuracy but the correct fix is mechanically
+  obvious (e.g., "plan says 12 files, reality is 11 + 1 tracked;
+  adjust commit message, proceed")
+- Mechanical detail differs from plan: rename vs add, path depth,
+  ordering of steps, exact wording of commit message body
+- Untracked file would be lost by planned operation — copy to
+  appropriate archive location and proceed (the "no delete" rule
+  is a PRESERVE rule, not a STOP rule; see §11 note below)
+- Small plan deviation that CC can adapt without polluting the
+  semantic outcome
+- Command output differs from plan's expected output but achieves
+  the same end state
+
+### 13.3 How to adapt without stopping
+
+Inline in the session ledger, under the relevant step:
+
+    ### <HH:MM> — <step description>
+    Plan said: <what the plan assumed>
+    Reality: <what CC found>
+    Adapted: <what CC did differently and why>
+    Outcome: <final state, SHA if commit>
+
+This makes adaptations visible to architect on review without
+requiring synchronous approval for every line.
+
+### 13.4 The preserve-vs-delete clarification
+
+ORCHESTRATION.md §11 and Vladimir's memory slot 20 say
+"NEVER DELETE FILES". This is a **preserve rule**, not a **stop
+rule**. When CC encounters an untracked file that a planned
+operation would lose (worktree remove, directory prune,
+ephemeral workspace discard):
+
+- Default: copy to appropriate archive location, commit, proceed
+- Archive targets:
+  - Plan documents / agent outputs → `docs/audits/<date-slug>/`
+  - Scratch experiments → `.scratch/`
+  - Uncertain category → `docs/audits/<date-slug>/uncategorized/`
+- Only stop if: file > 100 KB, or content is sensitive, or path
+  suggests credentials, or content is binary garbage
+
+For files matching the routine agent-plan-document pattern (1-20 KB
+markdown in worktree or scratch), just preserve and proceed.
+
+### 13.5 Autonomy band explicitly granted
+
+CC is authorized, without architect round-trip, to:
+
+- Adapt commit message wording when plan's claim is slightly wrong
+- Adjust exact file paths when plan's path differs from actual tree
+- Re-order mechanical steps when a planned order hits a technical
+  obstacle (e.g., worktree can't be removed while branch checked
+  out elsewhere → remove worktree first, then delete branch)
+- Add preservation side-commits for untracked files that would
+  otherwise be lost (per §13.4)
+- Include additional context in session ledger beyond what plan
+  explicitly asked for
+
+CC is NOT authorized, even with autonomy band:
+
+- To merge branches not explicitly named in plan
+- To delete files outside `git branch -D` targets in the plan
+- To rewrite commit history on master (amend pushed commits,
+  rebase shared branches, force-push)
+- To invoke consultants for decisions this document already
+  covers
+- To create new feature branches for initiative work while
+  architect is unavailable (§8)
+
+### 13.6 The calibration principle
+
+Rules that over-stop waste architect time. Rules that under-stop
+risk silent breakage. The session ledger + handoff artifacts are
+the mechanism that lets us run with relaxed stopping discipline
+— architect reviews the ledger end-of-day and catches any
+adaptation that should have been a stop. If that review pattern
+breaks down (architect misses something important in the ledger),
+then specific rules get tightened. Otherwise, stay in autonomy
+band.
 
 ---
 
