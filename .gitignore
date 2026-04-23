@@ -53,3 +53,13 @@ logs/
 
 # Runtime SQLite databases (per-machine, not portable)
 data/
+
+# Agent orchestration workspaces (all untracked, gitignored per
+# docs/ORCHESTRATION.md §6.4)
+.worktrees/
+.audit-run/
+.omc/
+.swarm/
+.venv-tools/
+agentswarm/
+.scratch/
