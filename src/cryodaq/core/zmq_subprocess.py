@@ -25,11 +25,11 @@ import threading
 import time
 from typing import Any
 
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR
+
 logger = logging.getLogger(__name__)
 
 # Re-export constants so GUI code doesn't need to import zmq_bridge
-DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
-DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 # Mirror of zmq_bridge.DEFAULT_TOPIC. Duplicated (not imported) because this
 # module is loaded in the GUI process, which must not import zmq/zmq_bridge
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.

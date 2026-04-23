@@ -20,12 +20,16 @@ import msgpack
 import zmq
 import zmq.asyncio
 
+from cryodaq.core.zmq_transport import (
+    DEFAULT_CMD_ADDR,
+    DEFAULT_PUB_ADDR,
+    cleanup_ipc_path,
+    prepare_ipc_path,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
-DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
 # IV.3 Finding 7: per-command tiered handler timeout.
@@ -199,6 +203,7 @@ class ZMQPublisher:
         # reverted on the command path (REQ + REP); retained on the
         # SUB drain path in zmq_subprocess.sub_drain_loop as an
         # orthogonal safeguard for long between-experiment pauses.
+        prepare_ipc_path(self._address)
         _bind_with_retry(self._socket, self._address)
         self._running = True
         self._task = asyncio.create_task(self._publish_loop(queue), name="zmq_publisher")
@@ -219,6 +224,7 @@ class ZMQPublisher:
         if self._ctx:
             self._ctx.term()
             self._ctx = None
+        cleanup_ipc_path(self._address)
         logger.info("ZMQPublisher остановлен (отправлено: %d)", self._total_sent)
 
 
@@ -524,13 +530,14 @@ class ZMQCommandServer:
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.REP)
-        # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
+        # Phase 2b H.4: LINGER=0 + EADDRINUSE retry on bind.
         self._socket.setsockopt(zmq.LINGER, 0)
         # IV.6: TCP_KEEPALIVE previously added on the idle-reap
         # hypothesis (commit f5f9039). Reverted — the actual fix is
         # an ephemeral per-command REQ socket on the GUI subprocess
         # side (zmq_subprocess.cmd_forward_loop). With a fresh TCP
         # connection per command, loopback kernel reaping is moot.
+        prepare_ipc_path(self._address)
         _bind_with_retry(self._socket, self._address)
         self._running = True
         self._shutdown_requested = False
@@ -553,4 +560,5 @@ class ZMQCommandServer:
         if self._ctx:
             self._ctx.term()
             self._ctx = None
+        cleanup_ipc_path(self._address)
         logger.info("ZMQCommandServer остановлен")

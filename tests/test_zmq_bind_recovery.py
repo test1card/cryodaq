@@ -78,3 +78,28 @@ def test_no_raw_bind_in_publisher_or_command_server():
         assert "self._socket.bind(" not in block, (
             f"{class_name} still calls raw self._socket.bind() — must use _bind_with_retry"
         )
+
+
+def test_publisher_start_prepares_ipc_path_before_bind() -> None:
+    src = inspect.getsource(zmq_bridge)
+    pub_start = src.find("class ZMQPublisher")
+    pub_end = src.find("class ZMQSubscriber")
+    assert pub_start >= 0 and pub_end >= 0
+    pub_block = src[pub_start:pub_end]
+    prepare_pos = pub_block.find("prepare_ipc_path")
+    bind_pos = pub_block.find("_bind_with_retry")
+    assert prepare_pos >= 0, "PUB socket must prepare ipc path before bind"
+    assert bind_pos >= 0
+    assert prepare_pos < bind_pos
+
+
+def test_command_server_start_prepares_ipc_path_before_bind() -> None:
+    src = inspect.getsource(zmq_bridge)
+    rep_start = src.find("class ZMQCommandServer")
+    assert rep_start >= 0
+    rep_block = src[rep_start:]
+    prepare_pos = rep_block.find("prepare_ipc_path")
+    bind_pos = rep_block.find("_bind_with_retry")
+    assert prepare_pos >= 0, "REP socket must prepare ipc path before bind"
+    assert bind_pos >= 0
+    assert prepare_pos < bind_pos
