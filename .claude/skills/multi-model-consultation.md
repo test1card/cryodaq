@@ -40,7 +40,7 @@ Claude, Codex, Gemini, GLM, Kimi are NOT interchangeable. Each has a
 real niche. Using the wrong model is not just wasteful — it actively
 produces worse output than no consultation.
 
-### Codex CLI — gpt-5.4 high reasoning
+### Codex CLI — gpt-5.5 high reasoning
 
 **Strength:** narrow adversarial code review. Step-by-step reasoning on
 concurrency, race conditions, IPC, subprocess lifecycle, socket state
@@ -52,9 +52,14 @@ forest. Long context (> ~50K tokens) degrades. Prose-heavy reports
 (strategy docs, vision statements) are not Codex's format — it produces
 bullet lists and verdicts instead.
 
-**Always pass:** `--model gpt-5.4 --reasoning high` as flags AND
-`Model: gpt-5.4 / Reasoning effort: high` as first two lines of prompt
+**Always pass:** `--model gpt-5.5 --reasoning high` as flags AND
+`Model: gpt-5.5 / Reasoning effort: high` as first two lines of prompt
 body. Default `o3` is weak for this workflow.
+
+**Version note:** GPT-5.5 released post 2026-04-24. Prior to that release
+we used gpt-5.4. When CC reads this skill and the date is later than
+2026-04-24, use gpt-5.5. If architect references a newer version,
+architect wins — update this skill accordingly.
 
 **Signature signal:** verdict headers like "FAIL / PASS / CONDITIONAL",
 numbered findings with file:line, short reasoning per finding.
@@ -547,14 +552,16 @@ one.
 
 **What happened:** Codex default `o3` model with low reasoning was
 used for a B1 analysis earlier. Output was shallow and missed the
-shared-REQ-state pattern that `gpt-5.4 high` later identified.
+shared-REQ-state pattern that `gpt-5.4 high` (then the latest) later
+identified.
 
 **Why:** `/codex` defaults are weak. Override is required.
 
 **Don't:** invoke `/codex` without explicit model + reasoning flags.
 
-**Do:** ALWAYS pass `--model gpt-5.4 --reasoning high` AND repeat in
-prompt body first two lines: `Model: gpt-5.4 / Reasoning effort: high`.
+**Do:** ALWAYS pass `--model gpt-5.5 --reasoning high` AND repeat in
+prompt body first two lines: `Model: gpt-5.5 / Reasoning effort: high`.
+(Or the current latest Codex model — gpt-5.5 as of 2026-04-24.)
 
 ## 8. Templates
 
@@ -563,7 +570,7 @@ Copy-paste starting points. Fill in brackets.
 ### 8.1 Codex adversarial review brief
 
 ```
-Model: gpt-5.4
+Model: gpt-5.5
 Reasoning effort: high
 
 # Adversarial review — [one-line task description]
