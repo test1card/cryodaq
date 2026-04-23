@@ -43,6 +43,7 @@ logging.basicConfig(
 # Suppress very noisy third-party loggers
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR  # noqa: E402
 from cryodaq.gui.zmq_client import ZmqBridge  # noqa: E402
 
 
@@ -122,7 +123,7 @@ def _monitor_over_time(bridge: ZmqBridge, duration_s: float, interval_s: float) 
 
 def main() -> None:
     print(f"[{_ts()}] Python: {sys.version.split()[0]}, platform: {sys.platform}")
-    print(f"[{_ts()}] Engine must be running at tcp://127.0.0.1:5555 / :5556")
+    print(f"[{_ts()}] Engine must be running at {DEFAULT_PUB_ADDR} / {DEFAULT_CMD_ADDR}")
 
     bridge = ZmqBridge()
     print(f"[{_ts()}] Starting ZmqBridge...")

@@ -39,6 +39,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from cryodaq.core.zmq_bridge import ZMQSubscriber
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
 
@@ -50,7 +51,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Standalone ZMQ command client (no GUI dependency)
 # ---------------------------------------------------------------------------
 
-_CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
+_CMD_ADDR = DEFAULT_CMD_ADDR
 
 
 def _send_engine_command(cmd: dict) -> dict:

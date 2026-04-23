@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR, ipc_path, tcp_host_port
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
@@ -49,8 +50,6 @@ from cryodaq.instance_lock import release_lock, try_acquire_lock
 
 logger = logging.getLogger("cryodaq.launcher")
 
-# Порт ZMQ — для проверки, запущен ли уже engine
-_ZMQ_PORT = 5555
 _WEB_PORT = 8080
 
 # Settings → Тема menu: curated display order. Dark group first, then
@@ -152,25 +151,44 @@ def _make_icon(color: str) -> QIcon:
     return QIcon(pix)
 
 
-def _is_port_busy(port: int) -> bool:
-    """Check if engine is listening by probing BOTH PUB and CMD ports."""
+def _transport_endpoint_present() -> bool:
+    """Check if any configured engine transport endpoint is accepting connections."""
     import socket
 
-    for p in (port, port + 1):  # PUB=5555, CMD=5556
+    for addr in (DEFAULT_PUB_ADDR, DEFAULT_CMD_ADDR):
+        ipc = ipc_path(addr)
+        if ipc is not None:
+            if not ipc.exists() or not hasattr(socket, "AF_UNIX"):
+                continue
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(1.0)
+                if probe.connect_ex(str(ipc)) == 0:
+                    return True
+            except OSError:
+                pass
+            finally:
+                probe.close()
+            continue
+
+        host_port = tcp_host_port(addr)
+        if host_port is None:
+            continue
+        host, port = host_port
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(1.0)
-            result = s.connect_ex(("127.0.0.1", p))
-            s.close()
-            if result == 0:
+            probe.settimeout(1.0)
+            if probe.connect_ex((host, port)) == 0:
                 return True
         except OSError:
             pass
+        finally:
+            probe.close()
     return False
 
 
 def _ping_engine() -> bool:
-    """Check if a CryoDAQ engine is actually running on the command port."""
+    """Check if a CryoDAQ engine is actually running on the command endpoint."""
     try:
         import json
 
@@ -181,7 +199,7 @@ def _ping_engine() -> bool:
         sock.setsockopt(zmq.RCVTIMEO, 2000)
         sock.setsockopt(zmq.SNDTIMEO, 2000)
         sock.setsockopt(zmq.LINGER, 0)
-        sock.connect(f"tcp://127.0.0.1:{_ZMQ_PORT + 1}")
+        sock.connect(DEFAULT_CMD_ADDR)
         sock.send_string(json.dumps({"cmd": "safety_status"}))
         reply = json.loads(sock.recv_string())
         sock.close()
@@ -308,14 +326,13 @@ class LauncherWindow(QMainWindow):
 
     def _start_engine(self, *, wait: bool = True) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
-        if _is_port_busy(_ZMQ_PORT):
+        if _transport_endpoint_present():
             if _ping_engine():
-                logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
+                logger.info("Engine уже запущен (%s, ping OK) — подключаемся", DEFAULT_CMD_ADDR)
                 self._engine_external = True
                 return
             logger.warning(
-                "Порт %d занят, но CryoDAQ engine не отвечает — запускаем новый",
-                _ZMQ_PORT,
+                "Обнаружен transport endpoint, но CryoDAQ engine не отвечает — запускаем новый",
             )
 
         # Probe lock file via flock — OS-agnostic, no read_text on Windows
@@ -346,10 +363,10 @@ class LauncherWindow(QMainWindow):
                     except OSError:
                         pass
                     probe_fd = None
-                logger.warning("Engine lock held. Waiting for port...")
+                logger.warning("Engine lock held. Waiting for transport...")
                 for _ in range(30):
                     time.sleep(0.5)
-                    if _is_port_busy(_ZMQ_PORT):
+                    if _transport_endpoint_present():
                         logger.info("Engine ready — connecting")
                         self._engine_external = True
                         return
@@ -449,10 +466,10 @@ class LauncherWindow(QMainWindow):
         self._engine_stderr_logger = None
 
     def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
-        """Wait for engine to start listening on ZMQ port."""
+        """Wait for engine to start listening on its configured transport."""
         for attempt in range(max_attempts):
             time.sleep(interval_s)
-            if _is_port_busy(_ZMQ_PORT):
+            if _transport_endpoint_present():
                 logger.info("Engine ready (attempt %d/%d)", attempt + 1, max_attempts)
                 return
         logger.warning("Engine did not respond after %d attempts, proceeding anyway", max_attempts)
@@ -490,7 +507,7 @@ class LauncherWindow(QMainWindow):
     def _is_engine_alive(self) -> bool:
         """Проверить, жив ли engine."""
         if self._engine_external:
-            return _is_port_busy(_ZMQ_PORT)
+            return _transport_endpoint_present()
         if self._engine_proc is None:
             return False
         return self._engine_proc.poll() is None
@@ -720,13 +737,10 @@ class LauncherWindow(QMainWindow):
         # sides automatically because _start_engine spawns a fresh
         # engine child with CRYODAQ_LOG_LEVEL set from the new value.
         body_embedded = (
-            f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
-            "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043f\u0440\u0438\u043c\u0435"
-            "\u043d\u044f\u0442\u0441\u044f \u043a launcher / gui / engine \u043f\u043e\u0441\u043b"
-            "\u0435 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a\u0430 "
-            "\u041b\u0430\u0443\u043d\u0447\u0435\u0440\u0430 (engine \u043f\u0435\u0440\u0435"
-            "\u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u0432\u043c\u0435\u0441"
-            "\u0442\u0435 \u0441 \u043d\u0438\u043c)."
+            f"Подробные логи {state_ru}.\n"
+            "Изменения применятся к launcher / gui / engine после "
+            "перезапуска Лаунчера (engine перезапускается вместе "
+            "с ним)."
         )
         if engine_external and checked:
             # External engine + enabling DEBUG: launcher restart only
@@ -734,31 +748,23 @@ class LauncherWindow(QMainWindow):
             # INFO until operator relaunches it (or exports
             # CRYODAQ_LOG_LEVEL=DEBUG before doing so).
             body = (
-                f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
-                "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u041b\u0430\u0443\u043d\u0447"
-                "\u0435\u0440\u0430 \u0438 GUI \u043f\u0440\u0438\u043c\u0435\u043d\u044f\u0442\u0441"
-                "\u044f \u043f\u043e\u0441\u043b\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0437"
-                "\u0430\u043f\u0443\u0441\u043a\u0430. Engine \u0437\u0430\u043f\u0443\u0449\u0435\u043d "
-                "\u0432\u043d\u0435\u0448\u043d\u0435 \u2014 \u043f\u0435\u0440\u0435\u0437\u0430\u043f"
-                "\u0443\u0441\u0442\u0438\u0442\u0435 \u0435\u0433\u043e \u043e\u0442\u0434\u0435\u043b"
-                "\u044c\u043d\u043e \u0441 CRYODAQ_LOG_LEVEL=DEBUG, \u0447\u0442\u043e\u0431\u044b "
-                "DEBUG \u043b\u043e\u0433\u0438 \u043f\u043e\u043f\u0430\u043b\u0438 \u0438 \u0432 "
-                "engine.log."
+                f"Подробные логи {state_ru}.\n"
+                "Изменения Лаунчера и GUI применятся после их "
+                "перезапуска. Engine запущен внешне — перезапустите "
+                "его отдельно с CRYODAQ_LOG_LEVEL=DEBUG, чтобы DEBUG "
+                "логи попали и в engine.log."
             )
         elif engine_external and not checked:
             # External engine + disabling DEBUG: same restart-gap, but
             # the guidance is the inverse — unset the env var or set
             # it to INFO so the engine actually returns to INFO.
             body = (
-                f"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0435 \u043b\u043e\u0433\u0438 {state_ru}.\n"
-                "\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u041b\u0430\u0443\u043d\u0447"
-                "\u0435\u0440\u0430 \u0438 GUI \u043f\u0440\u0438\u043c\u0435\u043d\u044f\u0442\u0441"
-                "\u044f \u043f\u043e\u0441\u043b\u0435 \u0438\u0445 \u043f\u0435\u0440\u0435\u0437"
-                "\u0430\u043f\u0443\u0441\u043a\u0430. Engine \u0437\u0430\u043f\u0443\u0449\u0435\u043d "
-                "\u0432\u043d\u0435\u0448\u043d\u0435 \u2014 \u043f\u0435\u0440\u0435\u0437\u0430\u043f"
-                "\u0443\u0441\u0442\u0438\u0442\u0435 \u0435\u0433\u043e \u0431\u0435\u0437 "
-                "CRYODAQ_LOG_LEVEL (\u0438\u043b\u0438 CRYODAQ_LOG_LEVEL=INFO), \u0447\u0442\u043e\u0431\u044b "
-                "engine.log \u0432\u0435\u0440\u043d\u0443\u043b\u0441\u044f \u043a INFO."
+                f"Подробные логи {state_ru}.\n"
+                "Изменения Лаунчера и GUI применятся после их "
+                "перезапуска. Engine запущен внешне — перезапустите "
+                "его без CRYODAQ_LOG_LEVEL (или "
+                "CRYODAQ_LOG_LEVEL=INFO), чтобы engine.log "
+                "вернулся к INFO."
             )
         else:
             body = body_embedded
@@ -824,7 +830,7 @@ class LauncherWindow(QMainWindow):
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not _is_port_busy(_ZMQ_PORT):
+            if not _transport_endpoint_present():
                 return True
             time.sleep(interval)
         return False

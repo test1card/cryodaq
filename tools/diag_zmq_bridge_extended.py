@@ -29,6 +29,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR  # noqa: E402
 from cryodaq.gui.zmq_client import ZmqBridge  # noqa: E402
 
 
@@ -38,7 +39,7 @@ def _ts() -> str:
 
 def main() -> None:
     print(f"[{_ts()}] Extended bridge soak test — 180 seconds")
-    print(f"[{_ts()}] Engine must be running at tcp://127.0.0.1:5555 / :5556")
+    print(f"[{_ts()}] Engine must be running at {DEFAULT_PUB_ADDR} / {DEFAULT_CMD_ADDR}")
 
     bridge = ZmqBridge()
     bridge.start()

@@ -40,11 +40,8 @@ import queue
 import sys
 import time
 
-from cryodaq.core.zmq_subprocess import (
-    DEFAULT_CMD_ADDR,
-    DEFAULT_PUB_ADDR,
-    zmq_bridge_main,
-)
+from cryodaq.core.zmq_subprocess import zmq_bridge_main
+from cryodaq.core.zmq_transport import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR
 
 
 def _run_diagnostic(start_method: str) -> None:
@@ -112,7 +109,10 @@ def _run_diagnostic(start_method: str) -> None:
         else:
             readings += 1
 
-    print(f"[main] initial drain — heartbeats={heartbeats} warnings={len(warnings)} readings={readings}")
+    print(
+        "[main] initial drain — "
+        f"heartbeats={heartbeats} warnings={len(warnings)} readings={readings}"
+    )
     if warnings:
         for w in warnings[:5]:
             print(f"[main]   warning: {w.get('message', w)}")
@@ -172,7 +172,7 @@ def _run_diagnostic(start_method: str) -> None:
 
 if __name__ == "__main__":
     print("CryoDAQ ZMQ subprocess bridge — diagnostic")
-    print("Engine must be running at tcp://127.0.0.1:5555 / :5556")
+    print(f"Engine must be running at {DEFAULT_PUB_ADDR} / {DEFAULT_CMD_ADDR}")
     print(f"Python: {sys.version}")
     print(f"Platform: {sys.platform}")
     print(f"Default mp start method: {mp.get_start_method()}")
