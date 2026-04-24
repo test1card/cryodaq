@@ -19,7 +19,7 @@
 | Тесты | **1 368 passed, 2 skipped** |
 | Coverage (full suite) | **66%** (stale — last measured 2026-04-17; re-run pending) |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
-| Версия пакета | 0.13.0 |
+| Версия пакета | 0.34.0.dev0 |
 | Python | 3.12+ (dev: 3.14.3) |
 
 Источник актуального репо-инвентаря: `docs/REPO_AUDIT_REPORT.md` (2026-04-17).
