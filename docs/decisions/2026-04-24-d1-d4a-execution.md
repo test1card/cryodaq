@@ -94,6 +94,39 @@ Architect Q3 explicitly declined a forwarding doc at `docs/audits/2026-04-22-age
 - Test cases 4-6 deferred to manual hardware verification per architect explicit instruction ("Don't block on hardware-dependent tests").
 - New dependency: added `import logging` to `tools/diag_zmq_b1_capture.py` (stdlib, no `pyproject.toml` change). Called out in commit body.
 
+## 22:16 — Q4 equivalence check PASS (session addendum)
+
+Post-merge Codex adversarial equivalence review dispatched per
+architect Q4 directive after the M2 merge-commit `89b4db1` landed.
+
+- Consulted: Codex gpt-5.5 / high reasoning, ~88 KB response
+  (1924 lines), completed in ~1 min wall-clock.
+- Brief: `artifacts/consultations/2026-04-24-overnight/BRIEFS/codex-06-q4-equivalence.prompt.md`
+- Raw response: `artifacts/consultations/2026-04-24-overnight/RESPONSES/codex-06-q4-equivalence.response.md`
+- Synthesis: `artifacts/consultations/2026-04-24-overnight/STREAM_SYNTHESES/Q4-equivalence-synthesis.md`
+- Verdict: **EQUIVALENT + improvement only.** Zero findings at any
+  severity level. Only `ACCEPTABLE` category used, describing the
+  intended retry improvement.
+- Key evidence: Codex ran inline Python predicate simulation across
+  7 edge-case inputs (`None`, `{}`, `{"ok": None}`, `{"ok": "True"}`,
+  `{"ok": 1}`, `{"ok": True}`, `{"ok": False}`) — R1 and b2b4fb5
+  predicates behave identically for all. Cross-referenced
+  `ZmqBridge.send_command` + `zmq_subprocess.cmd_forward_loop`
+  confirmed no retry-induced REQ socket state leak (IV.6 ephemeral
+  REQ invariant preserved).
+
+Decision: D1 loop formally closed. Branch cleanup authorized.
+
+Action taken this session:
+1. `git branch -D feat/b2b4fb5-repair` (local)
+2. `git push origin --delete feat/b2b4fb5-repair` (remote)
+3. Verified `c3f4f86` remains reachable via merge-commit `89b4db1`
+   second-parent link — history intact.
+
+Consulted: Codex gpt-5.5 high.
+Open: none for D1. D2 / D4b / retro-tag queue still open for future
+sessions.
+
 ## Next architect action
 
 Review `feat/b2b4fb5-repair` (`c3f4f86`):
