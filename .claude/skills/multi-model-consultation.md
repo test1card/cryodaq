@@ -69,6 +69,24 @@ for ~3-5 substantial reviews per day. Background jobs eat the window
 fast — use `/codex:review` foreground unless you genuinely need
 parallelism.
 
+**Sandbox gotcha (2026-04-24 observed):** Codex CLI defaults to
+read-only filesystem sandbox and will emit
+`patch rejected: writing is blocked by read-only sandbox` when asked
+to write the response file itself. Two workarounds:
+1. Invoke with `--sandbox workspace-write` flag so Codex can write
+   directly to the response path.
+2. Let Codex print response to stdout and have CC redirect the
+   stdout to the response file: `codex exec ... > RESPONSES/....md`.
+Option 2 is the proven path for overnight batches since CC adapted
+to it 2026-04-24.
+
+**Response size gotcha:** Codex returns full reasoning transcript
+(100-300 KB typical). Final verdict + findings are at the END of
+the response file, not the top. When synthesizing: use `tail -250`
+or parse for the last `Model: gpt-5.X` marker. Codex tends to
+repeat its final answer after the transcript, so the bottom is
+the authoritative section.
+
 **Use for:**
 - Review of a completed diff before commit (adversarial review)
 - Specific bug hypothesis testing ("is this a race or a deadlock?")
@@ -80,31 +98,42 @@ parallelism.
 - "Review the entire repo"
 - Anything that requires loading > 10 files at once
 
-### Gemini CLI — Gemini 2.5 Pro
+### Gemini CLI — Gemini 3.1 Pro Preview
 
 **Strength:** wide-context architectural analysis. 1M token window lets
 you drop the entire CryoDAQ src tree into one prompt and ask
 cross-cutting questions. Strong on multi-file drift detection, impact
 analysis, doc-vs-code reconciliation, finding patterns across many
-files.
+files. 3.1 Pro improved long-horizon stability + tool orchestration
+over 2.5 Pro (Feb 2026 release), scores Artificial Analysis Intelligence
+Index 57 (top in class at release). Three-tier thinking modes (low /
+medium / high) added.
 
 **Weakness:** verbosity. Default response size is 3-10x what you asked
 for. Needs explicit "maximum 800 words" or "single markdown table, no
 prose". Can be confidently wrong on narrow hot-path bugs that Codex
 would catch. Architect voice — tends toward summary statements over
-specific findings without line refs.
+specific findings without line refs. Higher time-to-first-token than
+2.5 Pro (~30s) — noticeable for interactive use, irrelevant for
+background batches.
 
-**Always pass:** `--model pro` or `--model gemini-2.5-pro` — default
-model is weaker. For audits → `--background` if you can afford to wait
-60-90 min for the deeper pass.
+**Always pass:** `-m gemini-3.1-pro-preview` (full model string
+required — plain `pro` may resolve to 2.5 on older CLI installs, and
+`--model pro` defaults to auto-routing which can include flash). For
+audits → `--background` or `--yolo` if tool approval would block.
+
+**Version note:** Gemini 3.1 Pro Preview released 2026-02-19. Previous
+was Gemini 2.5 Pro. Auto-route is now Gemini 3 family by default on
+recent Gemini CLI. Older `gemini-2.5-pro` endpoint still works but is
+strictly worse; no reason to prefer it.
 
 **Signature signal:** section-headed reports with tables, high-level
 recommendations. Watch for confident claims without file:line backing —
 those are often hallucinated.
 
-**Budget:** Google AI Pro — 1000 requests/day via OAuth. Generous.
-Individual deep audit counts as 1 request but may take 60-90 min of
-wall-clock.
+**Budget:** Google AI Pro — daily quota via OAuth (consumer Gemini app
+limits apply; CLI shows limit-reached banner when hit). Individual deep
+audit counts as 1 request but may take 60-90 min of wall-clock.
 
 **Use for:**
 - Wide audit ("find architectural drift across the whole engine")
@@ -606,6 +635,8 @@ Write to: artifacts/consultations/[DATE]/[topic]/codex.response.md
 ### 8.2 Gemini wide-audit brief
 
 ```
+Model: gemini-3.1-pro-preview
+
 # Wide audit — [subsystem or topic]
 
 ## Context

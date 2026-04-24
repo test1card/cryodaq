@@ -145,7 +145,7 @@ Create `BRIEFS/gemini-NN-slug.prompt.md` using skill §8.2 template
 Dispatch:
 
 ```bash
-/gemini:rescue --model pro --background \
+/gemini:rescue -m gemini-3.1-pro-preview --background \
   --prompt "$(cat artifacts/consultations/2026-04-24-overnight/BRIEFS/gemini-NN-slug.prompt.md)" \
   --output artifacts/consultations/2026-04-24-overnight/RESPONSES/gemini-NN-slug.response.md
 ```
@@ -180,7 +180,7 @@ Every brief contains:
   critique)
 - **Response file path** — exact path where response goes
 - **Model confirmation** — first line `Model: gpt-5.5 / Reasoning
-  effort: high` for Codex, `Model: gemini-2.5-pro` for Gemini
+  effort: high` for Codex, `Model: gemini-3.1-pro-preview` for Gemini
 
 ### 3.6 Context file budget per brief
 
@@ -197,6 +197,13 @@ All Codex invocations use `gpt-5.5` (latest as of 2026-04-24). If
 `/codex` rejects that model string (e.g. "model not found"), fall
 back to `gpt-5.4` for this batch and ledger the issue — the plugin
 config may need updating separately.
+
+All Gemini invocations use `gemini-3.1-pro-preview` (latest as of
+2026-04-24, released 2026-02-19). Plain `-m gemini-3.1-pro-preview`
+in Gemini CLI. If CLI rejects, fall back to `gemini-2.5-pro` with
+ledger note. Older CLI installs may not recognize the 3.1 string;
+running `gemini --version` and comparing against CLI changelog is a
+fast check.
 
 ---
 
@@ -556,7 +563,7 @@ Do all in one CC session before sleeping:
    - Anti-anchoring rules STRICT on Stream A briefs (Codex-01, Gemini-01)
 3. **Phase 2** — dispatch all 10 in background (5-10 min)
    - 5 Codex jobs via `/codex:rescue --background`
-   - 5 Gemini jobs via `/gemini:rescue --background --model pro`
+   - 5 Gemini jobs via `/gemini:rescue --background -m gemini-3.1-pro-preview`
 4. **Phase 3** — status verification (2 min)
    - `/codex:status` shows 5 Codex jobs queued/running
    - `/gemini:status` shows 5 Gemini jobs queued/running
@@ -654,7 +661,10 @@ this input".
 **F3. Consultant answers with different model than requested.**
 Check first line of response for model declaration. If Codex returns
 "Model: o3" or an older Codex model when we asked `gpt-5.5` — retry
-once. This is the common failure.
+once. If Gemini returns "Model: gemini-2.5-pro" or "gemini-2.5-flash"
+when we asked `gemini-3.1-pro-preview` — retry once with explicit
+full model string in both CLI flag and prompt body. This is the
+common failure.
 
 **F4. Background job lost.**
 `/codex:status` or `/gemini:status` shows job neither running nor
@@ -722,3 +732,7 @@ specifications, keep the structure.*
 
 *Codex model: gpt-5.5 (released post-2026-04-24). If rejected, fall
 back to gpt-5.4 with ledger note per §3.7.*
+
+*Gemini model: gemini-3.1-pro-preview (released 2026-02-19). If
+rejected by older CLI, fall back to gemini-2.5-pro with ledger note
+per §3.7.*
