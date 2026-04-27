@@ -652,3 +652,36 @@ def test_acknowledge_no_event_on_unknown_or_reack():
     first = mgr.acknowledge("dup")
     assert first is not None
     assert mgr.acknowledge("dup") is None  # idempotent, no event
+
+
+# ---------------------------------------------------------------------------
+# Codex-04 regression: cooldown_stall composite — threshold, not threshold_expr
+# ---------------------------------------------------------------------------
+
+
+def test_cooldown_stall_config_evaluates_without_threshold_keyerror(caplog) -> None:
+    """Codex-04: composite cooldown_stall must not KeyError on 'above' condition.
+
+    threshold_expr is not implemented; alarms_v3.yaml uses static threshold: 150.
+    Т12=200 K > 150, rate≈0 K/мин → both AND conditions true → alarm fires.
+    """
+    t0 = time.time() - 90
+    rate_points = _linear_rate_data("Т12", rate_per_min=0.01, n=90, start_val=200.0, t0=t0)
+    ev = _make_evaluator([_reading("Т12", 200.0)], rate_data={"Т12": rate_points})
+    cfg = {
+        "alarm_type": "composite",
+        "operator": "AND",
+        "conditions": [
+            {"channel": "Т12", "check": "rate_near_zero", "rate_threshold": 0.1, "rate_window_s": 900},
+            {"channel": "Т12", "check": "above", "threshold": 150},
+        ],
+        "level": "WARNING",
+        "message": "Охлаждение остановилось, Т12 далеко от setpoint.",
+        "notify": ["gui", "telegram"],
+    }
+
+    with caplog.at_level("ERROR", logger="cryodaq.core.alarm_v2"):
+        result = ev.evaluate("cooldown_stall", cfg)
+
+    assert result is not None
+    assert "Ошибка evaluate cooldown_stall" not in caplog.text
