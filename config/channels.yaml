@@ -54,7 +54,7 @@ channels:
     group: криостат
   Т8:
     name: Калибровка
-    visible: false
+    visible: true
     is_cold: true
     group: криостат
   Т9:
@@ -94,7 +94,7 @@ channels:
     group: компрессор
   Т16:
     name: Фланец
-    visible: false
+    visible: true
     is_cold: false
     group: компрессор
   Т17:
