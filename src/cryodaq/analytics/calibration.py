@@ -376,14 +376,14 @@ class CalibrationStore:
         suffix = path.suffix.lower()
         if suffix == ".json":
             curve = self.import_curve_json(path)
-        elif suffix in {".330", ".340"}:
+        elif suffix == ".340":
             curve = self._import_curve_text(
                 path,
                 sensor_id=sensor_id,
                 channel_key=channel_key,
                 raw_unit=raw_unit,
                 sensor_kind=sensor_kind,
-                import_format=suffix.lstrip("."),
+                import_format="340",
             )
         else:
             raise ValueError(f"Unsupported calibration import format: {path.suffix}")
@@ -421,18 +421,23 @@ class CalibrationStore:
                 writer.writerow([float(raw_value), curve.evaluate(float(raw_value))])
         return target
 
-    def export_curve_330(
+    def export_curve_cof(
         self,
         sensor_id: str,
         *,
         path: Path | None = None,
-        points: int = 200,
     ) -> Path:
+        """Export calibration curve as .cof (Chebyshev coefficients) format.
+
+        Unlike .340 which exports sampled breakpoints, .cof preserves the
+        raw fit coefficients per zone. Portable: can be re-evaluated by
+        any code with numpy.polynomial.chebyshev, no CryoDAQ schema
+        dependency.
+        """
         curve = self._require_curve(sensor_id)
-        target = path or (self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330")
+        target = path or (self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.cof")
         target.parent.mkdir(parents=True, exist_ok=True)
-        rows = self._export_rows(curve, points=max(points, 2))
-        self._write_curve_text_export(target, curve, rows, format_name="330")
+        self._write_cof_export(target, curve)
         self._write_index()
         return target
 
@@ -478,8 +483,8 @@ class CalibrationStore:
             "table_path": str(
                 self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"
             ),
-            "curve_330_path": str(
-                self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"
+            "curve_cof_path": str(
+                self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.cof"
             ),
             "curve_340_path": str(
                 self._curve_340_path(curve.sensor_id, curve.curve_id) if self._exports_dir else ""
@@ -784,8 +789,8 @@ class CalibrationStore:
                     "table_path": str(
                         self._curve_directory(curve.sensor_id, curve.curve_id) / "curve_table.csv"
                     ),
-                    "curve_330_path": str(
-                        self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.330"
+                    "curve_cof_path": str(
+                        self._curve_directory(curve.sensor_id, curve.curve_id) / "curve.cof"
                     ),
                     "curve_340_path": str(
                         self._curve_340_path(curve.sensor_id, curve.curve_id)
@@ -867,6 +872,34 @@ class CalibrationStore:
             for temperature_k, raw_value in rows:
                 writer.writerow([f"{temperature_k:.9g}", f"{raw_value:.9g}"])
 
+    def _write_cof_export(self, path: Path, curve: CalibrationCurve) -> None:
+        """Write .cof format: header + per-zone raw Chebyshev coefficients."""
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        lines: list[str] = []
+        lines.append("# CryoDAQ calibration curve export .cof")
+        lines.append(f"# sensor_id: {curve.sensor_id}")
+        lines.append(f"# curve_id: {curve.curve_id}")
+        lines.append(f"# raw_unit: {curve.raw_unit}")
+        lines.append(f"# fit_timestamp: {curve.fit_timestamp.isoformat()}")
+        lines.append(
+            "# format: Chebyshev T_n(x), x = 2*(raw - raw_min)/(raw_max - raw_min) - 1"
+        )
+        lines.append(f"# zone_count: {len(curve.zones)}")
+        lines.append("")
+        for index, zone in enumerate(curve.zones, start=1):
+            lines.append(f"[zone {index}]")
+            lines.append(f"raw_min: {zone.raw_min:.12g}")
+            lines.append(f"raw_max: {zone.raw_max:.12g}")
+            lines.append(f"order: {zone.order}")
+            coefficients = ", ".join(f"{value:.12g}" for value in zone.coefficients)
+            lines.append(f"coefficients: {coefficients}")
+            lines.append(f"# rmse_k: {zone.rmse_k:.6g}")
+            lines.append(f"# max_abs_error_k: {zone.max_abs_error_k:.6g}")
+            lines.append(f"# point_count: {zone.point_count}")
+            lines.append("")
+        atomic_write_text(path, "\n".join(lines))
+
     def _import_curve_text(
         self,
         path: Path,
@@ -925,8 +958,6 @@ class CalibrationStore:
             },
         )
         self.save_curve(curve)
-        if import_format == "330":
-            self.export_curve_330(curve.sensor_id)
         if import_format == "340":
             self.export_curve_340(curve.sensor_id)
         return curve
