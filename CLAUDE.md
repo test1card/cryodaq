@@ -354,12 +354,12 @@ Phase I.1.
 
 **Автономный workflow:** после каждого **initial block commit** (новый overlay / новая feature surface / engine wiring) и каждого **amend-fix в ответ на предыдущий Codex FAIL** Claude Code вызывает Codex через slash-команду `/codex`, самостоятельно читает verdict, решает amend или close по правилам `docs/CODEX_SELF_REVIEW_PLAYBOOK.md`, и продолжает до PASS или 3-cycle limit — без ожидания `continue` от architect.
 
-**Полный playbook:** `docs/CODEX_SELF_REVIEW_PLAYBOOK.md` — autonomy mode rules, canonical prompt template, fix-amend template, invocation pattern, model selection (gpt-5.4 high reasoning ОБЯЗАТЕЛЬНО), anti-patterns, max-cycle limit, decision tree для FAIL findings. Читать перед каждым block commit.
+**Полный playbook:** `docs/CODEX_SELF_REVIEW_PLAYBOOK.md` — autonomy mode rules, canonical prompt template, fix-amend template, invocation pattern, model selection (gpt-5.5 high reasoning ОБЯЗАТЕЛЬНО), anti-patterns, max-cycle limit, decision tree для FAIL findings. Читать перед каждым block commit.
 
 **Short version:**
 - **Когда звать Codex:** initial block commit + любой amend после FAIL.
 - **Когда НЕ звать:** doc-only commits, theme/YAML drops, cleanup commits, уже PASS на текущем SHA.
-- **Модель:** `gpt-5.4` с high reasoning effort — ОБЯЗАТЕЛЬНО. `/codex` по умолчанию берёт o3, который слаб для нашего workflow. Всегда указывать в первых строках prompt блока `Model: gpt-5.4 / Reasoning effort: high` + inline flags если plugin их поддерживает. Если Codex ответил как o3 — retry с override.
+- **Модель:** `gpt-5.5` с high reasoning effort — ОБЯЗАТЕЛЬНО. `/codex` по умолчанию берёт o3, который слаб для нашего workflow. Всегда указывать в первых строках prompt блока `Model: gpt-5.5 / Reasoning effort: high` + inline flags если plugin их поддерживает. Если Codex ответил как o3 — retry с override.
 - **На FAIL — автономно:** CRITICAL/HIGH → amend без спроса; MEDIUM <3 файлов скоп → amend без спроса; LOW trivial → amend, иначе в residual risks; design-decision FAIL (wine vs blue, layout choice) → STOP + surface to architect.
 - **Когда ОБЯЗАТЕЛЬНО surface к architect:** genuine architectural fork в Stage 0 (missing engine API, duplicate backend); design-decision FAIL; 3 amend cycles без PASS; out-of-scope требования Codex; pre-commit gates fail в чужом коде.
 - **Лимит:** 3 amend cycles на блок. 4-я попытка — STOP, что-то структурное сломано.
