@@ -75,3 +75,6 @@ data/
 .venv-tools/
 agentswarm/
 .scratch/
+
+# Node.js (added 2026-04-27 — stray npm artifacts; deps never tracked)
+node_modules/
