@@ -883,7 +883,8 @@ class CalibrationStore:
         lines.append(f"# raw_unit: {curve.raw_unit}")
         lines.append(f"# fit_timestamp: {curve.fit_timestamp.isoformat()}")
         lines.append(
-            "# format: Chebyshev T_n(x), x = 2*(raw - raw_min)/(raw_max - raw_min) - 1"
+            "# format: Chebyshev T_n(x); raw clipped to [raw_min, raw_max],"
+            " then x = 2*(clipped - raw_min)/(raw_max - raw_min) - 1"
         )
         lines.append(f"# zone_count: {len(curve.zones)}")
         lines.append("")
