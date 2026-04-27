@@ -1,7 +1,9 @@
 # CryoDAQ agent orchestration — CC-centric swarm model
 
-**Authoritative as of 2026-04-23.** Supersedes ad-hoc multi-agent
-coordination from 2026-04-21 to 2026-04-23.
+**Authoritative as of 2026-04-28 (v1.2).** Supersedes ad-hoc multi-agent
+coordination from 2026-04-21 to 2026-04-23. v1.2 incorporates calibration
+findings from vault build/audit, B1 investigation closure, and `.cof`
+migration sessions (2026-04-26 through 2026-04-28).
 
 **Who reads this:** every agent session (Claude Code, Codex CLI,
 Gemini CLI, GLM via CCR, architect web Claude, metaswarm). If you
@@ -380,6 +382,15 @@ At the start of every CC session on this repo:
 
 - [ ] Read this file end-to-end
 - [ ] Read `CLAUDE.md` (repo-level invariants)
+- [ ] **Skill registry refresh.** If a skill in `.claude/skills/` was
+  added or modified within the last 24 hours, run
+  `Read(.claude/skills/<n>.md)` explicitly at session start.
+  Skill registry is frozen at session boot — recent skills won't
+  auto-load.
+- [ ] **Recon before execution.** If the plan contains expectations
+  about repo state (HEAD SHA, tags, file existence, worktree state),
+  verify each via direct command before executing plan steps. Plan
+  staleness is a frequent source of silent corruption (§14.1).
 - [ ] `git status` — note any uncommitted state
 - [ ] **If tracked files are modified and not explicitly covered
   by the current plan, STOP with a diff summary.** Plans must be
@@ -391,6 +402,10 @@ At the start of every CC session on this repo:
   silently — plans are annotated with their starting branch for
   a reason. Report the mismatch and wait.
 - [ ] `git worktree list` — note active worktrees and branches
+- [ ] **Cross-branch divergence check.** If the plan involves merge,
+  cherry-pick, rebase, or feature work depending on master state,
+  run `git rev-list --left-right --count <base>...<branch>` first.
+  Catches unexpected drift before destructive operations (§14.4).
 - [ ] Check `artifacts/consultations/` for pending response files
   that haven't been synthesized
 - [ ] Check `docs/decisions/` for the latest session ledger to
@@ -471,6 +486,26 @@ why the rules exist:
    round-trip cost exceeded the value of the caution. Rule
    preventing it: §13 (STOP discipline + autonomy band,
    introduced retroactively after this session).
+
+7. **Vault/doc propagation gap.** 2026-04-27 vault audit: Т4
+   interlock exclusion fact landed correctly in `30 Investigations/
+   Cyrillic homoglyph in alarm config` while staying stale in
+   `00 Overview/Hardware setup` AND `20 Drivers/LakeShore 218S`
+   See-also section. Three notes, one fact, propagation incomplete
+   because audit fixes were per-flagged-file rather than per-claim.
+   Same pattern hit repo 2026-04-28: removing `export_curve_330`
+   from `calibration.py` without removing the caller in `engine.py`
+   is the same bug class one level up. Rule preventing it: §14.3.
+
+8. **Codex literal blind spot for callers.** 2026-04-28 `.cof`
+   migration audit: Codex audited `calibration.py` per declared
+   scope, all green (CONDITIONAL with 1 LOW finding). Missed
+   `engine.py` still calling removed `export_curve_330()`. Caught
+   only by Gemini structural pass. Codex by design verifies
+   declared scope; doesn't grep external callers unless prompted
+   explicitly. Without Gemini, the merge would have shipped a
+   runtime `AttributeError`. Rule preventing it: §14.2 dual-
+   verifier pattern.
 
 Rules exist because specific failures happened. The failures are
 enumerated above so that when a future agent is tempted to think
@@ -565,8 +600,14 @@ CC is NOT authorized, even with autonomy band:
 
 - To merge branches not explicitly named in plan
 - To delete files outside `git branch -D` targets in the plan
-- To rewrite commit history on master (amend pushed commits,
-  rebase shared branches, force-push)
+- To rewrite commit history on master or other shared branches
+  (amend pushed master commits, rebase shared branches, force-push
+  to master, force-push to architect-shared branches)
+  - *Force-push of CC-owned, not-yet-merged `feat/<slug>` or
+    `experiment/<slug>` branches IS allowed for commit
+    reorganization during active development. The prohibition is
+    force-push to master and to branches the architect or other
+    agents read from.*
 - To invoke consultants for decisions this document already
   covers
 - To create new feature branches for initiative work while
@@ -585,9 +626,138 @@ band.
 
 ---
 
+## 14. Verification practices
+
+Added 2026-04-28 (v1.2) consolidating recon, verification, and
+dual-verifier patterns surfaced through vault build, vault audit,
+B1 investigation, and `.cof` migration sessions.
+
+### 14.1 Recon before execution
+
+Architect plans contain stale assumptions. Before executing any
+multi-step plan, CC performs recon (read-only) and reports actual
+state vs plan-expected state:
+
+- `git status` + `git log -3 --oneline`
+- `git tag -l` if plan references tags
+- Inventory of touched files (existence, last_modified)
+- Dependency state (skills, configs, worktrees) per plan scope
+
+If reality differs materially from plan: STOP, report diff, await
+architect adjustment. If reality matches: proceed.
+
+This pattern caught vault folder collision (overnight build),
+retroactive tag execution memory gap, mystery `channels.yaml`
+modification — each would have caused silent corruption if CC
+had executed the plan blindly.
+
+### 14.2 Dual-verifier complementary review
+
+Codex (literal) and Gemini (structural) have non-overlapping
+strengths. Pair them for non-trivial code review:
+
+- **Codex** (`gpt-5.5 high`): verifies declared scope file-by-file,
+  line-level precision, file:line citations. Strong on factual
+  correctness within stated boundaries. Tends to NOT grep callers
+  or check downstream impact unless prompted explicitly.
+
+- **Gemini** (`gemini-3.1-pro-preview`): wide-context audit, finds
+  cross-file inconsistency, caller-impact, doc-vs-code drift. 1M
+  context lets it read related files Codex would skip. Verbose
+  by default — needs explicit output cap and table-first format.
+
+The 2026-04-28 `.cof` migration audit demonstrated the pattern:
+Codex CONDITIONAL on `calibration.py` with 1 LOW finding (all
+declared scope green). Gemini CRITICAL — found `engine.py` still
+called removed `export_curve_330()`, missed by Codex because
+Codex didn't grep caller sites. Without Gemini, the merge would
+have shipped a runtime `AttributeError`.
+
+Pair both verifiers when:
+- Public API changes (callers in unknown locations)
+- Removal of exported names (must grep all callers)
+- Structural refactor across multiple files
+- Doc claims that reference code state
+
+Skip dual-verifier when:
+- Single-file localized change with clear scope
+- Test-only addition
+- Pure documentation update without code claims
+
+### 14.3 Propagation gap when fixing flagged content
+
+Audit findings frequently surface in one location while equivalent
+stale claims exist in others. When applying a fix to a flagged
+note/file/doc:
+
+1. Grep all related artifacts for the corrected claim
+2. Fix all instances in single batch
+3. Don't merge until grep is clean
+
+The 2026-04-27 vault audit caught Т4 interlock fact landing
+correctly in `Cyrillic homoglyph` note while staying stale in
+`Hardware setup` AND `LakeShore 218S` See-also section. Three
+notes, one fact, propagation incomplete because audit fixes were
+per-flagged-file rather than per-claim.
+
+Same pattern applies to repo: removing `export_curve_330` from
+`calibration.py` without removing the caller in `engine.py` is
+the same bug class one level higher.
+
+Discipline: before committing, `grep -rn <claim>` across the
+edit's blast radius. Repository or vault, doesn't matter.
+
+### 14.4 Cross-branch divergence check
+
+Before any cross-branch operation (merge, cherry-pick, rebase,
+feature work depending on master state):
+
+```
+git rev-list --left-right --count master...feat/branch
+```
+
+Format: `<commits-on-master-not-in-branch> <commits-on-branch-not-in-master>`.
+
+Outputs to interpret:
+- `0 N` — branch is ahead, clean fast-forward possible
+- `M 0` — branch is behind, rebase or merge master in first
+- `M N` — both diverged, merge will be no-ff with potential
+  conflicts
+- `0 0` — branches identical (suspicious — verify intent)
+
+Run before merge to catch unexpected drift. Run before starting
+work on a branch to know whether rebase is needed.
+
+### 14.5 rtk-ai proxy filters merge commits
+
+The rtk-ai proxy compresses shell output before reaching CC's
+context. Side-effect: `git log --oneline` may omit merge commits
+from display, making merge commits invisible without explicit
+verification.
+
+When verifying merge state or parent SHAs, use direct git commands
+that bypass abbreviated formats:
+
+```
+git cat-file -p HEAD                     # Full commit incl parents
+git log -1 --format='%h %P %s'           # Hash, parents, subject
+git log --format='%h %P %s' -10          # Same, last 10 commits
+```
+
+The 2026-04-28 `.cof` migration session illustrated this: CC saw
+`git log --oneline` showing only feature branch commits + master
+parent, no merge commit. Verified via `git cat-file -p HEAD`
+that the merge had landed correctly with two parents — only the
+display was filtered.
+
+This is rtk's design choice for context economy. Don't fight it
+— verify with full-format commands when correctness matters.
+
+---
+
 *This document is the contract. If you are an agent on this repo
 and you don't like a rule, propose a change through the
 architect. Do not work around it.*
 
 *— Vladimir Fomenko (architect), authored by Claude Opus 4.7
-(web), 2026-04-23.*
+(web), 2026-04-23 (v1.1) — extended 2026-04-28 (v1.2).*
