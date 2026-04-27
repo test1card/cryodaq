@@ -672,3 +672,117 @@ in auto-reports. Fix:
 *GLM-5.1 via CCR for the coming days while Vladimir's Anthropic*
 *weekly limit recovers. See `HANDOFF_2026-04-20_GLM.md` for full*
 *context transfer.*
+
+---
+
+# 2026-04-27 update — D2 H4 falsified, H5 promoted
+
+## D2 split-context experiment outcome
+
+Codex-02 (overnight 2026-04-24) hypothesized H4: shared `zmq.Context()`
+between data-plane SUB and per-command REQ accumulates state across
+ephemeral REQ socket creation/destruction cycles, eventually
+contaminating the command path while leaving data plane healthy.
+
+D2 ran the falsification experiment per Codex-02 spec:
+- Baseline (current code, single shared context): fail at cmd #17 /
+  uptime 51.1s, TimeoutError + permanent lockout (35s RCVTIMEO, 0/4
+  OK after first fail)
+- Split-context (ctx_sub + ctx_req per Codex-02 patch): fail at
+  cmd #23 / uptime 57.1s, identical failure pattern
+- Δ = 6 commands / 6 seconds, within run-to-run variability on macOS
+
+Both runs fail well below Codex-02's 40-50 cmd threshold for "H4
+sufficient cause." **H4 FALSIFIED.** Splitting the context does not
+prevent B1.
+
+Full ledger: docs/decisions/2026-04-27-d2-h4-experiment.md.
+
+## H5 promoted to top hypothesis
+
+H5 — engine REP task state degradation. Failure pattern across all
+B1 reproductions (35s RCVTIMEO + permanent lockout, even with
+ephemeral per-command REQ on bridge side) is consistent with
+**engine never replies**, not with bridge inability to construct
+new REQ.
+
+Specifically:
+- IV.6 ephemeral REQ ruled out bridge-side REQ socket state
+- D2 ruled out shared zmq.Context() on bridge side
+- Data plane (SUB) stays healthy throughout — engine PUB loop
+  unaffected
+- "Resource temporarily unavailable" after first timeout = ZMQ
+  socket in bad state after failed send/recv (NORMAL given how
+  REQ/REP works after a timeout)
+
+Mechanism candidates within H5:
+- Engine asyncio REP handler accumulates state or stalls after
+  ~50s / 15-20 cmd cycles in mock mode
+- Reaper / fd accumulation in bridge subprocess (Codex-02 §2.1,
+  not addressed by split-context)
+
+## Next investigation: direct-REQ bypass test
+
+Per D2 ledger §"architect actions required":
+
+Send commands from a direct REQ script that bypasses the bridge
+subprocess entirely:
+- If direct REQ ALSO fails at ~50s → H5 confirmed (engine-side)
+- If direct REQ PASSES → bridge process still has the issue
+  (reaper/fd accumulation)
+
+Plus parallel fd monitoring: `lsof -p <bridge-pid> | wc -l`
+every 10s during a B1 reproduction. If fd count grows monotonically
+and exceeds a threshold at failure time, reaper accumulation is
+the mechanism.
+
+Designing this experiment as a separate session task.
+
+## IV.7 status — clarification
+
+IV.7 ipc:// transport was tried (worktree
+.worktrees/experiment-iv7-ipc-transport). Initial run failed at
+cmd #0 — this was misattributed to ipc:// transport itself, but
+the 2026-04-24 morning investigation
+(docs/decisions/2026-04-24-b2b4fb5-investigation.md) revealed
+the cause was b2b4fb5's hardened probe racing engine bind
+readiness on ipc:// transport.
+
+R1 bounded-backoff retry repair (merged 2026-04-24, commit 89b4db1)
+fixed b2b4fb5's race. With R1 + ipc://, the probe survives the bind
+race. But B1 still reproduces ~80s into the session — IV.7 transport
+itself does NOT eliminate B1.
+
+The TCP-loopback hypothesis from the 2026-04-20 evening update is
+therefore weakened: B1 occurs on both tcp:// and ipc://. The
+mechanism is above the transport layer.
+
+## v0.34.0 release status
+
+Production fixes from overnight 2026-04-24 batch all landed:
+- Codex-03 SIGTERM handler (commit 708b0f7 merge of 9a8412e)
+- Codex-04 alarm_v2 threshold validation (1869910)
+- Codex-05 Thyracont V1 probe TIGHTEN (7230c9f)
+- D1 R1 repair (89b4db1)
+
+**v0.34.0 tag remains blocked on B1 — engine cannot run reliably
+beyond ~80s on either transport.**
+
+Working theory: H5 confirmation (or falsification) is the next
+gate. If H5 confirmed + fix designed → tag after fix lands. If
+H5 falsified → revisit fd accumulation hypothesis.
+
+## Plugin context for future readers
+
+This doc has accumulated 4 distinct framings over its lifetime:
+1. Original 2026-04-20 framing: TCP loopback issue (transport
+   level) — partially superseded by IV.7 result
+2. IV.6 ephemeral REQ framing: shared REQ state on bridge —
+   FALSIFIED
+3. IV.7 ipc:// transport framing: TCP-specific bug — partially
+   FALSIFIED (B1 reproduces on ipc:// too)
+4. **2026-04-27 framing (current): engine REP state degradation
+   above transport layer** — being verified
+
+Earlier sections preserve the analytical history. This section
+is the canonical current-state reference.
