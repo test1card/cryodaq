@@ -9,6 +9,31 @@
 
 ## [Unreleased]
 
+*(Будущие изменения)*
+
+---
+
+## [0.34.0] — 2026-04-27
+
+### Highlights
+
+- B1 ZMQ idle-death CLOSED after 7-day investigation. Root cause:
+  asyncio cancellation-polling pattern in REP loop. Fix: replace
+  with `poll(timeout=1000)` + conditional `recv()` after `POLLIN`. See
+  `docs/decisions/2026-04-27-d4-h5-fix.md`.
+- IV.4 safe features (F1 Parquet, F2 Debug mode, F6 auto-report
+  verification, F11 shift handover) shipped.
+- Phase III UI rebuild (DS token decoupling, GlobalTimeWindow,
+  phase-aware AnalyticsView, polish + bug batch).
+- IV.6 ZMQ command-plane hardening (ephemeral REQ per command,
+  command-channel watchdog).
+- Field fixes: Thyracont validate_checksum wired, xml_safe sanitizer
+  for python-docx XML 1.0 compatibility.
+- Production hardening: SIGTERM/SIGINT handler in launcher (engine no
+  longer orphans on systemd stop / Ctrl+C), alarm_v2 threshold
+  validation tightened, Thyracont V1 probe checksum-validates.
+- R1 bounded-backoff probe retry (b2b4fb5 race fix).
+
 ### Today — 2026-04-20 session (handoff → GLM-5.1)
 
 This is a tight working record, not a formal release. Full
@@ -647,6 +672,18 @@ release is `0.34.0` once B1 is resolved via IV.7.
 
 - `ae7d8d4` fix(engine): add missing load_alarm_config import
 - `c4396a8` ui(phase-1-v2): block B.3 — DynamicSensorGrid
+
+### Investigation closed
+
+- **B1 ZMQ idle-death** — H5 CONFIRMED + FIXED. 7-day investigation
+  closed. Root cause: `asyncio.wait_for(socket.recv(), timeout=1.0)`
+  cancels the inner coroutine every second; after ~50 cancellations,
+  pyzmq asyncio integration wedges libzmq REP socket state. Fix:
+  `poll(timeout=1000)` + conditional `recv()` after `POLLIN`. D3
+  direct-REQ test confirmed engine-side (bypass bridge); D4 verified
+  180/180 clean on macOS; Ubuntu lab PC verified. See
+  `docs/bug_B1_zmq_idle_death_handoff.md` and
+  `docs/decisions/2026-04-27-d{1,2,3,4}-*.md` series.
 
 ---
 
