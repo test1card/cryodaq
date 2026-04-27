@@ -296,15 +296,15 @@ def test_import_click_dispatches_curve_import(app, monkeypatch, tmp_path):
 
     panel = CalibrationPanel()
     panel.set_connected(True)
-    import_path = tmp_path / "curve.330"
-    import_path.write_text("STUB")
+    import_path = tmp_path / "curve.340"
+    import_path.write_text("# header\n4.0 75.0\n6.0 60.0\n10.0 40.0\n20.0 22.0\n")
     monkeypatch.setattr(
         QFileDialog,
         "getOpenFileName",
-        staticmethod(lambda *a, **k: (str(import_path), "LakeShore .330 (*.330)")),
+        staticmethod(lambda *a, **k: (str(import_path), "LakeShore .340 (*.340)")),
     )
     _StubWorker.dispatched = []
-    panel._setup_widget._import_330_btn.click()
+    panel._setup_widget._import_340_btn.click()
     import_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_import"]
     assert len(import_cmds) == 1
     assert import_cmds[0]["path"] == str(import_path)
@@ -331,7 +331,7 @@ def test_export_without_selection_shows_error(app, monkeypatch):
     panel.set_connected(True)
     # Channel combo empty → current_sensor_id unset.
     panel._results_widget._current_sensor_id = ""
-    panel._results_widget._export_330_btn.click()
+    panel._results_widget._export_cof_btn.click()
     assert "канал" in panel._banner_label.text().lower()
 
 
@@ -341,22 +341,23 @@ def test_export_dispatches_correct_path_parameter(app, monkeypatch, tmp_path):
     panel = CalibrationPanel()
     panel.set_connected(True)
     panel._results_widget.set_channels(["Т1"])
-    out = tmp_path / "Т1.330"
+    out = tmp_path / "Т1.cof"
     monkeypatch.setattr(
         QFileDialog,
         "getSaveFileName",
-        staticmethod(lambda *a, **k: (str(out), "LakeShore .330 (*.330)")),
+        staticmethod(lambda *a, **k: (str(out), "Chebyshev .cof (*.cof)")),
     )
     _StubWorker.dispatched = []
-    panel._results_widget._export_330_btn.click()
+    panel._results_widget._export_cof_btn.click()
     export_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_export"]
     assert len(export_cmds) == 1
     cmd = export_cmds[0]
     assert cmd["sensor_id"] == "Т1"
-    assert cmd["curve_330_path"] == str(out)
+    assert cmd["curve_cof_path"] == str(out)
     # Other format paths not set.
     assert "json_path" not in cmd
     assert "table_path" not in cmd
+    assert "curve_330_path" not in cmd
     assert "curve_340_path" not in cmd
 
 
@@ -431,8 +432,8 @@ def test_disconnected_disables_setup_and_results_buttons(app):
     panel = CalibrationPanel()
     panel.set_connected(False)
     assert panel._setup_widget._start_btn.isEnabled() is False
-    assert panel._setup_widget._import_330_btn.isEnabled() is False
-    assert panel._results_widget._export_330_btn.isEnabled() is False
+    assert panel._setup_widget._import_340_btn.isEnabled() is False
+    assert panel._results_widget._export_cof_btn.isEnabled() is False
     assert panel._results_widget._apply_btn.isEnabled() is False
 
 
@@ -442,8 +443,8 @@ def test_reconnect_reenables_controls(app):
     # Import buttons only enabled when channels loaded OR always?
     # _SetupWidget.set_engine_enabled(True) enables import unconditionally;
     # start gated by channel presence.
-    assert panel._setup_widget._import_330_btn.isEnabled() is True
-    assert panel._results_widget._export_330_btn.isEnabled() is True
+    assert panel._setup_widget._import_340_btn.isEnabled() is True
+    assert panel._results_widget._export_cof_btn.isEnabled() is True
 
 
 # ----------------------------------------------------------------------

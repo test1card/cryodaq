@@ -382,11 +382,9 @@ class _SetupWidget(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(theme.SPACE_2)
-        self._import_330_btn = QPushButton("Импорт .330")
         self._import_340_btn = QPushButton("Импорт .340")
         self._import_json_btn = QPushButton("Импорт JSON")
         for btn, file_filter in (
-            (self._import_330_btn, "LakeShore .330 (*.330)"),
             (self._import_340_btn, "LakeShore .340 (*.340)"),
             (self._import_json_btn, "JSON (*.json)"),
         ):
@@ -515,7 +513,6 @@ class _SetupWidget(QWidget):
     def set_engine_enabled(self, enabled: bool) -> None:
         """Gate engine-dependent controls on connection state."""
         self._start_btn.setEnabled(enabled and bool(self._all_channels))
-        self._import_330_btn.setEnabled(enabled)
         self._import_340_btn.setEnabled(enabled)
         self._import_json_btn.setEnabled(enabled)
 
@@ -781,12 +778,12 @@ class _ResultsWidget(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(theme.SPACE_2)
-        self._export_330_btn = QPushButton(".330")
+        self._export_cof_btn = QPushButton(".cof")
         self._export_340_btn = QPushButton(".340")
         self._export_json_btn = QPushButton("JSON")
         self._export_csv_btn = QPushButton("CSV")
         for btn, format_key, file_filter in (
-            (self._export_330_btn, "curve_330_path", "LakeShore .330 (*.330)"),
+            (self._export_cof_btn, "curve_cof_path", "Chebyshev .cof (*.cof)"),
             (self._export_340_btn, "curve_340_path", "LakeShore .340 (*.340)"),
             (self._export_json_btn, "json_path", "JSON (*.json)"),
             (self._export_csv_btn, "table_path", "CSV (*.csv)"),
@@ -948,7 +945,7 @@ class _ResultsWidget(QWidget):
         Export buttons stay clickable (they need a file dialog first);
         the worker gate prevents the command from firing without
         connection via the shell's auto-pause path."""
-        self._export_330_btn.setEnabled(enabled)
+        self._export_cof_btn.setEnabled(enabled)
         self._export_340_btn.setEnabled(enabled)
         self._export_json_btn.setEnabled(enabled)
         self._export_csv_btn.setEnabled(enabled)
