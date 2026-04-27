@@ -198,7 +198,6 @@ def test_export_340_uses_200_breakpoints_and_roundtrips_via_import(tmp_path: Pat
     source_store.save_curve(curve)
 
     path_340 = source_store.export_curve_340("sensor-003", points=200)
-    path_330 = source_store.export_curve_330("sensor-003", points=200)
     imported_store = CalibrationStore(tmp_path / "imported")
     imported_curve = imported_store.import_curve_file(
         path_340, sensor_id="sensor-003B", channel_key="LS218:CH3", raw_unit="V"
@@ -208,12 +207,11 @@ def test_export_340_uses_200_breakpoints_and_roundtrips_via_import(tmp_path: Pat
     roundtrip_raw = _piecewise_raw(88.0)
 
     assert len(exported_lines) == 200
-    assert path_330.exists()
     assert imported_curve.sensor_id == "sensor-003B"
     assert imported_store.T_from_V("sensor-003B", roundtrip_raw) == pytest.approx(88.0, abs=0.1)
 
 
-def test_calibration_store_imports_330_and_340_and_supports_lookup(tmp_path: Path) -> None:
+def test_calibration_store_imports_340_and_supports_lookup(tmp_path: Path) -> None:
     source_store = CalibrationStore(tmp_path / "source")
     curve = source_store.fit_curve(
         "sensor-004",
@@ -223,20 +221,15 @@ def test_calibration_store_imports_330_and_340_and_supports_lookup(tmp_path: Pat
         min_points_per_zone=4,
     )
     source_store.save_curve(curve)
-    exported_330 = source_store.export_curve_330("sensor-004", points=48)
     exported_340 = source_store.export_curve_340("sensor-004", points=48)
 
     imported_store = CalibrationStore(tmp_path / "imported")
-    imported_curve_330 = imported_store.import_curve_file(
-        exported_330, sensor_id="sensor-004A", channel_key="LS218:CH2"
-    )
     imported_curve_340 = imported_store.import_curve_file(
         exported_340, sensor_id="sensor-004B", channel_key="LS218:CH3"
     )
 
     lookup = imported_store.lookup_curve(channel_key="LS218:CH3")
 
-    assert imported_curve_330.sensor_id == "sensor-004A"
     assert imported_curve_340.sensor_id == "sensor-004B"
     assert lookup["assignment"]["channel_key"] == "LS218:CH3"
     assert lookup["curve"]["sensor_id"] == "sensor-004B"
@@ -280,3 +273,99 @@ def test_calibration_index_uses_atomic_write():
         f"should all route through atomic_write_text"
     )
     assert "atomic_write_text" in source
+
+
+# ---------------------------------------------------------------------------
+# Phase D: .cof export + .330 removal
+# ---------------------------------------------------------------------------
+
+
+def test_export_curve_cof_writes_file_with_expected_structure(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve(
+        "sensor-cof-01", _multi_zone_samples(300), raw_unit="V", max_zones=2, min_points_per_zone=24
+    )
+    store.save_curve(curve)
+
+    cof_path = store.export_curve_cof("sensor-cof-01")
+
+    assert cof_path.exists()
+    assert cof_path.suffix == ".cof"
+    text = cof_path.read_text(encoding="utf-8")
+    assert "# CryoDAQ calibration curve export .cof" in text
+    assert f"# sensor_id: {curve.sensor_id}" in text
+    assert f"# curve_id: {curve.curve_id}" in text
+    assert "[zone 1]" in text
+    assert "raw_min:" in text
+    assert "raw_max:" in text
+    assert "order:" in text
+    assert "coefficients:" in text
+
+
+def test_export_curve_cof_preserves_chebyshev_coefficients_round_trip(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve(
+        "sensor-cof-02", _multi_zone_samples(600), raw_unit="V", max_zones=3, min_points_per_zone=24
+    )
+    store.save_curve(curve)
+
+    cof_path = store.export_curve_cof("sensor-cof-02")
+    text = cof_path.read_text(encoding="utf-8")
+
+    parsed_coefficients: list[tuple[float, ...]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("coefficients:"):
+            values = tuple(float(v) for v in line.split(":", 1)[1].split(","))
+            parsed_coefficients.append(values)
+
+    assert len(parsed_coefficients) == len(curve.zones)
+    for parsed, zone in zip(parsed_coefficients, curve.zones, strict=True):
+        assert len(parsed) == len(zone.coefficients)
+        for a, b in zip(parsed, zone.coefficients, strict=True):
+            assert a == pytest.approx(b, rel=1e-10)
+
+
+def test_export_curve_cof_includes_zone_count_header(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve(
+        "sensor-cof-03", _multi_zone_samples(300), raw_unit="V", max_zones=3, min_points_per_zone=24
+    )
+    store.save_curve(curve)
+
+    cof_path = store.export_curve_cof("sensor-cof-03")
+    text = cof_path.read_text(encoding="utf-8")
+
+    assert f"# zone_count: {len(curve.zones)}" in text
+
+
+def test_export_curve_cof_metadata_comments_match_curve(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path)
+    curve = store.fit_curve(
+        "sensor-cof-04", _sample_series(), raw_unit="ohm", max_zones=2, min_points_per_zone=4
+    )
+    store.save_curve(curve)
+
+    cof_path = store.export_curve_cof("sensor-cof-04")
+    text = cof_path.read_text(encoding="utf-8")
+
+    assert f"# raw_unit: {curve.raw_unit}" in text
+    assert f"# fit_timestamp: {curve.fit_timestamp.isoformat()}" in text
+    assert "# rmse_k:" in text
+    assert "# max_abs_error_k:" in text
+    assert "# point_count:" in text
+
+
+def test_export_curve_330_removed(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path)
+    assert not hasattr(store, "export_curve_330"), (
+        "export_curve_330 must be removed — architect decision 2026-04-25"
+    )
+
+
+def test_import_curve_file_rejects_330_suffix(tmp_path: Path) -> None:
+    fake_330 = tmp_path / "curve.330"
+    fake_330.write_text("# header\n4.0 75.0\n6.0 60.0\n10.0 40.0\n20.0 22.0\n", encoding="utf-8")
+    store = CalibrationStore(tmp_path)
+    with pytest.raises(ValueError, match="Unsupported calibration import format"):
+        store.import_curve_file(fake_330)

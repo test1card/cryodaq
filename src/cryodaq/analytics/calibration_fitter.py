@@ -198,7 +198,7 @@ class CalibrationFitter:
         max_breakpoints: int = 200,
         tolerance_mk: float = 50.0,
     ) -> list[tuple[float, float]]:
-        """Douglas-Peucker breakpoint selection for .330 export."""
+        """Douglas-Peucker breakpoint selection for calibration table export."""
         if len(pairs) <= 2:
             return list(pairs)
 

@@ -309,12 +309,11 @@ def _run_calibration_command(
             else None,
             points=int(cmd.get("points", 200)),
         )
-        curve_330_path = calibration_store.export_curve_330(
+        curve_cof_path = calibration_store.export_curve_cof(
             sensor_id,
-            path=Path(str(cmd.get("curve_330_path")).strip())
-            if str(cmd.get("curve_330_path", "")).strip()
+            path=Path(str(cmd.get("curve_cof_path")).strip())
+            if str(cmd.get("curve_cof_path", "")).strip()
             else None,
-            points=int(cmd.get("points", 200)),
         )
         curve_340_path = calibration_store.export_curve_340(
             sensor_id,
@@ -327,7 +326,7 @@ def _run_calibration_command(
             "ok": True,
             "json_path": str(json_path),
             "table_path": str(table_path),
-            "curve_330_path": str(curve_330_path),
+            "curve_cof_path": str(curve_cof_path),
             "curve_340_path": str(curve_340_path),
         }
 
