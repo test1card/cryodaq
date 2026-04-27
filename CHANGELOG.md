@@ -9,7 +9,26 @@
 
 ## [Unreleased]
 
-*(Будущие изменения)*
+### Added
+
+- **`.cof` Chebyshev coefficient export** — `export_curve_cof()` added to
+  `CalibrationStore`. Portable text format: per-zone raw Chebyshev
+  coefficients re-evaluatable via `numpy.polynomial.chebyshev.chebval()`
+  without CryoDAQ schema dependency.
+  (`feat(calibration)` `0fed332`, `fix(cof)` `d0e1c7f`)
+
+### Removed
+
+- **`.330` calibration export removed** — `export_curve_330()` deleted;
+  `import_curve_file()` rejects `.330` suffix with `ValueError`.
+  Existing `.330` files in production data trees are NOT auto-migrated;
+  use manual CSV read or `git restore` for legacy access.
+  `engine.py` `calibration_curve_export` action updated: `curve_330_path`
+  → `curve_cof_path`; `points` arg dropped.
+  GUI calibration overlay updated: `.330` import button removed, `.330`
+  export button replaced with `.cof`.
+  (architect decision 2026-04-25; `0fed332`, `d0e1c7f`, merge `097a26d`,
+  GUI `ba6b997`, `b254de2`)
 
 ---
 
@@ -1457,6 +1476,8 @@ Keithley, алармы, давление.
 - **Калибровка GUI** — трёхрежимная вкладка: Setup (выбор каналов,
   импорт) → Acquisition (live stats, coverage bar) → Results (метрики,
   export). `.330` / `.340` / JSON export.
+  *(Note: `.330` format removed post-v0.39.0; `.cof` Chebyshev coefficient
+  export added — see [Unreleased].)*
 
 ### Изменено
 
