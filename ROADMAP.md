@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-04-20 after IV.2 close (HEAD `df43081`).
+> **Living document.** Updated 2026-04-28 after v0.39.0 release (HEAD `955bb71`, B1 closed).
 > Companion to `PROJECT_STATUS.md` (infrastructure state) and
 > `docs/phase-ui-1/phase_ui_v2_roadmap.md` (UI rebuild phases).
 >
@@ -23,17 +23,17 @@
 
 | # | Feature | Status | Effort | ROI |
 |---|---|---|---|---|
-| F1 | Parquet archive wire-up | ✅ DONE (UI + base dep, IV.4.F1) | S | H |
-| F2 | Debug mode toggle (verbose logging) | ✅ DONE (IV.4.F2) | S | H |
+| F1 | Parquet archive wire-up | ✅ DONE (shipped v0.34.0) | S | H |
+| F2 | Debug mode toggle (verbose logging) | ✅ DONE (shipped v0.34.0) | S | H |
 | F3 | Analytics placeholder widgets → data wiring | ⬜ | M | M |
 | F4 | Analytics lazy-open snapshot replay | ⬜ | S | M |
 | F5 | Engine events → Hermes webhook | ⬜ | M | M |
-| F6 | Auto-report on experiment finalize | ✅ DONE (verified + per-experiment override, IV.4.F6) | S | H |
+| F6 | Auto-report on experiment finalize | ✅ DONE (shipped v0.34.0) | S | H |
 | F7 | Web API readings query extension | ⬜ | L | M |
 | F8 | Cooldown ML prediction upgrade | 🔬 | L | M |
 | F9 | Thermal conductivity auto-report (TIM) | 🔬 | M | H |
 | F10 | Sensor diagnostics → alarm integration | ⬜ | M | M |
-| F11 | Shift handover enrichment | ✅ DONE (IV.4.F11, Telegram export deferred) | S | H |
+| F11 | Shift handover enrichment | ✅ DONE (v0.34.0; Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
 | F13 | Vacuum leak rate estimator | ⬜ | M | M |
 | F14 | Remote command approval (Telegram) | ⬜ | M | L |
@@ -49,14 +49,14 @@ ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
 
 ## Planned batches
 
-Ordered by when we intend to ship them. Status at 2026-04-20.
+Ordered by when we intend to ship them. Status at 2026-04-28.
 
 ### IV.4 — Safe features batch
 
-**Target:** tag `0.34.0` (next increment after current `0.33.0`).
+**Target:** ✅ tag `v0.34.0` (retroactive, applied 2026-04-27).
 
-**Status:** ✅ CLOSED at HEAD `7cb5634` (2026-04-20).
-All 4 findings PASS. Pending: real `git tag` command.
+**Status:** ✅ SHIPPED v0.34.0 (commit `256da7a`, released 2026-04-27 retroactive tag).
+All 4 findings PASS. Retroactive versioning chain: v0.34.0..v0.39.0.
 
 Scope:
 - **F1** — Parquet UI export button + default pyarrow install
@@ -79,8 +79,8 @@ Telegram export in F11 deferred (out of IV.4 scope per Rule 4).
 
 ### IV.5 — Stretch features batch
 
-**Target:** tag `0.35.0` after IV.4 closes, smoke passes, and ZMQ
-subprocess bug (see "Known broken" below) resolved.
+**Target:** next minor version after v0.39.0 production-stable period.
+B1 blocker resolved (see B1 RESOLVED stub below).
 
 Scope:
 - **F3** — Analytics placeholder widgets data wiring
@@ -111,7 +111,7 @@ F4, F7, F10, F12, F13, F14, F15, F16, F18 — see individual entries below.
 
 ### F1 — Parquet archive wire-up
 
-**Status:** 🔧 PARTIAL.
+**Status:** ✅ DONE. Shipped v0.34.0.
 
 Backend already works: `src/cryodaq/storage/parquet_archive.py` ships
 `export_experiment_readings_to_parquet()`, and
@@ -137,7 +137,7 @@ Tests: 10 new cases covering UI button wiring + file-dialog flow.
 
 ### F2 — Debug mode toggle
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.34.0.
 
 Operator needs to enable verbose file logging post-deployment to diagnose
 issues without recompiling or editing `logging_setup.py`.
@@ -226,7 +226,7 @@ Estimated: ~200 LOC + 15 tests.
 
 ### F6 — Auto-report on experiment finalize
 
-**Status:** ✅ DONE — verify only.
+**Status:** ✅ DONE. Shipped v0.34.0. Verification passed.
 
 `ExperimentManager.finalize_experiment()` already calls
 `ReportGenerator(data_dir).generate(experiment_id)` when
@@ -302,8 +302,7 @@ Estimated: ~250 LOC + 20 tests.
 
 ### F11 — Shift handover enrichment
 
-**Status:** 🔧 PARTIAL. Legacy widget at `gui/widgets/shift_handover.py`
-ships with form dialog + operator log integration.
+**Status:** ✅ DONE. Shipped v0.34.0. Telegram export deferred.
 
 Missing auto-sections:
 - «Что случилось за смену» — filter `event_logger` by last 8/12/24h
@@ -418,158 +417,53 @@ packaging).
 
 ---
 
-## Known broken (blocking next tag)
+## Known issues
 
-### B1 — ZMQ subprocess command channel dies (not idle-related)
+### B1 — ZMQ idle-death (RESOLVED v0.39.0)
 
-**Status:** 🔧 root cause identified, fix spec prepared
-(`CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`), awaiting implementation.
-Blocks `0.34.0` tag.
+**Status:** ✅ CLOSED 2026-04-27.
 
-**Symptom:** GUI command plane (REQ/REP on `tcp://127.0.0.1:5556`)
-works for some time then hangs permanently. Data plane (SUB on 5555)
-unaffected — readings continue flowing.
+7-day investigation closed. Root cause: asyncio cancellation polling
+pattern (`asyncio.wait_for(socket.recv(), timeout)`) in
+`ZMQCommandServer._serve_loop` accumulated pyzmq reactor state,
+wedging REP after ~50 cancellations.
 
-- macOS: first failure at 4-92s uptime (stochastic, rate-dependent)
-- Ubuntu: first failure at **exactly 120s** after subprocess start
-  (deterministic — single data point, may vary)
+Fix: `poll(timeout) + conditional recv()` pattern in
+`src/cryodaq/core/zmq_bridge.py`. Verified 180/180 clean on macOS
+dev and Ubuntu lab PC.
 
-**NOT macOS-specific.** Confirmed on Ubuntu 22.04 lab machine
-(Python 3.12.13, pyzmq 26.4.0, libzmq 4.3.5). Reproduces in live
-`./start.sh` run, not just diagnostic tools.
+Investigation chain:
+- H1 falsified — macOS idle reap
+- H2 falsified — shared REQ state (IV.6 mitigation)
+- H3 partially falsified — TCP loopback (IV.7 ipc:// experiment
+  remains as open worktree, not blocking)
+- H4 falsified — shared zmq.Context (D2 split-context experiment)
+- H5 confirmed + fixed (D3 direct-REQ + D4 fix)
 
-**Root cause (Codex-confirmed 2026-04-20 afternoon):** single
-long-lived REQ socket in `cmd_forward_loop()` eventually enters
-unrecoverable state. Shared state across all commands means one
-bad socket poisons the entire command channel permanently.
+Decision ledger: `docs/decisions/2026-04-27-d{1,2,3,4}-*.md`.
+Full handoff: `docs/bug_B1_zmq_idle_death_handoff.md`.
 
-**Original "macOS idle-reap" hypothesis proved WRONG:**
-- Linux default `tcp_keepalive_time = 7200s` rules out kernel reaping.
-- Active polling at 1 Hz never goes idle for 10s (our keepalive
-  threshold), so probes never fire — TCP_KEEPALIVE fix doesn't
-  participate in failure mode.
-- TCP_KEEPALIVE fix (commit `f5f9039`) will be **reverted** on
-  command path in IV.6 batch; maybe helped with failure delay on
-  macOS by coincidence, not by mechanism.
+---
 
-**Agreed fix plan:**
-1. **Primary:** per-command ephemeral REQ socket in
-   `zmq_subprocess.py::cmd_forward_loop()`. Remove `REQ_RELAXED`,
-   `REQ_CORRELATE`, `TCP_KEEPALIVE*` (all unnecessary with
-   ephemeral sockets). Matches ZeroMQ Guide ch.4 canonical
-   "poll / timeout / close / reopen" pattern.
-2. **Secondary:** command-channel watchdog in `launcher.py`.
-   Current watchdog restarts bridge on data-plane failure but
-   not command-only failure. Add `command_channel_stalled()`
-   check.
+## Post-v0.39.0 known issues
 
-**Full evidence + Codex analysis:**
-`docs/bug_B1_zmq_idle_death_handoff.md`.
+### Cooldown_stall threshold_error
 
-**Implementation spec:**
-`CC_PROMPT_IV_6_ZMQ_BRIDGE_FIX.md`.
+**Status:** mitigated, not fully resolved.
 
-**Diagnostics kept in tree** (will remain after fix for
-regression testing):
-- `tools/diag_zmq_subprocess.py` — subprocess alone
-- `tools/diag_zmq_bridge.py` — full ZmqBridge 60s soak
-- `tools/diag_zmq_bridge_extended.py` — 180s past-first-failure
-- `tools/diag_zmq_idle_hypothesis.py` — rate-dependence
+`alarm_v2.py:_eval_condition` defensive `cond.get("threshold")`
+handling shipped v0.38.0 (commit `1869910`). Log spam eliminated.
+Underlying config issue in `config/alarms_v3.yaml` (cooldown_stall
+composite alarm sub-condition without threshold) deferred —
+operational alarm definitions need physics review.
 
-#### IV.6 partial mitigation outcome (2026-04-20)
+### IV.7 ipc:// transport experiment worktree
 
-IV.6 landed the full Codex-proposed fix plan: per-command ephemeral
-REQ socket in `zmq_subprocess.cmd_forward_loop`, launcher-side
-`command_channel_stalled()` watchdog in `_poll_bridge_data`, and
-`TCP_KEEPALIVE` reverted on the command + PUB paths (kept on
-`sub_drain_loop` as orthogonal safeguard). 60/60 unit tests green,
-full subtree 1775/1776 (1 unrelated flaky). Committed as `be51a24`
-as partial mitigation rather than a fix.
+**Status:** worktree at `experiment/iv7-ipc-transport`, not in master.
 
-**Shared-REQ-state hypothesis FALSIFIED.** Post-fix diag runs on
-macOS reproduce B1 with structurally identical timing to pre-fix
-master:
-
-- `diag_zmq_idle_hypothesis.py` SPARSE_0.33HZ: cmd #8 FAIL at
-  uptime 56 s (pre-fix was cmd #10 FAIL at ~30 s).
-- `diag_zmq_bridge_extended.py`: cmd #48 FAIL at uptime 82 s,
-  0/3 recovery thereafter (pre-fix was cmd #28 FAIL at 92 s).
-- RAPID_5HZ path still clean (295/295), matching pre-fix behaviour
-  — rate-dependence preserved.
-
-Removing shared REQ state did NOT eliminate the failure. Engine
-REP goes silently unresponsive after ~30-90 s of bridge uptime
-while the asyncio loop, data-plane PUB, heartbeats, scheduler
-writes, and plugin ticks all remain healthy. Root cause is
-elsewhere — likely libzmq loopback-TCP handling, pyzmq 25.x +
-Python 3.14 asyncio integration, or engine-side REP task state
-under rapid REQ connect/disconnect churn.
-
-Diag logs preserved at `/tmp/diag_iv6_idle.log`,
-`/tmp/diag_iv6_extended.log`, and `/tmp/engine_iv6_debug.log`
-for architect review.
-
-**Status:** still 🔧. B1 remains OPEN and blocks `0.34.0`.
-
-**Next:** IV.7 `ipc://` transport experiment (spec
-`CC_PROMPT_IV_7_IPC_TRANSPORT.md`). Fallback (a) from the original
-handoff is now the working hypothesis — Unix-domain sockets bypass
-the TCP-loopback layer entirely, which is the most likely remaining
-culprit given everything above the transport has been ruled out.
-
-IV.6 code stays in master as defense-in-depth: matches ZeroMQ
-Guide ch.4 canonical poll/timeout/close/reopen pattern, removes
-a real brittle point (shared REQ accumulated state), and gives
-the launcher a genuine command-channel watchdog for any future
-command-only failure shape — independent of whether B1 is
-ultimately resolved at the transport layer.
-
-#### IV.6 watchdog regression + cooldown hotfix (2026-04-20 evening)
-
-The IV.6 `command_channel_stalled()` watchdog had a regression:
-`_last_cmd_timeout` persisted across watchdog-triggered subprocess
-restart, so the fresh subprocess immediately saw a stale
-cmd_timeout signal on the very next `_poll_bridge_data` tick and
-was restarted again — restart storm (30-40 restarts/minute
-observed on Ubuntu lab PC).
-
-Hotfix applied in `src/cryodaq/launcher.py`: 60 s cooldown between
-command-watchdog restarts via `_last_cmd_watchdog_restart`
-timestamp, plus missing `return` after restart so no further
-checks run in the same poll cycle. Does not resolve B1 itself —
-only prevents the watchdog from pathologically amplifying it.
-System returns to "works ~60-120 s, one restart, works again"
-cycle which is a usable workaround until IV.7 `ipc://` ships.
-
-#### Related fixes shipped alongside IV.6 (2026-04-20)
-
-- `aabd75f` — `engine: wire validate_checksum through Thyracont
-  driver loader`. `_create_instruments()` was ignoring the YAML
-  key; driver defaulted to `True` regardless of config. Fix
-  resolves TopWatchBar pressure em-dash on Ubuntu lab PC (VSP206
-  hardware has different checksum formula than VSP63D).
-- `74dbbc7` — `reporting: xml_safe sanitizer for python-docx
-  compatibility`. Keithley VISA resource strings contain `\x00`
-  per NI-VISA spec; python-docx rejected them as XML 1.0
-  incompatible when embedded in auto-reports. New
-  `src/cryodaq/utils/xml_safe.py` strips XML-illegal control chars;
-  applied at all `add_paragraph()` / `cell.text` sites in
-  `src/cryodaq/reporting/sections.py`; `core/experiment.py:782`
-  logger upgraded from `log.warning` to `log.exception` so future
-  report-gen failures carry tracebacks.
-
-**No-longer-broken bugs:** TopWatchBar pressure display (was
-reading-driven, not B1-caused) is now resolved by `aabd75f` +
-Ubuntu-side config (`validate_checksum: false` in
-`instruments.local.yaml`).
-
-**Orthogonal issue still open:** `alarm_v2.py:252` raises
-`KeyError: 'threshold'` when evaluating the `cooldown_stall`
-composite alarm (one sub-condition is missing a `threshold`
-field — probably stale/rate-type where `threshold` is spurious).
-Log spam every ~2 s. Engine does not crash. Fix candidate: config
-adjustment in `config/alarms_v3.yaml` OR defensive
-`cond.get("threshold")` check in `_eval_condition`.
+Pre-H5-fix exploration of Unix-domain socket fallback. Now superseded
+by H5 fix (no longer blocks anything). Worktree retained for
+reference; can be deleted on future cleanup pass.
 
 ---
 
@@ -582,4 +476,10 @@ adjustment in `config/alarms_v3.yaml` OR defensive
 - `CHANGELOG.md` — shipped feature history
 - `CC_PROMPT_IV_*_BATCH.md` — active / queued batch specs
 - `docs/CODEX_SELF_REVIEW_PLAYBOOK.md` — autonomous workflow
+- `docs/ORCHESTRATION.md` — agent governance contract v1.2 (CC-centric
+  swarm model, STOP discipline, autonomy band, artifact layout)
+- `docs/decisions/2026-04-27-d{1,2,3,4}-*.md` — B1 investigation
+  decision ledger (D1 R1 probe retry, D2 H4 split-context, D3 H5
+  direct-REQ, D4 H5 fix)
+- `~/Vault/CryoDAQ/` — Obsidian knowledge base
 - Memory slot 10 — TODO backlog (parts obsoleted by this doc)
