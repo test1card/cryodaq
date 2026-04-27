@@ -196,6 +196,33 @@ async def test_parse_v1_response_very_high_pressure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 12. V1 probe rejects bad checksum when validate_checksum=True (Codex-05)
+# ---------------------------------------------------------------------------
+
+
+async def test_v1_probe_rejects_checksum_mismatch() -> None:
+    """Codex-05: V1 probe must fail when prefix matches but checksum is wrong.
+
+    validate_checksum=True (default) — probe must not accept a response that
+    passes the prefix check but fails XOR checksum (reproduces VSP206 masquerade
+    failure mode recorded in HANDOFF_2026-04-20_GLM.md §3).
+    """
+
+    class BadChecksumTransport:
+        async def query(self, command: str) -> str:
+            # "001M100023D" has correct prefix "001M" but wrong checksum byte
+            return "001M100023D\r"
+
+        async def flush_input(self) -> None:
+            pass
+
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, address="001")
+    driver._transport = BadChecksumTransport()  # type: ignore[assignment]
+
+    assert await driver._try_v1_probe() is False
+
+
+# ---------------------------------------------------------------------------
 # 14. Parse Protocol V1 — good vacuum: "001M100014X" → (1000/1000)*10^(14-20) = 1e-6 mbar
 # ---------------------------------------------------------------------------
 
@@ -232,7 +259,7 @@ async def test_parse_v1_response_invalid() -> None:
 
 async def test_thyracont_connect_v1() -> None:
     """connect() sends '001M^' and gets '001M100023D\\r' → connected via V1."""
-    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001")
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False)
 
     await driver.connect()
 
@@ -275,7 +302,7 @@ async def test_connect_fallback_baudrate() -> None:
 
 async def test_connect_preserves_original_baudrate_on_success() -> None:
     """When primary baudrate probe succeeds, no fallback is attempted."""
-    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=115200, mock=True)
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=115200, mock=True, validate_checksum=False)
     await driver.connect()
     assert driver.connected
     assert driver._protocol_v1 is True

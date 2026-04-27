@@ -163,7 +163,15 @@ class ThyracontVSP63D(InstrumentDriver):
                 await self._transport.flush_input()
             try:
                 resp = await self._transport.query(cmd)
-                if resp.strip().startswith(expected_prefix):
+                resp_stripped = resp.strip()
+                if resp_stripped.startswith(expected_prefix):
+                    if self._validate_checksum and not self._verify_v1_checksum(resp_stripped):
+                        log.warning(
+                            "%s: V1 probe checksum mismatch in '%s'",
+                            self.name,
+                            resp_stripped,
+                        )
+                        continue
                     log.debug("%s: V1 probe OK (attempt %d)", self.name, attempt + 1)
                     return True
             except Exception as exc:
