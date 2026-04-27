@@ -15,6 +15,7 @@ import asyncio
 import logging
 import logging.handlers
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -228,6 +229,7 @@ class LauncherWindow(QMainWindow):
         # window. Set when we schedule a restart, cleared when _start_engine
         # actually runs. (Codex Phase 2b Block A P1.)
         self._restart_pending: bool = False
+        self._shutdown_requested: bool = False
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
@@ -992,6 +994,9 @@ class LauncherWindow(QMainWindow):
 
     def _do_shutdown(self) -> None:
         """Корректное завершение."""
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
         self._health_timer.stop()
         self._data_timer.stop()
         if hasattr(self, "_status_timer"):
@@ -1036,6 +1041,8 @@ class LauncherWindow(QMainWindow):
         burn through every backoff slot in 15 seconds (Codex Phase 2b P1).
         """
         if self._restart_pending:
+            return
+        if self._shutdown_requested:
             return
 
         from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
@@ -1290,6 +1297,19 @@ def main() -> None:
     window = LauncherWindow(app, mock=mock, tray_only=args.tray, lock_fd=lock_fd)
     if not args.tray:
         window.show()
+
+    # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill)
+    # and SIGINT (Ctrl+C) cleanly shut down the engine subprocess rather than
+    # orphaning it. The handler is idempotent via _shutdown_requested flag;
+    # QTimer.singleShot dispatches _do_shutdown onto the Qt main thread.
+    def _signal_handler(signum: int, frame: object) -> None:
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.info("Получен %s, инициирую корректное завершение", sig_name)
+        QTimer.singleShot(0, window._do_shutdown)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     sys.exit(app.exec())
 
