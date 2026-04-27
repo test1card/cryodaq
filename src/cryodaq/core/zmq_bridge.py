@@ -255,9 +255,18 @@ class ZMQSubscriber:
     async def _receive_loop(self) -> None:
         while self._running:
             try:
-                parts = await asyncio.wait_for(self._socket.recv_multipart(), timeout=1.0)
-            except TimeoutError:
+                events = await self._socket.poll(timeout=1000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка poll ZMQ")
                 continue
+            if not (events & zmq.POLLIN):
+                continue
+            try:
+                parts = await self._socket.recv_multipart()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Ошибка приёма ZMQ")
                 continue
@@ -470,9 +479,16 @@ class ZMQCommandServer:
     async def _serve_loop(self) -> None:
         while self._running:
             try:
-                raw = await asyncio.wait_for(self._socket.recv(), timeout=1.0)
-            except TimeoutError:
+                events = await self._socket.poll(timeout=1000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка poll команды ZMQ")
                 continue
+            if not (events & zmq.POLLIN):
+                continue
+            try:
+                raw = await self._socket.recv()
             except asyncio.CancelledError:
                 raise
             except Exception:
