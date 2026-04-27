@@ -13,26 +13,149 @@
 
 ---
 
-## [0.34.0] — 2026-04-27
+## [0.39.0] — 2026-04-27 — B1 ZMQ idle-death fixed (H5 confirmed)
 
 ### Highlights
 
-- B1 ZMQ idle-death CLOSED after 7-day investigation. Root cause:
-  asyncio cancellation-polling pattern in REP loop. Fix: replace
-  with `poll(timeout=1000)` + conditional `recv()` after `POLLIN`. See
-  `docs/decisions/2026-04-27-d4-h5-fix.md`.
-- IV.4 safe features (F1 Parquet, F2 Debug mode, F6 auto-report
-  verification, F11 shift handover) shipped.
-- Phase III UI rebuild (DS token decoupling, GlobalTimeWindow,
-  phase-aware AnalyticsView, polish + bug batch).
-- IV.6 ZMQ command-plane hardening (ephemeral REQ per command,
-  command-channel watchdog).
-- Field fixes: Thyracont validate_checksum wired, xml_safe sanitizer
-  for python-docx XML 1.0 compatibility.
-- Production hardening: SIGTERM/SIGINT handler in launcher (engine no
-  longer orphans on systemd stop / Ctrl+C), alarm_v2 threshold
-  validation tightened, Thyracont V1 probe checksum-validates.
-- R1 bounded-backoff probe retry (b2b4fb5 race fix).
+Closes the 7-day B1 investigation. Root cause: `asyncio.wait_for(socket.recv(),
+timeout=1.0)` cancels the inner pyzmq coroutine every second; after ~50
+cancellations, libzmq reactor state wedges the REP socket permanently.
+Fix: `poll(timeout=1000)` + conditional `recv()` after `POLLIN`.
+
+### Fixed
+
+- `fix(zmq)` `1f88d2e` — `ZMQCommandServer._serve_loop` and
+  `ZMQSubscriber._receive_loop` replaced with poll+recv pattern.
+  Verified: macOS 180/180 commands clean; Ubuntu lab PC verified.
+
+### Added
+
+- `feat(diag)` `5e7eeac` — `tools/diag_zmq_direct_req.py`: direct REQ to
+  engine REP bypassing bridge subprocess. D3 experiment tool proving
+  engine-side causation. Regression gate: clean 180s = pass.
+
+### Investigation closed
+
+- **B1 ZMQ idle-death** — H5 CONFIRMED + FIXED. See
+  `docs/bug_B1_zmq_idle_death_handoff.md` and
+  `docs/decisions/2026-04-27-d{1,2,3,4}-*.md`.
+
+### Closing commit
+
+`21a3a28` — release: v0.34.0 (retroactively relabelled v0.39.0)
+
+---
+
+## [0.38.0] — 2026-04-27 — Production hardening: alarms, drivers, launcher
+
+### Highlights
+
+Production hardening from the overnight Codex batch (Codex-03/04/05).
+Tightens alarm_v2 validation, fixes Thyracont probe inconsistency, and
+adds clean SIGTERM handling so the engine no longer orphans on
+`systemd stop` or Ctrl+C.
+
+### Fixed
+
+- `fix(alarms)` `1869910` — alarm_v2 threshold validation rejects
+  missing/wrong-type `threshold` fields; eliminates `KeyError` log spam.
+- `fix(thyracont)` `7230c9f` — V1 probe checksum-validates on connect,
+  matching read-path behavior; prevents silent NaN-forever on
+  non-VSP63D hardware.
+- `3215580` — channels.yaml header recovered from stale state.
+
+### Added
+
+- `feat(launcher)` `9a8412e` — SIGTERM/SIGINT handler; engine subprocess
+  receives SIGTERM and exits cleanly on systemd stop / Ctrl+C.
+
+### Closing commit
+
+`9a8412e` — feat(launcher): SIGTERM/SIGINT handler prevents engine orphan on shutdown
+
+---
+
+## [0.37.0] — 2026-04-24 — R1 probe retry repair
+
+### Highlights
+
+Bounded-backoff retry in `_validate_bridge_startup()` repairs the
+b2b4fb5 race: the single-shot probe rejected healthy ipc:// bridges
+during engine bind-startup, falsely attributing IV.7's failure to the
+transport layer.
+
+### Fixed
+
+- `fix(diag)` `c3f4f86` — `_validate_bridge_startup()` in
+  `diag_zmq_b1_capture.py` now retries with bounded exponential backoff
+  instead of failing on the first non-OK response.
+
+### Closing commit
+
+`cabd854` — docs: Q4 equivalence check synthesis + D1 close
+
+---
+
+## [0.36.0] — 2026-04-21 — B1 investigation tooling (merged 2026-04-24)
+
+> Authored 2026-04-21 on `codex/safe-merge-b1-truth-recovery` branch,
+> merged to master 2026-04-24. Tag follows topological order, not
+> authorship date.
+
+### Highlights
+
+Reusable diagnostic helpers and canonical B1 capture CLI for structured
+ZMQ bridge investigation. JSONL output enables post-hoc analysis and
+cross-run comparison.
+
+### Added
+
+- `8b9ce4a` — `tools/_b1_diagnostics.py`: `bridge_snapshot` +
+  `direct_engine_probe` reusable helpers.
+- `cc090be` — `tools/diag_zmq_b1_capture.py`: canonical B1 capture CLI
+  with JSONL output and structured timing.
+- `40553ea`, `033f87b` — alignment passes syncing helpers and CLI with
+  bridge API changes.
+- `62314be` — record direct probe timeouts for post-analysis.
+
+### Closing commit
+
+`62314be` — tools: record direct probe timeouts in B1 capture CLI
+
+---
+
+## [0.35.0] — 2026-04-24 — Agent orchestration governance
+
+### Highlights
+
+Governance infrastructure after the 2026-04-21 agent-swarm chaos
+(duplicate branches, root-markdown flood, no-leader multi-agent drift).
+Establishes the CC-centric swarm model with explicit STOP discipline,
+autonomy band, and artifact layout rules.
+
+### Added
+
+- `5286fa2` — `docs/ORCHESTRATION.md` v1.1: CC-centric role matrix,
+  branch discipline, artifact layout, STOP discipline (§13), autonomy
+  band (§13.5).
+- `9a1a100` — `.claude/skills/`: multi-model-consultation +
+  negative-space skills.
+- `587bea8` — `.gitignore`: exclude agent orchestration workspaces
+  (`.omc/`, `.swarm/`, `.audit-run/`, `agentswarm/`, `.worktrees/`).
+
+### Closing commit
+
+`af77095` — recon: safe-merge branch commit classification
+
+---
+
+## [0.34.0] — 2026-04-20 — ZMQ cmd-plane hardening + field fixes
+
+### Highlights
+
+IV.6 ZMQ command-plane hardening: ephemeral REQ-per-command pattern +
+launcher command-channel watchdog. Field fixes from the 2026-04-20
+Ubuntu lab PC session.
 
 ### Today — 2026-04-20 session (handoff → GLM-5.1)
 
@@ -672,18 +795,6 @@ release is `0.34.0` once B1 is resolved via IV.7.
 
 - `ae7d8d4` fix(engine): add missing load_alarm_config import
 - `c4396a8` ui(phase-1-v2): block B.3 — DynamicSensorGrid
-
-### Investigation closed
-
-- **B1 ZMQ idle-death** — H5 CONFIRMED + FIXED. 7-day investigation
-  closed. Root cause: `asyncio.wait_for(socket.recv(), timeout=1.0)`
-  cancels the inner coroutine every second; after ~50 cancellations,
-  pyzmq asyncio integration wedges libzmq REP socket state. Fix:
-  `poll(timeout=1000)` + conditional `recv()` after `POLLIN`. D3
-  direct-REQ test confirmed engine-side (bypass bridge); D4 verified
-  180/180 clean on macOS; Ubuntu lab PC verified. See
-  `docs/bug_B1_zmq_idle_death_handoff.md` and
-  `docs/decisions/2026-04-27-d{1,2,3,4}-*.md` series.
 
 ---
 
