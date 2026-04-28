@@ -628,6 +628,7 @@ class MainWindowV2(QMainWindow):
         new_exp_id = active.get("id") if isinstance(active, dict) else None
         if new_exp_id != self._analytics_last_exp_id:
             self._analytics_snapshot.pop("set_cooldown", None)
+            self._analytics_snapshot.pop("set_experiment_status", None)
             self._analytics_temperature_snapshot.clear()
             self._analytics_keithley_snapshot.clear()
             self._analytics_last_exp_id = new_exp_id
@@ -651,6 +652,8 @@ class MainWindowV2(QMainWindow):
         if self._analytics_view is not None:
             current_phase = status.get("current_phase")
             self._analytics_view.set_phase(str(current_phase) if current_phase else None)
+        # F3-Cycle4: W3 experiment_summary — forward full status for replay.
+        self._push_analytics("set_experiment_status", status)
 
     def _active_experiment_id(self) -> str | None:
         """Return the cached active experiment id, or None."""

@@ -150,6 +150,7 @@ class AnalyticsView(QWidget):
         self._last_keithley_readings: dict[str, Reading] = {}
         self._last_instrument_health: dict[str, str] | None = None
         self._last_vacuum_prediction: dict | None = None
+        self._last_experiment_status: dict | None = None
 
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
@@ -207,6 +208,10 @@ class AnalyticsView(QWidget):
     def set_vacuum_prediction(self, prediction: dict | None) -> None:
         self._last_vacuum_prediction = prediction
         self._forward("set_vacuum_prediction", prediction)
+
+    def set_experiment_status(self, status: dict | None) -> None:
+        self._last_experiment_status = status
+        self._forward("set_experiment_status", status)
 
     # ------------------------------------------------------------------
     # Layout management
@@ -310,4 +315,8 @@ class AnalyticsView(QWidget):
         if self._last_vacuum_prediction is not None:
             self._forward_to(
                 widgets, "set_vacuum_prediction", self._last_vacuum_prediction
+            )
+        if self._last_experiment_status is not None:
+            self._forward_to(
+                widgets, "set_experiment_status", self._last_experiment_status
             )
