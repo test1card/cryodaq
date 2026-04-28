@@ -458,6 +458,72 @@ diagnostic alarms; user feedback will clarify aggregation threshold.
 
 ---
 
+### F21 — Alarm hysteresis deadband (was Task A #1.3)
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~80–150 LOC).
+**Source:** Task A verification 2026-04-29 finding #1.3.
+
+`AlarmStateManager._check_hysteresis_cleared()` in `src/cryodaq/core/alarm_v2.py`
+is currently a stub returning `True` unconditionally. Config schema already
+accepts a `hysteresis` key but it is not evaluated. Implement deadband logic:
+alarm clears only when channel value crosses threshold minus hysteresis margin.
+
+---
+
+### F22 — F10 diagnostic alarm severity escalation (was Task A #1.4)
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~80 LOC).
+**Source:** Task A verification 2026-04-29 finding #1.4.
+
+`AlarmStateManager.publish_diagnostic_alarm()` uses `alarm_id = f"diag:{channel_id}"`
+for both warning and critical levels. If warning is active, critical can never
+fire (early return on existing alarm_id). Fix: either separate alarm IDs per
+severity (`diag-warning:` / `diag-critical:`) or implement severity-upgrade
+semantics where critical replaces warning in-place.
+
+---
+
+### F23 — RateEstimator measurement timestamp (was Task A #1.7)
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~30 LOC + tests).
+**Source:** Task A verification 2026-04-29 finding #1.7.
+
+`SafetyManager._collect_loop` calls `rate_estimator.push(channel, now, value)` where
+`now = time.monotonic()` (queue dequeue time), not `reading.timestamp`. Under queue
+backlog, `now` values cluster, distorting computed rate. Use
+`reading.timestamp.timestamp()` for true measurement-time-based rate computation.
+
+---
+
+### F24 — Interlock acknowledge ZMQ command (was Task A #1.8)
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~100 LOC).
+**Source:** Task A verification 2026-04-29 finding #1.8.
+
+`InterlockEngine.acknowledge()` exists but is not exposed as ZMQ command. Once
+an interlock trips, it stops monitoring its condition indefinitely until process
+restart. Expose `interlock_acknowledge` as ZMQ verb so operator can re-arm an
+interlock after the underlying condition has cleared.
+
+---
+
+### F25 — SQLite WAL corruption startup gate (was Task A #1.10)
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~50 LOC).
+**Source:** Task A verification 2026-04-29 finding #1.10.
+
+`SQLiteWriter._check_sqlite_version()` currently issues `logger.warning(...)` for
+affected SQLite versions (3.7.0–3.51.2 WAL corruption bug, March 2026). Decision
+needed: hard-fail startup on affected versions, or opt-in env var bypass with
+explicit acknowledgment. Either way: must NOT silently continue.
+
+---
+
 ## Collaboration guidelines
 
 **Autonomous (CC batch work):** F1, F2, F3, F4, F5, F7, F10, F11, F12,

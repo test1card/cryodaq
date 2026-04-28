@@ -9,6 +9,35 @@
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-04-29 — Safety hotfix HF1+HF2
+
+### Highlights
+- **HF1**: `update_target()` docstring clarification — verified delayed-update design. GLM's CRITICAL finding refuted by hypothesis verification: P=const regulation loop in `Keithley2604B.read_channels()` reads `runtime.p_target` every poll cycle, recomputes `target_v = sqrt(p_target * R)`, and issues SCPI. `update_target()` is delayed-update (≤1 s), not a no-op. Direct SCPI write explicitly rejected to preserve slew-rate limiting and compliance checks.
+- **HF2**: `keithley_emergency_off` + `keithley_stop` added to `_SLOW_COMMANDS` in `zmq_bridge.py`. These safety commands now use `HANDLER_TIMEOUT_SLOW_S` (30 s) instead of the fast 2 s envelope. USBTMC slow-path cancellation during fault events is no longer possible.
+
+### Source
+2026-04-29 overnight metaswarm session — Task A architectural blind spots audit (6 models × 4 tasks). GLM and Codex flagged these findings. Both findings architect-verified against actual source code before any fix applied.
+
+Verification ledger: `artifacts/handoffs/2026-04-29-task-a-verification.md`
+
+### Changed
+- `src/cryodaq/core/safety_manager.py` — `update_target()` docstring documents delayed-update design and rejected alternative (direct SCPI write)
+- `src/cryodaq/core/zmq_bridge.py` — `"keithley_emergency_off"` and `"keithley_stop"` added to `_SLOW_COMMANDS` frozenset with explanatory comment
+
+### Tests
+- 2 new: `test_slow_commands_covers_safety_critical_hardware_ops` (zmq_bridge), `test_update_target_updates_runtime_p_target_immediately` (safety_manager)
+- Full suite: 1931 passed, 4 skipped, 0 failures
+
+### Known Issues
+- 5 deferred Task A findings added to ROADMAP as F21–F25 (not implemented in this release): hysteresis deadband (#1.3), F10 escalation (#1.4), RateEstimator timestamp (#1.7), interlock re-arm (#1.8), SQLite WAL gate (#1.10)
+
+### Tags
+- `v0.42.0` → merge commit `751b4cf`
+
+### Selected commits in this release
+- `189c4b7` fix(safety): HF1 update_target docstring + HF2 emergency_off slow timeout
+- `751b4cf` merge: HF1+HF2 safety hotfix (Task A verified findings)
+
 ---
 
 ## [0.41.0] — 2026-04-29 — F10 sensor diagnostics → alarm integration
