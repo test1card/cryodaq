@@ -246,8 +246,13 @@ class SensorDiagnosticsEngine:
         buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))
 
-    def update(self) -> None:
-        """Recompute diagnostics for all channels with data."""
+    def update(self) -> list:
+        """Recompute diagnostics for all channels with data.
+
+        Returns list of newly published AlarmEvent objects so the engine's
+        sensor_diag_tick can dispatch Telegram notifications (F10 Cycle 3).
+        Empty list when alarm_publisher is None or no new events triggered.
+        """
         now = datetime.now(UTC)
         for channel_id, buf in self._buffers.items():
             if not buf:
@@ -258,12 +263,18 @@ class SensorDiagnosticsEngine:
             diag = self._compute_channel(channel_id, buf, now)
             self._diagnostics[channel_id] = diag
         if self._alarm_publisher is not None:
-            self._update_anomaly_tracking()
+            return self._update_anomaly_tracking()
+        return []
 
-    def _update_anomaly_tracking(self) -> None:
-        """Update per-channel anomaly duration and publish alarms when sustained."""
+    def _update_anomaly_tracking(self) -> list:
+        """Update per-channel anomaly duration and publish alarms when sustained.
+
+        Returns list of newly published AlarmEvent objects (non-None returns from
+        publish_diagnostic_alarm) so callers can dispatch notifications.
+        """
         now_mono = time.monotonic()
         current_channels = set(self._diagnostics.keys())
+        new_events: list = []
 
         for channel_id, diag in self._diagnostics.items():
             status = _health_to_status(diag.health_score)
@@ -285,17 +296,23 @@ class SensorDiagnosticsEngine:
                 elapsed = now_mono - state.first_anomaly_ts
 
                 if elapsed >= self._warning_duration_s and state.last_warning_published_ts is None:
-                    self._alarm_publisher.publish_diagnostic_alarm(channel_id, "warning", elapsed)
+                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "warning", elapsed)
                     state.last_warning_published_ts = now_mono
+                    if event is not None:
+                        new_events.append(event)
 
                 if elapsed >= self._critical_duration_s and state.last_critical_published_ts is None:
-                    self._alarm_publisher.publish_diagnostic_alarm(channel_id, "critical", elapsed)
+                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "critical", elapsed)
                     state.last_critical_published_ts = now_mono
+                    if event is not None:
+                        new_events.append(event)
 
         # Channels in anomaly state but no longer in diagnostics: no_data — keep alarm, log
         for channel_id in list(self._anomaly_state.keys()):
             if channel_id not in current_channels:
                 logger.debug("Diagnostic anomaly for %s: no_data, keeping alarm active", channel_id)
+
+        return new_events
 
     def get_diagnostics(self) -> dict[str, ChannelDiagnostics]:
         """All channel diagnostics."""
