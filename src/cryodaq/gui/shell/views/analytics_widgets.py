@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -513,6 +513,94 @@ class KeithleyPowerWidget(QWidget):
             label.setText(f"{float(reading.value):.3g} {unit}")
 
 
+class CooldownHistoryWidget(QWidget):
+    """Past cooldown durations for comparison (W2, warmup/bottom_right, F3-Cycle3).
+
+    One-shot ``cooldown_history_get`` ZMQ fetch on construction.
+    No live stream — this is historical data only (spec §4.2).
+    Scatter: X = cooldown start date, Y = duration in hours.
+    Empty state: "Нет завершённых охлаждений".
+    Error state: error banner (engine failure gracefully handled).
+    """
+
+    def __init__(self, parent: QWidget | None = None, *, limit: int = 20) -> None:
+        super().__init__(parent)
+        self._limit = limit
+        self._cooldowns: list[dict] = []
+        self._history_worker = None
+        self._build_ui()
+        self._fetch_history()
+
+    def _build_ui(self) -> None:
+        card = _card("analyticsCooldownHistory")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        lay.setSpacing(theme.SPACE_2)
+        lay.addWidget(_title_label("История захолаживаний"))
+
+        self._plot = pg.PlotWidget()
+        apply_plot_style(self._plot)
+        pi = self._plot.getPlotItem()
+        pi.setLabel("left", "Длительность", units="ч", color=theme.PLOT_LABEL_COLOR)
+        pi.getAxis("left").enableAutoSIPrefix(False)
+        date_axis = pg.DateAxisItem(orientation="bottom")
+        self._plot.setAxisItems({"bottom": date_axis})
+        self._scatter = pg.ScatterPlotItem(size=9, pen=series_pen(0))
+        self._plot.addItem(self._scatter)
+
+        self._empty_label = _muted_label("Нет завершённых охлаждений")
+        self._error_label = _muted_label("Ошибка загрузки данных")
+        self._error_label.setHidden(True)
+        lay.addWidget(self._empty_label)
+        lay.addWidget(self._error_label)
+        lay.addWidget(self._plot, stretch=1)
+        self._plot.setHidden(True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(card)
+
+    def _fetch_history(self) -> None:
+        """Issue a cooldown_history_get ZMQ command (spec §5)."""
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        cmd = {"cmd": "cooldown_history_get", "limit": self._limit}
+        self._history_worker = ZmqCommandWorker(cmd, parent=self)
+        self._history_worker.finished.connect(self._on_history_loaded)
+        self._history_worker.start()
+
+    @Slot(dict)
+    def _on_history_loaded(self, result: dict) -> None:
+        """Render fetched cooldown records as a scatter plot."""
+        if not result.get("ok"):
+            self._empty_label.setHidden(True)
+            self._error_label.setHidden(False)
+            return
+        cooldowns = result.get("cooldowns", [])
+        self._cooldowns = list(cooldowns)
+        if not cooldowns:
+            return
+        xs: list[float] = []
+        ys: list[float] = []
+        for entry in cooldowns:
+            started_at = entry.get("cooldown_started_at") or entry.get("started_at")
+            duration = entry.get("duration_hours")
+            if not started_at or duration is None:
+                continue
+            try:
+                from datetime import datetime as _dt
+
+                ts = _dt.fromisoformat(started_at).timestamp()
+                xs.append(ts)
+                ys.append(float(duration))
+            except Exception:
+                continue
+        if xs:
+            self._scatter.setData(x=xs, y=ys)
+            self._empty_label.setHidden(True)
+            self._plot.setHidden(False)
+
+
 # ---------------------------------------------------------------------------
 # Placeholder widget factories
 # ---------------------------------------------------------------------------
@@ -547,5 +635,5 @@ register(WIDGET_SENSOR_HEALTH_SUMMARY, SensorHealthSummaryWidget)
 register(WIDGET_KEITHLEY_POWER, KeithleyPowerWidget)
 register(WIDGET_R_THERMAL_PLACEHOLDER, _r_thermal_placeholder)
 register(WIDGET_TEMPERATURE_TRAJECTORY, _temperature_trajectory_placeholder)
-register(WIDGET_COOLDOWN_HISTORY, _cooldown_history_placeholder)
+register(WIDGET_COOLDOWN_HISTORY, CooldownHistoryWidget)
 register(WIDGET_EXPERIMENT_SUMMARY, _experiment_summary_placeholder)
