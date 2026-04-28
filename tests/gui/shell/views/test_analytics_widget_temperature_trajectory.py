@@ -76,12 +76,12 @@ def test_construction_no_data_shows_empty_label(app):
     """Fresh widget with no data must show the empty-state label."""
     w = _make_widget()
     assert not w._empty_label.isHidden()
-    assert w._plot.isHidden()
+    assert w._graphics.isHidden()
 
 
-def test_construction_has_plot_widget(app):
+def test_construction_has_graphics_layout(app):
     w = _make_widget()
-    assert w._plot is not None
+    assert w._graphics is not None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -125,8 +125,8 @@ def test_history_fetch_uses_7_day_window(app):
 
 
 def test_history_loaded_populates_curves(app):
-    """_on_history_loaded with a successful response must populate series
-    and make the plot visible."""
+    """_on_history_loaded with a successful response must populate series,
+    create group plots, and make the graphics visible."""
     w = _make_widget()
 
     result = {
@@ -144,8 +144,48 @@ def test_history_loaded_populates_curves(app):
     assert len(w._series["Т2"].xs) == 2
     assert "Т1" in w._curves
     assert "Т2" in w._curves
-    assert not w._plot.isHidden()
+    # At least one group plot created.
+    assert len(w._group_plots) >= 1
+    assert not w._graphics.isHidden()
     assert w._empty_label.isHidden()
+
+
+def test_channels_from_different_groups_get_separate_plotitems(app):
+    """Channels in different channel groups must each have their own PlotItem
+    for independent Y-axis scaling (spec §4.1 criterion 3)."""
+    from cryodaq.core.channel_manager import get_channel_manager
+
+    mgr = get_channel_manager()
+    # Register two channels in distinct groups.
+    mgr._channels.setdefault("Т_cryostat_test", {})["group"] = "cryostat"
+    mgr._channels.setdefault("Т_compressor_test", {})["group"] = "compressor"
+    try:
+        w = _make_widget()
+        w.set_temperature_readings({
+            "Т_cryostat_test": _reading("Т_cryostat_test", 4.2),
+            "Т_compressor_test": _reading("Т_compressor_test", 280.0),
+        })
+        assert "cryostat" in w._group_plots
+        assert "compressor" in w._group_plots
+        # Each group has its own PlotItem — they must be distinct objects.
+        assert w._group_plots["cryostat"] is not w._group_plots["compressor"]
+    finally:
+        mgr._channels.pop("Т_cryostat_test", None)
+        mgr._channels.pop("Т_compressor_test", None)
+
+
+def test_history_sorted_by_timestamp_after_load(app):
+    """After _on_history_loaded, series must be sorted by timestamp even if
+    the engine returned out-of-order points (dedup/sort guard, MEDIUM fix)."""
+    w = _make_widget()
+    w._on_history_loaded({
+        "ok": True,
+        "data": {
+            "Т1": [[3000.0, 200.0], [1000.0, 295.0], [2000.0, 250.0]],
+        },
+    })
+    series = w._series["Т1"]
+    assert series.xs == sorted(series.xs)
 
 
 def test_history_loaded_error_response_is_silent(app):
@@ -184,7 +224,7 @@ def test_live_append_hides_empty_label(app):
     w = _make_widget()
     assert not w._empty_label.isHidden()
     w.set_temperature_readings({"Т1": _reading("Т1", 120.0)})
-    assert not w._plot.isHidden()
+    assert not w._graphics.isHidden()
     assert w._empty_label.isHidden()
 
 
@@ -239,7 +279,7 @@ def test_snapshot_replay_via_set_temperature_readings(app):
     }
     w.set_temperature_readings(snapshot)
 
-    assert not w._plot.isHidden()
+    assert not w._graphics.isHidden()
     assert "Т1" in w._curves
     assert "Т2" in w._curves
 
