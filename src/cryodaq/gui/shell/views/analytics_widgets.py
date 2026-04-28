@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
@@ -257,6 +258,139 @@ class TemperatureOverviewWidget(QWidget):
             return
         now = time.time()
         pi.setXRange(now - window.seconds, now, padding=0)
+
+
+class TemperatureTrajectoryWidget(QWidget):
+    """Full-experiment temperature history — per-group Y-axis scaling (W1, warmup/main, F3-Cycle2).
+
+    Initial data: ``readings_history`` ZMQ fetch (7-day window, cold channels) on construction.
+    Live updates: :meth:`set_temperature_readings` — append-only per spec §4.1.
+    Y-axis: one :class:`pg.PlotItem` per channel group (cryostat / compressor / detector)
+    for independent auto-scaling (spec §4.1 criterion 3).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._channel_mgr = get_channel_manager()
+        self._series: dict[str, _ChannelSeries] = {}
+        self._curves: dict[str, pg.PlotDataItem] = {}
+        self._group_plots: dict[str, pg.PlotItem] = {}
+        self._next_row: int = 0
+        self._history_worker = None
+        self._build_ui()
+        self._fetch_history()
+
+    def _build_ui(self) -> None:
+        card = _card("analyticsTemperatureTrajectory")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        lay.setSpacing(theme.SPACE_2)
+        lay.addWidget(_title_label("Траектория температуры"))
+        self._graphics = pg.GraphicsLayoutWidget()
+        self._graphics.setBackground(theme.PLOT_BG)
+        self._empty_label = _muted_label("Ожидание данных…")
+        lay.addWidget(self._empty_label)
+        lay.addWidget(self._graphics, stretch=1)
+        self._graphics.setVisible(False)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(card)
+
+    def _get_or_create_group_plot(self, group: str) -> pg.PlotItem:
+        """Return the PlotItem for *group*, creating it if needed."""
+        if group in self._group_plots:
+            return self._group_plots[group]
+        pi = self._graphics.addPlot(row=self._next_row, col=0)
+        pi.showGrid(x=True, y=True, alpha=0.3)
+        label = group if group else "Температура"
+        pi.setLabel("left", label, units="K", color=theme.PLOT_LABEL_COLOR)
+        pi.getAxis("left").enableAutoSIPrefix(False)
+        date_axis = pg.DateAxisItem(orientation="bottom")
+        pi.setAxisItems({"bottom": date_axis})
+        pi.addLegend(offset=(10, 10))
+        # Link x-axis so all groups scroll / zoom together.
+        if self._group_plots:
+            pi.setXLink(next(iter(self._group_plots.values())))
+        self._group_plots[group] = pi
+        self._next_row += 1
+        return pi
+
+    def _fetch_history(self) -> None:
+        """Issue a readings_history ZMQ command for all cold channels (spec §4.1)."""
+        import time
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        channels = self._channel_mgr.get_cold_channels() or None
+        cmd = {
+            "cmd": "readings_history",
+            "from_ts": time.time() - 7 * 24 * 3600,
+            "to_ts": time.time(),
+            "channels": channels,
+            "limit_per_channel": 5000,
+        }
+        self._history_worker = ZmqCommandWorker(cmd, parent=self)
+        self._history_worker.finished.connect(self._on_history_loaded)
+        self._history_worker.start()
+
+    @Slot(dict)
+    def _on_history_loaded(self, result: dict) -> None:
+        """Merge engine history response; sort each series by timestamp."""
+        if not result.get("ok"):
+            return
+        data: dict[str, list] = result.get("data", {})
+        for channel, points in data.items():
+            if not points:
+                continue
+            series = self._series.setdefault(channel, _ChannelSeries())
+            for entry in points:
+                series.xs.append(float(entry[0]))
+                series.ys.append(float(entry[1]))
+        # Sort by timestamp: history may arrive after F4 live-stream replay,
+        # producing out-of-order points if not sorted.
+        for series in self._series.values():
+            if len(series.xs) > 1:
+                pairs = sorted(zip(series.xs, series.ys))
+                series.xs[:] = [p[0] for p in pairs]
+                series.ys[:] = [p[1] for p in pairs]
+        self._refresh_all_curves()
+        self._update_empty_state()
+
+    def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
+        """Append live broker readings (spec §4.1 live stream)."""
+        for ch_id, reading in readings.items():
+            series = self._series.setdefault(ch_id, _ChannelSeries())
+            series.xs.append(reading.timestamp.timestamp())
+            series.ys.append(float(reading.value))
+            max_pts = 5000
+            if len(series.xs) > max_pts:
+                del series.xs[: len(series.xs) - max_pts]
+                del series.ys[: len(series.ys) - max_pts]
+            self._update_curve(ch_id)
+        self._update_empty_state()
+
+    def _update_curve(self, ch_id: str) -> None:
+        series = self._series.get(ch_id)
+        if series is None:
+            return
+        group = self._channel_mgr.get_group(ch_id)
+        pi = self._get_or_create_group_plot(group)
+        if ch_id not in self._curves:
+            pen = series_pen(len(self._curves))
+            name = self._channel_mgr.get_name(ch_id) or ch_id
+            curve = pi.plot([], [], pen=pen, name=name)
+            self._curves[ch_id] = curve
+        self._curves[ch_id].setData(x=series.xs, y=series.ys)
+
+    def _refresh_all_curves(self) -> None:
+        for ch_id in self._series:
+            self._update_curve(ch_id)
+
+    def _update_empty_state(self) -> None:
+        has_data = any(s.xs for s in self._series.values())
+        self._empty_label.setHidden(has_data)
+        self._graphics.setHidden(not has_data)
 
 
 class VacuumPredictionWidget(QWidget):
@@ -546,6 +680,6 @@ register(WIDGET_PRESSURE_CURRENT, PressureCurrentWidget)
 register(WIDGET_SENSOR_HEALTH_SUMMARY, SensorHealthSummaryWidget)
 register(WIDGET_KEITHLEY_POWER, KeithleyPowerWidget)
 register(WIDGET_R_THERMAL_PLACEHOLDER, _r_thermal_placeholder)
-register(WIDGET_TEMPERATURE_TRAJECTORY, _temperature_trajectory_placeholder)
+register(WIDGET_TEMPERATURE_TRAJECTORY, TemperatureTrajectoryWidget)
 register(WIDGET_COOLDOWN_HISTORY, _cooldown_history_placeholder)
 register(WIDGET_EXPERIMENT_SUMMARY, _experiment_summary_placeholder)

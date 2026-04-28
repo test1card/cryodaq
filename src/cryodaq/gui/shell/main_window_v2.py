@@ -404,6 +404,14 @@ class MainWindowV2(QMainWindow):
             and self._conductivity_panel is not None
         ):
             self._conductivity_panel.on_reading(reading)
+        # F3-Cycle2: route temperature readings to analytics view + shell cache.
+        # This is intentional parallel routing — calibration_panel and analytics_view
+        # are independent consumers: calibration uses readings for curve fitting;
+        # analytics uses them for TemperatureTrajectoryWidget live stream.
+        if reading.unit == "K":
+            self._analytics_temperature_snapshot[channel] = reading
+            if self._analytics_view is not None:
+                self._analytics_view.set_temperature_readings({channel: reading})
         if (
             "/smua/" in channel
             or "/smub/" in channel

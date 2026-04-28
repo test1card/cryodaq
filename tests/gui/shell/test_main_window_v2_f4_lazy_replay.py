@@ -20,6 +20,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
@@ -455,6 +456,59 @@ def test_keithley_snapshot_replayed_on_view_open():
 # ──────────────────────────────────────────────────────────────────────────────
 # §4.5 — set_fault is never replayed
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_k_reading_routes_to_analytics_temperature_snapshot():
+    """F3-Cycle2: every K-unit reading dispatched through MainWindowV2 must
+    update _analytics_temperature_snapshot so TemperatureTrajectoryWidget
+    receives it on F4 replay. Calibration panel routing is parallel and
+    independent (intentional double-routing — see MainWindowV2 comment)."""
+    _app()
+    reset_time_window_controller()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    k_reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218S_1",
+        channel="Т1",
+        value=77.0,
+        unit="K",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    w._dispatch_reading(k_reading)
+
+    assert "Т1" in w._analytics_temperature_snapshot
+    assert w._analytics_temperature_snapshot["Т1"].value == 77.0
+
+
+def test_k_reading_forwarded_to_analytics_view_when_open():
+    """K-unit reading must reach analytics_view.set_temperature_readings()
+    when the view has been opened (F3-Cycle2 live stream path)."""
+    from unittest.mock import patch
+
+    _app()
+    reset_time_window_controller()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w._ensure_overlay("analytics")
+
+    k_reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218S_1",
+        channel="Т2",
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    w._dispatch_reading(k_reading)
+
+    assert "Т2" in w._analytics_view._last_temperature_readings
 
 
 def test_set_fault_never_added_to_snapshot():
