@@ -1,5 +1,71 @@
 # CryoDAQ Repository Audit
 
+---
+
+## Audit 2026-04-30 (repo cleanup pass)
+
+**Дата:** 2026-04-30
+**Commit:** `6662981` (cleanup: Phase 5 living docs refresh)
+**Latest release tag:** v0.42.0 → `751b4cf` (2026-04-29)
+**Ветка:** master
+**Метод:** repo cleanup + living-doc refresh pass. Read-only for code; docs/structure changed per CC_PROMPT_REPO_CLEANUP_2026-04-30.md.
+
+### State
+
+| Метрика | Значение |
+|---|---|
+| Python `src/cryodaq/` | **~48 500** строк в **145** файлах |
+| Python `tests/` | **~38 800** строк в **206** файлах |
+| Тесты | **1 931 passed, 4 skipped** (baseline v0.42.0) |
+| Coverage | stale — re-run pending |
+| Версия пакета | **0.42.0** |
+| Коммитов с начала | **536** |
+| Design System | v1.0.1, 67 canonical .md, 139 токенов |
+| TODO/FIXME в src/ | **0** |
+| Untracked files в root | **21** |
+
+### Cleanup actions taken (this audit)
+
+- 14 CC_PROMPT_* files archived → `docs/cc-prompts-archive/2026-04/`
+- 2 stale handoff files moved → `docs/handoffs-archive/2026-04/`
+- 1 doc moved from root → `docs/codex-architecture-control-plane.md`
+- 4 recon files reorganized → `artifacts/recon/`
+- 3 living docs refreshed: PROJECT_STATUS.md, DOC_REALITY_MAP.md (addendum), docs/NEXT_SESSION.md
+
+### Repo root after cleanup
+
+Kept (legitimate):
+- Active prompts: `CC_PROMPT_CALIBRATION_2026-04-30.md`, `CC_PROMPT_METASWARM_F17.md`, `CC_PROMPT_REPO_CLEANUP_2026-04-30.md`
+- Living docs: `CHANGELOG.md`, `CLAUDE.md`, `DOC_REALITY_MAP.md`, `PROJECT_STATUS.md`, `ROADMAP.md`, `README.md`, `RELEASE_CHECKLIST.md`, `THIRD_PARTY_NOTICES.md`
+- Config: `pyproject.toml`, `requirements-lock.txt`, `.gitattributes`, `.gitignore`, `.graphifyignore`
+- Scripts: `create_shortcut.py`, `release_notes.py`, `install.bat`, `start*.bat`, `start*.sh`
+
+### Outstanding (architect-only decisions — not addressed this pass)
+
+| Item | Notes |
+|---|---|
+| `~/` directory in repo root | Shell mkdir mistake. `rm -rf ~/Projects/cryodaq/\~/` when architect present |
+| `draft.py`, `draft2.py` | Word-count scratch scripts. Safe to delete (not production, not referenced) |
+| `graphify-out.stale-pre-merge/` | Gitignored stale graph — safe to rm locally |
+| `agentswarm/` | Gitignored local cache — architect can move outside repo |
+
+### Ignored / out-of-scope
+
+- `src/`, `tests/`, `config/` — production, no cleanup
+- `.venv/`, `.pytest_cache/`, `build/`, `dist/` — gitignored
+- `.worktrees/`, `.swarm/`, `.audit-run/`, `.omc/` — gitignored agent workspaces
+- `artifacts/calibration/` — active session output
+
+### Health metrics
+
+- Untracked files in root: 21 (includes active CC_PROMPT files, draft.py/draft2.py, graphify-out dirs)
+- Stale docs >14 days at root: 0 (DOC_REALITY_MAP.md is 13 days, marked HISTORICAL)
+- TODO/FIXME density in src/: 0
+
+---
+
+## Audit 2026-04-17
+
 **Дата:** 2026-04-17
 **Commit:** `d8ec668c82f37add016ab6969388930498eadcb6` (`style: fix 587 ruff lint errors (CI green)`, 2026-04-17)
 **Ветка:** master
