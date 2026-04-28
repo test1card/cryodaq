@@ -151,6 +151,16 @@ class MainWindowV2(QMainWindow):
         self._keithley_panel: KeithleyPanel | None = None
         self._analytics_view: AnalyticsView | None = None
         self._conductivity_panel: ConductivityPanel | None = None
+
+        # F4 lazy-open snapshot replay cache (F3-Cycle1).
+        # Last-value setters: dict[setter_name → last args tuple].
+        # Accumulating setters: separate dicts keyed by full channel name.
+        # set_fault is intentionally excluded from replay (spec §4.5).
+        self._analytics_snapshot: dict[str, tuple] = {}
+        self._analytics_temperature_snapshot: dict[str, Reading] = {}
+        self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        # Track active experiment ID to detect boundaries for cache invalidation.
+        self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
         self._instrument_panel: InstrumentsPanel | None = None
         self._archive_panel: ArchivePanel | None = None
@@ -328,6 +338,39 @@ class MainWindowV2(QMainWindow):
                     exp,
                     self._latest_experiment_status.get("phases", []),
                 )
+        # F4: replay shell-level snapshot cache into freshly-opened AnalyticsView.
+        # Phase is sourced from _latest_experiment_status (not the snapshot cache)
+        # since it drives layout, not widget data.
+        if name == "analytics":
+            if self._latest_experiment_status:
+                current_phase = self._latest_experiment_status.get("current_phase")
+                widget.set_phase(str(current_phase) if current_phase else None)
+            for setter_name, args in self._analytics_snapshot.items():
+                fn = getattr(widget, setter_name, None)
+                if callable(fn):
+                    fn(*args)
+            if self._analytics_temperature_snapshot:
+                widget.set_temperature_readings(dict(self._analytics_temperature_snapshot))
+            if self._analytics_keithley_snapshot:
+                widget.set_keithley_readings(dict(self._analytics_keithley_snapshot))
+
+    # ------------------------------------------------------------------
+    # F4 analytics snapshot cache helper
+    # ------------------------------------------------------------------
+
+    def _push_analytics(self, setter_name: str, *args: object) -> None:
+        """Cache a last-value analytics setter call and forward to view if open.
+
+        Keeps the shell-level snapshot in sync so that when AnalyticsView is
+        first opened (or re-opened after close), _ensure_overlay replays all
+        cached values into the fresh instance — preventing the empty-on-open
+        UX bug described in F4 (spec §4.5).
+        """
+        self._analytics_snapshot[setter_name] = args
+        if self._analytics_view is not None:
+            fn = getattr(self._analytics_view, setter_name, None)
+            if callable(fn):
+                fn(*args)
 
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
@@ -370,6 +413,18 @@ class MainWindowV2(QMainWindow):
                 self._keithley_panel.on_reading(reading)
             if channel.endswith("/power") and self._conductivity_panel is not None:
                 self._conductivity_panel.on_reading(reading)
+            # F4: accumulate Keithley power readings into analytics snapshot.
+            # KeithleyPowerWidget.set_keithley_readings expects dict[channel→Reading]
+            # with keys like "<instrument>/smua/voltage" — the widget extracts
+            # parts[-2] (smua/smub) and parts[-1] (voltage/current/power).
+            if channel.split("/")[-1] in ("voltage", "current", "power"):
+                self._analytics_keithley_snapshot[channel] = reading
+                if self._analytics_view is not None:
+                    self._analytics_view.set_keithley_readings({channel: reading})
+        # F4: route pressure gauge readings to analytics view + shell cache.
+        # VSP63D publishes on channels ending with /pressure, unit мбар.
+        if reading.unit == "мбар" and channel.endswith("/pressure"):
+            self._push_analytics("set_pressure_reading", reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (Codex B.5.5 F3)
@@ -377,8 +432,9 @@ class MainWindowV2(QMainWindow):
             # set_r_thermal / set_fault setters instead of a generic
             # on_reading sink. The shell adapts specific analytics
             # channels into the typed snapshots below.
-            if self._analytics_view is not None:
-                self._adapt_reading_to_analytics(reading)
+            # F4: _adapt_reading_to_analytics now handles None view internally
+            # via _push_analytics — remove the prior None guard.
+            self._adapt_reading_to_analytics(reading)
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
@@ -400,30 +456,21 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
 
     def _adapt_reading_to_analytics(self, reading: Reading) -> None:
-        """Translate broker `analytics/*` readings into AnalyticsView
-        setter calls.
+        """Translate broker ``analytics/*`` readings into AnalyticsView setter calls.
 
-        Today only the cooldown predictor publishes structured data on
-        the broker (`analytics/cooldown_predictor/cooldown_eta`, see
-        `src/cryodaq/analytics/cooldown_service.py`). R_thermal has no
-        publisher, so `set_r_thermal` is never invoked and the tile
-        shows its «—» placeholder. `actual_trajectory` is also not
-        published — the cooldown plugin keeps the raw buffer internal
-        — so the actual-line on the cooldown plot stays empty until a
-        publisher is added. Both gaps are flagged in the analytics
-        spec's «Known limitations» section.
+        Routes known analytics channels through :meth:`_push_analytics` so that
+        the shell-level snapshot cache is updated regardless of whether
+        AnalyticsView is currently open (F4 lazy-open replay, spec §4.5).
+
+        Any unrecognised ``analytics/*`` channel is silently dropped — the v2
+        panel has no generic ``on_reading`` sink, so unknown channels are
+        intentional no-ops.
         """
-        if self._analytics_view is None:
-            return
         channel = reading.channel
         if channel == "analytics/cooldown_predictor/cooldown_eta":
             data = self._cooldown_reading_to_data(reading)
             if data is not None:
-                self._analytics_view.set_cooldown(data)
-        # Any other analytics/* channel is silently dropped — previously
-        # went to the legacy panel's on_reading sink; the v2 panel has no
-        # equivalent general sink, so unknown analytics channels are
-        # intentional no-ops here rather than attribute errors.
+                self._push_analytics("set_cooldown", data)
 
     @staticmethod
     def _cooldown_reading_to_data(reading: Reading):
@@ -569,6 +616,20 @@ class MainWindowV2(QMainWindow):
     def _on_experiment_status_received(self, status: dict) -> None:
         """Forward status to dashboard + overlay, cache for routing."""
         self._latest_experiment_status = status
+
+        # F4: invalidate experiment-scoped analytics snapshot on boundary.
+        # Accumulating caches (temperature, keithley) and cooldown are
+        # tied to one experiment; clear them when the active experiment changes
+        # so a newly-opened AnalyticsView does not replay stale data.
+        active = status.get("active_experiment")
+        new_exp_id = active.get("id") if isinstance(active, dict) else None
+        if new_exp_id != self._analytics_last_exp_id:
+            self._analytics_snapshot.pop("set_cooldown", None)
+            self._analytics_snapshot.pop("set_experiment_status", None)
+            self._analytics_temperature_snapshot.clear()
+            self._analytics_keithley_snapshot.clear()
+            self._analytics_last_exp_id = new_exp_id
+
         self._overview_panel.on_experiment_status(status)
         # Forward to overlay if it exists and is visible
         if self._experiment_overlay is not None:
