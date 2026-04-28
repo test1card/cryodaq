@@ -32,7 +32,7 @@
 | F7 | Web API readings query extension | ⬜ | L | M |
 | F8 | Cooldown ML prediction upgrade | 🔬 | L | M |
 | F9 | Thermal conductivity auto-report (TIM) | 🔬 | M | H |
-| F10 | Sensor diagnostics → alarm integration | ⬜ | M | M |
+| F10 | Sensor diagnostics → alarm integration | ✅ DONE (shipped v0.41.0) | M | M |
 | F11 | Shift handover enrichment | ✅ DONE (v0.34.0; Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
 | F13 | Vacuum leak rate estimator | ⬜ | M | M |
@@ -42,6 +42,7 @@
 | F17 | SQLite → Parquet cold-storage rotation | ⬜ | M | M |
 | F18 | CI/CD upgrade (coverage, matrix, releases) | ⬜ | M | L |
 | F19 | F3.W3 experiment_summary enriched content | ⬜ | S–M | M |
+| F20 | Diagnostic alarm notification polish | ⬜ | S | L |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -296,16 +297,15 @@ Estimated: ~500 LOC + 25 tests + DOCX templates. Close Vladimir interaction.
 
 ### F10 — Sensor diagnostics → alarm integration
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.41.0.
 
-`sensor_diagnostics.py` shipped (MAD, correlation). Currently displays
-only. Upgrade to publish anomaly events into Alarm Engine v2:
+Sensor diagnostics anomaly events now flow through Alarm Engine v2.
+Warning at 5 min sustained anomaly, critical at 15 min, auto-clear on
+return to ok. Telegram dispatch via `_sensor_diag_tick`. Config in
+`plugins.yaml`. 17 new tests; 3-cycle overnight implementation.
 
-- Anomaly > 5 min → WARNING
-- Anomaly > 15 min → CRITICAL
-- ACK + auto-mute with configurable retry window
-
-Estimated: ~250 LOC + 20 tests.
+See CHANGELOG [0.41.0] for full details. F20 added for notification
+polish (aggregation + escalation cooldown).
 
 ### F11 — Shift handover enrichment
 
@@ -431,6 +431,30 @@ Three independent sub-items, each shippable as a separate commit:
 
 Recommend: post-v0.40.0 stable period or after operator feedback
 identifies top priority among the three.
+
+### F20 — Diagnostic alarm notification polish
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~80–150 LOC).
+**Source:** Deferred from F10 Cycle 3 review (overnight 2026-04-29 finding #3).
+
+Two independent enhancements for diagnostic alarm Telegram notifications
+introduced in F10 (v0.41.0):
+
+1. **Aggregation** — when N > 3 channels go warning/critical in the same
+   tick, send a single message ("5 channels critical: T1, T3, T5, T7, T9")
+   instead of N separate messages. Prevents Telegram flood during
+   multi-channel simultaneous anomaly (e.g., shield group all going noisy).
+2. **Per-channel escalation cooldown** — prevent rapid warning→critical→
+   warning re-firing if a channel oscillates near the threshold. Configurable
+   cooldown window per escalation level (separate from the interlock cooldown).
+
+Edge case currently bounded: in normal ops ≤16 channels, simultaneous
+criticals indicate genuine catastrophe where flood is preferable to silence.
+Not blocking F10 shipment.
+
+Recommend: implement after first production observation of multi-channel
+diagnostic alarms; user feedback will clarify aggregation threshold.
 
 ---
 

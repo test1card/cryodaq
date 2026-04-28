@@ -11,6 +11,72 @@
 
 ---
 
+## [0.41.0] — 2026-04-29 — F10 sensor diagnostics → alarm integration
+
+### Highlights
+
+F10 complete. Sensor diagnostics anomaly events now flow through Alarm
+Engine v2: warning alarm at 5 min sustained anomaly, critical at 15 min,
+auto-clear when channel returns to ok. Telegram dispatch for diagnostic
+alarms follows the existing `_alarm_v2_tick` pattern.
+
+Implementation: 3-cycle overnight Sonnet batch with Codex audit per cycle.
+Gemini quota exhausted overnight (MODEL_CAPACITY_EXHAUSTED on all 4
+dispatches); architect performed manual structural pass for Cycle 3.
+
+Spec deviation ratified: alarm-publishing config lives in `plugins.yaml`
+(existing `sensor_diagnostics` convention) rather than `alarms_v3.yaml`.
+
+F20 added for future polish: Telegram notification aggregation for
+simultaneous multi-channel diagnostic alarms + per-channel escalation
+cooldown. Not blocking; in normal ops ≤16 channels, simultaneous
+criticals indicate genuine catastrophe where flood is preferable to
+silence.
+
+### Added
+
+- `SensorDiagnosticsEngine.__init__` gains `alarm_publisher`,
+  `warning_duration_s` (default 300 s), `critical_duration_s`
+  (default 900 s) parameters
+- `_AnomalyState` dataclass for per-channel sustained-anomaly tracking
+  (monotonic clock; one-shot publish guards per severity level)
+- `_health_to_status()` bridge maps health_score (0–100) → ok / warning
+  / critical (spec called for status enum; existing engine uses numeric
+  health score)
+- `SensorDiagnosticsEngine.update()` now returns `list[AlarmEvent]` of
+  newly published events so engine tick can dispatch Telegram
+- `AlarmStateManager.publish_diagnostic_alarm(channel_id, severity,
+  age_seconds)` — idempotent per channel, creates alarm in same shape as
+  rule-evaluated alarms; inherits ACK workflow
+- `AlarmStateManager.clear_diagnostic_alarm(channel_id)` — removes from
+  active and records CLEARED in history
+- Engine wiring: `alarm_v2_state_mgr` injected as `alarm_publisher` into
+  `SensorDiagnosticsEngine`; graceful degradation when
+  `alarm_publishing_enabled: false`
+- `_sensor_diag_tick` dispatches Telegram for returned diagnostic
+  AlarmEvents via `_alarm_dispatch_tasks` (strong-ref management)
+- `config/plugins.yaml` sensor_diagnostics block: `alarm_publishing_enabled`,
+  `warning_duration_s`, `critical_duration_s`, `notify_telegram`
+- 17 new tests: 11 unit (Cycle 1, sensor_diagnostics publishing) +
+  4 unit (Cycle 2, AlarmStateManager) + 2 integration (Cycle 3, pipeline)
+- Vault: 6 new subsystem notes (Analytics view, F4 lazy replay, Web
+  dashboard, Cooldown predictor, Experiment manager, Interlock engine)
+
+### Test baseline
+
+Pre: 0.40.0 — ~300 tests
+Post: 81 passing (+17 new), 0 regressions
+
+### Tags
+
+- `v0.41.0` — see closing commit below
+
+### Closing commit
+
+See `merge: F10 Cycle 3` on master.
+
+---
+
 ## [0.40.0] — 2026-04-29 — F3 Analytics widgets data wiring
 
 ### Highlights
