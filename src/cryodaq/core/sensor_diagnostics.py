@@ -9,16 +9,23 @@ Read-only аналитика поверх ChannelStateTracker:
 
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from cryodaq.core.rate_estimator import _ols_slope_per_min
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Channel classifier (Phase 2c user report)
@@ -100,6 +107,31 @@ class DiagnosticsSummary:
     worst_flags: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _AnomalyState:
+    """Per-channel anomaly tracking state for alarm publishing (F10)."""
+
+    channel_id: str
+    first_anomaly_ts: float  # monotonic clock — when anomaly first started
+    current_status: str  # "warning" | "critical"
+    last_warning_published_ts: float | None = None
+    last_critical_published_ts: float | None = None
+
+
+def _health_to_status(health_score: int) -> str:
+    """Map health score (0-100) to alarm severity string.
+
+    Mapping: >=80 → ok, 50-79 → warning, <50 → critical.
+    Existing SensorDiagnosticsEngine uses health_score, not a status enum;
+    this bridge derives status for F10 alarm-publishing logic.
+    """
+    if health_score >= 80:
+        return "ok"
+    if health_score >= 50:
+        return "warning"
+    return "critical"
+
+
 # ---------------------------------------------------------------------------
 # Noise thresholds by temperature (DT-670 sensitivity zones)
 # ---------------------------------------------------------------------------
@@ -156,6 +188,9 @@ class SensorDiagnosticsEngine:
     def __init__(
         self,
         config: dict[str, Any] | None = None,
+        alarm_publisher: Any | None = None,
+        warning_duration_s: float = 300.0,
+        critical_duration_s: float = 900.0,
     ) -> None:
         cfg = config or {}
         thresholds = cfg.get("thresholds", {})
@@ -188,6 +223,12 @@ class SensorDiagnosticsEngine:
         # Cached diagnostics
         self._diagnostics: dict[str, ChannelDiagnostics] = {}
 
+        # F10 alarm publishing
+        self._alarm_publisher = alarm_publisher
+        self._warning_duration_s = warning_duration_s
+        self._critical_duration_s = critical_duration_s
+        self._anomaly_state: dict[str, _AnomalyState] = {}
+
     def set_channel_names(self, names: dict[str, str]) -> None:
         """Set display names for channels."""
         self._channel_names = dict(names)
@@ -210,9 +251,51 @@ class SensorDiagnosticsEngine:
         now = datetime.now(UTC)
         for channel_id, buf in self._buffers.items():
             if not buf:
+                # Remove stale cached result so _update_anomaly_tracking
+                # correctly classifies this channel as no_data.
+                self._diagnostics.pop(channel_id, None)
                 continue
             diag = self._compute_channel(channel_id, buf, now)
             self._diagnostics[channel_id] = diag
+        if self._alarm_publisher is not None:
+            self._update_anomaly_tracking()
+
+    def _update_anomaly_tracking(self) -> None:
+        """Update per-channel anomaly duration and publish alarms when sustained."""
+        now_mono = time.monotonic()
+        current_channels = set(self._diagnostics.keys())
+
+        for channel_id, diag in self._diagnostics.items():
+            status = _health_to_status(diag.health_score)
+
+            if status == "ok":
+                if channel_id in self._anomaly_state:
+                    state = self._anomaly_state.pop(channel_id)
+                    if state.last_warning_published_ts is not None or state.last_critical_published_ts is not None:
+                        self._alarm_publisher.clear_diagnostic_alarm(channel_id)
+            else:
+                if channel_id not in self._anomaly_state:
+                    self._anomaly_state[channel_id] = _AnomalyState(
+                        channel_id=channel_id,
+                        first_anomaly_ts=now_mono,
+                        current_status=status,
+                    )
+                state = self._anomaly_state[channel_id]
+                state.current_status = status
+                elapsed = now_mono - state.first_anomaly_ts
+
+                if elapsed >= self._warning_duration_s and state.last_warning_published_ts is None:
+                    self._alarm_publisher.publish_diagnostic_alarm(channel_id, "warning", elapsed)
+                    state.last_warning_published_ts = now_mono
+
+                if elapsed >= self._critical_duration_s and state.last_critical_published_ts is None:
+                    self._alarm_publisher.publish_diagnostic_alarm(channel_id, "critical", elapsed)
+                    state.last_critical_published_ts = now_mono
+
+        # Channels in anomaly state but no longer in diagnostics: no_data — keep alarm, log
+        for channel_id in list(self._anomaly_state.keys()):
+            if channel_id not in current_channels:
+                logger.debug("Diagnostic anomaly for %s: no_data, keeping alarm active", channel_id)
 
     def get_diagnostics(self) -> dict[str, ChannelDiagnostics]:
         """All channel diagnostics."""
