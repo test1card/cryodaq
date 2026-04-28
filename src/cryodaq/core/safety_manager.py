@@ -430,14 +430,20 @@ class SafetyManager:
     async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
         """Live-update P_target on an active channel. Validates against config limits.
 
-        Updates ``runtime.p_target`` in-memory. The hardware voltage is NOT changed
-        here directly — the P=const regulation loop in
-        ``Keithley2604B.read_channels()`` reads ``runtime.p_target`` on every poll
-        cycle and recomputes ``target_v = sqrt(p_target * R)``, so the instrument
-        output converges within one poll interval (typically ≤1 s).
+        Updates ``runtime.p_target`` in-memory. The hardware voltage is NOT
+        changed here directly — the P=const regulation loop in
+        ``Keithley2604B.read_channels()`` reads ``runtime.p_target`` on every
+        poll cycle and recomputes ``target_v = sqrt(p_target * R)``.
 
-        This is intentional: slew-rate limiting and compliance checks live in the
-        regulation loop and must not be bypassed by direct SCPI writes here.
+        Convergence time depends on the size of the p_target step. For small
+        steps (delta_v ≤ MAX_DELTA_V_PER_STEP = 0.5 V), convergence completes
+        in one poll interval (typically ≤1 s). For larger steps, the
+        slew-rate limiter caps voltage change at 0.5 V per poll cycle, so
+        full convergence may take multiple seconds (e.g., a 0.5W → 5W jump
+        on 100Ω can require ~15 polls = ~7-15 s depending on poll interval).
+
+        This is intentional: slew-rate limiting and compliance checks live in
+        the regulation loop and must not be bypassed by direct SCPI writes.
         """
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
