@@ -170,6 +170,19 @@ def test_slow_commands_set_covers_experiment_lifecycle() -> None:
         assert cmd in _SLOW_COMMANDS
 
 
+def test_slow_commands_covers_safety_critical_hardware_ops() -> None:
+    """HF2 — keithley_emergency_off and keithley_stop must use the 30 s envelope.
+
+    USBTMC under stress (USB reconnect, instrument busy) can take 5–10 s.
+    The fast 2-second envelope would cancel the hardware command mid-flight,
+    leaving the Keithley output in an unknown state during a fault event.
+    """
+    assert "keithley_emergency_off" in _SLOW_COMMANDS
+    assert "keithley_stop" in _SLOW_COMMANDS
+    assert _timeout_for({"cmd": "keithley_emergency_off"}) == HANDLER_TIMEOUT_SLOW_S
+    assert _timeout_for({"cmd": "keithley_stop"}) == HANDLER_TIMEOUT_SLOW_S
+
+
 def test_timeout_for_fast_commands() -> None:
     assert _timeout_for({"cmd": "safety_status"}) == HANDLER_TIMEOUT_FAST_S
     assert _timeout_for({"cmd": "alarm_v2_status"}) == HANDLER_TIMEOUT_FAST_S
