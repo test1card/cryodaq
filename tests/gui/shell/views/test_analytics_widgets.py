@@ -178,8 +178,8 @@ def test_keithley_power_smua_smub_grid(app):
     [
         "r_thermal_placeholder",
         # temperature_trajectory wired in F3-Cycle2 — no longer a PlaceholderCard
-        "cooldown_history",   # F3-Cycle3 still pending
-        "experiment_summary", # F3-Cycle4 still pending
+        # cooldown_history wired in F3-Cycle3 — no longer a PlaceholderCard
+        "experiment_summary",  # F3-Cycle4 still pending
     ],
 )
 def test_placeholder_widget_constructs(app, widget_id):
@@ -188,8 +188,7 @@ def test_placeholder_widget_constructs(app, widget_id):
 
 
 def test_temperature_trajectory_is_real_widget_not_placeholder(app):
-    """After F3-Cycle2, temperature_trajectory is a TemperatureTrajectoryWidget,
-    not a PlaceholderCard."""
+    """After F3-Cycle2, temperature_trajectory is a TemperatureTrajectoryWidget."""
     from unittest.mock import MagicMock, patch
 
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
@@ -197,3 +196,14 @@ def test_temperature_trajectory_is_real_widget_not_placeholder(app):
         w = aw.create("temperature_trajectory")
     assert not isinstance(w, aw.PlaceholderCard)
     assert isinstance(w, aw.TemperatureTrajectoryWidget)
+
+
+def test_cooldown_history_is_real_widget_not_placeholder(app):
+    """After F3-Cycle3, cooldown_history is a CooldownHistoryWidget."""
+    from unittest.mock import MagicMock, patch
+
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = aw.create("cooldown_history")
+    assert not isinstance(w, aw.PlaceholderCard)
+    assert isinstance(w, aw.CooldownHistoryWidget)

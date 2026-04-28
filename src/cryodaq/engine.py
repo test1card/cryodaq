@@ -402,6 +402,93 @@ def _try_activate_calibration_acquisition(
         logger.warning("Failed to activate calibration acquisition", exc_info=True)
 
 
+async def _run_cooldown_history_command(
+    cmd: dict[str, Any],
+    experiment_manager: ExperimentManager,
+    writer: Any,
+) -> dict[str, Any]:
+    """Return a list of past completed cooldowns (spec §5, F3-Cycle3).
+
+    Mines experiment metadata JSON files for cooldown phase transitions,
+    filters to COMPLETED experiments where cooldown ended, and fetches
+    T1 readings at cooldown boundaries from the readings store.
+    """
+    import json as _json
+
+    limit = int(cmd.get("limit", 20))
+    entries = await asyncio.to_thread(
+        experiment_manager.list_archive_entries,
+        sort_by="start_time",
+        descending=True,
+    )
+    cooldowns: list[dict] = []
+    for entry in entries:
+        if len(cooldowns) >= limit:
+            break
+        if entry.status != "COMPLETED":
+            continue
+        try:
+            payload = _json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        phases: list[dict] = payload.get("phases", [])
+        cooldown_phase = next(
+            (
+                p
+                for p in phases
+                if p.get("phase") == "cooldown" and p.get("ended_at") is not None
+            ),
+            None,
+        )
+        if cooldown_phase is None:
+            continue
+        cooldown_started_at = cooldown_phase.get("started_at")
+        cooldown_ended_at = cooldown_phase.get("ended_at")
+        if not cooldown_started_at or not cooldown_ended_at:
+            continue
+        try:
+            started_dt = datetime.fromisoformat(cooldown_started_at).astimezone(UTC)
+            ended_dt = datetime.fromisoformat(cooldown_ended_at).astimezone(UTC)
+            duration_hours = round(
+                (ended_dt - started_dt).total_seconds() / 3600, 3
+            )
+        except Exception:
+            continue
+        start_t: float | None = None
+        end_t: float | None = None
+        try:
+            t_hist = await writer.read_readings_history(
+                channels=["Т1"],
+                from_ts=started_dt.timestamp(),
+                to_ts=ended_dt.timestamp(),
+                limit_per_channel=500,
+            )
+            t_pts = t_hist.get("Т1", [])
+            if t_pts:
+                start_t = round(float(t_pts[0][1]), 2)
+                end_t = round(float(t_pts[-1][1]), 2)
+        except Exception:
+            pass
+        cooldowns.append(
+            {
+                "experiment_id": entry.experiment_id,
+                "sample_name": entry.sample,
+                "started_at": entry.start_time.isoformat(),
+                "cooldown_started_at": cooldown_started_at,
+                "cooldown_ended_at": cooldown_ended_at,
+                "duration_hours": duration_hours,
+                "start_T_kelvin": start_t,
+                "end_T_kelvin": end_t,
+                "phase_transitions": [
+                    {"phase": p.get("phase"), "ts": p.get("started_at")}
+                    for p in phases
+                    if p.get("started_at")
+                ],
+            }
+        )
+    return {"ok": True, "cooldowns": cooldowns}
+
+
 def _run_experiment_command(
     action: str,
     cmd: dict[str, Any],
@@ -1431,6 +1518,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                     "ok": True,
                     "data": {ch: pts for ch, pts in data.items()},
                 }
+            if action == "cooldown_history_get":
+                return await _run_cooldown_history_command(
+                    cmd, experiment_manager, writer
+                )
             if action in {"log_entry", "log_get"}:
                 return await _run_operator_log_command(
                     action,
