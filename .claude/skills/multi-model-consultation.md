@@ -339,6 +339,29 @@ Is the task a code review of an existing diff?
            → architect approves BEFORE action
 ```
 
+### 2.1 Calibrated task-class routing matrix
+
+Empirical from 2026-04-30 calibration session (T1–T7). Overrides the
+generic tree above when task class is unambiguous.
+
+| Task class | Primary | Secondary / verify | Avoid |
+|---|---|---|---|
+| Bug hypothesis (asyncio / ZMQ / concurrency) | Codex | Chimera or MiniMax for independent verify | — |
+| Code review (verify correctness only — no invention) | GLM | Gemini secondary | Codex, Qwen3, Kimi — over-flag on clean code (T3) |
+| Spec design | Codex + GLM + Gemini parallel | — | — (all three add unique insight, T4) |
+| Code generation | Codex + GLM | — | Gemini — fabricated `getattr(runtime, "last_i", 0.0)` in T5 |
+| Long-context digest (>20KB) | Codex + Qwen3 | — | Others — only Codex + Qwen3 identified meta-arc in T6 96KB CHANGELOG |
+| Math derivation | Any single model | — | No discrimination between models (T7 clean sweep) |
+
+**Key calibration T3 finding:** high-reasoning models (Codex, Qwen3, Kimi) all produced
+DRIFT verdict on architecturally-consistent code during a consistency check task. GLM
+was the only 3/3 CONSISTENT. For tasks asking "is this consistent?" — route to GLM
+first; reserve Codex for tasks asking "what is wrong?".
+
+**Calibration T5 finding:** Gemini hallucinated a non-existent method
+`getattr(runtime, "last_i", 0.0)` during code generation. Gemini may fabricate
+plausible-looking repo-specific attributes; always verify against actual source.
+
 ## 3. Formation patterns
 
 These are the only patterns you should use. Invent new ones only with
@@ -437,6 +460,26 @@ each review it → CC synthesizes all three → architect approves.
 
 Requires architect to be available. Do NOT use as coordinator-solo
 decision mechanism.
+
+### 3.7 Calibrated task routing (~5%)
+
+Use the 2.1 matrix when task class is unambiguous. Replaces ad-hoc
+model selection for the six task classes listed.
+
+Key distinction from 3.1–3.6: routing is driven by empirical
+calibration data, not just model profile heuristics. When the matrix
+says "avoid Codex for consistency review" — that is not a heuristic,
+it is a measured 0/3 result on a clean-code consistency task (T3).
+
+For consistency-review tasks specifically:
+- Start with GLM (3/3 CONSISTENT on T3 — best calibrated for this class)
+- Add Gemini as secondary if architectural context is needed
+- Do NOT use Codex / Qwen3 / Kimi as primary reviewers for "is this
+  consistent?" tasks — they will over-flag clean code
+
+For spec-design tasks specifically:
+- Dispatch Codex + GLM + Gemini in parallel (formation 3.5-style)
+- All three contributed unique insights in T4; no single model was sufficient
 
 ## 4. Consultation protocol (from ORCHESTRATION.md §4)
 
@@ -557,15 +600,40 @@ model per the log, not the self-claim.
 
 Per session (rough):
 
-| Model | Typical session cost | Budget per week |
-|---|---|---|
-| Codex | 1 review = 0.5-1 hr of 5hr window | 10-15 reviews/week before throttle |
-| Gemini | 1 request = free, but wall-clock 1-90 min | effectively unlimited |
-| GLM | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
-| Kimi | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
-| R1-0528 | $1-4 per session (CoT overhead) | $20 budget ≈ 5-20 sessions |
-| Qwen3-Coder | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
-| CC (coordinator) | architect weekly quota | watch architect |
+| Model | Typical session cost | Budget per week | max_tokens default |
+|---|---|---|---|
+| Codex | 1 review = 0.5-1 hr of 5hr window | 10-15 reviews/week before throttle | n/a (CLI) |
+| Gemini | 1 request = free, but wall-clock 1-90 min | effectively unlimited | n/a (CLI) |
+| GLM | $0.5-2 per session | $20 budget ≈ 10-40 sessions | 32000 |
+| Kimi | $0.5-2 per session | $20 budget ≈ 10-40 sessions | 32000 (but see below) |
+| R1-0528 | $1-4 per session (CoT overhead) | $20 budget ≈ 5-20 sessions | 32000 (but see below) |
+| Qwen3-Coder | $0.5-2 per session | $20 budget ≈ 10-40 sessions | 32000 |
+| MiniMax-M2.5 | $0.5-2 per session | $20 budget ≈ 10-40 sessions | 8192 (hard cap) |
+| Chimera (TNG) | $0.5-2 per session | $20 budget ≈ 10-40 sessions | 32000 (but see below) |
+| CC (coordinator) | architect weekly quota | watch architect | n/a |
+
+**Chutes API max_tokens discipline (2026-04-30):**
+Chutes models reject `max_tokens=null`. Always set explicit cap. Default: `max_tokens=32000`
+(high enough that models hit natural stop conditions, not artificial truncation).
+Per-model practical caps observed in calibration:
+- MiniMax-M2.5: 8192 non-streaming hard cap — always set ≤8192
+- R1-0528, Kimi-K2.6: 8000 stable in practice
+- GLM-5.1, Qwen3-Coder: 4000 stable; 32000 request is fine, model self-caps
+
+**Kimi long-prompt instability (2026-04-30):**
+Kimi-K2.6 connection drops on prompts >50KB approximately.
+- 2026-04-29 metaswarm 375KB prompts → all PARSE_ERROR
+- 2026-04-30 calibration T6 96KB prompt → failed
+- T4 spec design ~5KB → succeeded
+Discipline: keep Kimi prompts ≤10KB (conservative) or ≤50KB (risky).
+Do NOT dispatch Kimi for long-context digest unless prompt fits safely under threshold.
+
+**R1 / Chimera capacity throttling (2026-04-30):**
+R1-0528 showed 33% failure rate during calibration (daytime UTC saturation).
+Chimera (TNG) showed 50% failure rate.
+For overnight or multi-wave dispatch including either: add ≥30 min inter-wave delay.
+Do not include R1 or Chimera in reliability-critical dispatch where failure would
+block the session. Prefer Codex + Qwen3-Coder + MiniMax for overnight reliability.
 
 Hard budget rules:
 
@@ -695,6 +763,30 @@ identified.
 **Do:** ALWAYS pass `--model gpt-5.5 --reasoning high` AND repeat in
 prompt body first two lines: `Model: gpt-5.5 / Reasoning effort: high`.
 (Or the current latest Codex model — gpt-5.5 as of 2026-04-24.)
+
+### 7.8 High-reasoning models over-flag on consistency review
+
+**What happened:** 2026-04-30 calibration T3 — narrow code review of
+HF1+HF2 commit (189c4b7). The commit was architect-reviewed and correct.
+Codex, Qwen3, and Kimi all returned DRIFT verdict. GLM returned
+CONSISTENT (3/3). The DRIFT verdicts from high-reasoning models were
+false positives — the code was consistent with documented invariants.
+
+**Why:** high-reasoning models apply adversarial pressure by default.
+On "verify correctness" tasks they search for problems and find
+pattern-matches-to-problems even when no actual problem exists.
+This is a feature for adversarial review, a bug for consistency check.
+
+**Don't:** use Codex, Qwen3, or Kimi as the primary reviewer for
+"does this code match the spec / is this consistent?" tasks.
+They are calibrated for "what is wrong?" not "is this right?"
+
+**Do:** use GLM first for consistency-check tasks (§2.1 matrix).
+Use Codex for adversarial review only when you want it to hunt for
+problems. Separate the task class from the model selection — a model
+good at finding bugs is bad at confirming absence of bugs.
+
+**Ref:** artifacts/calibration/2026-04-30/CALIBRATION-MATRIX.md T3.
 
 ## 8. Templates
 
