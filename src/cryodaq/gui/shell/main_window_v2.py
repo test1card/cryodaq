@@ -625,7 +625,7 @@ class MainWindowV2(QMainWindow):
         # tied to one experiment; clear them when the active experiment changes
         # so a newly-opened AnalyticsView does not replay stale data.
         active = status.get("active_experiment")
-        new_exp_id = active.get("id") if isinstance(active, dict) else None
+        new_exp_id = active.get("experiment_id") if isinstance(active, dict) else None
         if new_exp_id != self._analytics_last_exp_id:
             self._analytics_snapshot.pop("set_cooldown", None)
             self._analytics_snapshot.pop("set_experiment_status", None)
@@ -662,7 +662,7 @@ class MainWindowV2(QMainWindow):
         active = self._latest_experiment_status.get("active_experiment")
         if not isinstance(active, dict):
             return None
-        value = active.get("id")
+        value = active.get("experiment_id")
         return str(value) if value is not None else None
 
     def _on_experiment_clicked(self) -> None:

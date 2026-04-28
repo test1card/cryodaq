@@ -162,7 +162,12 @@ def _mono_value_label(text: str) -> QLabel:
 class PlaceholderCard(QWidget):
     """Placeholder card for widgets whose data pipeline is not yet wired."""
 
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        subtitle: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._title = title
         card = _card("analyticsPlaceholder")
@@ -171,7 +176,8 @@ class PlaceholderCard(QWidget):
         layout.setSpacing(theme.SPACE_2)
         layout.addWidget(_title_label(title))
         layout.addStretch()
-        layout.addWidget(_muted_label(f"{title} — данные появятся при переходе фазы."))
+        body = subtitle if subtitle is not None else f"{title} — данные появятся при переходе фазы."
+        layout.addWidget(_muted_label(body))
         layout.addStretch()
 
         root = QVBoxLayout(self)
@@ -695,7 +701,11 @@ class ExperimentSummaryWidget(QWidget):
 
 
 def _r_thermal_placeholder() -> QWidget:
-    return PlaceholderCard("R тепл.")
+    # Unblock criterion: F8 (cooldown ML upgrade or new R_thermal engine service).
+    return PlaceholderCard(
+        "R тепловое сопротивление",
+        subtitle="данные источника ожидают (зависит от F8)",
+    )
 
 
 def _temperature_trajectory_placeholder() -> QWidget:

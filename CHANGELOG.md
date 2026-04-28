@@ -11,6 +11,28 @@
 
 ### Added
 
+- **F3 analytics data wiring — W1…W3 + F4 lazy replay** — Five-cycle batch
+  completing Phase III.C analytics placeholder → live data wiring:
+  - **W5 / F4** (Cycle 1): shell-level F4 lazy-open snapshot replay.
+    `MainWindowV2._push_analytics` caches last-value per setter; replayed into
+    `AnalyticsView` on lazy open. 19 new tests. (`feat/f3-cycle1`, merged)
+  - **W1 `temperature_trajectory`** (Cycle 2): `TemperatureTrajectoryWidget` —
+    multi-group `pg.GraphicsLayoutWidget` with per-group PlotItems for
+    independent Y-axis scaling. Fetches 7-day history via `readings_history`
+    ZMQ command on construction. 14 new tests. (`feat/f3-cycle2`)
+  - **W2 `cooldown_history`** (Cycle 3): `CooldownHistoryWidget` — one-shot
+    scatter plot of past cooldown durations. New `cooldown_history_get` engine
+    command mines JSON metadata files per experiment. `list_archive_entries`
+    wrapped in `asyncio.to_thread` (event-loop safety). 21 new tests.
+    (`feat/f3-cycle3`)
+  - **W3 `experiment_summary`** (Cycle 4): `ExperimentSummaryWidget` — header,
+    duration, phase breakdown, alarm count (via existing `alarm_v2_history`
+    command), artifact links. `set_experiment_status` setter added to
+    `AnalyticsView` + `MainWindowV2` routing. 21 new tests. (`feat/f3-cycle4`)
+  - **Cycle 5**: W4 `r_thermal_placeholder` text updated (F8 dependency note);
+    cross-widget lifecycle integration tests (`tests/integration/`);
+    CHANGELOG + ROADMAP updated. (`feat/f3-cycle5`)
+
 - **`.cof` Chebyshev coefficient export** — `export_curve_cof()` added to
   `CalibrationStore`. Portable text format: per-zone raw Chebyshev
   coefficients re-evaluatable via `numpy.polynomial.chebyshev.chebval()`
