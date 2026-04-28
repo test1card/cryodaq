@@ -179,9 +179,13 @@ def test_keithley_power_smua_smub_grid(app):
         "r_thermal_placeholder",
         "temperature_trajectory",
         "cooldown_history",
-        "experiment_summary",
     ],
 )
 def test_placeholder_widget_constructs(app, widget_id):
     w = aw.create(widget_id)
     assert isinstance(w, aw.PlaceholderCard)
+
+
+def test_experiment_summary_widget_constructs(app):
+    w = aw.create("experiment_summary")
+    assert isinstance(w, aw.ExperimentSummaryWidget)

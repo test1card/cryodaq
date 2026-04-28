@@ -24,11 +24,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QVBoxLayout,
     QWidget,
@@ -513,6 +514,181 @@ class KeithleyPowerWidget(QWidget):
             label.setText(f"{float(reading.value):.3g} {unit}")
 
 
+class ExperimentSummaryWidget(QWidget):
+    """Post-experiment summary card (W3, disassembly/main, F3-Cycle4).
+
+    Receives experiment status via set_experiment_status().
+    On data arrival: populates header/duration/artifacts from status dict,
+    then issues alarm_v2_history ZMQ fetch for alarm count.
+    Empty state rendered when status is None or experiment is not yet
+    finalized.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._alarm_worker = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        card = _card("analyticsExperimentSummary")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        lay.setSpacing(theme.SPACE_2)
+        lay.addWidget(_title_label("Сводка эксперимента"))
+
+        self._empty_label = _muted_label("Эксперимент не завершён")
+        lay.addWidget(self._empty_label)
+
+        self._content = QWidget()
+        self._content.setStyleSheet("background: transparent;")
+        c_lay = QVBoxLayout(self._content)
+        c_lay.setContentsMargins(0, 0, 0, 0)
+        c_lay.setSpacing(theme.SPACE_1)
+
+        self._id_label = self._add_info_row(c_lay, "Эксперимент")
+        self._sample_label = self._add_info_row(c_lay, "Образец")
+        self._operator_label = self._add_info_row(c_lay, "Оператор")
+        self._date_label = self._add_info_row(c_lay, "Начало")
+        self._duration_label = self._add_info_row(c_lay, "Продолжительность")
+        self._phases_label = self._add_info_row(c_lay, "Фазы")
+        self._phases_label.setWordWrap(True)
+        self._alarm_label = self._add_info_row(c_lay, "Алармы")
+        self._docx_label = self._add_info_row(c_lay, "Отчёт DOCX")
+        self._docx_label.setWordWrap(True)
+        self._pdf_label = self._add_info_row(c_lay, "Отчёт PDF")
+        self._pdf_label.setWordWrap(True)
+
+        c_lay.addStretch()
+        self._content.setHidden(True)
+        lay.addWidget(self._content, stretch=1)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(card)
+
+    def _add_info_row(self, layout: QVBoxLayout, label_text: str) -> QLabel:
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(theme.SPACE_2)
+
+        key = QLabel(f"{label_text}:")
+        key_font = QFont(theme.FONT_BODY)
+        key_font.setPixelSize(theme.FONT_BODY_SIZE)
+        key.setFont(key_font)
+        key.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        key.setFixedWidth(140)
+
+        val = QLabel("—")
+        val_font = QFont(theme.FONT_BODY)
+        val_font.setPixelSize(theme.FONT_BODY_SIZE)
+        val.setFont(val_font)
+        val.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+
+        h.addWidget(key)
+        h.addWidget(val, stretch=1)
+        layout.addWidget(row)
+        return val
+
+    def set_experiment_status(self, status: dict | None) -> None:
+        if status is None:
+            self._show_empty()
+            return
+        active = status.get("active_experiment")
+        if not isinstance(active, dict):
+            self._show_empty()
+            return
+        self._populate(active, status.get("phases", []))
+
+    def _show_empty(self) -> None:
+        self._empty_label.setHidden(False)
+        self._content.setHidden(True)
+
+    def _populate(self, active: dict, phases: list) -> None:
+        from datetime import UTC
+        from datetime import datetime as _dt
+        from pathlib import Path as _Path
+
+        self._id_label.setText(active.get("experiment_id") or "—")
+        self._sample_label.setText(active.get("sample") or "—")
+        self._operator_label.setText(active.get("operator") or "—")
+
+        start_ts: float | None = None
+        start_str = active.get("start_time") or ""
+        end_str = active.get("end_time") or ""
+        try:
+            start_dt = _dt.fromisoformat(start_str)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=UTC)
+            self._date_label.setText(start_dt.strftime("%Y-%m-%d %H:%M UTC"))
+            start_ts = start_dt.timestamp()
+            if end_str:
+                end_dt = _dt.fromisoformat(end_str)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=UTC)
+                total_h = (end_dt - start_dt).total_seconds() / 3600
+                self._duration_label.setText(f"{total_h:.1f} ч")
+            else:
+                self._duration_label.setText("в процессе")
+        except (ValueError, TypeError):
+            self._date_label.setText("—")
+            self._duration_label.setText("—")
+
+        phase_parts: list[str] = []
+        for p in phases:
+            name = str(p.get("phase") or "—")
+            ps = p.get("started_at") or ""
+            pe = p.get("ended_at") or ""
+            try:
+                dt_s = _dt.fromisoformat(ps)
+                dt_e = _dt.fromisoformat(pe)
+                ph_h = (dt_e - dt_s).total_seconds() / 3600
+                phase_parts.append(f"{name}: {ph_h:.1f} ч")
+            except (ValueError, TypeError):
+                phase_parts.append(f"{name}: —")
+        self._phases_label.setText(", ".join(phase_parts) if phase_parts else "—")
+
+        artifact_dir = active.get("artifact_dir") or ""
+        if artifact_dir:
+            base = _Path(artifact_dir)
+            self._docx_label.setText(str(base / "reports" / "report_editable.docx"))
+            self._pdf_label.setText(str(base / "reports" / "report_raw.pdf"))
+        else:
+            self._docx_label.setText("—")
+            self._pdf_label.setText("—")
+
+        if start_ts is not None:
+            self._fetch_alarms(start_ts)
+        else:
+            self._alarm_label.setText("—")
+
+        self._empty_label.setHidden(True)
+        self._content.setHidden(False)
+
+    def _fetch_alarms(self, start_ts: float) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        cmd = {"cmd": "alarm_v2_history", "start_ts": start_ts, "limit": 500}
+        self._alarm_worker = ZmqCommandWorker(cmd, parent=self)
+        self._alarm_worker.finished.connect(self._on_alarms_loaded)
+        self._alarm_worker.start()
+
+    @Slot(dict)
+    def _on_alarms_loaded(self, result: dict) -> None:
+        if not result.get("ok"):
+            self._alarm_label.setText("—")
+            return
+        history = result.get("history", [])
+        triggered = [e for e in history if e.get("transition") == "TRIGGERED"]
+        warnings = sum(1 for e in triggered if str(e.get("level", "")).upper() == "WARNING")
+        criticals = sum(1 for e in triggered if str(e.get("level", "")).upper() == "CRITICAL")
+        total = len(triggered)
+        self._alarm_label.setText(f"{total} ({warnings} пред. / {criticals} крит.)")
+
+
 # ---------------------------------------------------------------------------
 # Placeholder widget factories
 # ---------------------------------------------------------------------------
@@ -548,4 +724,4 @@ register(WIDGET_KEITHLEY_POWER, KeithleyPowerWidget)
 register(WIDGET_R_THERMAL_PLACEHOLDER, _r_thermal_placeholder)
 register(WIDGET_TEMPERATURE_TRAJECTORY, _temperature_trajectory_placeholder)
 register(WIDGET_COOLDOWN_HISTORY, _cooldown_history_placeholder)
-register(WIDGET_EXPERIMENT_SUMMARY, _experiment_summary_placeholder)
+register(WIDGET_EXPERIMENT_SUMMARY, ExperimentSummaryWidget)

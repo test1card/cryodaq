@@ -133,7 +133,7 @@ def test_phase_replayed_into_view_on_first_open():
     _stop_timers(w)
 
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_001"},
+        "active_experiment": {"experiment_id":"exp_001"},
         "current_phase": "cooldown",
     })
     assert w._analytics_view is None
@@ -207,7 +207,7 @@ def test_new_experiment_clears_cooldown_cache():
 
     # New experiment arrives with a different ID.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_002"},
+        "active_experiment": {"experiment_id":"exp_002"},
         "current_phase": "preparation",
     })
     assert "set_cooldown" not in w._analytics_snapshot
@@ -223,7 +223,7 @@ def test_experiment_end_clears_cooldown_cache():
 
     # Start experiment + cooldown data.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_abc"},
+        "active_experiment": {"experiment_id":"exp_abc"},
         "current_phase": "cooldown",
     })
     w._dispatch_reading(_cooldown_reading(t_hours=1.5))
@@ -246,7 +246,7 @@ def test_experiment_id_change_clears_all_scoped_caches():
 
     # Establish exp_old and populate all experiment-scoped caches.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_old"},
+        "active_experiment": {"experiment_id":"exp_old"},
         "current_phase": "cooldown",
     })
     w._dispatch_reading(_cooldown_reading(t_hours=5.0))
@@ -267,7 +267,7 @@ def test_experiment_id_change_clears_all_scoped_caches():
 
     # New experiment starts — exp_new replaces exp_old.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_new"},
+        "active_experiment": {"experiment_id":"exp_new"},
         "current_phase": "preparation",
     })
 
@@ -285,14 +285,14 @@ def test_same_experiment_id_does_not_clear_cache():
     _stop_timers(w)
 
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_keep"},
+        "active_experiment": {"experiment_id":"exp_keep"},
         "current_phase": "warmup",
     })
     w._dispatch_reading(_cooldown_reading(t_hours=9.0))
 
     # Same experiment, different phase — cache must survive.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_keep"},
+        "active_experiment": {"experiment_id":"exp_keep"},
         "current_phase": "measurement",
     })
     assert "set_cooldown" in w._analytics_snapshot
@@ -323,7 +323,7 @@ def test_temperature_cache_cleared_on_experiment_change():
     assert w._analytics_temperature_snapshot
 
     w._on_experiment_status_received({
-        "active_experiment": {"id": "new_exp"},
+        "active_experiment": {"experiment_id":"new_exp"},
         "current_phase": "cooldown",
     })
     assert not w._analytics_temperature_snapshot
@@ -338,7 +338,7 @@ def test_keithley_cache_cleared_on_experiment_change():
 
     # Establish an active experiment so the ID transition is tracked.
     w._on_experiment_status_received({
-        "active_experiment": {"id": "exp_keithley"},
+        "active_experiment": {"experiment_id":"exp_keithley"},
         "current_phase": "measurement",
     })
     w._analytics_keithley_snapshot["KEITHLEY_2604B_1/smua/voltage"] = _keithley_reading()
@@ -474,16 +474,68 @@ def test_set_fault_never_added_to_snapshot():
 
 
 def test_snapshot_replay_skips_missing_setter_gracefully():
-    """If a setter name in the cache does not exist on AnalyticsView (e.g.
-    set_experiment_status added in Cycle 4), the replay must not crash."""
+    """If a setter name in the cache does not exist on AnalyticsView,
+    the replay must not crash."""
     _app()
     reset_time_window_controller()
     w = MainWindowV2()
     _stop_timers(w)
 
-    # Manually plant a future setter name in the cache.
-    w._analytics_snapshot["set_experiment_status"] = ({"experiment_id": "x"},)
+    # Manually plant a setter name that does not exist on AnalyticsView.
+    w._analytics_snapshot["set_nonexistent_setter"] = ({"data": "x"},)
 
-    # Opening the view must not raise even though the setter doesn't exist yet.
+    # Opening the view must not raise even though the setter doesn't exist.
     w._ensure_overlay("analytics")
     assert w._analytics_view is not None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# F3-Cycle4 — set_experiment_status routing
+# ──────────────────────────────────────────────────────────────────────────────
+
+_EXPERIMENT_STATUS = {
+    "active_experiment": {
+        "experiment_id": "exp_001",
+        "sample": "Si",
+        "operator": "Иванов",
+        "start_time": "2026-04-15T10:00:00+00:00",
+        "end_time": None,
+        "artifact_dir": "",
+        "status": "RUNNING",
+    },
+    "current_phase": "cooldown",
+    "phases": [],
+}
+
+
+def test_experiment_status_cached_in_analytics_snapshot():
+    """_on_experiment_status_received must store status in set_experiment_status
+    snapshot entry so the ExperimentSummaryWidget gets it on lazy open."""
+    _app()
+    reset_time_window_controller()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    w._on_experiment_status_received(_EXPERIMENT_STATUS)
+
+    assert "set_experiment_status" in w._analytics_snapshot
+    cached = w._analytics_snapshot["set_experiment_status"][0]
+    assert cached["active_experiment"]["experiment_id"] == "exp_001"
+
+
+def test_experiment_status_forwarded_to_analytics_view_when_open():
+    """When AnalyticsView is open, _on_experiment_status_received must
+    forward the status to analytics_view.set_experiment_status."""
+    _app()
+    reset_time_window_controller()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    w._ensure_overlay("analytics")
+    w._on_experiment_status_received(_EXPERIMENT_STATUS)
+
+    assert w._analytics_view._last_experiment_status is not None
+    assert (
+        w._analytics_view._last_experiment_status["active_experiment"]["experiment_id"]
+        == "exp_001"
+    )
