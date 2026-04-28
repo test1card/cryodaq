@@ -404,6 +404,13 @@ class MainWindowV2(QMainWindow):
             and self._conductivity_panel is not None
         ):
             self._conductivity_panel.on_reading(reading)
+        # F3-Cycle2: route temperature readings to analytics view + shell cache.
+        # All K-unit readings accumulate in _analytics_temperature_snapshot so
+        # TemperatureTrajectoryWidget receives a full snapshot on first open.
+        if reading.unit == "K":
+            self._analytics_temperature_snapshot[channel] = reading
+            if self._analytics_view is not None:
+                self._analytics_view.set_temperature_readings({channel: reading})
         if (
             "/smua/" in channel
             or "/smub/" in channel
