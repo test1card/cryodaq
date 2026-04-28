@@ -51,7 +51,7 @@ contract + multi-model-consultation skill end-to-end.
 | How to spawn CC teammates | `.claude/skills/cryodaq-team-lead.md` |
 | B1 bug full evidence | `docs/bug_B1_zmq_idle_death_handoff.md` |
 | 2026-04-20 session chronology | `HANDOFF_2026-04-20_GLM.md` + `SESSION_DETAIL_2026-04-20.md` |
-| Codex technical dossier on transport layer | `CODEX_ARCHITECTURE_CONTROL_PLANE.md` |
+| Codex technical dossier on transport layer | `docs/codex-architecture-control-plane.md` |
 
 ---
 
