@@ -414,10 +414,13 @@ class MainWindowV2(QMainWindow):
             if channel.endswith("/power") and self._conductivity_panel is not None:
                 self._conductivity_panel.on_reading(reading)
             # F4: accumulate Keithley power readings into analytics snapshot.
-            # KeithleyPowerWidget.set_keithley_readings expects dict[channel→Reading]
-            # with keys like "<instrument>/smua/voltage" — the widget extracts
-            # parts[-2] (smua/smub) and parts[-1] (voltage/current/power).
-            if channel.split("/")[-1] in ("voltage", "current", "power"):
+            # Must guard on SMU sub-path explicitly — the outer condition also
+            # matches analytics/keithley_channel_state/* channels which lack
+            # the smua/smub segment KeithleyPowerWidget expects at parts[-2].
+            if (
+                ("/smua/" in channel or "/smub/" in channel)
+                and channel.split("/")[-1] in ("voltage", "current", "power")
+            ):
                 self._analytics_keithley_snapshot[channel] = reading
                 if self._analytics_view is not None:
                     self._analytics_view.set_keithley_readings({channel: reading})
@@ -625,7 +628,6 @@ class MainWindowV2(QMainWindow):
         new_exp_id = active.get("id") if isinstance(active, dict) else None
         if new_exp_id != self._analytics_last_exp_id:
             self._analytics_snapshot.pop("set_cooldown", None)
-            self._analytics_snapshot.pop("set_experiment_status", None)
             self._analytics_temperature_snapshot.clear()
             self._analytics_keithley_snapshot.clear()
             self._analytics_last_exp_id = new_exp_id

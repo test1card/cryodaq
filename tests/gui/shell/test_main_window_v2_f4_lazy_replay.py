@@ -234,6 +234,48 @@ def test_experiment_end_clears_cooldown_cache():
     assert "set_cooldown" not in w._analytics_snapshot
 
 
+def test_experiment_id_change_clears_all_scoped_caches():
+    """Starting a NEW experiment while a prior one was running must clear
+    all experiment-scoped caches (cooldown + accumulating temperature/keithley)
+    so that the new experiment's view does not receive stale data from the
+    previous run."""
+    _app()
+    reset_time_window_controller()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    # Establish exp_old and populate all experiment-scoped caches.
+    w._on_experiment_status_received({
+        "active_experiment": {"id": "exp_old"},
+        "current_phase": "cooldown",
+    })
+    w._dispatch_reading(_cooldown_reading(t_hours=5.0))
+    w._analytics_temperature_snapshot["Т1"] = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218S_1",
+        channel="Т1",
+        value=150.0,
+        unit="K",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    w._dispatch_reading(_keithley_reading(measurement="voltage", value=0.9))
+
+    assert "set_cooldown" in w._analytics_snapshot
+    assert w._analytics_temperature_snapshot
+    assert w._analytics_keithley_snapshot
+
+    # New experiment starts — exp_new replaces exp_old.
+    w._on_experiment_status_received({
+        "active_experiment": {"id": "exp_new"},
+        "current_phase": "preparation",
+    })
+
+    assert "set_cooldown" not in w._analytics_snapshot, "cooldown must clear on exp change"
+    assert not w._analytics_temperature_snapshot, "temperature snapshot must clear on exp change"
+    assert not w._analytics_keithley_snapshot, "keithley snapshot must clear on exp change"
+
+
 def test_same_experiment_id_does_not_clear_cache():
     """Repeated status pushes from the same experiment must NOT clear
     the cache — only a change in experiment ID triggers invalidation."""
