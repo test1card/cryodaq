@@ -1152,15 +1152,26 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _sd_enabled:
         _ch_mgr = get_channel_manager()
         # Build correlation groups from config; channel ids use display prefix (Т1→T1)
-        sensor_diag = SensorDiagnosticsEngine(config=_sd_cfg)
+        _sd_alarm_publisher = (
+            alarm_v2_state_mgr
+            if _sd_cfg.get("alarm_publishing_enabled", True)
+            else None
+        )
+        sensor_diag = SensorDiagnosticsEngine(
+            config=_sd_cfg,
+            alarm_publisher=_sd_alarm_publisher,
+            warning_duration_s=float(_sd_cfg.get("warning_duration_s", 300.0)),
+            critical_duration_s=float(_sd_cfg.get("critical_duration_s", 900.0)),
+        )
         # Set display names from channel_manager
         sensor_diag.set_channel_names(
             {ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()}
         )
         logger.info(
-            "SensorDiagnostics: enabled, update_interval=%ds, groups=%d",
+            "SensorDiagnostics: enabled, update_interval=%ds, groups=%d, alarm_publishing=%s",
             _sd_cfg.get("update_interval_s", 10),
             len(_sd_cfg.get("correlation_groups", {})),
+            _sd_alarm_publisher is not None,
         )
     else:
         logger.info("SensorDiagnostics: отключён (plugins.yaml не найден или enabled=false)")
@@ -1264,14 +1275,24 @@ async def _run_engine(*, mock: bool = False) -> None:
             return
 
     async def _sensor_diag_tick() -> None:
-        """Periodically recompute sensor diagnostics."""
+        """Periodically recompute sensor diagnostics and dispatch alarm notifications."""
         if sensor_diag is None:
             return
         interval = _sd_cfg.get("update_interval_s", 10)
+        _notify_telegram = _sd_cfg.get("notify_telegram", True)
         while True:
             await asyncio.sleep(interval)
             try:
-                sensor_diag.update()
+                new_events = sensor_diag.update()
+                for event in new_events:
+                    if _notify_telegram and telegram_bot is not None:
+                        msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                        t = asyncio.create_task(
+                            telegram_bot._send_to_all(msg),
+                            name=f"diag_tg_{event.alarm_id}",
+                        )
+                        _alarm_dispatch_tasks.add(t)
+                        t.add_done_callback(_alarm_dispatch_tasks.discard)
             except Exception as exc:
                 logger.error("SensorDiagnostics tick error: %s", exc)
 

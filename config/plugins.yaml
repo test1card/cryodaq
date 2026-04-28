@@ -20,6 +20,11 @@ sensor_diagnostics:
     shield:    [Т1, Т2, Т3, Т4, Т5, Т6, Т7, Т8]
     cold:      [Т9, Т10, Т11, Т12, Т13, Т14]
     periphery: [Т15, Т16, Т17, Т18, Т19, Т20]
+  # F10 alarm publishing (sensor_diagnostics → alarm engine v2)
+  alarm_publishing_enabled: true   # false → diagnostics display only, no alarms
+  warning_duration_s: 300.0        # 5 min sustained anomaly → warning alarm
+  critical_duration_s: 900.0       # 15 min sustained anomaly → critical alarm
+  notify_telegram: true            # dispatch Telegram when alarm triggered
 
 vacuum_trend:
   enabled: true
