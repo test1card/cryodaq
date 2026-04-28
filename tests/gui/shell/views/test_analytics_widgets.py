@@ -179,7 +179,7 @@ def test_keithley_power_smua_smub_grid(app):
         "r_thermal_placeholder",
         # temperature_trajectory wired in F3-Cycle2 — no longer a PlaceholderCard
         # cooldown_history wired in F3-Cycle3 — no longer a PlaceholderCard
-        "experiment_summary",  # F3-Cycle4 still pending
+        # experiment_summary wired in F3-Cycle4 — no longer a PlaceholderCard
     ],
 )
 def test_placeholder_widget_constructs(app, widget_id):
@@ -207,3 +207,8 @@ def test_cooldown_history_is_real_widget_not_placeholder(app):
         w = aw.create("cooldown_history")
     assert not isinstance(w, aw.PlaceholderCard)
     assert isinstance(w, aw.CooldownHistoryWidget)
+
+
+def test_experiment_summary_widget_constructs(app):
+    w = aw.create("experiment_summary")
+    assert isinstance(w, aw.ExperimentSummaryWidget)
