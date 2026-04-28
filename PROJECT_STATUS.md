@@ -1,10 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-19
+**Дата:** 2026-04-30 *(обновлено в рамках repo cleanup 2026-04-30)*
 **Ветка:** master
-**Последний commit:** `e4a60f3` (`feat(ui): II.2 ArchiveOverlay + K6 bulk export migration — DS v1.0.1`)
-**Тесты:** 1 368 passed, 2 skipped
-**Фронтир:** Phase II.2 ArchiveOverlay (`e4a60f3`) и II.3 OperatorLog (`9676acc`) закрыты вслед за II.6 Keithley (`96adf5a`); следующий блок — II.5 ConductivityOverlay.
+**Последний commit:** `35f2798` (`release: v0.42.0 — Safety hotfix HF1+HF2`)
+**Тесты:** 1 931 passed, 4 skipped
+**Фронтир:** v0.42.0 shipped (HF1+HF2). Open feature work: F19–F25 (см. ROADMAP.md). Phase II UI rebuild в процессе — статус см. ниже.
 
 ---
 
@@ -12,14 +12,14 @@
 
 | Метрика | Значение |
 |---|---|
-| Python файлы (`src/cryodaq/`) | **139** |
-| Строки кода (`src/cryodaq/`) | **44 195** |
-| Тестовые файлы (`tests/`) | **150** |
-| Строки тестов (`tests/`) | **24 275** |
-| Тесты | **1 368 passed, 2 skipped** |
-| Coverage (full suite) | **66%** (stale — last measured 2026-04-17; re-run pending) |
+| Python файлы (`src/cryodaq/`) | **145** |
+| Строки кода (`src/cryodaq/`) | **~48 500** |
+| Тестовые файлы (`tests/`) | **206** |
+| Строки тестов (`tests/`) | **~38 800** |
+| Тесты | **1 931 passed, 4 skipped** |
+| Coverage (full suite) | stale — re-run pending |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
-| Версия пакета | 0.34.0.dev0 |
+| Версия пакета | **0.42.0** |
 | Python | 3.12+ (dev: 3.14.3) |
 
 Источник актуального репо-инвентаря: `docs/REPO_AUDIT_REPORT.md` (2026-04-17).
@@ -164,6 +164,42 @@ Mechanisms added:
 ---
 
 ## В работе
+
+### Недавние релизы (v0.34.0 → v0.42.0)
+
+| Версия | Дата | Highlights |
+|---|---|---|
+| v0.34.0 | 2026-04-27 (retroactive) | F1 Parquet, F2 Debug mode, F6 Auto-report, F11 Shift handover |
+| v0.35.0–v0.39.0 | 2026-04-27 (retroactive) | B1 ZMQ idle-death fix chain, IV.6/7 experiments, B1 RESOLVED (H5 fix) |
+| v0.40.0 | 2026-04-29 | F3 Analytics widgets (W1–W4) + F4 lazy-open snapshot replay |
+| v0.41.0 | 2026-04-29 | F10 sensor diagnostics → alarm integration + 6 vault subsystem notes |
+| v0.42.0 | 2026-04-29 | HF1 update_target docstring + HF2 _SLOW_COMMANDS safety expansion |
+
+Full history: `CHANGELOG.md`. Tags: `v0.34.0`..`v0.42.0` on master.
+
+### Открытые F-задачи (из ROADMAP.md, 2026-04-30)
+
+| ID | Название | Статус | Приоритет |
+|---|---|---|---|
+| F19 | experiment_summary enriched content (W3 sub-items) | ⬜ NOT STARTED | S–M |
+| F20 | Diagnostic alarm notification polish (aggregation + cooldown) | ⬜ NOT STARTED | S |
+| F21 | Alarm hysteresis deadband (`_check_hysteresis_cleared` stub) | ⬜ NOT STARTED | S |
+| F22 | F10 escalation severity fix (shared alarm_id blocks critical) | ⬜ NOT STARTED | S |
+| F23 | RateEstimator measurement timestamp (use reading.timestamp) | ⬜ NOT STARTED | S |
+| F24 | Interlock acknowledge ZMQ command | ⬜ NOT STARTED | S |
+| F25 | SQLite WAL corruption startup gate (warning → hard fail) | ⬜ NOT STARTED | S |
+| F5 | Engine events → Hermes webhook | ⬜ BLOCKED (Hermes service) | M |
+| F7 | Web API readings query extension | ⬜ NOT STARTED | L |
+| F8 | Cooldown ML prediction upgrade | 🔬 RESEARCH | L |
+| F9 | TIM thermal conductivity auto-report | 🔬 RESEARCH | M |
+| F15 | Linux AppImage / .deb | ⬜ BLOCKED (packaging) | L |
+| F17 | SQLite → Parquet cold-storage rotation | ⬜ NOT STARTED (F17 spec drafted) | M |
+
+Source of truth: `ROADMAP.md` (updated 2026-04-28).
+
+### Phase II UI rebuild — mixed status (2026-04-16 … 2026-04-19)
+
+*Block-level statuses below were last verified 2026-04-19. Phase II work may have progressed — see `docs/phase-ui-1/phase_ui_v2_roadmap.md` for authoritative block status.*
 
 **Phase II UI rebuild — mixed status (2026-04-16 … 2026-04-19).**
 

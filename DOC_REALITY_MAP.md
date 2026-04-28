@@ -1,4 +1,50 @@
 > **HISTORICAL.** Snapshot from commit `7aaeb2b`. See `docs/REPO_AUDIT_REPORT.md` for current state.
+>
+> **Addendum 2026-04-30 (repo cleanup):** notable changes since 2026-04-17 snapshot.
+> See CHANGELOG.md for full details. A fresh full audit against `35f2798` (v0.42.0) is pending.
+
+---
+
+## Addendum — changes since 2026-04-17 (v0.42.0 / 2026-04-30)
+
+### New modules (not in original snapshot)
+
+**GUI — Shell views (Phase II analytics + F3/F4)**
+- `src/cryodaq/gui/shell/views/analytics_view.py` — AnalyticsView primary-view QWidget (II.1, shipped v0.34.0-era; `860ecf3`)
+- `src/cryodaq/gui/shell/views/analytics_widgets.py` — F3 analytics widget set: W1 temperature_trajectory, W2 cooldown_history, W3 experiment_summary, W4 r_thermal_placeholder (v0.40.0)
+
+**GUI — Shell overlays (Phase II blocks)**
+- `src/cryodaq/gui/shell/overlays/alarm_panel.py` — AlarmPanel overlay
+- `src/cryodaq/gui/shell/overlays/archive_panel.py` — ArchivePanel overlay (II.2, v0.34.0-era)
+- `src/cryodaq/gui/shell/overlays/calibration_panel.py` — CalibrationPanel overlay
+- `src/cryodaq/gui/shell/overlays/conductivity_panel.py` — ConductivityPanel overlay
+- `src/cryodaq/gui/shell/overlays/instruments_panel.py` — InstrumentsPanel overlay
+- `src/cryodaq/gui/shell/overlays/keithley_panel.py` — KeithleyPanel overlay (II.6, v0.34.0-era)
+- `src/cryodaq/gui/shell/overlays/operator_log_panel.py` — OperatorLogPanel overlay (II.3, v0.34.0-era)
+
+### Modified modules with significant additions since snapshot
+
+| Module | Change | Release |
+|---|---|---|
+| `src/cryodaq/core/sensor_diagnostics.py` | Added `publish_diagnostic_alarm` / `clear_diagnostic_alarm` interface; `_AnomalyState` per-channel tracker; alarm_publisher injection | v0.41.0 |
+| `src/cryodaq/core/alarm_v2.py` | `AlarmStateManager.publish_diagnostic_alarm()`, `clear_diagnostic_alarm()` — F10 alarm integration | v0.41.0 |
+| `src/cryodaq/core/safety_manager.py` | HF1: `update_target()` docstring — delayed-update design documented | v0.42.0 |
+| `src/cryodaq/core/zmq_bridge.py` | HF2: `keithley_emergency_off`, `keithley_stop` added to `_SLOW_COMMANDS` frozenset | v0.42.0 |
+| `src/cryodaq/gui/shell/main_window_v2.py` | F3/F4 wiring: `_analytics_snapshot_cache`, `set_cooldown()` + analytics widget push methods; `active.get("experiment_id")` key fix | v0.40.0 |
+
+### Vault subsystem notes (new in v0.41.0)
+
+6 Obsidian vault notes added via CC_PROMPT_VAULT_SUBSYSTEM_QUARTET + subsequent dispatches:
+Analytics view, F4 lazy replay, Web dashboard, Cooldown predictor, Experiment manager, Interlock engine.
+Location: `~/Vault/CryoDAQ/` (not in git repo).
+
+### Calibration module (v1.0, 2026-04-25+)
+
+`src/cryodaq/analytics/calibration_fitter.py` shipped with full post-run pipeline
+(extract → downsample → breakpoints → Chebyshev fit). `.330` format removed per
+architect decision 2026-04-25. See CLAUDE.md `## Снимок сверки` for calibration v2 invariants.
+
+---
 
 # CryoDAQ Documentation Reality Map
 
