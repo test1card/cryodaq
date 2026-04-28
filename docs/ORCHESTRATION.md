@@ -1,6 +1,6 @@
 # CryoDAQ agent orchestration — CC-centric swarm model
 
-**Authoritative as of 2026-04-28 (v1.2).** Supersedes ad-hoc multi-agent
+**Authoritative as of 2026-04-30 (v1.3).** Supersedes ad-hoc multi-agent
 coordination from 2026-04-21 to 2026-04-23. v1.2 incorporates calibration
 findings from vault build/audit, B1 investigation closure, and `.cof`
 migration sessions (2026-04-26 through 2026-04-28).
@@ -382,6 +382,12 @@ At the start of every CC session on this repo:
 
 - [ ] Read this file end-to-end
 - [ ] Read `CLAUDE.md` (repo-level invariants)
+- [ ] **Plugin auto-load awareness.** At session start, note any
+  plugins (`oh-my-claudecode`, `metaswarm`, etc.) that loaded
+  automatically per skill description matchers. If auto-load was
+  not architect-anticipated, flag in handoff. Plugin tooling
+  outside our skill registry may conflict with multi-model-
+  consultation routing.
 - [ ] **Skill registry refresh.** If a skill in `.claude/skills/` was
   added or modified within the last 24 hours, run
   `Read(.claude/skills/<n>.md)` explicitly at session start.
@@ -753,6 +759,112 @@ display was filtered.
 This is rtk's design choice for context economy. Don't fight it
 — verify with full-format commands when correctness matters.
 
+### 14.6 Hallucination verification before action
+
+When a metaswarm or multi-model audit produces CRITICAL or HIGH
+findings, architect-side verification MANDATORY before any
+hotfix or merge. Models are confidently wrong with non-trivial
+frequency.
+
+Empirical: 2026-04-29 metaswarm Task A produced 9 verified
+findings + 2 fabricated (~22% hallucination rate on CRITICAL
+claims). 2026-04-30 calibration session: convergent T3 finding
+across 3 models was real (slew-rate docstring imprecision)
+but each model's verdict (DRIFT vs CONSISTENT) was wrong.
+
+Discipline before action:
+1. Read source file at exact line referenced
+2. Verify the claimed condition exists (grep for method name,
+   class, regex pattern)
+3. If condition exists: severity may still differ from model's
+   claim (CRITICAL vs LOW). Architect re-rates.
+4. If condition does NOT exist: HALLUCINATION. Document in
+   verification ledger. Do NOT fix the imagined issue.
+
+Verification ledger format:
+`artifacts/handoffs/<date>-<topic>-verification.md`
+
+Per finding: claim, file:line referenced, actual content at that
+location, REAL/HALLUCINATION/RELOCATE/AMBIGUOUS verdict, action.
+
+---
+
+## 15. Multi-model dispatch realities
+
+Added 2026-04-30 (v1.3) consolidating empirical findings from
+metaswarm session 2026-04-29 + calibration session 2026-04-30.
+
+### 15.1 CCR vs direct Chutes API
+
+CCR `localhost:3456` requires Claude Code OAuth context to route
+to providers. Direct curl (without OAuth) returns "Provider
+'undefined' not found". This is by-design CCR behavior, NOT a
+config bug.
+
+For batch dispatch (metaswarm, calibration), use **direct
+Chutes API**:
+- Endpoint: `https://llm.chutes.ai/v1/chat/completions`
+- Auth: `Authorization: Bearer $CHUTES_API_KEY`
+- Key location: `~/.claude-code-router/config.json` Providers[chutes].api_key
+- Extract via: `python3 -c "import json; cfg=json.load(open('$HOME/.claude-code-router/config.json')); [print(p['api_key']) for p in cfg['Providers'] if 'chutes' in p['name'].lower()]"`
+
+CCR is for interactive use within CC sessions. Batch dispatch
+uses direct API.
+
+### 15.2 max_tokens per model
+
+Chutes models reject `max_tokens=null`. Use explicit cap. Default:
+`max_tokens=32000` (high enough that models hit natural stop
+conditions, not truncation).
+
+Per-model practical caps:
+- MiniMax-M2.5: 8192 non-streaming
+- R1-0528, Kimi-K2.6: 8000 in practice
+- GLM-5.1, Qwen3-Coder: 4000 stable
+
+Set 32000 as request, models cap themselves.
+
+### 15.3 Codex sandbox modes
+
+Three sandbox options affect stdout:
+- `--sandbox read-only` — blocks stdout writes. EMPTY responses
+  for spec-generation tasks (2026-04-29 metaswarm Task B).
+- `--sandbox workspace-write` — DEFAULT for review/audit tasks.
+  Writes to workspace allowed.
+- `--sandbox none` — invalid (codex 0.124+ rejects). Use
+  workspace-write.
+
+For audit + review use workspace-write. NOT none.
+
+### 15.4 Capacity reliability ranking (empirical)
+
+Per 2026-04-30 calibration session:
+1. Codex, Qwen3-Coder, MiniMax-M2.5 — 0% failure rate
+2. GLM-5.1, Gemini — ~17% failure rate (single waves)
+3. R1-0528 — 33% failure rate (daytime UTC saturation)
+4. Chimera (TNG) — 50% failure rate
+5. Kimi-K2.6 — 67% failure rate (connection instability on
+   long prompts)
+
+For overnight reliability: prefer Codex + Qwen3-Coder + MiniMax
+over R1/Chimera/Kimi. Add 30+ min inter-wave delay if R1 or
+Chimera in dispatch list.
+
+### 15.5 Kimi long-prompt threshold
+
+Kimi-K2.6 connection drops on prompts >50KB approximately.
+2026-04-29 metaswarm 375KB prompts all PARSE_ERROR.
+2026-04-30 calibration T6 96KB also failed.
+T4 spec design ~5KB succeeded.
+
+Discipline: keep Kimi prompts ≤10KB conservative, ≤50KB risky.
+
+### 15.6 Architect verification mandatory
+
+Per §14.6: synthesis is first-pass aggregation, NOT truth.
+Hallucination rate is non-zero. Architect verifies CRITICAL
++ HIGH findings against actual source before any action.
+
 ---
 
 *This document is the contract. If you are an agent on this repo
@@ -760,4 +872,4 @@ and you don't like a rule, propose a change through the
 architect. Do not work around it.*
 
 *— Vladimir Fomenko (architect), authored by Claude Opus 4.7
-(web), 2026-04-23 (v1.1) — extended 2026-04-28 (v1.2).*
+(web), 2026-04-23 (v1.1) — extended 2026-04-28 (v1.2) — extended 2026-04-30 (v1.3).*
