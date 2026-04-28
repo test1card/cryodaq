@@ -25,8 +25,8 @@
 |---|---|---|---|---|
 | F1 | Parquet archive wire-up | ✅ DONE (shipped v0.34.0) | S | H |
 | F2 | Debug mode toggle (verbose logging) | ✅ DONE (shipped v0.34.0) | S | H |
-| F3 | Analytics placeholder widgets → data wiring | ⬜ | M | M |
-| F4 | Analytics lazy-open snapshot replay | ⬜ | S | M |
+| F3 | Analytics placeholder widgets → data wiring | ✅ DONE (W1–W3; W4 deferred F8) | M | M |
+| F4 | Analytics lazy-open snapshot replay | ✅ DONE (merged in F3-Cycle1) | S | M |
 | F5 | Engine events → Hermes webhook | ⬜ | M | M |
 | F6 | Auto-report on experiment finalize | ✅ DONE (shipped v0.34.0) | S | H |
 | F7 | Web API readings query extension | ⬜ | L | M |
@@ -157,10 +157,16 @@ Tests: 5 new cases covering setting persist, menu toggle, env var pass-through.
 
 ### F3 — Analytics placeholder widgets data wiring
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE (W1–W3 + F4 wired; W4 r_thermal deferred to F8).
 
 Phase III.C shipped 4 placeholder cards — layout correct, no data flow.
 Used in warmup + disassembly phases + one cooldown slot.
+F3 completed across 5 cycles (2026-04-29):
+- W1 `temperature_trajectory`: live multi-channel history plot (warmup/main)
+- W2 `cooldown_history`: scatter of past cooldown durations (warmup/bottom_right)
+- W3 `experiment_summary`: header/duration/alarms/artifacts (disassembly/main)
+- W4 `r_thermal_placeholder`: kept as placeholder; text updated (depends F8)
+- F4 lazy-open replay: shell-level snapshot cache for AnalyticsView
 
 Four widgets to wire:
 
