@@ -47,7 +47,7 @@ def _experiment_status(exp_id: str | None) -> dict:
     if exp_id is None:
         return {"active_experiment": None, "phases": []}
     return {
-        "active_experiment": {"id": exp_id, "name": exp_id},
+        "active_experiment": {"experiment_id": exp_id, "name": exp_id},
         "phases": [],
     }
 
