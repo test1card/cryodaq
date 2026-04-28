@@ -428,7 +428,17 @@ class SafetyManager:
             }
 
     async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
-        """Live-update P_target on an active channel. Validates against config limits."""
+        """Live-update P_target on an active channel. Validates against config limits.
+
+        Updates ``runtime.p_target`` in-memory. The hardware voltage is NOT changed
+        here directly — the P=const regulation loop in
+        ``Keithley2604B.read_channels()`` reads ``runtime.p_target`` on every poll
+        cycle and recomputes ``target_v = sqrt(p_target * R)``, so the instrument
+        output converges within one poll interval (typically ≤1 s).
+
+        This is intentional: slew-rate limiting and compliance checks live in the
+        regulation loop and must not be bypassed by direct SCPI writes here.
+        """
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 

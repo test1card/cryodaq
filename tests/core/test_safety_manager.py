@@ -688,3 +688,37 @@ async def test_fault_log_callback_runs_before_publish():
         pass
 
     assert callback_invoked.is_set(), "Log callback not invoked before publish — ordering wrong"
+
+
+@pytest.mark.asyncio
+async def test_update_target_updates_runtime_p_target_immediately():
+    """HF1 — update_target() is a delayed-update, not a hardware no-op.
+
+    ``update_target()`` writes the new power target to ``runtime.p_target``
+    immediately (within the same call). The hardware voltage converges on the
+    *next* poll cycle because ``Keithley2604B.read_channels()`` computes
+    ``target_v = sqrt(p_target * R)`` and issues SCPI every cycle.
+
+    This design is intentional: slew-rate limiting and compliance checks live
+    in the regulation loop and must not be bypassed by a direct SCPI write
+    in the safety manager.
+    """
+    from unittest.mock import MagicMock
+
+    k = _mock_keithley()
+    runtime = MagicMock()
+    runtime.active = True
+    runtime.p_target = 0.1
+    k._channels = {"smua": runtime}
+
+    mgr, _ = await _make_manager(keithley=k, mock=True)
+    mgr._keithley = k
+    mgr._state = SafetyState.RUNNING
+    mgr._active_sources = {"smua"}
+
+    result = await mgr.update_target(0.5, channel="smua")
+
+    assert result["ok"] is True
+    assert result["p_target"] == 0.5
+    assert runtime.p_target == 0.5, "p_target must update immediately in runtime for next poll cycle"
+    await mgr.stop()

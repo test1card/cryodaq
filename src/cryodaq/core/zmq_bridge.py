@@ -53,6 +53,10 @@ _SLOW_COMMANDS: frozenset[str] = frozenset(
         "calibration_curve_export",
         "calibration_v2_fit",
         "calibration_v2_extract",
+        # Safety commands that drive USBTMC hardware — must not be cancelled
+        # by the fast 2-second envelope during a slow USB transaction.
+        "keithley_emergency_off",
+        "keithley_stop",
     }
 )
 
