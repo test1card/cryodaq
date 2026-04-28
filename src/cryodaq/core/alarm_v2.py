@@ -508,6 +508,72 @@ class AlarmStateManager:
         items = list(self._history)
         return items[-limit:]
 
+    def publish_diagnostic_alarm(
+        self,
+        channel_id: str,
+        severity: Literal["warning", "critical"],
+        age_seconds: float,
+    ) -> AlarmEvent | None:
+        """Publish a diagnostic-sourced alarm for a channel.
+
+        Called by SensorDiagnosticsEngine when anomaly persists past threshold
+        duration (F10). Creates an alarm in the same shape as rule-evaluated
+        alarms — broker event, ACK tracking, history. Idempotent per channel_id:
+        if an alarm for this channel is already active, this is a no-op.
+
+        Returns the AlarmEvent on new trigger, None if already active.
+        """
+        alarm_id = f"diag:{channel_id}"
+        if alarm_id in self._active:
+            return None
+
+        level = severity.upper()
+        event = AlarmEvent(
+            alarm_id=alarm_id,
+            level=level,
+            message=f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}",
+            triggered_at=time.time(),
+            channels=[channel_id],
+            values={channel_id: age_seconds},
+        )
+        self._active[alarm_id] = event
+        self._history.append(
+            {
+                "alarm_id": alarm_id,
+                "transition": "TRIGGERED",
+                "at": event.triggered_at,
+                "level": level,
+                "message": event.message,
+            }
+        )
+        logger.info(
+            "DIAGNOSTIC ALARM TRIGGERED: %s [%s] age=%.0fs",
+            alarm_id,
+            level,
+            age_seconds,
+        )
+        return event
+
+    def clear_diagnostic_alarm(self, channel_id: str) -> None:
+        """Clear diagnostic alarm for channel when anomaly resolves.
+
+        Called by SensorDiagnosticsEngine when channel status returns to ok.
+        No-op if no active diagnostic alarm for this channel.
+        """
+        alarm_id = f"diag:{channel_id}"
+        if alarm_id not in self._active:
+            return
+        self._active.pop(alarm_id)
+        self._history.append(
+            {
+                "alarm_id": alarm_id,
+                "transition": "CLEARED",
+                "at": time.time(),
+                "level": "INFO",
+            }
+        )
+        logger.info("DIAGNOSTIC ALARM CLEARED: %s", alarm_id)
+
     def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> dict | None:
         """Подтвердить аларм — записать факт подтверждения в историю.
 
