@@ -9,6 +9,25 @@
 
 ## [Unreleased]
 
+---
+
+## [0.40.0] — 2026-04-29 — F3 Analytics widgets data wiring
+
+### Highlights
+
+F3 + F4 features complete. 5-cycle overnight Opus batch with dual-verifier
+audits per cycle. 86 new tests, ~1000 LOC. All four analytics widgets
+wired; W4 r_thermal kept as placeholder pending F8.
+
+Architecture fix caught by audit: `active.get("id")` → `active.get("experiment_id")`
+in `MainWindowV2` cache invalidation — `ExperimentInfo.to_payload()` emits
+`"experiment_id"`, not `"id"`.
+
+F19 added to ROADMAP for deferred W3 enrichment (channel min/max, top-3
+alarms, clickable artifact links).
+
+Closing commit: 3b626a2 (merge: F3 Cycle 5).
+
 ### Added
 
 - **F3 analytics data wiring — W1…W3 + F4 lazy replay** — Five-cycle batch
@@ -28,10 +47,37 @@
   - **W3 `experiment_summary`** (Cycle 4): `ExperimentSummaryWidget` — header,
     duration, phase breakdown, alarm count (via existing `alarm_v2_history`
     command), artifact links. `set_experiment_status` setter added to
-    `AnalyticsView` + `MainWindowV2` routing. 21 new tests. (`feat/f3-cycle4`)
+    `AnalyticsView` + `MainWindowV2` routing. 23 new tests. (`feat/f3-cycle4`)
   - **Cycle 5**: W4 `r_thermal_placeholder` text updated (F8 dependency note);
-    cross-widget lifecycle integration tests (`tests/integration/`);
-    CHANGELOG + ROADMAP updated. (`feat/f3-cycle5`)
+    cross-widget lifecycle integration tests (`tests/integration/`, 9 tests);
+    CHANGELOG + ROADMAP updated; F19 added to ROADMAP. (`feat/f3-cycle5`)
+- **New engine command `cooldown_history_get`** — async handler
+  `_run_cooldown_history_command`; reads JSON metadata files, returns past
+  cooldown durations with T1 boundary temperatures.
+- **F19 added to ROADMAP** — deferred W3 enrichment items (channel min/max,
+  top-3 alarm names, clickable artifact links).
+
+### Fixed
+
+- **`active.get("experiment_id")` cache invalidation** — pre-existing bug
+  where `active.get("id")` always returned `None` (key mismatch with
+  `ExperimentInfo.to_payload()` which emits `"experiment_id"`). Analytics
+  snapshot never invalidated on experiment boundary. Caught by F3-Cycle4
+  audit. Applied to both `_on_experiment_status_received` and
+  `_active_experiment_id` in `main_window_v2.py`.
+
+### Known gaps (deferred to F19)
+
+- W3 channel min/max/mean table per critical channel
+- W3 top-3 most-triggered alarm names
+- W3 clickable artifact links via `QDesktopServices`
+- W4 (`r_thermal_placeholder`) remains placeholder — depends on F8
+
+### Test baseline
+
+86 new tests across F3 cycles. Full suite green on master after all 5 merges.
+Pre-existing failures: timezone-drift in `test_experiment_overlay.py` (known),
+flaky ZMQ timing test (passes in isolation).
 
 - **`.cof` Chebyshev coefficient export** — `export_curve_cof()` added to
   `CalibrationStore`. Portable text format: per-zone raw Chebyshev

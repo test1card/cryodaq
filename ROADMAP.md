@@ -41,6 +41,7 @@
 | F16 | Plugin hot-reload SDK + examples | ⬜ | M | L |
 | F17 | SQLite → Parquet cold-storage rotation | ⬜ | M | M |
 | F18 | CI/CD upgrade (coverage, matrix, releases) | ⬜ | M | L |
+| F19 | F3.W3 experiment_summary enriched content | ⬜ | S–M | M |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -103,7 +104,7 @@ Spec: not yet drafted; pending IV.4 outcomes + Hermes service readiness.
 
 ### Deferred (not scheduled)
 
-F4, F7, F10, F12, F13, F14, F15, F16, F18 — see individual entries below.
+F7, F10, F12, F13, F14, F15, F16, F18, F19 — see individual entries below.
 
 ---
 
@@ -408,6 +409,28 @@ Add:
 - Artifact publishing (wheels + F15 AppImage)
 
 Estimated: ~200 LOC workflow.
+
+---
+
+### F19 — F3.W3 experiment_summary enriched content
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S–M (~150–250 LOC).
+**Source:** Deferred from F3 Cycle 4 audit (master summary 2026-04-29, items #2–4).
+
+Enrichment for `experiment_summary` widget (disassembly phase main slot).
+Three independent sub-items, each shippable as a separate commit:
+
+1. **Channel min/max/mean table** — for critical channels (T1..T8,
+   pressure, Keithley power) computed via `readings_history` range
+   queries over the experiment timespan.
+2. **Top-3 most-triggered alarm names** — extract from
+   `alarm_v2_history` (already wired in F3 for total count).
+3. **Clickable artifact links** — DOCX / PDF / Parquet / JSON
+   metadata paths via `QDesktopServices.openUrl`.
+
+Recommend: post-v0.40.0 stable period or after operator feedback
+identifies top priority among the three.
 
 ---
 
