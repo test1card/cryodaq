@@ -1,6 +1,6 @@
 ---
 name: multi-model-consultation
-description: "Use when CC needs to consult external AI models (Codex CLI, Gemini CLI, GLM-5.1, Kimi K2.6) for review, audit, draft, or second opinion on CryoDAQ work. Routes the task to the right model based on its strengths, produces a synthesis artifact that becomes the durable record, follows docs/ORCHESTRATION.md §4 protocol. Invoke whenever architect says 'get a review from', 'ask Codex', 'ask Gemini', 'run swarm', 'second opinion', 'adversarial review', 'cross-check with another model', or CC itself encounters a decision where its own confidence is low and architect is unavailable. Covers routing decision, budget discipline, identity-leak gotchas, formation patterns (single / writer-reviewer / adversarial pair / wide audit), brief templates, synthesis format, and anti-patterns learned from 2026-04-21..23 failed swarm cycle."
+description: "Use when CC needs to consult external AI models (Codex CLI, Gemini CLI, GLM-5.1, Kimi K2.6, DeepSeek-R1-0528, Qwen3-Coder-Next) for review, audit, draft, or second opinion on CryoDAQ work. Routes the task to the right model based on its strengths, produces a synthesis artifact that becomes the durable record, follows docs/ORCHESTRATION.md §4 protocol. Invoke whenever architect says 'get a review from', 'ask Codex', 'ask Gemini', 'run swarm', 'second opinion', 'adversarial review', 'cross-check with another model', or CC itself encounters a decision where its own confidence is low and architect is unavailable. Covers routing decision, budget discipline, identity-leak gotchas, formation patterns (single / writer-reviewer / adversarial pair / wide audit / three-model code review), brief templates, synthesis format, and anti-patterns learned from 2026-04-21..23 failed swarm cycle."
 ---
 
 # Multi-model consultation — CC as conductor, not soloist
@@ -36,9 +36,10 @@ Use consultation only when all three of these hold:
 
 ## 1. Why four models — what each actually offers
 
-Claude, Codex, Gemini, GLM, Kimi are NOT interchangeable. Each has a
-real niche. Using the wrong model is not just wasteful — it actively
-produces worse output than no consultation.
+Claude, Codex, Gemini, GLM, Kimi, DeepSeek-R1, and Qwen3-Coder are
+NOT interchangeable. Each has a real niche. Using the wrong model is
+not just wasteful — it actively produces worse output than no
+consultation.
 
 ### Codex CLI — gpt-5.5 high reasoning
 
@@ -211,6 +212,69 @@ from K2.5 — verify in practice.
 - Anything where its identity leak could cause architect to
   misread the output as CC's
 
+### DeepSeek-R1-0528 — reasoning model via Chutes (`think` route)
+
+**Strength:** explicit chain-of-thought reasoning. Best in the Chutes
+arsenal for math-heavy derivations, multi-step logic, concurrency
+analysis where you want the reasoning trace, and scenarios where you
+need to see the model's work (not just the answer). May 2026 update
+improved instruction-following over the original R1.
+
+**Weakness:** slower than instruct models (CoT adds latency). Verbose
+output — reasoning trace can be 2-10x the answer length. Not a code
+generator — it reasons about code, it doesn't produce it as well as
+Qwen3-Coder. Still has hallucination risk on domain-specific facts
+(instruments, VISA protocols, PySide6 internals).
+
+**Route:** `think` — triggered automatically by CCR when extended
+thinking is requested. For manual dispatch: use
+`chutes,deepseek-ai/deepseek-r1-0528-tee` as model alias.
+
+**Use for:**
+- Multi-step concurrency analysis as Codex backup when Codex window
+  is exhausted (R1 reasons, doesn't just scan)
+- Math derivations where intermediate steps matter
+- Hypothesis evaluation: "is this analysis correct?" as a reasoning audit
+- When Codex returns CONDITIONAL and you want a second reasoning pass
+
+**Do NOT use for:**
+- Primary code generation (use Qwen3-Coder or Codex)
+- Wide-scope architecture (use Gemini)
+- Anything requiring < 30s response (latency is higher than GLM/Kimi)
+
+**Budget:** Chutes pay-as-you-go. R1 is more expensive per token than
+GLM-5.1 but cheaper than Codex. Expect 2-5× GLM cost per session.
+
+### Qwen3-Coder-Next — dedicated code model via Chutes (`coder` route)
+
+**Strength:** purpose-built for code generation. Better than GLM-5.1
+on fresh code drafts, boilerplate reduction, and completing
+partially-written functions. Qwen3 family showed strong benchmark
+results on HumanEval/MBPP-style tasks. Next-gen update over Qwen3-Coder.
+
+**Weakness:** no long-context advantage over Kimi. May hallucinate
+repo-specific APIs (instrument drivers, ZMQ contracts) — always verify
+against actual interfaces. Not a reviewer — use Codex for adversarial
+review of its output.
+
+**Route:** `coder` — manual dispatch only (not auto-triggered by CCR).
+Use `chutes,qwen/qwen3-coder-next-tee` as model alias, or set model
+to `coder` route in Claude Code via `/model` command.
+
+**Use for:**
+- Fresh code generation where GLM draft quality is insufficient
+- Boilerplate scaffolding (new overlay, new driver stub, new test class)
+- Completing partially-written functions from a spec
+- Alternative implementation when Codex flags CC's draft as FAIL and
+  a fresh perspective is worth trying
+
+**Do NOT use for:**
+- Adversarial review (use Codex — Qwen3-Coder will be too agreeable)
+- Long-context document analysis (use Kimi or Gemini)
+- Safety-critical code without Codex review pass afterward
+
+**Budget:** Chutes pay-as-you-go, similar to GLM ($0.5-2 per session).
+
 ### Claude Code (CC / Opus 4.7) — coordinator
 
 Not a consultant for itself. If CC needs a second CC opinion, write
@@ -257,11 +321,16 @@ Is the task a code review of an existing diff?
   │
   ├─ NO — is it a question CC can't answer alone?
   │   │
-  │   ├─ concurrency / race / lifecycle question → Codex
+  │   ├─ concurrency / race / lifecycle question
+  │   │     → Codex first (if window available); R1-0528 as backup
+  │   │       or when math-heavy reasoning trace is needed
   │   ├─ cross-file pattern question → Gemini
   │   ├─ long-document comprehension → Kimi
   │   ├─ translation question → GLM or Kimi
-  │   └─ math derivation → Kimi
+  │   ├─ math derivation → R1-0528 (reasoning trace) or Kimi (show work)
+  │   └─ code generation / scaffolding task
+  │         → Qwen3-Coder draft → Codex review (writer-reviewer pair)
+  │           OR GLM draft if budget-sensitive and task is mechanical
   │
   └─ NO — is it a major architectural decision?
         │
@@ -326,6 +395,37 @@ refactor. Expensive time-wise.
 
 DO NOT use as a "default safety net" — `/ultrareview` misuse on
 2026-04-20 is the cautionary tale.
+
+### 3.6 Three-model code review (~3%)
+
+Parallel adversarial review + reasoning audit + alternative
+implementation. Heavier than 3.3 but covers the diff from three
+distinct angles.
+
+Pattern:
+- **Codex** (adversarial review): standard diff review, PASS/FAIL
+  verdict with file:line findings
+- **R1-0528** (reasoning audit): given the same diff + the Codex
+  findings, verify the reasoning chain — does Codex's logic hold?
+  Are there concurrency or logic issues Codex missed?
+- **Qwen3-Coder** (alternative): given only the spec (not the diff),
+  produce an alternative implementation. CC compares: does the
+  alternative reveal a simpler approach? Does it agree with CC's
+  implementation or flag a different pattern?
+
+CC synthesizes: Codex verdict, R1 reasoning audit, Qwen3-Coder
+alternative diff. Decision: commit as-is, amend based on R1 findings,
+or consider Qwen3-Coder alternative.
+
+Use when:
+- CC is uncertain about its own implementation AND Codex alone hasn't
+  cleared the uncertainty
+- The diff touches safety-adjacent code and a second reasoning pass
+  adds confidence
+- Architect explicitly asks for a three-way review
+
+Cost: 3 consultants in parallel. Reserve for genuinely high-stakes
+diffs — not a default gate.
 
 ### 3.5 Three-way parallel (~2%)
 
@@ -444,7 +544,9 @@ tail -f ~/.claude-code-router/logs/ccr-*.log | grep '"model":"'
 ```
 
 If the log shows `"zai-org/GLM-5.1-TEE"` — that's GLM.
-If `"moonshotai/Kimi-K2-"` — that's Kimi.
+If `"moonshotai/Kimi-K2.6-TEE"` — that's Kimi.
+If `"deepseek-ai/DeepSeek-R1-0528-TEE"` — that's R1 reasoning.
+If `"Qwen/Qwen3-Coder-Next-TEE"` — that's Qwen3-Coder.
 If Anthropic endpoint — that's real Claude (only when architect's
 quota is not exhausted).
 
@@ -461,6 +563,8 @@ Per session (rough):
 | Gemini | 1 request = free, but wall-clock 1-90 min | effectively unlimited |
 | GLM | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
 | Kimi | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
+| R1-0528 | $1-4 per session (CoT overhead) | $20 budget ≈ 5-20 sessions |
+| Qwen3-Coder | $0.5-2 per session | $20 budget ≈ 10-40 sessions |
 | CC (coordinator) | architect weekly quota | watch architect |
 
 Hard budget rules:
@@ -784,8 +888,10 @@ If CC is running without architect during a multi-model session:
 
 | Term | Meaning |
 |---|---|
-| CCR | claude-code-router, proxies Anthropic API calls to Chutes (GLM/Kimi) |
-| Chutes | pay-as-you-go endpoint for GLM/DeepSeek/Kimi models |
+| CCR | claude-code-router, proxies Anthropic API calls to Chutes (GLM/Kimi/R1/Qwen3-Coder) |
+| Chutes | pay-as-you-go endpoint for GLM/DeepSeek/Kimi/Qwen models |
+| think route | CCR route → DeepSeek-R1-0528-TEE (triggered by extended thinking or manual alias) |
+| coder route | CCR route → Qwen3-Coder-Next-TEE (manual dispatch only) |
 | Synthesis | CC-authored artifact that integrates consultant responses into a decision |
 | Brief | CC-authored prompt for a consultant, stored as .prompt.md |
 | Adversarial review | review whose primary goal is to find what's wrong, not approve |
