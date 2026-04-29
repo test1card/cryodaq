@@ -51,3 +51,10 @@ instruments:
     resource: "COM3"
     baudrate: 9600
     poll_interval_s: 2.0
+
+chamber:
+  volume_l: 0.0  # OPERATOR: set actual chamber volume in litres
+  leak_rate:
+    enabled: true
+    default_sample_window_s: 300.0
+    warning_threshold_mbar_l_per_s: 1.0e-4
