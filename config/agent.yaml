@@ -1,0 +1,39 @@
+gemma:
+  enabled: true
+
+  ollama:
+    base_url: http://localhost:11434
+    default_model: gemma4:e4b
+    timeout_s: 30
+    temperature: 0.3
+
+  triggers:
+    alarm_fired:
+      enabled: true
+      min_level: WARNING
+    experiment_finalize:
+      enabled: true
+    sensor_anomaly_critical:
+      enabled: true
+    shift_handover_request:
+      enabled: true
+    phase_transition_to_finalize:
+      enabled: true
+
+  outputs:
+    telegram: true
+    operator_log: true
+    gui_insight_panel: true
+
+  rate_limit:
+    max_calls_per_hour: 60
+    max_concurrent_inferences: 2
+
+  slices:
+    a_notification: true
+    b_suggestion: false
+    c_campaign_report: false
+
+  audit:
+    enabled: true
+    retention_days: 90

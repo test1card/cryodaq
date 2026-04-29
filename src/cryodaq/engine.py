@@ -29,6 +29,11 @@ from typing import Any
 
 import yaml
 
+from cryodaq.agents.audit import AuditLogger
+from cryodaq.agents.context_builder import ContextBuilder
+from cryodaq.agents.gemma import GemmaAgent, GemmaConfig
+from cryodaq.agents.ollama_client import OllamaClient
+from cryodaq.agents.output_router import OutputRouter
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -1656,9 +1661,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     _exp_info = result.get("experiment", {})
                     await event_bus.publish(
                         EngineEvent(
-                            event_type="experiment_finalize"
-                            if action != "experiment_abort"
-                            else "experiment_abort",
+                            event_type=action,
                             timestamp=datetime.now(UTC),
                             payload={"action": action, "experiment": _exp_info},
                             experiment_id=_exp_info.get("experiment_id"),
@@ -1666,7 +1669,6 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                 elif result.get("ok") and action == "experiment_advance_phase":
                     phase = cmd.get("phase", "?")
-                    await event_logger.log_event("phase", f"Фаза: → {phase}")
                     _active = experiment_manager.active_experiment
                     await event_bus.publish(
                         EngineEvent(
@@ -1676,6 +1678,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                             experiment_id=_active.experiment_id if _active else None,
                         )
                     )
+                    await event_logger.log_event("phase", f"Фаза: → {phase}")
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}
@@ -1868,6 +1871,48 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
 
+    # --- GemmaAgent (Гемма local LLM agent) ---
+    _agent_cfg_path = _CONFIG_DIR / "agent.yaml"
+    gemma_agent: GemmaAgent | None = None
+    if _agent_cfg_path.exists():
+        try:
+            _agent_raw = yaml.safe_load(_agent_cfg_path.read_text(encoding="utf-8")) or {}
+            _gemma_raw = _agent_raw.get("gemma", {})
+            _gemma_config = GemmaConfig.from_dict(_gemma_raw)
+            if _gemma_config.enabled:
+                _gemma_ollama = OllamaClient(
+                    base_url=_gemma_config.ollama_base_url,
+                    default_model=_gemma_config.default_model,
+                    timeout_s=_gemma_config.timeout_s,
+                )
+                _gemma_ctx = ContextBuilder(writer, experiment_manager)
+                _gemma_audit = AuditLogger(
+                    _DATA_DIR / "agents" / "gemma" / "audit",
+                    enabled=_gemma_config.audit_enabled,
+                    retention_days=_gemma_config.audit_retention_days,
+                )
+                _gemma_router = OutputRouter(
+                    telegram_bot=telegram_bot,
+                    event_logger=event_logger,
+                    event_bus=event_bus,
+                )
+                gemma_agent = GemmaAgent(
+                    config=_gemma_config,
+                    event_bus=event_bus,
+                    ollama_client=_gemma_ollama,
+                    context_builder=_gemma_ctx,
+                    audit_logger=_gemma_audit,
+                    output_router=_gemma_router,
+                )
+                logger.info(
+                    "GemmaAgent (Гемма): инициализирован, модель=%s",
+                    _gemma_config.default_model,
+                )
+        except Exception as _gemma_exc:
+            logger.warning("GemmaAgent: ошибка инициализации — %s", _gemma_exc)
+    else:
+        logger.info("GemmaAgent: config/agent.yaml не найден, агент отключён")
+
     # --- Запуск всех подсистем ---
     await safety_manager.start()
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
@@ -1883,6 +1928,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         await periodic_reporter.start()
     if telegram_bot is not None:
         await telegram_bot.start()
+    if gemma_agent is not None:
+        try:
+            await gemma_agent.start()
+        except Exception as _gemma_start_exc:
+            logger.warning("GemmaAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)
+            gemma_agent = None
     await scheduler.start()
     throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
     alarm_v2_feed_task = asyncio.create_task(_alarm_v2_feed_readings(), name="alarm_v2_feed")
@@ -2011,6 +2062,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     if periodic_reporter is not None:
         await periodic_reporter.stop()
         logger.info("PeriodicReporter остановлен")
+
+    if gemma_agent is not None:
+        await gemma_agent.stop()
+        logger.info("GemmaAgent (Гемма) остановлен")
 
     if telegram_bot is not None:
         await telegram_bot.stop()
