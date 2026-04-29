@@ -1,10 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-30 *(обновлено в рамках repo cleanup 2026-04-30)*
+**Дата:** 2026-04-30 *(обновлено post-v0.43.0 — docs audit Phase 2)*
 **Ветка:** master
-**Последний commit:** `35f2798` (`release: v0.42.0 — Safety hotfix HF1+HF2`)
-**Тесты:** 1 931 passed, 4 skipped
-**Фронтир:** v0.42.0 shipped (HF1+HF2). Open feature work: F19–F25 (см. ROADMAP.md). Phase II UI rebuild в процессе — статус см. ниже.
+**Последний commit:** `c44c575` (`release: v0.43.0 — Overnight sprint (F19-F25)`)
+**Тесты:** ~1 970 passed (re-count after v0.43.0 merges; baseline 1 931 + 39 new)
+**Фронтир:** v0.43.0 shipped. F19–F25 ✅ DONE. Open: F26 XS polish (SQLite backport whitelist), F19 LOW polish (channel heuristic), Lab Ubuntu PC verification, Vault refresh in-progress.
 
 ---
 
@@ -13,16 +13,19 @@
 | Метрика | Значение |
 |---|---|
 | Python файлы (`src/cryodaq/`) | **145** |
-| Строки кода (`src/cryodaq/`) | **~48 500** |
-| Тестовые файлы (`tests/`) | **206** |
-| Строки тестов (`tests/`) | **~38 800** |
-| Тесты | **1 931 passed, 4 skipped** |
+| Строки кода (`src/cryodaq/`) | **~48 800** |
+| Тестовые файлы (`tests/`) | **208** |
+| Строки тестов (`tests/`) | **~39 500** |
+| Тесты | **~1 970 passed** (baseline 1 931 + 39 new F19-F25) |
 | Coverage (full suite) | stale — re-run pending |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
-| Версия пакета | **0.42.0** |
+| Версия пакета | **0.43.0** |
 | Python | 3.12+ (dev: 3.14.3) |
 
-Источник актуального репо-инвентаря: `docs/REPO_AUDIT_REPORT.md` (2026-04-17).
+Источник актуального репо-инвентаря: этот документ, обновляется при каждом релизе.
+
+Per-subsystem implementation details: see vault notes at `~/Vault/CryoDAQ/10 Subsystems/`.
+`DOC_REALITY_MAP.md` retired 2026-04-30 (moved to `docs/handoffs-archive/2026-04/`).
 
 ---
 
@@ -58,6 +61,13 @@
 17. **_fault() ordering:** post-mortem log callback BEFORE optional broker publish (Jules R2 fix).
 18. **_fault() re-entry guard** (добавлен 2026-04-17): ранний `return` если `state == FAULT_LATCHED`, предотвращает overwrite `_fault_reason` + duplicate events / emergency_off при параллельных вызовах.
 
+### Инварианты добавленные Phase 2e (v0.42.0–v0.43.0)
+
+19. **_SLOW_COMMANDS expansion (HF2, v0.42.0):** `keithley_emergency_off` и `keithley_stop` добавлены в `_SLOW_COMMANDS` frozenset в `zmq_bridge.py`. Safety commands используют `HANDLER_TIMEOUT_SLOW_S` (30 s), не fast 2 s envelope.
+20. **Severity upgrade in-place (F22, v0.43.0):** `AlarmStateManager.publish_diagnostic_alarm()` upgrades WARNING→CRITICAL in-place на том же `alarm_id`. Мутация `AlarmEvent.level` безопасна (frozen=False intentional); история записывает `SEVERITY_UPGRADED` event.
+21. **RateEstimator measurement timestamp (F23, v0.43.0):** `SafetyManager._collect_loop` использует `reading.timestamp.timestamp()` вместо `time.monotonic()` для rate estimator input. Dequeue time искажает computed rate под queue backlog.
+22. **SQLite WAL startup gate (F25, v0.43.0):** `_check_sqlite_version()` raises `RuntimeError` на SQLite версиях в `[3.7.0, 3.51.3)` (WAL-reset corruption bug). Bypass: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` с warning log.
+
 ---
 
 ## Архитектура
@@ -69,7 +79,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 ```
 
 - **Engine** (headless asyncio): drivers, scheduler, persistence, safety, alarms, interlocks, plugins
-- **GUI** (PySide6): `MainWindowV2` shell + dashboard (Phase I.1 / Phase UI-1 v2 через Block B.2) + legacy v1 widgets (в ожидании Block B.7 миграции)
+- **GUI** (PySide6): `MainWindowV2` shell + dashboard (Phase III complete v0.40.0; все 5 dashboard zones активны) + legacy v1 widgets (permanent fallback; migration plan B.7 retired)
 - **Web** (FastAPI, опционально): monitoring dashboard на `:8080`
 - **IPC:** ZeroMQ PUB/SUB `:5555` (data, msgpack) + REP/REQ `:5556` (commands, JSON)
 

@@ -44,7 +44,7 @@ Governance: Architect = Vladimir; все изменения дизайн-сис�
 - Calibration v2: continuous SRDG acquisition during calibration experiments (CalibrationAcquisitionService), post-run pipeline (CalibrationFitter: extract → downsample → breakpoints → Chebyshev fit), three-mode GUI (Setup → Acquisition → Results), `.cof` (raw Chebyshev coefficients per zone, portable) / `.340` / JSON / CSV export; `.340` / JSON import; `.330` format removed (architect decision 2026-04-25); runtime apply с per-channel policy.
 
 Замена LabVIEW для cryogenic laboratory workflow (Millimetron / АКЦ ФИАН).
-Python 3.12+, asyncio, PySide6. Current package metadata: `0.13.0`.
+Python 3.12+, asyncio, PySide6. Current package metadata: see `pyproject.toml`.
 
 ## Команды сборки и разработки
 

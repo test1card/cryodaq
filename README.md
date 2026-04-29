@@ -1,274 +1,215 @@
 # CryoDAQ
 
-## Текущее состояние (v0.33.0)
+Software stack for cryogenic test laboratory data acquisition, control, and analysis.
+Replaces a 3-year-old LabVIEW VI used to drive instruments and push email alerts.
+Adds: scripted FSM-driven campaigns, automated calibration with multi-format export,
+auto-generated DOCX reports, role-filtered Telegram alerts, sensor-anomaly detection
+with alarm pipeline, plugin-based analytics, regression test suite (~1 970 tests).
 
-- Источник истины по продуктовой модели: один эксперимент равен одной experiment card, и во время активного эксперимента открыта ровно одна карточка.
-- Основной операторский workflow различает режимы `Эксперимент` и `Отладка`; в `Отладке` не должны появляться архивные карточки и автоматические отчёты по эксперименту.
-- Целевой внешний отчётный контракт в текущем коде: `report_raw.pdf` и `report_editable.docx`.
-- Dual-channel Keithley (`smua`, `smub`, `smua + smub`) остаётся актуальной моделью. Старые ожидания про disable/hide/remove `smub` устарели.
-- Calibration v2: непрерывный сбор SRDG при калибровочных экспериментах, post-run pipeline (extract → downsample → Chebyshev fit), `.cof` (raw Chebyshev coefficients) / `.340` / JSON / CSV export; `.340` / JSON import; runtime apply с global/per-channel policy.
+Developed for АКЦ ФИАН (проект Millimetron).
 
-CryoDAQ — система сбора данных и управления для криогенной лаборатории АКЦ ФИАН (проект Millimetron). Полнофункциональная система с experiment/report/archive/operator-log/calibration/housekeeping/shift-handover workflow.
+## Status
 
-## Текущая форма системы
+- **Latest release:** v0.43.0 (2026-04-30)
+- **Master:** `c44c575`
+- **Tests:** ~1 970 passing
+- **Production status:** stable; LabVIEW VI fully replaced
 
-- `cryodaq-engine` — headless runtime-процесс. Он опрашивает приборы, проверяет safety/alarm/interlock-логику, пишет данные и обслуживает GUI-команды.
-- `cryodaq-gui` — отдельный настольный клиент. Его можно перезапускать без остановки сбора данных.
-- `cryodaq` — операторский launcher для Windows.
-- `cryodaq.web.server:app` — опциональный web-доступ для мониторинга.
+## Architecture overview
+
+Three runtime processes:
+
+- `cryodaq-engine` — headless asyncio runtime. Drives instruments, runs the safety
+  manager FSM, evaluates alarms and interlocks, persists data, serves GUI commands
+  via ZMQ.
+- `cryodaq-gui` — Qt desktop client. Connects via ZMQ; restartable without stopping
+  data acquisition.
+- `cryodaq.web.server:app` — optional FastAPI monitoring dashboard.
+
+Plus Windows launcher: `cryodaq`.
+
+Data flow:
+
+```
+Instrument → Driver → Scheduler → SQLiteWriter → DataBroker → {GUI, SafetyBroker,
+                                                                Telegram, Analytics}
+```
+
+IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
+
+## Hardware (currently supported)
+
+- 3× LakeShore 218S (GPIB) — 24 temperature channels
+- Keithley 2604B (USB-TMC) — dual-channel SMU (`smua` + `smub`)
+- Thyracont VSP63D (RS-232) — 1 pressure channel
+
+## Implemented workflows
+
+End-to-end functional as of v0.43.0:
+
+- **Experiment FSM:** 6-phase lifecycle (idle → cooldown → measurement → warmup →
+  disassembly → idle, plus aborted). Template-driven scripted runs.
+- **Calibration v2:** continuous SRDG capture during calibration experiments;
+  post-run pipeline (extract → downsample → multi-zone Chebyshev fit); export to
+  `.cof` (raw Chebyshev coefficients) / `.340` / JSON / CSV; import from `.340` /
+  JSON; runtime apply with global / per-channel policy.
+- **Auto-report generation:** template-defined sections; guaranteed
+  `report_editable.docx`; best-effort PDF via `soffice` / LibreOffice.
+- **Telegram alerts:** role-filtered. Operators get full alarm stream; managers
+  get curated subset queryable on-demand via bot commands.
+- **Sensor diagnostics → alarm pipeline:** MAD-based outlier + cross-channel
+  correlation drift detection. Sustained anomaly publishes alarm: warning at 5 min,
+  critical at 15 min, auto-clear on recovery. Simultaneous events batched into a
+  single Telegram message; configurable per-channel escalation cooldown.
+- **Alarm engine v2:** threshold / rate / composite / phase-dependent rules;
+  hysteresis deadband; severity upgrade in-place (WARNING→CRITICAL); ack/clear
+  publish path.
+- **Interlocks:** 3 hard-safety rules (cryostat / compressor / detector). Trip
+  fires emergency_off and transitions interlock to TRIPPED state. Operator
+  acknowledges via `interlock_acknowledge` ZMQ command to re-arm without restart.
+- **Operator log:** SQLite-backed; GUI + ZMQ access.
+- **Experiment templates, lifecycle metadata, artifact archival:** per-experiment
+  directory with `metadata.json`, `reports/`, optional Parquet archive.
+- **Plugin architecture:** ABC-based isolation; callback failures mark plugin
+  degraded without crashing engine.
+- **Housekeeping:** conservative adaptive throttle + retention + compression policy.
 
 ## GUI
 
-Начиная с v0.33.0 CryoDAQ использует новый `MainWindowV2` (Phase UI-1 v2)
-как primary shell. Это ambient information radiator layout с dashboard
-из пяти зон, разработанный для недельных экспериментов без постоянного
-переключения вкладок.
+Primary: `MainWindowV2` — Phase III complete as of v0.40.0.
 
-Legacy `MainWindow` с десятью вкладками остаётся активным параллельно
-в режиме transition state до завершения блока B.7 (миграция всех legacy
-панелей в dashboard zones). Оба shell получают readings из engine;
-operator видит только `MainWindowV2`.
+Layout — ambient information radiator for week-long experiments:
 
-### MainWindowV2 (primary, с v0.33.0)
-
-- `TopWatchBar` — engine indicator, experiment status, time window echo
-- `ToolRail` — иконки для overlay navigation
-- `DashboardView` с пятью зонами:
-  1. Sensor grid (placeholder в v0.33.0, заполняется в блоке B.3)
+- **TopWatchBar** — engine indicator, experiment status, time window echo
+- **ToolRail** — overlay navigation
+- **DashboardView** — 5 live zones:
+  1. Sensor grid (temperature + pressure overview)
   2. Temperature plot (multi-channel, clickable legend, time window picker)
   3. Pressure plot (compact log-Y)
-  4. Phase widget (placeholder, блоки B.4-B.5)
-  5. Quick log (placeholder, блок B.6)
-- `BottomStatusBar` — safety state indicator
-- `OverlayContainer` — host для legacy tab panels через overlay mechanism
+  4. Phase widget (experiment phase indicator + transition)
+  5. Quick log (operator log inline view)
+- **BottomStatusBar** — safety state indicator
+- **OverlayContainer** — host for analytics and archive overlays
 
-### Legacy MainWindow (fallback, до блока B.7)
+Overlay views (from ToolRail):
 
-10 операторских вкладок:
+- Analytics — phase-aware widgets: W1 temperature trajectory, W2 cooldown history,
+  W3 experiment summary (channel stats, top alarms, artifact links). W4 R_thermal
+  remains placeholder pending F8 cooldown ML upgrade.
+- Archive — past experiments + reports + Parquet exports
+- Calibration — capture / fit / export workflow
+- Operator log
+- Other overlays per ToolRail icons
 
-1. `Обзор`
-2. `Эксперимент`
-3. `Источник мощности`
-4. `Аналитика`
-5. `Теплопроводность` (включает автоизмерение)
-6. `Алармы`
-7. `Служебный лог`
-8. `Архив`
-9. `Калибровка`
-10. `Приборы`
+Legacy `MainWindow` (10-tab shell) remains as **permanent fallback**. Operators
+see `MainWindowV2` only. Phase III closed the active migration plan.
 
-Также в окне есть:
+System tray: `healthy / warning / fault`. `healthy` not shown without sufficient
+backend-truth. `fault` set on unresolved alarms or safety-state `fault` /
+`fault_latched`.
 
-- меню `Файл` с экспортом CSV / HDF5 / Excel
-- меню `Эксперимент` со стартом и завершением эксперимента
-- меню `Настройки` с редактором каналов и настройками подключений приборов
-- строка состояния с соединением, uptime и скоростью потока данных
-- системный tray со статусами `healthy / warning / fault`
+## Installation
 
-Tray не показывает `healthy`, если у GUI нет достаточной backend-truth информации. `fault` выставляется при unresolved alarms или safety-state `fault` / `fault_latched`.
+### Requirements
 
-## Реализованные workflow-блоки
-
-- safety/alarm pipeline с acknowledge/clear publish path
-- backend-driven GUI для safety/alarm/status
-- dual-channel Keithley 2604B runtime для `smua`, `smub` и `smua + smub`
-- журнал оператора в SQLite с GUI и command access
-- experiment templates, lifecycle metadata и artifact folders
-- шаблонно-управляемая генерация отчётов
-- архив экспериментов с просмотром артефактов и повторной генерацией отчёта
-- housekeeping с conservative adaptive throttle и retention/compression policy
-- calibration backend:
-  - LakeShore raw/SRDG acquisition
-  - calibration sessions
-  - multi-zone Chebyshev fit
-  - `.cof` (Chebyshev coefficients) / `.340` / JSON / CSV export; `.330` removed
-  - `.340` / JSON import
-- calibration GUI для capture / fit / export
-
-## Установка
-
-### Требования
-
-- Windows 10/11 или Linux
+- Windows 10/11 or Linux
 - Python `>=3.12`
 - Git
-- VISA backend / драйверы, необходимые для фактического набора приборов
+- VISA backend / instrument drivers as required
 
-### Установка Python-пакета
+### Install
 
 ```bash
 pip install -e ".[dev,web]"
 ```
 
-Минимальная runtime-установка без dev/web extras:
+Minimal runtime install:
 
 ```bash
 pip install -e .
 ```
 
-Если нужен только web dashboard, используйте:
+Supported workflow: install from repo root into an active venv. Running `pytest`
+without `pip install -e ...` is not supported.
+
+Key runtime dependencies: `PySide6`, `pyqtgraph`, `pyvisa`, `pyserial-asyncio`,
+`pyzmq`, `python-docx`, `scipy`, `matplotlib`, `openpyxl`, `pyarrow`.
+
+## Running
 
 ```bash
-pip install -e ".[web]"
+cryodaq-engine        # headless engine (real instruments)
+cryodaq-gui           # GUI only (connects to running engine)
+cryodaq               # Windows operator launcher
+cryodaq-engine --mock # mock mode (simulated instruments)
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # optional web
 ```
 
-Поддерживаемый локальный dev/test workflow предполагает установку пакета из корня репозитория в активное окружение. Запуск `pytest` по произвольной распакованной копии исходников без `pip install -e ...` не считается поддерживаемым сценарием.
+## Configuration
 
-Ключевые runtime-зависимости из `pyproject.toml`:
+Active config files as of v0.43.0:
 
-- `PySide6`
-- `pyqtgraph`
-- `pyvisa`
-- `pyserial-asyncio`
-- `pyzmq`
-- `python-docx`
-- `scipy`
-- `matplotlib`
-- `openpyxl`
-
-## Запуск
-
-Рекомендуемый ручной порядок запуска:
-
-```bash
-cryodaq-engine
-cryodaq-gui
-```
-
-Дополнительные пути:
-
-```bash
-cryodaq
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
-```
-
-Команда `uvicorn cryodaq.web.server:app` относится к optional web-path и требует установленного extra `web`
-(или полного dev/test install path `.[dev,web]`).
-
-Mock mode:
-
-```bash
-cryodaq-engine --mock
-```
-
-## Конфигурация
-
-Основные конфигурационные файлы:
-
-- `config/instruments.yaml` — GPIB/serial/USB адреса, каналы LakeShore
+- `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels
 - `config/instruments.local.yaml` — machine-specific override (gitignored)
-- `config/safety.yaml` — SafetyManager FSM timeouts, rate limits, drain timeout
+- `config/safety.yaml` — FSM timeouts, rate limits, drain timeout
 - `config/alarms.yaml` — legacy alarm definitions
-- `config/alarms_v3.yaml` — v2 alarm engine: temperature limits, rate, composite, phase-dependent
-- `config/interlocks.yaml` — interlock conditions and action mappings
-- `config/channels.yaml` — channel display names, visibility, groupings
+- `config/alarms_v3.yaml` — v2 alarm engine rules (threshold/rate/composite/phase)
+- `config/interlocks.yaml` — interlock conditions + actions
+- `config/channels.yaml` — display names, visibility, groupings
 - `config/notifications.yaml` — Telegram bot_token, chat_ids, escalation
-- `config/housekeeping.yaml` — data throttle, retention, compression
-- `config/plugins.yaml` — sensor_diagnostics и vacuum_trend feature flags
-- `config/cooldown.yaml` — cooldown predictor model parameters
-- `config/shifts.yaml` — shift definitions (GUI-only)
+- `config/housekeeping.yaml` — throttle, retention, compression
+- `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; F20 `aggregation_threshold` + `escalation_cooldown_s`
+- `config/cooldown.yaml` — cooldown predictor parameters
+- `config/shifts.yaml` — shift definitions (GUI)
 - `config/experiment_templates/*.yaml` — experiment type templates
 
-`*.local.yaml` переопределяют базовые файлы и предназначены для machine-specific настроек.
+`*.local.yaml` overrides base files for machine-specific settings.
 
-## Эксперименты и артефакты
-
-Доступные шаблоны:
-
-- `config/experiment_templates/thermal_conductivity.yaml`
-- `config/experiment_templates/cooldown_test.yaml`
-- `config/experiment_templates/calibration.yaml`
-- `config/experiment_templates/debug_checkout.yaml`
-- `config/experiment_templates/custom.yaml`
-
-Артефакты эксперимента:
+## Experiment artifacts
 
 ```text
 data/experiments/<experiment_id>/
   metadata.json
   reports/
     report_editable.docx
-    report_raw.pdf      # optional, best effort if soffice/libreoffice is available
+    report_raw.pdf      # optional, best-effort (soffice/LibreOffice)
     report_raw.docx
     assets/
-```
-
-Артефакты калибровки:
-
-```text
 data/calibration/sessions/<session_id>/
 data/calibration/curves/<sensor_id>/<curve_id>/
 ```
 
-`metadata.json` хранит payload эксперимента, payload шаблона, `data_range` и `artifacts`.
+## Reports
 
-## Отчёты
-
-Подсистема отчётов находится в `src/cryodaq/reporting/` и использует template-defined sections.
-Основой для генерации отчёта служат архивная карточка эксперимента и её артефакты; для части данных текущий contour всё ещё может использовать fallback-чтение из SQLite.
-
-Реализованные section renderers:
-
-- `title_page`
-- `cooldown_section`
-- `thermal_section`
-- `pressure_section`
-- `operator_log_section`
-- `alarms_section`
-- `config_section`
-
-Гарантированный артефакт:
-
-- `report_editable.docx`
-
-Опциональный артефакт:
-
-- `report_raw.pdf`
-
-PDF-конвертация остаётся best-effort и зависит от наличия внешнего `soffice` / `LibreOffice`.
+Template-defined section renderers: `title_page`, `cooldown_section`,
+`thermal_section`, `pressure_section`, `operator_log_section`, `alarms_section`,
+`config_section`. Guaranteed artifact: `report_editable.docx`. Optional:
+`report_raw.pdf` (best-effort, requires `soffice` / LibreOffice).
 
 ## Keithley TSP
 
-TSP-скрипты для Keithley 2604B:
+`tsp/p_const.lua` — draft TSP supervisor for P=const feedback. **Not loaded on
+instrument.** P=const feedback runs host-side in `keithley_2604b.py`. TSP
+supervisor planned for Phase 3 (requires hardware verification).
 
-- `tsp/p_const.lua` — draft TSP supervisor для P=const feedback на SMU
-- `tsp/p_const_single.lua` — legacy single-channel вариант
-
-**Важно:** `p_const.lua` в текущей версии **не загружается** на прибор.
-P=const feedback loop выполняется host-side в `keithley_2604b.py`.
-TSP supervisor запланирован для Phase 3 (требует hardware verification).
-
-## Структура проекта
+## Project structure
 
 ```text
 src/cryodaq/
-  analytics/          # calibration fitter, cooldown, plugins, vacuum trend
-  core/               # safety, scheduler, broker, alarms, experiments
-  drivers/            # LakeShore, Keithley, Thyracont + transports
-  gui/
-    shell/            # MainWindowV2, TopWatchBar, ToolRail, BottomStatusBar (v0.33.0)
-    dashboard/        # DashboardView, temp/pressure plots, channel buffer (v0.33.0)
-    widgets/          # legacy tab panels (active until block B.7)
-  reporting/          # ГОСТ R 2.105-2019 report generator
-  storage/            # SQLiteWriter, Parquet, CSV, HDF5, XLSX export
-  web/                # FastAPI monitoring dashboard
-tsp/                  # Keithley TSP scripts (not loaded, see above)
-tests/
-config/
+  analytics/     # calibration fitter, cooldown predictor, plugins, vacuum trend
+  core/          # safety FSM, scheduler, broker, alarms v2, interlocks,
+                 # sensor_diagnostics, experiments, zmq_bridge
+  drivers/       # LakeShore, Keithley, Thyracont + transport adapters
+  gui/           # MainWindowV2, dashboard, overlays, legacy widgets
+  reporting/     # template-driven DOCX generator
+  storage/       # SQLite, Parquet, CSV, HDF5, XLSX
+  web/           # FastAPI monitoring
+tsp/             # Keithley TSP scripts (draft, not loaded)
+tests/           # ~1 970 tests
+config/          # YAML configs
 ```
 
-Ключевые файлы для операторских workflow:
-
-- `src/cryodaq/gui/shell/main_window_v2.py` — primary shell (с v0.33.0)
-- `src/cryodaq/gui/dashboard/dashboard_view.py` — 5-zone dashboard
-- `src/cryodaq/gui/main_window.py` — legacy 10-tab shell (fallback)
-- `src/cryodaq/gui/widgets/calibration_panel.py`
-- `src/cryodaq/core/experiment.py`
-- `src/cryodaq/reporting/generator.py`
-
-## Тесты
-
-Референсная regression matrix:
+## Tests
 
 ```bash
 python -m pytest tests/core -q
@@ -279,14 +220,25 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория после `pip install -e ".[dev,web]"`. GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke set не входит и требует отдельного `.[web]` install path.
+Run after `pip install -e ".[dev,web]"`. GUI tests require `PySide6` + `pyqtgraph`.
 
-## Известные ограничения
+## Known limitations
 
-- Runtime calibration policy реализована: глобальный режим `on/off` и per-channel policy переключают `KRDG` / `SRDG + curve`. При отсутствии curve, assignment, `SRDG` или ошибке вычисления backend консервативно возвращается к `KRDG`; поведение на живом LakeShore требует отдельной lab verification.
-- PDF для отчётов не гарантирован. Гарантированный результат — DOCX.
-- На новых версиях Python сохраняются deprecation warnings, связанные с `asyncio.WindowsSelectorEventLoopPolicy`.
+As of v0.43.0:
 
-## Статус
+- **SQLite WAL gate:** engine startup hard-fails on SQLite versions in the
+  WAL-reset corruption range `[3.7.0, 3.51.3)` per F25. Bypass:
+  `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (warning emitted). Ubuntu lab PC may have
+  affected version — verify with `sqlite3 --version`.
+- **Lab Ubuntu PC verification:** v0.39.0 H5 ZMQ fix verified on macOS dev only.
+  Ubuntu lab box pending verification.
+- **PDF reports:** best-effort only. Guaranteed artifact is DOCX.
+- **Runtime calibration policy:** global on/off + per-channel KRDG/SRDG+curve.
+  Conservative fallback to KRDG on missing curve / SRDG / compute error. Live
+  LakeShore behavior requires lab verification.
+- **Deprecation warnings:** `asyncio.WindowsSelectorEventLoopPolicy` on newer
+  Python versions.
 
-Этот README намеренно ограничен только подтверждённым текущим поведением и актуальными caveat-ограничениями RC-ветки.
+## License
+
+See `LICENSE`. Third-party notices: `THIRD_PARTY_NOTICES.md`.
