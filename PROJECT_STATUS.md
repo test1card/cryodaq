@@ -1,10 +1,10 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-04-30 *(обновлено post-v0.43.0 — docs audit Phase 2)*
+**Дата:** 2026-05-01 *(обновлено post-v0.44.0 — parallel work session)*
 **Ветка:** master
-**Последний commit:** `c44c575` (`release: v0.43.0 — Overnight sprint (F19-F25)`)
-**Тесты:** ~1 970 passed (re-count after v0.43.0 merges; baseline 1 931 + 39 new)
-**Фронтир:** v0.43.0 shipped. F19–F25 ✅ DONE. Open: F26 XS polish (SQLite backport whitelist), F19 LOW polish (channel heuristic), Lab Ubuntu PC verification, Vault refresh in-progress.
+**Последний commit:** `880c6e6` (`docs(readme): restore Russian-dominant style, update to v0.44.0`)
+**Тесты:** ~2 019 passed (baseline 1 970 + 49 new: F26+F17+F13)
+**Фронтир:** v0.44.0 shipped. F26+F17+F13 ✅ DONE. Open: F28 ArchiveReader engine replay (XS), F27 chamber photos (L, spec ready), F19 LOW polish, Lab Ubuntu PC verification.
 
 ---
 
@@ -16,10 +16,10 @@
 | Строки кода (`src/cryodaq/`) | **~48 800** |
 | Тестовые файлы (`tests/`) | **208** |
 | Строки тестов (`tests/`) | **~39 500** |
-| Тесты | **~1 970 passed** (baseline 1 931 + 39 new F19-F25) |
+| Тесты | **~2 019 passed** (1 970 + 49 new: F26+6, F17+16, F13+19) |
 | Coverage (full suite) | stale — re-run pending |
 | Design System | **v1.0.1**, 67 canonical .md файлов, 139 токенов |
-| Версия пакета | **0.43.0** |
+| Версия пакета | **0.44.0** |
 | Python | 3.12+ (dev: 3.14.3) |
 
 Источник актуального репо-инвентаря: этот документ, обновляется при каждом релизе.

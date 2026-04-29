@@ -2,6 +2,48 @@
 
 ---
 
+## Audit 2026-05-01 — post-v0.44.0 parallel work session
+
+**Дата:** 2026-05-01
+**Commit:** `880c6e6` (README RU) ← `184d461` (release v0.44.0) ← F13/F17/F26 merges
+**Latest release tag:** v0.44.0 → `184d461` (2026-05-01)
+**Ветка:** master
+
+### State summary
+
+- Master: `880c6e6`
+- Tag: `v0.44.0` (released 2026-05-01, F26+F17+F13 overnight sprint)
+- Tests: ~2 019 passing
+- ROADMAP: F1-F26 ✅ DONE; F27 SPEC READY (L); F28 ⬜ XS; F5/F7/F15 blocked; F8/F9 research
+
+### Actions (this session)
+
+Track C — merges + release:
+- F26 merged: SQLite WAL backport whitelist (6 tests)
+- F17 merged: ColdRotationService + ArchiveReader (16 tests)
+- F13 merged: LeakRateEstimator + engine wiring (19 tests)
+- pyproject.toml bumped 0.43.0 → 0.44.0
+- v0.44.0 tagged + pushed
+
+Track A — README RU:
+- README.md: Russian-dominant style restored; v0.44.0 facts; F17/F13 entries added
+
+Track B — docs sync:
+- PROJECT_STATUS.md: header updated to v0.44.0
+- REPO_AUDIT_REPORT.md: this section appended
+- NEXT_SESSION.md: updated in overnight sprint already
+- Vault: Versions.md + F-table + What is CryoDAQ pending (Group IV extension)
+
+### Outstanding (post-v0.44.0)
+
+- Lab Ubuntu PC verification (F25 SQLite gate + v0.39.0 ZMQ H5 fix)
+- F28 ArchiveReader engine replay integration (XS ~50 LOC)
+- F27 chamber photos (L, spec ready in CC_PROMPT_F27_CHAMBER_PHOTOS.md)
+- F19 channel heuristic refinement (LOW priority)
+- Calibration .cof GUI wiring completion
+
+---
+
 ## Audit 2026-04-30 (evening) — post-v0.43.0 docs audit Phase 2
 
 **Дата:** 2026-04-30 (evening)
