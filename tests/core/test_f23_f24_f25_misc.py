@@ -18,7 +18,6 @@ from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.drivers.base import Reading
 
-
 # ---------------------------------------------------------------------------
 # F23 — RateEstimator uses measurement timestamp not dequeue time
 # ---------------------------------------------------------------------------
@@ -182,3 +181,36 @@ def test_sqlite_version_check_idempotent() -> None:
     _sw._SQLITE_VERSION_CHECKED = True  # Already checked
     with patch.object(_sw.sqlite3, "sqlite_version_info", broken_version):
         _sw._check_sqlite_version()  # Must not raise — already checked
+
+
+# ---------------------------------------------------------------------------
+# F26 — SQLite WAL gate backport whitelist
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_3_44_6_backport_safe_passes() -> None:
+    """Version (3, 44, 6) is in SQLITE_BACKPORT_SAFE and must not raise."""
+    with patch.object(_sw.sqlite3, "sqlite_version_info", (3, 44, 6)):
+        _sw._check_sqlite_version()  # Must not raise
+
+
+def test_sqlite_3_50_7_backport_safe_passes() -> None:
+    """Version (3, 50, 7) is in SQLITE_BACKPORT_SAFE and must not raise."""
+    with patch.object(_sw.sqlite3, "sqlite_version_info", (3, 50, 7)):
+        _sw._check_sqlite_version()  # Must not raise
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        (3, 44, 5),  # one below 3.44.6 — not in whitelist
+        (3, 44, 7),  # one above 3.44.6 — backport was single-version only
+        (3, 50, 6),  # one below 3.50.7 — not in whitelist
+        (3, 50, 8),  # one above 3.50.7 — no backport in 3.50.8..3.51.2
+    ],
+)
+def test_sqlite_adjacent_versions_still_raise(version: tuple[int, int, int]) -> None:
+    """Adjacent versions to whitelist entries still raise RuntimeError."""
+    with patch.object(_sw.sqlite3, "sqlite_version_info", version):
+        with pytest.raises(RuntimeError, match="WAL-reset corruption bug"):
+            _sw._check_sqlite_version()
