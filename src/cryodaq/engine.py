@@ -850,7 +850,9 @@ def _load_drivers(
 
             baudrate = int(entry.get("baudrate", 9600))
             validate_checksum = bool(entry.get("validate_checksum", True))
-            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock)
+            driver = ThyracontVSP63D(
+                name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock
+            )
         else:
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
@@ -1240,7 +1242,18 @@ async def _run_engine(*, mock: bool = False) -> None:
                         alarm_v2_state_mgr.process(alarm_cfg.alarm_id, None, alarm_cfg.config)
                         continue
                 try:
-                    event = alarm_v2_evaluator.evaluate(alarm_cfg.alarm_id, alarm_cfg.config)
+                    _active_alarms = alarm_v2_state_mgr.get_active()
+                    _active_event = _active_alarms.get(alarm_cfg.alarm_id)
+                    event = alarm_v2_evaluator.evaluate(
+                        alarm_cfg.alarm_id,
+                        alarm_cfg.config,
+                        is_active=_active_event is not None,
+                        active_channels=(
+                            frozenset(_active_event.channels)
+                            if _active_event is not None
+                            else None
+                        ),
+                    )
                     transition = alarm_v2_state_mgr.process(
                         alarm_cfg.alarm_id, event, alarm_cfg.config
                     )
@@ -1284,15 +1297,41 @@ async def _run_engine(*, mock: bool = False) -> None:
             await asyncio.sleep(interval)
             try:
                 new_events = sensor_diag.update()
-                for event in new_events:
-                    if _notify_telegram and telegram_bot is not None:
-                        msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                if _notify_telegram and telegram_bot is not None and new_events:
+                    aggregation_threshold = _sd_cfg.get("aggregation_threshold", 3)
+                    # F20 aggregation: batch > N simultaneous events into one message
+                    if len(new_events) > aggregation_threshold:
+                        criticals = [e for e in new_events if e.level == "CRITICAL"]
+                        warnings = [e for e in new_events if e.level == "WARNING"]
+                        parts: list[str] = []
+                        if criticals:
+                            names = ", ".join(
+                                e.channels[0] if e.channels else e.alarm_id
+                                for e in criticals
+                            )
+                            parts.append(f"{len(criticals)} channels critical: {names}")
+                        if warnings:
+                            names = ", ".join(
+                                e.channels[0] if e.channels else e.alarm_id
+                                for e in warnings
+                            )
+                            parts.append(f"{len(warnings)} channels warning: {names}")
+                        msg = "⚠ Diagnostic alarm batch:\n" + "\n".join(parts)
                         t = asyncio.create_task(
                             telegram_bot._send_to_all(msg),
-                            name=f"diag_tg_{event.alarm_id}",
+                            name="diag_tg_batch",
                         )
                         _alarm_dispatch_tasks.add(t)
                         t.add_done_callback(_alarm_dispatch_tasks.discard)
+                    else:
+                        for event in new_events:
+                            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                            t = asyncio.create_task(
+                                telegram_bot._send_to_all(msg),
+                                name=f"diag_tg_{event.alarm_id}",
+                            )
+                            _alarm_dispatch_tasks.add(t)
+                            t.add_done_callback(_alarm_dispatch_tasks.discard)
             except Exception as exc:
                 logger.error("SensorDiagnostics tick error: %s", exc)
 

@@ -111,12 +111,35 @@ class AlarmEvaluator:
         self._phase = phase_provider
         self._setpoint = setpoint_provider
 
-    def evaluate(self, alarm_id: str, alarm_config: dict[str, Any]) -> AlarmEvent | None:
-        """Проверить одну alarm-конфигурацию. None = не сработал."""
+    def evaluate(
+        self,
+        alarm_id: str,
+        alarm_config: dict[str, Any],
+        *,
+        is_active: bool = False,
+        active_channels: frozenset[str] | None = None,
+    ) -> AlarmEvent | None:
+        """Проверить одну alarm-конфигурацию. None = не сработал.
+
+        Parameters
+        ----------
+        is_active:
+            True if this alarm is currently active in AlarmStateManager.
+            Used by threshold evaluator to apply hysteresis deadband: alarm
+            stays active until value clears ``threshold ± hysteresis``.
+        active_channels:
+            Set of channels that triggered the current active alarm event.
+            When provided, hysteresis deadband is only applied to these
+            channels — prevents a non-triggering channel from keeping a
+            multi-channel alarm alive incorrectly.
+        """
         alarm_type = alarm_config.get("alarm_type")
         try:
             if alarm_type == "threshold":
-                return self._eval_threshold(alarm_id, alarm_config)
+                return self._eval_threshold(
+                    alarm_id, alarm_config,
+                    is_active=is_active, active_channels=active_channels,
+                )
             elif alarm_type == "composite":
                 return self._eval_composite(alarm_id, alarm_config)
             elif alarm_type == "rate":
@@ -134,11 +157,19 @@ class AlarmEvaluator:
     # threshold
     # ------------------------------------------------------------------
 
-    def _eval_threshold(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
+    def _eval_threshold(
+        self,
+        alarm_id: str,
+        cfg: dict,
+        *,
+        is_active: bool = False,
+        active_channels: frozenset[str] | None = None,
+    ) -> AlarmEvent | None:
         check = cfg.get("check", "above")
         channels = self._resolve_channels(cfg)
         level = cfg.get("level", "WARNING")
         message_tmpl = cfg.get("message", f"Alarm {alarm_id}")
+        hysteresis: float | None = cfg.get("hysteresis")
 
         for ch in channels:
             triggered, value = self._check_threshold_channel(ch, check, cfg)
@@ -152,6 +183,30 @@ class AlarmEvaluator:
                     channels=[ch],
                     values={ch: value},
                 )
+            # Hysteresis deadband (F21): if alarm is currently active, keep it
+            # active until value clears threshold ± hysteresis margin. Returns a
+            # "keep active" event that AlarmStateManager deduplicates (no new
+            # TRIGGERED transition, no re-notification).
+            # active_channels guard: only apply deadband to the channel(s) that
+            # originally triggered the alarm; prevents a non-triggering channel
+            # from keeping a multi-channel alarm alive indefinitely.
+            if is_active and hysteresis is not None and check in ("above", "below"):
+                if active_channels is not None and ch not in active_channels:
+                    continue  # channel did not trigger this alarm; skip deadband
+                threshold = cfg.get("threshold", 0.0)
+                in_deadband = (check == "above" and value >= threshold - hysteresis) or (
+                    check == "below" and value <= threshold + hysteresis
+                )
+                if in_deadband:
+                    msg = self._format_message(message_tmpl, channel=ch, value=value)
+                    return AlarmEvent(
+                        alarm_id=alarm_id,
+                        level=level,
+                        message=msg,
+                        triggered_at=time.time(),
+                        channels=[ch],
+                        values={ch: value},
+                    )
         return None
 
     def _check_threshold_channel(self, channel: str, check: str, cfg: dict) -> tuple[bool, float]:
@@ -489,13 +544,13 @@ class AlarmStateManager:
             return "CLEARED"
 
     def _check_hysteresis_cleared(self, alarm_id: str, config: dict, hysteresis: Any) -> bool:
-        """Проверить что аларм вышел из зоны гистерезиса.
+        """Always returns True — hysteresis is handled in AlarmEvaluator (F21).
 
-        Упрощённая реализация: hysteresis как отдельный порог не реализован
-        без знания текущего значения. Возвращает True (разрешить сброс).
-        В реальном использовании evaluator передаёт event=None только когда
-        основное условие не выполнено, что уже учитывает гистерезис если
-        конфигурация использует порог+гистерезис.
+        AlarmEvaluator._eval_threshold receives is_active=True when an alarm is
+        active and returns a "keep active" AlarmEvent while the channel value is
+        inside the deadband [threshold - hysteresis, threshold]. process() only
+        receives event=None once the value has fully exited the deadband, so
+        this guard is always safe to pass.
         """
         return True
 
@@ -524,10 +579,33 @@ class AlarmStateManager:
         Returns the AlarmEvent on new trigger, None if already active.
         """
         alarm_id = f"diag:{channel_id}"
+        level = severity.upper()
+
         if alarm_id in self._active:
+            existing = self._active[alarm_id]
+            # F22 severity-upgrade: critical replaces warning in-place.
+            # Same alarm_id is reused so operator sees one notification thread
+            # rather than duplicate warning + critical alarms.
+            if level == "CRITICAL" and existing.level == "WARNING":
+                existing.level = level
+                existing.message = f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}"
+                self._history.append(
+                    {
+                        "alarm_id": alarm_id,
+                        "transition": "SEVERITY_UPGRADED",
+                        "at": time.time(),
+                        "level": level,
+                        "message": existing.message,
+                    }
+                )
+                logger.info(
+                    "DIAGNOSTIC ALARM SEVERITY UPGRADED: %s WARNING→CRITICAL age=%.0fs",
+                    alarm_id,
+                    age_seconds,
+                )
+                return existing
             return None
 
-        level = severity.upper()
         event = AlarmEvent(
             alarm_id=alarm_id,
             level=level,

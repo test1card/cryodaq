@@ -685,3 +685,173 @@ def test_cooldown_stall_config_evaluates_without_threshold_keyerror(caplog) -> N
 
     assert result is not None
     assert "Ошибка evaluate cooldown_stall" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# F21 — Hysteresis deadband (alarm clears only below threshold - margin)
+# ---------------------------------------------------------------------------
+
+
+def _threshold_cfg(
+    channel: str,
+    threshold: float,
+    hysteresis: float | None = None,
+    check: str = "above",
+) -> dict:
+    cfg: dict = {
+        "alarm_type": "threshold",
+        "channel": channel,
+        "check": check,
+        "threshold": threshold,
+        "level": "WARNING",
+        "message": f"{channel} alarm",
+    }
+    if hysteresis is not None:
+        cfg["hysteresis"] = hysteresis
+    return cfg
+
+
+def test_hysteresis_deadband_clears_only_below_margin() -> None:
+    """Alarm stays active when value is in [threshold - hysteresis, threshold] deadband.
+
+    With threshold=10.0 and hysteresis=2.0:
+    - value=9.5 (deadband: 9.5 >= 10-2=8) → evaluate(is_active=True) returns event (keep active)
+    - value=7.9 (below deadband) → evaluate(is_active=True) returns None (allow clear)
+    """
+    cfg = _threshold_cfg("T1", threshold=10.0, hysteresis=2.0)
+
+    # In deadband: value dropped below threshold but not below threshold - hysteresis
+    ev_deadband = _make_evaluator([_reading("T1", 9.5)])
+    result = ev_deadband.evaluate("test_hyst", cfg, is_active=True)
+    assert result is not None, "Deadband: alarm should remain active (keep event returned)"
+    assert result.alarm_id == "test_hyst"
+
+    # Below deadband: value cleared the margin → alarm clears
+    ev_cleared = _make_evaluator([_reading("T1", 7.9)])
+    result = ev_cleared.evaluate("test_hyst", cfg, is_active=True)
+    assert result is None, "Below deadband: alarm should clear (None returned)"
+
+
+def test_hysteresis_deadband_not_applied_when_alarm_inactive() -> None:
+    """Hysteresis deadband only activates when is_active=True.
+
+    Without is_active, value=9.5 (below threshold=10) → normal None return.
+    """
+    cfg = _threshold_cfg("T1", threshold=10.0, hysteresis=2.0)
+    ev = _make_evaluator([_reading("T1", 9.5)])
+    result = ev.evaluate("test_hyst", cfg, is_active=False)
+    assert result is None, "is_active=False → no deadband check, normal clear"
+
+
+def test_hysteresis_below_check_deadband() -> None:
+    """Hysteresis works for check='below' direction.
+
+    threshold=5.0, hysteresis=1.0:
+    - value=5.5 (in deadband: 5.5 <= 5+1=6) → keep active
+    - value=6.5 (above deadband) → clear
+    """
+    cfg = _threshold_cfg("T1", threshold=5.0, hysteresis=1.0, check="below")
+
+    ev_deadband = _make_evaluator([_reading("T1", 5.5)])
+    result = ev_deadband.evaluate("test_hyst_below", cfg, is_active=True)
+    assert result is not None, "Deadband (below): keep active"
+
+    ev_cleared = _make_evaluator([_reading("T1", 6.5)])
+    result = ev_cleared.evaluate("test_hyst_below", cfg, is_active=True)
+    assert result is None, "Above deadband (below check): allow clear"
+
+
+def test_no_hysteresis_config_clears_normally() -> None:
+    """Without hysteresis key in config, clearing behaviour unchanged."""
+    cfg = _threshold_cfg("T1", threshold=10.0, hysteresis=None)  # no hysteresis
+    ev = _make_evaluator([_reading("T1", 9.5)])
+    result = ev.evaluate("test_no_hyst", cfg, is_active=True)
+    assert result is None, "No hysteresis → normal clear when below threshold"
+
+
+# ---------------------------------------------------------------------------
+# F22 — Diagnostic alarm severity-upgrade (warning → critical in-place)
+# ---------------------------------------------------------------------------
+
+
+def test_warning_then_critical_severity_upgrade() -> None:
+    """Critical replaces warning in-place: same alarm_id, level upgraded to CRITICAL.
+
+    Sequence: publish warning → publish critical → expect SEVERITY_UPGRADED in history
+    and _active[alarm_id].level == "CRITICAL".
+    """
+    mgr = AlarmStateManager()
+
+    # Step 1: warning fires
+    warn_event = mgr.publish_diagnostic_alarm("T1", "warning", 300.0)
+    assert warn_event is not None
+    assert warn_event.level == "WARNING"
+    assert mgr.get_active()["diag:T1"].level == "WARNING"
+
+    # Step 2: critical fires → severity upgrade
+    crit_event = mgr.publish_diagnostic_alarm("T1", "critical", 900.0)
+    assert crit_event is not None, "Severity upgrade should return the upgraded AlarmEvent"
+    assert crit_event.level == "CRITICAL"
+    assert mgr.get_active()["diag:T1"].level == "CRITICAL"
+
+    # History should contain SEVERITY_UPGRADED transition
+    history = mgr.get_history()
+    transitions = [h["transition"] for h in history]
+    assert "SEVERITY_UPGRADED" in transitions
+
+
+def test_critical_no_duplicate_when_already_critical() -> None:
+    """publish_diagnostic_alarm returns None when level is same or lower than active."""
+    mgr = AlarmStateManager()
+
+    mgr.publish_diagnostic_alarm("T1", "warning", 300.0)
+    mgr.publish_diagnostic_alarm("T1", "critical", 900.0)  # upgrade
+
+    # Second critical on same alarm → no-op
+    result = mgr.publish_diagnostic_alarm("T1", "critical", 1000.0)
+    assert result is None, "Duplicate critical should be no-op"
+
+    # Warning on active critical → no-op (lower severity)
+    result = mgr.publish_diagnostic_alarm("T1", "warning", 1000.0)
+    assert result is None, "Lower severity on active critical should be no-op"
+    assert mgr.get_active()["diag:T1"].level == "CRITICAL"
+
+
+def test_severity_upgrade_message_updated() -> None:
+    """Upgraded alarm's message reflects the critical age_seconds."""
+    mgr = AlarmStateManager()
+    mgr.publish_diagnostic_alarm("T1", "warning", 300.0)
+    crit_event = mgr.publish_diagnostic_alarm("T1", "critical", 1234.0)
+    assert crit_event is not None
+    assert "1234" in crit_event.message
+
+
+def test_hysteresis_deadband_non_triggering_channel_does_not_keep_active() -> None:
+    """Codex finding: non-triggering channel in deadband must not keep alarm active.
+
+    Multi-channel alarm: T1 triggered (value was > threshold), T2 never triggered.
+    After T1 clears below deadband, T2 in deadband must NOT return keep-active event.
+    active_channels={T1} → T2 skipped in deadband check → returns None (alarm clears).
+    """
+    cfg = {
+        "alarm_type": "threshold",
+        "channels": ["T1", "T2"],
+        "check": "above",
+        "threshold": 10.0,
+        "hysteresis": 2.0,
+        "level": "WARNING",
+        "message": "test",
+    }
+
+    # T1 dropped below deadband (7.5 < 8.0), T2 in deadband (9.5 in [8, 10])
+    # active_channels={T1} means only T1's deadband is checked
+    ev = _make_evaluator([_reading("T1", 7.5), _reading("T2", 9.5)])
+
+    # With active_channels pointing to T1: T1 below deadband → skip; T2 not in
+    # active_channels → skip deadband → returns None (alarm clears correctly)
+    result = ev.evaluate("test_multi", cfg, is_active=True, active_channels=frozenset(["T1"]))
+    assert result is None, "Non-triggering channel T2 should not keep alarm active"
+
+    # Without active_channels (old behavior): T2 in deadband → returns keep-active
+    result_old = ev.evaluate("test_multi", cfg, is_active=True, active_channels=None)
+    assert result_old is not None, "Without active_channels guard, T2 keeps alarm active (old behavior)"
