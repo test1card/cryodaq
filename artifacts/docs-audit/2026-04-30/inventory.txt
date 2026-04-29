@@ -1,0 +1,41 @@
+CC_PROMPT_CALIBRATION_2026-04-30.md  23.3K
+CC_PROMPT_DOCS_AUDIT_REWRITE_2026-04-30.md  16.2K
+CC_PROMPT_METASWARM_F17.md  12.7K
+CC_PROMPT_OVERNIGHT_2026-04-30.md  25.6K
+CC_PROMPT_REPO_CLEANUP_2026-04-30.md  23.7K
+CHANGELOG.md  100.1K
+CLAUDE.md  28.2K
+DOC_REALITY_MAP.md  29.2K
+PROJECT_STATUS.md  23.6K
+README.md  13.2K
+RELEASE_CHECKLIST.md  9.4K
+ROADMAP.md  23.0K
+THIRD_PARTY_NOTICES.md  2.0K
+docs/architecture.md
+docs/instruments.md
+docs/ORCHESTRATION.md
+docs/safety-operator.md
+docs/changelog/RETRO_ANALYSIS_V3.md
+docs/runbooks/stall_diagnosis.md
+docs/PHASE_UI1_V2_WIREFRAME.md
+docs/SPEC_AUTHORING_TEMPLATE.md
+docs/operator_manual.md
+docs/DESIGN_SYSTEM.md
+docs/deployment.md
+docs/REPO_AUDIT_REPORT.md
+docs/first_deployment.md
+docs/NEXT_SESSION.md
+docs/bug_B1_zmq_idle_death_handoff.md
+docs/codex-architecture-control-plane.md
+docs/UI_REWORK_ROADMAP.md
+docs/CODEX_SELF_REVIEW_PLAYBOOK.md
+docs/alarms_tuning_guide.md
+--- Vault ---
+_index.md  241B
+F-table backlog.md  3.3K
+Versions.md  3.5K
+_index.md  339B
+Architecture overview.md  5.8K
+Hardware setup.md  3.9K
+UI and design system.md  7.5K
+What is CryoDAQ.md  4.0K
