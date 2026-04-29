@@ -248,10 +248,13 @@ async def test_smoke_real_ollama() -> None:
     """
     import subprocess
 
-    result_ls = subprocess.run(  # noqa: ASYNC221
-        ["ollama", "list"], capture_output=True, text=True, timeout=5
-    )
-    available = result_ls.stdout
+    try:
+        result_ls = subprocess.run(  # noqa: ASYNC221
+            ["ollama", "list"], capture_output=True, text=True, timeout=5
+        )
+        available = result_ls.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pytest.skip("ollama not installed or not responding")
 
     if "gemma4:e4b" in available:
         model = "gemma4:e4b"
