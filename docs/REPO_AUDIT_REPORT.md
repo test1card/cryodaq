@@ -2,6 +2,54 @@
 
 ---
 
+## Audit 2026-04-30 (evening) — post-v0.43.0 docs audit Phase 2
+
+**Дата:** 2026-04-30 (evening)
+**Commit:** `535fc9d` (Group I) → `79d5f99` (Group III) → Group II/IV in-progress
+**Latest release tag:** v0.43.0 → `c44c575` (2026-04-30)
+**Ветка:** master
+
+### State summary
+
+- Master: `c44c575`
+- Tag: `v0.43.0` (released 2026-04-30, overnight sprint F19-F25)
+- Tests: ~1 970 passing
+- ROADMAP: F1-F25 ✅ DONE; F26 XS backlog; F5/F7/F15 blocked; F8/F9 research
+
+### Docs audit actions (this session)
+
+Phase 1: 56 docs audited (27 in-repo + 29 vault notes). Findings:
+`artifacts/docs-audit/2026-04-30/findings.md`
+
+Phase 2 Group I (top-level rewrite):
+- README.md — full rewrite (v0.33.0 → v0.43.0; 5 stale dashboard zones, missing workflows F10/F19-F25, Phase III GUI status corrected)
+- PROJECT_STATUS.md — header/metrics/Phase 2e invariants (#19-#22) / vault pointer
+- CLAUDE.md — stale "0.13.0" metadata claim replaced
+
+Phase 2 Group III (archives):
+- `docs/architecture.md` (v0.13.0) → `docs/handoffs-archive/2026-03/architecture-v0.13-historical.md`
+- `docs/first_deployment.md` (v0.13.0) → `docs/handoffs-archive/2026-03/first_deployment-historical.md`
+- `DOC_REALITY_MAP.md` → `docs/handoffs-archive/2026-04/DOC_REALITY_MAP.md` (retired)
+- `docs/UI_REWORK_ROADMAP.md`, `docs/DESIGN_SYSTEM.md`, `docs/PHASE_UI1_V2_WIREFRAME.md` → `docs/handoffs-archive/2026-04/ui-superseded/`
+
+Phase 2 Group II (docs/ refresh):
+- `docs/architecture.md` — new file from scratch (v0.43.0, subsystem map + vault pointer)
+- `docs/NEXT_SESSION.md` — post-v0.43.0 outstanding items; all completed F19-F25 + docs audit items recorded
+- `docs/alarms_tuning_guide.md` — F20/F21/F22 config additions
+- `docs/safety-operator.md` — F24 interlock acknowledge operator section
+
+Phase 2 Group IV (vault): 13 vault notes refreshed in-place (see
+`artifacts/handoffs/2026-04-30-vault-refresh.md`).
+
+### Outstanding (post-docs-audit)
+
+- Lab Ubuntu PC verification (F25 SQLite gate + v0.39.0 ZMQ H5 fix)
+- F26 SQLite backport whitelist (XS ~20 LOC)
+- F19 channel heuristic refinement (LOW priority)
+- Calibration .cof GUI wiring completion
+
+---
+
 ## Audit 2026-04-30 (repo cleanup pass)
 
 **Дата:** 2026-04-30

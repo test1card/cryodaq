@@ -485,7 +485,67 @@ doc. Это снимет "магические числа" для следующ
 
 ---
 
+---
+
+## F20 — Диагностические алармы: агрегация и cooldown (v0.43.0)
+
+Sensor diagnostics engine (F10) теперь поддерживает:
+
+**Агрегация** (`plugins.yaml → aggregation_threshold`, default `3`):
+Если в одном тике N > threshold каналов переходят в warning/critical
+одновременно, вместо N отдельных Telegram-сообщений отправляется одно
+батчевое: "5 каналов critical: T1, T3, T5, T7, T9".
+
+**Per-channel escalation cooldown** (`plugins.yaml → escalation_cooldown_s`,
+default `120`):
+Предотвращает повторную нотификацию при oscilling канале вблизи порога.
+Первая нотификация НИКОГДА не подавляется. Critical всегда проходит вне
+зависимости от cooldown.
+
+Конфигурация в `config/plugins.yaml`:
+```yaml
+sensor_diagnostics:
+  aggregation_threshold: 3
+  escalation_cooldown_s: 120.0
+```
+
+---
+
+## F21 — Alarm hysteresis deadband (v0.43.0)
+
+Поле `hysteresis` в alarm rule (`config/alarms_v3.yaml`):
+Аларм не очищается пока значение не выйдет за границу `threshold - hysteresis`
+(для `check: above`) или `threshold + hysteresis` (для `check: below`).
+
+Особенность реализации: deadband применяется только к каналам, которые
+изначально триггернули аларм (`active_channels` parameter). Незатронутые
+каналы не наследуют alarm state.
+
+Пример конфигурации:
+```yaml
+alarm_type: threshold
+check: above
+threshold: 200.0
+hysteresis: 5.0   # аларм очищается только при T < 195.0
+```
+
+---
+
+## F22 — Severity upgrade: WARNING → CRITICAL (v0.43.0)
+
+`AlarmStateManager.publish_diagnostic_alarm()` теперь поддерживает upgrade
+severity в рамках одного `alarm_id`. Если warning уже активен и приходит
+critical — severity обновляется in-place. История записывает событие
+`SEVERITY_UPGRADED`.
+
+Оператор видит **одно** уведомление с эскалацией severity, не дублирующиеся
+warning + critical.
+
+---
+
 ## Changelog
 
+- 2026-04-30: добавлены F20/F21/F22 секции (aggregation, cooldown, hysteresis,
+  severity upgrade). Обновлено после v0.43.0 ship (`c44c575`).
 - 2026-04-20: первая редакция после IV.3 close (`b06c657`). Собрано
   из `safety.yaml`, `interlocks.yaml`, `alarms.yaml`, `alarms_v3.yaml`.

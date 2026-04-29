@@ -3,7 +3,7 @@ title: Руководство оператора — безопасность
 audience: operator on duty at the lab PC
 scope: operator-facing behaviour of SafetyManager FSM
 status: canonical
-last_updated: 2026-04-17
+last_updated: 2026-04-30
 companion: SAFETY_MANAGER_DEEP_DIVE.md (developer-facing, теперь
   в docs/audits/2026-04-09/SAFETY_MANAGER_DEEP_DIVE.md)
 ---
@@ -231,6 +231,31 @@ monitoring` (или аналогичным).
 - **Ответственный инженер по safety-path:** *(вписать)*
 - **Дежурный по приборам:** *(вписать)*
 - **Контакт для вопросов по эксперименту:** *(вписать)*
+
+---
+
+## Interlock acknowledge (F24, v0.43.0)
+
+Когда интерлок срабатывает, он переходит в состояние `TRIPPED` и останавливает
+мониторинг своего условия. Источник отключается через `emergency_off`.
+
+Для повторного включения мониторинга оператор должен **подтвердить** интерлок
+после устранения причины:
+
+```
+interlock_acknowledge {"name": "<interlock_name>"}
+```
+
+Эта команда отправляется через ZMQ REP/REQ (`cryodaq-engine :5556`).
+Engine переводит интерлок из `TRIPPED → ARMED`; мониторинг возобновляется.
+
+Важные свойства:
+- Неизвестное имя интерлока → `KeyError` (нет тихого провала).
+- Уже `ARMED` интерлок → команда выполняется успешно без изменения состояния.
+- Engine **не проверяет** что условие устранено — если условие всё ещё
+  присутствует, интерлок немедленно сработает повторно.
+- Доступные имена: `cryostat_overheat`, `compressor_fault`, `detector_temp`
+  (из `config/interlocks.yaml`).
 
 ---
 
