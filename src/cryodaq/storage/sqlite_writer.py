@@ -93,6 +93,16 @@ def _parse_timestamp(raw) -> datetime:
 
 _SQLITE_VERSION_CHECKED = False
 
+# Per SQLite official advisory (sqlite.org/wal.html), the WAL-reset corruption
+# fix is backported to these specific patch versions only. 3.44.7+ and 3.50.8+
+# do NOT have the backport; the fix landed in trunk at 3.51.3.
+SQLITE_BACKPORT_SAFE: frozenset[tuple[int, int, int]] = frozenset(
+    [
+        (3, 44, 6),
+        (3, 50, 7),
+    ]
+)
+
 
 def _check_sqlite_version() -> None:
     """Hard-fail if running on a SQLite version affected by the March 2026 WAL-reset bug.
@@ -102,6 +112,9 @@ def _check_sqlite_version() -> None:
     instant". CryoDAQ uses WAL with multiple concurrent connections (writer,
     history reader, web dashboard, reporting); upgrade to >= 3.51.3.
 
+    Versions in SQLITE_BACKPORT_SAFE (3.44.6, 3.50.7) carry a backport of the
+    fix and are allowed through without requiring CRYODAQ_ALLOW_BROKEN_SQLITE=1.
+
     Set CRYODAQ_ALLOW_BROKEN_SQLITE=1 to bypass with explicit operator acknowledgment.
     """
     global _SQLITE_VERSION_CHECKED
@@ -110,6 +123,8 @@ def _check_sqlite_version() -> None:
     _SQLITE_VERSION_CHECKED = True
     version = sqlite3.sqlite_version_info  # tuple, e.g. (3, 37, 2)
     if (3, 7, 0) <= version < (3, 51, 3):
+        if version in SQLITE_BACKPORT_SAFE:
+            return
         bypass = os.environ.get("CRYODAQ_ALLOW_BROKEN_SQLITE", "").strip()
         if bypass == "1":
             logger.warning(
@@ -125,7 +140,8 @@ def _check_sqlite_version() -> None:
             f"SQLite {version[0]}.{version[1]}.{version[2]} is affected by the "
             "March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). "
             "CryoDAQ refuses to start with a known-broken SQLite version. "
-            "Upgrade to SQLite >= 3.51.3, or set CRYODAQ_ALLOW_BROKEN_SQLITE=1 "
+            "Upgrade to SQLite >= 3.51.3, or use a backport-safe build "
+            "(3.44.6 or 3.50.7), or set CRYODAQ_ALLOW_BROKEN_SQLITE=1 "
             "to bypass with explicit operator acknowledgment."
         )
 
