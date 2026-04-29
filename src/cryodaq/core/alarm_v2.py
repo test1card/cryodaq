@@ -583,9 +583,13 @@ class AlarmStateManager:
 
         if alarm_id in self._active:
             existing = self._active[alarm_id]
-            # F22 severity-upgrade: critical replaces warning in-place.
-            # Same alarm_id is reused so operator sees one notification thread
-            # rather than duplicate warning + critical alarms.
+            # F22 severity-upgrade: WARNING→CRITICAL in-place on the existing AlarmEvent.
+            # Safety: AlarmEvent is a plain mutable @dataclass (no frozen=True), so
+            # field mutation is intentional. alarm_id is NOT changed — the routing key
+            # stays stable, so ACK tracking and Telegram thread continuity are preserved.
+            # Alternative (new alarm_id per severity) was rejected: creates duplicate
+            # operator notifications for the same physical anomaly. SEVERITY_UPGRADED
+            # history entry provides the audit trail.
             if level == "CRITICAL" and existing.level == "WARNING":
                 existing.level = level
                 existing.message = f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}"
