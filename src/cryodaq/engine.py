@@ -1373,6 +1373,22 @@ async def _run_engine(*, mock: bool = False) -> None:
                             )
                             _alarm_dispatch_tasks.add(t)
                             t.add_done_callback(_alarm_dispatch_tasks.discard)
+                for _sd_ev in new_events:
+                    if _sd_ev.level.upper() == "CRITICAL":
+                        await event_bus.publish(
+                            EngineEvent(
+                                event_type="sensor_anomaly_critical",
+                                timestamp=datetime.now(UTC),
+                                payload={
+                                    "alarm_id": _sd_ev.alarm_id,
+                                    "level": _sd_ev.level,
+                                    "channels": _sd_ev.channels,
+                                    "values": _sd_ev.values,
+                                    "message": _sd_ev.message,
+                                },
+                                experiment_id=experiment_manager.active_experiment_id,
+                            )
+                        )
             except Exception as exc:
                 logger.error("SensorDiagnostics tick error: %s", exc)
 
@@ -1763,6 +1779,20 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if pred is None:
                     return {"ok": True, "status": "no_data"}
                 return {"ok": True, **asdict(pred)}
+            if action == "shift_handover_summary":
+                _sh_active = experiment_manager.active_experiment
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type="shift_handover_request",
+                        timestamp=datetime.now(UTC),
+                        payload={
+                            "requested_by": cmd.get("operator", ""),
+                            "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
+                        },
+                        experiment_id=_sh_active.experiment_id if _sh_active else None,
+                    )
+                )
+                return {"ok": True, "status": "queued"}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)

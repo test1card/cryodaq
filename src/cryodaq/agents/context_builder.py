@@ -6,6 +6,7 @@ for LLM token budget.
 
 Cycle 1: AlarmContext dataclass + build_alarm_context interface.
 SQLite queries and full context assembly wired in Cycle 2.
+Cycle 3: ExperimentFinalizeContext, SensorAnomalyContext, ShiftHandoverContext added.
 Slice B (diagnostic) and Slice C (campaign) contexts deferred.
 """
 
@@ -84,6 +85,24 @@ class ContextBuilder:
             recent_alarms_text=_alarms_stub(recent_alarm_lookback_s),
         )
 
+    async def build_experiment_finalize_context(
+        self, payload: dict[str, Any]
+    ) -> ExperimentFinalizeContext:
+        """Assemble context for experiment finalize/stop/abort prompt."""
+        return _build_experiment_finalize_context(self._em, payload)
+
+    async def build_sensor_anomaly_context(
+        self, payload: dict[str, Any]
+    ) -> SensorAnomalyContext:
+        """Assemble context for sensor anomaly analysis prompt."""
+        return _build_sensor_anomaly_context(self._em, payload)
+
+    async def build_shift_handover_context(
+        self, payload: dict[str, Any]
+    ) -> ShiftHandoverContext:
+        """Assemble context for shift handover summary prompt."""
+        return _build_shift_handover_context(self._em, payload)
+
 
 def _compute_experiment_age(em: Any) -> float | None:
     try:
@@ -108,3 +127,174 @@ def _readings_stub(channels: list[str], lookback_s: float) -> str:
 
 def _alarms_stub(lookback_s: float) -> str:
     return f"[Alarm history over last {lookback_s:.0f}s — wired in Cycle 2]"
+
+
+# ---------------------------------------------------------------------------
+# Experiment finalize context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExperimentFinalizeContext:
+    """Context for experiment finalize/stop/abort summary (Slice A)."""
+
+    experiment_id: str | None
+    name: str
+    action: str
+    duration_str: str
+    phases_text: str
+    alarms_summary_text: str
+
+
+# ---------------------------------------------------------------------------
+# Sensor anomaly context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SensorAnomalyContext:
+    """Context for sensor anomaly analysis (Slice A)."""
+
+    alarm_id: str
+    level: str
+    channel: str
+    channels: list[str]
+    values: dict[str, float]
+    message: str
+    health_score: str
+    fault_flags: str
+    current_value: str
+    experiment_id: str | None
+    phase: str | None
+
+
+# ---------------------------------------------------------------------------
+# Shift handover context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ShiftHandoverContext:
+    """Context for shift handover summary (Slice A)."""
+
+    experiment_id: str | None
+    phase: str | None
+    experiment_age: str
+    active_alarms: str
+    recent_events: str
+    shift_duration_h: int
+
+
+# ---------------------------------------------------------------------------
+# Concrete build methods on ContextBuilder
+# ---------------------------------------------------------------------------
+
+
+def _build_experiment_finalize_context(
+    em: Any, payload: dict[str, Any]
+) -> ExperimentFinalizeContext:
+    action = payload.get("action", "experiment_finalize")
+    experiment = payload.get("experiment", {})
+    experiment_id = experiment.get("experiment_id")
+    name = experiment.get("name") or experiment.get("title") or "—"
+    age_float = _compute_experiment_age(em)
+    if age_float is None:
+        # Fallback: try to compute from experiment dict
+        started = experiment.get("started_at") or experiment.get("created_at")
+        if started:
+            try:
+                from datetime import UTC, datetime
+
+                start_dt = datetime.fromisoformat(started)
+                age_s = (datetime.now(UTC) - start_dt.astimezone(UTC)).total_seconds()
+                duration_str = _format_age(age_s)
+            except Exception:
+                duration_str = "—"
+        else:
+            duration_str = "—"
+    else:
+        duration_str = _format_age(age_float)
+    phases = experiment.get("phases") or experiment.get("phase_history") or []
+    if phases:
+        phases_text = "\n".join(
+            f"- {p.get('phase', '?')}: {p.get('started_at', '?')}" for p in phases
+        )
+    else:
+        phases_text = "[История фаз — wired in Cycle 2]"
+    return ExperimentFinalizeContext(
+        experiment_id=experiment_id,
+        name=name,
+        action=action,
+        duration_str=duration_str,
+        phases_text=phases_text,
+        alarms_summary_text="[Алармы за эксперимент — wired in Cycle 2]",
+    )
+
+
+def _build_sensor_anomaly_context(
+    em: Any, payload: dict[str, Any]
+) -> SensorAnomalyContext:
+    alarm_id = payload.get("alarm_id", "unknown")
+    level = payload.get("level", "CRITICAL")
+    channels: list[str] = payload.get("channels", [])
+    values: dict[str, float] = payload.get("values", {})
+    message = payload.get("message", "—")
+    channel = channels[0] if channels else alarm_id.replace("diag:", "")
+    current_value = "—"
+    if values:
+        first_ch = next(iter(values))
+        current_value = f"{values[first_ch]:.4g}"
+    experiment_id: str | None = getattr(em, "active_experiment_id", None)
+    phase: str | None = None
+    if hasattr(em, "get_current_phase"):
+        try:
+            phase = em.get_current_phase()
+        except Exception:
+            pass
+    health_score = payload.get("health_score", "—")
+    fault_flags_raw = payload.get("fault_flags", [])
+    fault_flags = ", ".join(fault_flags_raw) if fault_flags_raw else "—"
+    return SensorAnomalyContext(
+        alarm_id=alarm_id,
+        level=level,
+        channel=channel,
+        channels=channels,
+        values=values,
+        message=message,
+        health_score=str(health_score),
+        fault_flags=fault_flags,
+        current_value=current_value,
+        experiment_id=experiment_id,
+        phase=phase,
+    )
+
+
+def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHandoverContext:
+    experiment_id: str | None = getattr(em, "active_experiment_id", None)
+    phase: str | None = None
+    if hasattr(em, "get_current_phase"):
+        try:
+            phase = em.get_current_phase()
+        except Exception:
+            pass
+    age_s = _compute_experiment_age(em)
+    experiment_age = _format_age(age_s) if age_s is not None else "—"
+    shift_duration_h = int(payload.get("shift_duration_h", 8))
+    return ShiftHandoverContext(
+        experiment_id=experiment_id,
+        phase=phase,
+        experiment_age=experiment_age,
+        active_alarms="[Активные алармы — wired in Cycle 2]",
+        recent_events="[События смены — wired in Cycle 2]",
+        shift_duration_h=shift_duration_h,
+    )
+
+
+def _format_age(age_s: float) -> str:
+    h, rem = divmod(int(age_s), 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}ч {m}м"
+    if m > 0:
+        return f"{m}м {s}с"
+    return f"{s}с"

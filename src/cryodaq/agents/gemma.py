@@ -28,7 +28,16 @@ from cryodaq.agents.ollama_client import (
     OllamaUnavailableError,
 )
 from cryodaq.agents.output_router import OutputRouter, OutputTarget
-from cryodaq.agents.prompts import ALARM_SUMMARY_SYSTEM, ALARM_SUMMARY_USER
+from cryodaq.agents.prompts import (
+    ALARM_SUMMARY_SYSTEM,
+    ALARM_SUMMARY_USER,
+    EXPERIMENT_FINALIZE_SYSTEM,
+    EXPERIMENT_FINALIZE_USER,
+    SENSOR_ANOMALY_SYSTEM,
+    SENSOR_ANOMALY_USER,
+    SHIFT_HANDOVER_SYSTEM,
+    SHIFT_HANDOVER_USER,
+)
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -48,6 +57,9 @@ class GemmaConfig:
     max_calls_per_hour: int = 60
     alarm_fired_enabled: bool = True
     alarm_min_level: str = "WARNING"
+    experiment_finalize_enabled: bool = True
+    sensor_anomaly_critical_enabled: bool = True
+    shift_handover_request_enabled: bool = True
     slice_a_notification: bool = True
     slice_b_suggestion: bool = False
     slice_c_campaign_report: bool = False
@@ -86,6 +98,21 @@ class GemmaConfig:
                     f"alarm_min_level must be one of {list(_MIN_LEVELS)}, got {raw_level!r}"
                 )
             cfg.alarm_min_level = raw_level
+        exp_t = triggers.get("experiment_finalize", {})
+        if isinstance(exp_t, dict):
+            cfg.experiment_finalize_enabled = bool(
+                exp_t.get("enabled", cfg.experiment_finalize_enabled)
+            )
+        sa_t = triggers.get("sensor_anomaly_critical", {})
+        if isinstance(sa_t, dict):
+            cfg.sensor_anomaly_critical_enabled = bool(
+                sa_t.get("enabled", cfg.sensor_anomaly_critical_enabled)
+            )
+        sh_t = triggers.get("shift_handover_request", {})
+        if isinstance(sh_t, dict):
+            cfg.shift_handover_request_enabled = bool(
+                sh_t.get("enabled", cfg.shift_handover_request_enabled)
+            )
         outputs = d.get("outputs", {})
         cfg.output_telegram = bool(outputs.get("telegram", cfg.output_telegram))
         cfg.output_operator_log = bool(outputs.get("operator_log", cfg.output_operator_log))
@@ -192,7 +219,13 @@ class GemmaAgent:
             return _MIN_LEVELS.get(level, 0) >= _MIN_LEVELS.get(
                 self._config.alarm_min_level, 1
             )
-        return False  # experiment_finalize and phase_transition handled in Cycle 3
+        if event.event_type in {"experiment_finalize", "experiment_stop", "experiment_abort"}:
+            return self._config.experiment_finalize_enabled
+        if event.event_type == "sensor_anomaly_critical":
+            return self._config.sensor_anomaly_critical_enabled
+        if event.event_type == "shift_handover_request":
+            return self._config.shift_handover_request_enabled
+        return False
 
     def _check_rate_limit(self) -> bool:
         """True if we can make a call now (hourly bucket)."""
@@ -215,7 +248,18 @@ class GemmaAgent:
         async with self._semaphore:
             self._call_timestamps.append(time.monotonic())
             try:
-                await self._handle_alarm_fired(event)
+                if event.event_type in {
+                    "experiment_finalize",
+                    "experiment_stop",
+                    "experiment_abort",
+                }:
+                    await self._handle_experiment_finalize(event)
+                elif event.event_type == "sensor_anomaly_critical":
+                    await self._handle_sensor_anomaly(event)
+                elif event.event_type == "shift_handover_request":
+                    await self._handle_shift_handover(event)
+                else:
+                    await self._handle_alarm_fired(event)
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                 logger.warning("GemmaAgent: Ollama недоступен — %s", exc)
             except Exception:
@@ -297,6 +341,211 @@ class GemmaAgent:
             audit_id,
             result.latency_s,
             dispatched,
+        )
+
+
+    async def _handle_experiment_finalize(self, event: EngineEvent) -> None:
+        audit_id = self._audit.make_audit_id()
+        payload = event.payload
+
+        ctx = await self._ctx_builder.build_experiment_finalize_context(payload)
+        _action_labels = {
+            "experiment_finalize": "Завершён штатно",
+            "experiment_stop": "Остановлен",
+            "experiment_abort": "Прерван аварийно",
+        }
+        user_prompt = EXPERIMENT_FINALIZE_USER.format(
+            experiment_id=ctx.experiment_id or "—",
+            name=ctx.name,
+            duration=ctx.duration_str,
+            status=_action_labels.get(ctx.action, ctx.action),
+            phases=ctx.phases_text,
+            alarms_summary=ctx.alarms_summary_text,
+        )
+
+        result = await self._ollama.generate(
+            user_prompt,
+            system=EXPERIMENT_FINALIZE_SYSTEM,
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
+        )
+
+        errors: list[str] = []
+        if result.truncated:
+            errors.append("timeout_truncated")
+            logger.warning(
+                "GemmaAgent: ответ обрезан (experiment_finalize, audit_id=%s)", audit_id
+            )
+
+        targets = _build_targets(self._config)
+        if result.truncated or not result.text.strip():
+            logger.warning(
+                "GemmaAgent: пустой ответ experiment_finalize (audit_id=%s)", audit_id
+            )
+            dispatched: list[str] = []
+        else:
+            dispatched = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
+            audit_id=audit_id,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
+            context_assembled=user_prompt,
+            prompt_template="experiment_finalize",
+            model=result.model,
+            system_prompt=EXPERIMENT_FINALIZE_SYSTEM,
+            user_prompt=user_prompt,
+            response=result.text,
+            tokens={"in": result.tokens_in, "out": result.tokens_out},
+            latency_s=result.latency_s,
+            outputs_dispatched=dispatched,
+            errors=errors,
+        )
+        logger.info(
+            "GemmaAgent: %s обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
+            event.event_type,
+            audit_id,
+            result.latency_s,
+            dispatched,
+        )
+
+    async def _handle_sensor_anomaly(self, event: EngineEvent) -> None:
+        audit_id = self._audit.make_audit_id()
+        payload = event.payload
+
+        ctx = await self._ctx_builder.build_sensor_anomaly_context(payload)
+        user_prompt = SENSOR_ANOMALY_USER.format(
+            channel=ctx.channel,
+            alarm_id=ctx.alarm_id,
+            level=ctx.level,
+            message=ctx.message,
+            health_score=ctx.health_score,
+            fault_flags=ctx.fault_flags,
+            current_value=ctx.current_value,
+            experiment_id=ctx.experiment_id or "—",
+            phase=ctx.phase or "—",
+        )
+
+        result = await self._ollama.generate(
+            user_prompt,
+            system=SENSOR_ANOMALY_SYSTEM,
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
+        )
+
+        errors: list[str] = []
+        if result.truncated:
+            errors.append("timeout_truncated")
+            logger.warning(
+                "GemmaAgent: ответ обрезан (sensor_anomaly, audit_id=%s)", audit_id
+            )
+
+        targets = _build_targets(self._config)
+        if result.truncated or not result.text.strip():
+            logger.warning(
+                "GemmaAgent: пустой ответ sensor_anomaly (audit_id=%s)", audit_id
+            )
+            dispatched_sa: list[str] = []
+        else:
+            dispatched_sa = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
+            audit_id=audit_id,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
+            context_assembled=user_prompt,
+            prompt_template="sensor_anomaly",
+            model=result.model,
+            system_prompt=SENSOR_ANOMALY_SYSTEM,
+            user_prompt=user_prompt,
+            response=result.text,
+            tokens={"in": result.tokens_in, "out": result.tokens_out},
+            latency_s=result.latency_s,
+            outputs_dispatched=dispatched_sa,
+            errors=errors,
+        )
+        logger.info(
+            "GemmaAgent: sensor_anomaly_critical обработан "
+            "(audit_id=%s, latency=%.1fs, channel=%s)",
+            audit_id,
+            result.latency_s,
+            ctx.channel,
+        )
+
+    async def _handle_shift_handover(self, event: EngineEvent) -> None:
+        audit_id = self._audit.make_audit_id()
+        payload = event.payload
+
+        ctx = await self._ctx_builder.build_shift_handover_context(payload)
+        user_prompt = SHIFT_HANDOVER_USER.format(
+            experiment_id=ctx.experiment_id or "нет активного эксперимента",
+            phase=ctx.phase or "—",
+            experiment_age=ctx.experiment_age,
+            active_alarms=ctx.active_alarms,
+            recent_events=ctx.recent_events,
+            shift_duration_h=ctx.shift_duration_h,
+        )
+
+        result = await self._ollama.generate(
+            user_prompt,
+            system=SHIFT_HANDOVER_SYSTEM,
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
+        )
+
+        errors: list[str] = []
+        if result.truncated:
+            errors.append("timeout_truncated")
+            logger.warning(
+                "GemmaAgent: ответ обрезан (shift_handover, audit_id=%s)", audit_id
+            )
+
+        targets = _build_targets(self._config)
+        if result.truncated or not result.text.strip():
+            logger.warning(
+                "GemmaAgent: пустой ответ shift_handover (audit_id=%s)", audit_id
+            )
+            dispatched_sh: list[str] = []
+        else:
+            dispatched_sh = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
+            audit_id=audit_id,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
+            context_assembled=user_prompt,
+            prompt_template="shift_handover",
+            model=result.model,
+            system_prompt=SHIFT_HANDOVER_SYSTEM,
+            user_prompt=user_prompt,
+            response=result.text,
+            tokens={"in": result.tokens_in, "out": result.tokens_out},
+            latency_s=result.latency_s,
+            outputs_dispatched=dispatched_sh,
+            errors=errors,
+        )
+        logger.info(
+            "GemmaAgent: shift_handover_request обработан (audit_id=%s, latency=%.1fs)",
+            audit_id,
+            result.latency_s,
         )
 
 
