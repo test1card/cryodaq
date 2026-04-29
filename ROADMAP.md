@@ -35,11 +35,11 @@
 | F10 | Sensor diagnostics → alarm integration | ✅ DONE (shipped v0.41.0) | M | M |
 | F11 | Shift handover enrichment | ✅ DONE (v0.34.0; Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
-| F13 | Vacuum leak rate estimator | ⬜ | M | M |
+| F13 | Vacuum leak rate estimator | ✅ DONE (branch feat/overnight-f13-leak-rate `02afa77`, pending merge) | M | M |
 | F14 | Remote command approval (Telegram) | ⬜ | M | L |
 | F15 | Linux AppImage / .deb package | ⬜ | L | L |
 | F16 | Plugin hot-reload SDK + examples | ⬜ | M | L |
-| F17 | SQLite → Parquet cold-storage rotation | ⬜ | M | M |
+| F17 | SQLite → Parquet cold-storage rotation | ✅ DONE (branch feat/overnight-f17-cold-rotation `0435121`, pending merge) | M | M |
 | F18 | CI/CD upgrade (coverage, matrix, releases) | ⬜ | M | L |
 | F19 | F3.W3 experiment_summary enriched content | ✅ DONE (shipped v0.43.0) | S–M | M |
 | F20 | Diagnostic alarm notification polish | ✅ DONE (shipped v0.43.0) | S | L |
@@ -48,7 +48,7 @@
 | F23 | RateEstimator measurement timestamp | ✅ DONE (shipped v0.43.0) | S | M |
 | F24 | Interlock acknowledge ZMQ command | ✅ DONE (shipped v0.43.0) | S | M |
 | F25 | SQLite WAL corruption startup gate | ✅ DONE (shipped v0.43.0) | S | M |
-| F26 | SQLite WAL gate backport whitelist | ⬜ | XS | L |
+| F26 | SQLite WAL gate backport whitelist | ✅ DONE (branch feat/overnight-f26-sqlite-whitelist `649fb1a`, pending merge) | XS | L |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
