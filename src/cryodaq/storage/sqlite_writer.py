@@ -95,13 +95,14 @@ _SQLITE_VERSION_CHECKED = False
 
 
 def _check_sqlite_version() -> None:
-    """Warn if running on a SQLite version affected by the March 2026 WAL-reset bug.
+    """Hard-fail if running on a SQLite version affected by the March 2026 WAL-reset bug.
 
     The bug affects SQLite versions in [3.7.0, 3.51.3) when multiple
     connections across threads/processes write or checkpoint "at the same
     instant". CryoDAQ uses WAL with multiple concurrent connections (writer,
-    history reader, web dashboard, reporting); upgrade to >= 3.51.3 in
-    production. See: https://www.sqlite.org/wal.html
+    history reader, web dashboard, reporting); upgrade to >= 3.51.3.
+
+    Set CRYODAQ_ALLOW_BROKEN_SQLITE=1 to bypass with explicit operator acknowledgment.
     """
     global _SQLITE_VERSION_CHECKED
     if _SQLITE_VERSION_CHECKED:
@@ -109,16 +110,23 @@ def _check_sqlite_version() -> None:
     _SQLITE_VERSION_CHECKED = True
     version = sqlite3.sqlite_version_info  # tuple, e.g. (3, 37, 2)
     if (3, 7, 0) <= version < (3, 51, 3):
-        logger.warning(
-            "SQLite %d.%d.%d is affected by the March 2026 WAL-reset corruption "
-            "bug (range 3.7.0 – 3.51.2). CryoDAQ uses WAL with multiple "
-            "connections; upgrade to SQLite >= 3.51.3 in production. On Ubuntu "
-            "22.04 this means building libsqlite3 from source or bundling a "
-            "custom libsqlite3 in the PyInstaller build. "
-            "See https://www.sqlite.org/wal.html",
-            version[0],
-            version[1],
-            version[2],
+        bypass = os.environ.get("CRYODAQ_ALLOW_BROKEN_SQLITE", "").strip()
+        if bypass == "1":
+            logger.warning(
+                "CRYODAQ_ALLOW_BROKEN_SQLITE=1: bypassing SQLite WAL gate. "
+                "SQLite %d.%d.%d is affected by the March 2026 WAL-reset "
+                "corruption bug. Data integrity risk accepted by operator.",
+                version[0],
+                version[1],
+                version[2],
+            )
+            return
+        raise RuntimeError(
+            f"SQLite {version[0]}.{version[1]}.{version[2]} is affected by the "
+            "March 2026 WAL-reset corruption bug (range 3.7.0 – 3.51.2). "
+            "CryoDAQ refuses to start with a known-broken SQLite version. "
+            "Upgrade to SQLite >= 3.51.3, or set CRYODAQ_ALLOW_BROKEN_SQLITE=1 "
+            "to bypass with explicit operator acknowledgment."
         )
 
 

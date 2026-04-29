@@ -850,7 +850,9 @@ def _load_drivers(
 
             baudrate = int(entry.get("baudrate", 9600))
             validate_checksum = bool(entry.get("validate_checksum", True))
-            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock)
+            driver = ThyracontVSP63D(
+                name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock
+            )
         else:
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
@@ -1367,6 +1369,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                     await alarm_engine.acknowledge(name)
                     return {"ok": True, "action": "alarm_acknowledge"}
                 except (KeyError, ValueError) as exc:
+                    return {"ok": False, "error": str(exc)}
+            if action == "interlock_acknowledge":
+                # F24: re-arm a tripped interlock after operator clears the condition.
+                name = cmd.get("interlock_name", "")
+                try:
+                    interlock_engine.acknowledge(name)
+                    return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
+                except KeyError as exc:
                     return {"ok": False, "error": str(exc)}
             if action == "alarm_v2_status":
                 active = alarm_v2_state_mgr.get_active()
