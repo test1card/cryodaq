@@ -35,11 +35,11 @@
 | F10 | Sensor diagnostics → alarm integration | ✅ DONE (shipped v0.41.0) | M | M |
 | F11 | Shift handover enrichment | ✅ DONE (v0.34.0; Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
-| F13 | Vacuum leak rate estimator | ✅ DONE (branch feat/overnight-f13-leak-rate `02afa77`, pending merge) | M | M |
+| F13 | Vacuum leak rate estimator | ✅ DONE (shipped v0.44.0) | M | M |
 | F14 | Remote command approval (Telegram) | ⬜ | M | L |
 | F15 | Linux AppImage / .deb package | ⬜ | L | L |
 | F16 | Plugin hot-reload SDK + examples | ⬜ | M | L |
-| F17 | SQLite → Parquet cold-storage rotation | ✅ DONE (branch feat/overnight-f17-cold-rotation `0435121`, pending merge) | M | M |
+| F17 | SQLite → Parquet cold-storage rotation | ✅ DONE (shipped v0.44.0) | M | M |
 | F18 | CI/CD upgrade (coverage, matrix, releases) | ⬜ | M | L |
 | F19 | F3.W3 experiment_summary enriched content | ✅ DONE (shipped v0.43.0) | S–M | M |
 | F20 | Diagnostic alarm notification polish | ✅ DONE (shipped v0.43.0) | S | L |
@@ -48,7 +48,9 @@
 | F23 | RateEstimator measurement timestamp | ✅ DONE (shipped v0.43.0) | S | M |
 | F24 | Interlock acknowledge ZMQ command | ✅ DONE (shipped v0.43.0) | S | M |
 | F25 | SQLite WAL corruption startup gate | ✅ DONE (shipped v0.43.0) | S | M |
-| F26 | SQLite WAL gate backport whitelist | ✅ DONE (branch feat/overnight-f26-sqlite-whitelist `649fb1a`, pending merge) | XS | L |
+| F26 | SQLite WAL gate backport whitelist | ✅ DONE (shipped v0.44.0) | XS | L |
+| F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
+| F28 | ArchiveReader engine replay integration | ⬜ | S | M |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -532,12 +534,44 @@ explicit acknowledgment. Either way: must NOT silently continue.
 
 ### F26 — SQLite WAL gate backport whitelist
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.44.0.
 **Effort:** XS (~20 LOC).
-**Source:** F25 architect note 2026-04-30. Conservative gate in F25 blocks
-versions [3.7.0, 3.51.3) but per SQLite docs, backports (3.44.6, 3.50.7) are
-safe. Add per-version whitelist to `_check_sqlite_version()` to allow those
-specific patch builds without requiring `CRYODAQ_ALLOW_BROKEN_SQLITE=1`.
+
+`SQLITE_BACKPORT_SAFE = frozenset([(3,44,6),(3,50,7)])` added to
+`sqlite_writer.py`. Whitelist check inside affected-range gate before
+env var bypass. Adjacent versions still raise. 6 tests.
+
+---
+
+### F27 — Chamber preparation photos via Telegram
+
+**Status:** 🟡 SPEC READY.
+**Effort:** L (~700-900 LOC).
+**Source:** Architect-Vladimir conversation 2026-05-01.
+
+Operator photographs cryostat chamber layout (preparation phase
+only) with multi-angle series, sends to Telegram bot. Photos
+auto-attach to active experiment, GUI annotation in Archive
+overlay, reports embed all photos. TREVOGA alarm if 0 photos
+on preparation-leave (CRITICAL) or 1 photo (WARNING). 4-cycle
+implementation planned. Predictor integration deferred.
+
+Spec: `CC_PROMPT_F27_CHAMBER_PHOTOS.md`
+
+---
+
+### F28 — ArchiveReader engine replay integration
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** S (~50 LOC).
+**Source:** F17 residual risk 2026-05-01.
+
+`ArchiveReader` implementation exists post-F17 but is NOT wired
+into engine replay path. Live engine queries against archived
+data (>30 days old) currently fail silently. Integration:
+`storage/replay.py` should select between SQLite and ArchiveReader
+per query time range. Tests: time-range queries crossing rotation
+boundary.
 
 ---
 

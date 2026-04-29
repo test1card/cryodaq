@@ -9,24 +9,48 @@
 
 ## [Unreleased]
 
-### Added (overnight 2026-05-01 sprint — 3 branches pending merge)
+## [0.44.0] — 2026-05-01 — Storage maturity + leak rate
 
-- **F26 — SQLite WAL gate backport whitelist** (`feat/overnight-f26-sqlite-whitelist` `649fb1a`):
-  `SQLITE_BACKPORT_SAFE` frozenset `{(3,44,6), (3,50,7)}` bypasses the WAL-corruption gate
-  for known-safe backport builds. Codex+Gemini PASS. 6 tests (+4 negative boundary).
+### Highlights
+- F17: SQLite → Parquet cold rotation with day-by-day archive layout.
+  ArchiveReader replay across both sources.
+- F13: Vacuum leak rate estimator (LeakRateEstimator) with sliding-window OLS,
+  ZMQ commands, atomic history persistence.
+- F26: SQLite WAL gate backport whitelist (3.44.6, 3.50.7) per official SQLite advisory.
 
-- **F17 — SQLite → Parquet cold-storage rotation** (`feat/overnight-f17-cold-rotation` `0435121`):
-  `ColdRotationService` rotates daily SQLite files older than `age_days` to Parquet with
-  Zstd compression; verifies row count before deletion; updates `index.json`; `ArchiveReader`
-  queries both sources transparently by UTC day. Codex PASS (3 cycles: CRITICAL index-overwrite
-  fix, HIGH tz-epoch fix, MEDIUM lock fix). 16 tests.
+### Storage (F17, F26)
+- **F17 — ColdRotationService**: rotates SQLite files older than 30 days to Parquet/Zstd;
+  verifies row count before deletion; daemon mode (86400s). Corrupt index.json aborts
+  rotation rather than overwriting. asyncio.Lock guards concurrent runs.
+- **F17 — ArchiveReader**: unified query across SQLite (recent) + Parquet (archive);
+  UTC-normalized day iteration; fails loudly on corrupt index.
+- **F26 — SQLITE_BACKPORT_SAFE whitelist**: `{(3,44,6),(3,50,7)}` bypass the startup gate
+  without env var; adjacent versions still raise. Source: sqlite.org/wal.html advisory.
 
-- **F13 — Vacuum leak rate estimator** (`feat/overnight-f13-leak-rate` `02afa77`):
-  `LeakRateEstimator` with numpy-free OLS, sliding window, auto-finalize; engine
-  `leak_rate_start`/`leak_rate_stop` ZMQ handlers; `_leak_rate_feed()` broker task feeds
-  pressure samples automatically; history persisted to `data/leak_rate_history.json`.
-  Codex PASS (2 cycles: CRITICAL sample-feed + window-trim fixes, HIGH OLS/clear fixes).
-  19 tests.
+### Vacuum analytics (F13)
+- **LeakRateEstimator**: sliding-window OLS with FIFO trim, numpy-free regression,
+  R²=0.0 on degenerate input, atomic history persistence to `data/leak_rate_history.json`.
+- **Engine ZMQ commands**: `leak_rate_start` (duration_s validated), `leak_rate_stop`
+  (returns asdict(LeakRateMeasurement)).
+- **Engine broker task**: `_leak_rate_feed()` subscribes pressure samples (unit==mbar),
+  auto-finalizes on window expiry.
+- **Config**: `chamber.volume_l` (operator must set), `chamber.leak_rate.*`.
+
+### Operator action required
+- `chamber.volume_l` must be set in `config/instruments.local.yaml` before first
+  leak rate measurement; `finalize()` raises ValueError if volume_l == 0.0.
+
+### Tests
+- 49 new tests across F26 (6) + F17 (16) + F13 (19).
+- Full suite ~2 019 passing.
+
+### Tags
+- `v0.44.0` → F13 merge commit
+
+### Closing commits
+- F26 merge: see `git log --oneline --merges`
+- F17 merge: see `git log --oneline --merges`
+- F13 merge: see `git log --oneline --merges`
 
 ## [0.43.0] — 2026-04-30 — Overnight feature sprint (F19-F25)
 
