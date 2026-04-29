@@ -228,6 +228,9 @@ class SensorDiagnosticsEngine:
         self._warning_duration_s = warning_duration_s
         self._critical_duration_s = critical_duration_s
         self._anomaly_state: dict[str, _AnomalyState] = {}
+        # F20 escalation cooldown: suppress re-notification within window after alarm cleared
+        self._escalation_cooldown_s: float = cfg.get("escalation_cooldown_s", 0.0)
+        self._channel_last_notified: dict[str, float] = {}
 
     def set_channel_names(self, names: dict[str, str]) -> None:
         """Set display names for channels."""
@@ -282,7 +285,10 @@ class SensorDiagnosticsEngine:
             if status == "ok":
                 if channel_id in self._anomaly_state:
                     state = self._anomaly_state.pop(channel_id)
-                    if state.last_warning_published_ts is not None or state.last_critical_published_ts is not None:
+                    if (
+                        state.last_warning_published_ts is not None
+                        or state.last_critical_published_ts is not None
+                    ):
                         self._alarm_publisher.clear_diagnostic_alarm(channel_id)
             else:
                 if channel_id not in self._anomaly_state:
@@ -296,15 +302,37 @@ class SensorDiagnosticsEngine:
                 elapsed = now_mono - state.first_anomaly_ts
 
                 if elapsed >= self._warning_duration_s and state.last_warning_published_ts is None:
-                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "warning", elapsed)
+                    event = self._alarm_publisher.publish_diagnostic_alarm(
+                        channel_id, "warning", elapsed
+                    )
                     state.last_warning_published_ts = now_mono
                     if event is not None:
-                        new_events.append(event)
+                        # F20 cooldown: suppress re-notification if channel was recently notified.
+                        # Only applies when channel has a prior notification record — first
+                        # notification is never suppressed.
+                        within_cooldown = (
+                            self._escalation_cooldown_s > 0
+                            and channel_id in self._channel_last_notified
+                            and now_mono - self._channel_last_notified[channel_id]
+                            < self._escalation_cooldown_s
+                        )
+                        if not within_cooldown:
+                            self._channel_last_notified[channel_id] = now_mono
+                            new_events.append(event)
 
-                if elapsed >= self._critical_duration_s and state.last_critical_published_ts is None:
-                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "critical", elapsed)
+                if (
+                    elapsed >= self._critical_duration_s
+                    and state.last_critical_published_ts is None
+                ):
+                    event = self._alarm_publisher.publish_diagnostic_alarm(
+                        channel_id, "critical", elapsed
+                    )
                     state.last_critical_published_ts = now_mono
                     if event is not None:
+                        # Critical escalation always notifies — cooldown never suppresses
+                        # critical. Cooldown is designed to prevent warning re-triggers,
+                        # not severity upgrades.
+                        self._channel_last_notified[channel_id] = now_mono
                         new_events.append(event)
 
         # Channels in anomaly state but no longer in diagnostics: no_data — keep alarm, log
