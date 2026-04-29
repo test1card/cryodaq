@@ -30,6 +30,7 @@ from typing import Any
 import yaml
 
 from cryodaq.analytics.calibration import CalibrationStore
+from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
@@ -1118,6 +1119,16 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     event_logger = EventLogger(writer, experiment_manager)
 
+    # --- F13: Leak rate estimator ---
+    _instruments_raw = yaml.safe_load(instruments_cfg.read_text(encoding="utf-8"))
+    _chamber_cfg = _instruments_raw.get("chamber", {})
+    _leak_cfg = _chamber_cfg.get("leak_rate", {})
+    leak_rate_estimator = LeakRateEstimator(
+        chamber_volume_l=float(_chamber_cfg.get("volume_l", 0.0)),
+        sample_window_s=float(_leak_cfg.get("default_sample_window_s", 300.0)),
+        data_dir=_DATA_DIR,
+    )
+
     # --- Alarm Engine v2 ---
     _alarms_v3_cfg = _CONFIG_DIR / "alarms_v3.yaml"
     _alarm_v2_engine_cfg, _alarm_v2_configs = load_alarm_config(_alarms_v3_cfg)
@@ -1367,6 +1378,32 @@ async def _run_engine(*, mock: bool = False) -> None:
             except Exception as exc:
                 logger.error("VacuumTrendPredictor tick error: %s", exc)
 
+    async def _leak_rate_feed() -> None:
+        """Feed pressure readings into LeakRateEstimator; auto-finalize on window expiry."""
+        pressure_channel = _vt_cfg.get("pressure_channel", "")
+        queue = await broker.subscribe("leak_rate_feed", maxsize=500)
+        try:
+            while True:
+                reading: Reading = await queue.get()
+                if pressure_channel and reading.channel != pressure_channel:
+                    continue
+                if reading.unit != "mbar":
+                    continue
+                if not leak_rate_estimator.is_active:
+                    continue
+                leak_rate_estimator.add_sample(reading.timestamp, reading.value)
+                if leak_rate_estimator.should_finalize():
+                    try:
+                        result = leak_rate_estimator.finalize()
+                        await event_logger.log_event(
+                            "leak_rate",
+                            f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
+                        )
+                    except (ValueError, Exception) as exc:  # noqa: BLE001
+                        logger.error("Leak rate auto-finalize failed: %s", exc)
+        except asyncio.CancelledError:
+            return
+
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
@@ -1414,6 +1451,37 @@ async def _run_engine(*, mock: bool = False) -> None:
                     interlock_engine.acknowledge(name)
                     return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
                 except KeyError as exc:
+                    return {"ok": False, "error": str(exc)}
+            if action == "leak_rate_start":
+                if not _leak_cfg.get("enabled", True):
+                    return {"ok": False, "error": "leak rate measurement disabled in config"}
+                _raw_dur = cmd.get("duration_s")
+                window_s: float | None = None
+                if _raw_dur is not None:
+                    try:
+                        window_s = float(_raw_dur)
+                    except (TypeError, ValueError):
+                        return {"ok": False, "error": f"duration_s not numeric: {_raw_dur!r}"}
+                    if not (0 < window_s < float("inf")):
+                        return {
+                            "ok": False,
+                            "error": f"duration_s must be positive and finite, got {window_s}",
+                        }
+                try:
+                    leak_rate_estimator.start_measurement(window_s=window_s)
+                    return {"ok": True, "action": "leak_rate_start"}
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": False, "error": str(exc)}
+            if action == "leak_rate_stop":
+                try:
+                    from dataclasses import asdict as _asdict  # noqa: PLC0415
+                    result = leak_rate_estimator.finalize()
+                    await event_logger.log_event(
+                        "leak_rate",
+                        f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
+                    )
+                    return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
+                except ValueError as exc:
                     return {"ok": False, "error": str(exc)}
             if action == "alarm_v2_status":
                 active = alarm_v2_state_mgr.get_active()
@@ -1778,6 +1846,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     if vacuum_trend is not None:
         vt_feed_task = asyncio.create_task(_vacuum_trend_feed(), name="vacuum_trend_feed")
         vt_tick_task = asyncio.create_task(_vacuum_trend_tick(), name="vacuum_trend_tick")
+    leak_rate_feed_task = asyncio.create_task(_leak_rate_feed(), name="leak_rate_feed")
     await housekeeping_service.start()
 
     # Watchdog
@@ -1869,6 +1938,11 @@ async def _run_engine(*, mock: bool = False) -> None:
             await vt_tick_task
         except asyncio.CancelledError:
             pass
+    leak_rate_feed_task.cancel()
+    try:
+        await leak_rate_feed_task
+    except asyncio.CancelledError:
+        pass
 
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
     await scheduler.stop()

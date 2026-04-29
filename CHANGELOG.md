@@ -9,6 +9,25 @@
 
 ## [Unreleased]
 
+### Added (overnight 2026-05-01 sprint — 3 branches pending merge)
+
+- **F26 — SQLite WAL gate backport whitelist** (`feat/overnight-f26-sqlite-whitelist` `649fb1a`):
+  `SQLITE_BACKPORT_SAFE` frozenset `{(3,44,6), (3,50,7)}` bypasses the WAL-corruption gate
+  for known-safe backport builds. Codex+Gemini PASS. 6 tests (+4 negative boundary).
+
+- **F17 — SQLite → Parquet cold-storage rotation** (`feat/overnight-f17-cold-rotation` `0435121`):
+  `ColdRotationService` rotates daily SQLite files older than `age_days` to Parquet with
+  Zstd compression; verifies row count before deletion; updates `index.json`; `ArchiveReader`
+  queries both sources transparently by UTC day. Codex PASS (3 cycles: CRITICAL index-overwrite
+  fix, HIGH tz-epoch fix, MEDIUM lock fix). 16 tests.
+
+- **F13 — Vacuum leak rate estimator** (`feat/overnight-f13-leak-rate` `02afa77`):
+  `LeakRateEstimator` with numpy-free OLS, sliding window, auto-finalize; engine
+  `leak_rate_start`/`leak_rate_stop` ZMQ handlers; `_leak_rate_feed()` broker task feeds
+  pressure samples automatically; history persisted to `data/leak_rate_history.json`.
+  Codex PASS (2 cycles: CRITICAL sample-feed + window-trim fixes, HIGH OLS/clear fixes).
+  19 tests.
+
 ## [0.43.0] — 2026-04-30 — Overnight feature sprint (F19-F25)
 
 ### Highlights
