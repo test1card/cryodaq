@@ -34,6 +34,8 @@ class EventBus:
 
     async def subscribe(self, name: str, *, maxsize: int = 1000) -> asyncio.Queue[EngineEvent]:
         """Register a named subscriber and return its dedicated queue."""
+        if name in self._subscribers:
+            logger.warning("EventBus: duplicate subscribe '%s' — replacing existing queue", name)
         q: asyncio.Queue[EngineEvent] = asyncio.Queue(maxsize=maxsize)
         self._subscribers[name] = q
         return q

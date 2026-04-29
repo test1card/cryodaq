@@ -83,6 +83,9 @@ packages = ["src/cryodaq"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "smoke: requires live external services (ollama, instruments); excluded from default CI",
+]
 
 [tool.ruff]
 target-version = "py312"
