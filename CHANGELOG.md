@@ -9,6 +9,74 @@
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-04-30 — Overnight feature sprint (F19-F25)
+
+### Highlights
+- 7 features shipped from a single overnight Sonnet sprint (F19-F25), closing all
+  deferred Task A findings and the F3 polish backlog.
+- Phase A doc/process updates landed direct to master earlier in the session:
+  ORCHESTRATION v1.3 + multi-model-consultation skill v1.1 + plugin disposition.
+- Both feature branches Codex-audited (gpt-5.5 high-reasoning): alarm cluster
+  FAIL→PASS (2 MEDIUM fixes); misc cluster CONDITIONAL→PASS (1 P2 fix).
+
+### Alarm pipeline (F20, F21, F22)
+- **F20 — Sensor diagnostics aggregation + cooldown**: `_channel_last_notified`
+  dict tracks per-channel state; first notification never suppressed; critical always
+  bypasses cooldown; engine batches >3 simultaneous events into a single Telegram
+  message. Config: `plugins.yaml` `aggregation_threshold: 3`,
+  `escalation_cooldown_s: 120.0`.
+- **F21 — Alarm hysteresis deadband**: `AlarmEvaluator.evaluate()` gains `is_active`
+  + `active_channels: frozenset` params. Deadband filters to originally-triggering
+  channels only (Codex fix: non-triggering channel could inherit alarm state).
+- **F22 — Severity upgrade in-place**: `WARNING→CRITICAL` on same `alarm_id`
+  (`AlarmEvent.level` mutation, `frozen=False`). `SEVERITY_UPGRADED` history event
+  for audit. Prevents duplicate operator notifications per physical anomaly.
+
+### Independent features (F19, F23, F24, F25)
+- **F19 — ExperimentSummaryWidget enrichment**: clickable DOCX/PDF labels via
+  `_ClickableLabel` + `QDesktopServices`; top-3 alarm names by frequency;
+  per-channel min/max/mean stats (`limit_per_channel=50000` covers ~7 h at 0.5 s
+  cadence; Codex P2 fix from 5000 which covered only ~42 min).
+- **F23 — RateEstimator measurement timestamp**: `safety_manager._collect_loop` now
+  uses `reading.timestamp.timestamp()` instead of `time.monotonic()` (dequeue time),
+  giving correct dT/dt estimates under queue backlog.
+- **F24 — Interlock acknowledge ZMQ command**: `interlock_acknowledge` action exposes
+  `InterlockEngine.acknowledge(name)` — transitions `TRIPPED→ARMED`, `KeyError` for
+  unknown name. Operator re-arms interlock without process restart.
+- **F25 — SQLite WAL startup gate**: `_check_sqlite_version()` raises `RuntimeError`
+  on affected versions `[3.7.0, 3.51.3)` (March 2026 WAL corruption bug).
+  `CRYODAQ_ALLOW_BROKEN_SQLITE=1` bypasses with `WARNING` log. Module flag
+  `_SQLITE_VERSION_CHECKED` prevents repeated checks per process. Backport whitelist
+  refinement deferred to F26 (XS).
+
+### Doc/process (Phase A — direct to master)
+- ORCHESTRATION v1.3: §14.6 hallucination verification + §15 multi-model dispatch
+  realities (6 subsections on routing, delays, budget, anti-patterns).
+- multi-model-consultation skill v1.1: §2.1 calibrated routing matrix, §3.7
+  formation pattern, §6 budget updates, §7.8 anti-pattern (high-reasoning over-flag).
+- HF3: `update_target()` docstring — slew-rate convergence clarification (Codex T2
+  re-run CONDITIONAL→PASS).
+- Plugin disposition: oh-my-claudecode auto-load disabled for CryoDAQ engine process.
+
+### Tests
+- 39 new tests across F19-F25 (16 F19, 5 F20, 7 F21, 3 F22, 1 F23, 3 F24, 5 F25).
+- Alarm cluster targeted: 60 passed.
+- Misc cluster targeted: 13 passed.
+- All pass including SQLite 3.50.4 regression fix (fixture teardown isolation).
+
+### Tags
+- `v0.43.0` → `678aa64c` (misc-cluster merge)
+- alarm-cluster merge → `e0a8f140`
+
+### Selected commits in this release
+- `2e5f34b` — HF3: update_target docstring slew-rate clarification
+- `aaaa38f` — multi-model-consultation v1.1 routing matrix
+- `4115703` — ORCHESTRATION v1.3
+- `20b464b` — plugin disposition (oh-my-claudecode disabled)
+- `42f681d` — F20+F21+F22 alarm cluster
+- `4716219` — F22 severity-upgrade in-place documentation (architect annotation)
+- `673a428` — F19+F23+F24+F25 misc cluster
+
 ## [0.42.0] — 2026-04-29 — Safety hotfix HF1+HF2
 
 ### Highlights

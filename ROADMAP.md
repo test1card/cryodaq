@@ -41,8 +41,14 @@
 | F16 | Plugin hot-reload SDK + examples | ⬜ | M | L |
 | F17 | SQLite → Parquet cold-storage rotation | ⬜ | M | M |
 | F18 | CI/CD upgrade (coverage, matrix, releases) | ⬜ | M | L |
-| F19 | F3.W3 experiment_summary enriched content | ⬜ | S–M | M |
-| F20 | Diagnostic alarm notification polish | ⬜ | S | L |
+| F19 | F3.W3 experiment_summary enriched content | ✅ DONE (shipped v0.43.0) | S–M | M |
+| F20 | Diagnostic alarm notification polish | ✅ DONE (shipped v0.43.0) | S | L |
+| F21 | Alarm hysteresis deadband | ✅ DONE (shipped v0.43.0) | S | M |
+| F22 | Diagnostic alarm severity escalation | ✅ DONE (shipped v0.43.0) | S | M |
+| F23 | RateEstimator measurement timestamp | ✅ DONE (shipped v0.43.0) | S | M |
+| F24 | Interlock acknowledge ZMQ command | ✅ DONE (shipped v0.43.0) | S | M |
+| F25 | SQLite WAL corruption startup gate | ✅ DONE (shipped v0.43.0) | S | M |
+| F26 | SQLite WAL gate backport whitelist | ⬜ | XS | L |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -414,7 +420,7 @@ Estimated: ~200 LOC workflow.
 
 ### F19 — F3.W3 experiment_summary enriched content
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S–M (~150–250 LOC).
 **Source:** Deferred from F3 Cycle 4 audit (master summary 2026-04-29, items #2–4).
 
@@ -434,7 +440,7 @@ identifies top priority among the three.
 
 ### F20 — Diagnostic alarm notification polish
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~80–150 LOC).
 **Source:** Deferred from F10 Cycle 3 review (overnight 2026-04-29 finding #3).
 
@@ -460,7 +466,7 @@ diagnostic alarms; user feedback will clarify aggregation threshold.
 
 ### F21 — Alarm hysteresis deadband (was Task A #1.3)
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~80–150 LOC).
 **Source:** Task A verification 2026-04-29 finding #1.3.
 
@@ -473,7 +479,7 @@ alarm clears only when channel value crosses threshold minus hysteresis margin.
 
 ### F22 — F10 diagnostic alarm severity escalation (was Task A #1.4)
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~80 LOC).
 **Source:** Task A verification 2026-04-29 finding #1.4.
 
@@ -487,7 +493,7 @@ semantics where critical replaces warning in-place.
 
 ### F23 — RateEstimator measurement timestamp (was Task A #1.7)
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~30 LOC + tests).
 **Source:** Task A verification 2026-04-29 finding #1.7.
 
@@ -500,7 +506,7 @@ backlog, `now` values cluster, distorting computed rate. Use
 
 ### F24 — Interlock acknowledge ZMQ command (was Task A #1.8)
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~100 LOC).
 **Source:** Task A verification 2026-04-29 finding #1.8.
 
@@ -513,7 +519,7 @@ interlock after the underlying condition has cleared.
 
 ### F25 — SQLite WAL corruption startup gate (was Task A #1.10)
 
-**Status:** ⬜ NOT STARTED.
+**Status:** ✅ DONE. Shipped v0.43.0 (overnight 2026-04-30).
 **Effort:** S (~50 LOC).
 **Source:** Task A verification 2026-04-29 finding #1.10.
 
@@ -521,6 +527,17 @@ interlock after the underlying condition has cleared.
 affected SQLite versions (3.7.0–3.51.2 WAL corruption bug, March 2026). Decision
 needed: hard-fail startup on affected versions, or opt-in env var bypass with
 explicit acknowledgment. Either way: must NOT silently continue.
+
+---
+
+### F26 — SQLite WAL gate backport whitelist
+
+**Status:** ⬜ NOT STARTED.
+**Effort:** XS (~20 LOC).
+**Source:** F25 architect note 2026-04-30. Conservative gate in F25 blocks
+versions [3.7.0, 3.51.3) but per SQLite docs, backports (3.44.6, 3.50.7) are
+safe. Add per-version whitelist to `_check_sqlite_version()` to allow those
+specific patch builds without requiring `CRYODAQ_ALLOW_BROKEN_SQLITE=1`.
 
 ---
 
