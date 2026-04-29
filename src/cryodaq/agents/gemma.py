@@ -46,6 +46,7 @@ class GemmaConfig:
     max_tokens: int = 1024
     max_concurrent_inferences: int = 2
     max_calls_per_hour: int = 60
+    alarm_fired_enabled: bool = True
     alarm_min_level: str = "WARNING"
     slice_a_notification: bool = True
     slice_b_suggestion: bool = False
@@ -75,7 +76,13 @@ class GemmaConfig:
         triggers = d.get("triggers", {})
         alarm_t = triggers.get("alarm_fired", {})
         if isinstance(alarm_t, dict):
-            cfg.alarm_min_level = str(alarm_t.get("min_level", cfg.alarm_min_level))
+            cfg.alarm_fired_enabled = bool(alarm_t.get("enabled", cfg.alarm_fired_enabled))
+            raw_level = str(alarm_t.get("min_level", cfg.alarm_min_level)).upper()
+            if raw_level not in _MIN_LEVELS:
+                raise ValueError(
+                    f"alarm_min_level must be one of {list(_MIN_LEVELS)}, got {raw_level!r}"
+                )
+            cfg.alarm_min_level = raw_level
         outputs = d.get("outputs", {})
         cfg.output_telegram = bool(outputs.get("telegram", cfg.output_telegram))
         cfg.output_operator_log = bool(outputs.get("operator_log", cfg.output_operator_log))
@@ -114,6 +121,7 @@ class GemmaAgent:
 
         self._semaphore = asyncio.Semaphore(config.max_concurrent_inferences)
         self._call_timestamps: deque[float] = deque()
+        self._handler_tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
 
@@ -131,7 +139,7 @@ class GemmaAgent:
         )
 
     async def stop(self) -> None:
-        """Cancel the event loop and release resources."""
+        """Cancel the event loop and in-flight handlers, release resources."""
         if self._task is not None:
             self._task.cancel()
             try:
@@ -139,6 +147,14 @@ class GemmaAgent:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # Cancel in-flight inference tasks to avoid racing with shutdown
+        for t in list(self._handler_tasks):
+            t.cancel()
+        for t in list(self._handler_tasks):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         if self._queue is not None:
             self._bus.unsubscribe("gemma_agent")
             self._queue = None
@@ -152,10 +168,12 @@ class GemmaAgent:
             try:
                 event = await self._queue.get()
                 if self._should_handle(event):
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         self._safe_handle(event),
                         name=f"gemma_{event.event_type}",
                     )
+                    self._handler_tasks.add(t)
+                    t.add_done_callback(self._handler_tasks.discard)
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -165,6 +183,8 @@ class GemmaAgent:
         if not self._config.slice_a_notification:
             return False
         if event.event_type == "alarm_fired":
+            if not self._config.alarm_fired_enabled:
+                return False
             level = event.payload.get("level", "INFO")
             return _MIN_LEVELS.get(level, 0) >= _MIN_LEVELS.get(
                 self._config.alarm_min_level, 1
@@ -237,9 +257,17 @@ class GemmaAgent:
             logger.warning("GemmaAgent: ответ обрезан по таймауту (audit_id=%s)", audit_id)
 
         targets = _build_targets(self._config)
-        dispatched = await self._router.dispatch(
-            event, result.text, targets=targets, audit_id=audit_id
-        )
+        if result.truncated or not result.text.strip():
+            logger.warning(
+                "GemmaAgent: пустой ответ, dispatch пропущен (truncated=%s, audit_id=%s)",
+                result.truncated,
+                audit_id,
+            )
+            dispatched: list[str] = []
+        else:
+            dispatched = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
 
         await self._audit.log(
             audit_id=audit_id,

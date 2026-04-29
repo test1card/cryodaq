@@ -1909,7 +1909,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     _gemma_config.default_model,
                 )
         except Exception as _gemma_exc:
-            logger.warning("GemmaAgent: ошибка инициализации — %s", _gemma_exc)
+            logger.warning("GemmaAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)
     else:
         logger.info("GemmaAgent: config/agent.yaml не найден, агент отключён")
 

@@ -286,6 +286,67 @@ async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
     await agent.stop()
 
 
+async def test_alarm_fired_enabled_false_skips_handling(tmp_path: Path) -> None:
+    ollama = _make_mock_ollama()
+    agent, bus = _make_agent(
+        config=_make_config(alarm_fired_enabled=False), ollama=ollama, tmp_path=tmp_path
+    )
+    await agent.start()
+
+    await bus.publish(_alarm_event(level="CRITICAL"))
+    await asyncio.sleep(0.05)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
+
+
+async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
+    from cryodaq.agents.ollama_client import GenerationResult
+
+    ollama = AsyncMock()
+    ollama.generate = AsyncMock(
+        return_value=GenerationResult(
+            text="", tokens_in=0, tokens_out=0, latency_s=30.0, model="gemma4:e4b", truncated=True
+        )
+    )
+    ollama.close = AsyncMock()
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock()
+    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event())
+    await asyncio.sleep(0.05)
+
+    telegram._send_to_all.assert_not_awaited()
+    await agent.stop()
+
+
+async def test_handler_tasks_cancelled_on_stop(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def slow_generate(*args, **kwargs):
+        started.set()
+        await blocked.wait()
+        return GenerationResult(text="ok", tokens_in=5, tokens_out=5, latency_s=1.0, model="m")
+
+    from cryodaq.agents.ollama_client import GenerationResult
+
+    ollama = AsyncMock()
+    ollama.generate = AsyncMock(side_effect=slow_generate)
+    ollama.close = AsyncMock()
+    agent, bus = _make_agent(ollama=ollama, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    assert len(agent._handler_tasks) > 0
+    await agent.stop()
+    assert len(agent._handler_tasks) == 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
