@@ -24,3 +24,10 @@ retention:
   compress_after_days: 14
   delete_compressed_after_days: 90
   dry_run: false
+
+cold_rotation:
+  enabled: true
+  archive_dir: data/archive
+  age_days: 30
+  schedule_time: "03:00"
+  zstd_compression_level: 3
