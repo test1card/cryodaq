@@ -45,6 +45,7 @@ from cryodaq.core.calibration_acquisition import (
 from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.disk_monitor import DiskMonitor
+from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
@@ -1117,7 +1118,8 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
-    event_logger = EventLogger(writer, experiment_manager)
+    event_bus = EventBus()
+    event_logger = EventLogger(writer, experiment_manager, event_bus=event_bus)
 
     # --- F13: Leak rate estimator ---
     _instruments_raw = yaml.safe_load(instruments_cfg.read_text(encoding="utf-8"))
@@ -1278,6 +1280,29 @@ async def _run_engine(*, mock: bool = False) -> None:
                             )
                             _alarm_dispatch_tasks.add(t)
                             t.add_done_callback(_alarm_dispatch_tasks.discard)
+                        await event_bus.publish(
+                            EngineEvent(
+                                event_type="alarm_fired",
+                                timestamp=datetime.now(UTC),
+                                payload={
+                                    "alarm_id": event.alarm_id,
+                                    "level": event.level,
+                                    "message": event.message,
+                                    "channels": event.channels,
+                                    "values": event.values,
+                                },
+                                experiment_id=experiment_manager.active_experiment_id,
+                            )
+                        )
+                    elif transition == "CLEARED":
+                        await event_bus.publish(
+                            EngineEvent(
+                                event_type="alarm_cleared",
+                                timestamp=datetime.now(UTC),
+                                payload={"alarm_id": alarm_cfg.alarm_id},
+                                experiment_id=experiment_manager.active_experiment_id,
+                            )
+                        )
                 except Exception as exc:
                     logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
 
@@ -1610,6 +1635,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                     name = cmd.get("name") or cmd.get("title") or "?"
                     await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="experiment_start",
+                            timestamp=datetime.now(UTC),
+                            payload={"name": name, "experiment_id": result.get("experiment_id")},
+                            experiment_id=result.get("experiment_id"),
+                        )
+                    )
                 elif result.get("ok") and action in {
                     "experiment_finalize",
                     "experiment_stop",
@@ -1620,9 +1653,29 @@ async def _run_engine(*, mock: bool = False) -> None:
                         await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
                     else:
                         await event_logger.log_event("experiment", "Эксперимент завершён")
+                    _exp_info = result.get("experiment", {})
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="experiment_finalize"
+                            if action != "experiment_abort"
+                            else "experiment_abort",
+                            timestamp=datetime.now(UTC),
+                            payload={"action": action, "experiment": _exp_info},
+                            experiment_id=_exp_info.get("experiment_id"),
+                        )
+                    )
                 elif result.get("ok") and action == "experiment_advance_phase":
                     phase = cmd.get("phase", "?")
                     await event_logger.log_event("phase", f"Фаза: → {phase}")
+                    _active = experiment_manager.active_experiment
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="phase_transition",
+                            timestamp=datetime.now(UTC),
+                            payload={"phase": phase, "entry": result.get("phase", {})},
+                            experiment_id=_active.experiment_id if _active else None,
+                        )
+                    )
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}
