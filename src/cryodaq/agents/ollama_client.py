@@ -73,9 +73,10 @@ class OllamaClient:
         prompt: str,
         *,
         model: str | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
         temperature: float = 0.3,
         system: str | None = None,
+        num_ctx: int | None = None,
     ) -> GenerationResult:
         """Call Ollama /api/generate and return a GenerationResult.
 
@@ -87,14 +88,17 @@ class OllamaClient:
         """
         effective_model = model or self._default_model
         url = f"{self._base_url}{_GENERATE_PATH}"
+        options: dict[str, Any] = {
+            "num_predict": max_tokens,
+            "temperature": temperature,
+        }
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
         payload: dict[str, Any] = {
             "model": effective_model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "num_predict": max_tokens,
-                "temperature": temperature,
-            },
+            "options": options,
         }
         if system is not None:
             payload["system"] = system

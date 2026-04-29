@@ -43,7 +43,7 @@ class GemmaConfig:
     default_model: str = "gemma4:e4b"
     timeout_s: float = 30.0
     temperature: float = 0.3
-    max_tokens: int = 1024
+    max_tokens: int = 2048  # gemma4:e4b is thinking-first; needs 2048+ for thought + response
     max_concurrent_inferences: int = 2
     max_calls_per_hour: int = 60
     alarm_fired_enabled: bool = True
@@ -56,6 +56,7 @@ class GemmaConfig:
     output_gui_insight: bool = True
     audit_enabled: bool = True
     audit_retention_days: int = 90
+    num_ctx: int | None = None  # Ollama context window override; None = use model default
     audit_dir: Path = field(default_factory=lambda: Path("data/agents/gemma/audit"))
 
     @classmethod
@@ -68,6 +69,8 @@ class GemmaConfig:
         cfg.default_model = str(ollama.get("default_model", cfg.default_model))
         cfg.timeout_s = float(ollama.get("timeout_s", cfg.timeout_s))
         cfg.temperature = float(ollama.get("temperature", cfg.temperature))
+        _num_ctx = ollama.get("num_ctx")
+        cfg.num_ctx = int(_num_ctx) if _num_ctx is not None else None
         rl = d.get("rate_limit", {})
         cfg.max_calls_per_hour = int(rl.get("max_calls_per_hour", cfg.max_calls_per_hour))
         cfg.max_concurrent_inferences = int(
@@ -249,6 +252,7 @@ class GemmaAgent:
             system=ALARM_SUMMARY_SYSTEM,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
         )
 
         errors: list[str] = []

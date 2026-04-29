@@ -4,8 +4,9 @@ gemma:
   ollama:
     base_url: http://localhost:11434
     default_model: gemma4:e4b
-    timeout_s: 30
+    timeout_s: 60  # gemma4:e4b needs 60s for thinking + response (48s observed)
     temperature: 0.3
+    # num_ctx: 4096  # Uncomment to reduce context window for faster inference
 
   triggers:
     alarm_fired:
