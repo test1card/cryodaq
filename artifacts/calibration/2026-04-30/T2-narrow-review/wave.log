@@ -1,0 +1,18 @@
+=== Wave T2 (T2-narrow-review) started вторник, 28 апреля 2026 г. 22:01:26 (MSK) ===
+PIDs: Codex=78912 Gemini=78913 R1=78914 Chimera=78916 Qwen3=78917 GLM=78918 Kimi=78919 MiniMax=78920
+вторник, 28 апреля 2026 г. 22:02:26 (MSK): min 1, running=3
+вторник, 28 апреля 2026 г. 22:03:26 (MSK): min 2, running=3
+вторник, 28 апреля 2026 г. 22:04:26 (MSK): min 3, running=3
+вторник, 28 апреля 2026 г. 22:05:26 (MSK): min 4, running=2
+вторник, 28 апреля 2026 г. 22:06:26 (MSK): min 5, running=0
+Wave T2 complete at min 5
+=== T2 final status вторник, 28 апреля 2026 г. 22:06:26 (MSK) ===
+  codex      OK                164B
+  gemini     OK              40714B
+  r1         FAILED             54B
+  chimera    FAILED             54B
+  qwen3      PARSE_ERROR       110B
+  glm        OK               1134B
+  kimi       OK               1361B
+  minimax    OK               1713B
+Wave T2 done.

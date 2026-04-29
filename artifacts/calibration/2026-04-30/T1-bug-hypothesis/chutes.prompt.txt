@@ -1,0 +1,76 @@
+# Bug Investigation Challenge
+
+You are reviewing pre-fix Python code from a cryogenic data-acquisition system.
+The code uses pyzmq's async socket API to receive ZMQ commands.
+
+**Symptom observed in production:** The REP socket stops responding after approximately
+50 seconds of idle time. No exception is raised. Subsequent client requests time out.
+Restarting the engine process fixes the issue.
+
+## Pre-fix source code (_serve_loop method)
+
+```python
+    async def _serve_loop(self) -> None:
+        while self._running:
+            try:
+                raw = await asyncio.wait_for(self._socket.recv(), timeout=1.0)
+            except TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка приёма команды ZMQ")
+                continue
+
+            try:
+                cmd = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                await self._socket.send(json.dumps({"ok": False, "error": "invalid JSON"}).encode())
+                continue
+
+            try:
+                reply = await self._run_handler(cmd)
+            except asyncio.CancelledError:
+                try:
+                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
+                except Exception:
+                    pass
+                raise
+            except Exception as exc:
+                logger.exception("Ошибка обработки команды: %s", cmd)
+                reply = {"ok": False, "error": str(exc)}
+
+            try:
+                await self._socket.send(json.dumps(reply, default=str).encode())
+            except asyncio.CancelledError:
+                try:
+                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
+                except Exception:
+                    pass
+                raise
+            except Exception:
+                logger.exception("Ошибка отправки ответа ZMQ")
+                try:
+                    await self._socket.send(
+                        json.dumps({"ok": False, "error": "serialization error"}).encode()
+                    )
+                except Exception:
+                    pass
+```
+
+## Context
+- This is a ZMQ REP socket (request-reply pattern)
+- The socket processes JSON command messages from a GUI process
+- During idle periods, no messages arrive for 30-60 seconds
+- pyzmq version: 25.x, asyncio integration via zmq.asyncio
+
+## Question
+What is the root cause of the idle-death? Be specific about the mechanism.
+
+## Output format
+1. Root cause hypothesis (1-3 sentences, specific mechanism)
+2. The specific line(s) that cause the issue
+3. Why this mechanism produces the ~50 second idle-death symptom
+4. Suggested fix (in code, ~5-10 lines)
+
+Hard cap 1500 words. No skill-loading prelude.

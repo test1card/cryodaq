@@ -1,0 +1,13 @@
+**CryoDAQ Release Notes for Stakeholders**  
+
+This release marks a pivotal step in CryoDAQ’s evolution—from a fledgling lab control system to a mature, safety-critical platform. The narrative arc over recent versions has been clear: stabilize foundations, harden reliability, and integrate diagnostics into real-time operations.  
+
+The most pressing theme is *safety maturation*. In the unreleased 0.42.0 hotfix, we addressed two high-risk findings from an overnight architectural audit. HF1 refined how the `update_target()` function manages voltage updates to heaters, clarifying that updates are intentionally delayed—not ignored—as required by hardware slew-rate constraints. HF2 bolstered fail-safe behavior: emergency and stop commands now use a slower, 30-second timeout envelope, preventing unsafe command cancellation during faults. These fixes directly resolve Critical-severity gaps flagged by both GLM and Codex, verified against actual code before deployment.  
+
+Equally significant is *operational integration*. Version 0.41.0 completed F10: sensor diagnostics have been woven into the alarm engine. A sustained anomaly triggers a warning alarm after five minutes, elevating to critical after fifteen. Crucially, alarms auto-clear once the channel returns to normal, preventing persistent false alarms without operator intervention. This transition moves diagnostics from a background diagnostic tool into active operational awareness—alarms now reflect real-time health, not just static thresholds.  
+
+Beyond fixes, we see *architectural consistency*. All recent releases reflect a concerted effort to harmonize the user experience. Phase-aware overlays, like the new instruments and Keithley overlays, now provide a unified, context-sensitive interface across the application. The dashboard, too, has matured with the launch of global time windows for plots—clicking “1ч” on any plot synchronizes all subscribed plots across the application. These changes, while technical, serve a human goal: to reduce cognitive load, ensuring operators focus on decisions, not navigation.  
+
+The results are tangible. The full test suite now runs cleanly, with 1,931 tests passing. The system demonstrates resilience: it handles transient failures gracefully, recovering without data loss or inconsistent states. This reliability is critical for 24/7 lab operations, where downtime directly impacts research continuity.  
+
+Looking forward, this release sets the stage for even deeper integration of predictive analytics, with vacuum and cooldown prediction becoming standard tools rather than experimental features. As CryoDAQ continues its evolution, the commitment to safety, reliability, and operator support remains unwavering.

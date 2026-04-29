@@ -1,0 +1,16 @@
+=== Wave T7 (T7-math-derivation) started среда, 29 апреля 2026 г. 00:25:58 (MSK) ===
+PIDs: Codex=91971 Gemini=91972 R1=91973 Chimera=91975 Qwen3=91976 GLM=91977 Kimi=91978 MiniMax=91979
+среда, 29 апреля 2026 г. 00:26:58 (MSK): min 1, running=4
+среда, 29 апреля 2026 г. 00:27:58 (MSK): min 2, running=1
+среда, 29 апреля 2026 г. 00:28:58 (MSK): min 3, running=0
+Wave T7 complete at min 3
+=== T7 final status среда, 29 апреля 2026 г. 00:28:58 (MSK) ===
+  codex      OK              15278B
+  gemini     OK               5855B
+  r1         OK               5280B
+  chimera    OK               4371B
+  qwen3      OK              13181B
+  glm        OK               6511B
+  kimi       FAILED             54B
+  minimax    OK               8711B
+Wave T7 done.

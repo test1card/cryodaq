@@ -1,0 +1,3 @@
+- Verdict: CONSISTENT
+
+The docstring accurately describes the implementation: `update_target` only writes to `runtime.p_target` in memory (no SCPI writes), and the regulation loop in `read_channels()` correctly reads that value and computes `target_v = sqrt(p_target * R)` with slew-rate limiting (`MAX_DELTA_V_PER_STEP`) and compliance clamping (`v_comp`). The test verifies the core promise—`runtime.p_target` is updated immediately (0.1 → 0.5)—and confirms the return value reflects success. One observation: the test does not explicitly assert that *no* SCPI write was issued during `update_target` (e.g., checking the mock keithley's write call count remained zero), which would more directly confirm the "hardware voltage is NOT changed here directly" guarantee.

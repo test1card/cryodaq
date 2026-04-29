@@ -1,0 +1,15 @@
+=== Wave T3 (T3-arch-drift) started вторник, 28 апреля 2026 г. 22:06:57 (MSK) ===
+PIDs: Codex=79948 Gemini=79949 R1=79950 Chimera=79952 Qwen3=79953 GLM=79954 Kimi=79955 MiniMax=79956
+вторник, 28 апреля 2026 г. 22:07:58 (MSK): min 1, running=1
+вторник, 28 апреля 2026 г. 22:08:58 (MSK): min 2, running=0
+Wave T3 complete at min 2
+=== T3 final status вторник, 28 апреля 2026 г. 22:08:58 (MSK) ===
+  codex      OK              22944B
+  gemini     OK               5336B
+  r1         FAILED             54B
+  chimera    FAILED             54B
+  qwen3      OK               2420B
+  glm        OK                775B
+  kimi       OK                843B
+  minimax    OK                247B
+Wave T3 done.

@@ -1,0 +1,18 @@
+=== Wave T5 (T5-code-gen) started вторник, 28 апреля 2026 г. 22:12:35 (MSK) ===
+PIDs: Codex=81559 Gemini=81560 R1=81561 Chimera=81563 Qwen3=81564 GLM=81566 Kimi=81567 MiniMax=81568
+вторник, 28 апреля 2026 г. 22:13:35 (MSK): min 1, running=3
+вторник, 28 апреля 2026 г. 22:14:35 (MSK): min 2, running=2
+вторник, 28 апреля 2026 г. 22:15:35 (MSK): min 3, running=2
+вторник, 28 апреля 2026 г. 22:16:35 (MSK): min 4, running=1
+вторник, 28 апреля 2026 г. 22:17:35 (MSK): min 5, running=0
+Wave T5 complete at min 5
+=== T5 final status вторник, 28 апреля 2026 г. 22:17:35 (MSK) ===
+  codex      OK              29731B
+  gemini     OK               3829B
+  r1         FAILED             54B
+  chimera    FAILED             54B
+  qwen3      OK               7117B
+  glm        OK               7085B
+  kimi       PARSE_ERROR       104B
+  minimax    OK               5045B
+Wave T5 done.

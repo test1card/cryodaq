@@ -1,0 +1,19 @@
+=== Wave T1 (T1-bug-hypothesis) started вторник, 28 апреля 2026 г. 21:54:50 (MSK) ===
+PIDs: Codex=77578 Gemini=77579 R1=77580 Chimera=77581 Qwen3=77583 GLM=77584 Kimi=77585 MiniMax=77586
+вторник, 28 апреля 2026 г. 21:55:50 (MSK): min 1, running=4
+вторник, 28 апреля 2026 г. 21:56:50 (MSK): min 2, running=4
+вторник, 28 апреля 2026 г. 21:57:50 (MSK): min 3, running=4
+вторник, 28 апреля 2026 г. 21:58:50 (MSK): min 4, running=3
+вторник, 28 апреля 2026 г. 21:59:50 (MSK): min 5, running=2
+вторник, 28 апреля 2026 г. 22:00:50 (MSK): min 6, running=0
+Wave T1 complete at min 6
+=== T1 final status вторник, 28 апреля 2026 г. 22:00:50 (MSK) ===
+  codex      OK                164B
+  gemini     OK               6703B
+  r1         OK               1912B
+  chimera    OK               1631B
+  qwen3      OK              10369B
+  glm        PARSE_ERROR       109B
+  kimi       PARSE_ERROR       110B
+  minimax    FAILED            279B
+Wave T1 done.

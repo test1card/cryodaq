@@ -1,0 +1,16 @@
+=== Wave T4 (T4-spec-design) started вторник, 28 апреля 2026 г. 22:09:17 (MSK) ===
+PIDs: Codex=80794 Gemini=80795 R1=80796 Chimera=80798 Qwen3=80799 GLM=80800 Kimi=80801 MiniMax=80802
+вторник, 28 апреля 2026 г. 22:10:17 (MSK): min 1, running=6
+вторник, 28 апреля 2026 г. 22:11:17 (MSK): min 2, running=2
+вторник, 28 апреля 2026 г. 22:12:17 (MSK): min 3, running=0
+Wave T4 complete at min 3
+=== T4 final status вторник, 28 апреля 2026 г. 22:12:17 (MSK) ===
+  codex      OK              32698B
+  gemini     OK              36584B
+  r1         OK               5101B
+  chimera    FAILED             54B
+  qwen3      OK               7690B
+  glm        OK               9096B
+  kimi       OK               6343B
+  minimax    OK              11958B
+Wave T4 done.
