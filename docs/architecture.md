@@ -84,7 +84,7 @@ authoritative per-subsystem references.
 | Data broker | `broker.py` | — |
 | ZMQ bridge | `zmq_bridge.py`, `zmq_subprocess.py` | `ZMQ bridge.md` |
 | Experiment manager | `experiment.py` | `Experiment manager.md` |
-| Storage | `storage/sqlite_writer.py`, `storage/parquet_archive.py` | `Persistence-first.md` |
+| Storage | `storage/sqlite_writer.py`, `storage/parquet_archive.py`, `storage/cold_rotation.py`, `storage/archive_reader.py` | `Persistence-first.md` |
 | Reporting | `reporting/generator.py` | `Reporting.md` |
 | Calibration | `analytics/calibration.py`, `analytics/calibration_fitter.py`, `core/calibration_acquisition.py` | `Calibration v2.md` |
 | Cooldown predictor | `analytics/cooldown_predictor.py`, `analytics/cooldown_service.py` | `Cooldown predictor.md` |

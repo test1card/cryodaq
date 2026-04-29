@@ -1,8 +1,8 @@
-# Next session entry card — 2026-04-30+
+# Next session entry card — 2026-05-01+
 
-**Last updated:** 2026-04-30 (docs audit Phase 2 pass)
-**Current HEAD:** `c44c575` — v0.43.0 (Overnight sprint F19-F25)
-**Test baseline:** ~1 970 passed (baseline 1 931 + 39 new F19-F25)
+**Last updated:** 2026-05-01 (overnight sprint F26+F17+F13)
+**Current HEAD (master):** `c44c575` — v0.43.0; 3 feature branches pending merge
+**Test baseline:** ~2 019 passed (1 970 + 49 new: F26+14, F17+16, F13+19)
 
 ---
 
@@ -25,6 +25,9 @@
 | 2026-04-30 | Repo cleanup session (draft.py, artifacts, prompts archived) |
 | 2026-04-30 | Docs audit Phase 1 — 56 docs audited, findings.md written |
 | 2026-04-30 | Docs audit Phase 2 — Group I-IV executed, vault refreshed |
+| 2026-05-01 | F26 — SQLite WAL backport whitelist (`649fb1a`, pending merge) |
+| 2026-05-01 | F17 — Cold-storage rotation SQLite→Parquet (`0435121`, pending merge) |
+| 2026-05-01 | F13 — Vacuum leak rate estimator (`02afa77`, pending merge) |
 
 ---
 
@@ -32,7 +35,9 @@
 
 | ID | Description | Priority | Notes |
 |---|---|---|---|
-| F26 | SQLite WAL gate backport whitelist (3.44.6, 3.50.7 safe versions) | XS | ~20 LOC, no urgency |
+| F26 | SQLite WAL gate backport whitelist | ✅ branch ready | Merge `feat/overnight-f26-sqlite-whitelist` |
+| F17 | SQLite → Parquet cold-storage rotation | ✅ branch ready | Merge `feat/overnight-f17-cold-rotation` |
+| F13 | Vacuum leak rate estimator | ✅ branch ready | Merge `feat/overnight-f13-leak-rate`; set `chamber.volume_l` |
 | F19 channel heuristic | Refine T/Т prefix detection in ExperimentSummaryWidget | LOW | Post-production-obs |
 
 ---
@@ -73,11 +78,13 @@ sprint resolved. No open architectural forks.
 
 ## Next probable session items
 
-- F26 SQLite backport whitelist (XS ~20 LOC + tests)
+- **Merge 3 branches** (F26 → F17 → F13, all Codex PASS, architect review only)
+- **Set `chamber.volume_l`** in instruments.yaml (actual cryostat volume)
+- Tag v0.44.0 after merge (architect decision)
 - F19 channel heuristic refinement (after production observation)
-- Lab Ubuntu PC verification
+- Lab Ubuntu PC verification (SQLite version for F25 gate)
 - Calibration .cof GUI wiring completion (see CC_PROMPT_CALIBRATION)
 
 ---
 
-*Updated 2026-04-30 during docs audit Phase 2.*
+*Updated 2026-05-01 during overnight sprint (F26+F17+F13).*
