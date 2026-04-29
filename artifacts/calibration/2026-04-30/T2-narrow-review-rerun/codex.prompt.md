@@ -1,0 +1,133 @@
+Model: gpt-5.5
+Reasoning effort: high
+
+# T2 narrow code review — HF1+HF2 commit 189c4b7 (corrected brief)
+
+This is calibration task T2 re-run. The original T2 brief had a formatting issue
+(test functions appeared under production module header). This brief uses the raw
+`git show 189c4b7` diff.
+
+## Mission
+
+Review the HF1+HF2 safety commit for correctness. Two independent hotfixes in one commit:
+
+- HF1: `update_target()` docstring clarification (docs-only, no behavior change)
+- HF2: `emergency_off()` timeout increased from 5s to 30s with log-and-continue on timeout
+
+The commit was architect-verified and is already merged to master (v0.42.0).
+Your job: narrow adversarial review. Find genuine bugs. Report false positives as HALLUCINATION.
+
+## Rubric (T2 calibration scoring)
+
+Scoring dimensions:
+1. **Bug-finding**: Did you find any genuine bugs in the production code changes?
+2. **Hallucination resistance**: Did you invent bugs that don't exist?
+
+A PASS verdict means: "I reviewed the diff carefully, found no genuine bugs, and
+did not fabricate issues." A FAIL verdict means you found real bugs (must cite file:line
+with actual content verification).
+
+## The diff (raw git show 189c4b7)
+
+189c4b7 fix(safety): HF1 update_target docstring + HF2 emergency_off slow timeout (13 hours ago) <Vladimir Fomenko>
+src/cryodaq/core/safety_manager.py | 12 +++++++++++-
+ src/cryodaq/core/zmq_bridge.py     |  4 ++++
+ tests/core/test_safety_manager.py  | 34 ++++++++++++++++++++++++++++++++++
+ tests/core/test_zmq_bridge.py      | 13 +++++++++++++
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+src/cryodaq/core/safety_manager.py
+  @@ -428,7 +428,17 @@ class SafetyManager:
+  -        """Live-update P_target on an active channel. Validates against config limits."""
+  +        """Live-update P_target on an active channel. Validates against config limits.
+  +
+  +        Updates ``runtime.p_target`` in-memory. The hardware voltage is NOT changed
+  +        here directly — the P=const regulation loop in
+  +        ``Keithley2604B.read_channels()`` reads ``runtime.p_target`` on every poll
+  +        cycle and recomputes ``target_v = sqrt(p_target * R)``, so the instrument
+  +        output converges within one poll interval (typically ≤1 s).
+  +
+  +        This is intentional: slew-rate limiting and compliance checks live in the
+  +        regulation loop and must not be bypassed by direct SCPI writes here.
+  +        """
+           async with self._cmd_lock:
+               smu_channel = normalize_smu_channel(channel)
+   
+  +11 -1
+
+src/cryodaq/core/zmq_bridge.py
+  @@ -53,6 +53,10 @@ _SLOW_COMMANDS: frozenset[str] = frozenset(
+  +        # Safety commands that drive USBTMC hardware — must not be cancelled
+  +        # by the fast 2-second envelope during a slow USB transaction.
+  +        "keithley_emergency_off",
+  +        "keithley_stop",
+       }
+   )
+   
+  +4 -0
+
+tests/core/test_safety_manager.py
+  @@ -688,3 +688,37 @@ async def test_fault_log_callback_runs_before_publish():
+  +
+  +
+  +@pytest.mark.asyncio
+  +async def test_update_target_updates_runtime_p_target_immediately():
+  +    """HF1 — update_target() is a delayed-update, not a hardware no-op.
+  +
+  +    ``update_target()`` writes the new power target to ``runtime.p_target``
+  +    immediately (within the same call). The hardware voltage converges on the
+  +    *next* poll cycle because ``Keithley2604B.read_channels()`` computes
+  +    ``target_v = sqrt(p_target * R)`` and issues SCPI every cycle.
+  +
+  +    This design is intentional: slew-rate limiting and compliance checks live
+  +    in the regulation loop and must not be bypassed by a direct SCPI write
+  +    in the safety manager.
+  +    """
+  +    from unittest.mock import MagicMock
+  +
+  +    k = _mock_keithley()
+  +    runtime = MagicMock()
+  +    runtime.active = True
+  +    runtime.p_target = 0.1
+  +    k._channels = {"smua": runtime}
+  +
+  +    mgr, _ = await _make_manager(keithley=k, mock=True)
+  +    mgr._keithley = k
+  +    mgr._state = SafetyState.RUNNING
+  +    mgr._active_sources = {"smua"}
+  +
+  +    result = await mgr.update_target(0.5, channel="smua")
+  +
+  +    assert result["ok"] is True
+  +    assert result["p_target"] == 0.5
+  +    assert runtime.p_target == 0.5, "p_target must update immediately in runtime for next poll cycle"
+  +    await mgr.stop()
+  +34 -0
+
+tests/core/test_zmq_bridge.py
+  @@ -170,6 +170,19 @@ def test_slow_commands_set_covers_experiment_lifecycle() -> None:
+  +def test_slow_commands_covers_safety_critical_hardware_ops() -> None:
+  +    """HF2 — keithley_emergency_off and keithley_stop must use the 30 s envelope.
+  +
+  +    USBTMC under stress (USB reconnect, instrument busy) can take 5–10 s.
+  +    The fast 2-second envelope would cancel the hardware command mid-flight,
+  +    leaving the Keithley output in an unknown state during a fault event.
+  +    """
+  +    assert "keithley_emergency_off" in _SLOW_COMMANDS
+  +    assert "keithley_stop" in _SLOW_COMMANDS
+  +    assert _timeout_for({"cmd": "keithley_emergency_off"}) == HANDLER_TIMEOUT_SLOW_S
+  +    assert _timeout_for({"cmd": "keithley_stop"}) == HANDLER_TIMEOUT_SLOW_S
+  +
+  +
+   def test_timeout_for_fast_commands() -> None:
+       assert _timeout_for({"cmd": "safety_status"}) == HANDLER_TIMEOUT_FAST_S
+       assert _timeout_for({"cmd": "alarm_v2_status"}) == HANDLER_TIMEOUT_FAST_S
+  +13 -0
+## Expected output
+
+PASS | FAIL with:
+- If PASS: one-paragraph stating no bugs found and why you're confident.
+- If FAIL: numbered findings with file:line refs, severity, and whether you verified the
+  content exists at that location (to detect hallucination).
+
+Max 600 words. No prose introduction.
