@@ -1,215 +1,227 @@
 # CryoDAQ
 
-Software stack for cryogenic test laboratory data acquisition, control, and analysis.
-Replaces a 3-year-old LabVIEW VI used to drive instruments and push email alerts.
-Adds: scripted FSM-driven campaigns, automated calibration with multi-format export,
-auto-generated DOCX reports, role-filtered Telegram alerts, sensor-anomaly detection
-with alarm pipeline, plugin-based analytics, regression test suite (~1 970 tests).
+Стек сбора данных, управления и анализа для криогенной лаборатории.
+Заменяет 3-летний LabVIEW VI, управлявший приборами и отправлявший email-алерты.
+Добавлено: скриптовые FSM-кампании, автоматическая калибровка с мульти-форматным
+экспортом, автогенерация DOCX-отчётов, ролевые Telegram-алерты, детекция аномалий
+датчиков с аларм-конвейером, plugin-аналитика, регрессионный тест-сьют (~2 019 тестов).
 
-Developed for АКЦ ФИАН (проект Millimetron).
+Разработано для АКЦ ФИАН (проект Millimetron).
 
-## Status
+## Статус
 
-- **Latest release:** v0.43.0 (2026-04-30)
-- **Master:** `c44c575`
-- **Tests:** ~1 970 passing
-- **Production status:** stable; LabVIEW VI fully replaced
+- **Последний релиз:** v0.44.0 (2026-05-01)
+- **Master:** `184d461`
+- **Тесты:** ~2 019 passing
+- **Производственный статус:** stable; LabVIEW VI полностью заменён
 
-## Architecture overview
+## Архитектура
 
-Three runtime processes:
+Три runtime-процесса:
 
-- `cryodaq-engine` — headless asyncio runtime. Drives instruments, runs the safety
-  manager FSM, evaluates alarms and interlocks, persists data, serves GUI commands
-  via ZMQ.
-- `cryodaq-gui` — Qt desktop client. Connects via ZMQ; restartable without stopping
-  data acquisition.
-- `cryodaq.web.server:app` — optional FastAPI monitoring dashboard.
+- `cryodaq-engine` — headless asyncio runtime. Управляет приборами, запускает
+  safety manager FSM, оценивает аларм-правила и interlocks, сохраняет данные,
+  обслуживает команды GUI через ZMQ.
+- `cryodaq-gui` — Qt desktop-клиент. Подключается через ZMQ; перезапускается
+  без остановки сбора данных.
+- `cryodaq.web.server:app` — опциональный FastAPI monitoring-дашборд.
 
-Plus Windows launcher: `cryodaq`.
+Плюс Windows-лончер: `cryodaq`.
 
-Data flow:
+Поток данных:
 
 ```
 Instrument → Driver → Scheduler → SQLiteWriter → DataBroker → {GUI, SafetyBroker,
                                                                 Telegram, Analytics}
 ```
 
-IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
+IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
 
-## Hardware (currently supported)
+## Поддерживаемые приборы
 
-- 3× LakeShore 218S (GPIB) — 24 temperature channels
-- Keithley 2604B (USB-TMC) — dual-channel SMU (`smua` + `smub`)
-- Thyracont VSP63D (RS-232) — 1 pressure channel
+- 3× LakeShore 218S (GPIB) — 24 температурных канала
+- Keithley 2604B (USB-TMC) — двухканальный SMU (`smua` + `smub`)
+- Thyracont VSP63D (RS-232) — 1 канал давления
 
-## Implemented workflows
+## Реализованные рабочие процессы
 
-End-to-end functional as of v0.43.0:
+Полностью функциональны в v0.44.0:
 
-- **Experiment FSM:** 6-phase lifecycle (idle → cooldown → measurement → warmup →
-  disassembly → idle, plus aborted). Template-driven scripted runs.
-- **Calibration v2:** continuous SRDG capture during calibration experiments;
-  post-run pipeline (extract → downsample → multi-zone Chebyshev fit); export to
-  `.cof` (raw Chebyshev coefficients) / `.340` / JSON / CSV; import from `.340` /
-  JSON; runtime apply with global / per-channel policy.
-- **Auto-report generation:** template-defined sections; guaranteed
-  `report_editable.docx`; best-effort PDF via `soffice` / LibreOffice.
-- **Telegram alerts:** role-filtered. Operators get full alarm stream; managers
-  get curated subset queryable on-demand via bot commands.
-- **Sensor diagnostics → alarm pipeline:** MAD-based outlier + cross-channel
-  correlation drift detection. Sustained anomaly publishes alarm: warning at 5 min,
-  critical at 15 min, auto-clear on recovery. Simultaneous events batched into a
-  single Telegram message; configurable per-channel escalation cooldown.
-- **Alarm engine v2:** threshold / rate / composite / phase-dependent rules;
-  hysteresis deadband; severity upgrade in-place (WARNING→CRITICAL); ack/clear
-  publish path.
-- **Interlocks:** 3 hard-safety rules (cryostat / compressor / detector). Trip
-  fires emergency_off and transitions interlock to TRIPPED state. Operator
-  acknowledges via `interlock_acknowledge` ZMQ command to re-arm without restart.
-- **Operator log:** SQLite-backed; GUI + ZMQ access.
-- **Experiment templates, lifecycle metadata, artifact archival:** per-experiment
-  directory with `metadata.json`, `reports/`, optional Parquet archive.
-- **Plugin architecture:** ABC-based isolation; callback failures mark plugin
-  degraded without crashing engine.
-- **Housekeeping:** conservative adaptive throttle + retention + compression policy.
+- **Эксперимент FSM:** 6-фазный жизненный цикл (idle → cooldown → measurement →
+  warmup → disassembly → idle, плюс aborted). Шаблонные скриптовые прогоны.
+- **Калибровка v2:** непрерывная запись SRDG во время калибровочных экспериментов;
+  постобработка (extract → downsample → Chebyshev fit по зонам); экспорт в
+  `.cof` (сырые коэффициенты) / `.340` / JSON / CSV; импорт из `.340` / JSON;
+  runtime-применение с глобальной / поканальной политикой.
+- **Автогенерация отчётов:** секции по шаблону; гарантированный `report_editable.docx`;
+  PDF best-effort через `soffice` / LibreOffice.
+- **Telegram-алерты:** ролевая фильтрация. Операторы получают полный аларм-поток;
+  менеджеры — курированное подмножество с on-demand запросами через бот-команды.
+- **Диагностика датчиков → аларм-конвейер:** MAD-outlier + кросс-канальное
+  обнаружение дрейфа корреляций. Устойчивая аномалия публикует аларм: warning
+  через 5 мин, critical через 15 мин, auto-clear при восстановлении. Одновременные
+  события объединяются в одно Telegram-сообщение; конфигурируемый cooldown.
+- **Аларм-движок v2:** threshold / rate / composite / phase-dependent правила;
+  гистерезисный deadband; повышение severity на месте (WARNING→CRITICAL);
+  ack/clear publish-путь.
+- **Interlocks:** 3 правила жёсткой защиты (криостат / компрессор / детектор).
+  Срабатывание → `emergency_off` + переход в TRIPPED. Оператор подтверждает
+  через `interlock_acknowledge` ZMQ-команду без перезапуска.
+- **Оператор-лог:** SQLite-backed; доступ через GUI + ZMQ.
+- **Шаблоны экспериментов, lifecycle-метаданные, архивация артефактов:** каталог
+  `data/experiments/<id>/` с `metadata.json`, `reports/`, опциональный Parquet-архив.
+- **Plugin-архитектура:** ABC-изоляция; сбои callback помечают плагин degraded
+  без краша engine.
+- **Housekeeping:** адаптивный throttle + retention + compression.
+- **Cold-storage rotation (F17):** ежедневные SQLite-файлы старше 30 дней
+  автоматически ротируются в Parquet/Zstd. `ArchiveReader` прозрачно читает
+  оба источника по UTC-дням.
+- **Оценка утечки (F13):** `LeakRateEstimator` — скользящее окно, OLS-регрессия
+  без numpy, история в `data/leak_rate_history.json`. Команды: `leak_rate_start` /
+  `leak_rate_stop` (ZMQ). Требует: `chamber.volume_l` в `instruments.local.yaml`.
 
 ## GUI
 
-Primary: `MainWindowV2` — Phase III complete as of v0.40.0.
+Основной: `MainWindowV2` — Phase III завершена в v0.40.0.
 
-Layout — ambient information radiator for week-long experiments:
+Компоновка — ambient information radiator для недельных экспериментов:
 
-- **TopWatchBar** — engine indicator, experiment status, time window echo
-- **ToolRail** — overlay navigation
-- **DashboardView** — 5 live zones:
-  1. Sensor grid (temperature + pressure overview)
-  2. Temperature plot (multi-channel, clickable legend, time window picker)
-  3. Pressure plot (compact log-Y)
-  4. Phase widget (experiment phase indicator + transition)
-  5. Quick log (operator log inline view)
-- **BottomStatusBar** — safety state indicator
-- **OverlayContainer** — host for analytics and archive overlays
+- **TopWatchBar** — индикатор engine, статус эксперимента, эхо временно́го окна
+- **ToolRail** — навигация по overlay-панелям
+- **DashboardView** — 5 live-зон:
+  1. Сетка датчиков (температура + давление, обзор)
+  2. График температуры (мульти-канал, кликабельная легенда, выбор окна)
+  3. График давления (компактный log-Y)
+  4. Phase widget (индикатор фазы эксперимента + переход)
+  5. Quick log (inline-просмотр оператор-лога)
+- **BottomStatusBar** — индикатор safety state
+- **OverlayContainer** — хост для аналитики и архива
 
-Overlay views (from ToolRail):
+Overlay-панели (из ToolRail):
 
-- Analytics — phase-aware widgets: W1 temperature trajectory, W2 cooldown history,
-  W3 experiment summary (channel stats, top alarms, artifact links). W4 R_thermal
-  remains placeholder pending F8 cooldown ML upgrade.
-- Archive — past experiments + reports + Parquet exports
-- Calibration — capture / fit / export workflow
-- Operator log
-- Other overlays per ToolRail icons
+- Аналитика — phase-aware виджеты: W1 траектория температур, W2 история
+  охлаждений, W3 сводка эксперимента (статистика каналов, топ-аларм, ссылки
+  на артефакты). W4 R_thermal — placeholder до F8 (cooldown ML).
+- Архив — прошлые эксперименты + отчёты + Parquet-экспорты
+- Калибровка — рабочий процесс capture / fit / export
+- Оператор-лог
+- Другие overlay по иконкам ToolRail
 
-Legacy `MainWindow` (10-tab shell) remains as **permanent fallback**. Operators
-see `MainWindowV2` only. Phase III closed the active migration plan.
+Легаси `MainWindow` (10-вкладок) остаётся как **постоянный fallback**. Операторы
+видят только `MainWindowV2`. Phase III закрыла активный план миграции.
 
-System tray: `healthy / warning / fault`. `healthy` not shown without sufficient
-backend-truth. `fault` set on unresolved alarms or safety-state `fault` /
-`fault_latched`.
+Системный трей: `healthy / warning / fault`. `healthy` не отображается без
+достаточного backend-подтверждения. `fault` — при неснятых алармах или
+safety-state `fault` / `fault_latched`.
 
-## Installation
+## Установка
 
-### Requirements
+### Требования
 
-- Windows 10/11 or Linux
+- Windows 10/11 или Linux
 - Python `>=3.12`
 - Git
-- VISA backend / instrument drivers as required
+- VISA backend / драйверы приборов по необходимости
 
-### Install
+### Установка
 
 ```bash
 pip install -e ".[dev,web]"
 ```
 
-Minimal runtime install:
+Минимальная runtime-установка:
 
 ```bash
 pip install -e .
 ```
 
-Supported workflow: install from repo root into an active venv. Running `pytest`
-without `pip install -e ...` is not supported.
+Поддерживаемый workflow: установка из корня репозитория в активный venv.
+Запуск `pytest` без `pip install -e ...` не поддерживается.
 
-Key runtime dependencies: `PySide6`, `pyqtgraph`, `pyvisa`, `pyserial-asyncio`,
+Ключевые runtime-зависимости: `PySide6`, `pyqtgraph`, `pyvisa`, `pyserial-asyncio`,
 `pyzmq`, `python-docx`, `scipy`, `matplotlib`, `openpyxl`, `pyarrow`.
 
-## Running
+## Запуск
 
 ```bash
-cryodaq-engine        # headless engine (real instruments)
-cryodaq-gui           # GUI only (connects to running engine)
-cryodaq               # Windows operator launcher
-cryodaq-engine --mock # mock mode (simulated instruments)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # optional web
+cryodaq-engine        # headless engine (реальные приборы)
+cryodaq-gui           # только GUI (подключается к работающему engine)
+cryodaq               # Windows оператор-лончер
+cryodaq-engine --mock # mock-режим (симулированные приборы)
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # опциональный web
 ```
 
-## Configuration
+## Конфигурация
 
-Active config files as of v0.43.0:
+Активные конфигурационные файлы на v0.44.0:
 
-- `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels
-- `config/instruments.local.yaml` — machine-specific override (gitignored)
-- `config/safety.yaml` — FSM timeouts, rate limits, drain timeout
-- `config/alarms.yaml` — legacy alarm definitions
-- `config/alarms_v3.yaml` — v2 alarm engine rules (threshold/rate/composite/phase)
-- `config/interlocks.yaml` — interlock conditions + actions
-- `config/channels.yaml` — display names, visibility, groupings
+- `config/instruments.yaml` — GPIB/serial/USB адреса, каналы LakeShore,
+  `chamber.volume_l` для F13 leak rate
+- `config/instruments.local.yaml` — машино-специфические переопределения (gitignored)
+- `config/safety.yaml` — таймауты FSM, rate limits, drain timeout
+- `config/alarms.yaml` — legacy определения алармов
+- `config/alarms_v3.yaml` — правила аларм-движка v2 (threshold/rate/composite/phase)
+- `config/interlocks.yaml` — условия interlocks + действия
+- `config/channels.yaml` — отображаемые имена, видимость, группировка
 - `config/notifications.yaml` — Telegram bot_token, chat_ids, escalation
-- `config/housekeeping.yaml` — throttle, retention, compression
-- `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; F20 `aggregation_threshold` + `escalation_cooldown_s`
-- `config/cooldown.yaml` — cooldown predictor parameters
-- `config/shifts.yaml` — shift definitions (GUI)
-- `config/experiment_templates/*.yaml` — experiment type templates
+- `config/housekeeping.yaml` — throttle, retention, compression, `cold_rotation`
+- `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
+- `config/cooldown.yaml` — параметры cooldown predictor
+- `config/shifts.yaml` — определения смен (GUI)
+- `config/experiment_templates/*.yaml` — шаблоны типов экспериментов
 
-`*.local.yaml` overrides base files for machine-specific settings.
+`*.local.yaml` переопределяют базовые файлы для машино-специфических настроек.
 
-## Experiment artifacts
+## Артефакты экспериментов
 
 ```text
 data/experiments/<experiment_id>/
   metadata.json
   reports/
     report_editable.docx
-    report_raw.pdf      # optional, best-effort (soffice/LibreOffice)
+    report_raw.pdf      # опционально, best-effort (soffice/LibreOffice)
     report_raw.docx
     assets/
 data/calibration/sessions/<session_id>/
 data/calibration/curves/<sensor_id>/<curve_id>/
+data/archive/year=YYYY/month=MM/  # Parquet cold storage (F17)
+data/leak_rate_history.json        # история измерений утечки (F13)
 ```
 
-## Reports
+## Отчёты
 
-Template-defined section renderers: `title_page`, `cooldown_section`,
-`thermal_section`, `pressure_section`, `operator_log_section`, `alarms_section`,
-`config_section`. Guaranteed artifact: `report_editable.docx`. Optional:
-`report_raw.pdf` (best-effort, requires `soffice` / LibreOffice).
+Секции по шаблону: `title_page`, `cooldown_section`, `thermal_section`,
+`pressure_section`, `operator_log_section`, `alarms_section`, `config_section`.
+Гарантированный артефакт: `report_editable.docx`. Опционально: `report_raw.pdf`
+(best-effort, требует `soffice` / LibreOffice).
 
 ## Keithley TSP
 
-`tsp/p_const.lua` — draft TSP supervisor for P=const feedback. **Not loaded on
-instrument.** P=const feedback runs host-side in `keithley_2604b.py`. TSP
-supervisor planned for Phase 3 (requires hardware verification).
+`tsp/p_const.lua` — черновой TSP-супервизор для P=const обратной связи.
+**Не загружается на прибор.** P=const работает на стороне хоста в
+`keithley_2604b.py`. TSP-супервизор запланирован на Phase 3 (требует
+верификации на оборудовании).
 
-## Project structure
+## Структура проекта
 
 ```text
 src/cryodaq/
-  analytics/     # calibration fitter, cooldown predictor, plugins, vacuum trend
+  analytics/     # calibration fitter, cooldown predictor, plugins, vacuum trend,
+                 # leak_rate estimator (F13)
   core/          # safety FSM, scheduler, broker, alarms v2, interlocks,
                  # sensor_diagnostics, experiments, zmq_bridge
   drivers/       # LakeShore, Keithley, Thyracont + transport adapters
   gui/           # MainWindowV2, dashboard, overlays, legacy widgets
   reporting/     # template-driven DOCX generator
-  storage/       # SQLite, Parquet, CSV, HDF5, XLSX
+  storage/       # SQLite, Parquet, CSV, HDF5, XLSX,
+                 # cold_rotation (F17), archive_reader (F17)
   web/           # FastAPI monitoring
-tsp/             # Keithley TSP scripts (draft, not loaded)
-tests/           # ~1 970 tests
-config/          # YAML configs
+tsp/             # Keithley TSP scripts (черновик, не загружен)
+tests/           # ~2 019 тестов
+config/          # YAML-конфигурации
 ```
 
-## Tests
+## Тесты
 
 ```bash
 python -m pytest tests/core -q
@@ -220,25 +232,33 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Run after `pip install -e ".[dev,web]"`. GUI tests require `PySide6` + `pyqtgraph`.
+Запускать после `pip install -e ".[dev,web]"`. GUI-тесты требуют `PySide6` +
+`pyqtgraph`. Часть тестов storage требует `CRYODAQ_ALLOW_BROKEN_SQLITE=1` на
+машинах с SQLite < 3.51.3 (кроме backport-безопасных версий 3.44.6 и 3.50.7).
 
-## Known limitations
+## Известные ограничения
 
-As of v0.43.0:
+На v0.44.0:
 
-- **SQLite WAL gate:** engine startup hard-fails on SQLite versions in the
-  WAL-reset corruption range `[3.7.0, 3.51.3)` per F25. Bypass:
-  `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (warning emitted). Ubuntu lab PC may have
-  affected version — verify with `sqlite3 --version`.
-- **Lab Ubuntu PC verification:** v0.39.0 H5 ZMQ fix verified on macOS dev only.
-  Ubuntu lab box pending verification.
-- **PDF reports:** best-effort only. Guaranteed artifact is DOCX.
-- **Runtime calibration policy:** global on/off + per-channel KRDG/SRDG+curve.
-  Conservative fallback to KRDG on missing curve / SRDG / compute error. Live
-  LakeShore behavior requires lab verification.
-- **Deprecation warnings:** `asyncio.WindowsSelectorEventLoopPolicy` on newer
-  Python versions.
+- **SQLite WAL gate:** engine при старте падает на версиях SQLite из диапазона
+  `[3.7.0, 3.51.3)` по F25. Backport-безопасные: 3.44.6, 3.50.7 (проходят без
+  переменной). Обход: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (выводится предупреждение).
+  Лаб. Ubuntu PC — проверьте `sqlite3 --version`.
+- **Верификация lab Ubuntu PC:** H5 ZMQ fix из v0.39.0 проверен только на macOS.
+  Физический доступ к лаб. ПК ожидается.
+- **PDF-отчёты:** best-effort. Гарантированный артефакт — DOCX.
+- **Runtime calibration policy:** глобальный on/off + поканальный KRDG/SRDG+curve.
+  Консервативный fallback на KRDG при отсутствии curve / SRDG / ошибке вычисления.
+  Реальное поведение LakeShore требует лаб. верификации.
+- **Deprecation warnings:** `asyncio.WindowsSelectorEventLoopPolicy` на новых
+  версиях Python.
+- **Leak rate (F13):** `chamber.volume_l` должен быть задан в
+  `config/instruments.local.yaml` перед первым измерением; `finalize()` бросает
+  `ValueError` при `volume_l == 0.0`.
+- **ArchiveReader replay (F28):** `ArchiveReader` существует, но не подключён
+  к engine replay path. Запросы к данным старше 30 дней через replay пока не
+  охватывают Parquet-архив. Запланировано в F28.
 
-## License
+## Лицензия
 
 See `LICENSE`. Third-party notices: `THIRD_PARTY_NOTICES.md`.
