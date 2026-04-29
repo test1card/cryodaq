@@ -5,7 +5,7 @@ different context. Builders read SQLite state and format compact text
 for LLM token budget.
 
 Cycle 1: AlarmContext dataclass + build_alarm_context interface.
-SQLite queries and full context assembly wired in Cycle 2.
+SQLite queries and full context assembly wired in Cycle 4 — historical SQLite context.
 Cycle 3: ExperimentFinalizeContext, SensorAnomalyContext, ShiftHandoverContext added.
 Slice B (diagnostic) and Slice C (campaign) contexts deferred.
 """
@@ -53,7 +53,7 @@ class ContextBuilder:
         """Assemble context for a Slice A alarm summary prompt.
 
         Reads experiment state from ExperimentManager (in-memory, fast).
-        SQLite reading history and alarm history wired in Cycle 2.
+        SQLite reading history and alarm history wired in Cycle 4 — historical SQLite context.
         """
         alarm_id = alarm_payload.get("alarm_id", "unknown")
         channels: list[str] = alarm_payload.get("channels", [])
@@ -120,13 +120,16 @@ def _compute_experiment_age(em: Any) -> float | None:
         return None
 
 
+_STUB_SUFFIX = "wired in Cycle 4 — historical SQLite context"
+
+
 def _readings_stub(channels: list[str], lookback_s: float) -> str:
     ch = ", ".join(channels) if channels else "(none)"
-    return f"[Readings for {ch} over last {lookback_s:.0f}s — wired in Cycle 2]"
+    return f"[Readings for {ch} over last {lookback_s:.0f}s — {_STUB_SUFFIX}]"
 
 
 def _alarms_stub(lookback_s: float) -> str:
-    return f"[Alarm history over last {lookback_s:.0f}s — wired in Cycle 2]"
+    return f"[Alarm history over last {lookback_s:.0f}s — {_STUB_SUFFIX}]"
 
 
 # ---------------------------------------------------------------------------
@@ -220,14 +223,14 @@ def _build_experiment_finalize_context(
             f"- {p.get('phase', '?')}: {p.get('started_at', '?')}" for p in phases
         )
     else:
-        phases_text = "[История фаз — wired in Cycle 2]"
+        phases_text = "[История фаз — wired in Cycle 4 — historical SQLite context]"
     return ExperimentFinalizeContext(
         experiment_id=experiment_id,
         name=name,
         action=action,
         duration_str=duration_str,
         phases_text=phases_text,
-        alarms_summary_text="[Алармы за эксперимент — wired in Cycle 2]",
+        alarms_summary_text=f"[Алармы за эксперимент — {_STUB_SUFFIX}]",
     )
 
 
@@ -284,8 +287,8 @@ def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHand
         experiment_id=experiment_id,
         phase=phase,
         experiment_age=experiment_age,
-        active_alarms="[Активные алармы — wired in Cycle 2]",
-        recent_events="[События смены — wired in Cycle 2]",
+        active_alarms="[Активные алармы — wired in Cycle 4 — historical SQLite context]",
+        recent_events="[События смены — wired in Cycle 4 — historical SQLite context]",
         shift_duration_h=shift_duration_h,
     )
 

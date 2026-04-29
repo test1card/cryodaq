@@ -348,6 +348,237 @@ async def test_handler_tasks_cancelled_on_stop(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# GemmaAgent — experiment_finalize handler
+# ---------------------------------------------------------------------------
+
+
+async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
+    event_logger.log_event = AsyncMock()
+    ollama = _make_mock_ollama("Эксперимент завершён: продолжительность 2ч, всё штатно.")
+    cfg = _make_config(
+        output_telegram=True,
+        output_operator_log=True,
+        output_gui_insight=True,
+        experiment_finalize_enabled=True,
+    )
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
+    )
+    insight_q = await bus.subscribe("test_exp_insight", maxsize=10)
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="experiment_finalize",
+        timestamp=datetime(2026, 5, 1, 14, 0, 0, tzinfo=UTC),
+        payload={
+            "action": "experiment_finalize",
+            "experiment": {"experiment_id": "exp-001", "name": "Тест охлаждения"},
+        },
+        experiment_id="exp-001",
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.1)
+
+    ollama.generate.assert_awaited_once()
+    call_kwargs = ollama.generate.call_args[1]
+    assert call_kwargs["system"] is not None
+    assert "эксперимент" in call_kwargs["system"].lower()
+
+    telegram._send_to_all.assert_awaited_once()
+    event_logger.log_event.assert_awaited_once()
+
+    insight_events = []
+    while not insight_q.empty():
+        e = insight_q.get_nowait()
+        if e.event_type == "gemma_insight":
+            insight_events.append(e)
+    assert len(insight_events) == 1
+    assert insight_events[0].payload["trigger_event_type"] == "experiment_finalize"
+
+    bus.unsubscribe("test_exp_insight")
+    await agent.stop()
+
+
+async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> None:
+    ollama = _make_mock_ollama()
+    agent, bus = _make_agent(
+        config=_make_config(experiment_finalize_enabled=False), ollama=ollama, tmp_path=tmp_path
+    )
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="experiment_finalize",
+        timestamp=datetime(2026, 5, 1, 14, 0, 0, tzinfo=UTC),
+        payload={"action": "experiment_finalize", "experiment": {}},
+        experiment_id="exp-001",
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.05)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
+
+
+# ---------------------------------------------------------------------------
+# GemmaAgent — sensor_anomaly_critical handler
+# ---------------------------------------------------------------------------
+
+
+async def test_sensor_anomaly_critical_handler_dispatches(tmp_path: Path) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
+    event_logger.log_event = AsyncMock()
+    ollama = _make_mock_ollama("Датчик T1 показывает избыточный шум. Проверьте контакты.")
+    cfg = _make_config(
+        output_telegram=True,
+        output_operator_log=True,
+        output_gui_insight=True,
+        sensor_anomaly_critical_enabled=True,
+    )
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
+    )
+    insight_q = await bus.subscribe("test_sa_insight", maxsize=10)
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="sensor_anomaly_critical",
+        timestamp=datetime(2026, 5, 1, 14, 5, 0, tzinfo=UTC),
+        payload={
+            "alarm_id": "diag:T1",
+            "level": "CRITICAL",
+            "channels": ["T1"],
+            "values": {"T1": 4.2},
+            "message": "Excessive noise detected",
+            "health_score": 30,
+            "fault_flags": ["noise"],
+        },
+        experiment_id="exp-001",
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.1)
+
+    ollama.generate.assert_awaited_once()
+    call_kwargs = ollama.generate.call_args[1]
+    assert call_kwargs["system"] is not None
+    assert "датчик" in call_kwargs["system"].lower()
+
+    telegram._send_to_all.assert_awaited_once()
+    event_logger.log_event.assert_awaited_once()
+
+    insight_events = []
+    while not insight_q.empty():
+        e = insight_q.get_nowait()
+        if e.event_type == "gemma_insight":
+            insight_events.append(e)
+    assert len(insight_events) == 1
+    assert insight_events[0].payload["trigger_event_type"] == "sensor_anomaly_critical"
+
+    bus.unsubscribe("test_sa_insight")
+    await agent.stop()
+
+
+async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
+    ollama = _make_mock_ollama()
+    agent, bus = _make_agent(
+        config=_make_config(sensor_anomaly_critical_enabled=False),
+        ollama=ollama,
+        tmp_path=tmp_path,
+    )
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="sensor_anomaly_critical",
+        timestamp=datetime(2026, 5, 1, 14, 5, 0, tzinfo=UTC),
+        payload={"alarm_id": "diag:T1", "level": "CRITICAL", "channels": ["T1"], "values": {}},
+        experiment_id=None,
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.05)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
+
+
+# ---------------------------------------------------------------------------
+# GemmaAgent — shift_handover_request handler
+# ---------------------------------------------------------------------------
+
+
+async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
+    event_logger.log_event = AsyncMock()
+    ollama = _make_mock_ollama("Сводка смены: температура стабильна, эксперимент в норме.")
+    cfg = _make_config(
+        output_telegram=True,
+        output_operator_log=True,
+        output_gui_insight=True,
+        shift_handover_request_enabled=True,
+    )
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
+    )
+    insight_q = await bus.subscribe("test_sh_insight", maxsize=10)
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="shift_handover_request",
+        timestamp=datetime(2026, 5, 1, 20, 0, 0, tzinfo=UTC),
+        payload={"requested_by": "Иванов", "shift_duration_h": 8},
+        experiment_id="exp-001",
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.1)
+
+    ollama.generate.assert_awaited_once()
+    call_kwargs = ollama.generate.call_args[1]
+    assert call_kwargs["system"] is not None
+    assert "смен" in call_kwargs["system"].lower()
+
+    telegram._send_to_all.assert_awaited_once()
+    event_logger.log_event.assert_awaited_once()
+
+    insight_events = []
+    while not insight_q.empty():
+        e = insight_q.get_nowait()
+        if e.event_type == "gemma_insight":
+            insight_events.append(e)
+    assert len(insight_events) == 1
+    assert insight_events[0].payload["trigger_event_type"] == "shift_handover_request"
+
+    bus.unsubscribe("test_sh_insight")
+    await agent.stop()
+
+
+async def test_shift_handover_disabled_skips_handling(tmp_path: Path) -> None:
+    ollama = _make_mock_ollama()
+    agent, bus = _make_agent(
+        config=_make_config(shift_handover_request_enabled=False),
+        ollama=ollama,
+        tmp_path=tmp_path,
+    )
+    await agent.start()
+
+    event = EngineEvent(
+        event_type="shift_handover_request",
+        timestamp=datetime(2026, 5, 1, 20, 0, 0, tzinfo=UTC),
+        payload={"requested_by": "Иванов", "shift_duration_h": 8},
+        experiment_id=None,
+    )
+    await bus.publish(event)
+    await asyncio.sleep(0.05)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
