@@ -867,7 +867,12 @@ class SafetyManager:
                 now = time.monotonic()
                 self._latest[reading.channel] = (now, reading.value, reading.status.value)
                 if reading.unit == "K":
-                    self._rate_estimator.push(reading.channel, now, reading.value)
+                    # F23: use measurement timestamp, not queue dequeue time.
+                    # Under backlog, monotonic() clusters; reading.timestamp reflects
+                    # actual instrument measurement time, giving correct dT/dt.
+                    self._rate_estimator.push(
+                        reading.channel, reading.timestamp.timestamp(), reading.value
+                    )
         except asyncio.CancelledError:
             return
 

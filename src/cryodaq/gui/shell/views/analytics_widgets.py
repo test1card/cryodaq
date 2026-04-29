@@ -24,8 +24,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QUrl, Slot
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -742,6 +742,32 @@ class CooldownHistoryWidget(QWidget):
             self._plot.setHidden(False)
 
 
+class _ClickableLabel(QLabel):
+    """QLabel that opens a file path with QDesktopServices on click (F19 sub-item 3)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._path: str = ""
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_path(self, path: str) -> None:
+        self._path = path
+        if path:
+            self.setText(path)
+            self.setStyleSheet(
+                f"color: {theme.ACCENT}; text-decoration: underline; "
+                "background: transparent; border: none;"
+            )
+        else:
+            self.setText("—")
+            self.setStyleSheet("color: inherit; text-decoration: none;")
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._path))
+        super().mousePressEvent(event)
+
+
 class ExperimentSummaryWidget(QWidget):
     """Post-experiment summary card (W3, disassembly/main, F3-Cycle4).
 
@@ -755,6 +781,7 @@ class ExperimentSummaryWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._alarm_worker = None
+        self._stats_worker = None  # F19 sub-item 1
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -781,10 +808,15 @@ class ExperimentSummaryWidget(QWidget):
         self._phases_label = self._add_info_row(c_lay, "Фазы")
         self._phases_label.setWordWrap(True)
         self._alarm_label = self._add_info_row(c_lay, "Алармы")
-        self._docx_label = self._add_info_row(c_lay, "Отчёт DOCX")
-        self._docx_label.setWordWrap(True)
-        self._pdf_label = self._add_info_row(c_lay, "Отчёт PDF")
-        self._pdf_label.setWordWrap(True)
+        # F19 sub-item 2: top-3 alarm names
+        self._top_alarms_label = self._add_info_row(c_lay, "Топ алармов")
+        self._top_alarms_label.setWordWrap(True)
+        # F19 sub-item 1: channel min/max/mean stats
+        self._stats_label = self._add_info_row(c_lay, "Каналы")
+        self._stats_label.setWordWrap(True)
+        # F19 sub-item 3: clickable artifact links
+        self._docx_label = self._add_link_row(c_lay, "Отчёт DOCX")
+        self._pdf_label = self._add_link_row(c_lay, "Отчёт PDF")
 
         c_lay.addStretch()
         self._content.setHidden(True)
@@ -794,6 +826,35 @@ class ExperimentSummaryWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(card)
 
+
+    def _add_link_row(self, layout: QVBoxLayout, label_text: str) -> _ClickableLabel:
+        """Create a label row where the value is a clickable file link (F19 sub-item 3)."""
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(theme.SPACE_2)
+
+        key = QLabel(f"{label_text}:")
+        key_font = QFont(theme.FONT_BODY)
+        key_font.setPixelSize(theme.FONT_BODY_SIZE)
+        key.setFont(key_font)
+        key.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        key.setFixedWidth(140)
+
+        val = _ClickableLabel()
+        val_font = QFont(theme.FONT_BODY)
+        val_font.setPixelSize(theme.FONT_BODY_SIZE)
+        val.setFont(val_font)
+        val.setWordWrap(True)
+        val.set_path("")
+
+        h.addWidget(key)
+        h.addWidget(val, stretch=1)
+        layout.addWidget(row)
+        return val
 
     def _add_info_row(self, layout: QVBoxLayout, label_text: str) -> QLabel:
         row = QWidget()
@@ -835,6 +896,10 @@ class ExperimentSummaryWidget(QWidget):
     def _show_empty(self) -> None:
         self._empty_label.setHidden(False)
         self._content.setHidden(True)
+        self._top_alarms_label.setText("—")
+        self._stats_label.setText("—")
+        self._docx_label.set_path("")
+        self._pdf_label.set_path("")
 
     def _populate(self, active: dict, phases: list) -> None:
         from datetime import UTC
@@ -881,21 +946,88 @@ class ExperimentSummaryWidget(QWidget):
         self._phases_label.setText(", ".join(phase_parts) if phase_parts else "—")
 
         artifact_dir = active.get("artifact_dir") or ""
+        end_ts: float | None = None
         if artifact_dir:
             base = _Path(artifact_dir)
-            self._docx_label.setText(str(base / "reports" / "report_editable.docx"))
-            self._pdf_label.setText(str(base / "reports" / "report_raw.pdf"))
+            self._docx_label.set_path(str(base / "reports" / "report_editable.docx"))
+            self._pdf_label.set_path(str(base / "reports" / "report_raw.pdf"))
         else:
-            self._docx_label.setText("—")
-            self._pdf_label.setText("—")
+            self._docx_label.set_path("")
+            self._pdf_label.set_path("")
+
+        try:
+            if end_str:
+                end_dt = _dt.fromisoformat(end_str)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=UTC)
+                end_ts = end_dt.timestamp()
+        except (ValueError, TypeError):
+            pass
 
         if start_ts is not None:
             self._fetch_alarms(start_ts)
+            # F19 sub-item 1: fetch channel stats for experiment timespan
+            self._stats_label.setText("Загрузка…")
+            self._fetch_stats(start_ts, end_ts)
         else:
             self._alarm_label.setText("—")
+            self._top_alarms_label.setText("—")
+            self._stats_label.setText("—")
 
         self._empty_label.setHidden(True)
         self._content.setHidden(False)
+
+    def _fetch_stats(self, start_ts: float, end_ts: float | None) -> None:
+        """Issue readings_history ZMQ fetch for experiment timespan; compute channel stats (F19)."""
+        import time as _time
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        to_ts = end_ts if end_ts is not None else _time.time()
+        cmd = {
+            "cmd": "readings_history",
+            "from_ts": start_ts,
+            "to_ts": to_ts,
+            # 50k samples covers ~7h at 0.5s polling cadence (Codex P2: 5k was 42 min)
+            "limit_per_channel": 50000,
+        }
+        self._stats_worker = ZmqCommandWorker(cmd, parent=self)
+        self._stats_worker.finished.connect(self._on_stats_loaded)
+        self._stats_worker.start()
+
+    @Slot(dict)
+    def _on_stats_loaded(self, result: dict) -> None:
+        """Compute per-channel min/max/mean from readings_history response."""
+        if not result.get("ok"):
+            self._stats_label.setText("—")
+            return
+        data: dict[str, list] = result.get("data", {})
+        if not data:
+            self._stats_label.setText("нет данных")
+            return
+
+        lines: list[str] = []
+        # Show temperature channels (K) first, then others
+        temp_chs = sorted(
+            ch for ch in data
+            if ch.startswith("Т") or ch.startswith("T")
+        )
+        other_chs = sorted(ch for ch in data if ch not in temp_chs)
+        ordered = (temp_chs + other_chs)[:12]  # limit display
+
+        for ch in ordered:
+            pts = data[ch]
+            if not pts:
+                continue
+            vals = [float(p[1]) for p in pts if len(p) >= 2]
+            if not vals:
+                continue
+            mn = min(vals)
+            mx = max(vals)
+            mean = sum(vals) / len(vals)
+            lines.append(f"{ch}: {mn:.2f}–{mx:.2f} (ср {mean:.2f})")
+
+        self._stats_label.setText("\n".join(lines) if lines else "нет данных")
 
     def _fetch_alarms(self, start_ts: float) -> None:
         from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -909,6 +1041,7 @@ class ExperimentSummaryWidget(QWidget):
     def _on_alarms_loaded(self, result: dict) -> None:
         if not result.get("ok"):
             self._alarm_label.setText("—")
+            self._top_alarms_label.setText("—")
             return
         history = result.get("history", [])
         triggered = [e for e in history if e.get("transition") == "TRIGGERED"]
@@ -916,6 +1049,19 @@ class ExperimentSummaryWidget(QWidget):
         criticals = sum(1 for e in triggered if str(e.get("level", "")).upper() == "CRITICAL")
         total = len(triggered)
         self._alarm_label.setText(f"{total} ({warnings} пред. / {criticals} крит.)")
+
+        # F19 sub-item 2: top-3 most-triggered alarm names
+        counts: dict[str, int] = {}
+        for e in triggered:
+            aid = str(e.get("alarm_id") or "")
+            if aid:
+                counts[aid] = counts.get(aid, 0) + 1
+        if counts:
+            top3 = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            parts = [f"{name} ×{n}" for name, n in top3]
+            self._top_alarms_label.setText("; ".join(parts))
+        else:
+            self._top_alarms_label.setText("нет")
 
 
 # ---------------------------------------------------------------------------

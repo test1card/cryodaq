@@ -202,30 +202,37 @@ def test_empty_phases_renders_dash(app):
 
 
 def test_alarm_fetch_triggered_with_start_ts(app):
-    """set_experiment_status must issue alarm_v2_history with start_ts."""
+    """set_experiment_status must issue alarm_v2_history with start_ts.
+
+    F19: now also issues readings_history (2 ZMQ workers total); test verifies
+    the alarm_v2_history call specifically using call_args_list.
+    """
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(start_time="2026-04-15T10:00:00+00:00"))
 
-    mock_cls.assert_called_once()
-    cmd = mock_cls.call_args[0][0]
-    assert cmd["cmd"] == "alarm_v2_history"
-    assert "start_ts" in cmd
-    assert cmd["start_ts"] == pytest.approx(
+    # First call is alarm_v2_history, second is readings_history (F19 sub-item 1)
+    assert mock_cls.call_count == 2
+    alarm_cmd = mock_cls.call_args_list[0][0][0]
+    assert alarm_cmd["cmd"] == "alarm_v2_history"
+    assert "start_ts" in alarm_cmd
+    assert alarm_cmd["start_ts"] == pytest.approx(
         datetime(2026, 4, 15, 10, 0, 0, tzinfo=UTC).timestamp(), abs=1
     )
 
 
 def test_alarm_fetch_worker_has_parent(app):
-    """ZmqCommandWorker must be constructed with parent=self."""
+    """ZmqCommandWorker must be constructed with parent=self for both workers."""
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status())
 
-    _, kwargs = mock_cls.call_args
-    assert kwargs.get("parent") is w
+    # Both alarm and stats workers must have parent=self
+    for call in mock_cls.call_args_list:
+        _, kwargs = call
+        assert kwargs.get("parent") is w
 
 
 # ─── Alarm count rendering ─────────────────────────────────────────────────────
@@ -295,3 +302,146 @@ def test_content_shown_after_status_received(app):
         w.set_experiment_status(_make_status())
     assert w._empty_label.isHidden()
     assert not w._content.isHidden()
+
+
+# ─── F19 sub-item 2: Top-3 alarm names ─────────────────────────────────────────
+
+
+def test_top3_alarms_shows_most_frequent_names(app):
+    """Top-3 most-triggered alarm names shown with counts in _top_alarms_label."""
+    w = _make_widget()
+    history = [
+        _alarm_entry(alarm_id="t_high", level="WARNING"),
+        _alarm_entry(alarm_id="t_high", level="WARNING"),
+        _alarm_entry(alarm_id="t_high", level="WARNING"),
+        _alarm_entry(alarm_id="pressure", level="CRITICAL"),
+        _alarm_entry(alarm_id="pressure", level="CRITICAL"),
+        _alarm_entry(alarm_id="drift", level="WARNING"),
+        # CLEARED transitions should not be counted
+        _alarm_entry(alarm_id="t_high", transition="CLEARED"),
+    ]
+    w._on_alarms_loaded({"ok": True, "history": history})
+    text = w._top_alarms_label.text()
+    # Most frequent (t_high ×3) must appear first
+    assert "t_high" in text
+    assert "pressure" in text
+    # drift should appear (3rd most frequent ×1)
+    assert "drift" in text
+
+
+def test_top3_alarms_no_history_shows_net(app):
+    """Empty alarm history must render 'нет' in top_alarms_label."""
+    w = _make_widget()
+    w._on_alarms_loaded({"ok": True, "history": []})
+    assert "нет" in w._top_alarms_label.text()
+
+
+def test_top3_alarms_error_shows_dash(app):
+    """ok=False from engine must show '—' in top_alarms_label."""
+    w = _make_widget()
+    w._on_alarms_loaded({"ok": False, "error": "timeout"})
+    assert w._top_alarms_label.text() == "—"
+
+
+def test_top3_alarms_shows_at_most_three(app):
+    """When more than 3 alarms exist, only top 3 are displayed."""
+    w = _make_widget()
+    history = [
+        _alarm_entry(alarm_id=f"alarm_{i}")
+        for i in range(10)
+    ]
+    w._on_alarms_loaded({"ok": True, "history": history})
+    text = w._top_alarms_label.text()
+    # Max 3 entries separated by ";"
+    assert text.count(";") <= 2
+
+
+# ─── F19 sub-item 3: Clickable artifact links ──────────────────────────────────
+
+
+def test_artifact_links_are_clickable_labels(app):
+    """_docx_label and _pdf_label must be _ClickableLabel instances with set_path."""
+    from cryodaq.gui.shell.views.analytics_widgets import _ClickableLabel
+    w = _make_widget()
+    assert isinstance(w._docx_label, _ClickableLabel)
+    assert isinstance(w._pdf_label, _ClickableLabel)
+
+
+def test_artifact_link_set_path_updates_text_and_path(app):
+    """set_path() must update displayed text and internal _path."""
+    from cryodaq.gui.shell.views.analytics_widgets import _ClickableLabel
+    w = _make_widget()
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w.set_experiment_status(_make_status(artifact_dir="/data/exp_001"))
+    assert isinstance(w._docx_label, _ClickableLabel)
+    assert w._docx_label._path != ""
+    assert "report_editable.docx" in w._docx_label._path
+
+
+# ─── F19 sub-item 1: Channel min/max/mean stats ────────────────────────────────
+
+
+def test_stats_loaded_renders_channel_stats(app):
+    """_on_stats_loaded with valid data must populate _stats_label with channel stats."""
+    w = _make_widget()
+    data = {
+        "Т1": [[1000.0, 10.0], [1001.0, 20.0], [1002.0, 30.0]],
+        "Т2": [[1000.0, 5.0], [1001.0, 5.0]],
+    }
+    w._on_stats_loaded({"ok": True, "data": data})
+    text = w._stats_label.text()
+    assert "Т1" in text
+    assert "Т2" in text
+    # Min=10, max=30, mean=20 for T1
+    assert "10" in text and "30" in text
+
+
+def test_stats_loaded_empty_data_shows_no_data(app):
+    """_on_stats_loaded with empty data must render 'нет данных'."""
+    w = _make_widget()
+    w._on_stats_loaded({"ok": True, "data": {}})
+    assert "нет" in w._stats_label.text()
+
+
+def test_stats_loaded_error_shows_dash(app):
+    """ok=False from readings_history must render '—' in stats label."""
+    w = _make_widget()
+    w._on_stats_loaded({"ok": False})
+    assert w._stats_label.text() == "—"
+
+
+def test_stats_fetch_issued_on_status_set(app):
+    """set_experiment_status must trigger two ZMQ workers: alarm_history + readings_history."""
+    w = _make_widget()
+    call_cmds: list[str] = []
+
+    def capture(cmd, parent=None):
+        call_cmds.append(cmd.get("cmd", ""))
+        m = MagicMock()
+        m.start = MagicMock()
+        return m
+
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker", side_effect=capture):
+        w.set_experiment_status(_make_status())
+
+    assert "alarm_v2_history" in call_cmds
+    assert "readings_history" in call_cmds
+
+
+# ─── Empty-state coverage for new F19 labels ──────────────────────────────────
+
+
+def test_empty_state_resets_f19_labels(app):
+    """show_empty must reset top_alarms, stats, and artifact labels."""
+    w = _make_widget()
+    # First populate
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w.set_experiment_status(_make_status())
+    # Then clear
+    w.set_experiment_status(None)
+    assert w._top_alarms_label.text() == "—"
+    assert w._stats_label.text() == "—"
+    assert w._docx_label.text() == "—"
+    assert w._pdf_label.text() == "—"
