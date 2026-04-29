@@ -1669,6 +1669,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                 elif result.get("ok") and action == "experiment_advance_phase":
                     phase = cmd.get("phase", "?")
+                    await event_logger.log_event("phase", f"Фаза: → {phase}")
                     _active = experiment_manager.active_experiment
                     await event_bus.publish(
                         EngineEvent(
@@ -1678,7 +1679,6 @@ async def _run_engine(*, mock: bool = False) -> None:
                             experiment_id=_active.experiment_id if _active else None,
                         )
                     )
-                    await event_logger.log_event("phase", f"Фаза: → {phase}")
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}
