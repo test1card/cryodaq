@@ -1,4 +1,4 @@
-"""Tests for GemmaInsightPanel — lifecycle, push API, placeholder, card rendering."""
+"""Tests for AssistantInsightPanel — lifecycle, push API, placeholder, card rendering."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui.shell.views.gemma_insight_panel import (
+from cryodaq.gui.shell.views.assistant_insight_panel import (
     _MAX_INSIGHTS,
-    GemmaInsightPanel,
+    AssistantInsightPanel,
     _InsightCard,
     _TriggerChip,
 )
@@ -31,7 +31,7 @@ def _app() -> QApplication:
 
 def test_panel_initial_state_shows_placeholder() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     assert panel._entries == [] or len(panel._entries) == 0
     assert not panel._placeholder.isHidden()
@@ -41,7 +41,7 @@ def test_panel_initial_state_shows_placeholder() -> None:
 
 def test_clear_restores_placeholder() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     panel.push_insight("Температура T1 выше порога.", "alarm_fired")
     assert panel._placeholder.isHidden()
@@ -59,7 +59,7 @@ def test_clear_restores_placeholder() -> None:
 
 def test_push_insight_hides_placeholder(tmp_path) -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     panel.push_insight("Тест сообщения.", "alarm_fired")
 
@@ -69,7 +69,7 @@ def test_push_insight_hides_placeholder(tmp_path) -> None:
 
 def test_push_insight_renders_one_card() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     panel.push_insight("Аномалия датчика T2.", "sensor_anomaly_critical")
 
@@ -85,7 +85,7 @@ def test_push_insight_renders_one_card() -> None:
 
 def test_push_insight_uses_provided_timestamp() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
     ts = datetime(2026, 5, 1, 14, 30, 0, tzinfo=UTC)
 
     panel.push_insight("Сводка смены готова.", "shift_handover_request", timestamp=ts)
@@ -102,7 +102,7 @@ def test_push_insight_uses_provided_timestamp() -> None:
 
 def test_panel_keeps_last_10_insights() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     for i in range(_MAX_INSIGHTS + 3):
         panel.push_insight(f"Сообщение {i}", "alarm_fired")
@@ -115,7 +115,7 @@ def test_panel_keeps_last_10_insights() -> None:
 
 def test_panel_layout_count_matches_entries() -> None:
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
 
     for i in range(5):
         panel.push_insight(f"Сообщение {i}", "experiment_finalize")
@@ -163,7 +163,7 @@ def test_trigger_chip_unknown_uses_default() -> None:
 def test_placeholder_survives_multiple_push_clear_cycles() -> None:
     """Placeholder must not be deleted by deleteLater() and remain reusable."""
     _app()
-    panel = GemmaInsightPanel()
+    panel = AssistantInsightPanel()
     placeholder = panel._placeholder
 
     for _ in range(3):
