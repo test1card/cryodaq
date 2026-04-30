@@ -701,7 +701,13 @@ class AssistantLiveAgent:
             window_minutes=window_minutes,
         )
 
-        if (
+        if ctx.context_read_failed:
+            logger.warning(
+                "AssistantLiveAgent: periodic report context read failed "
+                "(audit_id=%s) — proceeding with empty context",
+                audit_id,
+            )
+        elif (
             self._config.periodic_report_skip_if_idle
             and ctx.total_event_count < self._config.periodic_report_min_events
         ):

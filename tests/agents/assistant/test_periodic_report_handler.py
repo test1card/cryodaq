@@ -228,3 +228,27 @@ def test_periodic_report_prompt_does_not_hardcode_hour_window() -> None:
     """Configured non-hourly windows must not fight a hardcoded system prompt."""
     assert "последний час" not in PERIODIC_REPORT_SYSTEM
     assert "{window_minutes}" in PERIODIC_REPORT_USER
+
+
+def test_periodic_report_prompt_prohibits_latex() -> None:
+    """PERIODIC_REPORT_SYSTEM must explicitly forbid LaTeX (no \\r escape corruption)."""
+    assert "LaTeX" in PERIODIC_REPORT_SYSTEM
+    assert "$" in PERIODIC_REPORT_SYSTEM
+    assert "→" in PERIODIC_REPORT_SYSTEM
+    assert "\r" not in PERIODIC_REPORT_SYSTEM
+
+
+async def test_periodic_report_context_read_failure_bypasses_idle_skip(
+    tmp_path: Path,
+) -> None:
+    """context_read_failed=True must bypass skip_if_idle so the fault is visible."""
+    telegram = MagicMock()
+    telegram._send_to_all = AsyncMock()
+    ctx = _make_mock_context(total_event_count=0)
+    ctx.context_read_failed = True
+    agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
+    await agent.start()
+    await bus.publish(_periodic_event())
+    await asyncio.sleep(0.05)
+    telegram._send_to_all.assert_awaited_once()
+    await agent.stop()

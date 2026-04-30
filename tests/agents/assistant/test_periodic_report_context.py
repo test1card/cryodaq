@@ -119,3 +119,31 @@ async def test_periodic_report_context_formats_calibration_section() -> None:
     assert "T1 offset" in tmpl["calibration_section"]
     assert "T1 offset" not in tmpl["events_section"]
     assert ctx.total_event_count == 1
+
+
+async def test_periodic_report_context_phase_tag_classified_correctly() -> None:
+    """Engine logs phase events with tag 'phase'; must appear in phase_entries not other."""
+    entries = [
+        _make_entry("Фаза: → COOL", ("auto", "phase")),
+    ]
+    cb = _make_context_builder(entries)
+    ctx = await cb.build_periodic_report_context(window_minutes=60)
+
+    assert len(ctx.phase_entries) == 1
+    assert len(ctx.other_entries) == 0
+    tmpl = ctx.to_template_dict()
+    assert "Фаза:" in tmpl["phase_transitions_section"]
+
+
+async def test_periodic_report_context_read_failure_sets_flag() -> None:
+    """SQLite failure must set context_read_failed=True, not silently return empty."""
+    from unittest.mock import AsyncMock, MagicMock
+    reader = MagicMock()
+    reader.get_operator_log = AsyncMock(side_effect=RuntimeError("db locked"))
+    em = MagicMock()
+    em.active_experiment_id = None
+    cb = ContextBuilder(reader, em)
+    ctx = await cb.build_periodic_report_context(window_minutes=60)
+
+    assert ctx.context_read_failed is True
+    assert ctx.total_event_count == 0

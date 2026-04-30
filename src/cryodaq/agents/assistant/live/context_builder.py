@@ -120,6 +120,7 @@ class ContextBuilder:
         start_time = now - timedelta(minutes=window_minutes)
 
         entries: list[Any] = []
+        _ctx_failed = False
         if hasattr(self._reader, "get_operator_log"):
             try:
                 entries = await self._reader.get_operator_log(
@@ -128,10 +129,14 @@ class ContextBuilder:
                     limit=50,
                 )
             except Exception:
-                logger.debug("PeriodicReportContext: get_operator_log failed", exc_info=True)
+                logger.warning(
+                    "PeriodicReportContext: get_operator_log failed — window data unavailable",
+                    exc_info=True,
+                )
+                _ctx_failed = True
 
         alarm_entries = [e for e in entries if "alarm" in e.tags]
-        phase_entries = [e for e in entries if "phase_transition" in e.tags]
+        phase_entries = [e for e in entries if "phase_transition" in e.tags or "phase" in e.tags]
         experiment_entries = [e for e in entries if "experiment" in e.tags]
         calibration_entries = [e for e in entries if "calibration" in e.tags]
         # Exclude machine-generated and AI-generated entries from operator section
@@ -145,6 +150,7 @@ class ContextBuilder:
             if "auto" in e.tags
             and "alarm" not in e.tags
             and "phase_transition" not in e.tags
+            and "phase" not in e.tags
             and "experiment" not in e.tags
             and "calibration" not in e.tags
             and "ai" not in e.tags
@@ -174,6 +180,7 @@ class ContextBuilder:
             operator_entries=operator_entries,
             other_entries=other_entries,
             total_event_count=total_event_count,
+            context_read_failed=_ctx_failed,
         )
 
     async def build_diagnostic_suggestion_context(
@@ -513,6 +520,7 @@ class PeriodicReportContext:
     operator_entries: list[Any] = field(default_factory=list)
     other_entries: list[Any] = field(default_factory=list)
     total_event_count: int = 0
+    context_read_failed: bool = False
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
