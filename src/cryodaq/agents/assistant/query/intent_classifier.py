@@ -92,7 +92,7 @@ class IntentClassifier:
         *,
         model: str | None = None,
         temperature: float = 0.1,
-        max_tokens: int = 256,
+        max_tokens: int = 2048,
         timeout_s: float | None = None,
     ) -> None:
         self._ollama = ollama_client

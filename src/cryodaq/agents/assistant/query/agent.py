@@ -114,7 +114,7 @@ class AssistantQueryAgent:
                 model=self._format_model,
                 system=system_prompt,
                 temperature=self._format_temperature,
-                max_tokens=512,
+                max_tokens=2048,
             )
             if result.truncated or not result.text.strip():
                 errors.append("format_llm_truncated_or_empty")
