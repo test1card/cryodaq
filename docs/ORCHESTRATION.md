@@ -1,9 +1,10 @@
 # CryoDAQ agent orchestration — CC-centric swarm model
 
-**Authoritative as of 2026-04-30 (v1.3).** Supersedes ad-hoc multi-agent
-coordination from 2026-04-21 to 2026-04-23. v1.2 incorporates calibration
-findings from vault build/audit, B1 investigation closure, and `.cof`
-migration sessions (2026-04-26 through 2026-04-28).
+**Authoritative as of 2026-05-01 (v1.4).** Supersedes ad-hoc multi-agent
+coordination from 2026-04-21 to 2026-04-23. v1.4 incorporates lessons
+from F28 Гемма implementation (Cycles 0-6, 6 weeks of multi-cycle work)
+and 7 accumulated calibration sessions establishing first defensible
+empirical patterns for model performance per task class.
 
 **Who reads this:** every agent session (Claude Code, Codex CLI,
 Gemini CLI, GLM via CCR, architect web Claude, metaswarm). If you
@@ -872,4 +873,400 @@ and you don't like a rule, propose a change through the
 architect. Do not work around it.*
 
 *— Vladimir Fomenko (architect), authored by Claude Opus 4.7
-(web), 2026-04-23 (v1.1) — extended 2026-04-28 (v1.2) — extended 2026-04-30 (v1.3).*
+(web), 2026-04-23 (v1.1) — extended 2026-04-28 (v1.2) — extended 2026-04-30 (v1.3) — extended 2026-05-01 (v1.4).*
+
+---
+
+## 16. Multi-cycle feature work (v1.4, 2026-05-01)
+
+F28 Гемма shipped over 6 cycles (Cycle 0 foundation through Cycle 6
+release). Lessons codified here apply to any L+ feature spanning
+multiple multi-day cycles — F27 chamber photos, F29-F32 assistant v2
+phases, future similar.
+
+### 16.1 Cycle structure
+
+A cycle is the unit of multi-cycle feature work. Each cycle has:
+
+1. **Spec** — written by architect, lives in repo as
+   `CC_PROMPT_<feature>_CYCLE<N>.md` or section of master spec.
+2. **Implementation** — CC executes spec, single feature branch.
+3. **Tests** — added in same commit as implementation. Acceptance
+   criteria from spec must verify green before audit.
+4. **Smoke test** (mandatory at end of substantial cycles) — real
+   verification with actual integrations (Ollama, hardware, GUI),
+   not just unit tests. See §16.4.
+5. **Audit** — 1-2 verifier dispatch per ORCHESTRATION §14.2 +
+   §16.3 verifier scaling.
+6. **Architect ratification** — STOP at end of cycle. Architect
+   reviews handoff, classifies findings per §14.6, decides proceed
+   to next cycle vs fix-up vs revert.
+7. **Handoff** — `artifacts/handoffs/<date>-<feature>-cycle<N>-handoff.md`
+   captures branch SHA, what landed, audit results, smoke results,
+   ARCHITECT DECISION NEEDED markers, time-budget assessment vs deadline.
+
+No cycle ships to master autonomously. Branch lives across all cycles
+until final cycle ratifies merge to master.
+
+### 16.2 Sub-cycle pattern
+
+When architect review surfaces fixes that don't justify a full new
+cycle but exceed routine commit scope, use **sub-cycle numbering**:
+Cycle 3 → Cycle 3.5 → Cycle 3.6.
+
+F28 example:
+- Cycle 3 — Slice A complete + GUI panel
+- Cycle 3.5 — handler tests + label hygiene (~30 min)
+- Cycle 3.6 — stub workaround (15 min)
+
+Sub-cycles: smaller scope, single audit dispatch (not multi-verifier),
+same branch, separate handoff or appended section.
+
+### 16.3 Verifier scaling per cycle scope
+
+Not every cycle warrants the same audit budget. Scale:
+
+| Cycle scope | Recommended verifiers | Rationale |
+|---|---|---|
+| Foundational (multi-file architectural change) | 5-6 models (full multi-model wave) | High blast radius, low test coverage on integration points; need broad signal. F28 Cycle 0 EventBus addition. |
+| Integration (engine wiring + first user-facing feature) | 2-3 models (Codex + GLM + optional third) | Surface integration bugs unit tests miss; reasonable cost. F28 Cycle 2 GemmaAgent + alarm. |
+| Narrow infra (isolated module, no engine wiring) | 1 model (Codex sufficient) | Codex consistently clean in §16.7 calibration data; second verifier marginal. F28 Cycle 1 Ollama client. |
+| Narrow feature extension (handlers, prompt templates, additional triggers) | 2 models (Codex + GLM) | Catches typical errors; overhead of 5-6 not justified. F28 Cycles 3-5. |
+| Polish (docs, refactor, retention housekeeping, no behavior change) | 1 model (Codex sufficient) | Refactor regression risk caught by full test suite running green. F28 Cycle 6. |
+| Sub-cycle (minor fixes <50 LOC) | 1 model OR no audit | Single-finding fixes don't justify multi-model dispatch. |
+
+Single-verifier acceptable for narrow scope, **multi-verifier mandatory
+for foundational + integration**. F28 Cycle 0 multi-model audit caught
+asymmetric failure mode reasoning (GLM Finding 6) that Codex alone
+missed; conversely Cycle 1 narrow infra single-Codex was fine when GLM
+responded EMPTY (4096-token reasoning cap on 15KB prompt).
+
+### 16.4 Smoke test discipline
+
+Unit tests verify behavior in mock; smoke verifies behavior **with real
+integrations**. Mandatory at end of substantial cycles touching:
+- External processes (Ollama, hardware drivers, file I/O)
+- User-facing output (Telegram, GUI rendering, DOCX generation)
+- Cross-process state (engine + GUI separate processes)
+
+Smoke test responsibilities:
+1. **Real services running** — actual Ollama with actual model, not
+   mock. Real engine in `--mock` data mode (mocking instruments) but
+   real Ollama, real EventBus, real SQLite.
+2. **End-to-end scenario** — trigger event → observe full output chain
+   (Telegram + log + GUI + audit log).
+3. **Output sample capture** — Russian text excerpts, latency numbers,
+   memory observed. F28 smoke samples accumulated cycle-by-cycle
+   formed natural verification ledger.
+4. **Documented in handoff** — sample text, latency, memory, any
+   observed quality regression. Not just "smoke passed".
+
+F28 example Cycle 3 smoke caught stub-label leak (model echoing
+`[wired in Cycle 4]` placeholder text into responses). Unit tests
+wouldn't have caught — they mocked the stub return path. Real
+inference revealed text leak, fix landed in Cycle 3.6 (15 min).
+
+### 16.5 Stub workaround pattern
+
+When a cycle ships before its dependent data layer, stub return
+values rather than empty strings. Two failure modes:
+- Empty string → prompt injection vulnerability (model fills
+  blanks with hallucination)
+- Technical placeholder (`[wired in Cycle X]`, `TODO`, etc) →
+  model **echoes** placeholder into output
+
+Use **neutral domain-language placeholder** that model treats as
+semantic content. Russian deployment example: `"нет данных"`.
+French: `"aucune donnée"`. English: `"no data available"`.
+
+F28 Cycle 3.6 fix: `[wired in Cycle 4 — historical SQLite context]`
+→ `нет данных`. Same code structure, but model reads it as actual
+negative result and skips that paragraph instead of expanding it.
+
+Document stubs in code comment: `# F28 Cycle 4 will wire real SQLite
+historical context here. See artifacts/architecture/X.md §Y.`
+
+### 16.6 Thinking-first model UX
+
+Reasoning-mode and thinking-first models (gemma4:e4b in F28,
+DeepSeek-R1, GLM-5.1 reasoning mode) consume large fraction of
+max_tokens budget on internal reasoning before producing visible
+output. Two implications:
+
+1. **max_tokens budget** — reserve enough for thinking + visible
+   response. Empirical: gemma4:e4b consumes ~500-600 tokens on
+   thinking before response begins. max_tokens=300 → empty response
+   (all consumed by reasoning, none for output). Set max_tokens=2048
+   minimum for thinking models.
+
+2. **UX state during inference** — operator-visible "thinking..."
+   indicator during inference. F28 GUI panel uses
+   `"{brand_name} думает..."` placeholder card during inference,
+   replaced by actual response card on completion.
+
+3. **Latency expectation** — thinking-first models are SLOWER than
+   token count alone suggests. gemma4:e4b smoke test: 48s wall-clock
+   for 200-token response (thinking + response combined). Document
+   in handoff. Don't chase hard latency targets that fight model
+   architecture.
+
+### 16.7 Asymmetric failure mode reasoning
+
+When ordering operations across components, distinguish failure modes
+that **can** fail vs **cannot** fail. Order durable-but-fallible
+before in-memory-but-unfailable.
+
+F28 Cycle 0 example: `event_bus.publish()` is in-memory pub/sub —
+cannot raise (full queue → drop with warning, never raise).
+`event_logger.log_event()` writes SQLite — CAN raise (disk full,
+lock contention).
+
+Wrong order (publish first, then log):
+- Subscribers (Гемма) react to event
+- Log fails
+- Operator sees Гемма commentary in Telegram
+- No durable record in operator log → audit trail broken
+
+Right order (log first, then publish):
+- Durable record commits or gracefully fails
+- Subscribers react after persistence
+- Audit trail intact regardless
+
+GLM Finding 6 (Cycle 0 multi-audit) flagged this. Initial architect
+direction was wrong; reversal applied in Cycle 2 → final order is
+log-then-publish. Generalized: **before deciding ordering between
+operations, ask which can fail and which cannot. Failable goes
+first.**
+
+### 16.8 Brand-name abstraction at module rename
+
+When feature is named after current implementation detail (model
+name, vendor, library), the brand becomes embedded in code paths,
+class names, audit log paths, GUI labels. Future migration to
+different implementation requires touching all of these.
+
+Decouple at first opportunity:
+- **Code uses generic name** (`assistant`, not `gemma`)
+- **Brand string lives in config** (`agent.brand_name: "Гемма"`)
+- **Prompts use interpolation** (`"Ты — {brand_name}..."`)
+- **Storage paths use generic name** (`data/agents/assistant/audit/`)
+- **Backward compat for one release cycle** — old config still loads
+  with deprecation warning
+
+F28 example: started as `agents/gemma.py` + `GemmaAgent` class +
+`gemma:` config namespace. Cycle 6 refactored to `agents/assistant/`
++ `AssistantLiveAgent` + `agent:` namespace. Migration to different
+model becomes 10-min config edit, not codebase rewrite.
+
+Do this at **first cycle that ships to release** (Cycle 6 in F28)
+rather than cycle 1 — early cycles iterate on naming, premature
+abstraction wastes effort.
+
+---
+
+## 17. Calibration log discipline (v1.4, 2026-05-01)
+
+v1.3 §15 documented multi-model dispatch realities from single
+pilot session (n=1 per task class). v1.4 adds: **persistent
+accumulating log discipline** so per-model task-class performance
+data grows over weeks/months toward defensible profile.
+
+### 17.1 Log location and schema
+
+```
+artifacts/calibration/
+  log.jsonl                           # append-only, one record per (session, task, model)
+  README.md                           # schema + read examples
+  MODEL-PROFILES.md                   # synthesis (architect-maintained, periodic)
+  <YYYY-MM-DD>-<session-slug>/        # per-session prompts, responses, ledger
+    audit-prompt.md
+    <model>.response.md
+    verification-ledger.md
+```
+
+Each `log.jsonl` line is a JSON record with schema documented in
+`artifacts/calibration/README.md` §schema. Required fields:
+`session_id`, `session_purpose`, `session_date`, `task_class`,
+`task_subtype`, `model`, `verdict`, `findings_critical/high/medium/low`,
+`real_findings_count`, `hallucinated_findings_count`,
+`ambiguous_findings_count`, `architect_verification_done`, `latency_s`.
+
+### 17.2 Append discipline
+
+Every multi-model audit dispatch creates one record per model.
+Records append to log immediately after architect classifies findings
+per §14.6 verification ledger.
+
+No retroactive editing — if a finding is later re-classified,
+append a correction record referencing the original session_id.
+Log is append-only audit trail, not living document.
+
+### 17.3 Honest framing
+
+Number of records is what it is. **Do not call accumulated data
+"validated routing rules" until n≥5 per task class.** Frame as:
+- n=1-2: "first observations from pilot session(s)"
+- n=3-5: "preliminary patterns from limited dispatches"
+- n=5-10: "observations consistent across N sessions"
+- n>10: "defensible profile per task class"
+
+F28 work accumulated 7 sessions through Cycle 6 — moving from n=1
+pilot to n=3-7 per common task class (code review, narrow audit,
+code generation). Patterns starting to emerge but **not yet
+authoritative routing**.
+
+### 17.4 Empirical patterns observed (n=3-7, 2026-05-01)
+
+Provisional, not yet authoritative. Update via
+`MODEL-PROFILES.md` periodic synthesis when n>5 per task class.
+
+**Codex gpt-5.5** (n=7 reviews):
+- 0% hallucination rate across all 7 sessions
+- Consistently identifies real findings in declared scope
+- Tends to NOT grep callers / check downstream impact unless
+  prompted (per v1.2 §14.2)
+- **Reliable primary verifier for narrow review tasks.**
+
+**GLM-5.1** (n=4 reviews, 2 with reasoning mode):
+- Strong signal-to-noise on code review when budget OK
+- Reasoning mode requires `max_tokens ≥ 8192` for prompts >10KB
+  (4096 cap leaves zero budget for actual response after thinking)
+- Cycle 0 caught asymmetric failure mode (Finding 6) Codex missed
+- Cycle 1 EMPTY due to budget cap (recoverable: increase budget)
+- **Strong secondary verifier when budget configured correctly.**
+
+**Qwen3-Coder-Next** (n=2 reviews):
+- Pilot T3: over-flag pattern (1 real + 7 ambiguous on consistency)
+- Cycle 0: 1 real + 2 halluc + 7 noise/ambig
+- Confidence claims unreliable
+- **Use as counter-signal probe only, not primary.**
+
+**MiniMax-M2.5** (n=2 reviews, deteriorating):
+- Pilot: 3 real / 2 halluc / 2 ambig (mixed)
+- Cycle 0: 3 real / 2 halluc / 2 ambig (similar)
+- Cycle 2: 0 real / 4 halluc — quality degraded
+- Wrong line refs 10× off (new negative signal Cycle 2)
+- **Defer until 1-2 recovery sessions show stabilization.**
+
+**Kimi-K2.6** (n=4 attempts):
+- Consistent failure: timeout / EMPTY / connection drops
+- Long-prompt threshold ~50KB (v1.3 §15.5) but failures even
+  on shorter
+- **Skip in routine dispatch.** Probe again when capacity
+  improves.
+
+**Gemini 2.5/3.1-Pro** (n=3 attempts):
+- 3rd consecutive 429 (chronic quota issue)
+- 3.1-Pro availability uncertain via CLI tier (v0.38.2 may fall
+  back to 2.5 silently)
+- **Defer until Vladimir investigates subscription tier.**
+  Document 2.5-Pro outputs as actual model when used.
+
+### 17.5 Routing implications (preliminary, not authoritative)
+
+Based on n=3-7 patterns above:
+- **Code review primary:** Codex gpt-5.5 (`workspace-write` sandbox)
+- **Code review secondary:** GLM-5.1 (`max_tokens=8192`+, prompt
+  trimmed to ≤10KB diff-only)
+- **Foundational change:** include 2-3 additional models for breadth
+  signal (Cycle 0 pattern). Counter-signal probes acceptable here.
+- **Narrow infra:** Codex sufficient. Skip secondary if budget tight.
+- **Skip current session:** Kimi (capacity), MiniMax (quality drop),
+  Gemini (quota).
+
+**These are observations, not rules.** Rule status requires sustained
+patterns over many more sessions. ORCHESTRATION v1.5 may codify if
+patterns hold.
+
+### 17.6 Pre-dispatch model identity verification
+
+When dispatching via CLI (Gemini, Codex), verify the requested model
+actually responds — silent fallback possible.
+
+```bash
+# Example: verify Gemini CLI 0.38.2 actually reaches 3.1-Pro
+gemini -m gemini-3.1-pro-preview -p "Reply with model identity" --yolo
+# If reply mentions 2.5 → silent fallback, log discrepancy
+```
+
+Log actual model used in calibration log (`gemini/2.5-pro` not
+intended `gemini/3.1-pro`). Honest data is the foundation; intent
+without verification corrupts log integrity.
+
+---
+
+## 18. Plan-conditional autonomy (v1.4, 2026-05-01)
+
+v1.3 §13 codified STOP discipline + autonomy band. v1.4 extends
+for multi-cycle work where architect is asynchronous within a single
+feature.
+
+### 18.1 Within-cycle autonomy (architect monitoring async)
+
+During an active cycle, architect (web Claude session) may be
+monitoring 1-2 days asynchronously while CC executes spec. Within
+the spec's scope, CC has expanded autonomy:
+
+- Apply audit findings classified REAL by reasonable judgment
+  (severity matching description). Architect classifies post-hoc
+  on next ratify.
+- Choose between options listed in spec's `ARCHITECT DECISION NEEDED`
+  markers using documented architect defaults.
+- Adjust commit message, file paths, ordering of mechanical steps
+  per §13.2.
+- Add hygiene fixes (typos, lint warnings, obvious test gaps)
+  alongside main work, batched in same commit.
+
+### 18.2 Cross-cycle requires ratification
+
+Outside the current cycle's spec scope:
+- New features even if seemingly natural fit → STOP, surface for
+  spec
+- Architectural decisions affecting future cycles → STOP, defer to
+  architect
+- Retiring or modifying ratified prior cycles → STOP, full ratify
+  required
+
+The rule: spec is the contract for current cycle. Anything outside
+the contract requires architect amendment.
+
+### 18.3 ARCHITECT DECISION NEEDED markers
+
+When surfacing decisions in handoff (or inline during cycle), use
+structured marker:
+
+```
+ARCHITECT DECISION NEEDED: <topic>
+Context: <why this is unclear from spec>
+Options:
+  A. <option> — <consequence>
+  B. <option> — <consequence>
+  C. <option> — <consequence>
+Default if no response: <safest interpretation>
+Urgency: blocks/non-blocking
+```
+
+Non-blocking decisions get default applied, architect resolves
+on next ratify. Blocking decisions stop the cycle.
+
+F28 example markers that worked:
+- Cycle 0: EventBus addition (a)/(b) — architect default (a) approved
+- Cycle 5 smoke: 48s latency Option A/B/C — architect chose A (accept)
+- Cycle 6: test file rename strategy — architect default applied
+
+---
+
+## 19. Document evolution
+
+v1.4 was written incrementally as F28 cycles executed. The right
+time to capture lessons is **immediately after the cycle** when
+details are fresh, not in retrospective at month-end. Future
+feature work should follow same pattern — cycle handoff includes
+any ORCHESTRATION update suggestion.
+
+v1.5 will likely codify (when sufficient data accumulates):
+- Routing matrix per task class (when n>5 per class achieved)
+- Sub-system specific verifier matching (sqlite-vec audit needs
+  different verifier vs Russian prompt template review)
+- Spot-check discipline cadence for archive-query agents (post-F32)
+- Cycle 0 foundation pattern as universal multi-cycle prerequisite
