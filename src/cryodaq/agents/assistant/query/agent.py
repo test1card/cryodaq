@@ -88,14 +88,25 @@ class AssistantQueryAgent:
         chat_id: int | str | None = None,
     ) -> str:
         """Process free-text operator query. Never raises."""
+        try:
+            return await self._handle_query_inner(query, chat_id=chat_id)
+        except Exception:
+            logger.warning(
+                "AssistantQueryAgent: unexpected error for %r", query[:80], exc_info=True
+            )
+            return _FALLBACK
+
+    async def _handle_query_inner(
+        self,
+        query: str,
+        *,
+        chat_id: int | str | None = None,
+    ) -> str:
         if chat_id is not None and not self._check_rate(chat_id):
             logger.info("AssistantQueryAgent: rate-limited chat_id=%s", chat_id)
             return "Слишком много запросов. Подожди немного."
 
-        try:
-            audit_id = self._audit.make_audit_id()
-        except Exception:
-            audit_id = "unknown"
+        audit_id = self._audit.make_audit_id()
         t0 = time.monotonic()
         errors: list[str] = []
         intent = None
@@ -126,7 +137,7 @@ class AssistantQueryAgent:
                 response = result.text.strip()
         except Exception as exc:
             logger.warning(
-                "AssistantQueryAgent: error handling %r: %s", query[:80], exc
+                "AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc
             )
             errors.append(f"unexpected: {exc}")
 
