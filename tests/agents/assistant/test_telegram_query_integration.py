@@ -106,14 +106,16 @@ async def test_telegram_ask_command_empty_query_sends_usage() -> None:
 async def test_telegram_query_timeout_user_message() -> None:
     """When handle_query times out, bot sends a friendly timeout message."""
     qa = MagicMock()
-    qa.handle_query = AsyncMock(side_effect=TimeoutError())
+    qa.handle_query = AsyncMock(return_value="ok")
 
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    # Patch asyncio.wait_for to raise TimeoutError immediately
-    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for",
-               new=AsyncMock(side_effect=TimeoutError())):
+    async def _timeout(coro, **_kw):
+        coro.close()
+        raise TimeoutError()
+
+    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", new=_timeout):
         await bot._handle_text(_msg("ETA охлаждения?"))
 
     bot._send.assert_awaited_once()
@@ -124,12 +126,16 @@ async def test_telegram_query_timeout_user_message() -> None:
 async def test_telegram_query_error_user_message() -> None:
     """When handle_query raises unexpected exception, bot sends error message."""
     qa = MagicMock()
+    qa.handle_query = AsyncMock(return_value="ok")
 
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for",
-               new=AsyncMock(side_effect=RuntimeError("internal error"))):
+    async def _error(coro, **_kw):
+        coro.close()
+        raise RuntimeError("internal error")
+
+    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", new=_error):
         await bot._handle_text(_msg("что сейчас?"))
 
     bot._send.assert_awaited_once()

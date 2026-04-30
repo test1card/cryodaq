@@ -89,6 +89,7 @@ class AssistantQueryAgent:
     ) -> str:
         """Process free-text operator query. Never raises."""
         if chat_id is not None and not self._check_rate(chat_id):
+            logger.info("AssistantQueryAgent: rate-limited chat_id=%s", chat_id)
             return "Слишком много запросов. Подожди немного."
 
         audit_id = self._audit.make_audit_id()
@@ -129,32 +130,35 @@ class AssistantQueryAgent:
         latency_s = time.monotonic() - t0
         cat_str = intent.category.value if intent is not None else "error"
 
-        await self._audit.log(
-            audit_id=audit_id,
-            trigger_event={
-                "type": "live_query",
-                "query": query,
-                "chat_id": chat_id,
-                "category": cat_str,
-            },
-            context_assembled=str(data),
-            prompt_template=cat_str,
-            model=result.model if result is not None else (
-                self._format_model or "unknown"
-            ),
-            system_prompt=format_with_brand(
-                FORMAT_RESPONSE_SYSTEM, self._config.brand_name
-            ),
-            user_prompt=user_prompt,
-            response=response,
-            tokens={
-                "in": result.tokens_in if result is not None else 0,
-                "out": result.tokens_out if result is not None else 0,
-            },
-            latency_s=latency_s,
-            outputs_dispatched=["telegram"] if chat_id is not None else [],
-            errors=errors,
-        )
+        try:
+            await self._audit.log(
+                audit_id=audit_id,
+                trigger_event={
+                    "type": "live_query",
+                    "query": query,
+                    "chat_id": chat_id,
+                    "category": cat_str,
+                },
+                context_assembled=str(data),
+                prompt_template=cat_str,
+                model=result.model if result is not None else (
+                    self._format_model or "unknown"
+                ),
+                system_prompt=format_with_brand(
+                    FORMAT_RESPONSE_SYSTEM, self._config.brand_name
+                ),
+                user_prompt=user_prompt,
+                response=response,
+                tokens={
+                    "in": result.tokens_in if result is not None else 0,
+                    "out": result.tokens_out if result is not None else 0,
+                },
+                latency_s=latency_s,
+                outputs_dispatched=["telegram"] if chat_id is not None else [],
+                errors=errors,
+            )
+        except Exception:
+            logger.warning("AssistantQueryAgent: audit log failed", exc_info=True)
 
         return response
 

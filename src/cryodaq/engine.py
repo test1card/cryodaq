@@ -1980,6 +1980,81 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
 
+    # --- AssistantQueryAgent (F30 Live Query) ---
+    _query_agent: Any = None
+    _q_broker_snap: Any = None
+    if _gemma_config is not None and _gemma_config.query_enabled:
+        try:
+            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
+            from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
+            from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
+            from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
+            from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
+            from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
+            from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
+            from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
+            from cryodaq.agents.assistant.query.schemas import QueryAdapters
+
+            try:
+                _q_ollama = _gemma_ollama
+                _q_audit = _gemma_audit
+            except NameError:
+                _q_ollama = OllamaClient(
+                    base_url=_gemma_config.ollama_base_url,
+                    default_model=_gemma_config.default_model,
+                    timeout_s=_gemma_config.timeout_s,
+                )
+                _q_audit = AuditLogger(
+                    _DATA_DIR / "agents" / "assistant" / "audit",
+                    enabled=_gemma_config.audit_enabled,
+                )
+
+            _q_broker_snap = BrokerSnapshot(broker)
+            await _q_broker_snap.start()
+
+            _q_cooldown = CooldownAdapter(cooldown_service)
+            _q_vacuum = VacuumAdapter(vacuum_trend)
+            _q_sqlite = SQLiteAdapter(writer)
+            _q_alarms = AlarmAdapter(alarm_engine)
+            _q_experiment = ExperimentAdapter(experiment_manager)
+            _q_composite = CompositeAdapter(
+                broker_snapshot=_q_broker_snap,
+                cooldown=_q_cooldown,
+                vacuum=_q_vacuum,
+                alarms=_q_alarms,
+                experiment=_q_experiment,
+            )
+
+            _query_agent = AssistantQueryAgent(
+                ollama_client=_q_ollama,
+                audit_logger=_q_audit,
+                config=_gemma_config,
+                adapters=QueryAdapters(
+                    broker_snapshot=_q_broker_snap,
+                    cooldown=_q_cooldown,
+                    vacuum=_q_vacuum,
+                    sqlite=_q_sqlite,
+                    alarms=_q_alarms,
+                    experiment=_q_experiment,
+                    composite=_q_composite,
+                ),
+                intent_model=_gemma_config.query_intent_model,
+                format_model=_gemma_config.query_format_model,
+                intent_temperature=_gemma_config.query_intent_temperature,
+                format_temperature=_gemma_config.query_format_temperature,
+                intent_timeout_s=_gemma_config.query_intent_timeout_s,
+                format_timeout_s=_gemma_config.query_format_timeout_s,
+                max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
+            )
+
+            if telegram_bot is not None:
+                telegram_bot._query_agent = _query_agent
+            logger.info("AssistantQueryAgent (F30): инициализирован")
+        except Exception as _q_exc:
+            logger.warning(
+                "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
+            )
+
     # --- Запуск всех подсистем ---
     await safety_manager.start()
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
@@ -2145,6 +2220,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     if gemma_agent is not None:
         await gemma_agent.stop()
         logger.info("AssistantLiveAgent (Гемма) остановлен")
+
+    if _q_broker_snap is not None:
+        await _q_broker_snap.stop()
+        logger.info("QueryAgent BrokerSnapshot остановлен")
 
     if telegram_bot is not None:
         await telegram_bot.stop()

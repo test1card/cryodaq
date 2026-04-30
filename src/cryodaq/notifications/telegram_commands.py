@@ -309,6 +309,10 @@ class TelegramCommandBot:
         if not text or not chat_id:
             return
 
+        if not self._is_chat_allowed(chat_id):
+            logger.warning("_handle_text: отклонён chat_id=%s", chat_id)
+            return
+
         if self._query_agent is None:
             await self._send(
                 chat_id, "Я понимаю только slash-команды. /help для списка."
