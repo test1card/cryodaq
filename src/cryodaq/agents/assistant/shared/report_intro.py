@@ -27,7 +27,7 @@ _OLLAMA_PATH = "/api/generate"
 
 @dataclass
 class IntroConfig:
-    """Configuration for synchronous Гемма report intro generation."""
+    """Configuration for synchronous assistant report intro generation."""
 
     enabled: bool = False  # explicitly opted in via agent.yaml c_campaign_report: true
     base_url: str = "http://localhost:11434"
@@ -35,6 +35,7 @@ class IntroConfig:
     timeout_s: float = 180.0  # campaign report is long — gemma4:e4b needs 60-120s
     max_tokens: int = 2048
     temperature: float = 0.2  # lower → more formal, less creative
+    brand_name: str = "Гемма"
 
 
 def load_intro_config() -> IntroConfig:
@@ -71,6 +72,7 @@ def load_intro_config() -> IntroConfig:
             model=str(ollama.get("default_model", "gemma4:e4b")),
             # Campaign reports generate 200-400 words — use at least 180s
             timeout_s=max(base_timeout, 180.0),
+            brand_name=str(gemma.get("brand_name", "Гемма")),
         )
     except Exception:
         logger.debug("report_intro: failed to load agent.yaml — using defaults", exc_info=True)
@@ -92,12 +94,14 @@ def generate_report_intro(dataset: Any, config: IntroConfig | None = None) -> st
         from cryodaq.agents.assistant.live.prompts import (
             CAMPAIGN_REPORT_INTRO_SYSTEM,
             CAMPAIGN_REPORT_INTRO_USER,
+            format_with_brand,
         )
 
         ctx = _build_context(dataset)
         user_prompt = CAMPAIGN_REPORT_INTRO_USER.format(**ctx)
+        system_prompt = format_with_brand(CAMPAIGN_REPORT_INTRO_SYSTEM, config.brand_name)
         t0 = time.monotonic()
-        text = _call_ollama_sync(user_prompt, CAMPAIGN_REPORT_INTRO_SYSTEM, config)
+        text = _call_ollama_sync(user_prompt, system_prompt, config)
         latency = time.monotonic() - t0
         if not text or not text.strip():
             logger.warning("report_intro: empty response from Гемма (%.1fs)", latency)

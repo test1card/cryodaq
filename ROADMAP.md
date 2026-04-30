@@ -27,11 +27,11 @@
 | F2 | Debug mode toggle (verbose logging) | ✅ DONE (shipped v0.34.0) | S | H |
 | F3 | Analytics placeholder widgets → data wiring | ✅ DONE (W1–W3; W4 deferred F8) | M | M |
 | F4 | Analytics lazy-open snapshot replay | ✅ DONE (merged in F3-Cycle1) | S | M |
-| F5 | Engine events → Hermes webhook | ⬜ | M | M |
+| F5 | Engine events → Hermes webhook | ❌ RETIRED — adapted into F30 WebhookDispatcher | M | M |
 | F6 | Auto-report on experiment finalize | ✅ DONE (shipped v0.34.0) | S | H |
 | F7 | Web API readings query extension | ⬜ | L | M |
 | F8 | Cooldown ML prediction upgrade | 🔬 | L | M |
-| F9 | Thermal conductivity auto-report (TIM) | 🔬 | M | H |
+| F9 | Thermal conductivity auto-report (TIM) | ❌ RETIRED — existing analyzer sufficient (architect decision 2026-05-01) | M | H |
 | F10 | Sensor diagnostics → alarm integration | ✅ DONE (shipped v0.41.0) | M | M |
 | F11 | Shift handover enrichment | ✅ DONE (v0.34.0; Telegram export deferred) | S | H |
 | F12 | Experiment templates UI editor | ⬜ | M | L |
@@ -50,7 +50,12 @@
 | F25 | SQLite WAL corruption startup gate | ✅ DONE (shipped v0.43.0) | S | M |
 | F26 | SQLite WAL gate backport whitelist | ✅ DONE (shipped v0.44.0) | XS | L |
 | F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
-| F28 | ArchiveReader engine replay integration | ⬜ | S | M |
+| F28 | Гемма Live — local LLM agent (assistant v1) | ✅ DONE (v0.45.0) | L | H |
+| F29 | Periodic narrative reports (assistant Phase 1) | ⬜ | S–M | H |
+| F30 | Assistant Sinks: vault writer + webhook (Phase 2) | ⬜ | M | M |
+| F31 | RAG indexer (Phase 2) | ⬜ | M | M |
+| F32 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
+| F33 | GUI chat overlay (Phase 4, deferred) | ⬜ | M | L |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -560,18 +565,67 @@ Spec: `CC_PROMPT_F27_CHAMBER_PHOTOS.md`
 
 ---
 
-### F28 — ArchiveReader engine replay integration
+### F28 — Гемма Live (assistant v1)
 
-**Status:** ⬜ NOT STARTED.
-**Effort:** S (~50 LOC).
-**Source:** F17 residual risk 2026-05-01.
+**Status:** ✅ DONE (v0.45.0, 2026-05-01).
+**Branch:** feat/f28-hermes-agent (legacy name; kept for git history).
 
-`ArchiveReader` implementation exists post-F17 but is NOT wired
-into engine replay path. Live engine queries against archived
-data (>30 days old) currently fail silently. Integration:
-`storage/replay.py` should select between SQLite and ArchiveReader
-per query time range. Tests: time-range queries crossing rotation
-boundary.
+Local LLM agent shipped end-to-end. Slice A+B+C complete:
+- 4 notification triggers (alarm, finalize, anomaly, handover)
+- Diagnostic suggestions (alarm + sensor_anomaly)
+- Campaign report intro (DOCX)
+- GUI insight panel
+- Audit log discipline
+- Brand abstraction (config-only model migration)
+
+Architecture: `src/cryodaq/agents/assistant/{live,shared}/`
+See: `artifacts/architecture/assistant-v2-vision.md`
+
+**Backlog (renamed from old F28):** ArchiveReader engine replay
+integration — `storage/replay.py` should select SQLite vs ArchiveReader
+per query time range. ~50 LOC. Not yet scheduled.
+
+### F29 — Periodic narrative reports (assistant Phase 1)
+
+**Status:** ⬜ NOT STARTED. Ships v0.46.0.
+**Effort:** S–M (~250 LOC, 1 cycle).
+
+Engine timer task publishes `periodic_report_request` every N minutes.
+New handler aggregates last-N-minutes events → Russian narrative →
+Telegram. Skip on idle hours. See `assistant-v2-vision.md` §5.1.
+
+### F30 — Assistant Sinks: vault writer + webhook (Phase 2)
+
+**Status:** ⬜ NOT STARTED. Ships v0.47.0.
+**Effort:** M (~600 LOC, 2 cycles).
+
+VaultWriter: per-experiment Obsidian campaign notes.
+WebhookDispatcher: HTTP fanout to configurable URLs (former F5 scope).
+See `assistant-v2-vision.md` §2.2, §5.2.
+
+### F31 — RAG indexer (Phase 2)
+
+**Status:** ⬜ NOT STARTED. Ships v0.47.0.
+**Effort:** M (~600 LOC, 3 cycles).
+
+sqlite-vec vector store + entity/relation tables. Embedding via
+Ollama bge-m3. IndexQueue subscriber. See `assistant-v2-vision.md` §5.2.
+
+### F32 — Assistant Archive query interface (Phase 3)
+
+**Status:** ⬜ NOT STARTED. Ships v0.48.0.
+**Effort:** M+ (~700 LOC, 4 cycles).
+
+Retrieval → grounded synthesis with mandatory citations. Telegram /ask.
+6-layer anti-hallucination. See `assistant-v2-vision.md` §4, §5.3.
+
+### F33 — GUI chat overlay (Phase 4, deferred)
+
+**Status:** ⬜ DEFERRED. After v0.48.0 stable.
+**Effort:** M (~400 LOC, 2-3 cycles).
+
+Multi-turn conversational overlay in MainWindowV2. Deferred pending
+operator feedback on F32 Telegram interface.
 
 ---
 

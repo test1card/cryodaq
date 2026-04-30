@@ -9,6 +9,87 @@
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-05-01 — F28 Гемма complete (assistant v1)
+
+### Highlights
+- F28 Гемма local LLM agent fully shipped: Slice A (4 notification
+  triggers) + Slice B (diagnostic suggestions) + Slice C (campaign
+  report intro)
+- Foundation EventBus primitive (Cycle 0) for non-Reading engine events
+- Local Ollama integration with gemma4:e4b model
+- Russian-language operator-facing dispatch (Telegram, operator log,
+  GUI insight panel)
+- DOCX campaign report intro auto-generation (formal Russian, 200-400 words)
+- Audit log discipline: every LLM call recorded for review
+- Brand abstraction: future model migrations are config-only
+
+### Added
+- `src/cryodaq/agents/assistant/` — complete assistant module family
+  - `live/agent.py` — AssistantLiveAgent (was GemmaAgent)
+  - `live/prompts.py` — {brand_name} interpolated system prompts
+  - `live/output_router.py` — brand-aware prefix, assistant_insight events
+  - `live/context_builder.py` — engine state → LLM context
+  - `shared/audit.py` — per-call JSON audit records
+  - `shared/ollama_client.py` — async Ollama /api/generate wrapper
+  - `shared/report_intro.py` — sync DOCX intro generator
+  - `shared/retention.py` — 90-day audit log cleanup
+- `src/cryodaq/gui/shell/views/assistant_insight_panel.py`
+  — AssistantInsightPanel with brand_name/brand_emoji params
+- `config/agent.yaml` — new `agent.*` namespace with brand_name, brand_emoji
+- `artifacts/architecture/assistant-v2-vision.md` — full architecture spec
+  for F29-F33 assistant v2 phases
+
+### Changed
+- `config/agent.yaml`: `gemma:` namespace → `agent:` namespace
+  (backward compat: `gemma:` still loads with deprecation warning until v0.46.0)
+- AssistantConfig: `from_yaml_path()` / `from_yaml_string()` for namespace detection
+- Audit log path: `data/agents/gemma/audit` → `data/agents/assistant/audit`
+- EventBus event_type: `gemma_insight` → `assistant_insight`
+- ROADMAP: F28 ✅ DONE; F5/F9 RETIRED; F29-F33 added (assistant v2 phases)
+
+### F28 cycles
+- Cycle 0: EventBus foundation
+- Cycle 1: Ollama client + audit + context builder
+- Cycle 2: AssistantLiveAgent + alarm summary (Slice A first)
+- Cycle 3: Slice A complete (4 triggers + GUI panel)
+- Cycle 4: Slice B diagnostic suggestions
+- Cycle 5: Slice C campaign report
+- Cycle 6: brand abstraction + module rename + polish + this release
+
+### Architecture
+- Module: `src/cryodaq/agents/assistant/{live,shared}/`
+- Class: `AssistantLiveAgent` (was `GemmaAgent`)
+- Config namespace: `agent.*` (was `gemma.*`, backward compat with warning)
+- Storage: `data/agents/assistant/audit/`
+- Brand-name interpolation throughout prompts and outputs
+
+### Tests
+- 71 agent tests (smoke + unit + integration)
+- Full suite green (~2 090 passing)
+- 11 brand abstraction tests
+- 4 audit retention tests
+
+### Calibration data
+- 6 multi-model audit sessions in `artifacts/calibration/log.jsonl`
+- Empirical: Codex reliable; GLM strong on review (max_tokens=8192);
+  Qwen3-Coder over-flags; MiniMax deteriorating; Kimi failures
+
+### Documentation
+- README: "Местный AI-ассистент" section
+- Vault note: `~/Vault/CryoDAQ/10 Subsystems/Assistant agent.md`
+- Operator manual: new section 10 (assistant behavior + on/off)
+- Architecture: `artifacts/architecture/assistant-v2-vision.md`
+
+### Tags
+- `v0.45.0` → release commit (see Phase G)
+
+### Selected commits in this release
+- `adc40d7` — refactor(f28): rename agents/gemma → agents/assistant (Phase A)
+- `00bd20f` — refactor(f28): rename GemmaAgent → AssistantLiveAgent (Phase B)
+- `a1f2811` — feat(f28): brand-name abstraction for assistant (Phase C)
+- `2fed36c` — docs(f28): polish — README, vault note, operator manual, retention (Phase D)
+- `7148432` — test(f28): rename insight panel test + smoke doc (Phase E)
+
 ## [0.44.0] — 2026-05-01 — Storage maturity + leak rate
 
 ### Highlights
