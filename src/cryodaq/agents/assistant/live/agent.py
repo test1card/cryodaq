@@ -81,6 +81,14 @@ class AssistantConfig:
     periodic_report_interval_minutes: int = 60
     periodic_report_skip_if_idle: bool = True
     periodic_report_min_events: int = 1
+    query_enabled: bool = False
+    query_intent_model: str | None = None
+    query_format_model: str | None = None
+    query_intent_temperature: float = 0.1
+    query_format_temperature: float = 0.3
+    query_intent_timeout_s: float = 10.0
+    query_format_timeout_s: float = 20.0
+    query_max_per_chat_per_hour: int = 60
 
     def get_periodic_report_interval_s(self) -> float:
         """Return interval in seconds, or 0 if periodic reports are disabled."""
@@ -157,6 +165,32 @@ class AssistantConfig:
         cfg.audit_retention_days = int(audit.get("retention_days", cfg.audit_retention_days))
         cfg.brand_name = str(d.get("brand_name", cfg.brand_name))
         cfg.brand_emoji = str(d.get("brand_emoji", cfg.brand_emoji))
+        q = d.get("query", {})
+        if isinstance(q, dict):
+            cfg.query_enabled = bool(q.get("enabled", cfg.query_enabled))
+            _im = q.get("intent_model")
+            if _im:
+                cfg.query_intent_model = str(_im)
+            _fm = q.get("format_model")
+            if _fm:
+                cfg.query_format_model = str(_fm)
+            cfg.query_intent_temperature = float(
+                q.get("intent_temperature", cfg.query_intent_temperature)
+            )
+            cfg.query_format_temperature = float(
+                q.get("format_temperature", cfg.query_format_temperature)
+            )
+            cfg.query_intent_timeout_s = float(
+                q.get("intent_timeout_s", cfg.query_intent_timeout_s)
+            )
+            cfg.query_format_timeout_s = float(
+                q.get("format_timeout_s", cfg.query_format_timeout_s)
+            )
+            _rl = q.get("rate_limit", {})
+            if isinstance(_rl, dict):
+                cfg.query_max_per_chat_per_hour = int(
+                    _rl.get("max_queries_per_chat_per_hour", cfg.query_max_per_chat_per_hour)
+                )
         return cfg
 
     @classmethod

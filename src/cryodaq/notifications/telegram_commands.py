@@ -84,6 +84,7 @@ class TelegramCommandBot:
         poll_interval_s: float = 2.0,
         command_handler: Callable[[dict], Awaitable[dict]] | None = None,
         commands_enabled: bool = True,
+        query_agent: Any | None = None,
     ) -> None:
         # Phase 2b Codex K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
@@ -98,6 +99,7 @@ class TelegramCommandBot:
 
         self._broker = broker
         self._alarm_engine = alarm_engine
+        self._query_agent = query_agent
         # Phase 2b K.1: SecretStr wrapper.
         self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
@@ -231,7 +233,13 @@ class TelegramCommandBot:
             text = msg.get("text", "")
             chat_id = msg.get("chat", {}).get("id")
 
-            if not chat_id or not text.startswith("/"):
+            if not chat_id or not text:
+                continue
+
+            if not text.startswith("/"):
+                # Free-text query — route to query agent if allowed
+                if self._is_chat_allowed(chat_id):
+                    await self._handle_text(msg)
                 continue
 
             # Security check (Phase 2b Codex K.1: default-deny on empty list).
@@ -280,8 +288,47 @@ class TelegramCommandBot:
         elif command == "/phase":
             phase_arg = text[len("/phase") :].strip()
             await self._cmd_phase(chat_id, phase_arg, msg)
+        elif command == "/ask":
+            query_text = text[len("/ask") :].strip()
+            if not query_text:
+                await self._send(chat_id, "Укажите запрос: /ask &lt;текст&gt;")
+                return
+            fake_msg = {"text": query_text, "chat": msg.get("chat", {})}
+            await self._handle_text(fake_msg)
         else:
             await self._send(chat_id, f"Неизвестная команда: {command}\n\n{_HELP_TEXT}")
+
+    # ------------------------------------------------------------------
+    # Free-text query handler (F30 Live Query Agent)
+    # ------------------------------------------------------------------
+
+    async def _handle_text(self, msg: dict) -> None:
+        """Route free-text (non-command) messages to the query agent."""
+        text = msg.get("text", "").strip()
+        chat_id = msg.get("chat", {}).get("id")
+        if not text or not chat_id:
+            return
+
+        if self._query_agent is None:
+            await self._send(
+                chat_id, "Я понимаю только slash-команды. /help для списка."
+            )
+            return
+
+        try:
+            response = await asyncio.wait_for(
+                self._query_agent.handle_query(text, chat_id=chat_id),
+                timeout=30.0,
+            )
+            await self._send(chat_id, response)
+        except TimeoutError:
+            await self._send(
+                chat_id,
+                "🤖 Гемма: запрос обрабатывался слишком долго (>30s). Попробуй короче.",
+            )
+        except Exception as exc:
+            logger.error("Query agent error: %s", exc, exc_info=True)
+            await self._send(chat_id, "🤖 Гемма: внутренняя ошибка. См. логи.")
 
     # ------------------------------------------------------------------
     # Command handlers
