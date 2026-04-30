@@ -222,9 +222,16 @@ class CooldownService:
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
 
+        # Cached prediction for query agent (F30)
+        self._last_prediction: dict[str, Any] | None = None
+
     @property
     def phase(self) -> CooldownPhase:
         return self._detector.phase
+
+    def last_prediction(self) -> dict[str, Any] | None:
+        """Return last computed prediction metadata, or None if not yet predicted."""
+        return self._last_prediction
 
     async def start(self) -> None:
         """Запустить сервис: подписка на брокер, загрузка модели, запуск задач."""
@@ -405,7 +412,10 @@ class CooldownService:
             "n_references": pred.n_references,
             "cooldown_active": cooldown_active,
             "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
+            "T_cold": T_cold,
+            "T_warm": T_warm,
         }
+        self._last_prediction = metadata  # cache for F30 query agent
 
         if pred.future_t is not None:
             metadata["future_t"] = pred.future_t.tolist()

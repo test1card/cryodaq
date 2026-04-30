@@ -435,6 +435,19 @@ class AlarmEngine:
             if record.state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED)
         ]
 
+    def get_active_alarm_details(self) -> list[dict]:
+        """Return structured details for active/acknowledged alarms (F30 query agent)."""
+        return [
+            {
+                "alarm_id": name,
+                "level": record.condition.severity.name,
+                "channel_pattern": record.condition.channel_pattern,
+                "triggered_at": record.last_activated,
+            }
+            for name, record in self._alarms.items()
+            if record.state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED)
+        ]
+
     def get_events(self) -> list[AlarmEvent]:
         """Вернуть историю событий (до последних 1000).
 
