@@ -29,6 +29,15 @@ class AuditLogger:
         self._audit_dir = Path(audit_dir)
         self._enabled = enabled
         self._retention_days = retention_days
+        _legacy = Path("data/agents/gemma/audit")
+        if _legacy.exists():
+            logger.warning(
+                "Legacy audit log path %s found. New path is %s. "
+                "Manual migration required: mv data/agents/gemma/audit "
+                "data/agents/assistant/audit — NEVER auto-deleted.",
+                _legacy,
+                self._audit_dir,
+            )
 
     def make_audit_id(self) -> str:
         """Return a short unique ID for one audit record."""

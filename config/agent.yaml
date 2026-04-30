@@ -1,5 +1,7 @@
-gemma:
+agent:
   enabled: true
+  brand_name: "Гемма"
+  brand_emoji: "🤖"
 
   ollama:
     base_url: http://localhost:11434

@@ -1906,9 +1906,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     gemma_agent: AssistantLiveAgent | None = None
     if _agent_cfg_path.exists():
         try:
-            _agent_raw = yaml.safe_load(_agent_cfg_path.read_text(encoding="utf-8")) or {}
-            _gemma_raw = _agent_raw.get("gemma", {})
-            _gemma_config = AssistantConfig.from_dict(_gemma_raw)
+            _gemma_config = AssistantConfig.from_yaml_path(_agent_cfg_path)
             if _gemma_config.enabled:
                 _gemma_ollama = OllamaClient(
                     base_url=_gemma_config.ollama_base_url,
@@ -1917,7 +1915,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 )
                 _gemma_ctx = ContextBuilder(writer, experiment_manager)
                 _gemma_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "gemma" / "audit",
+                    _DATA_DIR / "agents" / "assistant" / "audit",
                     enabled=_gemma_config.audit_enabled,
                     retention_days=_gemma_config.audit_retention_days,
                 )
@@ -1925,6 +1923,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                     telegram_bot=telegram_bot,
                     event_logger=event_logger,
                     event_bus=event_bus,
+                    brand_name=_gemma_config.brand_name,
+                    brand_emoji=_gemma_config.brand_emoji,
                 )
                 gemma_agent = AssistantLiveAgent(
                     config=_gemma_config,

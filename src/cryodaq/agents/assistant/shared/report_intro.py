@@ -47,10 +47,21 @@ def load_intro_config() -> IntroConfig:
         agent_yaml = get_config_dir() / "agent.yaml"
         with agent_yaml.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
-        gemma = raw.get("gemma", {})
+        # Try agent.* namespace (v0.45.0+), fall back to gemma.* (legacy)
+        if "agent" in raw:
+            section = raw["agent"]
+        elif "gemma" in raw:
+            logger.warning(
+                "report_intro: legacy gemma.* config namespace detected; "
+                "migrate to agent.*. Backward compatibility removed in v0.46.0."
+            )
+            section = raw["gemma"]
+        else:
+            section = {}
+        gemma = section
         ollama = gemma.get("ollama", {})
         slices = gemma.get("slices", {})
-        # Both gemma.enabled AND c_campaign_report must be true
+        # Both agent.enabled AND c_campaign_report must be true
         gemma_enabled = bool(gemma.get("enabled", True))
         slice_enabled = bool(slices.get("c_campaign_report", False))
         base_timeout = float(ollama.get("timeout_s", 60.0))

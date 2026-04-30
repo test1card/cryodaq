@@ -33,6 +33,7 @@ from cryodaq.agents.assistant.live.prompts import (
     SENSOR_ANOMALY_USER,
     SHIFT_HANDOVER_SYSTEM,
     SHIFT_HANDOVER_USER,
+    format_with_brand,
 )
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.shared.ollama_client import (
@@ -71,11 +72,13 @@ class AssistantConfig:
     audit_enabled: bool = True
     audit_retention_days: int = 90
     num_ctx: int | None = None  # Ollama context window override; None = use model default
-    audit_dir: Path = field(default_factory=lambda: Path("data/agents/gemma/audit"))
+    audit_dir: Path = field(default_factory=lambda: Path("data/agents/assistant/audit"))
+    brand_name: str = "Гемма"
+    brand_emoji: str = "🤖"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AssistantConfig:
-        """Build from agent.yaml gemma section dict."""
+        """Build from agent.yaml agent section dict."""
         cfg = cls()
         cfg.enabled = bool(d.get("enabled", True))
         ollama = d.get("ollama", {})
@@ -128,7 +131,35 @@ class AssistantConfig:
         audit = d.get("audit", {})
         cfg.audit_enabled = bool(audit.get("enabled", cfg.audit_enabled))
         cfg.audit_retention_days = int(audit.get("retention_days", cfg.audit_retention_days))
+        cfg.brand_name = str(d.get("brand_name", cfg.brand_name))
+        cfg.brand_emoji = str(d.get("brand_emoji", cfg.brand_emoji))
         return cfg
+
+    @classmethod
+    def from_yaml_string(cls, content: str) -> AssistantConfig:
+        """Load from YAML string; handles agent.* and legacy gemma.* namespaces."""
+        import yaml  # noqa: PLC0415
+        raw = yaml.safe_load(content) or {}
+        return cls._from_raw(raw)
+
+    @classmethod
+    def from_yaml_path(cls, path: Path) -> AssistantConfig:
+        """Load from agent.yaml file; handles agent.* and legacy gemma.* namespaces."""
+        import yaml  # noqa: PLC0415
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls._from_raw(raw)
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> AssistantConfig:
+        if "agent" in raw:
+            return cls.from_dict(raw["agent"])
+        if "gemma" in raw:
+            logger.warning(
+                "AssistantConfig: legacy gemma.* config namespace detected; "
+                "please migrate to agent.*. Backward compatibility removed in v0.46.0."
+            )
+            return cls.from_dict(raw["gemma"])
+        return cls()
 
 
 class AssistantLiveAgent:
@@ -293,9 +324,10 @@ class AssistantLiveAgent:
             recent_alarms=ctx.recent_alarms_text,
         )
 
+        system_prompt = format_with_brand(ALARM_SUMMARY_SYSTEM, self._config.brand_name)
         result = await self._ollama.generate(
             user_prompt,
-            system=ALARM_SUMMARY_SYSTEM,
+            system=system_prompt,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
@@ -329,7 +361,7 @@ class AssistantLiveAgent:
             context_assembled=user_prompt,
             prompt_template="alarm_summary",
             model=result.model,
-            system_prompt=ALARM_SUMMARY_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
@@ -374,9 +406,10 @@ class AssistantLiveAgent:
             pressure_trend=ctx.pressure_trend,
         )
 
+        system_prompt = format_with_brand(DIAGNOSTIC_SUGGESTION_SYSTEM, self._config.brand_name)
         result = await self._ollama.generate(
             user_prompt,
-            system=DIAGNOSTIC_SUGGESTION_SYSTEM,
+            system=system_prompt,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
@@ -408,7 +441,7 @@ class AssistantLiveAgent:
             context_assembled=user_prompt,
             prompt_template="diagnostic_suggestion",
             model=result.model,
-            system_prompt=DIAGNOSTIC_SUGGESTION_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
@@ -441,9 +474,10 @@ class AssistantLiveAgent:
             alarms_summary=ctx.alarms_summary_text,
         )
 
+        system_prompt = format_with_brand(EXPERIMENT_FINALIZE_SYSTEM, self._config.brand_name)
         result = await self._ollama.generate(
             user_prompt,
-            system=EXPERIMENT_FINALIZE_SYSTEM,
+            system=system_prompt,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
@@ -477,7 +511,7 @@ class AssistantLiveAgent:
             context_assembled=user_prompt,
             prompt_template="experiment_finalize",
             model=result.model,
-            system_prompt=EXPERIMENT_FINALIZE_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
@@ -510,9 +544,10 @@ class AssistantLiveAgent:
             phase=ctx.phase or "—",
         )
 
+        system_prompt = format_with_brand(SENSOR_ANOMALY_SYSTEM, self._config.brand_name)
         result = await self._ollama.generate(
             user_prompt,
-            system=SENSOR_ANOMALY_SYSTEM,
+            system=system_prompt,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
@@ -546,7 +581,7 @@ class AssistantLiveAgent:
             context_assembled=user_prompt,
             prompt_template="sensor_anomaly",
             model=result.model,
-            system_prompt=SENSOR_ANOMALY_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
@@ -578,9 +613,10 @@ class AssistantLiveAgent:
             shift_duration_h=ctx.shift_duration_h,
         )
 
+        system_prompt = format_with_brand(SHIFT_HANDOVER_SYSTEM, self._config.brand_name)
         result = await self._ollama.generate(
             user_prompt,
-            system=SHIFT_HANDOVER_SYSTEM,
+            system=system_prompt,
             max_tokens=self._config.max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
@@ -614,7 +650,7 @@ class AssistantLiveAgent:
             context_assembled=user_prompt,
             prompt_template="shift_handover",
             model=result.model,
-            system_prompt=SHIFT_HANDOVER_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},

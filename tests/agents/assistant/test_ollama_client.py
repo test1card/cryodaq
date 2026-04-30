@@ -204,7 +204,8 @@ async def test_generate_returns_truncated_on_timeout() -> None:
     timeout_cm.__aenter__ = AsyncMock(side_effect=TimeoutError())
     timeout_cm.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("cryodaq.agents.assistant.shared.ollama_client.asyncio.timeout", return_value=timeout_cm):
+    _patch = "cryodaq.agents.assistant.shared.ollama_client.asyncio.timeout"
+    with patch(_patch, return_value=timeout_cm):
         result = await client.generate("test")
 
     assert result.truncated is True

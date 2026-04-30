@@ -17,9 +17,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_GEMMA_PREFIX = "🤖 Гемма:"
-
-
 class OutputTarget(enum.Enum):
     TELEGRAM = "telegram"
     OPERATOR_LOG = "operator_log"
@@ -27,7 +24,7 @@ class OutputTarget(enum.Enum):
 
 
 class OutputRouter:
-    """Dispatches GemmaAgent LLM output to configured channels."""
+    """Dispatches AssistantLiveAgent LLM output to configured channels."""
 
     def __init__(
         self,
@@ -35,10 +32,13 @@ class OutputRouter:
         telegram_bot: Any | None,
         event_logger: EventLogger,
         event_bus: EventBus,
+        brand_name: str = "Гемма",
+        brand_emoji: str = "🤖",
     ) -> None:
         self._telegram = telegram_bot
         self._event_logger = event_logger
         self._event_bus = event_bus
+        self._prefix = f"{brand_emoji} {brand_name}:"
 
     async def dispatch(
         self,
@@ -53,7 +53,7 @@ class OutputRouter:
         Returns list of successfully dispatched target names.
         """
         dispatched: list[str] = []
-        prefixed = f"{_GEMMA_PREFIX} {llm_output}"
+        prefixed = f"{self._prefix} {llm_output}"
 
         for target in targets:
             try:
@@ -66,7 +66,7 @@ class OutputRouter:
 
                 elif target == OutputTarget.OPERATOR_LOG:
                     await self._event_logger.log_event(
-                        "gemma",
+                        "assistant",
                         prefixed,
                         extra_tags=["ai", audit_id],
                     )
@@ -79,7 +79,7 @@ class OutputRouter:
 
                     await self._event_bus.publish(
                         _EngineEvent(
-                            event_type="gemma_insight",
+                            event_type="assistant_insight",
                             timestamp=datetime.now(UTC),
                             payload={
                                 "text": llm_output,

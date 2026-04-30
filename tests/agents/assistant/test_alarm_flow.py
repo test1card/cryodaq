@@ -221,7 +221,7 @@ async def test_alarm_fired_dispatches_to_operator_log(tmp_path: Path) -> None:
 
     event_logger.log_event.assert_awaited_once()
     args = event_logger.log_event.call_args
-    assert args[0][0] == "gemma"
+    assert args[0][0] == "assistant"
     await agent.stop()
 
 
@@ -393,7 +393,7 @@ async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
     insight_events = []
     while not insight_q.empty():
         e = insight_q.get_nowait()
-        if e.event_type == "gemma_insight":
+        if e.event_type == "assistant_insight":
             insight_events.append(e)
     assert len(insight_events) == 1
     assert insight_events[0].payload["trigger_event_type"] == "experiment_finalize"
@@ -473,7 +473,7 @@ async def test_sensor_anomaly_critical_handler_dispatches(tmp_path: Path) -> Non
     insight_events = []
     while not insight_q.empty():
         e = insight_q.get_nowait()
-        if e.event_type == "gemma_insight":
+        if e.event_type == "assistant_insight":
             insight_events.append(e)
     assert len(insight_events) == 1
     assert insight_events[0].payload["trigger_event_type"] == "sensor_anomaly_critical"
@@ -547,7 +547,7 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
     insight_events = []
     while not insight_q.empty():
         e = insight_q.get_nowait()
-        if e.event_type == "gemma_insight":
+        if e.event_type == "assistant_insight":
             insight_events.append(e)
     assert len(insight_events) == 1
     assert insight_events[0].payload["trigger_event_type"] == "shift_handover_request"

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.assistant.live.agent import AssistantLiveAgent, AssistantConfig
+from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.shared.audit import AuditLogger

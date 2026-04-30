@@ -1,8 +1,8 @@
-"""GemmaInsightPanel — operator-facing Гемма insight viewer.
+"""AssistantInsightPanel — operator-facing assistant insight viewer.
 
-Displays the last 10 LLM-generated insights from GemmaAgent.
+Displays the last 10 LLM-generated insights from AssistantLiveAgent.
 Populated via push_insight() by the shell when it receives
-gemma_insight events.
+assistant_insight events.
 
 DS compliance: all colors and fonts from theme tokens.
 No hardcoded hex/px values.
@@ -110,16 +110,24 @@ class _InsightCard(QFrame):
         root.addWidget(text_label)
 
 
-class GemmaInsightPanel(QWidget):
-    """Panel displaying last N Гемма insights.
+class AssistantInsightPanel(QWidget):
+    """Panel displaying last N assistant insights.
 
     Public API:
       push_insight(text, trigger_event_type, timestamp)  — add one insight
       clear()                                             — remove all insights
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        brand_name: str = "Гемма",
+        brand_emoji: str = "🤖",
+    ) -> None:
         super().__init__(parent)
+        self._brand_name = brand_name
+        self._brand_emoji = brand_emoji
         self._entries: deque[_InsightEntry] = deque(maxlen=_MAX_INSIGHTS)
         self._setup_ui()
 
@@ -140,7 +148,7 @@ class GemmaInsightPanel(QWidget):
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(12, 0, 12, 0)
 
-        title = QLabel("Гемма — ИИ аналитика")
+        title = QLabel(f"{self._brand_emoji} {self._brand_name} — ИИ аналитика")
         title_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_BASE)
         title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         title.setFont(title_font)
@@ -174,7 +182,7 @@ class GemmaInsightPanel(QWidget):
         root.addWidget(scroll)
         self._scroll = scroll
 
-        self._placeholder = QLabel("Гемма ещё не прислала ни одного сообщения.")
+        self._placeholder = QLabel(f"{self._brand_name} ещё не прислала ни одного сообщения.")
         placeholder_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_SM)
         self._placeholder.setFont(placeholder_font)
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -201,7 +209,7 @@ class GemmaInsightPanel(QWidget):
         self._entries.appendleft(entry)
         self._rebuild_cards()
         logger.debug(
-            "GemmaInsightPanel: push_insight trigger=%s len=%d",
+            "AssistantInsightPanel: push_insight trigger=%s len=%d",
             trigger_event_type,
             len(self._entries),
         )
