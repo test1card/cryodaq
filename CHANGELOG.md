@@ -9,6 +9,70 @@
 
 ## [Unreleased]
 
+## [0.47.0] — 2026-05-01 — F30 Live Query Agent
+
+Implements the Live Query Agent (F30): operators can now send free-text
+Telegram messages or `/ask <query>` commands to query current engine state.
+Three-step pipeline: intent classification (gemma4:e2b, temp 0.1) →
+deterministic service adapter fetch → Russian format response (temp 0.3).
+
+### Added
+- `AssistantQueryAgent` orchestrator: classify → fetch → format pipeline
+  with rate limiting (60/hr per chat), audit log per query, full "never
+  raises" contract.
+- `IntentClassifier`: gemma4:e2b, temperature=0.1, max_tokens=2048,
+  fallback to UNKNOWN on parse failure or timeout.
+- `QueryRouter`: deterministic dispatch of QueryIntent to 7 ServiceAdapters.
+- 7 ServiceAdapters: `BrokerSnapshot`, `CooldownAdapter`, `VacuumAdapter`,
+  `SQLiteAdapter`, `AlarmAdapter`, `ExperimentAdapter`, `CompositeAdapter`.
+  CompositeAdapter parallelizes fetch via `asyncio.gather`.
+- `BrokerSnapshot`: new read-only subscriber pattern — latest-per-channel
+  cache on top of DataBroker (which is pure pub/sub with no snapshot API).
+- Russian format prompt templates per category (current_value, eta_cooldown,
+  eta_vacuum, range_stats, phase_info, alarm_status, composite_status,
+  out_of_scope_historical, out_of_scope_general, unknown). Anti-hallucination
+  instructions, Unicode-only (no LaTeX), conversational tone.
+- `TelegramCommandBot`: free-text and `/ask <query>` routes to query agent.
+  Allowlist defense-in-depth in `_handle_text()`. Stub fallback when query
+  agent absent.
+- `AssistantConfig`: `query.*` config section (enabled, model overrides,
+  temperatures, timeouts, rate_limit). `query_enabled` defaults to False.
+- Engine wiring: constructs query agent when `agent.query.enabled`, starts
+  `BrokerSnapshot`, late-binds to `TelegramCommandBot`, stops on shutdown.
+- `CooldownService.last_prediction()` method exposing cached prediction dict.
+- `AlarmEngine.get_active_alarm_details()` method for structured alarm info.
+
+### Fixed
+- gemma4:e2b thinking-model issue: `max_tokens` raised from 256 → 2048 to
+  give CoT reasoning room before producing the JSON response.
+- `INTENT_CLASSIFIER_SYSTEM`: `{{`/`}}` → `{`/`}` (not a format string —
+  literal double braces were confusing the model).
+- `INTENT_CLASSIFIER_SYSTEM` `current_value` rule: added bare channel
+  patterns (`T1?`, `channel?`) to prevent misrouting to `out_of_scope_general`.
+
+### Test baseline
+- 166 tests passing (49 new vs v0.46.1 baseline of 117)
+- New test files: `test_query_adapters.py` (19), `test_intent_classifier.py`
+  (28), `test_query_agent.py` (12), `test_telegram_query_integration.py` (9)
+
+### Phase F audit
+- Codex gpt-5.5 (high reasoning): PASS after 3 fix-up cycles.
+  6 findings addressed (1 HIGH, 3 MEDIUM, 2 LOW). 0 residual CRITICAL/HIGH.
+
+### Tags
+- `v0.47.0` → TBD (set on merge to master)
+
+### Selected commits in this release
+- `02aa9dd` docs(roadmap): renumber F30+ for Live Query Agent insertion
+- `e0254d9` feat(f30): query adapters + BrokerSnapshot
+- `f3d36d3` feat(f30): intent classifier + router
+- `dbb15d5` feat(f30): AssistantQueryAgent + format prompts
+- `09f78d5` feat(f30): Telegram free-text + /ask integration
+- `1731584` fix(f30): max_tokens 2048 for thinking model + prompt fixes
+- `4acfd48` fix(f30): Codex audit fix-up cycle 1
+- `8852786` fix(f30): Codex audit fix-up cycle 2
+- `4a9800c` fix(f30): Codex audit fix-up cycle 3
+
 ## [0.46.1] — 2026-05-01 — F29 fix-up (swarm audit CF-2/CF-3/CF-5)
 
 Patch release incorporating three fixes found by the 8-model swarm audit

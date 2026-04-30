@@ -52,7 +52,7 @@
 | F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
 | F28 | Гемма Live — local LLM agent (assistant v1) | ✅ DONE (v0.45.0) | L | H |
 | F29 | Periodic narrative reports (assistant Phase 1) | ✅ DONE (v0.46.1) | S–M | H |
-| F30 | Live Query Agent — current-state operator queries (Phase 1.5) | ⬜ | M | H |
+| F30 | Live Query Agent — current-state operator queries (Phase 1.5) | ✅ DONE (v0.47.0) | M | H |
 | F31 | Assistant Sinks: vault writer + webhook (Phase 2) | ⬜ | M | M |
 | F32 | RAG indexer (Phase 2) | ⬜ | M | M |
 | F33 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
