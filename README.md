@@ -236,9 +236,74 @@ python -m pytest tests/reporting -q
 `pyqtgraph`. Часть тестов storage требует `CRYODAQ_ALLOW_BROKEN_SQLITE=1` на
 машинах с SQLite < 3.51.3 (кроме backport-безопасных версий 3.44.6 и 3.50.7).
 
+## Местный AI-ассистент
+
+В CryoDAQ работает локальный AI-агент (текущий бренд: Гемма,
+основан на модели gemma4:e4b через Ollama). Никаких внешних API.
+
+### Что делает
+
+Подписан на engine events (alarms, phase transitions, finalize,
+sensor anomalies, shift handovers). Когда срабатывает alarm или
+завершается эксперимент, генерирует human-readable summary для
+оператора в:
+- Telegram (чат бота)
+- Operator log (журнал)
+- GUI insight panel (overlay в MainWindowV2)
+
+Также генерирует диагностические предложения (alarms +
+sensor_anomaly_critical) и intro-параграфы для DOCX отчётов
+кампаний.
+
+### Что НЕ делает
+
+- Не имеет доступа к engine командам. Только текстовые каналы.
+- Не модифицирует state. Read-only.
+- Не отвечает на запросы (это будет добавлено в Phase 3 — Archive
+  query interface).
+
+### Конфигурация
+
+См. `config/agent.yaml`. Ключевые параметры:
+- `agent.enabled`: вкл/выкл агента
+- `agent.brand_name`: имя для оператора (можно менять при
+  миграции на другую модель)
+- `agent.ollama.default_model`: модель Ollama
+- `agent.triggers.*`: какие события активируют агента
+- `agent.rate_limit`: ограничения (60 calls/hour по умолчанию)
+
+### Миграция на другую модель
+
+1. `ollama pull <new_model>`
+2. Edit `config/agent.yaml`:
+   ```yaml
+   agent:
+     brand_name: "Новое имя"
+     brand_emoji: "🦉"
+     ollama:
+       default_model: <new_model>
+   ```
+3. Restart engine
+4. Smoke test: trigger alarm в mock mode
+
+Без изменений кода. См. `artifacts/architecture/assistant-v2-vision.md`
+§1.6 для деталей.
+
+### Архитектура
+
+См. `artifacts/architecture/assistant-v2-vision.md` —
+полная архитектурная картина включая planned Phases 1-3 (periodic
+reports, sinks, archive query).
+
+### Audit log
+
+Каждый LLM call записан в `data/agents/assistant/audit/<YYYY-MM-DD>/`.
+Полный context, prompt, response, tokens, latency, output targets.
+Verifiable trail для post-hoc review.
+
 ## Известные ограничения
 
-На v0.44.0:
+На v0.45.0:
 
 - **SQLite WAL gate:** engine при старте падает на версиях SQLite из диапазона
   `[3.7.0, 3.51.3)` по F25. Backport-безопасные: 3.44.6, 3.50.7 (проходят без
