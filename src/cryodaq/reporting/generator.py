@@ -74,11 +74,27 @@ class ReportGenerator:
         raw_sections = self._resolve_raw_sections(dataset.metadata)
         editable_sections = tuple(list(raw_sections) + list(self._EDITABLE_ONLY_SECTIONS))
 
-        raw_document = self._build_document(dataset, assets_dir, raw_sections)
+        # Slice C: Гемма-generated annotation (sync, graceful degradation)
+        gemma_intro: str | None = None
+        try:
+            from cryodaq.agents.report_intro import generate_report_intro, load_intro_config
+
+            gemma_intro = generate_report_intro(dataset, load_intro_config())
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "ReportGenerator: Гемма intro unavailable — continuing without",
+                exc_info=True,
+            )
+
+        raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro)
         raw_document.save(str(raw_source_docx_path))
         pdf_path = self._try_convert_pdf(raw_source_docx_path, raw_pdf_path)
 
-        editable_document = self._build_document(dataset, assets_dir, editable_sections)
+        editable_document = self._build_document(
+            dataset, assets_dir, editable_sections, gemma_intro
+        )
         editable_document.save(str(editable_docx_path))
 
         return ReportGenerationResult(
@@ -88,7 +104,13 @@ class ReportGenerator:
             sections=editable_sections,
         )
 
-    def _build_document(self, dataset, assets_dir: Path, sections: tuple[str, ...]) -> Document:
+    def _build_document(
+        self,
+        dataset,
+        assets_dir: Path,
+        sections: tuple[str, ...],
+        gemma_intro: str | None = None,
+    ) -> Document:
         document = Document()
         self._apply_gost_formatting(document)
 
@@ -112,7 +134,23 @@ class ReportGenerator:
                 document.add_page_break()
             renderer = SECTION_REGISTRY[section_name]
             renderer(document, dataset, assets_dir)
+            # Insert Гемма annotation immediately after title page
+            if section_name == "title_page" and gemma_intro:
+                self._render_gemma_annotation(document, gemma_intro)
         return document
+
+    @staticmethod
+    def _render_gemma_annotation(document: Document, intro_text: str) -> None:
+        """Insert Slice C Гемма-generated annotation section after the title page."""
+        document.add_heading("Аннотация", level=1)
+        for para in intro_text.strip().split("\n"):
+            if para.strip():
+                document.add_paragraph(para.strip())
+        # Auto-generated marker as italicised note
+        note = document.add_paragraph()
+        run = note.add_run("Аннотация сгенерирована автоматически: Гемма (gemma4:e4b).")
+        run.italic = True
+        run.font.size = Pt(11)
 
     @staticmethod
     def _apply_gost_formatting(document: Document) -> None:

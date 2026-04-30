@@ -355,6 +355,24 @@ def _build_sensor_anomaly_context(
 
 
 # ---------------------------------------------------------------------------
+# Campaign report context (Slice C) — async path for future event-driven use
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CampaignReportContext:
+    """Context for Slice C campaign report intro (async EventBus path)."""
+
+    experiment_id: str | None
+    name: str
+    duration_str: str
+    phases_text: str
+    channel_stats: str
+    alarms_summary: str
+    operator_notes: str
+
+
+# ---------------------------------------------------------------------------
 # Diagnostic suggestion context (Slice B)
 # ---------------------------------------------------------------------------
 
