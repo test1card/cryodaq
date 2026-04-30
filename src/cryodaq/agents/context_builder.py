@@ -120,16 +120,12 @@ def _compute_experiment_age(em: Any) -> float | None:
         return None
 
 
-_STUB_SUFFIX = "wired in Cycle 4 — historical SQLite context"
+def _readings_stub(_channels: list[str], _lookback_s: float) -> str:
+    return "нет данных"
 
 
-def _readings_stub(channels: list[str], lookback_s: float) -> str:
-    ch = ", ".join(channels) if channels else "(none)"
-    return f"[Readings for {ch} over last {lookback_s:.0f}s — {_STUB_SUFFIX}]"
-
-
-def _alarms_stub(lookback_s: float) -> str:
-    return f"[Alarm history over last {lookback_s:.0f}s — {_STUB_SUFFIX}]"
+def _alarms_stub(_lookback_s: float) -> str:
+    return "нет данных"
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +219,14 @@ def _build_experiment_finalize_context(
             f"- {p.get('phase', '?')}: {p.get('started_at', '?')}" for p in phases
         )
     else:
-        phases_text = "[История фаз — wired in Cycle 4 — historical SQLite context]"
+        phases_text = "нет данных"
     return ExperimentFinalizeContext(
         experiment_id=experiment_id,
         name=name,
         action=action,
         duration_str=duration_str,
         phases_text=phases_text,
-        alarms_summary_text=f"[Алармы за эксперимент — {_STUB_SUFFIX}]",
+        alarms_summary_text="нет данных",
     )
 
 
@@ -287,8 +283,8 @@ def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHand
         experiment_id=experiment_id,
         phase=phase,
         experiment_age=experiment_age,
-        active_alarms="[Активные алармы — wired in Cycle 4 — historical SQLite context]",
-        recent_events="[События смены — wired in Cycle 4 — historical SQLite context]",
+        active_alarms="нет данных",
+        recent_events="нет данных",
         shift_duration_h=shift_duration_h,
     )
 
