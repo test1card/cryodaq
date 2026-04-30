@@ -1,4 +1,4 @@
-"""Tests for GemmaAgent alarm flow — Slice A end-to-end (mock Ollama)."""
+"""Tests for AssistantLiveAgent alarm flow — Slice A end-to-end (mock Ollama)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.assistant.live.agent import GemmaAgent, GemmaConfig, _format_age
+from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent, _format_age
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.shared.audit import AuditLogger
@@ -38,8 +38,8 @@ def _alarm_event(
     )
 
 
-def _make_config(**overrides) -> GemmaConfig:
-    cfg = GemmaConfig(
+def _make_config(**overrides) -> AssistantConfig:
+    cfg = AssistantConfig(
         enabled=True,
         max_concurrent_inferences=1,
         max_calls_per_hour=60,
@@ -100,19 +100,19 @@ def _make_output_router(telegram=None, event_logger=None, event_bus=None) -> Out
 
 def _make_agent(
     *,
-    config: GemmaConfig | None = None,
+    config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
     event_logger=None,
     tmp_path: Path,
-) -> tuple[GemmaAgent, EventBus]:
+) -> tuple[AssistantLiveAgent, EventBus]:
     bus = EventBus()
     cfg = config or _make_config()
     em = _make_mock_em()
     ctx = _make_context_builder(em)
     audit = _make_audit(tmp_path)
     router = _make_output_router(telegram=telegram, event_logger=event_logger, event_bus=bus)
-    agent = GemmaAgent(
+    agent = AssistantLiveAgent(
         config=cfg,
         event_bus=bus,
         ollama_client=ollama or _make_mock_ollama(),
@@ -124,12 +124,12 @@ def _make_agent(
 
 
 # ---------------------------------------------------------------------------
-# GemmaConfig
+# AssistantConfig
 # ---------------------------------------------------------------------------
 
 
 def test_config_defaults() -> None:
-    cfg = GemmaConfig()
+    cfg = AssistantConfig()
     assert cfg.enabled is True
     assert cfg.alarm_min_level == "WARNING"
     assert cfg.max_concurrent_inferences == 2
@@ -151,7 +151,7 @@ def test_config_from_dict() -> None:
         "slices": {"a_notification": True, "b_suggestion": False},
         "audit": {"enabled": True, "retention_days": 90},
     }
-    cfg = GemmaConfig.from_dict(raw)
+    cfg = AssistantConfig.from_dict(raw)
     assert cfg.enabled is True
     assert cfg.default_model == "gemma4:e4b"
     assert cfg.alarm_min_level == "WARNING"
@@ -159,7 +159,7 @@ def test_config_from_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — start / stop
+# AssistantLiveAgent — start / stop
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ async def test_agent_disabled_does_not_subscribe(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — alarm_fired → LLM → dispatch
+# AssistantLiveAgent — alarm_fired → LLM → dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -252,7 +252,7 @@ async def test_critical_level_alarm_is_handled(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — error resilience
+# AssistantLiveAgent — error resilience
 # ---------------------------------------------------------------------------
 
 
@@ -348,7 +348,7 @@ async def test_handler_tasks_cancelled_on_stop(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — experiment_finalize handler
+# AssistantLiveAgent — experiment_finalize handler
 # ---------------------------------------------------------------------------
 
 
@@ -423,7 +423,7 @@ async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — sensor_anomaly_critical handler
+# AssistantLiveAgent — sensor_anomaly_critical handler
 # ---------------------------------------------------------------------------
 
 
@@ -505,7 +505,7 @@ async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GemmaAgent — shift_handover_request handler
+# AssistantLiveAgent — shift_handover_request handler
 # ---------------------------------------------------------------------------
 
 

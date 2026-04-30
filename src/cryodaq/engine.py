@@ -31,7 +31,7 @@ import yaml
 
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
-from cryodaq.agents.assistant.live.agent import GemmaAgent, GemmaConfig
+from cryodaq.agents.assistant.live.agent import AssistantLiveAgent, AssistantConfig
 from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.analytics.calibration import CalibrationStore
@@ -1901,14 +1901,14 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
 
-    # --- GemmaAgent (Гемма local LLM agent) ---
+    # --- AssistantLiveAgent (Гемма local LLM agent) ---
     _agent_cfg_path = _CONFIG_DIR / "agent.yaml"
-    gemma_agent: GemmaAgent | None = None
+    gemma_agent: AssistantLiveAgent | None = None
     if _agent_cfg_path.exists():
         try:
             _agent_raw = yaml.safe_load(_agent_cfg_path.read_text(encoding="utf-8")) or {}
             _gemma_raw = _agent_raw.get("gemma", {})
-            _gemma_config = GemmaConfig.from_dict(_gemma_raw)
+            _gemma_config = AssistantConfig.from_dict(_gemma_raw)
             if _gemma_config.enabled:
                 _gemma_ollama = OllamaClient(
                     base_url=_gemma_config.ollama_base_url,
@@ -1926,7 +1926,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     event_logger=event_logger,
                     event_bus=event_bus,
                 )
-                gemma_agent = GemmaAgent(
+                gemma_agent = AssistantLiveAgent(
                     config=_gemma_config,
                     event_bus=event_bus,
                     ollama_client=_gemma_ollama,
@@ -1935,13 +1935,13 @@ async def _run_engine(*, mock: bool = False) -> None:
                     output_router=_gemma_router,
                 )
                 logger.info(
-                    "GemmaAgent (Гемма): инициализирован, модель=%s",
+                    "AssistantLiveAgent (Гемма): инициализирован, модель=%s",
                     _gemma_config.default_model,
                 )
         except Exception as _gemma_exc:
-            logger.warning("GemmaAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)
+            logger.warning("AssistantLiveAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)
     else:
-        logger.info("GemmaAgent: config/agent.yaml не найден, агент отключён")
+        logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
 
     # --- Запуск всех подсистем ---
     await safety_manager.start()
@@ -1962,7 +1962,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             await gemma_agent.start()
         except Exception as _gemma_start_exc:
-            logger.warning("GemmaAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)
+            logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)
             gemma_agent = None
     await scheduler.start()
     throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
@@ -2095,7 +2095,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     if gemma_agent is not None:
         await gemma_agent.stop()
-        logger.info("GemmaAgent (Гемма) остановлен")
+        logger.info("AssistantLiveAgent (Гемма) остановлен")
 
     if telegram_bot is not None:
         await telegram_bot.stop()

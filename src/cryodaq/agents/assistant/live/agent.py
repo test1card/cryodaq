@@ -1,4 +1,4 @@
-"""GemmaAgent — local LLM agent observing engine events.
+"""AssistantLiveAgent — local LLM agent observing engine events.
 
 Service named Гемма (after the underlying Gemma 4 model via Ollama).
 Subscribes to EventBus, generates Russian-language operator insights,
@@ -48,7 +48,7 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 
 
 @dataclass
-class GemmaConfig:
+class AssistantConfig:
     enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"
     default_model: str = "gemma4:e4b"
@@ -74,7 +74,7 @@ class GemmaConfig:
     audit_dir: Path = field(default_factory=lambda: Path("data/agents/gemma/audit"))
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> GemmaConfig:
+    def from_dict(cls, d: dict[str, Any]) -> AssistantConfig:
         """Build from agent.yaml gemma section dict."""
         cfg = cls()
         cfg.enabled = bool(d.get("enabled", True))
@@ -131,13 +131,13 @@ class GemmaConfig:
         return cfg
 
 
-class GemmaAgent:
+class AssistantLiveAgent:
     """Local LLM agent. Operator-facing brand: Гемма."""
 
     def __init__(
         self,
         *,
-        config: GemmaConfig,
+        config: AssistantConfig,
         event_bus: EventBus,
         ollama_client: OllamaClient,
         context_builder: ContextBuilder,
@@ -160,12 +160,12 @@ class GemmaAgent:
     async def start(self) -> None:
         """Subscribe to EventBus and begin event processing."""
         if not self._config.enabled:
-            logger.info("GemmaAgent (Гемма): отключён в конфигурации")
+            logger.info("AssistantLiveAgent (Гемма): отключён в конфигурации")
             return
         self._queue = await self._bus.subscribe("gemma_agent", maxsize=1000)
         self._task = asyncio.create_task(self._event_loop(), name="gemma_agent")
         logger.info(
-            "GemmaAgent (Гемма): запущен. Модель=%s, timeout=%.0fs",
+            "AssistantLiveAgent (Гемма): запущен. Модель=%s, timeout=%.0fs",
             self._config.default_model,
             self._config.timeout_s,
         )
@@ -191,7 +191,7 @@ class GemmaAgent:
             self._bus.unsubscribe("gemma_agent")
             self._queue = None
         await self._ollama.close()
-        logger.info("GemmaAgent (Гемма): остановлен")
+        logger.info("AssistantLiveAgent (Гемма): остановлен")
 
     async def _event_loop(self) -> None:
         """Drain the EventBus queue and dispatch handlers."""
@@ -209,7 +209,7 @@ class GemmaAgent:
             except asyncio.CancelledError:
                 return
             except Exception:
-                logger.warning("GemmaAgent: event loop error", exc_info=True)
+                logger.warning("AssistantLiveAgent: event loop error", exc_info=True)
 
     def _should_handle(self, event: EngineEvent) -> bool:
         if not self._config.slice_a_notification:
@@ -241,7 +241,7 @@ class GemmaAgent:
         """Handle one event with rate-limit + semaphore + error isolation."""
         if not self._check_rate_limit():
             logger.warning(
-                "GemmaAgent: rate limit reached (%d/hr), dropping %s",
+                "AssistantLiveAgent: rate limit reached (%d/hr), dropping %s",
                 self._config.max_calls_per_hour,
                 event.event_type,
             )
@@ -263,10 +263,10 @@ class GemmaAgent:
                 else:
                     await self._handle_alarm_fired(event)
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
-                logger.warning("GemmaAgent: Ollama недоступен — %s", exc)
+                logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
             except Exception:
                 logger.warning(
-                    "GemmaAgent: ошибка обработки %s", event.event_type, exc_info=True
+                    "AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True
                 )
 
     async def _handle_alarm_fired(self, event: EngineEvent) -> None:
@@ -304,12 +304,12 @@ class GemmaAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("GemmaAgent: ответ обрезан по таймауту (audit_id=%s)", audit_id)
+            logger.warning("AssistantLiveAgent: ответ обрезан по таймауту (audit_id=%s)", audit_id)
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning(
-                "GemmaAgent: пустой ответ, dispatch пропущен (truncated=%s, audit_id=%s)",
+                "AssistantLiveAgent: пустой ответ, dispatch пропущен (truncated=%s, audit_id=%s)",
                 result.truncated,
                 audit_id,
             )
@@ -339,7 +339,7 @@ class GemmaAgent:
         )
 
         logger.info(
-            "GemmaAgent: alarm_fired обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
+            "AssistantLiveAgent: alarm_fired обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
             audit_id,
             result.latency_s,
             dispatched,
@@ -386,12 +386,12 @@ class GemmaAgent:
         if result.truncated:
             errors.append("timeout_truncated")
             logger.warning(
-                "GemmaAgent: diagnostic ответ обрезан (audit_id=%s)", audit_id
+                "AssistantLiveAgent: diagnostic ответ обрезан (audit_id=%s)", audit_id
             )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
-            logger.warning("GemmaAgent: пустой diagnostic ответ (audit_id=%s)", audit_id)
+            logger.warning("AssistantLiveAgent: пустой diagnostic ответ (audit_id=%s)", audit_id)
             dispatched_diag: list[str] = []
         else:
             dispatched_diag = await self._router.dispatch(
@@ -417,7 +417,7 @@ class GemmaAgent:
             errors=errors,
         )
         logger.info(
-            "GemmaAgent: diagnostic_suggestion dispatched (audit_id=%s, latency=%.1fs)",
+            "AssistantLiveAgent: diagnostic_suggestion dispatched (audit_id=%s, latency=%.1fs)",
             audit_id,
             result.latency_s,
         )
@@ -453,13 +453,13 @@ class GemmaAgent:
         if result.truncated:
             errors.append("timeout_truncated")
             logger.warning(
-                "GemmaAgent: ответ обрезан (experiment_finalize, audit_id=%s)", audit_id
+                "AssistantLiveAgent: ответ обрезан (experiment_finalize, audit_id=%s)", audit_id
             )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning(
-                "GemmaAgent: пустой ответ experiment_finalize (audit_id=%s)", audit_id
+                "AssistantLiveAgent: пустой ответ experiment_finalize (audit_id=%s)", audit_id
             )
             dispatched: list[str] = []
         else:
@@ -486,7 +486,7 @@ class GemmaAgent:
             errors=errors,
         )
         logger.info(
-            "GemmaAgent: %s обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
+            "AssistantLiveAgent: %s обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
             event.event_type,
             audit_id,
             result.latency_s,
@@ -522,13 +522,13 @@ class GemmaAgent:
         if result.truncated:
             errors.append("timeout_truncated")
             logger.warning(
-                "GemmaAgent: ответ обрезан (sensor_anomaly, audit_id=%s)", audit_id
+                "AssistantLiveAgent: ответ обрезан (sensor_anomaly, audit_id=%s)", audit_id
             )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning(
-                "GemmaAgent: пустой ответ sensor_anomaly (audit_id=%s)", audit_id
+                "AssistantLiveAgent: пустой ответ sensor_anomaly (audit_id=%s)", audit_id
             )
             dispatched_sa: list[str] = []
         else:
@@ -555,7 +555,7 @@ class GemmaAgent:
             errors=errors,
         )
         logger.info(
-            "GemmaAgent: sensor_anomaly_critical обработан "
+            "AssistantLiveAgent: sensor_anomaly_critical обработан "
             "(audit_id=%s, latency=%.1fs, channel=%s)",
             audit_id,
             result.latency_s,
@@ -590,13 +590,13 @@ class GemmaAgent:
         if result.truncated:
             errors.append("timeout_truncated")
             logger.warning(
-                "GemmaAgent: ответ обрезан (shift_handover, audit_id=%s)", audit_id
+                "AssistantLiveAgent: ответ обрезан (shift_handover, audit_id=%s)", audit_id
             )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning(
-                "GemmaAgent: пустой ответ shift_handover (audit_id=%s)", audit_id
+                "AssistantLiveAgent: пустой ответ shift_handover (audit_id=%s)", audit_id
             )
             dispatched_sh: list[str] = []
         else:
@@ -623,13 +623,13 @@ class GemmaAgent:
             errors=errors,
         )
         logger.info(
-            "GemmaAgent: shift_handover_request обработан (audit_id=%s, latency=%.1fs)",
+            "AssistantLiveAgent: shift_handover_request обработан (audit_id=%s, latency=%.1fs)",
             audit_id,
             result.latency_s,
         )
 
 
-def _build_targets(config: GemmaConfig) -> list[OutputTarget]:
+def _build_targets(config: AssistantConfig) -> list[OutputTarget]:
     targets = []
     if config.output_telegram:
         targets.append(OutputTarget.TELEGRAM)

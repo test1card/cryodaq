@@ -1,4 +1,4 @@
-"""Tests for GemmaAgent Slice B — diagnostic suggestion flow."""
+"""Tests for AssistantLiveAgent Slice B — diagnostic suggestion flow."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.assistant.live.agent import GemmaAgent, GemmaConfig
+from cryodaq.agents.assistant.live.agent import AssistantLiveAgent, AssistantConfig
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.shared.audit import AuditLogger
@@ -34,8 +34,8 @@ def _alarm_event(experiment_id: str = "exp-001") -> EngineEvent:
     )
 
 
-def _make_config(**overrides) -> GemmaConfig:
-    cfg = GemmaConfig(
+def _make_config(**overrides) -> AssistantConfig:
+    cfg = AssistantConfig(
         enabled=True,
         max_concurrent_inferences=1,
         max_calls_per_hour=60,
@@ -75,13 +75,13 @@ def _make_mock_em() -> MagicMock:
 
 def _make_agent(
     *,
-    config: GemmaConfig | None = None,
+    config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
     event_logger=None,
     reader=None,
     tmp_path: Path,
-) -> tuple[GemmaAgent, EventBus]:
+) -> tuple[AssistantLiveAgent, EventBus]:
     bus = EventBus()
     cfg = config or _make_config()
     em = _make_mock_em()
@@ -105,7 +105,7 @@ def _make_agent(
         event_logger=event_logger,
         event_bus=bus,
     )
-    agent = GemmaAgent(
+    agent = AssistantLiveAgent(
         config=cfg,
         event_bus=bus,
         ollama_client=ollama or _two_call_ollama("Аларм summary.", "Диагноз: проверьте."),
