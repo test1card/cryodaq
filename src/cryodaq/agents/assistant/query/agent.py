@@ -92,7 +92,10 @@ class AssistantQueryAgent:
             logger.info("AssistantQueryAgent: rate-limited chat_id=%s", chat_id)
             return "Слишком много запросов. Подожди немного."
 
-        audit_id = self._audit.make_audit_id()
+        try:
+            audit_id = self._audit.make_audit_id()
+        except Exception:
+            audit_id = "unknown"
         t0 = time.monotonic()
         errors: list[str] = []
         intent = None

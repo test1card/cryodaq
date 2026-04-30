@@ -17,7 +17,9 @@ INTENT_CLASSIFIER_SYSTEM = """\
 Твоя задача: получить запрос, вернуть СТРОГО JSON со схемой:
 
 {
-  "category": "<one of: current_value | eta_cooldown | eta_vacuum | range_stats | phase_info | alarm_status | composite_status | out_of_scope_historical | out_of_scope_general | unknown>",
+  "category": "<one of: current_value | eta_cooldown | eta_vacuum | range_stats |
+    phase_info | alarm_status | composite_status | out_of_scope_historical |
+    out_of_scope_general | unknown>",
   "target_channels": ["список каналов из запроса, или null"],
   "time_window_minutes": <int или null>,
   "quantity": "<краткое описание что спрашивают>"
