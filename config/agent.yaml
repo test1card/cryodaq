@@ -5,10 +5,12 @@ agent:
 
   ollama:
     base_url: http://localhost:11434
-    default_model: gemma4:e4b
-    timeout_s: 60  # gemma4:e4b needs 60s for thinking + response (48s observed)
+    default_model: gemma4:e2b
+    timeout_s: 60  # gemma4:e2b runs comfortably on M5 24GB; thinking-first still applies
     temperature: 0.3
     # num_ctx: 4096  # Uncomment to reduce context window for faster inference
+    # Note: gemma4:e4b also pulled (~14GB) but doesn't fit on M5 alongside engine + GUI.
+    # Switch to e4b only on dedicated GPU box (e.g. RTX with ≥16GB VRAM).
 
   triggers:
     alarm_fired:
@@ -22,6 +24,11 @@ agent:
       enabled: true
     phase_transition_to_finalize:
       enabled: true
+    periodic_report:
+      enabled: true
+      interval_minutes: 60
+      skip_if_idle: true
+      min_events_for_dispatch: 1
 
   outputs:
     telegram: true

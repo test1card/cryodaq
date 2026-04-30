@@ -75,6 +75,16 @@ class AssistantConfig:
     audit_dir: Path = field(default_factory=lambda: Path("data/agents/assistant/audit"))
     brand_name: str = "Гемма"
     brand_emoji: str = "🤖"
+    periodic_report_enabled: bool = True
+    periodic_report_interval_minutes: int = 60
+    periodic_report_skip_if_idle: bool = True
+    periodic_report_min_events: int = 1
+
+    def get_periodic_report_interval_s(self) -> float:
+        """Return interval in seconds, or 0 if periodic reports are disabled."""
+        if not self.periodic_report_enabled:
+            return 0.0
+        return float(self.periodic_report_interval_minutes * 60)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AssistantConfig:
@@ -117,6 +127,18 @@ class AssistantConfig:
         if isinstance(sh_t, dict):
             cfg.shift_handover_request_enabled = bool(
                 sh_t.get("enabled", cfg.shift_handover_request_enabled)
+            )
+        pr_t = triggers.get("periodic_report", {})
+        if isinstance(pr_t, dict):
+            cfg.periodic_report_enabled = bool(pr_t.get("enabled", cfg.periodic_report_enabled))
+            cfg.periodic_report_interval_minutes = int(
+                pr_t.get("interval_minutes", cfg.periodic_report_interval_minutes)
+            )
+            cfg.periodic_report_skip_if_idle = bool(
+                pr_t.get("skip_if_idle", cfg.periodic_report_skip_if_idle)
+            )
+            cfg.periodic_report_min_events = int(
+                pr_t.get("min_events_for_dispatch", cfg.periodic_report_min_events)
             )
         outputs = d.get("outputs", {})
         cfg.output_telegram = bool(outputs.get("telegram", cfg.output_telegram))
