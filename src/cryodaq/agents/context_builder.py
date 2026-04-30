@@ -5,14 +5,15 @@ different context. Builders read SQLite state and format compact text
 for LLM token budget.
 
 Cycle 1: AlarmContext dataclass + build_alarm_context interface.
-SQLite queries and full context assembly wired in Cycle 4 — historical SQLite context.
 Cycle 3: ExperimentFinalizeContext, SensorAnomalyContext, ShiftHandoverContext added.
-Slice B (diagnostic) and Slice C (campaign) contexts deferred.
+Cycle 4: DiagnosticSuggestionContext + real SQLite channel history reads.
+Slice C (campaign) contexts deferred.
 """
 
 from __future__ import annotations
 
 import logging
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,6 +103,91 @@ class ContextBuilder:
     ) -> ShiftHandoverContext:
         """Assemble context for shift handover summary prompt."""
         return _build_shift_handover_context(self._em, payload)
+
+    async def build_diagnostic_suggestion_context(
+        self,
+        alarm_payload: dict[str, Any],
+        *,
+        lookback_min: int = 60,
+    ) -> DiagnosticSuggestionContext:
+        """Assemble context for Slice B diagnostic suggestion.
+
+        Reads last lookback_min minutes of readings for alarm channels
+        from SQLite. Alarm history, cooldown history, and pressure trend
+        remain stubs until Cycle 4.1 wires those sources.
+        """
+        alarm_id = alarm_payload.get("alarm_id", "unknown")
+        channels: list[str] = alarm_payload.get("channels", [])
+        values: dict[str, float] = alarm_payload.get("values", {})
+        channel_history = await self._read_channel_history(channels, lookback_min)
+        pressure_trend = await self._read_pressure_trend()
+        return DiagnosticSuggestionContext(
+            alarm_id=alarm_id,
+            channels=channels,
+            values=values,
+            channel_history=channel_history,
+            recent_alarms="нет данных",
+            past_cooldowns="нет истории",
+            pressure_trend=pressure_trend,
+            lookback_min=lookback_min,
+        )
+
+    async def _read_channel_history(self, channels: list[str], lookback_min: int) -> str:
+        """Read recent readings for alarm channels from SQLite."""
+        if not channels or not hasattr(self._reader, "read_readings_history"):
+            return "нет данных"
+        try:
+            from_ts = _time.time() - lookback_min * 60
+            data: dict[str, list[tuple[float, float]]] = (
+                await self._reader.read_readings_history(
+                    channels=channels,
+                    from_ts=from_ts,
+                    limit_per_channel=20,
+                )
+            )
+            if not data:
+                return "нет данных"
+            lines: list[str] = []
+            for ch, readings in data.items():
+                if readings:
+                    vals = [f"{v:.4g}" for _, v in readings[-5:]]
+                    lines.append(f"- {ch}: [{', '.join(vals)}]")
+            return "\n".join(lines) if lines else "нет данных"
+        except Exception:
+            logger.debug("ContextBuilder: channel history read failed", exc_info=True)
+            return "нет данных"
+
+    async def _read_pressure_trend(self) -> str:
+        """Read recent pressure readings from SQLite."""
+        if not hasattr(self._reader, "read_readings_history"):
+            return "нет данных"
+        try:
+            from_ts = _time.time() - 30 * 60
+            data: dict[str, list[tuple[float, float]]] = (
+                await self._reader.read_readings_history(
+                    from_ts=from_ts,
+                    limit_per_channel=10,
+                )
+            )
+            pressure = {
+                k: v
+                for k, v in data.items()
+                if "pressure" in k.lower() or "mbar" in k.lower()
+            }
+            if not pressure:
+                return "нет данных"
+            lines: list[str] = []
+            for ch, readings in pressure.items():
+                if len(readings) >= 2:
+                    start = readings[0][1]
+                    end = readings[-1][1]
+                    threshold = 0.01 * max(abs(start), 1e-12)
+                    arrow = "→" if abs(end - start) < threshold else ("↑" if end > start else "↓")
+                    lines.append(f"- {ch}: {start:.2e} → {end:.2e} {arrow}")
+            return "\n".join(lines) if lines else "нет данных"
+        except Exception:
+            logger.debug("ContextBuilder: pressure trend read failed", exc_info=True)
+            return "нет данных"
 
 
 def _compute_experiment_age(em: Any) -> float | None:
@@ -266,6 +352,25 @@ def _build_sensor_anomaly_context(
         experiment_id=experiment_id,
         phase=phase,
     )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic suggestion context (Slice B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DiagnosticSuggestionContext:
+    """Context for diagnostic suggestion generation (Slice B)."""
+
+    alarm_id: str
+    channels: list[str]
+    values: dict[str, float]
+    channel_history: str
+    recent_alarms: str
+    past_cooldowns: str
+    pressure_trend: str
+    lookback_min: int = 60
 
 
 def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHandoverContext:

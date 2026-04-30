@@ -32,7 +32,7 @@ gemma:
 
   slices:
     a_notification: true
-    b_suggestion: false
+    b_suggestion: true
     c_campaign_report: false
 
   audit:

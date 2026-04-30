@@ -31,6 +31,8 @@ from cryodaq.agents.output_router import OutputRouter, OutputTarget
 from cryodaq.agents.prompts import (
     ALARM_SUMMARY_SYSTEM,
     ALARM_SUMMARY_USER,
+    DIAGNOSTIC_SUGGESTION_SYSTEM,
+    DIAGNOSTIC_SUGGESTION_USER,
     EXPERIMENT_FINALIZE_SYSTEM,
     EXPERIMENT_FINALIZE_USER,
     SENSOR_ANOMALY_SYSTEM,
@@ -342,7 +344,83 @@ class GemmaAgent:
             result.latency_s,
             dispatched,
         )
+        if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
+            await self._generate_diagnostic_suggestion(event, payload)
 
+
+    async def _generate_diagnostic_suggestion(
+        self, event: EngineEvent, alarm_payload: dict[str, Any]
+    ) -> None:
+        """Generate and dispatch Slice B diagnostic suggestion (second LLM call).
+
+        Records a separate rate-limit timestamp so each Ollama call counts
+        toward the hourly budget (Slice B makes 2 calls per alarm event).
+        """
+        # Count diagnostic as a separate call toward the hourly rate limit
+        self._call_timestamps.append(time.monotonic())
+        audit_id = self._audit.make_audit_id()
+        ctx = await self._ctx_builder.build_diagnostic_suggestion_context(alarm_payload)
+        channels_str = ", ".join(ctx.channels) if ctx.channels else "—"
+        values_str = ", ".join(f"{k}={v}" for k, v in ctx.values.items()) if ctx.values else "—"
+
+        user_prompt = DIAGNOSTIC_SUGGESTION_USER.format(
+            alarm_id=ctx.alarm_id,
+            channels=channels_str,
+            values=values_str,
+            lookback_min=ctx.lookback_min,
+            channel_history=ctx.channel_history,
+            recent_alarms=ctx.recent_alarms,
+            past_cooldowns=ctx.past_cooldowns,
+            pressure_trend=ctx.pressure_trend,
+        )
+
+        result = await self._ollama.generate(
+            user_prompt,
+            system=DIAGNOSTIC_SUGGESTION_SYSTEM,
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
+        )
+
+        errors: list[str] = []
+        if result.truncated:
+            errors.append("timeout_truncated")
+            logger.warning(
+                "GemmaAgent: diagnostic ответ обрезан (audit_id=%s)", audit_id
+            )
+
+        targets = _build_targets(self._config)
+        if result.truncated or not result.text.strip():
+            logger.warning("GemmaAgent: пустой diagnostic ответ (audit_id=%s)", audit_id)
+            dispatched_diag: list[str] = []
+        else:
+            dispatched_diag = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
+            audit_id=audit_id,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": alarm_payload,
+                "experiment_id": event.experiment_id,
+            },
+            context_assembled=user_prompt,
+            prompt_template="diagnostic_suggestion",
+            model=result.model,
+            system_prompt=DIAGNOSTIC_SUGGESTION_SYSTEM,
+            user_prompt=user_prompt,
+            response=result.text,
+            tokens={"in": result.tokens_in, "out": result.tokens_out},
+            latency_s=result.latency_s,
+            outputs_dispatched=dispatched_diag,
+            errors=errors,
+        )
+        logger.info(
+            "GemmaAgent: diagnostic_suggestion dispatched (audit_id=%s, latency=%.1fs)",
+            audit_id,
+            result.latency_s,
+        )
 
     async def _handle_experiment_finalize(self, event: EngineEvent) -> None:
         audit_id = self._audit.make_audit_id()
@@ -483,6 +561,8 @@ class GemmaAgent:
             result.latency_s,
             ctx.channel,
         )
+        if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
+            await self._generate_diagnostic_suggestion(event, payload)
 
     async def _handle_shift_handover(self, event: EngineEvent) -> None:
         audit_id = self._audit.make_audit_id()
