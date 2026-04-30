@@ -9,6 +9,39 @@
 
 ## [Unreleased]
 
+## [0.46.1] — 2026-05-01 — F29 fix-up (swarm audit CF-2/CF-3/CF-5)
+
+Patch release incorporating three fixes found by the 8-model swarm audit
+of v0.46.0 (commit `ef0a1eb`). No new functionality; no engine wiring changes.
+
+### Fixed
+- CF-2: SQLite read failure during periodic report context build no longer silently
+  suppresses the hourly report. Failure now logs at WARNING and sets
+  `context_read_failed=True`; handler bypasses `skip_if_idle` so operators receive
+  an empty-data report rather than silence (`context_builder.py`, `agent.py`).
+- CF-3: Phase transitions tagged `"phase"` by the engine were not matching the
+  context builder's `"phase_transition"` filter — phase section always showed
+  `(нет)`. Both tags now accepted; `other_entries` filter updated to exclude
+  `"phase"` entries to avoid double-classification (`context_builder.py`).
+- CF-5: `PERIODIC_REPORT_SYSTEM` now explicitly prohibits LaTeX notation and
+  `$...$` formulas. Removed `\rightarrow` backslash notation which was a Python
+  string escape bug (rendered as CR + `ightarrow` at runtime, `prompts.py`).
+
+### Tests
+- `test_periodic_report_context_read_failure_sets_flag`
+- `test_periodic_report_context_read_failure_bypasses_idle_skip`
+- `test_periodic_report_context_phase_tag_classified_correctly`
+- `test_periodic_report_prompt_prohibits_latex` strengthened (no `\r` control char)
+
+### Test baseline
+- 27 tests passing (3 new vs v0.46.0 baseline of 24)
+
+### Tags
+- `v0.46.1` → 70bb588
+
+### Selected commits in this release
+- `70bb588` fix(f29): swarm audit findings CF-2 CF-3 CF-5
+
 ## [0.46.0] — 2026-04-30 — F29 Periodic narrative reports
 
 ### Added
