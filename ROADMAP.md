@@ -27,7 +27,7 @@
 | F2 | Debug mode toggle (verbose logging) | ✅ DONE (shipped v0.34.0) | S | H |
 | F3 | Analytics placeholder widgets → data wiring | ✅ DONE (W1–W3; W4 deferred F8) | M | M |
 | F4 | Analytics lazy-open snapshot replay | ✅ DONE (merged in F3-Cycle1) | S | M |
-| F5 | Engine events → Hermes webhook | ❌ RETIRED — adapted into F30 WebhookDispatcher | M | M |
+| F5 | Engine events → Hermes webhook | ❌ RETIRED — adapted into F31 WebhookDispatcher | M | M |
 | F6 | Auto-report on experiment finalize | ✅ DONE (shipped v0.34.0) | S | H |
 | F7 | Web API readings query extension | ⬜ | L | M |
 | F8 | Cooldown ML prediction upgrade | 🔬 | L | M |
@@ -51,11 +51,12 @@
 | F26 | SQLite WAL gate backport whitelist | ✅ DONE (shipped v0.44.0) | XS | L |
 | F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
 | F28 | Гемма Live — local LLM agent (assistant v1) | ✅ DONE (v0.45.0) | L | H |
-| F29 | Periodic narrative reports (assistant Phase 1) | ✅ DONE (v0.46.0) | S–M | H |
-| F30 | Assistant Sinks: vault writer + webhook (Phase 2) | ⬜ | M | M |
-| F31 | RAG indexer (Phase 2) | ⬜ | M | M |
-| F32 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
-| F33 | GUI chat overlay (Phase 4, deferred) | ⬜ | M | L |
+| F29 | Periodic narrative reports (assistant Phase 1) | ✅ DONE (v0.46.1) | S–M | H |
+| F30 | Live Query Agent — current-state operator queries (Phase 1.5) | ⬜ | M | H |
+| F31 | Assistant Sinks: vault writer + webhook (Phase 2) | ⬜ | M | M |
+| F32 | RAG indexer (Phase 2) | ⬜ | M | M |
+| F33 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
+| F34 | GUI chat overlay (Phase 4, deferred) | ⬜ | M | L |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -603,38 +604,50 @@ Shipped:
 - Real `gemma4:e2b` smoke: 19.2s wall latency, 94.8% Russian,
   dispatch + idle skip verified.
 
-### F30 — Assistant Sinks: vault writer + webhook (Phase 2)
+### F30 — Live Query Agent — current-state operator queries (Phase 1.5)
 
 **Status:** ⬜ NOT STARTED. Ships v0.47.0.
+**Effort:** M (~600 LOC code + ~250 tests, 1 cycle).
+
+Three-step pipeline: intent classifier (gemma4:e2b, temperature=0.1)
+→ deterministic service adapter fetch (BrokerSnapshot, CooldownAdapter,
+VacuumAdapter, SQLiteAdapter, AlarmAdapter, ExperimentAdapter)
+→ Russian format LLM response. Operator asks "что сейчас?" or
+"ETA вакуума" via free-text Telegram or `/ask` command.
+See `assistant-v2-vision.md` §2.2 (new), CC_PROMPT_F30_LIVE_QUERY_AGENT.md.
+
+### F31 — Assistant Sinks: vault writer + webhook (Phase 2)
+
+**Status:** ⬜ NOT STARTED. Ships v0.48.0.
 **Effort:** M (~600 LOC, 2 cycles).
 
 VaultWriter: per-experiment Obsidian campaign notes.
 WebhookDispatcher: HTTP fanout to configurable URLs (former F5 scope).
-See `assistant-v2-vision.md` §2.2, §5.2.
+See `assistant-v2-vision.md` §2.3, §5.2.
 
-### F31 — RAG indexer (Phase 2)
+### F32 — RAG indexer (Phase 2)
 
-**Status:** ⬜ NOT STARTED. Ships v0.47.0.
+**Status:** ⬜ NOT STARTED. Ships v0.48.0.
 **Effort:** M (~600 LOC, 3 cycles).
 
 sqlite-vec vector store + entity/relation tables. Embedding via
 Ollama bge-m3. IndexQueue subscriber. See `assistant-v2-vision.md` §5.2.
 
-### F32 — Assistant Archive query interface (Phase 3)
+### F33 — Assistant Archive query interface (Phase 3)
 
-**Status:** ⬜ NOT STARTED. Ships v0.48.0.
+**Status:** ⬜ NOT STARTED. Ships v0.49.0.
 **Effort:** M+ (~700 LOC, 4 cycles).
 
 Retrieval → grounded synthesis with mandatory citations. Telegram /ask.
 6-layer anti-hallucination. See `assistant-v2-vision.md` §4, §5.3.
 
-### F33 — GUI chat overlay (Phase 4, deferred)
+### F34 — GUI chat overlay (Phase 4, deferred)
 
-**Status:** ⬜ DEFERRED. After v0.48.0 stable.
+**Status:** ⬜ DEFERRED. After v0.49.0 stable.
 **Effort:** M (~400 LOC, 2-3 cycles).
 
 Multi-turn conversational overlay in MainWindowV2. Deferred pending
-operator feedback on F32 Telegram interface.
+operator feedback on F33 Telegram interface.
 
 ---
 
