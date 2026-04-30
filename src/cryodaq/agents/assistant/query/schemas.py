@@ -99,6 +99,19 @@ class ExperimentStatus:
 
 
 @dataclass
+class QueryAdapters:
+    """Container for all service adapters used by the query agent."""
+
+    broker_snapshot: object
+    cooldown: object
+    vacuum: object
+    sqlite: object
+    alarms: object
+    experiment: object
+    composite: object
+
+
+@dataclass
 class CompositeStatus:
     timestamp: datetime
     experiment: ExperimentStatus | None
