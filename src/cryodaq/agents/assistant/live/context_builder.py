@@ -133,6 +133,7 @@ class ContextBuilder:
         alarm_entries = [e for e in entries if "alarm" in e.tags]
         phase_entries = [e for e in entries if "phase_transition" in e.tags]
         experiment_entries = [e for e in entries if "experiment" in e.tags]
+        calibration_entries = [e for e in entries if "calibration" in e.tags]
         # Exclude machine-generated and AI-generated entries from operator section
         operator_entries = [
             e for e in entries
@@ -145,12 +146,13 @@ class ContextBuilder:
             and "alarm" not in e.tags
             and "phase_transition" not in e.tags
             and "experiment" not in e.tags
+            and "calibration" not in e.tags
             and "ai" not in e.tags
         ]
 
         total_event_count = (
             len(alarm_entries) + len(phase_entries) + len(experiment_entries)
-            + len(operator_entries) + len(other_entries)
+            + len(calibration_entries) + len(operator_entries) + len(other_entries)
         )
 
         experiment_id: str | None = getattr(self._em, "active_experiment_id", None)
@@ -168,6 +170,7 @@ class ContextBuilder:
             alarm_entries=alarm_entries,
             phase_entries=phase_entries,
             experiment_entries=experiment_entries,
+            calibration_entries=calibration_entries,
             operator_entries=operator_entries,
             other_entries=other_entries,
             total_event_count=total_event_count,
@@ -506,6 +509,7 @@ class PeriodicReportContext:
     alarm_entries: list[Any] = field(default_factory=list)
     phase_entries: list[Any] = field(default_factory=list)
     experiment_entries: list[Any] = field(default_factory=list)
+    calibration_entries: list[Any] = field(default_factory=list)
     operator_entries: list[Any] = field(default_factory=list)
     other_entries: list[Any] = field(default_factory=list)
     total_event_count: int = 0
@@ -527,7 +531,7 @@ class PeriodicReportContext:
             "alarms_section": _format_log_entries(self.alarm_entries) or "(нет)",
             "phase_transitions_section": _format_log_entries(self.phase_entries) or "(нет)",
             "operator_entries_section": _format_log_entries(self.operator_entries) or "(нет)",
-            "calibration_section": "(нет)",
+            "calibration_section": _format_log_entries(self.calibration_entries) or "(нет)",
             "total_event_count": str(self.total_event_count),
         }
 

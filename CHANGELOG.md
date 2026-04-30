@@ -9,6 +9,49 @@
 
 ## [Unreleased]
 
+## [0.46.0] — 2026-04-30 — F29 Periodic narrative reports
+
+### Added
+- F29: configurable Russian-language narrative summary of recent engine activity.
+- New EventBus event type: `periodic_report_request`.
+- Engine timer task `_periodic_report_tick`, controlled by
+  `agent.triggers.periodic_report`.
+- AssistantLiveAgent handler `_handle_periodic_report`.
+- Prompt templates `PERIODIC_REPORT_SYSTEM` / `PERIODIC_REPORT_USER`.
+- Context builder method `build_periodic_report_context`.
+- Skip-if-idle filtering when a window has fewer than
+  `min_events_for_dispatch` events.
+- Output prefix variation: `🤖 Гемма (отчёт за час):`.
+- GUI insight panel chip for periodic reports.
+- F29 smoke harness:
+  `artifacts/scripts/smoke_f29_periodic_report.py`.
+
+### Changed
+- Default assistant model in `config/agent.yaml`: `gemma4:e4b` →
+  `gemma4:e2b` for M5 24GB compatibility.
+- Periodic prompt wording now respects configurable `window_minutes`
+  instead of hardcoding the last hour.
+
+### Configuration
+- `config/agent.yaml`: new `triggers.periodic_report` section with
+  `enabled`, `interval_minutes`, `skip_if_idle`, and
+  `min_events_for_dispatch`.
+
+### Tests
+- Added Phase D engine timer tests for publish, disabled no-op, and shutdown
+  cancellation.
+- Added context/prompt regressions for calibration section formatting and
+  non-hourly window wording.
+- Focused F29 slice: 34 tests passing.
+- Smoke: real `gemma4:e2b`, 19.2s wall latency, 94.8% Russian,
+  Telegram/log/GUI/audit dispatch verified, idle skip verified.
+
+### Reference
+- Architecture: `artifacts/architecture/assistant-v2-vision.md` §5 Phase 1
+- Spec: `CC_PROMPT_F29_PERIODIC_REPORTS.md`
+- Smoke: `artifacts/handoffs/2026-04-30-f29-cycle1-smoke.md`
+- Audit: `artifacts/consultations/2026-04-30/f29-cycle1-audit/synthesis.md`
+
 ## [0.45.0] — 2026-05-01 — F28 Гемма complete (assistant v1)
 
 ### Highlights

@@ -51,7 +51,7 @@
 | F26 | SQLite WAL gate backport whitelist | ✅ DONE (shipped v0.44.0) | XS | L |
 | F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
 | F28 | Гемма Live — local LLM agent (assistant v1) | ✅ DONE (v0.45.0) | L | H |
-| F29 | Periodic narrative reports (assistant Phase 1) | ⬜ | S–M | H |
+| F29 | Periodic narrative reports (assistant Phase 1) | ✅ DONE (v0.46.0) | S–M | H |
 | F30 | Assistant Sinks: vault writer + webhook (Phase 2) | ⬜ | M | M |
 | F31 | RAG indexer (Phase 2) | ⬜ | M | M |
 | F32 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
@@ -587,12 +587,21 @@ per query time range. ~50 LOC. Not yet scheduled.
 
 ### F29 — Periodic narrative reports (assistant Phase 1)
 
-**Status:** ⬜ NOT STARTED. Ships v0.46.0.
+**Status:** ✅ DONE (v0.46.0, 2026-04-30).
 **Effort:** S–M (~250 LOC, 1 cycle).
 
 Engine timer task publishes `periodic_report_request` every N minutes.
 New handler aggregates last-N-minutes events → Russian narrative →
 Telegram. Skip on idle hours. See `assistant-v2-vision.md` §5.1.
+
+Shipped:
+- Engine `_periodic_report_tick` task with configurable interval.
+- Assistant `_handle_periodic_report` handler.
+- Operator-facing prefix `🤖 Гемма (отчёт за час):`.
+- Telegram, operator log, GUI insight panel, and audit dispatch path.
+- Idle-window skip when total events fall below threshold.
+- Real `gemma4:e2b` smoke: 19.2s wall latency, 94.8% Russian,
+  dispatch + idle skip verified.
 
 ### F30 — Assistant Sinks: vault writer + webhook (Phase 2)
 

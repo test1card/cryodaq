@@ -106,3 +106,16 @@ async def test_periodic_report_context_to_template_dict_structure() -> None:
     assert "total_event_count" in tmpl
     assert "Alarm T1 high" in tmpl["alarms_section"]
     assert tmpl["total_event_count"] == "1"
+
+
+async def test_periodic_report_context_formats_calibration_section() -> None:
+    entries = [
+        _make_entry("T1 offset +0.02 K", ("auto", "calibration")),
+    ]
+    cb = _make_context_builder(entries)
+    ctx = await cb.build_periodic_report_context(window_minutes=60)
+
+    tmpl = ctx.to_template_dict()
+    assert "T1 offset" in tmpl["calibration_section"]
+    assert "T1 offset" not in tmpl["events_section"]
+    assert ctx.total_event_count == 1

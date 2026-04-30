@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder, PeriodicReportContext
 from cryodaq.agents.assistant.live.output_router import OutputRouter
+from cryodaq.agents.assistant.live.prompts import PERIODIC_REPORT_SYSTEM, PERIODIC_REPORT_USER
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
@@ -221,3 +222,9 @@ def test_periodic_report_prefix_includes_suffix() -> None:
     assert router._brand_base == "🤖 Гемма"
     # Verify standard prefix unchanged
     assert router._prefix == "🤖 Гемма:"
+
+
+def test_periodic_report_prompt_does_not_hardcode_hour_window() -> None:
+    """Configured non-hourly windows must not fight a hardcoded system prompt."""
+    assert "последний час" not in PERIODIC_REPORT_SYSTEM
+    assert "{window_minutes}" in PERIODIC_REPORT_USER

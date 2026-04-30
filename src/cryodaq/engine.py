@@ -95,6 +95,42 @@ _LOG_GET_TIMEOUT_S = 1.5
 _EXPERIMENT_STATUS_TIMEOUT_S = 1.5
 
 
+async def _periodic_report_tick(
+    agent_config: AssistantConfig,
+    event_bus: EventBus,
+    experiment_manager: ExperimentManager,
+    *,
+    sleep=asyncio.sleep,
+) -> None:
+    """Publish periodic_report_request events on the assistant schedule."""
+    interval_s = float(agent_config.get_periodic_report_interval_s())
+    if interval_s <= 0:
+        logger.info("Periodic assistant reports disabled (interval=0)")
+        return
+
+    window_minutes = int(agent_config.periodic_report_interval_minutes)
+    while True:
+        await sleep(interval_s)
+        try:
+            experiment_id = getattr(experiment_manager, "active_experiment_id", None)
+            if experiment_id is None:
+                active = getattr(experiment_manager, "active_experiment", None)
+                experiment_id = getattr(active, "experiment_id", None) if active else None
+            await event_bus.publish(
+                EngineEvent(
+                    event_type="periodic_report_request",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "window_minutes": window_minutes,
+                        "trigger": "scheduled",
+                    },
+                    experiment_id=experiment_id,
+                )
+            )
+        except Exception as exc:
+            logger.error("Periodic assistant report tick error: %s", exc)
+
+
 async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
@@ -1903,6 +1939,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # --- AssistantLiveAgent (Гемма local LLM agent) ---
     _agent_cfg_path = _CONFIG_DIR / "agent.yaml"
+    _gemma_config: AssistantConfig | None = None
     gemma_agent: AssistantLiveAgent | None = None
     if _agent_cfg_path.exists():
         try:
@@ -1964,6 +2001,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         except Exception as _gemma_start_exc:
             logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)
             gemma_agent = None
+    periodic_report_tick_task: asyncio.Task | None = None
+    if _gemma_config is not None and _gemma_config.periodic_report_enabled:
+        periodic_report_tick_task = asyncio.create_task(
+            _periodic_report_tick(_gemma_config, event_bus, experiment_manager),
+            name="periodic_report_tick",
+        )
     await scheduler.start()
     throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
     alarm_v2_feed_task = asyncio.create_task(_alarm_v2_feed_readings(), name="alarm_v2_feed")
@@ -2070,6 +2113,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         vt_tick_task.cancel()
         try:
             await vt_tick_task
+        except asyncio.CancelledError:
+            pass
+    if periodic_report_tick_task is not None:
+        periodic_report_tick_task.cancel()
+        try:
+            await periodic_report_tick_task
         except asyncio.CancelledError:
             pass
     leak_rate_feed_task.cancel()
