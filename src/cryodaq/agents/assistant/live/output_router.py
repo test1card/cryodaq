@@ -38,7 +38,8 @@ class OutputRouter:
         self._telegram = telegram_bot
         self._event_logger = event_logger
         self._event_bus = event_bus
-        self._prefix = f"{brand_emoji} {brand_name}:"
+        self._brand_base = f"{brand_emoji} {brand_name}"
+        self._prefix = f"{self._brand_base}:"
 
     async def dispatch(
         self,
@@ -47,13 +48,19 @@ class OutputRouter:
         *,
         targets: list[OutputTarget],
         audit_id: str,
+        prefix_suffix: str = "",
     ) -> list[str]:
         """Send llm_output to all configured targets.
 
+        prefix_suffix: optional text inserted before the colon, e.g. "(отчёт за час)".
         Returns list of successfully dispatched target names.
         """
         dispatched: list[str] = []
-        prefixed = f"{self._prefix} {llm_output}"
+        if prefix_suffix:
+            prefix = f"{self._brand_base} {prefix_suffix}:"
+        else:
+            prefix = self._prefix
+        prefixed = f"{prefix} {llm_output}"
 
         for target in targets:
             try:

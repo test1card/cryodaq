@@ -29,6 +29,8 @@ from cryodaq.agents.assistant.live.prompts import (
     DIAGNOSTIC_SUGGESTION_USER,
     EXPERIMENT_FINALIZE_SYSTEM,
     EXPERIMENT_FINALIZE_USER,
+    PERIODIC_REPORT_SYSTEM,
+    PERIODIC_REPORT_USER,
     SENSOR_ANOMALY_SYSTEM,
     SENSOR_ANOMALY_USER,
     SHIFT_HANDOVER_SYSTEM,
@@ -280,6 +282,8 @@ class AssistantLiveAgent:
             return self._config.sensor_anomaly_critical_enabled
         if event.event_type == "shift_handover_request":
             return self._config.shift_handover_request_enabled
+        if event.event_type == "periodic_report_request":
+            return self._config.periodic_report_enabled
         return False
 
     def _check_rate_limit(self) -> bool:
@@ -313,6 +317,8 @@ class AssistantLiveAgent:
                     await self._handle_sensor_anomaly(event)
                 elif event.event_type == "shift_handover_request":
                     await self._handle_shift_handover(event)
+                elif event.event_type == "periodic_report_request":
+                    await self._handle_periodic_report(event)
                 else:
                     await self._handle_alarm_fired(event)
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
@@ -684,6 +690,91 @@ class AssistantLiveAgent:
             "AssistantLiveAgent: shift_handover_request обработан (audit_id=%s, latency=%.1fs)",
             audit_id,
             result.latency_s,
+        )
+
+
+    async def _handle_periodic_report(self, event: EngineEvent) -> None:
+        audit_id = self._audit.make_audit_id()
+        window_minutes = int(event.payload.get("window_minutes", 60))
+
+        ctx = await self._ctx_builder.build_periodic_report_context(
+            window_minutes=window_minutes,
+        )
+
+        if (
+            self._config.periodic_report_skip_if_idle
+            and ctx.total_event_count < self._config.periodic_report_min_events
+        ):
+            logger.debug(
+                "AssistantLiveAgent: periodic report skipped "
+                "(idle: %d events < min=%d)",
+                ctx.total_event_count,
+                self._config.periodic_report_min_events,
+            )
+            return
+
+        template_dict = ctx.to_template_dict()
+        user_prompt = PERIODIC_REPORT_USER.format(
+            window_minutes=window_minutes,
+            **template_dict,
+        )
+        system_prompt = format_with_brand(PERIODIC_REPORT_SYSTEM, self._config.brand_name)
+
+        result = await self._ollama.generate(
+            user_prompt,
+            system=system_prompt,
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+            num_ctx=self._config.num_ctx,
+        )
+
+        errors: list[str] = []
+        if result.truncated:
+            errors.append("timeout_truncated")
+            logger.warning(
+                "AssistantLiveAgent: periodic report обрезан (audit_id=%s)", audit_id
+            )
+
+        targets = _build_targets(self._config)
+        if result.truncated or not result.text.strip():
+            logger.warning(
+                "AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id
+            )
+            dispatched_pr: list[str] = []
+        else:
+            dispatched_pr = await self._router.dispatch(
+                event,
+                result.text,
+                targets=targets,
+                audit_id=audit_id,
+                prefix_suffix="(отчёт за час)",
+            )
+
+        await self._audit.log(
+            audit_id=audit_id,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": event.payload,
+                "experiment_id": event.experiment_id,
+            },
+            context_assembled=user_prompt,
+            prompt_template="periodic_report",
+            model=result.model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=result.text,
+            tokens={"in": result.tokens_in, "out": result.tokens_out},
+            latency_s=result.latency_s,
+            outputs_dispatched=dispatched_pr,
+            errors=errors,
+        )
+        logger.info(
+            "AssistantLiveAgent: periodic_report_request обработан "
+            "(audit_id=%s, latency=%.1fs, events=%d, dispatched=%s)",
+            audit_id,
+            result.latency_s,
+            ctx.total_event_count,
+            dispatched_pr,
         )
 
 

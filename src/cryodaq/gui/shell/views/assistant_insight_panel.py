@@ -41,6 +41,7 @@ _TRIGGER_META: dict[str, tuple[str, str]] = {
     "experiment_abort": ("ПРЕРВАН", theme.STATUS_FAULT),
     "sensor_anomaly_critical": ("ДАТЧИК", theme.STATUS_FAULT),
     "shift_handover_request": ("СМЕНА", theme.STATUS_OK),
+    "periodic_report_request": ("ОТЧЁТ", theme.STATUS_INFO),
 }
 _DEFAULT_META = ("СОБЫТИЕ", theme.STATUS_STALE)
 
