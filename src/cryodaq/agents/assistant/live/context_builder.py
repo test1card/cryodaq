@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,74 @@ class ContextBuilder:
     ) -> ShiftHandoverContext:
         """Assemble context for shift handover summary prompt."""
         return _build_shift_handover_context(self._em, payload)
+
+    async def build_periodic_report_context(
+        self,
+        *,
+        window_minutes: int = 60,
+    ) -> PeriodicReportContext:
+        """Aggregate engine activity over last window_minutes for periodic report.
+
+        Uses get_operator_log() with time window — no new SQLite methods needed.
+        All event types (alarms, phases, experiments, operator entries) are
+        stored in the operator log with identifying tags.
+        """
+        now = datetime.now(UTC)
+        start_time = now - timedelta(minutes=window_minutes)
+
+        entries: list[Any] = []
+        if hasattr(self._reader, "get_operator_log"):
+            try:
+                entries = await self._reader.get_operator_log(
+                    start_time=start_time,
+                    end_time=now,
+                    limit=50,
+                )
+            except Exception:
+                logger.debug("PeriodicReportContext: get_operator_log failed", exc_info=True)
+
+        alarm_entries = [e for e in entries if "alarm" in e.tags]
+        phase_entries = [e for e in entries if "phase_transition" in e.tags]
+        experiment_entries = [e for e in entries if "experiment" in e.tags]
+        # Exclude machine-generated and AI-generated entries from operator section
+        operator_entries = [
+            e for e in entries
+            if e.source != "auto" and "ai" not in e.tags and "auto" not in e.tags
+        ]
+        # Any auto event not classified above (calibration, leak_rate, etc.)
+        other_entries = [
+            e for e in entries
+            if "auto" in e.tags
+            and "alarm" not in e.tags
+            and "phase_transition" not in e.tags
+            and "experiment" not in e.tags
+            and "ai" not in e.tags
+        ]
+
+        total_event_count = (
+            len(alarm_entries) + len(phase_entries) + len(experiment_entries)
+            + len(operator_entries) + len(other_entries)
+        )
+
+        experiment_id: str | None = getattr(self._em, "active_experiment_id", None)
+        phase: str | None = None
+        if hasattr(self._em, "get_current_phase"):
+            try:
+                phase = self._em.get_current_phase()
+            except Exception:
+                pass
+
+        return PeriodicReportContext(
+            window_minutes=window_minutes,
+            active_experiment_id=experiment_id,
+            active_experiment_phase=phase,
+            alarm_entries=alarm_entries,
+            phase_entries=phase_entries,
+            experiment_entries=experiment_entries,
+            operator_entries=operator_entries,
+            other_entries=other_entries,
+            total_event_count=total_event_count,
+        )
 
     async def build_diagnostic_suggestion_context(
         self,
@@ -420,3 +489,55 @@ def _format_age(age_s: float) -> str:
     if m > 0:
         return f"{m}м {s}с"
     return f"{s}с"
+
+
+# ---------------------------------------------------------------------------
+# Periodic report context (F29)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PeriodicReportContext:
+    """Context for periodic narrative report (F29)."""
+
+    window_minutes: int
+    active_experiment_id: str | None
+    active_experiment_phase: str | None
+    alarm_entries: list[Any] = field(default_factory=list)
+    phase_entries: list[Any] = field(default_factory=list)
+    experiment_entries: list[Any] = field(default_factory=list)
+    operator_entries: list[Any] = field(default_factory=list)
+    other_entries: list[Any] = field(default_factory=list)
+    total_event_count: int = 0
+
+    def to_template_dict(self) -> dict[str, str]:
+        """Format all context fields as prompt-ready strings."""
+        if self.active_experiment_id:
+            phase_str = (
+                f" (фаза: {self.active_experiment_phase})"
+                if self.active_experiment_phase else ""
+            )
+            active_exp = f"{self.active_experiment_id}{phase_str}"
+        else:
+            active_exp = "нет активного эксперимента"
+
+        return {
+            "active_experiment_summary": active_exp,
+            "events_section": _format_log_entries(self.other_entries) or "(нет)",
+            "alarms_section": _format_log_entries(self.alarm_entries) or "(нет)",
+            "phase_transitions_section": _format_log_entries(self.phase_entries) or "(нет)",
+            "operator_entries_section": _format_log_entries(self.operator_entries) or "(нет)",
+            "calibration_section": "(нет)",
+            "total_event_count": str(self.total_event_count),
+        }
+
+
+def _format_log_entries(entries: list[Any]) -> str:
+    if not entries:
+        return ""
+    lines = []
+    for e in entries[:10]:
+        ts = e.timestamp.astimezone().strftime("%H:%M") if hasattr(e, "timestamp") else "?"
+        msg = getattr(e, "message", str(e))[:120]
+        lines.append(f"- {ts}: {msg}")
+    return "\n".join(lines)
