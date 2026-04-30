@@ -77,7 +77,7 @@ class ReportGenerator:
         # Slice C: Гемма-generated annotation (sync, graceful degradation)
         gemma_intro: str | None = None
         try:
-            from cryodaq.agents.report_intro import generate_report_intro, load_intro_config
+            from cryodaq.agents.assistant.shared.report_intro import generate_report_intro, load_intro_config
 
             gemma_intro = generate_report_intro(dataset, load_intro_config())
         except Exception:

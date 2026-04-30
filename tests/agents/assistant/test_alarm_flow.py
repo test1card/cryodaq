@@ -7,11 +7,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.audit import AuditLogger
-from cryodaq.agents.context_builder import ContextBuilder
-from cryodaq.agents.gemma import GemmaAgent, GemmaConfig, _format_age
-from cryodaq.agents.ollama_client import GenerationResult, OllamaUnavailableError
-from cryodaq.agents.output_router import OutputRouter
+from cryodaq.agents.assistant.live.agent import GemmaAgent, GemmaConfig, _format_age
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.output_router import OutputRouter
+from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.ollama_client import GenerationResult, OllamaUnavailableError
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ async def test_alarm_fired_enabled_false_skips_handling(tmp_path: Path) -> None:
 
 
 async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
-    from cryodaq.agents.ollama_client import GenerationResult
+    from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 
     ollama = AsyncMock()
     ollama.generate = AsyncMock(
@@ -331,7 +331,7 @@ async def test_handler_tasks_cancelled_on_stop(tmp_path: Path) -> None:
         await blocked.wait()
         return GenerationResult(text="ok", tokens_in=5, tokens_out=5, latency_s=1.0, model="m")
 
-    from cryodaq.agents.ollama_client import GenerationResult
+    from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 
     ollama = AsyncMock()
     ollama.generate = AsyncMock(side_effect=slow_generate)

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cryodaq.agents.ollama_client import (
+from cryodaq.agents.assistant.shared.ollama_client import (
     GenerationResult,
     OllamaClient,
     OllamaModelMissingError,
@@ -204,7 +204,7 @@ async def test_generate_returns_truncated_on_timeout() -> None:
     timeout_cm.__aenter__ = AsyncMock(side_effect=TimeoutError())
     timeout_cm.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("cryodaq.agents.ollama_client.asyncio.timeout", return_value=timeout_cm):
+    with patch("cryodaq.agents.assistant.shared.ollama_client.asyncio.timeout", return_value=timeout_cm):
         result = await client.generate("test")
 
     assert result.truncated is True

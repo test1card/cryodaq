@@ -20,15 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cryodaq.agents.audit import AuditLogger
-from cryodaq.agents.context_builder import ContextBuilder
-from cryodaq.agents.ollama_client import (
-    OllamaClient,
-    OllamaModelMissingError,
-    OllamaUnavailableError,
-)
-from cryodaq.agents.output_router import OutputRouter, OutputTarget
-from cryodaq.agents.prompts import (
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget
+from cryodaq.agents.assistant.live.prompts import (
     ALARM_SUMMARY_SYSTEM,
     ALARM_SUMMARY_USER,
     DIAGNOSTIC_SUGGESTION_SYSTEM,
@@ -39,6 +33,12 @@ from cryodaq.agents.prompts import (
     SENSOR_ANOMALY_USER,
     SHIFT_HANDOVER_SYSTEM,
     SHIFT_HANDOVER_USER,
+)
+from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.ollama_client import (
+    OllamaClient,
+    OllamaModelMissingError,
+    OllamaUnavailableError,
 )
 from cryodaq.core.event_bus import EngineEvent, EventBus
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
-from cryodaq.agents.report_intro import (
+from cryodaq.agents.assistant.shared.report_intro import (
     IntroConfig,
     _build_context,
     _format_channel_stats,

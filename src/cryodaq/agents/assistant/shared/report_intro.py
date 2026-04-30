@@ -78,7 +78,7 @@ def generate_report_intro(dataset: Any, config: IntroConfig | None = None) -> st
         logger.debug("report_intro: slice_c disabled — skipping")
         return None
     try:
-        from cryodaq.agents.prompts import (
+        from cryodaq.agents.assistant.live.prompts import (
             CAMPAIGN_REPORT_INTRO_SYSTEM,
             CAMPAIGN_REPORT_INTRO_USER,
         )

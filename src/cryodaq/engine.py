@@ -29,11 +29,11 @@ from typing import Any
 
 import yaml
 
-from cryodaq.agents.audit import AuditLogger
-from cryodaq.agents.context_builder import ContextBuilder
-from cryodaq.agents.gemma import GemmaAgent, GemmaConfig
-from cryodaq.agents.ollama_client import OllamaClient
-from cryodaq.agents.output_router import OutputRouter
+from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.agent import GemmaAgent, GemmaConfig
+from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
+from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
