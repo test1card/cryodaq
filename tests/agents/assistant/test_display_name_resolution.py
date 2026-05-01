@@ -28,7 +28,6 @@ from cryodaq.agents.assistant.query.schemas import (
 )
 from cryodaq.core.channel_manager import ChannelManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -124,7 +123,7 @@ def test_find_by_name_empty_string() -> None:
 
 def test_find_by_name_no_name_field() -> None:
     mgr = _make_manager(**{"Т7": {"visible": True}})
-    assert mgr.find_by_name("Т7") is None
+    assert mgr.find_by_name("Т7") == "Т7"
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +177,12 @@ async def test_classifier_prompt_includes_channel_hint_when_manager_provided() -
     clf = IntentClassifier(ollama, channel_manager=mgr)
     await clf.classify("что на азотной плите?")
     call_kwargs = ollama.generate.call_args
-    system_arg = call_kwargs.kwargs.get("system") or call_kwargs.args[1] if len(call_kwargs.args) > 1 else call_kwargs.kwargs["system"]
+    system_arg = (
+        call_kwargs.kwargs.get("system")
+        or call_kwargs.args[1]
+        if len(call_kwargs.args) > 1
+        else call_kwargs.kwargs["system"]
+    )
     assert "Азотная плита" in system_arg
     assert "Т12" in system_arg
 
@@ -301,7 +305,9 @@ def test_router_drops_unresolvable_logs_warning() -> None:
         category=QueryCategory.CURRENT_VALUE, target_channels=["нечто странное"]
     )
     import logging
-    with patch.object(logging.getLogger("cryodaq.agents.assistant.query.router"), "warning") as mock_warn:
+
+    router_logger = logging.getLogger("cryodaq.agents.assistant.query.router")
+    with patch.object(router_logger, "warning") as mock_warn:
         result = router._resolve_target_channels(intent)
     assert result is None
     mock_warn.assert_called_once()

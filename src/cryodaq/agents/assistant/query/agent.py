@@ -299,7 +299,7 @@ class AssistantQueryAgent:
                 ci_low=0.0,
                 ci_high=0.0,
                 n_references=0,
-                cooldown_active=False,
+                cooldown_active=ru_bool(False),
             )
         h = max(eta.t_remaining_hours, 0.0)
         t_str = f"{int(h)}ч {int((h % 1) * 60)}мин"

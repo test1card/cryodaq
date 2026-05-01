@@ -59,6 +59,7 @@ _PHASE_ALIASES: dict[str, str] = {
 }
 # Legacy mutable list kept for any callers that import it. Prefer VALID_PHASES.
 _VALID_PHASES = sorted(VALID_PHASES)
+_COMMAND_FAILED_TEXT = "❌ Команда не выполнена. Подробности в логах."
 
 
 class _TelegramAuthError(Exception):
@@ -333,7 +334,7 @@ class TelegramCommandBot:
 
         if self._query_agent is None:
             await self._send(
-                chat_id, "Я понимаю только slash-команды. /help для списка."
+                chat_id, "Я понимаю только команды с косой чертой. /help для списка."
             )
             return
 
@@ -459,7 +460,7 @@ class TelegramCommandBot:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
             return
         if self._command_handler is None:
-            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
@@ -474,7 +475,8 @@ class TelegramCommandBot:
         if result.get("ok"):
             await self._send(chat_id, "✅ Записано в журнал")
         else:
-            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
+            logger.warning("Telegram /log failed: %s", result.get("error"))
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
         # Phase 2c Codex I.2: accept legacy aliases (cooling/warming) and
@@ -489,7 +491,7 @@ class TelegramCommandBot:
             return
         phase = normalized
         if self._command_handler is None:
-            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
@@ -503,7 +505,8 @@ class TelegramCommandBot:
         if result.get("ok"):
             await self._send(chat_id, f"✅ Фаза изменена: → {phase_display_name(phase)}")
         else:
-            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
+            logger.warning("Telegram /phase failed: %s", result.get("error"))
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     # ------------------------------------------------------------------
     # Send

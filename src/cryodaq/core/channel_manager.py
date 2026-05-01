@@ -177,26 +177,30 @@ class ChannelManager:
     def find_by_name(self, name: str) -> str | None:
         """Find channel ID by display name (case-insensitive, partial match).
 
-        Three-pass: exact name match, substring, then Latin→Cyrillic normalization.
-        Does NOT match by channel ID (use get_all() for that).
+        Four-pass: exact ID/name match, substring, then Latin→Cyrillic normalization.
         Returns first hit or None.
         """
         name_lower = name.lower().strip()
         if not name_lower:
             return None
 
-        # First pass: exact name match
+        # First pass: direct channel ID match, including Latin→Cyrillic fallback.
+        normalized_id = name.strip().translate(self._LATIN_TO_CYRILLIC)
+        if normalized_id in self._channels:
+            return normalized_id
+
+        # Second pass: exact name match
         for ch_id, ch_data in self._channels.items():
             if ch_data.get("name", "").lower() == name_lower:
                 return ch_id
 
-        # Second pass: substring match (e.g. "плита" matches "Азотная плита")
+        # Third pass: substring match (e.g. "плита" matches "Азотная плита")
         for ch_id, ch_data in self._channels.items():
             ch_name = ch_data.get("name", "").lower()
             if ch_name and (name_lower in ch_name or ch_name in name_lower):
                 return ch_id
 
-        # Third pass: Latin→Cyrillic normalized retry (e.g. "T12" name → "Т12" name)
+        # Fourth pass: Latin→Cyrillic normalized retry (e.g. "T12" name → "Т12" name)
         norm = name_lower.translate(self._LATIN_TO_CYRILLIC)
         if norm != name_lower:
             for ch_id, ch_data in self._channels.items():

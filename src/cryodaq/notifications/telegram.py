@@ -33,6 +33,12 @@ _SEVERITY_EMOJI: dict[str, str] = {
     "critical": "🚨",
 }
 
+_SEVERITY_RU: dict[str, str] = {
+    "info": "информационная",
+    "warning": "предупреждение",
+    "critical": "критическая",
+}
+
 # Эмодзи по типу события
 _EVENT_EMOJI: dict[str, str] = {
     "activated": "🔔",
@@ -154,6 +160,7 @@ class TelegramNotifier:
         severity_str = (
             event.severity.value if hasattr(event.severity, "value") else str(event.severity)
         )
+        severity_label = _SEVERITY_RU.get(severity_str, severity_str)
         severity_emoji = _SEVERITY_EMOJI.get(severity_str, "❓")
         event_emoji = _EVENT_EMOJI.get(event.event_type, "")
 
@@ -179,7 +186,7 @@ class TelegramNotifier:
             f"Канал: <code>{event.channel}</code>",
             f"Значение: <b>{event.value:.4g}</b>",
             f"Порог: {event.threshold:.4g}",
-            f"Уровень: {severity_str.upper()}",
+            f"Уровень: {severity_label}",
             f"Время: {time_str}",
         ]
 

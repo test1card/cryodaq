@@ -66,10 +66,10 @@ def test_find_by_name_resolves_cyrillic_name_directly() -> None:
     assert mgr.find_by_name("Детектор") == "Т7"
 
 
-def test_find_by_name_latin_id_returns_none() -> None:
-    """find_by_name('T7') returns None — ID lookup is router's job via normalize_channel_id."""
+def test_find_by_name_resolves_latin_id() -> None:
+    """find_by_name('T7') resolves via Latin→Cyrillic ID normalization."""
     mgr = _make_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
-    assert mgr.find_by_name("T7") is None
+    assert mgr.find_by_name("T7") == "Т7"
 
 
 def test_find_by_name_mixed_latin_cyrillic_returns_none_gracefully() -> None:

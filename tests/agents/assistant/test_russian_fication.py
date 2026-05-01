@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 from cryodaq.agents.assistant.query import prompts as p
+from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
 from cryodaq.agents.assistant.query.ru_labels import (
     experiment_status_display,
     phase_display_name,
@@ -155,3 +156,19 @@ def test_composite_prompt_uses_prognoz_not_eta_label() -> None:
 
 def test_composite_prompt_has_good_example() -> None:
     assert "захолаживания" in p.FORMAT_COMPOSITE_STATUS_USER
+
+
+def test_eta_cooldown_fallback_uses_russian_bool() -> None:
+    agent = object.__new__(AssistantQueryAgent)
+
+    prompt = agent._fmt_eta_cooldown("когда 4К?", {"cooldown_eta": None})
+
+    assert "Захолаживание активно: нет" in prompt
+    assert "False" not in prompt
+
+
+def test_range_stats_prompt_uses_russian_min_max_labels() -> None:
+    assert "- Минимум:" in p.FORMAT_RANGE_STATS_USER
+    assert "- Максимум:" in p.FORMAT_RANGE_STATS_USER
+    assert "- Min:" not in p.FORMAT_RANGE_STATS_USER
+    assert "- Max:" not in p.FORMAT_RANGE_STATS_USER

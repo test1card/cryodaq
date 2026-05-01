@@ -129,8 +129,8 @@ FORMAT_RANGE_STATS_USER = """\
 
 Статистика канала {channel} за последние {window_minutes} минут:
 - Точек: {n_samples}
-- Min: {min_value:.4g} {unit}
-- Max: {max_value:.4g} {unit}
+- Минимум: {min_value:.4g} {unit}
+- Максимум: {max_value:.4g} {unit}
 - Среднее: {mean_value:.4g} {unit}
 - σ: {std_value:.4g} {unit}
 
