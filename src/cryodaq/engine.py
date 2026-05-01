@@ -1872,6 +1872,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             tg_cfg = notif_raw.get("telegram", {})
             bot_token = str(tg_cfg.get("bot_token", ""))
             token_valid = bot_token and bot_token != "YOUR_BOT_TOKEN_HERE"
+            verify_ssl = bool(tg_cfg.get("verify_ssl", True))
 
             # PeriodicReporter
             pr_cfg = notif_raw.get("periodic_report", {})
@@ -1913,6 +1914,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
                         command_handler=_handle_gui_command,
+                        verify_ssl=verify_ssl,
                     )
                     logger.info(
                         "TelegramCommandBot создан (allowed=%d chat ids)",
@@ -1926,6 +1928,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 _esc_notifier = TelegramNotifier(
                     bot_token=bot_token,
                     chat_id=tg_cfg.get("chat_id", 0),
+                    verify_ssl=verify_ssl,
                 )
                 escalation_service = EscalationService(_esc_notifier, notif_raw)
                 logger.info("EscalationService создан (%d уровней)", len(notif_raw["escalation"]))
