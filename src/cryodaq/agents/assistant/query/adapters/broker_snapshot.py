@@ -61,12 +61,22 @@ class BrokerSnapshot:
         while True:
             try:
                 reading = await self._queue.get()
+                short_id = self._normalize_channel_id(reading.channel)
                 async with self._lock:
-                    self._latest[reading.channel] = reading
+                    self._latest[short_id] = reading
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.error("BrokerSnapshot consume error: %s", exc)
+
+    @staticmethod
+    def _normalize_channel_id(ch: str) -> str:
+        """Normalize driver-emitted channel ID to canonical short form.
+
+        Same pattern as ChannelStateTracker: split on first space.
+        'Т7 Детектор' → 'Т7', 'VSP63D_1/pressure' → unchanged.
+        """
+        return ch.split(" ", 1)[0] if " " in ch else ch
 
     async def latest(self, channel: str) -> Reading | None:
         async with self._lock:

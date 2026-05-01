@@ -21,6 +21,7 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_CURRENT_VALUE_USER,
     FORMAT_ETA_COOLDOWN_USER,
     FORMAT_ETA_VACUUM_USER,
+    FORMAT_GREETING_USER,
     FORMAT_OUT_OF_SCOPE_GENERAL_USER,
     FORMAT_OUT_OF_SCOPE_HISTORICAL_USER,
     FORMAT_PHASE_INFO_USER,
@@ -242,6 +243,10 @@ class AssistantQueryAgent:
             return self._fmt_alarm_status(query, data)
         if category == QueryCategory.COMPOSITE_STATUS:
             return self._fmt_composite(query, data)
+        if category == QueryCategory.GREETING:
+            return FORMAT_GREETING_USER.format(
+                query=query, brand_name=self._config.brand_name
+            )
         if category == QueryCategory.OUT_OF_SCOPE_HISTORICAL:
             return FORMAT_OUT_OF_SCOPE_HISTORICAL_USER.format(
                 query=query, brand_name=self._config.brand_name
@@ -389,7 +394,7 @@ class AssistantQueryAgent:
                 experiment_age_text="—",
                 target_temp="нет данных",
             )
-        exp_id_text = status.experiment_id
+        exp_id_text = status.experiment_label or f"эксперимент {status.experiment_id[:8]}"
         if status.experiment_started_human:
             exp_id_text += f" (начат {status.experiment_started_human})"
         age_h = status.experiment_age_s / 3600
@@ -455,7 +460,11 @@ class AssistantQueryAgent:
             )
 
         exp = cs.experiment
-        exp_text = exp.experiment_id if exp else "нет активного эксперимента"
+        exp_text = (
+            (exp.experiment_label or f"эксперимент {exp.experiment_id[:8]}")
+            if exp
+            else "нет активного эксперимента"
+        )
         phase_text = phase_display_name(exp.phase) if exp else "—"
 
         temps_parts = [

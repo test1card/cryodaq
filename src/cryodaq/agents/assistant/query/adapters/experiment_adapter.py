@@ -62,6 +62,8 @@ class ExperimentAdapter:
                 except (OSError, OverflowError, ValueError):
                     pass
 
+            label = self._resolve_display_name(active, str(exp_id)) if active else None
+
             return ExperimentStatus(
                 experiment_id=exp_id,
                 phase=phase,
@@ -70,7 +72,29 @@ class ExperimentAdapter:
                 target_temp=getattr(active, "target_temp", None) if active else None,
                 sample_id=getattr(active, "sample_id", None) if active else None,
                 experiment_started_human=started_human,
+                experiment_label=label,
             )
         except Exception as exc:
             logger.warning("ExperimentAdapter.status failed: %s", exc)
             return None
+
+    @staticmethod
+    def _resolve_display_name(active: object, exp_id: str) -> str:
+        """Human-friendly experiment label, never raw UUID."""
+        title = (getattr(active, "title", None) or "").strip()
+        if title:
+            return title
+        name = (getattr(active, "name", None) or "").strip()
+        if name:
+            return name
+        started = getattr(active, "start_time", None)
+        if started is not None:
+            try:
+                return f"эксперимент {started.strftime('%Y-%m-%d')}"
+            except AttributeError:
+                try:
+                    dt = datetime.fromtimestamp(float(started), tz=UTC)
+                    return f"эксперимент {dt.strftime('%Y-%m-%d')}"
+                except Exception:
+                    pass
+        return f"эксперимент {exp_id[:8]}"
