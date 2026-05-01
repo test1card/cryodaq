@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
 
 import pytest
 
@@ -171,6 +172,14 @@ def test_engine_constructs_query_agent_when_enabled() -> None:
     assert cfg.query_intent_timeout_s == pytest.approx(10.0)
     assert cfg.query_format_timeout_s == pytest.approx(20.0)
     assert cfg.query_max_per_chat_per_hour == 30
+
+
+def test_repository_agent_yaml_enables_live_query() -> None:
+    """Runtime config must enable free-text Telegram query handling."""
+    cfg = AssistantConfig.from_yaml_path(Path("config/agent.yaml"))
+
+    assert cfg.enabled is True
+    assert cfg.query_enabled is True
 
 
 def test_engine_skips_query_agent_when_disabled() -> None:

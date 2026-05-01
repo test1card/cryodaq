@@ -39,6 +39,17 @@ agent:
     max_calls_per_hour: 60
     max_concurrent_inferences: 2
 
+  query:
+    enabled: true
+    intent_model: gemma4:e2b
+    format_model: gemma4:e2b
+    intent_temperature: 0.1
+    format_temperature: 0.3
+    intent_timeout_s: 10.0
+    format_timeout_s: 20.0
+    rate_limit:
+      max_queries_per_chat_per_hour: 60
+
   slices:
     a_notification: true
     b_suggestion: true
