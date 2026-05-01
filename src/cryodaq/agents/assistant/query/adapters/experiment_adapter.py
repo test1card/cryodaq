@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cryodaq.agents.assistant.query.schemas import ExperimentStatus
@@ -53,6 +54,14 @@ class ExperimentAdapter:
 
             experiment_age_s = (time.time() - started_at) if started_at else 0.0
 
+            started_human: str | None = None
+            if started_at is not None:
+                try:
+                    dt = datetime.fromtimestamp(started_at, tz=UTC)
+                    started_human = dt.strftime("%H:%M UTC %d.%m.%Y")
+                except (OSError, OverflowError, ValueError):
+                    pass
+
             return ExperimentStatus(
                 experiment_id=exp_id,
                 phase=phase,
@@ -60,6 +69,7 @@ class ExperimentAdapter:
                 experiment_age_s=experiment_age_s,
                 target_temp=getattr(active, "target_temp", None) if active else None,
                 sample_id=getattr(active, "sample_id", None) if active else None,
+                experiment_started_human=started_human,
             )
         except Exception as exc:
             logger.warning("ExperimentAdapter.status failed: %s", exc)

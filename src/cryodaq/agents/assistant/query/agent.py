@@ -29,6 +29,10 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_UNKNOWN_USER,
 )
 from cryodaq.agents.assistant.query.router import QueryRouter
+from cryodaq.agents.assistant.query.ru_labels import (
+    phase_display_name,
+    ru_bool,
+)
 from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory
 
 if TYPE_CHECKING:
@@ -306,12 +310,12 @@ class AssistantQueryAgent:
             query=query,
             t_cold=t_cold,
             progress_pct=eta.progress * 100,
-            phase=eta.phase,
+            phase=phase_display_name(eta.phase),
             t_remaining_str=t_str,
             ci_low=eta.t_remaining_low_68,
             ci_high=eta.t_remaining_high_68,
             n_references=eta.n_references,
-            cooldown_active=eta.cooldown_active,
+            cooldown_active=ru_bool(eta.cooldown_active),
         )
 
     def _fmt_eta_vacuum(self, query: str, data: dict[str, Any]) -> str:
@@ -385,6 +389,9 @@ class AssistantQueryAgent:
                 experiment_age_text="—",
                 target_temp="нет данных",
             )
+        exp_id_text = status.experiment_id
+        if status.experiment_started_human:
+            exp_id_text += f" (начат {status.experiment_started_human})"
         age_h = status.experiment_age_s / 3600
         age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
         if status.phase_started_at is not None:
@@ -399,8 +406,8 @@ class AssistantQueryAgent:
         )
         return FORMAT_PHASE_INFO_USER.format(
             query=query,
-            experiment_id=status.experiment_id,
-            phase=status.phase or "нет данных",
+            experiment_id=exp_id_text,
+            phase=phase_display_name(status.phase),
             phase_started_text=phase_started,
             experiment_age_text=age_text,
             target_temp=target,
@@ -449,7 +456,7 @@ class AssistantQueryAgent:
 
         exp = cs.experiment
         exp_text = exp.experiment_id if exp else "нет активного эксперимента"
-        phase_text = exp.phase if exp else "—"
+        phase_text = phase_display_name(exp.phase) if exp else "—"
 
         temps_parts = [
             f"{ch}: {val:.2f} K" if val is not None else f"{ch}: нет"

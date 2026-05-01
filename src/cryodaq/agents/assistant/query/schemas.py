@@ -97,6 +97,7 @@ class ExperimentStatus:
     experiment_age_s: float
     target_temp: float | None = None
     sample_id: str | None = None
+    experiment_started_human: str | None = None
 
 
 @dataclass

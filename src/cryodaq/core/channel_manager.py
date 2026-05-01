@@ -168,25 +168,51 @@ class ChannelManager:
         """Получить список видимых channel_id."""
         return [ch_id for ch_id, info in self._channels.items() if info.get("visible", True)]
 
+    # Latin↔Cyrillic visually-confusable map (e.g. Latin T → Cyrillic Т)
+    _LATIN_TO_CYRILLIC: dict[int, str] = str.maketrans(
+        "TtAaKkMmOoPpHhEeBbCcXxYy",
+        "ТтАаКкМмООРрНнЕеВвСсХхУу",
+    )  # type: ignore[assignment]
+
     def find_by_name(self, name: str) -> str | None:
         """Find channel ID by display name (case-insensitive, partial match).
 
-        Two-pass: exact match first, then substring. Returns first hit or None.
-        Used by QueryRouter for late-binding channel resolution when operator
-        references a channel by display name rather than ID.
+        Three-pass: exact match, substring, then Latin→Cyrillic normalization.
+        Handles operator input from Latin keyboard (e.g. "T12" → "Т12").
+        Returns first hit or None.
         """
         name_lower = name.lower().strip()
         if not name_lower:
             return None
-        # First pass: exact match
+
+        # First pass: direct channel ID match (handles "T12" → "Т12" shortcut)
+        normalized_id = name.strip().translate(self._LATIN_TO_CYRILLIC)
+        if normalized_id in self._channels:
+            return normalized_id
+
+        # Second pass: exact name match
         for ch_id, ch_data in self._channels.items():
             if ch_data.get("name", "").lower() == name_lower:
                 return ch_id
-        # Second pass: substring match (e.g. "плита" matches "Азотная плита")
+
+        # Third pass: substring match (e.g. "плита" matches "Азотная плита")
         for ch_id, ch_data in self._channels.items():
             ch_name = ch_data.get("name", "").lower()
             if ch_name and (name_lower in ch_name or ch_name in name_lower):
                 return ch_id
+
+        # Fourth pass: Latin→Cyrillic normalized retry
+        norm = name_lower.translate(self._LATIN_TO_CYRILLIC)
+        if norm != name_lower:
+            for ch_id, ch_data in self._channels.items():
+                ch_name = ch_data.get("name", "").lower()
+                if ch_name == norm:
+                    return ch_id
+            for ch_id, ch_data in self._channels.items():
+                ch_name = ch_data.get("name", "").lower()
+                if ch_name and (norm in ch_name or ch_name in norm):
+                    return ch_id
+
         return None
 
     def get_cold_channels(self) -> list[str]:

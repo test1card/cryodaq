@@ -15,6 +15,7 @@ from typing import Any
 
 import aiohttp
 
+from cryodaq.agents.assistant.query.ru_labels import phase_display_name
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 
@@ -43,6 +44,13 @@ _HELP_TEXT = (
 )
 
 VALID_PHASES: frozenset[str] = frozenset(p.value for p in _ExperimentPhase)
+
+_ALARM_STATE_RU: dict[str, str] = {
+    "active": "активна",
+    "ok": "снята",
+    "acknowledged": "подтверждена",
+    "cleared": "снята",
+}
 # Backwards-compatible aliases for Telegram clients that learned the old
 # vocabulary. Mapped to canonical enum values at command-handler entry.
 _PHASE_ALIASES: dict[str, str] = {
@@ -436,7 +444,8 @@ class TelegramCommandBot:
             state = states.get(name)
             recent = [e for e in events if e.alarm_name == name]
             last = recent[-1] if recent else None
-            line = f"  <b>{name}</b> — {state.value if state else '?'}"
+            state_ru = _ALARM_STATE_RU.get(state.value, state.value) if state else "?"
+            line = f"  <b>{name}</b> — {state_ru}"
             if last:
                 line += f"\n    Канал: {last.channel}, значение: {last.value:.4g}"
             lines.append(line)
@@ -473,8 +482,10 @@ class TelegramCommandBot:
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)
         if normalized not in VALID_PHASES:
-            phases_str = ", ".join(sorted(VALID_PHASES))
-            await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_str}")
+            phases_ru = ", ".join(
+                phase_display_name(p) for p in sorted(VALID_PHASES)
+            )
+            await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_ru}")
             return
         phase = normalized
         if self._command_handler is None:
@@ -490,7 +501,7 @@ class TelegramCommandBot:
             }
         )
         if result.get("ok"):
-            await self._send(chat_id, f"✅ Фаза: → {phase}")
+            await self._send(chat_id, f"✅ Фаза изменена: → {phase_display_name(phase)}")
         else:
             await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
 

@@ -167,8 +167,10 @@ class TelegramNotifier:
             header = f"{event_emoji} {severity_emoji} ТРЕВОГА"
         elif event.event_type == "cleared":
             header = f"{event_emoji} Тревога снята"
+        elif event.event_type == "acknowledged":
+            header = f"{event_emoji} Тревога подтверждена"
         else:
-            header = f"{event_emoji} {event.event_type}"
+            header = f"{event_emoji} Событие тревоги"
 
         lines = [
             header,
