@@ -85,6 +85,7 @@ class TelegramCommandBot:
         command_handler: Callable[[dict], Awaitable[dict]] | None = None,
         commands_enabled: bool = True,
         query_agent: Any | None = None,
+        verify_ssl: bool = True,
     ) -> None:
         # Phase 2b Codex K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
@@ -106,6 +107,13 @@ class TelegramCommandBot:
         self._poll_interval_s = poll_interval_s
         self._command_handler = command_handler
         self._commands_enabled = commands_enabled
+        self._verify_ssl = verify_ssl
+        if not verify_ssl:
+            logger.warning(
+                "TelegramCommandBot SSL verification DISABLED. "
+                "Use only for dev environments behind VPN/SSL-inspection. "
+                "Production deployments must keep verify_ssl=true."
+            )
 
         # Runtime state — restored from the original constructor (the Phase 2b
         # rewrite of __init__ accidentally dropped these initializers).
@@ -139,8 +147,10 @@ class TelegramCommandBot:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             # total=None чтобы long-poll (timeout=5 в params) не упирался в общий таймаут
+            connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
+                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+                connector=connector,
             )
         return self._session
 

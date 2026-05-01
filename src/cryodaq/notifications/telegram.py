@@ -68,6 +68,7 @@ class TelegramNotifier:
         *,
         send_cleared: bool = True,
         timeout_s: float = 10.0,
+        verify_ssl: bool = True,
     ) -> None:
         # Phase 2b K.1: store the token in a SecretStr wrapper so accidental
         # repr/str/f-string never leaks it. The API URL is computed on demand.
@@ -75,7 +76,14 @@ class TelegramNotifier:
         self._chat_id = chat_id
         self._send_cleared = send_cleared
         self._timeout_s = timeout_s
+        self._verify_ssl = verify_ssl
         self._session: aiohttp.ClientSession | None = None
+        if not verify_ssl:
+            logger.warning(
+                "TelegramNotifier SSL verification DISABLED. "
+                "Use only for dev environments behind VPN/SSL-inspection. "
+                "Production deployments must keep verify_ssl=true."
+            )
 
     def _build_api_url(self, method: str = "sendMessage") -> str:
         """Compute the Telegram API URL on demand. Never store as attribute."""
@@ -115,6 +123,7 @@ class TelegramNotifier:
             chat_id=tg["chat_id"],
             send_cleared=bool(tg.get("send_cleared", True)),
             timeout_s=float(tg.get("timeout_s", 10.0)),
+            verify_ssl=bool(tg.get("verify_ssl", True)),
         )
 
     async def __call__(self, event: Any) -> None:
@@ -180,8 +189,10 @@ class TelegramNotifier:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self._timeout_s)
+                timeout=aiohttp.ClientTimeout(total=self._timeout_s),
+                connector=connector,
             )
         return self._session
 
