@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.query.schemas import (
     QueryAdapters,
     QueryCategory,
     QueryIntent,
 )
+
+if TYPE_CHECKING:
+    from cryodaq.core.channel_manager import ChannelManager
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +24,42 @@ class QueryRouter:
     The data dict is category-specific and is passed to the format LLM in Phase C.
     """
 
-    def __init__(self, adapters: QueryAdapters) -> None:
+    def __init__(
+        self,
+        adapters: QueryAdapters,
+        *,
+        channel_manager: ChannelManager | None = None,
+    ) -> None:
         self._adapters = adapters
+        self._channel_manager = channel_manager
+
+    def _resolve_target_channels(self, intent: QueryIntent) -> list[str] | None:
+        """Validate and resolve target_channels against current ChannelManager.
+
+        Late binding: reads ChannelManager fresh on every call, picks up renames.
+        """
+        if not intent.target_channels:
+            return None
+        if self._channel_manager is None:
+            return list(intent.target_channels)
+        all_ids = set(self._channel_manager.get_all())
+        resolved: list[str] = []
+        for raw in intent.target_channels:
+            raw_s = raw.strip()
+            if raw_s in all_ids:
+                resolved.append(raw_s)
+                continue
+            # Latin→Cyrillic normalization: "T12" → "Т12" (keyboard layout mismatch)
+            norm_id = self._channel_manager.normalize_channel_id(raw_s)
+            if norm_id != raw_s and norm_id in all_ids:
+                resolved.append(norm_id)
+                continue
+            match_id = self._channel_manager.find_by_name(raw_s)
+            if match_id:
+                resolved.append(match_id)
+                continue
+            logger.warning("QueryRouter: cannot resolve target_channel %r to known ID", raw)
+        return resolved if resolved else None
 
     async def fetch(
         self,
@@ -57,7 +94,7 @@ class QueryRouter:
             return {}
 
     async def _fetch_current_value(self, intent: QueryIntent) -> dict[str, Any]:
-        channels = intent.target_channels or []
+        channels = self._resolve_target_channels(intent) or []
         snapshot = self._adapters.broker_snapshot
         readings = {}
         for ch in channels:
@@ -91,7 +128,7 @@ class QueryRouter:
         return {"vacuum_eta": eta, "current_pressure": current_p}
 
     async def _fetch_range_stats(self, intent: QueryIntent) -> dict[str, Any]:
-        channels = intent.target_channels or []
+        channels = self._resolve_target_channels(intent) or []
         window = intent.time_window_minutes or 60
         results = {}
         for ch in channels:

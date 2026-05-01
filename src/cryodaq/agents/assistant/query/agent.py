@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.live.prompts import format_with_brand
+from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.intent_classifier import IntentClassifier
 from cryodaq.agents.assistant.query.prompts import (
     FORMAT_ALARM_STATUS_USER,
@@ -28,6 +29,10 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_UNKNOWN_USER,
 )
 from cryodaq.agents.assistant.query.router import QueryRouter
+from cryodaq.agents.assistant.query.ru_labels import (
+    phase_display_name,
+    ru_bool,
+)
 from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory
 
 if TYPE_CHECKING:
@@ -37,6 +42,7 @@ if TYPE_CHECKING:
         GenerationResult,
         OllamaClient,
     )
+    from cryodaq.core.channel_manager import ChannelManager
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,8 @@ class AssistantQueryAgent:
         intent_timeout_s: float = 10.0,
         format_timeout_s: float = 20.0,
         max_queries_per_chat_per_hour: int = 60,
+        channel_manager: ChannelManager | None = None,
+        chart_dispatcher: ChartDispatcher | None = None,
     ) -> None:
         self._ollama = ollama_client
         self._audit = audit_logger
@@ -69,12 +77,14 @@ class AssistantQueryAgent:
             model=intent_model,
             temperature=intent_temperature,
             timeout_s=intent_timeout_s,
+            channel_manager=channel_manager,
         )
-        self._router = QueryRouter(adapters)
+        self._router = QueryRouter(adapters, channel_manager=channel_manager)
         self._format_model = format_model
         self._format_temperature = format_temperature
         self._format_timeout_s = format_timeout_s
         self._max_per_hour = max_queries_per_chat_per_hour
+        self._chart_dispatcher = chart_dispatcher
         self._rate_buckets: dict[int | str, collections.deque[float]] = {}
 
     # ------------------------------------------------------------------
@@ -135,6 +145,8 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
+                if self._chart_dispatcher is not None and chat_id is not None:
+                    self._chart_dispatcher.dispatch(intent.category, data, chat_id)
         except Exception as exc:
             logger.warning(
                 "AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc
@@ -238,7 +250,9 @@ class AssistantQueryAgent:
             return FORMAT_OUT_OF_SCOPE_GENERAL_USER.format(
                 query=query, brand_name=self._config.brand_name
             )
-        return FORMAT_UNKNOWN_USER.format(query=query)
+        return FORMAT_UNKNOWN_USER.format(
+            query=query, brand_name=self._config.brand_name
+        )
 
     def _fmt_current_value(self, query: str, data: dict[str, Any]) -> str:
         readings = data.get("readings", {})
@@ -285,7 +299,7 @@ class AssistantQueryAgent:
                 ci_low=0.0,
                 ci_high=0.0,
                 n_references=0,
-                cooldown_active=False,
+                cooldown_active=ru_bool(False),
             )
         h = max(eta.t_remaining_hours, 0.0)
         t_str = f"{int(h)}ч {int((h % 1) * 60)}мин"
@@ -296,12 +310,12 @@ class AssistantQueryAgent:
             query=query,
             t_cold=t_cold,
             progress_pct=eta.progress * 100,
-            phase=eta.phase,
+            phase=phase_display_name(eta.phase),
             t_remaining_str=t_str,
             ci_low=eta.t_remaining_low_68,
             ci_high=eta.t_remaining_high_68,
             n_references=eta.n_references,
-            cooldown_active=eta.cooldown_active,
+            cooldown_active=ru_bool(eta.cooldown_active),
         )
 
     def _fmt_eta_vacuum(self, query: str, data: dict[str, Any]) -> str:
@@ -375,6 +389,9 @@ class AssistantQueryAgent:
                 experiment_age_text="—",
                 target_temp="нет данных",
             )
+        exp_id_text = status.experiment_id
+        if status.experiment_started_human:
+            exp_id_text += f" (начат {status.experiment_started_human})"
         age_h = status.experiment_age_s / 3600
         age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
         if status.phase_started_at is not None:
@@ -389,8 +406,8 @@ class AssistantQueryAgent:
         )
         return FORMAT_PHASE_INFO_USER.format(
             query=query,
-            experiment_id=status.experiment_id,
-            phase=status.phase or "нет данных",
+            experiment_id=exp_id_text,
+            phase=phase_display_name(status.phase),
             phase_started_text=phase_started,
             experiment_age_text=age_text,
             target_temp=target,
@@ -428,9 +445,18 @@ class AssistantQueryAgent:
                 alarms_text="нет данных",
             )
 
+        if getattr(cs, "snapshot_empty", False):
+            return (
+                f"Запрос: {query}\n\n"
+                "Поток данных только запускается — показания датчиков ещё "
+                "не поступили (обычно занимает 5–15 секунд после старта). "
+                "Скажи оператору по-человечески что система запускается "
+                "и предложи повторить запрос через несколько секунд."
+            )
+
         exp = cs.experiment
         exp_text = exp.experiment_id if exp else "нет активного эксперимента"
-        phase_text = exp.phase if exp else "—"
+        phase_text = phase_display_name(exp.phase) if exp else "—"
 
         temps_parts = [
             f"{ch}: {val:.2f} K" if val is not None else f"{ch}: нет"

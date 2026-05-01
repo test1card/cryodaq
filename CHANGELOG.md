@@ -9,6 +9,96 @@
 
 ## [Unreleased]
 
+## [0.47.4] — 2026-05-01 — HF: Comprehensive F30 query agent fix-up (Tracks A-F)
+
+Aggregates all outstanding F30 Live Query Agent regressions и pending features
+from real-world testing 2026-05-01. Supersedes planned v0.47.1/v0.47.2/v0.47.3
+hotfixes with a single comprehensive branch.
+
+### Added
+- **Track A**: `agent.yaml` query section с `enabled: true` — query agent now
+  actually starts (was disabled by missing config key, causing slash-only fallback).
+- **Track B**: Late-binding display name resolution in `IntentClassifier`
+  (`_build_channel_hint()` reads ChannelManager fresh per call). `ChannelManager.find_by_name()`
+  case-insensitive exact+substring match. `QueryRouter._resolve_target_channels()` fallback.
+- **Track C**: `BrokerSnapshot.oldest_age_s()`, `display_name()`, `latest_with_labels()`,
+  `channel_manager` param. `CompositeStatus.snapshot_empty` + `snapshot_age_s`.
+  `CompositeAdapter` uses dynamic K-unit channel discovery.
+  Warming-up branch in agent: "поток данных только запускается".
+- **Track D**: `render_temperature_chart()` → PNG via matplotlib. `ChartDispatcher.dispatch()`
+  fire-and-forget with `add_done_callback(_log_task_exception)`. `send_photo()` on
+  `TelegramCommandBot`. Charts attached to composite_status + range_stats queries.
+- **Track E**: `ru_labels.py` — `phase_display_name()`, `experiment_status_display()`,
+  `ru_bool()`. Full russification of all FORMAT_* prompts. `GREETING` category added.
+  `test_format_prompts_no_english_leakage` regression test.
+- **Track F**: `FORMAT_COMPOSITE_STATUS_USER` anti-pattern guard — НЕ начинай +
+  "Прогноз захолаживания" label + concrete bad example (НЕ ДЕЛАЙ ТАК).
+- SSL config knob (v0.47.1 invariant): `verify_ssl` param wired to both
+  `TelegramNotifier` and `TelegramCommandBot` via `aiohttp.TCPConnector(ssl=...)`.
+  WARNING logged when disabled. `test_telegram_ssl_verification.py` created.
+- ≥90 new tests across all tracks.
+
+### Fixed
+- **CRITICAL**: "Я понимаю только slash-команды" on all queries — `query_enabled` was
+  False (missing `query:` section in agent.yaml). Fixed by adding `query: enabled: true`.
+- "Что на азотной плите?" now resolves to Т12 via ChannelManager late-binding.
+- Composite response no longer starts with "Т7 Детектор," (anti-pattern guard).
+- "в фазе cooldown" → "в фазе захолаживания" (full russification).
+- Empty BrokerSnapshot on engine startup → "поток данных только запускается" instead of "температуры отсутствуют".
+- Charts now attach to composite_status queries (dispatcher + send_photo wired).
+- `ChannelManager.find_by_name`: empty-name guard prevents false substring matches.
+
+### Test baseline
+- ≥291 passed, 0 new failures (pre-existing failures unchanged)
+
+### Reference
+- CC_PROMPT_HF_V0.47.2_FIXUP_REGRESSION_BLOCK.md
+
+## [0.47.3] — 2026-05-01 — HF: Display name resolution в Intent Classifier (LATE BINDING)
+
+Hotfix для реального UX-бага: оператор переименовал каналы через GUI
+ChannelEditor, но Гемма не resolve'ила запросы по display name. "Что на
+азотной плите?" игнорировало Т12 и возвращало generic mix.
+
+Ключевое архитектурное решение: **LATE BINDING** — классификатор читает
+ChannelManager при КАЖДОМ вызове `classify()`. Engine restart НЕ НУЖЕН.
+Operator names sensors during preparation phase, then queries Гемма in
+measurement phase — all renames reflected immediately.
+
+### Added
+- `IntentClassifier` принимает `channel_manager: ChannelManager | None`.
+  Строит таблицу channel_id → display_name в system prompt при КАЖДОМ
+  `classify()` вызове (late binding). GUI ChannelEditor renames picked up
+  on next query without engine restart.
+- `ChannelManager.find_by_name(name)` — case-insensitive exact + substring
+  match: display name → channel ID. Two-pass to avoid substring bias.
+- `QueryRouter` принимает `channel_manager`. Метод `_resolve_target_channels()`
+  валидирует и fuzzy-матчит `target_channels` из classifier против текущего
+  ChannelManager state (late binding).
+- 22 новых теста: `tests/agents/assistant/test_display_name_resolution.py`
+  — covering classifier hint rebuild, rename mid-session (LATE BINDING),
+  router resolution, ChannelManager.find_by_name.
+
+### Fixed
+- "Что на азотной плите?" — Гемма resolves operator vocabulary
+  (renamed via ChannelEditor) к channel IDs.
+- Sensor renaming через GUI ChannelEditor немедленно отражается в Гемма
+  responses на NEXT query — NO engine restart needed.
+- `ChannelManager.find_by_name`: substring second pass теперь пропускает
+  каналы без поля `name` (пустая строка `""` всегда подстрока любого
+  запроса — bug fix).
+
+### Test baseline
+- 50 passed (22 new + 28 existing classifier/router)
+- 0 failures
+
+### Tags
+- `v0.47.3` — (pending Phase D tag)
+
+### Reference
+- ARCHITECT REQUEST: realworld testing 2026-05-01 13:06
+- HF spec: CC_PROMPT_HF_V0.47.3_DISPLAY_NAME_RESOLUTION.md
+
 ## [0.47.0] — 2026-05-01 — F30 Live Query Agent
 
 Implements the Live Query Agent (F30): operators can now send free-text

@@ -15,6 +15,7 @@ class QueryCategory(Enum):
     PHASE_INFO = "phase_info"
     ALARM_STATUS = "alarm_status"
     COMPOSITE_STATUS = "composite_status"
+    GREETING = "greeting"
     OUT_OF_SCOPE_HISTORICAL = "out_of_scope_historical"
     OUT_OF_SCOPE_GENERAL = "out_of_scope_general"
     UNKNOWN = "unknown"
@@ -96,6 +97,7 @@ class ExperimentStatus:
     experiment_age_s: float
     target_temp: float | None = None
     sample_id: str | None = None
+    experiment_started_human: str | None = None
 
 
 @dataclass
@@ -120,3 +122,5 @@ class CompositeStatus:
     active_alarms: list[ActiveAlarmInfo]
     key_temperatures: dict[str, float | None]
     current_pressure: float | None
+    snapshot_empty: bool = False
+    snapshot_age_s: float | None = None

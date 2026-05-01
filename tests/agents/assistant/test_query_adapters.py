@@ -313,12 +313,21 @@ async def _make_composite_adapter(
     exp_status=None,
 ) -> tuple[CompositeAdapter, MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]:
     snap = MagicMock()
-    snap.latest_all = AsyncMock(
-        return_value={} if snapshot_all is None else snapshot_all
-        if not isinstance(snapshot_all, Exception) else None
-    )
+    # CompositeAdapter uses latest_with_labels() — convert Reading mocks to labeled format
     if isinstance(snapshot_all, Exception):
-        snap.latest_all.side_effect = snapshot_all
+        snap.latest_with_labels = AsyncMock(side_effect=snapshot_all)
+    else:
+        raw = snapshot_all or {}
+        labeled: dict = {}
+        for ch, reading in raw.items():
+            labeled[ch] = {
+                "value": getattr(reading, "value", reading),
+                "unit": getattr(reading, "unit", "K"),
+                "display_name": ch,
+                "timestamp": getattr(reading, "timestamp", datetime.now(UTC)),
+            }
+        snap.latest_with_labels = AsyncMock(return_value=labeled)
+    snap.oldest_age_s = AsyncMock(return_value=None)
 
     cooldown = MagicMock()
     cooldown.eta = AsyncMock(return_value=cd_eta)
@@ -356,9 +365,10 @@ async def test_composite_adapter_parallel_fetch() -> None:
 async def test_composite_adapter_handles_partial_failure() -> None:
     """Single adapter exception does not crash composite fetch."""
     adapter, snap, *_ = await _make_composite_adapter()
-    snap.latest_all.side_effect = RuntimeError("broker unavailable")
+    snap.latest_with_labels.side_effect = RuntimeError("broker unavailable")
 
     result = await adapter.status()
     assert isinstance(result, CompositeStatus)
-    # Gracefully degraded — snapshot failed but status still returned
-    assert result.key_temperatures["T_cold"] is None
+    # Gracefully degraded — snapshot failed, key_temperatures is empty
+    assert result.key_temperatures == {}
+    assert result.snapshot_empty is True

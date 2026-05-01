@@ -15,6 +15,7 @@ from typing import Any
 
 import aiohttp
 
+from cryodaq.agents.assistant.query.ru_labels import phase_display_name
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 
@@ -43,6 +44,13 @@ _HELP_TEXT = (
 )
 
 VALID_PHASES: frozenset[str] = frozenset(p.value for p in _ExperimentPhase)
+
+_ALARM_STATE_RU: dict[str, str] = {
+    "active": "активна",
+    "ok": "снята",
+    "acknowledged": "подтверждена",
+    "cleared": "снята",
+}
 # Backwards-compatible aliases for Telegram clients that learned the old
 # vocabulary. Mapped to canonical enum values at command-handler entry.
 _PHASE_ALIASES: dict[str, str] = {
@@ -51,6 +59,7 @@ _PHASE_ALIASES: dict[str, str] = {
 }
 # Legacy mutable list kept for any callers that import it. Prefer VALID_PHASES.
 _VALID_PHASES = sorted(VALID_PHASES)
+_COMMAND_FAILED_TEXT = "❌ Команда не выполнена. Подробности в логах."
 
 
 class _TelegramAuthError(Exception):
@@ -325,7 +334,7 @@ class TelegramCommandBot:
 
         if self._query_agent is None:
             await self._send(
-                chat_id, "Я понимаю только slash-команды. /help для списка."
+                chat_id, "Я понимаю только команды с косой чертой. /help для списка."
             )
             return
 
@@ -436,7 +445,8 @@ class TelegramCommandBot:
             state = states.get(name)
             recent = [e for e in events if e.alarm_name == name]
             last = recent[-1] if recent else None
-            line = f"  <b>{name}</b> — {state.value if state else '?'}"
+            state_ru = _ALARM_STATE_RU.get(state.value, state.value) if state else "?"
+            line = f"  <b>{name}</b> — {state_ru}"
             if last:
                 line += f"\n    Канал: {last.channel}, значение: {last.value:.4g}"
             lines.append(line)
@@ -450,7 +460,7 @@ class TelegramCommandBot:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
             return
         if self._command_handler is None:
-            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
@@ -465,7 +475,8 @@ class TelegramCommandBot:
         if result.get("ok"):
             await self._send(chat_id, "✅ Записано в журнал")
         else:
-            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
+            logger.warning("Telegram /log failed: %s", result.get("error"))
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
         # Phase 2c Codex I.2: accept legacy aliases (cooling/warming) and
@@ -473,12 +484,14 @@ class TelegramCommandBot:
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)
         if normalized not in VALID_PHASES:
-            phases_str = ", ".join(sorted(VALID_PHASES))
-            await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_str}")
+            phases_ru = ", ".join(
+                phase_display_name(p) for p in sorted(VALID_PHASES)
+            )
+            await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_ru}")
             return
         phase = normalized
         if self._command_handler is None:
-            await self._send(chat_id, "❌ Команды недоступны (нет command_handler)")
+            await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
@@ -490,9 +503,10 @@ class TelegramCommandBot:
             }
         )
         if result.get("ok"):
-            await self._send(chat_id, f"✅ Фаза: → {phase}")
+            await self._send(chat_id, f"✅ Фаза изменена: → {phase_display_name(phase)}")
         else:
-            await self._send(chat_id, f"❌ Ошибка: {result.get('error', '?')}")
+            logger.warning("Telegram /phase failed: %s", result.get("error"))
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     # ------------------------------------------------------------------
     # Send
@@ -521,3 +535,25 @@ class TelegramCommandBot:
                 await self._send(chat_id, text)
         else:
             logger.debug("_send_to_all: нет allowed_chat_ids, сообщение не отправлено")
+
+    async def send_photo(
+        self,
+        chat_id: int | str,
+        photo: bytes,
+        caption: str = "",
+    ) -> None:
+        """Отправить PNG-изображение в указанный chat_id через sendPhoto."""
+        try:
+            import aiohttp  # noqa: PLC0415
+            session = await self._get_session()
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("photo", photo, filename="chart.png", content_type="image/png")
+            if caption:
+                form.add_field("caption", caption)
+            async with session.post(f"{self._api}/sendPhoto", data=form) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error("Telegram sendPhoto %d: %s", resp.status, body[:200])
+        except Exception as exc:
+            logger.error("Ошибка отправки Telegram фото: %s", exc)

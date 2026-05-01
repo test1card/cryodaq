@@ -2012,7 +2012,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     enabled=_gemma_config.audit_enabled,
                 )
 
-            _q_broker_snap = BrokerSnapshot(broker)
+            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
             await _q_broker_snap.start()
 
             _q_cooldown = CooldownAdapter(cooldown_service)
@@ -2027,6 +2027,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                 alarms=_q_alarms,
                 experiment=_q_experiment,
             )
+
+            from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher  # noqa: PLC0415
+
+            _q_chart_dispatcher: ChartDispatcher | None = None
+            if telegram_bot is not None:
+                _q_chart_dispatcher = ChartDispatcher(
+                    send_photo=telegram_bot.send_photo
+                )
 
             _query_agent = AssistantQueryAgent(
                 ollama_client=_q_ollama,
@@ -2048,6 +2056,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                 intent_timeout_s=_gemma_config.query_intent_timeout_s,
                 format_timeout_s=_gemma_config.query_format_timeout_s,
                 max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
+                channel_manager=get_channel_manager(),
+                chart_dispatcher=_q_chart_dispatcher,
             )
 
             if telegram_bot is not None:

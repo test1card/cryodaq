@@ -72,7 +72,21 @@ def test_format_message_activated() -> None:
     assert "ls218s/T_STAGE" in msg or "ls218s" in msg, "channel not in message"
     assert "350" in msg, "value not in message"
     assert "300" in msg, "threshold not in message"
-    assert "CRITICAL" in msg, "severity label not in message"
+    assert "критическая" in msg, "severity label not russified"
+    assert "CRITICAL" not in msg, "raw English severity leaked"
+
+
+def test_format_message_severity_labels_are_russian() -> None:
+    notifier = _notifier()
+
+    for severity, expected in (
+        (AlarmSeverity.INFO, "информационная"),
+        (AlarmSeverity.WARNING, "предупреждение"),
+        (AlarmSeverity.CRITICAL, "критическая"),
+    ):
+        msg = notifier._format_message(_event(severity=severity))
+        assert f"Уровень: {expected}" in msg
+        assert severity.value.upper() not in msg
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +278,37 @@ async def test_cmd_log_writes_entry() -> None:
     assert cmd["author"] == "testuser"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
+
+
+async def test_query_agent_missing_reply_has_no_english_terms() -> None:
+    bot = _make_bot(query_agent=None)
+
+    await bot._handle_text(_tg_msg("что сейчас?"))
+
+    text: str = bot._send.call_args[0][1]
+    assert "slash" not in text.lower()
+    assert "команды" in text
+
+
+async def test_unavailable_command_handler_reply_has_no_english_terms() -> None:
+    bot = _make_bot(command_handler=None)
+
+    await bot._handle_message(_tg_msg("/log запись"))
+
+    text: str = bot._send.call_args[0][1]
+    assert "command_handler" not in text
+    assert "обработчик" in text
+
+
+async def test_command_handler_failure_does_not_expose_raw_english_error() -> None:
+    handler = AsyncMock(return_value={"ok": False, "error": "backend failure"})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/log запись"))
+
+    text: str = bot._send.call_args[0][1]
+    assert "backend failure" not in text
+    assert "Подробности" in text
 
 
 async def test_cmd_log_empty_text_returns_error() -> None:

@@ -168,6 +168,60 @@ class ChannelManager:
         """Получить список видимых channel_id."""
         return [ch_id for ch_id, info in self._channels.items() if info.get("visible", True)]
 
+    # Latin↔Cyrillic visually-confusable map (e.g. Latin T → Cyrillic Т)
+    _LATIN_TO_CYRILLIC: dict[int, str] = str.maketrans(
+        "TtAaKkMmOoPpHhEeBbCcXxYy",
+        "ТтАаКкМмООРрНнЕеВвСсХхУу",
+    )  # type: ignore[assignment]
+
+    def find_by_name(self, name: str) -> str | None:
+        """Find channel ID by display name (case-insensitive, partial match).
+
+        Four-pass: exact ID/name match, substring, then Latin→Cyrillic normalization.
+        Returns first hit or None.
+        """
+        name_lower = name.lower().strip()
+        if not name_lower:
+            return None
+
+        # First pass: direct channel ID match, including Latin→Cyrillic fallback.
+        normalized_id = name.strip().translate(self._LATIN_TO_CYRILLIC)
+        if normalized_id in self._channels:
+            return normalized_id
+
+        # Second pass: exact name match
+        for ch_id, ch_data in self._channels.items():
+            if ch_data.get("name", "").lower() == name_lower:
+                return ch_id
+
+        # Third pass: substring match (e.g. "плита" matches "Азотная плита")
+        for ch_id, ch_data in self._channels.items():
+            ch_name = ch_data.get("name", "").lower()
+            if ch_name and (name_lower in ch_name or ch_name in name_lower):
+                return ch_id
+
+        # Fourth pass: Latin→Cyrillic normalized retry (e.g. "T12" name → "Т12" name)
+        norm = name_lower.translate(self._LATIN_TO_CYRILLIC)
+        if norm != name_lower:
+            for ch_id, ch_data in self._channels.items():
+                ch_name = ch_data.get("name", "").lower()
+                if ch_name == norm:
+                    return ch_id
+            for ch_id, ch_data in self._channels.items():
+                ch_name = ch_data.get("name", "").lower()
+                if ch_name and (norm in ch_name or ch_name in norm):
+                    return ch_id
+
+        return None
+
+    def normalize_channel_id(self, ch_ref: str) -> str:
+        """Normalize a channel ID reference: Latin→Cyrillic confusables.
+
+        Used by QueryRouter to handle operator keyboard layout mismatch.
+        'T12' (Latin T) → 'Т12' (Cyrillic Т).
+        """
+        return ch_ref.strip().translate(self._LATIN_TO_CYRILLIC)
+
     def get_cold_channels(self) -> list[str]:
         """Return list of channel IDs marked as cold (cryogenic).
 
