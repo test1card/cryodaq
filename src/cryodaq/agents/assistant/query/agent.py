@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         GenerationResult,
         OllamaClient,
     )
+    from cryodaq.core.channel_manager import ChannelManager
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class AssistantQueryAgent:
         intent_timeout_s: float = 10.0,
         format_timeout_s: float = 20.0,
         max_queries_per_chat_per_hour: int = 60,
+        channel_manager: ChannelManager | None = None,
     ) -> None:
         self._ollama = ollama_client
         self._audit = audit_logger
@@ -69,8 +71,9 @@ class AssistantQueryAgent:
             model=intent_model,
             temperature=intent_temperature,
             timeout_s=intent_timeout_s,
+            channel_manager=channel_manager,
         )
-        self._router = QueryRouter(adapters)
+        self._router = QueryRouter(adapters, channel_manager=channel_manager)
         self._format_model = format_model
         self._format_temperature = format_temperature
         self._format_timeout_s = format_timeout_s

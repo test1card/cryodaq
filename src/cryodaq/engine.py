@@ -2045,6 +2045,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 intent_timeout_s=_gemma_config.query_intent_timeout_s,
                 format_timeout_s=_gemma_config.query_format_timeout_s,
                 max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
+                channel_manager=get_channel_manager(),
             )
 
             if telegram_bot is not None:

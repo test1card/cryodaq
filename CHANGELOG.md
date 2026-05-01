@@ -9,6 +9,51 @@
 
 ## [Unreleased]
 
+## [0.47.3] — 2026-05-01 — HF: Display name resolution в Intent Classifier (LATE BINDING)
+
+Hotfix для реального UX-бага: оператор переименовал каналы через GUI
+ChannelEditor, но Гемма не resolve'ила запросы по display name. "Что на
+азотной плите?" игнорировало Т12 и возвращало generic mix.
+
+Ключевое архитектурное решение: **LATE BINDING** — классификатор читает
+ChannelManager при КАЖДОМ вызове `classify()`. Engine restart НЕ НУЖЕН.
+Operator names sensors during preparation phase, then queries Гемма in
+measurement phase — all renames reflected immediately.
+
+### Added
+- `IntentClassifier` принимает `channel_manager: ChannelManager | None`.
+  Строит таблицу channel_id → display_name в system prompt при КАЖДОМ
+  `classify()` вызове (late binding). GUI ChannelEditor renames picked up
+  on next query without engine restart.
+- `ChannelManager.find_by_name(name)` — case-insensitive exact + substring
+  match: display name → channel ID. Two-pass to avoid substring bias.
+- `QueryRouter` принимает `channel_manager`. Метод `_resolve_target_channels()`
+  валидирует и fuzzy-матчит `target_channels` из classifier против текущего
+  ChannelManager state (late binding).
+- 22 новых теста: `tests/agents/assistant/test_display_name_resolution.py`
+  — covering classifier hint rebuild, rename mid-session (LATE BINDING),
+  router resolution, ChannelManager.find_by_name.
+
+### Fixed
+- "Что на азотной плите?" — Гемма resolves operator vocabulary
+  (renamed via ChannelEditor) к channel IDs.
+- Sensor renaming через GUI ChannelEditor немедленно отражается в Гемма
+  responses на NEXT query — NO engine restart needed.
+- `ChannelManager.find_by_name`: substring second pass теперь пропускает
+  каналы без поля `name` (пустая строка `""` всегда подстрока любого
+  запроса — bug fix).
+
+### Test baseline
+- 50 passed (22 new + 28 existing classifier/router)
+- 0 failures
+
+### Tags
+- `v0.47.3` — (pending Phase D tag)
+
+### Reference
+- ARCHITECT REQUEST: realworld testing 2026-05-01 13:06
+- HF spec: CC_PROMPT_HF_V0.47.3_DISPLAY_NAME_RESOLUTION.md
+
 ## [0.47.0] — 2026-05-01 — F30 Live Query Agent
 
 Implements the Live Query Agent (F30): operators can now send free-text

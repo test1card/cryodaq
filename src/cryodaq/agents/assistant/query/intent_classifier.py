@@ -19,10 +19,36 @@ from cryodaq.agents.assistant.query.schemas import QueryCategory, QueryIntent
 
 if TYPE_CHECKING:
     from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
+    from cryodaq.core.channel_manager import ChannelManager
 
 logger = logging.getLogger(__name__)
 
 _UNKNOWN_INTENT = QueryIntent(category=QueryCategory.UNKNOWN)
+
+
+def _build_channel_hint(channel_manager: ChannelManager | None) -> str:
+    """Build channel reference table for classifier prompt.
+
+    Reads CURRENT ChannelManager state on every call — reflects all renames
+    done via GUI ChannelEditor since engine startup (late binding).
+    """
+    if channel_manager is None:
+        return ""
+    rows: list[str] = []
+    for ch_id, ch_data in channel_manager.get_all().items():
+        if not channel_manager.is_visible(ch_id):
+            continue
+        name = ch_data.get("name", "")
+        rows.append(f"  {ch_id} → \"{name}\"" if name else f"  {ch_id}")
+    if not rows:
+        return ""
+    return (
+        "\n\nДоступные каналы (channel_id → название):\n"
+        + "\n".join(rows)
+        + "\n\nКогда оператор называет канал по имени (например "
+        "\"азотная плита\", \"болометр\", \"детектор\"), "
+        "найди соответствующий channel_id и положи в target_channels.\n"
+    )
 
 _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 
@@ -94,21 +120,25 @@ class IntentClassifier:
         temperature: float = 0.1,
         max_tokens: int = 2048,
         timeout_s: float | None = None,
+        channel_manager: ChannelManager | None = None,
     ) -> None:
         self._ollama = ollama_client
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._timeout_s = timeout_s
+        self._channel_manager = channel_manager  # stored by reference, never cached
 
     async def classify(self, query: str) -> QueryIntent:
         """Classify query text into a QueryIntent. Never raises."""
         try:
+            channel_hint = _build_channel_hint(self._channel_manager)
+            system_prompt = INTENT_CLASSIFIER_SYSTEM + channel_hint
             user_prompt = INTENT_CLASSIFIER_USER.format(query=query)
             result = await self._ollama.generate(
                 user_prompt,
                 model=self._model,
-                system=INTENT_CLASSIFIER_SYSTEM,
+                system=system_prompt,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
             )
