@@ -521,3 +521,25 @@ class TelegramCommandBot:
                 await self._send(chat_id, text)
         else:
             logger.debug("_send_to_all: нет allowed_chat_ids, сообщение не отправлено")
+
+    async def send_photo(
+        self,
+        chat_id: int | str,
+        photo: bytes,
+        caption: str = "",
+    ) -> None:
+        """Отправить PNG-изображение в указанный chat_id через sendPhoto."""
+        try:
+            import aiohttp  # noqa: PLC0415
+            session = await self._get_session()
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("photo", photo, filename="chart.png", content_type="image/png")
+            if caption:
+                form.add_field("caption", caption)
+            async with session.post(f"{self._api}/sendPhoto", data=form) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error("Telegram sendPhoto %d: %s", resp.status, body[:200])
+        except Exception as exc:
+            logger.error("Ошибка отправки Telegram фото: %s", exc)

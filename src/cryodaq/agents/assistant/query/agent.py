@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.live.prompts import format_with_brand
+from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.intent_classifier import IntentClassifier
 from cryodaq.agents.assistant.query.prompts import (
     FORMAT_ALARM_STATUS_USER,
@@ -62,6 +63,7 @@ class AssistantQueryAgent:
         format_timeout_s: float = 20.0,
         max_queries_per_chat_per_hour: int = 60,
         channel_manager: ChannelManager | None = None,
+        chart_dispatcher: ChartDispatcher | None = None,
     ) -> None:
         self._ollama = ollama_client
         self._audit = audit_logger
@@ -78,6 +80,7 @@ class AssistantQueryAgent:
         self._format_temperature = format_temperature
         self._format_timeout_s = format_timeout_s
         self._max_per_hour = max_queries_per_chat_per_hour
+        self._chart_dispatcher = chart_dispatcher
         self._rate_buckets: dict[int | str, collections.deque[float]] = {}
 
     # ------------------------------------------------------------------
@@ -138,6 +141,8 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
+                if self._chart_dispatcher is not None and chat_id is not None:
+                    self._chart_dispatcher.dispatch(intent.category, data, chat_id)
         except Exception as exc:
             logger.warning(
                 "AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc

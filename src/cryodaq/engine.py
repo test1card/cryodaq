@@ -2028,6 +2028,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                 experiment=_q_experiment,
             )
 
+            from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher  # noqa: PLC0415
+
+            _q_chart_dispatcher: ChartDispatcher | None = None
+            if telegram_bot is not None:
+                _q_chart_dispatcher = ChartDispatcher(
+                    send_photo=telegram_bot.send_photo
+                )
+
             _query_agent = AssistantQueryAgent(
                 ollama_client=_q_ollama,
                 audit_logger=_q_audit,
@@ -2049,6 +2057,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 format_timeout_s=_gemma_config.query_format_timeout_s,
                 max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
                 channel_manager=get_channel_manager(),
+                chart_dispatcher=_q_chart_dispatcher,
             )
 
             if telegram_bot is not None:
