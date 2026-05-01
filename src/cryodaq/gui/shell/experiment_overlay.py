@@ -34,6 +34,7 @@ from cryodaq.core.phase_labels import (
 )
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_content.eta_display import _format_duration_ru
+from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,10 @@ class ExperimentOverlay(QWidget):
         # Divider
         root.addWidget(self._make_divider())
 
+        # F27 — Composition photos section
+        self._photos_widget = CompositionPhotosWidget()
+        root.addWidget(self._photos_widget)
+
         # Footer: ⋯ left (via menu), Завершить right
         footer = QHBoxLayout()
         footer.addStretch()
@@ -517,6 +522,10 @@ class ExperimentOverlay(QWidget):
             if exp_id and exp_id == active_id:
                 self._reload_timeline()
 
+    def on_photo_attached(self, payload: dict) -> None:
+        """Handle experiment.photo_attached EventBus event — reload thumbnails."""
+        self._photos_widget.on_photo_attached(payload)
+
     def set_connected(self, connected: bool) -> None:
         """Host Integration Contract — gate action buttons on connection.
 
@@ -565,6 +574,7 @@ class ExperimentOverlay(QWidget):
             self._finalize_btn.setEnabled(False)
             self._prev_btn.setVisible(False)
             self._next_btn.setVisible(False)
+            self._photos_widget.load_from_artifact_dir(None)
             return
 
         exp = self._experiment
@@ -578,6 +588,9 @@ class ExperimentOverlay(QWidget):
         template_name = template.get("name", template_id)
         started = self._format_datetime(exp.get("start_time", ""))
         self._passport_label.setText(f"{eid} \u00b7 {template_name} \u00b7 {started}")
+
+        # F27 \u2014 load composition photos
+        self._photos_widget.load_from_artifact_dir(exp.get("artifact_dir"))
 
         # Phase pills with durations
         current_phase = exp.get("current_phase")

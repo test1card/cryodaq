@@ -29,11 +29,11 @@ from typing import Any
 
 import yaml
 
-from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
-from cryodaq.agents.assistant.live.agent import AssistantLiveAgent, AssistantConfig
-from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.agents.assistant.live.output_router import OutputRouter
+from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -71,6 +71,7 @@ from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.drivers.base import Reading
+from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
@@ -1862,6 +1863,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Уведомления (один раз разбираем YAML) ---
     periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
+    _photo_handler: CompositionPhotoHandler | None = None
     escalation_service: EscalationService | None = None
     notifications_cfg = _cfg("notifications")
     if notifications_cfg.exists():
@@ -1920,6 +1922,16 @@ async def _run_engine(*, mock: bool = False) -> None:
                         "TelegramCommandBot создан (allowed=%d chat ids)",
                         len(allowed_ids),
                     )
+
+                    # F27 — composition photo handler
+                    _photo_handler = CompositionPhotoHandler(
+                        bot=telegram_bot,
+                        experiment_manager=experiment_manager,
+                        channel_manager=get_channel_manager(),
+                        event_bus=event_bus,
+                    )
+                    telegram_bot._photo_handler = _photo_handler
+                    logger.info("CompositionPhotoHandler создан")
 
             # EscalationService
             if token_valid and notif_raw.get("escalation"):
@@ -1988,7 +2000,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     _q_broker_snap: Any = None
     if _gemma_config is not None and _gemma_config.query_enabled:
         try:
-            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
             from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
             from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
             from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
@@ -1996,6 +2007,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
             from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
             from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
+            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
             from cryodaq.agents.assistant.query.schemas import QueryAdapters
 
             try:
@@ -2028,7 +2040,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                 experiment=_q_experiment,
             )
 
-            from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher  # noqa: PLC0415
+            from cryodaq.agents.assistant.query.chart_dispatcher import (
+                ChartDispatcher,  # noqa: PLC0415
+            )
 
             _q_chart_dispatcher: ChartDispatcher | None = None
             if telegram_bot is not None:
@@ -2083,6 +2097,8 @@ async def _run_engine(*, mock: bool = False) -> None:
         await periodic_reporter.start()
     if telegram_bot is not None:
         await telegram_bot.start()
+    if _photo_handler is not None:
+        await _photo_handler.start()
     if gemma_agent is not None:
         try:
             await gemma_agent.start()
@@ -2237,6 +2253,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _q_broker_snap is not None:
         await _q_broker_snap.stop()
         logger.info("QueryAgent BrokerSnapshot остановлен")
+
+    if _photo_handler is not None:
+        await _photo_handler.stop()
+        logger.info("CompositionPhotoHandler остановлен")
 
     if telegram_bot is not None:
         await telegram_bot.stop()

@@ -681,6 +681,108 @@ class ExperimentManager:
     def get_active_experiment(self) -> ExperimentInfo | None:
         return self._active
 
+    def attach_composition_photo(
+        self,
+        experiment_id: str,
+        photo_bytes: bytes,
+        *,
+        caption: str = "",
+        operator_username: str = "",
+        file_id: str = "",
+        channels_mentioned: list[str] | None = None,
+        mime_type: str = "image/jpeg",
+    ) -> dict[str, Any]:
+        """Persist composition photo to experiment artifact dir.
+
+        Writes photo file + JSON sidecar atomically. Appends artifact_index entry
+        to metadata.json. Returns dict with filename, path, metadata.
+        """
+        artifact_dir = self._artifact_dir(experiment_id)
+        if not artifact_dir.exists():
+            raise ValueError(f"Experiment artifact dir not found: {artifact_dir}")
+
+        composition_dir = artifact_dir / "composition"
+        composition_dir.mkdir(parents=True, exist_ok=True)
+
+        now = datetime.now(UTC)
+        ts_str = now.strftime("%Y%m%dT%H%M%S")
+        ext = "jpg" if "jpeg" in mime_type.lower() else "png"
+        existing = list(composition_dir.glob("*.jpg")) + list(composition_dir.glob("*.png"))
+        seq = len(existing) + 1
+        filename = f"{ts_str}_{seq:03d}.{ext}"
+        photo_path = composition_dir / filename
+        sidecar_path = composition_dir / f"{ts_str}_{seq:03d}.json"
+
+        dimensions = _validate_photo_dimensions(photo_bytes)
+        if dimensions is None:
+            raise ValueError("Invalid or unreadable photo data")
+
+        from cryodaq.core.atomic_write import atomic_write_bytes, atomic_write_text
+
+        atomic_write_bytes(photo_path, photo_bytes)
+
+        # Phase at upload time (only available for active experiment)
+        phase_at_upload: str | None = None
+        exp_title = ""
+        if self._active and self._active.experiment_id == experiment_id:
+            try:
+                phase_at_upload = self.get_current_phase()
+            except Exception:
+                pass
+            exp_title = self._active.title or self._active.name
+
+        sidecar_meta: dict[str, Any] = {
+            "filename": filename,
+            "telegram_file_id": file_id,
+            "telegram_username": operator_username,
+            "caption": caption[:500] if caption else "",
+            "uploaded_at": now.isoformat(),
+            "file_size_bytes": len(photo_bytes),
+            "dimensions": dimensions,
+            "mime_type": mime_type,
+            "experiment_id": experiment_id,
+            "experiment_title": exp_title,
+            "phase_at_upload": phase_at_upload,
+            "channels_mentioned": list(channels_mentioned or []),
+        }
+        atomic_write_text(
+            sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2)
+        )
+
+        artifact_entry: dict[str, Any] = {
+            "artifact_id": f"composition_photo:operator:{filename}",
+            "category": "composition_photo",
+            "role": "operator_upload",
+            "path": str(photo_path),
+            "summary": {
+                "uploaded_at": sidecar_meta["uploaded_at"],
+                "telegram_username": operator_username,
+                "caption": sidecar_meta["caption"],
+                "file_size_bytes": len(photo_bytes),
+                "dimensions": dimensions,
+                "phase_at_upload": phase_at_upload,
+                "channels_mentioned": sidecar_meta["channels_mentioned"],
+            },
+        }
+        self._append_composition_photo_to_metadata(experiment_id, artifact_entry)
+
+        return {"filename": filename, "path": str(photo_path), "metadata": sidecar_meta}
+
+    def _append_composition_photo_to_metadata(
+        self, experiment_id: str, entry: dict[str, Any]
+    ) -> None:
+        """Atomically append a composition_photo entry to artifact_index in metadata.json."""
+        metadata_path = self._metadata_path(experiment_id)
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        payload = self._read_metadata_payload(experiment_id)
+        artifact_index: list[dict[str, Any]] = list(payload.get("artifact_index", []))
+        artifact_index.append(entry)
+        payload["artifact_index"] = artifact_index
+        atomic_write_text(
+            metadata_path, json.dumps(payload, ensure_ascii=False, indent=2)
+        )
+
     def update_experiment(
         self,
         experiment_id: str | None = None,
@@ -1784,3 +1886,25 @@ class ExperimentManager:
         except Exception as exc:
             logger.error("Failed to read instruments config: %s", exc)
             return {}
+
+
+# ---------------------------------------------------------------------------
+# F27 helpers (module-level)
+# ---------------------------------------------------------------------------
+
+
+def _validate_photo_dimensions(data: bytes) -> dict[str, int] | None:
+    """Return {'width': w, 'height': h} if bytes are a valid JPEG/PNG, else None."""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(data))
+        img.verify()
+        # verify() closes the file; reopen to read dimensions
+        img = Image.open(BytesIO(data))
+        return {"width": img.width, "height": img.height}
+    except Exception as exc:
+        logger.error("Photo validation failed: %s", exc)
+        return None

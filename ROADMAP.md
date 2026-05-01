@@ -49,7 +49,7 @@
 | F24 | Interlock acknowledge ZMQ command | ✅ DONE (shipped v0.43.0) | S | M |
 | F25 | SQLite WAL corruption startup gate | ✅ DONE (shipped v0.43.0) | S | M |
 | F26 | SQLite WAL gate backport whitelist | ✅ DONE (shipped v0.44.0) | XS | L |
-| F27 | Chamber preparation photos via Telegram | 🟡 SPEC READY | L | H |
+| F27 | Composition photos via Telegram | ✅ DONE (shipped v0.50.0) | L | H |
 | F28 | Гемма Live — local LLM agent (assistant v1) | ✅ DONE (v0.45.0) | L | H |
 | F29 | Periodic narrative reports (assistant Phase 1) | ✅ DONE (v0.46.1) | S–M | H |
 | F30 | Live Query Agent — current-state operator queries (Phase 1.5) | ✅ DONE (v0.47.0) | M | H |
@@ -549,20 +549,22 @@ env var bypass. Adjacent versions still raise. 6 tests.
 
 ---
 
-### F27 — Chamber preparation photos via Telegram
+### F27 — Composition photos via Telegram
 
-**Status:** 🟡 SPEC READY.
+**Status:** ✅ DONE (shipped v0.50.0, 2026-05-01).
 **Effort:** L (~700-900 LOC).
 **Source:** Architect-Vladimir conversation 2026-05-01.
 
-Operator photographs cryostat chamber layout (preparation phase
-only) with multi-angle series, sends to Telegram bot. Photos
-auto-attach to active experiment, GUI annotation in Archive
-overlay, reports embed all photos. TREVOGA alarm if 0 photos
-on preparation-leave (CRITICAL) or 1 photo (WARNING). 4-cycle
-implementation planned. Predictor integration deferred.
+Operator sends experiment composition photo via Telegram bot →
+bot confirms target experiment via inline keyboard → photo
+persisted to `<artifact_dir>/composition/` with sidecar metadata.
+GUI ExperimentOverlay and ArchivePanel show thumbnail gallery.
+ZMQ event `experiment.photo_attached` triggers live GUI refresh.
 
-Spec: `CC_PROMPT_F27_CHAMBER_PHOTOS.md`
+Spec: `CC_PROMPT_F27_COMPOSITION_PHOTOS.md`
+
+**Note:** v0.50.0 shipped ahead of F-X/F-Y (reserved v0.48.0/v0.49.0)
+because F27 was an independent track and ready.
 
 ---
 

@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
@@ -621,6 +622,11 @@ class ArchivePanel(QWidget):
         _style_input(self._results_view)
         layout.addWidget(self._results_view)
 
+        # F27 — composition photos gallery
+        layout.addWidget(self._caption("Фото композиции:"))
+        self._archive_photos_widget = CompositionPhotosWidget()
+        layout.addWidget(self._archive_photos_widget)
+
         actions_row = QHBoxLayout()
         actions_row.setContentsMargins(0, 0, 0, 0)
         actions_row.setSpacing(theme.SPACE_1)
@@ -870,6 +876,7 @@ class ArchivePanel(QWidget):
         self._runs_view.setPlainText(_format_run_records(entry))
         self._artifacts_view.setPlainText(_format_artifacts(entry))
         self._results_view.setPlainText(_format_results(entry))
+        self._archive_photos_widget.set_photos(list(entry.get("artifact_index", [])))
         self._open_folder_btn.setEnabled(folder_path is not None)
         self._open_pdf_btn.setEnabled(pdf_path is not None)
         self._open_docx_btn.setEnabled(docx_path is not None)
@@ -892,6 +899,7 @@ class ArchivePanel(QWidget):
         self._open_pdf_btn.setEnabled(False)
         self._open_docx_btn.setEnabled(False)
         self._regenerate_btn.setEnabled(False)
+        self._archive_photos_widget.set_photos([])
 
     # ------------------------------------------------------------------
     # Actions: open folder / PDF / DOCX / regenerate
