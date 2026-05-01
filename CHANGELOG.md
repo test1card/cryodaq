@@ -9,6 +9,31 @@
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-05-01 — F27 Composition photos via Telegram bot
+
+### Added
+- Operator sends experiment composition photo via Telegram → bot
+  confirms target experiment via inline keyboard ([Да] / [Нет] /
+  [Другой эксперимент]) → photo persisted to
+  `<artifact_dir>/composition/<ts>_<seq>.{jpg,png}` with sidecar
+  metadata JSON.
+- GUI ExperimentOverlay shows composition photos in new
+  "Композиция эксперимента" section with thumbnails + click-to-
+  full-size dialog.
+- GUI ArchivePanel shows composition gallery for archived
+  experiments.
+- ChannelManager LATE BINDING in caption parsing — channel
+  mentions resolved via fresh ChannelManager state per call.
+- ZMQ event `experiment.photo_attached` published on attach,
+  GUI auto-refreshes.
+- Pillow added as dependency for image validation.
+- 50 new tests covering photo handler, attach API, GUI
+  rendering, channel extraction.
+
+### Reference
+- ARCHITECT REQUEST: 2026-05-01 post-v0.47.4
+- Spec: CC_PROMPT_F27_COMPOSITION_PHOTOS.md
+
 ## [0.47.4] — 2026-05-01 — HF: Comprehensive F30 query agent fix-up (Tracks A-F)
 
 Aggregates all outstanding F30 Live Query Agent regressions и pending features
