@@ -44,6 +44,8 @@ dependencies = [
     # Upper bound set to <25 so the lockfile's pyarrow 23.x pin
     # resolves cleanly from the declared spec.
     "pyarrow>=15,<25",
+    # F27: composition photo validation and dimension extraction
+    "pillow>=10.0,<12",
 ]
 
 [project.optional-dependencies]

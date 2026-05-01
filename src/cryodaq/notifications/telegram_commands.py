@@ -94,6 +94,7 @@ class TelegramCommandBot:
         command_handler: Callable[[dict], Awaitable[dict]] | None = None,
         commands_enabled: bool = True,
         query_agent: Any | None = None,
+        photo_handler: Any | None = None,
         verify_ssl: bool = True,
     ) -> None:
         # Phase 2b Codex K.1: default-deny — empty allowlist with commands
@@ -110,6 +111,7 @@ class TelegramCommandBot:
         self._broker = broker
         self._alarm_engine = alarm_engine
         self._query_agent = query_agent
+        self._photo_handler = photo_handler
         # Phase 2b K.1: SecretStr wrapper.
         self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
@@ -248,11 +250,27 @@ class TelegramCommandBot:
 
         for update in updates:
             self._last_update_id = max(self._last_update_id, update["update_id"])
-            msg = update.get("message", {})
-            text = msg.get("text", "")
-            chat_id = msg.get("chat", {}).get("id")
 
-            if not chat_id or not text:
+            # Inline keyboard button tap
+            cb = update.get("callback_query")
+            if cb is not None:
+                await self._handle_callback(cb)
+                continue
+
+            msg = update.get("message", {})
+            chat_id = msg.get("chat", {}).get("id")
+            if not chat_id:
+                continue
+
+            # Photo message — route to photo handler
+            photo = msg.get("photo")
+            if photo and self._photo_handler is not None:
+                if self._is_chat_allowed(chat_id):
+                    await self._photo_handler.handle_photo(msg)
+                continue
+
+            text = msg.get("text", "")
+            if not text:
                 continue
 
             if not text.startswith("/"):
@@ -557,3 +575,124 @@ class TelegramCommandBot:
                     logger.error("Telegram sendPhoto %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("Ошибка отправки Telegram фото: %s", exc)
+
+    # ------------------------------------------------------------------
+    # F27 — Photo download and inline keyboard helpers
+    # ------------------------------------------------------------------
+
+    async def get_file_path(self, file_id: str) -> str | None:
+        """Resolve Telegram file_id к downloadable path via getFile API."""
+        session = await self._get_session()
+        try:
+            async with session.get(
+                f"{self._api}/getFile", params={"file_id": file_id}
+            ) as resp:
+                if resp.status != 200:
+                    logger.error("Telegram getFile %d", resp.status)
+                    return None
+                data = await resp.json()
+                if not data.get("ok"):
+                    return None
+                return data["result"].get("file_path")
+        except Exception as exc:
+            logger.error("getFile error: %s", exc)
+            return None
+
+    async def download_file(self, file_path: str) -> bytes | None:
+        """Download file bytes from Telegram CDN."""
+        token = self._bot_token.get_secret_value()
+        url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        session = await self._get_session()
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.error("Telegram download %d", resp.status)
+                    return None
+                return await resp.read()
+        except Exception as exc:
+            logger.error("download_file error: %s", exc)
+            return None
+
+    async def send_message_with_keyboard(
+        self,
+        chat_id: int,
+        text: str,
+        keyboard: list[list[dict]],
+    ) -> int | None:
+        """Send message with inline keyboard. Returns message_id or None."""
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": keyboard},
+        }
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{self._api}/sendMessage", json=payload
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        "Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200]
+                    )
+                    return None
+                data = await resp.json()
+                return data.get("result", {}).get("message_id")
+        except Exception as exc:
+            logger.error("sendMessage keyboard error: %s", exc)
+            return None
+
+    async def edit_message(
+        self, chat_id: int, message_id: int, text: str
+    ) -> None:
+        """Edit existing message text (used after inline keyboard tap)."""
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{self._api}/editMessageText", json=payload
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        "Telegram editMessage %d: %s", resp.status, body[:200]
+                    )
+        except Exception as exc:
+            logger.error("editMessage error: %s", exc)
+
+    async def answer_callback(self, callback_id: str, text: str = "") -> None:
+        """Acknowledge callback query (removes loading spinner on button)."""
+        payload: dict[str, Any] = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{self._api}/answerCallbackQuery", json=payload
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("Telegram answerCallback %d", resp.status)
+        except Exception as exc:
+            logger.error("answerCallback error: %s", exc)
+
+    async def _handle_callback(self, cb: dict) -> None:
+        """Route inline keyboard button taps to photo handler."""
+        callback_id = cb.get("id")
+        data = cb.get("data", "")
+        chat_id = cb.get("message", {}).get("chat", {}).get("id")
+
+        if not callback_id or not chat_id:
+            return
+        if not self._is_chat_allowed(chat_id):
+            return
+
+        await self.answer_callback(callback_id)
+
+        if self._photo_handler is not None and data.startswith("photo:"):
+            await self._photo_handler.handle_callback(cb, data)
