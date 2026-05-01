@@ -15,6 +15,7 @@ class QueryCategory(Enum):
     PHASE_INFO = "phase_info"
     ALARM_STATUS = "alarm_status"
     COMPOSITE_STATUS = "composite_status"
+    GREETING = "greeting"
     OUT_OF_SCOPE_HISTORICAL = "out_of_scope_historical"
     OUT_OF_SCOPE_GENERAL = "out_of_scope_general"
     UNKNOWN = "unknown"
