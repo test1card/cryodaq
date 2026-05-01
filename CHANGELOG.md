@@ -9,11 +9,11 @@
 
 ## [Unreleased]
 
-## [0.47.4] — 2026-05-01 — HF: Comprehensive F30 query agent fix-up (Tracks A-F)
+## [0.47.4] — 2026-05-01 — HF: Channel ID normalization + F30 comprehensive fix-up
 
 Aggregates all outstanding F30 Live Query Agent regressions и pending features
 from real-world testing 2026-05-01. Supersedes planned v0.47.1/v0.47.2/v0.47.3
-hotfixes with a single comprehensive branch.
+hotfixes. Adds Phase 4–6 from CC_PROMPT_HF_V0.47.4_CHANNEL_ID_NORMALIZATION.md.
 
 ### Added
 - **Track A**: `agent.yaml` query section с `enabled: true` — query agent now
@@ -38,18 +38,37 @@ hotfixes with a single comprehensive branch.
   WARNING logged when disabled. `test_telegram_ssl_verification.py` created.
 - ≥90 new tests across all tracks.
 
+- **Phase 4 (3192f1c)**: `BrokerSnapshot._normalize_channel_id()` — same pattern as
+  `ChannelStateTracker._short_to_full`. Drivers emit `"Т7 Детектор"` (long form,
+  instruments.yaml frozen); cache now stores under `"Т7"` (short). `snapshot.latest("Т7")`
+  returns reading. Option B chosen over Option A (SQLite 141k rows + safety-critical
+  interlocks regex patterns unchanged).
+- **Phase 5 (3192f1c)**: `ExperimentAdapter._resolve_display_name()` — title → name →
+  date → short UUID prefix. `ExperimentStatus.experiment_label` field. Agent uses label
+  instead of raw UUID in phase_info + composite_status prompts.
+- **Phase 6 (3192f1c)**: `FORMAT_GREETING_USER` + GREETING dispatch in `_format_dispatch`.
+  Greetings no longer fall through to FORMAT_UNKNOWN_USER, eliminating stray
+  "пока не вижу" appended after greeting responses.
+
 ### Fixed
 - **CRITICAL**: "Я понимаю только slash-команды" on all queries — `query_enabled` was
   False (missing `query:` section in agent.yaml). Fixed by adding `query: enabled: true`.
+- **CRITICAL (v0.47.4)**: `snapshot.latest("Т7")` returned None — drivers emitted long
+  form "Т7 Детектор" but cache was queried by short form "Т7". Fixed by normalizing at
+  ingest in `BrokerSnapshot._consume_loop`.
 - "Что на азотной плите?" now resolves to Т12 via ChannelManager late-binding.
 - Composite response no longer starts with "Т7 Детектор," (anti-pattern guard).
 - "в фазе cooldown" → "в фазе захолаживания" (full russification).
 - Empty BrokerSnapshot on engine startup → "поток данных только запускается" instead of "температуры отсутствуют".
 - Charts now attach to composite_status queries (dispatcher + send_photo wired).
 - `ChannelManager.find_by_name`: empty-name guard prevents false substring matches.
+- Experiment displayed as UUID → now resolves to human label via title/name/date.
+- Stray "Пока не вижу этих показаний." after greeting → eliminated by dedicated GREETING prompt.
+- Mid-session ChannelEditor rename now propagates to composite display (via BrokerSnapshot short key + ChannelManager late binding).
 
 ### Test baseline
-- ≥291 passed, 0 new failures (pre-existing failures unchanged)
+- 2300 passed, 1 pre-existing unrelated failure (test_sqlite_stop_after_write)
+- +19 new tests (test_channel_id_normalization.py)
 
 ### Reference
 - CC_PROMPT_HF_V0.47.2_FIXUP_REGRESSION_BLOCK.md
