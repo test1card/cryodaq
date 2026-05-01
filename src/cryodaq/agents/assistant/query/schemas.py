@@ -120,3 +120,5 @@ class CompositeStatus:
     active_alarms: list[ActiveAlarmInfo]
     key_temperatures: dict[str, float | None]
     current_pressure: float | None
+    snapshot_empty: bool = False
+    snapshot_age_s: float | None = None

@@ -2012,7 +2012,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     enabled=_gemma_config.audit_enabled,
                 )
 
-            _q_broker_snap = BrokerSnapshot(broker)
+            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
             await _q_broker_snap.start()
 
             _q_cooldown = CooldownAdapter(cooldown_service)

@@ -431,6 +431,15 @@ class AssistantQueryAgent:
                 alarms_text="нет данных",
             )
 
+        if getattr(cs, "snapshot_empty", False):
+            return (
+                f"Запрос: {query}\n\n"
+                "Поток данных только запускается — показания датчиков ещё "
+                "не поступили (обычно занимает 5–15 секунд после старта). "
+                "Скажи оператору по-человечески что система запускается "
+                "и предложи повторить запрос через несколько секунд."
+            )
+
         exp = cs.experiment
         exp_text = exp.experiment_id if exp else "нет активного эксперимента"
         phase_text = exp.phase if exp else "—"
