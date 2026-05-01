@@ -246,7 +246,9 @@ class AssistantQueryAgent:
             return FORMAT_OUT_OF_SCOPE_GENERAL_USER.format(
                 query=query, brand_name=self._config.brand_name
             )
-        return FORMAT_UNKNOWN_USER.format(query=query)
+        return FORMAT_UNKNOWN_USER.format(
+            query=query, brand_name=self._config.brand_name
+        )
 
     def _fmt_current_value(self, query: str, data: dict[str, Any]) -> str:
         readings = data.get("readings", {})

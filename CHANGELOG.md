@@ -9,6 +9,51 @@
 
 ## [Unreleased]
 
+## [0.47.4] — 2026-05-01 — HF: Comprehensive F30 query agent fix-up (Tracks A-F)
+
+Aggregates all outstanding F30 Live Query Agent regressions и pending features
+from real-world testing 2026-05-01. Supersedes planned v0.47.1/v0.47.2/v0.47.3
+hotfixes with a single comprehensive branch.
+
+### Added
+- **Track A**: `agent.yaml` query section с `enabled: true` — query agent now
+  actually starts (was disabled by missing config key, causing slash-only fallback).
+- **Track B**: Late-binding display name resolution in `IntentClassifier`
+  (`_build_channel_hint()` reads ChannelManager fresh per call). `ChannelManager.find_by_name()`
+  case-insensitive exact+substring match. `QueryRouter._resolve_target_channels()` fallback.
+- **Track C**: `BrokerSnapshot.oldest_age_s()`, `display_name()`, `latest_with_labels()`,
+  `channel_manager` param. `CompositeStatus.snapshot_empty` + `snapshot_age_s`.
+  `CompositeAdapter` uses dynamic K-unit channel discovery.
+  Warming-up branch in agent: "поток данных только запускается".
+- **Track D**: `render_temperature_chart()` → PNG via matplotlib. `ChartDispatcher.dispatch()`
+  fire-and-forget with `add_done_callback(_log_task_exception)`. `send_photo()` on
+  `TelegramCommandBot`. Charts attached to composite_status + range_stats queries.
+- **Track E**: `ru_labels.py` — `phase_display_name()`, `experiment_status_display()`,
+  `ru_bool()`. Full russification of all FORMAT_* prompts. `GREETING` category added.
+  `test_format_prompts_no_english_leakage` regression test.
+- **Track F**: `FORMAT_COMPOSITE_STATUS_USER` anti-pattern guard — НЕ начинай +
+  "Прогноз захолаживания" label + concrete bad example (НЕ ДЕЛАЙ ТАК).
+- SSL config knob (v0.47.1 invariant): `verify_ssl` param wired to both
+  `TelegramNotifier` and `TelegramCommandBot` via `aiohttp.TCPConnector(ssl=...)`.
+  WARNING logged when disabled. `test_telegram_ssl_verification.py` created.
+- ≥90 new tests across all tracks.
+
+### Fixed
+- **CRITICAL**: "Я понимаю только slash-команды" on all queries — `query_enabled` was
+  False (missing `query:` section in agent.yaml). Fixed by adding `query: enabled: true`.
+- "Что на азотной плите?" now resolves to Т12 via ChannelManager late-binding.
+- Composite response no longer starts with "Т7 Детектор," (anti-pattern guard).
+- "в фазе cooldown" → "в фазе захолаживания" (full russification).
+- Empty BrokerSnapshot on engine startup → "поток данных только запускается" instead of "температуры отсутствуют".
+- Charts now attach to composite_status queries (dispatcher + send_photo wired).
+- `ChannelManager.find_by_name`: empty-name guard prevents false substring matches.
+
+### Test baseline
+- ≥291 passed, 0 new failures (pre-existing failures unchanged)
+
+### Reference
+- CC_PROMPT_HF_V0.47.2_FIXUP_REGRESSION_BLOCK.md
+
 ## [0.47.3] — 2026-05-01 — HF: Display name resolution в Intent Classifier (LATE BINDING)
 
 Hotfix для реального UX-бага: оператор переименовал каналы через GUI
