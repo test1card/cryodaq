@@ -49,6 +49,11 @@ class QueryRouter:
             if raw_s in all_ids:
                 resolved.append(raw_s)
                 continue
+            # Latin→Cyrillic normalization: "T12" → "Т12" (keyboard layout mismatch)
+            norm_id = self._channel_manager.normalize_channel_id(raw_s)
+            if norm_id != raw_s and norm_id in all_ids:
+                resolved.append(norm_id)
+                continue
             match_id = self._channel_manager.find_by_name(raw_s)
             if match_id:
                 resolved.append(match_id)

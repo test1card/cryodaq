@@ -52,26 +52,24 @@ def test_classifier_prompt_no_latin_t_digit_pattern() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_find_by_name_resolves_latin_t_to_cyrillic_id() -> None:
-    """'T12' (Latin T) resolves to 'Т12' (Cyrillic) channel ID."""
+def test_normalize_channel_id_latin_t_to_cyrillic() -> None:
+    """normalize_channel_id converts Latin T→Cyrillic Т (keyboard layout fix)."""
     mgr = _make_mgr(**{"Т12": {"name": "Азотная плита", "visible": True}})
-    # Latin T12 → Cyrillic Т12
-    result = mgr.find_by_name("T12")
-    assert result == "Т12", f"Expected Т12, got {result!r}"
+    assert mgr.normalize_channel_id("T12") == "Т12"
+    assert mgr.normalize_channel_id("T7") == "Т7"
+    assert mgr.normalize_channel_id("Т7") == "Т7"  # already Cyrillic — no change
 
 
-def test_find_by_name_resolves_cyrillic_id_directly() -> None:
-    """Direct Cyrillic match still works."""
+def test_find_by_name_resolves_cyrillic_name_directly() -> None:
+    """Direct name match works (find_by_name is name-only, not ID lookup)."""
     mgr = _make_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
     assert mgr.find_by_name("Детектор") == "Т7"
 
 
-def test_find_by_name_latin_t_in_display_name_search() -> None:
-    """Substring match with Latin T: 'T7 sensor' resolves via normalization."""
+def test_find_by_name_latin_id_returns_none() -> None:
+    """find_by_name('T7') returns None — ID lookup is router's job via normalize_channel_id."""
     mgr = _make_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
-    # This should find Т7 via direct normalized-ID lookup
-    result = mgr.find_by_name("T7")
-    assert result == "Т7"
+    assert mgr.find_by_name("T7") is None
 
 
 def test_find_by_name_mixed_latin_cyrillic_returns_none_gracefully() -> None:
