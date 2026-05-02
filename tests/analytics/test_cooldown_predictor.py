@@ -58,11 +58,21 @@ async def test_compute_progress_room_temperature():
 
 
 async def test_compute_progress_base_temperature():
-    """At base temperature (T_cold=4 K, T_warm=85 K) progress should be ≈ 1."""
+    """With explicit T_COLD_END=4K floor, progress at 4K should be ≈ 1."""
     from cryodaq.analytics.cooldown_predictor import compute_progress
 
-    p = compute_progress(np.array([4.0]), np.array([85.0]))
+    p = compute_progress(np.array([4.0]), np.array([85.0]), T_cold_end=4.0, T_warm_end=85.0)
     assert float(p[0]) == pytest.approx(1.0, abs=0.02)
+
+
+async def test_compute_progress_quasi_stationary_not_saturated():
+    """With data-driven floors (2.5K), progress at 4K should be <1.0 (not saturated)."""
+    from cryodaq.analytics.cooldown_predictor import T_COLD_END_FALLBACK, T_WARM_END_FALLBACK, compute_progress
+
+    p = compute_progress(np.array([4.0]), np.array([80.0]),
+                         T_cold_end=T_COLD_END_FALLBACK, T_warm_end=T_WARM_END_FALLBACK)
+    assert float(p[0]) < 0.999, "Progress at 4K should not saturate with data-driven floors"
+    assert float(p[0]) > 0.95, "Progress at 4K should still be high"
 
 
 async def test_compute_progress_monotone():
@@ -403,3 +413,184 @@ async def test_no_print_in_module():
         f"Found bare print() calls in cooldown_predictor.py at lines: {bare_prints}. "
         "Replace with logging.getLogger(__name__).info/warning/error."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: data-driven floor tests
+# ---------------------------------------------------------------------------
+
+
+async def test_derive_floors_from_curves():
+    """_derive_floors returns min(T_cold) - 0.5 K from raw curve data."""
+    from cryodaq.analytics.cooldown_predictor import ReferenceCurve, _derive_floors
+
+    rc = ReferenceCurve(
+        name="test",
+        date="2026-01-01",
+        t_hours=np.linspace(0, 20, 100),
+        T_cold=np.linspace(295.0, 2.8, 100),
+        T_warm=np.linspace(295.0, 72.0, 100),
+        duration_hours=20.0,
+        phase1_hours=8.0,
+        phase2_hours=12.0,
+        T_cold_final=2.8,
+        T_warm_final=72.0,
+    )
+    T_cold_end, T_warm_end = _derive_floors([rc])
+    assert T_cold_end == pytest.approx(2.8 - 0.5, abs=0.01)
+    assert T_warm_end == pytest.approx(72.0 - 2.0, abs=0.01)
+
+
+async def test_compute_progress_extended_range():
+    """At T_cold=3K with T_cold_end=2K, progress is < 1.0 (not saturated)."""
+    from cryodaq.analytics.cooldown_predictor import compute_progress
+
+    p = compute_progress(np.array([3.0]), np.array([75.0]), T_cold_end=2.0, T_warm_end=60.0)
+    assert float(p[0]) < 1.0, "Progress at 3K should not saturate when floor=2K"
+    assert float(p[0]) > 0.97, "Progress at 3K should be very high"
+
+
+async def test_build_model_from_curves_sets_floors(synthetic_curves):
+    """build_model_from_curves() sets T_cold_end from data, not from fallback."""
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        T_COLD_END_FALLBACK,
+        build_model_from_curves,
+    )
+
+    raw = [
+        ReferenceCurve(
+            name=d["name"], date=d["date"], t_hours=d["t_hours"],
+            T_cold=d["T_cold"], T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            T_warm_final=d["T_warm_final"],
+        )
+        for d in synthetic_curves
+    ]
+    model = build_model_from_curves(raw)
+    # Floor is always derived as min(T_cold) - 0.5 from the raw curves
+    min_cold = min(float(np.nanmin(rc.T_cold)) for rc in raw)
+    assert model.T_cold_end == pytest.approx(max(1.0, min_cold - 0.5), abs=0.01)
+    # Floor must be ≥ 1.0 (physical lower bound)
+    assert model.T_cold_end >= 1.0
+
+
+async def test_predict_quasi_stationary_returns_trajectory(synthetic_curves):
+    """At T_cold=5K (quasi-stationary), predict() returns a non-empty trajectory."""
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        build_model_from_curves,
+        predict,
+    )
+
+    raw = [
+        ReferenceCurve(
+            name=d["name"], date=d["date"], t_hours=d["t_hours"],
+            T_cold=d["T_cold"], T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            T_warm_final=d["T_warm_final"],
+        )
+        for d in synthetic_curves
+    ]
+    model = build_model_from_curves(raw)
+    pred = predict(model, T_cold_now=5.0, T_warm_now=86.0, t_elapsed=18.0,
+                   generate_trajectory=True)
+
+    assert pred.phase != "steady", "5K with data-driven floor should not be 'steady'"
+    assert pred.future_t is not None, "Trajectory should be generated in quasi-stationary regime"
+    assert len(pred.future_t) > 0
+
+
+async def test_predict_at_true_floor_is_steady(synthetic_curves):
+    """Predict at T_cold well below any reference curve floor → phase='steady'."""
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        build_model_from_curves,
+        predict,
+    )
+
+    raw = [
+        ReferenceCurve(
+            name=d["name"], date=d["date"], t_hours=d["t_hours"],
+            T_cold=d["T_cold"], T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            T_warm_final=d["T_warm_final"],
+        )
+        for d in synthetic_curves
+    ]
+    model = build_model_from_curves(raw)
+    # Predict at T_cold=1.0K — well below the derived floor (~2.8K)
+    pred = predict(model, T_cold_now=1.0, T_warm_now=60.0, t_elapsed=22.0,
+                   generate_trajectory=True)
+    assert pred.phase == "steady"
+    assert pred.future_t is None
+
+
+async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path):
+    """A model JSON that pre-dates T_cold_end/T_warm_end fields still loads correctly."""
+    import json as _json
+
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        T_COLD_END_FALLBACK,
+        build_model_from_curves,
+        load_model,
+        save_model,
+    )
+
+    raw = [
+        ReferenceCurve(
+            name=d["name"], date=d["date"], t_hours=d["t_hours"],
+            T_cold=d["T_cold"], T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            T_warm_final=d["T_warm_final"],
+        )
+        for d in synthetic_curves
+    ]
+    model = build_model_from_curves(raw)
+    save_model(model, tmp_path)
+
+    # Strip floor fields to simulate legacy JSON
+    model_path = tmp_path / "predictor_model.json"
+    data = _json.loads(model_path.read_text(encoding="utf-8"))
+    data.pop("T_cold_end", None)
+    data.pop("T_warm_end", None)
+    data["version"] = "1.0"
+    model_path.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    # Must load without error; floors re-derived from curves
+    loaded = load_model(tmp_path)
+    assert loaded.n_curves == model.n_curves
+    assert loaded.T_cold_end > 0.0
+    assert loaded.T_warm_end > 0.0
+
+
+async def test_save_load_round_trip_preserves_floors(synthetic_curves, tmp_path):
+    """save_model then load_model preserves the data-driven T_cold_end."""
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        build_model_from_curves,
+        load_model,
+        save_model,
+    )
+
+    raw = [
+        ReferenceCurve(
+            name=d["name"], date=d["date"], t_hours=d["t_hours"],
+            T_cold=d["T_cold"], T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            T_warm_final=d["T_warm_final"],
+        )
+        for d in synthetic_curves
+    ]
+    model_orig = build_model_from_curves(raw)
+    save_model(model_orig, tmp_path)
+
+    model_loaded = load_model(tmp_path)
+    assert model_loaded.T_cold_end == pytest.approx(model_orig.T_cold_end, abs=0.01)
+    assert model_loaded.T_warm_end == pytest.approx(model_orig.T_warm_end, abs=0.01)

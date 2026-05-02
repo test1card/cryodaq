@@ -13,6 +13,7 @@ from cryodaq.analytics.cooldown_predictor import (
     T_PHASE_BOUNDARY,
     ReferenceCurve,
     build_ensemble,
+    build_model_from_curves,
     format_prediction,
     ingest_curve,
     load_curves,
@@ -122,8 +123,7 @@ def cmd_build(args):
     curves = load_curves(Path(args.data))
     if not curves:
         sys.exit("No curves loaded")
-    curves = prepare_all(curves)
-    model = build_ensemble(curves)
+    model = build_model_from_curves(curves)
     out = Path(args.output)
     save_model(model, out)
     plot_ensemble(model, out / "ensemble_overview.png")
@@ -153,7 +153,9 @@ def cmd_validate(args):
     curves = load_curves(Path(args.data))
     if len(curves) < 3:
         sys.exit(f"Need >=3 curves, got {len(curves)}")
-    curves = prepare_all(curves)
+    from cryodaq.analytics.cooldown_predictor import _derive_floors, prepare_all
+    T_cold_end, T_warm_end = _derive_floors(curves)
+    curves = prepare_all(curves, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     results = validate_loo(curves)
@@ -192,8 +194,7 @@ def cmd_demo(args):
         curves = generate_synthetic_curves(tmp)
         tmp.unlink()
 
-    curves = prepare_all(curves)
-    model = build_ensemble(curves)
+    model = build_model_from_curves(curves)
     save_model(model, out)
     plot_ensemble(model, out / "ensemble_overview.png")
 

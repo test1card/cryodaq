@@ -9,6 +9,34 @@
 
 ## [Unreleased]
 
+## [0.52.2] — 2026-05-03 — Cooldown predictor: data-driven floor + quasi-stationary support
+
+### Changed
+
+- `CooldownPredictor` `T_cold_end` and `T_warm_end` now derived from reference curve minima
+  at model build time via `_derive_floors()`. Previous hardcoded values (4.0 K, 85.0 K)
+  silently discarded the quasi-stationary regime from ~4 K to the actual 2nd-stage base.
+- Trajectory generation gate raised from `p_now < 0.98` → `p_now < 0.999`; steady-phase
+  classification similarly raised. Prediction now spans the full quasi-stationary regime
+  (T_cold approaching real base, ~2.5–3 K depending on hardware).
+- `compute_progress()` accepts explicit `T_cold_end` / `T_warm_end` parameters; defaults to
+  new fallback constants (`T_COLD_END_FALLBACK = 2.5 K`, `T_WARM_END_FALLBACK = 75.0 K`).
+- `EnsembleModel` gains `T_cold_end` / `T_warm_end` fields populated at build time.
+- `build_model_from_curves()` convenience function consolidates full build pipeline
+  (derive floors → prepare → ensemble).
+- `save_model()` schema bumped to version 2.0; records derived floor values.
+- `load_model()` and `ingest_curve()` use `build_model_from_curves()` — floors always
+  re-derived from curve data, not loaded from stale JSON field.
+- `validate_loo()` derives per-fold floors from training curves.
+- `cooldown_cli.py` `build` / `demo` / `validate` commands updated accordingly.
+- Backward compat: module-level `T_COLD_END` / `T_WARM_END` aliases retained.
+
+### Note
+
+No reference curve data exists on disk (`data/cooldown_model/` absent). Floors will be
+derived automatically on first model build after a real cooldown is ingested via
+`auto_ingest`. Fallback constants (2.5 K / 75.0 K) active until then.
+
 ## [0.52.1] — 2026-05-03 — Русификация интерфейса
 
 ### Changed

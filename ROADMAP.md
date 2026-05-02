@@ -800,7 +800,7 @@ physics constraint encoding.
 
 ### F-P1 — Cooldown trajectory overlay (Analytics tab)
 
-**Status:** ✅ DONE (shipped v0.52.0, 2026-05-03).
+**Status:** ✅ DONE (shipped v0.52.0, 2026-05-03; quasi-stationary extended v0.52.2).
 **Effort:** S. **ROI:** H.
 
 Predictor `future_T_cold_mean` ± σ envelope on Analytics temperature plot
@@ -810,6 +810,11 @@ Data already flows: `cooldown_service.py` publishes `future_t` /
 `future_T_cold_mean` / `future_T_cold_upper` / `future_T_cold_lower` in metadata;
 `main_window_v2.py` maps these into `CooldownData.predicted_trajectory` +
 `ci_trajectory`.
+
+v0.52.2: predictor `T_cold_end` now data-driven (derived from reference curve
+minima). Previous hardcode 4.0 K silently blocked trajectory in quasi-stationary
+regime (~4 K → real base ~2.9 K). Trajectory gate raised `p_now < 0.98` →
+`p_now < 0.999`.
 
 ---
 

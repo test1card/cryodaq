@@ -47,9 +47,18 @@ T_PHASE_BOUNDARY = 50.0
 N_PROGRESS_GRID = 500
 
 T_COLD_START = 295.0
-T_COLD_END = 4.0
 T_WARM_START = 295.0
-T_WARM_END = 85.0
+
+# Floors derived at model-build time from reference curve minima.
+# Fallbacks used when no curves are available (empty model, first boot).
+# Previous hardcoded values (4.0 K, 85.0 K) silently lost the
+# quasi-stationary regime from ~4 K to the actual 2nd-stage base (~2.9 K).
+T_COLD_END_FALLBACK = 2.5   # K — below typical 2-stage GM floor
+T_WARM_END_FALLBACK = 75.0  # K — 1st-stage floor with margin
+
+# Module-level aliases kept for backward compatibility with external callers.
+T_COLD_END = T_COLD_END_FALLBACK
+T_WARM_END = T_WARM_END_FALLBACK
 
 # Adaptive rate-based weighting
 RATE_WINDOW_H = 1.5  # compute avg cooling rate over first 1.5h
@@ -139,6 +148,8 @@ class EnsembleModel:
     n_curves: int = 0
     duration_mean: float = 0.0
     duration_std: float = 0.0
+    T_cold_end: float = T_COLD_END_FALLBACK
+    T_warm_end: float = T_WARM_END_FALLBACK
 
 
 # ============================================================================
@@ -196,10 +207,15 @@ def _smooth(arr: np.ndarray, window: int = SMOOTH_WINDOW) -> np.ndarray:
     return savgol_filter(arr, w, min(SMOOTH_ORDER, w - 1))
 
 
-def compute_progress(T_cold: np.ndarray, T_warm: np.ndarray) -> np.ndarray:
-    """Progress p in [0,1] from both channels. p=0 at 295K, p=1 at baseline."""
-    dT_c = T_COLD_START - T_COLD_END
-    dT_w = T_WARM_START - T_WARM_END
+def compute_progress(
+    T_cold: np.ndarray,
+    T_warm: np.ndarray,
+    T_cold_end: float = T_COLD_END_FALLBACK,
+    T_warm_end: float = T_WARM_END_FALLBACK,
+) -> np.ndarray:
+    """Progress p in [0,1] from both channels. p=0 at 295K, p=1 at floor."""
+    dT_c = T_COLD_START - T_cold_end
+    dT_w = T_WARM_START - T_warm_end
 
     p_cold = (T_COLD_START - T_cold) / dT_c if dT_c > 0 else np.zeros_like(T_cold)
     p_warm = (T_WARM_START - T_warm) / dT_w if dT_w > 0 else np.zeros_like(T_warm)
@@ -210,6 +226,20 @@ def compute_progress(T_cold: np.ndarray, T_warm: np.ndarray) -> np.ndarray:
         p = W_COLD * p_cold + W_WARM * p_warm
 
     return np.clip(p, 0.0, 1.0)
+
+
+def _derive_floors(curves: list[ReferenceCurve]) -> tuple[float, float]:
+    """Derive T_cold_end and T_warm_end from observed minima across reference curves."""
+    cold_mins = [float(np.nanmin(rc.T_cold)) for rc in curves if len(rc.T_cold) > 0]
+    warm_mins = [
+        float(np.nanmin(rc.T_warm))
+        for rc in curves
+        if len(rc.T_warm) > 0 and not np.all(np.isnan(rc.T_warm))
+    ]
+
+    T_cold_end = max(1.0, min(cold_mins) - 0.5) if cold_mins else T_COLD_END_FALLBACK
+    T_warm_end = max(50.0, min(warm_mins) - 2.0) if warm_mins else T_WARM_END_FALLBACK
+    return T_cold_end, T_warm_end
 
 
 def _compute_initial_rate(t_hours: np.ndarray, T: np.ndarray, window_h: float) -> float:
@@ -236,7 +266,11 @@ def _compute_initial_rate(t_hours: np.ndarray, T: np.ndarray, window_h: float) -
     return a
 
 
-def prepare_curve(rc: ReferenceCurve) -> ReferenceCurve:
+def prepare_curve(
+    rc: ReferenceCurve,
+    T_cold_end: float = T_COLD_END_FALLBACK,
+    T_warm_end: float = T_WARM_END_FALLBACK,
+) -> ReferenceCurve:
     """Smooth, compute progress, build interpolators, measure initial rate."""
     n = len(rc.t_hours)
     rc.T_cold_smooth = _smooth(rc.T_cold)
@@ -254,7 +288,7 @@ def prepare_curve(rc: ReferenceCurve) -> ReferenceCurve:
     if not np.all(np.isnan(Tw)):
         rc.initial_rate_warm = _compute_initial_rate(rc.t_hours, Tw, RATE_WINDOW_H)
 
-    rc.progress = compute_progress(Tc, Tw)
+    rc.progress = compute_progress(Tc, Tw, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
     rc.progress = np.maximum.accumulate(rc.progress)
 
     # p(t)
@@ -288,11 +322,15 @@ def prepare_curve(rc: ReferenceCurve) -> ReferenceCurve:
     return rc
 
 
-def prepare_all(curves: list[ReferenceCurve]) -> list[ReferenceCurve]:
+def prepare_all(
+    curves: list[ReferenceCurve],
+    T_cold_end: float = T_COLD_END_FALLBACK,
+    T_warm_end: float = T_WARM_END_FALLBACK,
+) -> list[ReferenceCurve]:
     prepared = []
     for rc in curves:
         try:
-            rc = prepare_curve(rc)
+            rc = prepare_curve(rc, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
             if rc._t_of_p is not None:
                 prepared.append(rc)
             else:
@@ -308,7 +346,11 @@ def prepare_all(curves: list[ReferenceCurve]) -> list[ReferenceCurve]:
 # ============================================================================
 
 
-def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
+def build_ensemble(
+    curves: list[ReferenceCurve],
+    T_cold_end: float = T_COLD_END_FALLBACK,
+    T_warm_end: float = T_WARM_END_FALLBACK,
+) -> EnsembleModel:
     n = len(curves)
     p_grid = np.linspace(0, 1, N_PROGRESS_GRID)
 
@@ -329,6 +371,8 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
             n_curves=0,
             duration_mean=0.0,
             duration_std=0.0,
+            T_cold_end=T_cold_end,
+            T_warm_end=T_warm_end,
         )
 
     t_mat = np.full((n, N_PROGRESS_GRID), np.nan)
@@ -386,14 +430,24 @@ def build_ensemble(curves: list[ReferenceCurve]) -> EnsembleModel:
         n_curves=n,
         duration_mean=float(np.mean(durations)),
         duration_std=float(np.std(durations)),
+        T_cold_end=T_cold_end,
+        T_warm_end=T_warm_end,
     )
     logger.info(
-        "Ансамбль: %d кривых, длительность %.1f +/- %.1f ч",
+        "Ансамбль: %d кривых, длительность %.1f +/- %.1f ч, T_cold_end=%.2f K",
         n,
         model.duration_mean,
         model.duration_std,
+        model.T_cold_end,
     )
     return model
+
+
+def build_model_from_curves(raw_curves: list[ReferenceCurve]) -> EnsembleModel:
+    """Full build pipeline: derive data-driven floors → prepare → build ensemble."""
+    T_cold_end, T_warm_end = _derive_floors(raw_curves)
+    prepared = prepare_all(raw_curves, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
+    return build_ensemble(prepared, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
 
 
 # ============================================================================
@@ -425,7 +479,14 @@ def predict(
 
     Without observed_rate: falls back to progress-only weighting (v1.0 behavior).
     """
-    p_now = float(compute_progress(np.array([T_cold_now]), np.array([T_warm_now]))[0])
+    p_now = float(
+        compute_progress(
+            np.array([T_cold_now]),
+            np.array([T_warm_now]),
+            T_cold_end=model.T_cold_end,
+            T_warm_end=model.T_warm_end,
+        )[0]
+    )
 
     # Compute rate statistics for outlier detection
     ref_rates_cold = np.array(
@@ -514,7 +575,7 @@ def predict(
     t_68 = 1.0 + 0.5 / max(n_eff, 1)
     t_95 = 2.0 + 3.0 / max(n_eff, 1)
 
-    if p_now >= 0.98:
+    if p_now >= 0.999:
         phase = "steady"
     elif T_cold_now > T_PHASE_BOUNDARY:
         phase = "phase1"
@@ -541,7 +602,7 @@ def predict(
         individual_estimates=[(n, round(r, 2)) for n, r, *_ in estimates],
     )
 
-    if generate_trajectory and p_now < 0.98:
+    if generate_trajectory and p_now < 0.999:
         p_future = np.linspace(p_now, 1.0, 200)
         t_fut = np.full((n_eff, 200), np.nan)
         Tc_fut = np.full((n_eff, 200), np.nan)
@@ -632,10 +693,11 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
         training = [c for j, c in enumerate(curves) if j != i_hold]
         if len(training) < 2:
             continue
-        training_p = prepare_all(training)
+        t_cold_end_loo, t_warm_end_loo = _derive_floors(training)
+        training_p = prepare_all(training, T_cold_end=t_cold_end_loo, T_warm_end=t_warm_end_loo)
         if len(training_p) < 2:
             continue
-        model = build_ensemble(training_p)
+        model = build_ensemble(training_p, T_cold_end=t_cold_end_loo, T_warm_end=t_warm_end_loo)
 
         n_pts = len(held.t_hours)
         i_s = int(0.05 * n_pts)
@@ -995,8 +1057,10 @@ def plot_validation(results: list[ValidationResult], output: Path):
 def save_model(model: EnsembleModel, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     md = {
-        "version": "1.0",
+        "version": "2.0",
         "n_curves": model.n_curves,
+        "T_cold_end": model.T_cold_end,
+        "T_warm_end": model.T_warm_end,
         "duration_mean": model.duration_mean,
         "duration_std": model.duration_std,
         "p_grid": model.p_grid.tolist(),
@@ -1029,7 +1093,7 @@ def save_model(model: EnsembleModel, output_dir: Path):
 
 def load_model(model_dir: Path) -> EnsembleModel:
     d = json.loads((model_dir / "predictor_model.json").read_text(encoding="utf-8"))
-    curves = []
+    raw_curves = []
     for cd in d["curves"]:
         rc = ReferenceCurve(
             name=cd["name"],
@@ -1043,9 +1107,8 @@ def load_model(model_dir: Path) -> EnsembleModel:
             T_cold_final=cd["T_cold_final"],
             T_warm_final=cd["T_warm_final"],
         )
-        curves.append(rc)
-    curves = prepare_all(curves)
-    return build_ensemble(curves)
+        raw_curves.append(rc)
+    return build_model_from_curves(raw_curves)
 
 
 # ============================================================================
@@ -1197,11 +1260,12 @@ def ingest_curve(
         )
         curves.append(rc)
 
-    curves = prepare_all(curves)
-    model = build_ensemble(curves)
+    model = build_model_from_curves(curves)
 
     # Save updated model with history
     model_data["n_curves"] = model.n_curves
+    model_data["T_cold_end"] = model.T_cold_end
+    model_data["T_warm_end"] = model.T_warm_end
     model_data["duration_mean"] = model.duration_mean
     model_data["duration_std"] = model.duration_std
     model_data["p_grid"] = model.p_grid.tolist()
