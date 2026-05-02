@@ -20,12 +20,14 @@ Phase III.C contract:
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QUrl, Slot
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtCore import Qt, QTimer, QUrl, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -401,7 +404,18 @@ class TemperatureTrajectoryWidget(QWidget):
 
 
 class VacuumPredictionWidget(QWidget):
-    """Log-Y prediction widget wrapped for vacuum forecast."""
+    """Log-Y prediction widget for vacuum pressure forecast (F-P2).
+
+    Self-contained: accumulates raw pressure readings via
+    :meth:`set_pressure_reading` and polls the engine every 10 s via
+    ``get_vacuum_trend`` to obtain the extrapolated P(t) projection.
+    Converts relative-time extrapolation arrays to absolute unix
+    timestamps so the inner :class:`PredictionWidget` date axis works
+    correctly.  Confidence band = ±1σ from ``residual_std`` (log₁₀
+    units), converted to mbar.
+    """
+
+    _MAX_RAW_PTS: int = 5000
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -415,7 +429,26 @@ class VacuumPredictionWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._inner)
 
+        # Raw pressure history: (unix_ts, pressure_mbar)
+        self._raw_buffer: list[tuple[float, float]] = []
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(10_000)
+        self._poll_timer.timeout.connect(self._poll_trend)
+        self._poll_timer.start()
+        QTimer.singleShot(500, self._poll_trend)
+
+    def set_pressure_reading(self, reading: Reading) -> None:
+        if reading is None:
+            return
+        ts = reading.timestamp.timestamp()
+        self._raw_buffer.append((ts, float(reading.value)))
+        if len(self._raw_buffer) > self._MAX_RAW_PTS:
+            del self._raw_buffer[: len(self._raw_buffer) - self._MAX_RAW_PTS]
+        self._inner.set_history(list(self._raw_buffer))
+
     def set_vacuum_prediction(self, data: dict | None) -> None:
+        """Accept externally-pushed prediction dict (legacy path)."""
         if data is None:
             return
         history = data.get("history") or []
@@ -426,6 +459,57 @@ class VacuumPredictionWidget(QWidget):
         self._inner.set_history(list(history))
         if central and lower and upper:
             self._inner.set_prediction(list(central), list(lower), list(upper), ci_level_pct=ci_pct)
+
+    @Slot()
+    def _poll_trend(self) -> None:
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, parent=self)
+        worker.finished.connect(self._on_trend_result)
+        worker.start()
+
+    @Slot(dict)
+    def _on_trend_result(self, result: dict) -> None:
+        if not result.get("ok") or result.get("status") == "no_data":
+            # Clear any previously-rendered forecast so no stale overlay persists
+            # after a bridge restart, disabled predictor, or empty buffer.
+            self._inner.set_prediction([], [], [], ci_level_pct=68.0)
+            return
+        extrap_t = result.get("extrapolation_t") or []
+        extrap_logP = result.get("extrapolation_logP") or []
+        residual_std = float(result.get("residual_std") or 0.0)
+        if not extrap_t or not extrap_logP or len(extrap_t) != len(extrap_logP):
+            return
+
+        # extrap_t is seconds from engine buffer t0; extrap_t[0] ≈ buffer duration.
+        # Setting t0 = now - extrap_t[0] maps relative times to absolute unix
+        # timestamps with the prediction starting at "now".
+        now = time.time()
+        t0 = now - extrap_t[0]
+
+        central = [
+            (t0 + t, 10.0**lp)
+            for t, lp in zip(extrap_t, extrap_logP)
+            if math.isfinite(lp)
+        ]
+        if not central:
+            return
+
+        if residual_std > 0:
+            lower = [
+                (t0 + t, 10.0 ** (lp - residual_std))
+                for t, lp in zip(extrap_t, extrap_logP)
+                if math.isfinite(lp)
+            ]
+            upper = [
+                (t0 + t, 10.0 ** (lp + residual_std))
+                for t, lp in zip(extrap_t, extrap_logP)
+                if math.isfinite(lp)
+            ]
+        else:
+            lower = central
+            upper = central
+        self._inner.set_prediction(central, lower, upper, ci_level_pct=68.0)
 
 
 class CooldownPredictionWidget(QWidget):
@@ -464,10 +548,24 @@ class CooldownPredictionWidget(QWidget):
 
 
 class RThermalLiveWidget(QWidget):
-    """Live R_thermal readout + delta/min + compact history plot."""
+    """Live R_thermal readout + delta/min + compact history plot (F-P3).
+
+    Adds a horizontal asymptote overlay via :class:`SteadyStatePredictor`
+    applied to the R_thermal history.  The overlay (dashed line + ±σ band)
+    appears once the predictor has settled ≥30% and reports a valid fit.
+
+    Visual tokens follow the canonical PredictionWidget convention:
+    - Asymptote line: STATUS_INFO, PLOT_LINE_WIDTH, Qt.DashLine
+    - Confidence band: STATUS_INFO at alpha=64 (~25% opacity)
+    """
+
+    # Predictor convergence threshold: show overlay when ≥30% settled.
+    _SETTLE_THRESHOLD: float = 30.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._ss_predictor = SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
+        self._last_r_ts: float = 0.0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -490,7 +588,38 @@ class RThermalLiveWidget(QWidget):
         pi.getAxis("left").enableAutoSIPrefix(False)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
+
+        # F-P3: CI band added first so it renders behind the data curve.
+        # Color: STATUS_INFO at alpha=64 — matches PredictionWidget convention.
+        band_color = QColor(theme.STATUS_INFO)
+        band_color.setAlpha(64)
+        self._asym_band = pg.LinearRegionItem(
+            values=[0.0, 0.0],
+            orientation="horizontal",
+            brush=pg.mkBrush(band_color),
+            movable=False,
+        )
+        self._asym_band.setVisible(False)
+        self._plot.addItem(self._asym_band)
+
+        # Data curve renders above the band.
         self._curve = self._plot.plot([], [], pen=series_pen(0))
+
+        # F-P3: Asymptote dashed line added last — renders above data curve.
+        # Pen: STATUS_INFO, PLOT_LINE_WIDTH, DashLine — matches PredictionWidget.
+        self._asym_line = pg.InfiniteLine(
+            angle=0,
+            pen=pg.mkPen(
+                color=QColor(theme.STATUS_INFO),
+                width=theme.PLOT_LINE_WIDTH,
+                style=Qt.DashLine,
+            ),
+            label="R∞",
+            labelOpts={"color": theme.STATUS_INFO, "position": 0.95},
+        )
+        self._asym_line.setVisible(False)
+        self._plot.addItem(self._asym_line)
+
         lay.addWidget(self._plot, stretch=1)
 
         root = QVBoxLayout(self)
@@ -502,6 +631,8 @@ class RThermalLiveWidget(QWidget):
             self._value_label.setText("—")
             self._delta_label.setText("ΔR / мин: —")
             self._curve.setData([], [])
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
             return
         current = getattr(data, "current_value", None)
         delta = getattr(data, "delta_per_minute", None)
@@ -518,6 +649,29 @@ class RThermalLiveWidget(QWidget):
             xs = [t for t, _ in history]
             ys = [v for _, v in history]
             self._curve.setData(x=xs, y=ys)
+
+            # Feed only new history points into the predictor.
+            for ts, val in history:
+                if ts > self._last_r_ts:
+                    self._ss_predictor.add_point("R_thermal", ts, val)
+                    self._last_r_ts = ts
+
+            self._ss_predictor.update(time.time())
+            pred = self._ss_predictor.get_prediction("R_thermal")
+            if pred is not None and pred.valid and pred.percent_settled >= self._SETTLE_THRESHOLD:
+                r_inf = pred.t_predicted
+                sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
+                self._asym_line.setPos(r_inf)
+                self._asym_band.setRegion([r_inf - sigma, r_inf + sigma])
+                self._asym_line.setVisible(True)
+                self._asym_band.setVisible(True)
+            else:
+                self._asym_line.setVisible(False)
+                self._asym_band.setVisible(False)
+        else:
+            # Empty history on non-None push — hide stale overlay if present.
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
 
 
 class PressureCurrentWidget(QWidget):
