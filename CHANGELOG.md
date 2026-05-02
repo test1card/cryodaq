@@ -9,6 +9,35 @@
 
 ## [Unreleased]
 
+## [0.52.4] — 2026-05-04 — fix(gui): analytics UX + warmup channel ID
+
+### Fixed
+
+- **CooldownPredictionWidget idle placeholder** now rendered as `pg.TextItem`
+  on the plot canvas instead of a `QLabel` above the plot. Plot uses full
+  vertical space at all times. Single-line: «Охлаждение не активно — прогноз
+  недоступен». With v0.52.2 data-driven predictor, placeholder appears only
+  for warm-idle state (system warm, cryocooler off) — not at base temperature.
+- **TemperatureTrajectoryWidget._fetch_history()** now sends full channel labels
+  (e.g. `Т7 Детектор`) instead of short IDs (`Т7`). SQLiteWriter stores
+  readings under full labels; short IDs yielded 0 rows for warmup-phase
+  temperature history. Same class as v0.47.4 BrokerSnapshot fix.
+  Gemini bonus finding from F-X v3 audit, now closed.
+
+### Investigation
+
+Analytics live panels (TemperatureOverviewWidget, PressureCurrentWidget)
+were claimed "actually broken" by CC_PROMPT. Code analysis found them
+**correctly wired** — ≤2s empty on open is expected for live-only widgets.
+Pressure widget is correctly absent from cooldown-phase layout.
+Original triage (commit fb59916) was accurate.
+
+### Reference
+
+- TemperatureTrajectoryWidget fix: Gemini bonus finding, F-X v3 audit 2026-05-02
+- Placeholder fix: UX gap from fb59916 idle-label implementation
+- 4 new tests, 130/130 analytics view tests passed
+
 ## [0.52.3] — 2026-05-04 — fix(c6): correct Т11/Т12 hardware mapping
 
 ### Fixed
