@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-05-02 — F-X v3: Physical-state alarms
+
 ### F-X v3: Physical-state alarms (CooldownAlarm + VacuumGuard)
 
 Replaces the zone-band alarm model (F-X v2, never tagged) with two
