@@ -9,6 +9,32 @@
 
 ## [Unreleased]
 
+## [0.52.3] — 2026-05-04 — fix(c6): correct Т11/Т12 hardware mapping
+
+### Fixed
+
+- **C6 (F-X v3 audit stuck finding)** — `physical_alarms.yaml` had cold/warm
+  channel assignments inverted relative to real lab hardware. Corrected:
+  - `cold_channel: "Т12"` (2-я ступень GM-cooler, ~2.9K floor)
+  - `warm_channel: "Т11"` (плита 1-й ступени, ~40K floor)
+  - `cooldown_alarm.py` and `physical_alarms_config.py` defaults flipped to match
+  - `replay_alarm_history.py` fallbacks flipped
+- Display labels in `channels.yaml` and `channel_manager.py`:
+  «Теплообменник 1» → «Плита 1-й ступени» (Т11);
+  «Теплообменник 2» → «2-я ступень» (Т12). Physically accurate.
+- `top_watch_bar.py`: T_MIN_CHANNEL Т11→Т12, T_MAX_CHANNEL Т12→Т11.
+  T_min cell now correctly shows 2nd-stage cold-head temperature.
+- `interlocks.yaml` `detector_warmup` description clarified (Т12 = 2-я ступень).
+  Threshold (10K, Т12) was already correct; no change.
+- `vacuum_guard.py` `reference_temp_channel` (Т12) confirmed correct; no change.
+
+### Reference
+
+- C6 stuck finding raised in F-X v3 audit iter 4, 2026-05-02
+- Hardware verification by architect at lab, 2026-05-03
+- Reference curve data provenance consistent with Т12=cold (2.9K floor)
+- **Push gate now CLEARED** for v0.51.0 / v0.52.0 / v0.52.1 / v0.52.2 / v0.52.3
+
 ## [0.52.2] — 2026-05-03 — Cooldown predictor: data-driven floor + quasi-stationary support
 
 ### Changed
