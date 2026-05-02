@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+## [0.52.1] — 2026-05-03 — Русификация интерфейса
+
+### Changed
+
+- Кнопки переключения шкалы Y: «Lin Y» / «Log Y» → «Лин Y» / «Лог Y»
+  (`dashboard/temp_plot_widget.py`, `widgets/overview_panel.py`)
+- Документация оператора `docs/operator/analytics-tab.md` переведена на русский язык полностью
+
 ## [0.52.0] — 2026-05-03 — F-P prediction overlays on Analytics tab
 
 ### Added

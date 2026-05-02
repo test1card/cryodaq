@@ -1,0 +1,1194 @@
+src/cryodaq/gui/theme.py:33:BACKGROUND = _pack["BACKGROUND"]
+src/cryodaq/gui/theme.py:34:FOREGROUND = _pack["FOREGROUND"]
+src/cryodaq/gui/theme.py:51:BORDER = _pack["BORDER"]
+src/cryodaq/gui/theme.py:55:ACCENT = _pack["ACCENT"]
+src/cryodaq/gui/theme.py:64:# (operator reads green as "safe" when it means "selected"). These
+src/cryodaq/gui/theme.py:123:FONT_DISPLAY = "Fira Code"
+src/cryodaq/gui/theme.py:124:FONT_BODY = "Fira Sans"
+src/cryodaq/gui/theme.py:125:FONT_MONO = "Fira Code"
+src/cryodaq/gui/theme.py:209:QDARKTHEME_CORNER_SHAPE = "rounded"
+src/cryodaq/gui/theme.py:307:pg.setConfigOption("background", PLOT_BG)
+src/cryodaq/gui/theme.py:308:pg.setConfigOption("foreground", PLOT_FG)
+src/cryodaq/gui/theme.py:309:pg.setConfigOption("antialias", True)
+src/cryodaq/gui/shell/bottom_status_bar.py:35:        self.setObjectName("BottomStatusBar")
+src/cryodaq/gui/shell/bottom_status_bar.py:109:        if "fault" in s:
+src/cryodaq/gui/shell/bottom_status_bar.py:111:        elif "running" in s or "permitted" in s:
+src/cryodaq/gui/shell/bottom_status_bar.py:113:        elif "ready" in s:
+src/cryodaq/gui/shell/experiment_overlay.py:56:        self.setObjectName("ExperimentOverlay")
+src/cryodaq/gui/shell/experiment_overlay.py:112:        self._name_label.setObjectName("expOverlayName")
+src/cryodaq/gui/shell/experiment_overlay.py:126:        self._name_edit.setObjectName("expOverlayNameEdit")
+src/cryodaq/gui/shell/experiment_overlay.py:139:        self._more_btn.setObjectName("expMoreBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:147:        self._passport_label.setObjectName("expPassport")
+src/cryodaq/gui/shell/experiment_overlay.py:162:        self._phase_frame.setObjectName("expPhaseFrame")
+src/cryodaq/gui/shell/experiment_overlay.py:190:        self._phase_status.setObjectName("expPhaseStatus")
+src/cryodaq/gui/shell/experiment_overlay.py:205:        self._prev_btn.setObjectName("expPrevBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:212:        self._next_btn.setObjectName("expNextBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:264:        self._save_btn.setObjectName("expSaveBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:289:        self._timeline_list.setObjectName("expTimeline")
+src/cryodaq/gui/shell/experiment_overlay.py:308:        self._finalize_btn.setObjectName("expFinalizeBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:347:        page.setObjectName("ExperimentLandingPage")
+src/cryodaq/gui/shell/experiment_overlay.py:362:        heading.setObjectName("expLandingHeading")
+src/cryodaq/gui/shell/experiment_overlay.py:386:        body.setObjectName("expLandingBody")
+src/cryodaq/gui/shell/experiment_overlay.py:403:        self._landing_create_btn.setObjectName("expLandingCreateBtn")
+src/cryodaq/gui/shell/experiment_overlay.py:471:        if state == "current":
+src/cryodaq/gui/shell/experiment_overlay.py:472:            # IV.2 B.2: phase pill marks the UI "which phase are we in"
+src/cryodaq/gui/shell/experiment_overlay.py:478:        elif state == "past":
+src/cryodaq/gui/shell/experiment_overlay.py:517:        channel = getattr(reading, "channel", "")
+src/cryodaq/gui/shell/experiment_overlay.py:519:            metadata = dict(getattr(reading, "metadata", {}) or {})
+src/cryodaq/gui/shell/experiment_overlay.py:581:        self._name_label.setText(exp.get("name", exp.get("title", "\u2014")))
+src/cryodaq/gui/shell/experiment_overlay.py:586:        template_id = exp.get("template_id", "custom")
+src/cryodaq/gui/shell/experiment_overlay.py:588:        template_name = template.get("name", template_id)
+src/cryodaq/gui/shell/experiment_overlay.py:601:                self._style_pill(phase, "current", dur_text)
+src/cryodaq/gui/shell/experiment_overlay.py:603:                self._style_pill(phase, "past", dur_text)
+src/cryodaq/gui/shell/experiment_overlay.py:605:                self._style_pill(phase, "future")
+src/cryodaq/gui/shell/experiment_overlay.py:648:        self._sample_edit.setText(exp.get("sample", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:649:        self._desc_edit.setPlainText(exp.get("description", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:650:        self._notes_edit.setPlainText(exp.get("notes", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:659:            phase = p.get("phase")
+src/cryodaq/gui/shell/experiment_overlay.py:684:        template_id = exp.get("template_id", "custom")
+src/cryodaq/gui/shell/experiment_overlay.py:688:            str(f.get("id", "")): str(f.get("label", f.get("id", "")))
+src/cryodaq/gui/shell/experiment_overlay.py:710:            {"cmd": "log_get", "current_experiment": True, "limit": 50},
+src/cryodaq/gui/shell/experiment_overlay.py:720:        entries = result.get("entries", [])
+src/cryodaq/gui/shell/experiment_overlay.py:729:            ts = self._format_time(entry.get("timestamp", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:730:            author = str(entry.get("author", "") or entry.get("source", "") or "")
+src/cryodaq/gui/shell/experiment_overlay.py:731:            msg_raw = str(entry.get("message", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:765:                str(result.get("error", "\u041e\u0448\u0438\u0431\u043a\u0430"))
+src/cryodaq/gui/shell/experiment_overlay.py:771:            "cmd": "experiment_update",
+src/cryodaq/gui/shell/experiment_overlay.py:773:            "title": name,
+src/cryodaq/gui/shell/experiment_overlay.py:774:            "sample": self._sample_edit.text().strip(),
+src/cryodaq/gui/shell/experiment_overlay.py:775:            "description": self._desc_edit.toPlainText().strip(),
+src/cryodaq/gui/shell/experiment_overlay.py:776:            "notes": self._notes_edit.toPlainText().strip(),
+src/cryodaq/gui/shell/experiment_overlay.py:816:            {"cmd": "experiment_advance_phase", "phase": target},
+src/cryodaq/gui/shell/experiment_overlay.py:833:        name = self._experiment.get("name", "")
+src/cryodaq/gui/shell/experiment_overlay.py:862:        name = self._experiment.get("name", "")
+src/cryodaq/gui/shell/experiment_overlay.py:889:            "cmd": command,
+src/cryodaq/gui/shell/experiment_overlay.py:891:            "title": card.get("title", ""),
+src/cryodaq/gui/shell/experiment_overlay.py:892:            "sample": card.get("sample", ""),
+src/cryodaq/gui/shell/experiment_overlay.py:893:            "description": card.get("description", ""),
+src/cryodaq/gui/shell/experiment_overlay.py:894:            "notes": card.get("notes", ""),
+src/cryodaq/gui/shell/experiment_overlay.py:938:        self._name_edit.setText(self._experiment.get("name", ""))
+src/cryodaq/gui/shell/experiment_overlay.py:951:        old_name = self._experiment.get("name", "") if self._experiment else ""
+src/cryodaq/gui/shell/experiment_overlay.py:955:            self._experiment["name"] = new_name
+src/cryodaq/gui/shell/tool_rail.py:38:    "alarms": "ph.bell-simple",
+src/cryodaq/gui/shell/tool_rail.py:39:    "analytics": "ph.chart-line-up",
+src/cryodaq/gui/shell/tool_rail.py:40:    "conductivity": "ph.thermometer-simple",
+src/cryodaq/gui/shell/tool_rail.py:41:    "experiment": "ph.flask",
+src/cryodaq/gui/shell/tool_rail.py:42:    "home": "ph.house",
+src/cryodaq/gui/shell/tool_rail.py:43:    "instruments": "ph.cpu",
+src/cryodaq/gui/shell/tool_rail.py:44:    "log": "ph.note-pencil",
+src/cryodaq/gui/shell/tool_rail.py:45:    "more": "ph.dots-three",
+src/cryodaq/gui/shell/tool_rail.py:47:    "source": "ph.lightning",
+src/cryodaq/gui/shell/tool_rail.py:79:    raw = raw.replace('stroke="currentColor"', f'stroke="{color}"')
+src/cryodaq/gui/shell/tool_rail.py:80:    raw = raw.replace('fill="currentColor"', f'fill="{color}"')
+src/cryodaq/gui/shell/tool_rail.py:98:    "Ctrl+L": "log",  # Журнал
+src/cryodaq/gui/shell/tool_rail.py:99:    "Ctrl+E": "experiment",  # Эксперимент
+src/cryodaq/gui/shell/tool_rail.py:100:    "Ctrl+A": "analytics",  # Аналитика
+src/cryodaq/gui/shell/tool_rail.py:101:    "Ctrl+K": "source",  # Keithley (источник мощности)
+src/cryodaq/gui/shell/tool_rail.py:102:    "Ctrl+M": "alarms",  # Модуль сигнализации
+src/cryodaq/gui/shell/tool_rail.py:103:    "Ctrl+R": "archive",  # Records (архив, lives in More menu)
+src/cryodaq/gui/shell/tool_rail.py:104:    "Ctrl+C": "conductivity",  # Теплопроводность
+src/cryodaq/gui/shell/tool_rail.py:105:    "Ctrl+D": "instruments",  # Диагностика / приборы
+src/cryodaq/gui/shell/tool_rail.py:108:_ICONS_DIR = Path(__file__).parent.parent / "resources" / "icons"
+src/cryodaq/gui/shell/tool_rail.py:112:    ("home", "home.svg", "Дашборд"),
+src/cryodaq/gui/shell/tool_rail.py:118:    ("experiment", "flask-conical.svg", "Эксперимент"),
+src/cryodaq/gui/shell/tool_rail.py:119:    ("source", "zap.svg", "Источник мощности"),
+src/cryodaq/gui/shell/tool_rail.py:120:    ("analytics", "trending-up.svg", "Аналитика"),
+src/cryodaq/gui/shell/tool_rail.py:121:    ("conductivity", "thermometer.svg", "Теплопроводность"),
+src/cryodaq/gui/shell/tool_rail.py:122:    ("alarms", "bell.svg", "Алармы"),
+src/cryodaq/gui/shell/tool_rail.py:123:    ("log", "file-text.svg", "Служебный лог"),
+src/cryodaq/gui/shell/tool_rail.py:124:    ("instruments", "cpu.svg", "Приборы"),
+src/cryodaq/gui/shell/tool_rail.py:126:_MORE_NAME = "more"
+src/cryodaq/gui/shell/tool_rail.py:129:    ("archive", "Архив"),
+src/cryodaq/gui/shell/tool_rail.py:130:    ("calibration", "Калибровка"),
+src/cryodaq/gui/shell/tool_rail.py:131:    ("settings", "Настройки"),
+src/cryodaq/gui/shell/tool_rail.py:227:        self.setObjectName("ToolRail")
+src/cryodaq/gui/shell/overlays/_design_system/modal_card.py:46:        self.setObjectName("modalCardBackdrop")
+src/cryodaq/gui/shell/overlays/_design_system/modal_card.py:72:        self.setObjectName("ModalCard")
+src/cryodaq/gui/shell/overlays/_design_system/modal_card.py:93:        self._card.setObjectName("modalCardBody")
+src/cryodaq/gui/shell/overlays/_design_system/modal_card.py:113:        self._close_button.setObjectName("modalCardCloseButton")
+src/cryodaq/gui/shell/overlays/_design_system/modal_card.py:135:        self._content_host.setObjectName("modalCardContentHost")
+src/cryodaq/gui/shell/overlays/_design_system/__init__.py:7:__all__ = ["BentoGrid", "DrillDownBreadcrumb", "ModalCard"]
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:19:    tile.setObjectName("showcaseTile")
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:60:    window.setWindowTitle("CryoDAQ Overlay Design System Showcase")
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:91:            "Executive tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:101:            "Live tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:111:            "Wide tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:121:            "Tall tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:131:            "Support tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:141:            "Dense tile",
+src/cryodaq/gui/shell/overlays/_design_system/_showcase.py:151:            "Telemetry tile",
+src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py:46:        self.setObjectName("DrillDownBreadcrumb")
+src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py:55:        self._back_button.setObjectName("drillDownBackButton")
+src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py:74:        self._separator.setObjectName("drillDownSeparator")
+src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py:85:        self._overlay_label.setObjectName("drillDownOverlayLabel")
+src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py:100:        self._close_button.setObjectName("drillDownCloseButton")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:60:_FILTER_CHIP_ALL = "all"
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:61:_FILTER_CHIP_CURRENT = "current"
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:94:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:109:    if variant == "primary":
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:113:    elif variant == "warning":
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:115:    elif variant == "accent":
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:117:    elif variant == "ghost":
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:119:    else:  # "neutral"
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:169:        parsed = _parse_entry_timestamp(str(entry.get("timestamp", "")))
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:194:        self.setObjectName("operatorLogPanel")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:198:        self._settings = QSettings("FIAN", "CryoDAQ")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:252:        self._banner_label.setObjectName("operatorLogBanner")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:262:        card.setObjectName("composerCard")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:324:        _style_button(self._submit_btn, "primary")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:333:        card.setObjectName("filterBarCard")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:388:        card.setObjectName("timelineCard")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:450:        _style_button(self._load_more_btn, "neutral")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:483:            "cmd": "log_entry",
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:484:            "message": message,
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:485:            "author": author,
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:486:            "source": "gui",
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:487:            "tags": tags,
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:500:            error = result.get("error", "Не удалось сохранить запись.")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:505:        entry = result.get("entry")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:537:            _style_button(btn, "accent" if is_active else "neutral")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:547:        payload: dict = {"cmd": "log_get", "limit": self._limit}
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:560:            error = result.get("error", "Не удалось загрузить журнал.")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:564:        entries = list(result.get("entries", []))
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:593:                ts = _parse_entry_timestamp(str(entry.get("timestamp", "")))
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:597:                message = str(entry.get("message", "")).lower()
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:601:                author = str(entry.get("author", "")).lower()
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:605:                tags = [str(t).lower() for t in (entry.get("tags") or [])]
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:639:            ts = _parse_entry_timestamp(str(entry.get("timestamp", "")))
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:668:        is_system = str(entry.get("author", "")).strip().lower() == "system"
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:681:        author_text = str(entry.get("author") or entry.get("source") or "system")
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:693:        message_label = QLabel(str(entry.get("message", "")))
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:707:        tags = entry.get("tags") or []
+src/cryodaq/gui/shell/overlays/operator_log_panel.py:758:        # The "current experiment" chip is only meaningful when there's
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:22:- ``get_auto_state() -> str`` — returns ``"idle"`` / ``"stabilizing"`` /
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:23:  ``"done"`` for external finalize guards. Mirrors legacy
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:25:- ``is_auto_sweep_active() -> bool`` — convenience (state == "stabilizing").
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:147:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:157:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:164:    if variant == "primary":
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:167:    elif variant == "warning":
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:169:    elif variant == "accent":
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:171:    else:  # "neutral"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:236:        self._auto_state: str = "idle"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:250:        self.setObjectName("conductivityPanel")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:311:        self._banner_label.setObjectName("conductivityBanner")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:321:        card.setObjectName("chainCard")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:382:        _style_button(self._up_btn, "neutral")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:387:        _style_button(self._down_btn, "neutral")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:395:        _style_button(self._export_btn, "neutral")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:404:        card.setObjectName("liveCard")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:420:        self._steady_banner_label.setObjectName("steadyBanner")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:539:        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:542:        pi.setLabel("left", "Температура", units="К")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:543:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:544:        pi.setLabel("bottom", "Время")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:561:        card.setObjectName("autoSweepCard")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:655:        _style_button(self._auto_start_btn, "primary")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:659:        _style_button(self._auto_stop_btn, "warning")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:775:        return parts[1] if len(parts) >= 2 else "smua"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:789:                if item.opts.get("name") != new_name:
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:790:                    item.opts["name"] = new_name
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:912:            t_hot = self._temps.get(hot_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:913:            t_cold = self._temps.get(cold_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:915:            R = dt / P if P != 0 and math.isfinite(dt) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:916:            G = P / dt if dt != 0 and P != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:964:        t_first = self._temps.get(self._chain[0], float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:965:        t_last = self._temps.get(self._chain[-1], float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:967:        total_G = P / total_dt if total_dt != 0 and P != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:968:        total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1163:        self._auto_state = "stabilizing"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1175:                "cmd": "keithley_set_target",
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1176:                "channel": self._smu_channel(),
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1186:        self._auto_state = "idle"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1188:        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1198:        if self._auto_state != "stabilizing":
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1238:                        "cmd": "keithley_set_target",
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1239:                        "channel": self._smu_channel(),
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1256:        T_hot = self._temps.get(hot_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1257:        T_cold = self._temps.get(cold_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1259:        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1260:        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1288:        self._auto_state = "done"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1290:        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1347:        T_hot = self._temps.get(hot_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1348:        T_cold = self._temps.get(cold_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1351:        R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1352:        G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1356:        R_pred = G_pred = float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1358:        tau_hot = tau_cold = T_inf_hot = T_inf_cold = float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1373:        step = self._auto_step if self._auto_state == "stabilizing" else -1
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1376:            if self._auto_state == "stabilizing" and self._auto_step < len(self._auto_power_list)
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1434:                    "timestamp",
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1437:                    "pair",
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1449:                t_hot = self._temps.get(hot_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1450:                t_cold = self._temps.get(cold_ch, float("nan"))
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1452:                R = dt / P if P != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1453:                G = P / dt if dt != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1454:                t_values = [self._temps.get(ch, float("nan")) for ch in self._chain]
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1457:                t_inf_hot = p_hot.t_predicted if p_hot and p_hot.valid else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1458:                t_inf_cold = p_cold.t_predicted if p_cold and p_cold.valid else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1460:                r_pred = dt_inf / P if P != 0 and math.isfinite(dt_inf) else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1461:                g_pred = P / dt_inf if dt_inf != 0 and P != 0 else float("nan")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1502:        start_ok = self._connected and self._auto_state != "stabilizing"
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1504:        self._auto_stop_btn.setEnabled(self._auto_state == "stabilizing")
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1509:        Returns one of ``"idle"``, ``"stabilizing"``, ``"done"``.
+src/cryodaq/gui/shell/overlays/conductivity_panel.py:1521:        return self._auto_state == "stabilizing"
+src/cryodaq/gui/shell/overlays/archive_panel.py:70:    ("Оператор А-Я", "operator", False),
+src/cryodaq/gui/shell/overlays/archive_panel.py:71:    ("Образец А-Я", "sample", False),
+src/cryodaq/gui/shell/overlays/archive_panel.py:77:    ("Есть отчёт", "true"),
+src/cryodaq/gui/shell/overlays/archive_panel.py:78:    ("Нет отчёта", "false"),
+src/cryodaq/gui/shell/overlays/archive_panel.py:118:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/archive_panel.py:126:    if variant == "primary":
+src/cryodaq/gui/shell/overlays/archive_panel.py:129:    elif variant == "warning":
+src/cryodaq/gui/shell/overlays/archive_panel.py:131:    elif variant == "accent":
+src/cryodaq/gui/shell/overlays/archive_panel.py:133:    else:  # "neutral"
+src/cryodaq/gui/shell/overlays/archive_panel.py:175:        root = Path(artifact_dir) / "reports"
+src/cryodaq/gui/shell/overlays/archive_panel.py:243:        role = str(item.get("role", "")).strip() or "unknown"
+src/cryodaq/gui/shell/overlays/archive_panel.py:244:        summary = item.get("summary", {}) if isinstance(item.get("summary"), dict) else {}
+src/cryodaq/gui/shell/overlays/archive_panel.py:247:            fmt = summary.get("format", "?")
+src/cryodaq/gui/shell/overlays/archive_panel.py:248:            channels = summary.get("channels", [])
+src/cryodaq/gui/shell/overlays/archive_panel.py:250:            path = Path(str(item.get("path", "")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:263:            category = str(item.get("category", "")).strip() or "artifact"
+src/cryodaq/gui/shell/overlays/archive_panel.py:264:            path_text = str(item.get("path", "")).strip() or "—"
+src/cryodaq/gui/shell/overlays/archive_panel.py:350:        self.setObjectName("archivePanel")
+src/cryodaq/gui/shell/overlays/archive_panel.py:404:        self._banner_label.setObjectName("archiveBanner")
+src/cryodaq/gui/shell/overlays/archive_panel.py:414:        card.setObjectName("filterBarCard")
+src/cryodaq/gui/shell/overlays/archive_panel.py:479:        _style_button(self._refresh_btn, "accent")
+src/cryodaq/gui/shell/overlays/archive_panel.py:498:        card.setObjectName("listCard")
+src/cryodaq/gui/shell/overlays/archive_panel.py:553:        card.setObjectName("detailsCard")
+src/cryodaq/gui/shell/overlays/archive_panel.py:575:        metadata.setObjectName("metadataBlock")
+src/cryodaq/gui/shell/overlays/archive_panel.py:634:        _style_button(self._open_folder_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:637:        self._open_pdf_btn = QPushButton("PDF")
+src/cryodaq/gui/shell/overlays/archive_panel.py:638:        _style_button(self._open_pdf_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:641:        self._open_docx_btn = QPushButton("DOCX")
+src/cryodaq/gui/shell/overlays/archive_panel.py:642:        _style_button(self._open_docx_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:647:        _style_button(self._regenerate_btn, "primary")
+src/cryodaq/gui/shell/overlays/archive_panel.py:676:        card.setObjectName("exportCard")
+src/cryodaq/gui/shell/overlays/archive_panel.py:700:        _style_button(self._export_csv_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:704:        _style_button(self._export_hdf5_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:708:        _style_button(self._export_xlsx_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:716:        _style_button(self._export_parquet_btn, "neutral")
+src/cryodaq/gui/shell/overlays/archive_panel.py:754:            "cmd": "experiment_archive_list",
+src/cryodaq/gui/shell/overlays/archive_panel.py:756:            "operator": self._operator_edit.text().strip(),
+src/cryodaq/gui/shell/overlays/archive_panel.py:757:            "sample": self._sample_edit.text().strip(),
+src/cryodaq/gui/shell/overlays/archive_panel.py:761:            "descending": bool(descending),
+src/cryodaq/gui/shell/overlays/archive_panel.py:773:            error = result.get("error", "Не удалось загрузить архив.")
+src/cryodaq/gui/shell/overlays/archive_panel.py:776:        entries = list(result.get("entries", []))
+src/cryodaq/gui/shell/overlays/archive_panel.py:793:            self._set_cell(row, 2, str(entry.get("title") or entry.get("experiment_id", "")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:795:            self._set_cell(row, 4, str(entry.get("operator", "")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:796:            self._set_cell(row, 5, str(entry.get("sample", "")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:797:            self._set_cell(row, 6, str(entry.get("status", "")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:803:                isinstance(item, dict) and item.get("role") == "experiment_data"
+src/cryodaq/gui/shell/overlays/archive_panel.py:845:        title = str(entry.get("title") or entry.get("experiment_id", "")).strip()
+src/cryodaq/gui/shell/overlays/archive_panel.py:852:        self._operator_label.setText(str(entry.get("operator", "")) or "—")
+src/cryodaq/gui/shell/overlays/archive_panel.py:853:        self._sample_label.setText(str(entry.get("sample", "")) or "—")
+src/cryodaq/gui/shell/overlays/archive_panel.py:868:        raw_notes = entry.get("notes")
+src/cryodaq/gui/shell/overlays/archive_panel.py:951:            {"cmd": "experiment_generate_report", "experiment_id": experiment_id},
+src/cryodaq/gui/shell/overlays/archive_panel.py:964:            self.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:966:        report = result.get("report") or {}
+src/cryodaq/gui/shell/overlays/archive_panel.py:967:        if report.get("skipped"):
+src/cryodaq/gui/shell/overlays/archive_panel.py:968:            self.show_warning(str(report.get("reason", "Формирование отчёта пропущено.")))
+src/cryodaq/gui/shell/overlays/archive_panel.py:980:        self.export_requested.emit("csv")
+src/cryodaq/gui/shell/overlays/archive_panel.py:994:        self._start_export_worker("csv", runner, unit="записей")
+src/cryodaq/gui/shell/overlays/archive_panel.py:1019:        self.export_requested.emit("xlsx")
+src/cryodaq/gui/shell/overlays/archive_panel.py:1035:        self._start_export_worker("xlsx", runner, unit="записей")
+src/cryodaq/gui/shell/overlays/archive_panel.py:1047:        self.export_requested.emit("parquet")
+src/cryodaq/gui/shell/overlays/archive_panel.py:1081:        self._start_export_worker("parquet", runner, unit="строк")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:139:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/instruments_panel.py:238:        self.setObjectName("instrumentCard")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:352:        self.setStyleSheet(_card_qss("instrumentCard", color))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:383:        self.setObjectName("diagSection")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:473:        healthy = int(self._summary.get("healthy", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:474:        warning = int(self._summary.get("warning", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:475:        critical = int(self._summary.get("critical", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:507:                (_fmt(float(data.get("current_T", float("nan")))), True, False),
+src/cryodaq/gui/shell/overlays/instruments_panel.py:508:                (_fmt(float(data.get("noise_mK", float("nan"))), 0), True, False),
+src/cryodaq/gui/shell/overlays/instruments_panel.py:509:                (_fmt(float(data.get("drift_mK_per_min", float("nan")))), True, False),
+src/cryodaq/gui/shell/overlays/instruments_panel.py:512:                    _fmt(float(data["correlation"]), 2)
+src/cryodaq/gui/shell/overlays/instruments_panel.py:513:                    if data.get("correlation") is not None
+src/cryodaq/gui/shell/overlays/instruments_panel.py:541:        healthy = int(self._summary.get("healthy", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:542:        warning = int(self._summary.get("warning", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:543:        critical = int(self._summary.get("critical", 0))
+src/cryodaq/gui/shell/overlays/instruments_panel.py:559:        _add(healthy, "INFO", "ОК")  # STATUS_INFO reused for OK summary
+src/cryodaq/gui/shell/overlays/instruments_panel.py:560:        _add(warning, "WARNING", "ПРЕД")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:561:        _add(critical, "CRITICAL", "КРИТ")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:581:        self.setObjectName("instrumentsPanel")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:619:        cards_card.setObjectName("instrumentsCard")
+src/cryodaq/gui/shell/overlays/instruments_panel.py:709:        channels_raw = payload.get("channels") or {}
+src/cryodaq/gui/shell/overlays/instruments_panel.py:710:        summary_raw = payload.get("summary") or {}
+src/cryodaq/gui/shell/overlays/instruments_panel.py:759:           not create bogus "analytics" cards. Legacy v1 split first and
+src/cryodaq/gui/shell/overlays/instruments_panel.py:770:        if channel.startswith("analytics/") or channel == "analytics":
+src/cryodaq/gui/shell/overlays/instruments_panel.py:803:        worker = ZmqCommandWorker({"cmd": "get_sensor_diagnostics"}, parent=self)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:63:_MEASUREMENTS: tuple[str, ...] = ("voltage", "current", "resistance", "power")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:65:    "voltage": "Напряжение",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:66:    "current": "Ток",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:67:    "resistance": "Сопротивление",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:68:    "power": "Мощность",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:71:    "voltage": "В",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:72:    "current": "А",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:73:    "resistance": "Ом",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:74:    "power": "Вт",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:86:    "fault": "АВАРИЯ",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:115:    "voltage": _format_voltage,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:116:    "current": _format_current,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:117:    "resistance": _format_resistance,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:118:    "power": _format_power,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:124:    "voltage": "— В",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:125:    "current": "— А",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:126:    "resistance": "— Ом",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:127:    "power": "— Вт",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:138:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:170:    if variant == "primary":
+src/cryodaq/gui/shell/overlays/keithley_panel.py:174:    elif variant == "warning":
+src/cryodaq/gui/shell/overlays/keithley_panel.py:177:    elif variant == "destructive":
+src/cryodaq/gui/shell/overlays/keithley_panel.py:180:    elif variant == "accent":
+src/cryodaq/gui/shell/overlays/keithley_panel.py:189:        bg = "transparent"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:192:    else:  # "neutral"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:228:        self._channel_state: str = "off"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:283:        self._state_badge = QLabel(_STATE_LABELS["off"])
+src/cryodaq/gui/shell/overlays/keithley_panel.py:307:        # forced the operator to visually re-group "set parameters"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:308:        # vs "run". Two rows separate the concerns explicitly and let
+src/cryodaq/gui/shell/overlays/keithley_panel.py:341:        _style_button(self._start_btn, "primary")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:346:        _style_button(self._stop_btn, "warning")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:351:        _style_button(self._emergency_btn, "destructive")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:422:                "left",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:430:            item.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:434:            item.setLabel("bottom", "Время", units="с")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:435:            item.getAxis("bottom").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:436:            for axis_name in ("left", "bottom"):
+src/cryodaq/gui/shell/overlays/keithley_panel.py:453:        border_color = theme.STATUS_FAULT if self._channel_state == "fault" else theme.BORDER_SUBTLE
+src/cryodaq/gui/shell/overlays/keithley_panel.py:454:        border_width = 3 if self._channel_state == "fault" else 1
+src/cryodaq/gui/shell/overlays/keithley_panel.py:464:        text = _STATE_LABELS.get(self._channel_state, _STATE_LABELS["off"])
+src/cryodaq/gui/shell/overlays/keithley_panel.py:468:        elif self._channel_state == "fault":
+src/cryodaq/gui/shell/overlays/keithley_panel.py:556:                "cmd": "keithley_start",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:557:                "channel": self._key,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:566:        self._dispatch_command({"cmd": "keithley_stop", "channel": self._key})
+src/cryodaq/gui/shell/overlays/keithley_panel.py:583:        self._dispatch_command({"cmd": "keithley_emergency_off", "channel": self._key})
+src/cryodaq/gui/shell/overlays/keithley_panel.py:604:                "cmd": "keithley_set_target",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:605:                "channel": self._key,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:620:                "cmd": "keithley_set_limits",
+src/cryodaq/gui/shell/overlays/keithley_panel.py:621:                "channel": self._key,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:640:                result.get("error"),
+src/cryodaq/gui/shell/overlays/keithley_panel.py:649:        normalized = state.lower() if state else "off"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:651:            normalized = "off"
+src/cryodaq/gui/shell/overlays/keithley_panel.py:709:        if suffix in ("resistance", "power") and self._current_is_effectively_zero():
+src/cryodaq/gui/shell/overlays/keithley_panel.py:722:        buf = self._buffers.get("current")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:807:        self.setObjectName("keithleyPanel")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:811:        self._smua_block = _SmuChannelBlock("smua", "Канал А", palette_index=0)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:812:        self._smub_block = _SmuChannelBlock("smub", "Канал B", palette_index=1)
+src/cryodaq/gui/shell/overlays/keithley_panel.py:814:            "smua": self._smua_block,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:815:            "smub": self._smub_block,
+src/cryodaq/gui/shell/overlays/keithley_panel.py:886:        self._banner_label.setObjectName("keithleyBanner")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:944:        _style_button(self._stop_both_btn, "warning")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:949:        _style_button(self._emergency_both_btn, "destructive")
+src/cryodaq/gui/shell/overlays/keithley_panel.py:1001:            block._dispatch_command({"cmd": "keithley_emergency_off", "channel": block._key})
+src/cryodaq/gui/shell/overlays/keithley_panel.py:1032:                state = str(reading.metadata.get("state", "off"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:14:- ``get_current_mode() -> str`` — public accessor: ``"setup"`` /
+src/cryodaq/gui/shell/overlays/calibration_panel.py:15:  ``"acquisition"`` / ``"results"`` for tests and future host hooks.
+src/cryodaq/gui/shell/overlays/calibration_panel.py:91:    for entry in raw.get("instruments", []):
+src/cryodaq/gui/shell/overlays/calibration_panel.py:92:        if entry.get("type") != "lakeshore_218s":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:94:        name = entry.get("name", "LS218")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:95:        channels_raw = entry.get("channels", {})
+src/cryodaq/gui/shell/overlays/calibration_panel.py:104:                elif isinstance(ch, dict) and "label" in ch:
+src/cryodaq/gui/shell/overlays/calibration_panel.py:108:        result.append({"instrument": name, "channels": channels})
+src/cryodaq/gui/shell/overlays/calibration_panel.py:148:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/calibration_panel.py:155:    if variant == "primary":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:158:    elif variant == "warning":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:160:    elif variant == "accent":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:162:    else:  # "neutral"
+src/cryodaq/gui/shell/overlays/calibration_panel.py:232:        if status == "dense":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:234:        if status == "medium":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:236:        if status == "sparse":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:250:            painter.fillRect(i * seg_w, 0, seg_w, h, self._color_for(str(b.get("status", "empty"))))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:290:        card.setObjectName("calibParamsCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:292:        card.setStyleSheet(_card_qss("calibParamsCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:314:            for ch in group["channels"]:
+src/cryodaq/gui/shell/overlays/calibration_panel.py:326:            gb = QGroupBox(group["instrument"])
+src/cryodaq/gui/shell/overlays/calibration_panel.py:344:            for ch in group["channels"]:
+src/cryodaq/gui/shell/overlays/calibration_panel.py:360:        _style_button(self._start_btn, "primary")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:370:        card.setObjectName("calibImportCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:372:        card.setStyleSheet(_card_qss("calibImportCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:391:            _style_button(btn, "neutral")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:400:        card.setObjectName("calibCurvesCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:402:        card.setStyleSheet(_card_qss("calibCurvesCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:414:            ["Датчик", "Curve ID", "Зон", "RMSE", "Источник"]
+src/cryodaq/gui/shell/overlays/calibration_panel.py:458:            {"cmd": "calibration_curve_import", "path": path_str}, parent=self
+src/cryodaq/gui/shell/overlays/calibration_panel.py:474:        worker = ZmqCommandWorker({"cmd": "calibration_curve_list"}, parent=self)
+src/cryodaq/gui/shell/overlays/calibration_panel.py:484:        curves = list(result.get("curves", []))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:504:            metrics = curve.get("metrics", {}) or {}
+src/cryodaq/gui/shell/overlays/calibration_panel.py:511:            self._curves_table.setItem(row, 4, _cell(str(curve.get("source", ""))))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:553:        card.setObjectName("calibStatsCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:555:        card.setStyleSheet(_card_qss("calibStatsCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:582:        card.setObjectName("calibCoverageCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:584:        card.setStyleSheet(_card_qss("calibCoverageCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:607:        card.setObjectName("calibLiveCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:609:        card.setStyleSheet(_card_qss("calibLiveCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:699:        card.setObjectName("calibChannelCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:701:        card.setStyleSheet(_card_qss("calibChannelCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:721:        card.setObjectName("calibMetricsCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:723:        card.setStyleSheet(_card_qss("calibMetricsCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:766:        card.setObjectName("calibExportCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:768:        card.setStyleSheet(_card_qss("calibExportCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:783:        self._export_json_btn = QPushButton("JSON")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:784:        self._export_csv_btn = QPushButton("CSV")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:791:            _style_button(btn, "neutral")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:804:        card.setObjectName("calibApplyCard")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:806:        card.setStyleSheet(_card_qss("calibApplyCard"))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:831:        self._policy_combo.addItem("Наследовать", "inherit")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:833:        self._policy_combo.addItem("Выключить", "off")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:839:        _style_button(self._apply_btn, "primary")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:865:            {"cmd": "calibration_curve_get", "sensor_id": sensor_id}, parent=self
+src/cryodaq/gui/shell/overlays/calibration_panel.py:875:        curve = result.get("curve") or {}
+src/cryodaq/gui/shell/overlays/calibration_panel.py:884:        metrics = curve.get("metrics", {}) or {}
+src/cryodaq/gui/shell/overlays/calibration_panel.py:904:                "cmd": "calibration_curve_export",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:922:            self.runtime_apply_requested.emit({"error": "no_channel"})
+src/cryodaq/gui/shell/overlays/calibration_panel.py:930:            "policy": self._policy_combo.currentData() or "inherit",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:971:        self._current_mode: str = "setup"
+src/cryodaq/gui/shell/overlays/calibration_panel.py:975:        self.setObjectName("calibrationPanel")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1045:        self._banner_label.setObjectName("calibrationBanner")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1063:        worker = ZmqCommandWorker({"cmd": "calibration_acquisition_status"}, parent=self)
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1073:        if result.get("active"):
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1074:            self._switch_mode("acquisition")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1079:        elif self._current_mode == "acquisition":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1083:            self._switch_mode("results")
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1090:        if mode == "setup":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1092:        elif mode == "acquisition":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1094:        elif mode == "results":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1113:                "cmd": "experiment_start",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1114:                "template_id": "calibration",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1115:                "name": name,
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1116:                "title": name,
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1117:                "operator": "",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1135:            self.show_error(str(result.get("error", "Не удалось начать прогон.")))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1139:            self.show_error(str(result.get("error", "Не удалось импортировать кривую.")))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1141:        curve = result.get("curve", {}) or {}
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1167:            self.show_error(str(result.get("error", "Не удалось экспортировать кривую.")))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1170:        if payload.get("error") == "no_channel":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1175:        policy = payload.get("policy") or "inherit"
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1186:                    "cmd": "calibration_runtime_set_global",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1187:                    "global_mode": "on" if global_toggle else "off",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1204:            self.show_error(str(result.get("error", "Не удалось установить глобальный режим.")))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1212:            {"cmd": "calibration_curve_lookup", "channel_key": channel_key},
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1227:            assignment = result.get("assignment") or {}
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1231:                "cmd": "calibration_runtime_set_channel_policy",
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1233:                "policy": policy,
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1248:            self.show_error(str(result.get("error", "Не удалось применить политику канала.")))
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1260:        if self._current_mode != "acquisition":
+src/cryodaq/gui/shell/overlays/calibration_panel.py:1291:        return self._current_mode == "acquisition"
+src/cryodaq/gui/shell/overlays/alarm_panel.py:66:    "CRITICAL": theme.STATUS_FAULT,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:67:    "WARNING": theme.STATUS_WARNING,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:68:    "INFO": theme.STATUS_INFO,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:73:    "CRITICAL": "КРИТ",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:74:    "WARNING": "ПРЕД",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:75:    "INFO": "ИНФО",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:79:    "CRITICAL": 0,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:80:    "WARNING": 1,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:81:    "INFO": 2,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:85:    "activated": "active",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:86:    "acknowledged": "acknowledged",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:87:    "cleared": "cleared",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:144:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:235:    state: str  # "ok" | "active" | "acknowledged" | "cleared"
+src/cryodaq/gui/shell/overlays/alarm_panel.py:265:        self.setObjectName("alarmPanel")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:300:        # "both lists empty" message — a single centered line rather
+src/cryodaq/gui/shell/overlays/alarm_panel.py:323:        group.setObjectName("cooldownControl")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:358:        page.setObjectName("alarmUnifiedEmpty")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:557:        active = payload.get("active") or {}
+src/cryodaq/gui/shell/overlays/alarm_panel.py:566:        return sum(1 for row in self._alarms.values() if row.state == "active")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:581:        severity = str(meta.get("severity", "INFO")).upper()
+src/cryodaq/gui/shell/overlays/alarm_panel.py:583:        threshold_raw = meta.get("threshold", 0.0)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:592:        channel_display = str(meta.get("channel", reading.channel))
+src/cryodaq/gui/shell/overlays/alarm_panel.py:599:            if event_type == "activated":
+src/cryodaq/gui/shell/overlays/alarm_panel.py:611:                trigger_count=1 if event_type == "activated" else 0,
+src/cryodaq/gui/shell/overlays/alarm_panel.py:652:            if alarm.state == "active":
+src/cryodaq/gui/shell/overlays/alarm_panel.py:661:                    "cleared": "Сброшена",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:662:                    "acknowledged": "Подтв.",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:668:            level = str(kv[1].get("level", "INFO")).upper()
+src/cryodaq/gui/shell/overlays/alarm_panel.py:685:            level = str(info.get("level", "INFO")).upper()
+src/cryodaq/gui/shell/overlays/alarm_panel.py:686:            message = str(info.get("message", ""))
+src/cryodaq/gui/shell/overlays/alarm_panel.py:689:            channels_raw = info.get("channels") or []
+src/cryodaq/gui/shell/overlays/alarm_panel.py:701:            acknowledged = bool(info.get("acknowledged", False))
+src/cryodaq/gui/shell/overlays/alarm_panel.py:760:        v2_counts: dict[str, int] = {"CRITICAL": 0, "WARNING": 0, "INFO": 0}
+src/cryodaq/gui/shell/overlays/alarm_panel.py:762:            level = str(info.get("level", "INFO")).upper()
+src/cryodaq/gui/shell/overlays/alarm_panel.py:769:                if row.state == "active" and row.severity == "CRITICAL"
+src/cryodaq/gui/shell/overlays/alarm_panel.py:771:            + v2_counts["CRITICAL"]
+src/cryodaq/gui/shell/overlays/alarm_panel.py:777:                if row.state == "active" and row.severity == "WARNING"
+src/cryodaq/gui/shell/overlays/alarm_panel.py:779:            + v2_counts["WARNING"]
+src/cryodaq/gui/shell/overlays/alarm_panel.py:803:            {"cmd": "alarm_acknowledge", "alarm_name": alarm_name}, parent=self
+src/cryodaq/gui/shell/overlays/alarm_panel.py:817:                result.get("error"),
+src/cryodaq/gui/shell/overlays/alarm_panel.py:821:        worker = ZmqCommandWorker({"cmd": "alarm_v2_ack", "alarm_name": alarm_id}, parent=self)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:834:                result.get("error"),
+src/cryodaq/gui/shell/overlays/alarm_panel.py:848:        worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:870:        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:880:        state = result.get("state", "UNAVAILABLE")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:881:        progress = result.get("progress")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:896:        watching = state in ("WATCHING", "FIRED")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:897:        watchdog_active = state in ("WATCHDOG", "WATCHDOG_FIRED")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:899:            "DISARMED": "Не активен",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:900:            "ARMED": "Активен (сбор базы...)",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:901:            "WATCHING": "Активен",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:902:            "FIRED": "ПРЕДУПРЕЖДЕНИЕ: захолаживание не по плану",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:904:            "WATCHDOG": "Контроль измерения активен",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:906:            "UNAVAILABLE": "Недоступен",
+src/cryodaq/gui/shell/overlays/alarm_panel.py:910:        if state in ("FIRED", "WATCHDOG_FIRED"):
+src/cryodaq/gui/shell/overlays/alarm_panel.py:912:        elif state in ("ARMED", "WATCHING", "WATCHDOG"):
+src/cryodaq/gui/shell/overlays/alarm_panel.py:914:        elif state in ("DISARMED", "UNAVAILABLE"):
+src/cryodaq/gui/shell/overlays/alarm_panel.py:919:            active = state in ("ARMED", "WATCHING", "FIRED", "WATCHDOG", "WATCHDOG_FIRED")
+src/cryodaq/gui/shell/overlays/alarm_panel.py:927:                self._connected and state != "UNAVAILABLE"
+src/cryodaq/gui/shell/overlays/alarm_panel.py:951:        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.arm"}, parent=self)
+src/cryodaq/gui/shell/overlays/alarm_panel.py:960:        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.disarm"}, parent=self)
+src/cryodaq/gui/shell/top_watch_bar.py:101:        self.setObjectName("TopWatchBar")
+src/cryodaq/gui/shell/top_watch_bar.py:171:        self._mode_badge.setObjectName("modeBadge")
+src/cryodaq/gui/shell/top_watch_bar.py:236:        self._context_frame.setObjectName("topWatchBarContext")
+src/cryodaq/gui/shell/top_watch_bar.py:402:        self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+src/cryodaq/gui/shell/top_watch_bar.py:421:        name = exp.get("name", "—")
+src/cryodaq/gui/shell/top_watch_bar.py:502:        self._alarm_worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
+src/cryodaq/gui/shell/top_watch_bar.py:509:        active = result.get("active", {}) or {}
+src/cryodaq/gui/shell/top_watch_bar.py:545:        # invariant #5 "Mode badge always visible".
+src/cryodaq/gui/shell/top_watch_bar.py:558:        if app_mode == "experiment":
+src/cryodaq/gui/shell/top_watch_bar.py:569:        elif app_mode == "debug":
+src/cryodaq/gui/shell/top_watch_bar.py:589:        if self._app_mode not in ("experiment", "debug"):
+src/cryodaq/gui/shell/top_watch_bar.py:597:        if self._app_mode == "experiment":
+src/cryodaq/gui/shell/top_watch_bar.py:598:            target = "debug"
+src/cryodaq/gui/shell/top_watch_bar.py:609:            target = "experiment"
+src/cryodaq/gui/shell/top_watch_bar.py:639:            {"cmd": "set_app_mode", "app_mode": target}, parent=self
+src/cryodaq/gui/shell/top_watch_bar.py:650:                "error",
+src/cryodaq/gui/shell/main_window_v2.py:53:_SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
+src/cryodaq/gui/shell/main_window_v2.py:70:    fallback = state if state else "unknown"
+src/cryodaq/gui/shell/main_window_v2.py:109:        self.setWindowTitle("CryoDAQ")
+src/cryodaq/gui/shell/main_window_v2.py:131:        "experiment": ("_experiment_overlay", lambda self: ExperimentOverlay()),
+src/cryodaq/gui/shell/main_window_v2.py:132:        "source": ("_keithley_panel", lambda self: KeithleyPanel()),
+src/cryodaq/gui/shell/main_window_v2.py:133:        "analytics": ("_analytics_view", lambda self: AnalyticsView()),
+src/cryodaq/gui/shell/main_window_v2.py:134:        "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
+src/cryodaq/gui/shell/main_window_v2.py:135:        "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
+src/cryodaq/gui/shell/main_window_v2.py:136:        "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
+src/cryodaq/gui/shell/main_window_v2.py:137:        "archive": ("_archive_panel", lambda self: ArchivePanel()),
+src/cryodaq/gui/shell/main_window_v2.py:138:        "calibration": ("_calibration_panel", lambda self: CalibrationPanel()),
+src/cryodaq/gui/shell/main_window_v2.py:176:        self._overlay.register("home", self._overview_panel)
+src/cryodaq/gui/shell/main_window_v2.py:178:        self._overlay.register("alarms", self._alarm_panel)
+src/cryodaq/gui/shell/main_window_v2.py:180:        self._tool_rail.set_active("home")
+src/cryodaq/gui/shell/main_window_v2.py:185:        self._top_bar.alarms_clicked.connect(lambda: self._on_tool_clicked("alarms"))
+src/cryodaq/gui/shell/main_window_v2.py:236:        if name == "settings":
+src/cryodaq/gui/shell/main_window_v2.py:242:        if name == "home":
+src/cryodaq/gui/shell/main_window_v2.py:244:            self._tool_rail.set_active("home")
+src/cryodaq/gui/shell/main_window_v2.py:265:        if name == "source":
+src/cryodaq/gui/shell/main_window_v2.py:277:        if name == "log":
+src/cryodaq/gui/shell/main_window_v2.py:285:        if name == "archive":
+src/cryodaq/gui/shell/main_window_v2.py:291:        if name == "conductivity":
+src/cryodaq/gui/shell/main_window_v2.py:297:        if name == "calibration":
+src/cryodaq/gui/shell/main_window_v2.py:303:        if name == "instruments":
+src/cryodaq/gui/shell/main_window_v2.py:309:        if name == "experiment":
+src/cryodaq/gui/shell/main_window_v2.py:319:        if name == "experiment" and hasattr(widget, "closed"):
+src/cryodaq/gui/shell/main_window_v2.py:320:            widget.closed.connect(lambda: self._on_tool_clicked("home"))
+src/cryodaq/gui/shell/main_window_v2.py:321:            widget.experiment_finalized.connect(lambda: self._on_tool_clicked("home"))
+src/cryodaq/gui/shell/main_window_v2.py:344:        if name == "analytics":
+src/cryodaq/gui/shell/main_window_v2.py:430:                and channel.split("/")[-1] in ("voltage", "current", "power")
+src/cryodaq/gui/shell/main_window_v2.py:452:                state_name = reading.metadata.get("state")
+src/cryodaq/gui/shell/main_window_v2.py:453:                reason = reading.metadata.get("reason", "") or ""
+src/cryodaq/gui/shell/main_window_v2.py:494:          - metadata["progress"]            float in [0, 1]  (fraction, NOT %)
+src/cryodaq/gui/shell/main_window_v2.py:495:          - metadata["phase"]               "phase1" | "transition" | "phase2" | "steady"
+src/cryodaq/gui/shell/main_window_v2.py:522:        progress_raw = meta.get("progress", 0.0)
+src/cryodaq/gui/shell/main_window_v2.py:528:        # Phase remap: plugin emits "steady" for p ≥ 0.98; spec uses
+src/cryodaq/gui/shell/main_window_v2.py:529:        # "stabilizing". The spec's "complete" state is NOT distinguished
+src/cryodaq/gui/shell/main_window_v2.py:531:        plugin_phase = str(meta.get("phase", "") or "")
+src/cryodaq/gui/shell/main_window_v2.py:532:        phase = "stabilizing" if plugin_phase == "steady" else plugin_phase
+src/cryodaq/gui/shell/main_window_v2.py:653:            phases = status.get("phases", [])
+src/cryodaq/gui/shell/main_window_v2.py:683:            self._on_tool_clicked("experiment")
+src/cryodaq/gui/shell/main_window_v2.py:699:        cmd = {"cmd": "experiment_create", **payload}
+src/cryodaq/gui/shell/main_window_v2.py:770:            if parent.__class__.__name__ == "LauncherWindow":
+src/cryodaq/gui/shell/main_window_v2.py:772:            parent = parent.parent() if callable(getattr(parent, "parent", None)) else None
+src/cryodaq/gui/shell/new_experiment_dialog.py:73:            "\u2014 \u0431\u0435\u0437 \u0448\u0430\u0431\u043b\u043e\u043d\u0430 \u2014", "custom"
+src/cryodaq/gui/shell/new_experiment_dialog.py:76:            name = t.get("name", t.get("id", "?"))
+src/cryodaq/gui/shell/new_experiment_dialog.py:77:            tid = t.get("id", t.get("template_id", "custom"))
+src/cryodaq/gui/shell/new_experiment_dialog.py:93:        known_ops = QSettings("FIAN", "CryoDAQ").value("known_operators", [])
+src/cryodaq/gui/shell/new_experiment_dialog.py:171:        if last.get("operator") and not self._operator_combo.currentText():
+src/cryodaq/gui/shell/new_experiment_dialog.py:172:            self._operator_combo.setCurrentText(last["operator"])
+src/cryodaq/gui/shell/new_experiment_dialog.py:173:        if last.get("sample") and not self._sample_edit.text():
+src/cryodaq/gui/shell/new_experiment_dialog.py:174:            self._sample_edit.setText(last["sample"])
+src/cryodaq/gui/shell/new_experiment_dialog.py:175:        if last.get("cryostat") and not self._cryostat_combo.currentText():
+src/cryodaq/gui/shell/new_experiment_dialog.py:176:            self._cryostat_combo.setCurrentText(last["cryostat"])
+src/cryodaq/gui/shell/new_experiment_dialog.py:184:            _make_completer(self._preferences.get_history("operator"))
+src/cryodaq/gui/shell/new_experiment_dialog.py:186:        self._sample_edit.setCompleter(_make_completer(self._preferences.get_history("sample")))
+src/cryodaq/gui/shell/new_experiment_dialog.py:188:            _make_completer(self._preferences.get_history("cryostat"))
+src/cryodaq/gui/shell/new_experiment_dialog.py:208:        tid = self._template_combo.currentData() or "custom"
+src/cryodaq/gui/shell/new_experiment_dialog.py:217:        if tid == "custom":
+src/cryodaq/gui/shell/new_experiment_dialog.py:220:        name_map = {tid: t.get("name", tid)} if tid else {}
+src/cryodaq/gui/shell/new_experiment_dialog.py:228:        tid = self._template_combo.currentData() or "custom"
+src/cryodaq/gui/shell/new_experiment_dialog.py:235:            edit.setPlaceholderText(str(field.get("default", "")))
+src/cryodaq/gui/shell/new_experiment_dialog.py:257:            "cmd": "experiment_create",
+src/cryodaq/gui/shell/new_experiment_dialog.py:258:            "template_id": self._template_combo.currentData() or "custom",
+src/cryodaq/gui/shell/new_experiment_dialog.py:259:            "title": name,
+src/cryodaq/gui/shell/new_experiment_dialog.py:260:            "name": name,
+src/cryodaq/gui/shell/new_experiment_dialog.py:261:            "operator": operator,
+src/cryodaq/gui/shell/new_experiment_dialog.py:262:            "sample": self._sample_edit.text().strip(),
+src/cryodaq/gui/shell/new_experiment_dialog.py:263:            "cryostat": self._cryostat_combo.currentText().strip(),
+src/cryodaq/gui/shell/new_experiment_dialog.py:264:            "description": self._description_edit.toPlainText().strip(),
+src/cryodaq/gui/shell/new_experiment_dialog.py:265:            "notes": self._notes_edit.toPlainText().strip(),
+src/cryodaq/gui/shell/new_experiment_dialog.py:279:            s = QSettings("FIAN", "CryoDAQ")
+src/cryodaq/gui/shell/new_experiment_dialog.py:291:            sample=str(payload.get("sample", "")),
+src/cryodaq/gui/shell/new_experiment_dialog.py:292:            cryostat=str(payload.get("cryostat", "")),
+src/cryodaq/gui/shell/new_experiment_dialog.py:293:            description=str(payload.get("description", "")),
+src/cryodaq/gui/shell/overlay_container.py:17:    switches to the page registered as ``"home"``. ``show_overlay(name)``
+src/cryodaq/gui/shell/overlay_container.py:22:    DASHBOARD_NAME = "home"
+src/cryodaq/gui/shell/views/analytics_widgets.py:153:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/shell/views/analytics_widgets.py:177:        card = _card("analyticsPlaceholder")
+src/cryodaq/gui/shell/views/analytics_widgets.py:217:        card = _card("analyticsTemperatureOverview")
+src/cryodaq/gui/shell/views/analytics_widgets.py:225:        pi.setLabel("left", "Температура", units="K", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/shell/views/analytics_widgets.py:226:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/views/analytics_widgets.py:227:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/shell/views/analytics_widgets.py:228:        self._plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/shell/views/analytics_widgets.py:294:        card = _card("analyticsTemperatureTrajectory")
+src/cryodaq/gui/shell/views/analytics_widgets.py:317:        pi.setLabel("left", label, units="K", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/shell/views/analytics_widgets.py:318:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/views/analytics_widgets.py:319:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/shell/views/analytics_widgets.py:320:        pi.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/shell/views/analytics_widgets.py:337:            "cmd": "readings_history",
+src/cryodaq/gui/shell/views/analytics_widgets.py:340:            "channels": channels,
+src/cryodaq/gui/shell/views/analytics_widgets.py:352:        data: dict[str, list] = result.get("data", {})
+src/cryodaq/gui/shell/views/analytics_widgets.py:454:        history = data.get("history") or []
+src/cryodaq/gui/shell/views/analytics_widgets.py:455:        central = data.get("central") or []
+src/cryodaq/gui/shell/views/analytics_widgets.py:456:        lower = data.get("lower") or []
+src/cryodaq/gui/shell/views/analytics_widgets.py:457:        upper = data.get("upper") or []
+src/cryodaq/gui/shell/views/analytics_widgets.py:467:        worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, parent=self)
+src/cryodaq/gui/shell/views/analytics_widgets.py:473:        if not result.get("ok") or result.get("status") == "no_data":
+src/cryodaq/gui/shell/views/analytics_widgets.py:486:        # timestamps with the prediction starting at "now".
+src/cryodaq/gui/shell/views/analytics_widgets.py:586:        card = _card("analyticsRThermalLive")
+src/cryodaq/gui/shell/views/analytics_widgets.py:601:        pi.setLabel("left", "R", units="К/Вт", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/shell/views/analytics_widgets.py:602:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/views/analytics_widgets.py:603:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/shell/views/analytics_widgets.py:604:        self._plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/shell/views/analytics_widgets.py:612:            orientation="horizontal",
+src/cryodaq/gui/shell/views/analytics_widgets.py:632:            labelOpts={"color": theme.STATUS_INFO, "position": 0.95},
+src/cryodaq/gui/shell/views/analytics_widgets.py:653:        history = getattr(data, "history", []) or []
+src/cryodaq/gui/shell/views/analytics_widgets.py:696:        card = _card("analyticsPressureCurrent")
+src/cryodaq/gui/shell/views/analytics_widgets.py:730:        card = _card("analyticsSensorHealth")
+src/cryodaq/gui/shell/views/analytics_widgets.py:783:        card = _card("analyticsKeithleyPower")
+src/cryodaq/gui/shell/views/analytics_widgets.py:796:            for row, key in enumerate(("voltage", "current", "power"), start=1):
+src/cryodaq/gui/shell/views/analytics_widgets.py:815:            channel = "A" if channel_raw == "smua" else "B" if channel_raw == "smub" else None
+src/cryodaq/gui/shell/views/analytics_widgets.py:821:            unit = {"voltage": "В", "current": "А", "power": "Вт"}[measurement]
+src/cryodaq/gui/shell/views/analytics_widgets.py:844:        card = _card("analyticsCooldownHistory")
+src/cryodaq/gui/shell/views/analytics_widgets.py:853:        pi.setLabel("left", "Длительность", units="ч", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/shell/views/analytics_widgets.py:854:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/shell/views/analytics_widgets.py:855:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/shell/views/analytics_widgets.py:856:        self._plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/shell/views/analytics_widgets.py:876:        cmd = {"cmd": "cooldown_history_get", "limit": self._limit}
+src/cryodaq/gui/shell/views/analytics_widgets.py:888:        cooldowns = result.get("cooldowns", [])
+src/cryodaq/gui/shell/views/analytics_widgets.py:956:        card = _card("analyticsExperimentSummary")
+src/cryodaq/gui/shell/views/analytics_widgets.py:1062:        self._populate(active, status.get("phases", []))
+src/cryodaq/gui/shell/views/analytics_widgets.py:1078:        self._sample_label.setText(active.get("sample") or "—")
+src/cryodaq/gui/shell/views/analytics_widgets.py:1079:        self._operator_label.setText(active.get("operator") or "—")
+src/cryodaq/gui/shell/views/analytics_widgets.py:1104:            name = str(p.get("phase") or "—")
+src/cryodaq/gui/shell/views/analytics_widgets.py:1120:            self._docx_label.set_path(str(base / "reports" / "report_editable.docx"))
+src/cryodaq/gui/shell/views/analytics_widgets.py:1121:            self._pdf_label.set_path(str(base / "reports" / "report_raw.pdf"))
+src/cryodaq/gui/shell/views/analytics_widgets.py:1156:            "cmd": "readings_history",
+src/cryodaq/gui/shell/views/analytics_widgets.py:1172:        data: dict[str, list] = result.get("data", {})
+src/cryodaq/gui/shell/views/analytics_widgets.py:1203:        cmd = {"cmd": "alarm_v2_history", "start_ts": start_ts, "limit": 500}
+src/cryodaq/gui/shell/views/analytics_widgets.py:1214:        history = result.get("history", [])
+src/cryodaq/gui/shell/views/analytics_widgets.py:1215:        triggered = [e for e in history if e.get("transition") == "TRIGGERED"]
+src/cryodaq/gui/shell/views/analytics_widgets.py:1216:        warnings = sum(1 for e in triggered if str(e.get("level", "")).upper() == "WARNING")
+src/cryodaq/gui/shell/views/analytics_widgets.py:1217:        criticals = sum(1 for e in triggered if str(e.get("level", "")).upper() == "CRITICAL")
+src/cryodaq/gui/shell/views/analytics_view.py:42:_LAYOUT_CONFIG_PATH = Path(__file__).resolve().parents[5] / "config" / "analytics_layout.yaml"
+src/cryodaq/gui/shell/views/analytics_view.py:49:    "preparation": "preparation",
+src/cryodaq/gui/shell/views/analytics_view.py:50:    "vacuum": "vacuum",
+src/cryodaq/gui/shell/views/analytics_view.py:51:    "cooldown": "cooldown",
+src/cryodaq/gui/shell/views/analytics_view.py:52:    "measurement": "measurement",
+src/cryodaq/gui/shell/views/analytics_view.py:53:    "warmup": "warmup",
+src/cryodaq/gui/shell/views/analytics_view.py:54:    "teardown": "disassembly",
+src/cryodaq/gui/shell/views/analytics_view.py:55:    "disassembly": "disassembly",
+src/cryodaq/gui/shell/views/analytics_view.py:97:        return {"phases": {}, "fallback": {"main": None, "top_right": None, "bottom_right": None}}
+src/cryodaq/gui/shell/views/analytics_view.py:99:        return yaml.safe_load(f) or {"phases": {}, "fallback": {}}
+src/cryodaq/gui/shell/views/analytics_view.py:107:    phases = config.get("phases") or {}
+src/cryodaq/gui/shell/views/analytics_view.py:112:    phases = config.get("phases") or {}
+src/cryodaq/gui/shell/views/analytics_view.py:114:        cfg = config.get("fallback") or {}
+src/cryodaq/gui/shell/views/analytics_view.py:118:        "main": cfg.get("main"),
+src/cryodaq/gui/shell/views/analytics_view.py:132:        self.setObjectName("analyticsView")
+src/cryodaq/gui/shell/views/analytics_view.py:263:        if slot == "main":
+src/cryodaq/gui/shell/composition_photos_widget.py:71:            e for e in artifact_index if e.get("category") == "composition_photo"
+src/cryodaq/gui/shell/composition_photos_widget.py:96:                if entry.get("category") == "composition_photo"
+src/cryodaq/gui/shell/composition_photos_widget.py:112:        header.setObjectName("compPhotosHeader")
+src/cryodaq/gui/shell/composition_photos_widget.py:141:        self._empty_label.setObjectName("compPhotosEmpty")
+src/cryodaq/gui/shell/composition_photos_widget.py:182:        cell.setObjectName("compPhotoCell")
+src/cryodaq/gui/shell/composition_photos_widget.py:196:        path_str = photo.get("path", "")
+src/cryodaq/gui/shell/composition_photos_widget.py:218:        summary = photo.get("summary", {})
+src/cryodaq/gui/shell/composition_photos_widget.py:219:        cap = summary.get("caption", "")
+src/cryodaq/gui/shell/composition_photos_widget.py:222:            cap_label.setObjectName("compThumbCaption")
+src/cryodaq/gui/shell/composition_photos_widget.py:256:        path_str = self._photo.get("path", "")
+src/cryodaq/gui/shell/composition_photos_widget.py:272:        summary = self._photo.get("summary", {})
+src/cryodaq/gui/shell/composition_photos_widget.py:283:        if summary.get("caption"):
+src/cryodaq/gui/shell/composition_photos_widget.py:285:        if summary.get("dimensions"):
+src/cryodaq/gui/shell/composition_photos_widget.py:286:            d = summary["dimensions"]
+src/cryodaq/gui/shell/composition_photos_widget.py:290:        meta_label.setObjectName("photoMeta")
+src/cryodaq/gui/shell/composition_photos_widget.py:306:        open_btn.setObjectName("photoOpenBtn")
+src/cryodaq/gui/shell/composition_photos_widget.py:311:        close_btn.setObjectName("photoCloseBtn")
+src/cryodaq/gui/shell/composition_photos_widget.py:320:        path = Path(self._photo.get("path", "")).parent
+src/cryodaq/gui/_plot_style.py:50:pg.setConfigOption("foreground", theme.PLOT_FG)
+src/cryodaq/gui/_plot_style.py:51:pg.setConfigOption("background", theme.PLOT_BG)
+src/cryodaq/gui/_plot_style.py:63:    for axis_name in ("left", "bottom", "right", "top"):
+src/cryodaq/gui/_plot_style.py:107:    / `FillBetweenItem` overlays marking "warning" zones on a plot.
+src/cryodaq/gui/_plot_style.py:119:    / `FillBetweenItem` overlays marking "fault" zones on a plot.
+src/cryodaq/gui/state/time_window.py:33:    ALL = ("Всё", float("inf"))
+src/cryodaq/gui/state/time_window.py:46:        # question is "how has this trended since we started running"
+src/cryodaq/gui/tray_status.py:12:    HEALTHY = "healthy"
+src/cryodaq/gui/tray_status.py:13:    WARNING = "warning"
+src/cryodaq/gui/tray_status.py:14:    FAULT = "fault"
+src/cryodaq/gui/tray_status.py:29:    if alarms > 0 or safety in {"fault", "fault_latched"}:
+src/cryodaq/gui/tray_status.py:46:    if safety in {"safe_off", "ready", "run_permitted", "running"}:
+src/cryodaq/gui/dashboard/phase_stepper.py:33:        self.setObjectName("phaseStepper")
+src/cryodaq/gui/dashboard/phase_stepper.py:71:        self._style_pill(pill, "future")
+src/cryodaq/gui/dashboard/phase_stepper.py:76:        if state == "current":
+src/cryodaq/gui/dashboard/phase_stepper.py:85:        elif state == "past":
+src/cryodaq/gui/dashboard/phase_stepper.py:86:            border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
+src/cryodaq/gui/dashboard/phase_stepper.py:88:            border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
+src/cryodaq/gui/dashboard/phase_stepper.py:107:                self._style_pill(self._pills[p], "future")
+src/cryodaq/gui/dashboard/phase_stepper.py:115:                self._style_pill(self._pills[p], "past")
+src/cryodaq/gui/dashboard/phase_stepper.py:117:                self._style_pill(self._pills[p], "current")
+src/cryodaq/gui/dashboard/phase_stepper.py:119:                self._style_pill(self._pills[p], "future")
+src/cryodaq/gui/dashboard/time_window.py:11:__all__ = ["TimeWindow"]
+src/cryodaq/gui/dashboard/sensor_cell.py:94:        self.setObjectName("sensorCell")
+src/cryodaq/gui/dashboard/sensor_cell.py:326:        menu.setObjectName("sensorCellContextMenu")
+src/cryodaq/gui/dashboard/dashboard_view.py:31:    ("phaseZone", "[ФАЗА ЭКСПЕРИМЕНТА — будет в B.4]", 4),
+src/cryodaq/gui/dashboard/dashboard_view.py:32:    ("sensorGridZone", "[ДАТЧИКИ — будет в B.3]", 22),
+src/cryodaq/gui/dashboard/dashboard_view.py:33:    ("tempPlotZone", None, 50),
+src/cryodaq/gui/dashboard/dashboard_view.py:34:    ("pressurePlotZone", None, 18),
+src/cryodaq/gui/dashboard/dashboard_view.py:35:    ("quickLogZone", "[ЖУРНАЛ — будет в B.6]", 4),
+src/cryodaq/gui/dashboard/dashboard_view.py:72:            if obj_name == "tempPlotZone":
+src/cryodaq/gui/dashboard/dashboard_view.py:79:            elif obj_name == "pressurePlotZone":
+src/cryodaq/gui/dashboard/dashboard_view.py:83:            elif obj_name == "phaseZone":
+src/cryodaq/gui/dashboard/dashboard_view.py:90:            elif obj_name == "sensorGridZone":
+src/cryodaq/gui/dashboard/dashboard_view.py:102:            elif obj_name == "quickLogZone":
+src/cryodaq/gui/dashboard/dashboard_view.py:213:            {"cmd": "experiment_advance_phase", "phase": phase, "operator": ""},
+src/cryodaq/gui/dashboard/dashboard_view.py:221:            error = result.get("error", "unknown error")
+src/cryodaq/gui/dashboard/dashboard_view.py:242:            {"cmd": "log_entry", "message": message, "source": "dashboard"},
+src/cryodaq/gui/dashboard/dashboard_view.py:262:            {"cmd": "log_get", "limit": 2},
+src/cryodaq/gui/dashboard/dashboard_view.py:271:        entries = result.get("entries", [])
+src/cryodaq/gui/dashboard/__init__.py:5:__all__ = ["DashboardView"]
+src/cryodaq/gui/dashboard/phase_aware_widget.py:47:        self.setObjectName("PhaseAwareWidget")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:86:        self._context_label.setObjectName("phaseContextLabel")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:93:        self._duration_label.setObjectName("phaseDurationLabel")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:107:        self._create_btn.setObjectName("phaseCreateBtn")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:137:        container.setObjectName("phaseControlsContainer")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:157:        self._back_btn.setObjectName("phaseBackBtn")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:168:        self._jump_combo.setObjectName("phaseJumpCombo")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:183:        self._forward_btn.setObjectName("phaseForwardBtn")
+src/cryodaq/gui/dashboard/phase_aware_widget.py:218:            if self._current_phase == "cooldown":
+src/cryodaq/gui/dashboard/phase_aware_widget.py:221:                        self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s))
+src/cryodaq/gui/dashboard/phase_aware_widget.py:229:            elif self._current_phase == "vacuum":
+src/cryodaq/gui/dashboard/phase_aware_widget.py:232:            elif self._current_phase == "measurement":
+src/cryodaq/gui/dashboard/phase_aware_widget.py:239:            elif self._current_phase == "teardown":
+src/cryodaq/gui/dashboard/phase_aware_widget.py:303:            phases = status.get("phases") or []
+src/cryodaq/gui/dashboard/experiment_card.py:44:# as "target channel" for an experiment per design-system invariant #4.
+src/cryodaq/gui/dashboard/experiment_card.py:58:    mode: str  # "experiment" or "debug"
+src/cryodaq/gui/dashboard/experiment_card.py:73:        if self.mode not in ("experiment", "debug"):
+src/cryodaq/gui/dashboard/experiment_card.py:88:        self.setObjectName("experimentCard")
+src/cryodaq/gui/dashboard/experiment_card.py:158:        self._mode_badge.setObjectName("experimentCardModeBadge")
+src/cryodaq/gui/dashboard/experiment_card.py:160:        self._set_mode_badge_style("experiment")  # default style
+src/cryodaq/gui/dashboard/experiment_card.py:167:            elapsed_font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/dashboard/experiment_card.py:186:            vital_font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/dashboard/experiment_card.py:211:        self._open_btn.setObjectName("experimentCardOpenBtn")
+src/cryodaq/gui/dashboard/experiment_card.py:217:        self._finalize_btn.setObjectName("experimentCardFinalizeBtn")
+src/cryodaq/gui/dashboard/experiment_card.py:236:        self._create_btn.setObjectName("experimentCardCreateBtn")
+src/cryodaq/gui/dashboard/experiment_card.py:304:        if mode == "debug":
+src/cryodaq/gui/dashboard/temp_plot_widget.py:84:        self._log_button = QPushButton("Lin Y")
+src/cryodaq/gui/dashboard/temp_plot_widget.py:115:        pi.setLabel("left", "Температура", units="K", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/dashboard/temp_plot_widget.py:116:        left_axis = pi.getAxis("left")
+src/cryodaq/gui/dashboard/temp_plot_widget.py:121:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/dashboard/temp_plot_widget.py:122:        self._plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/dashboard/temp_plot_widget.py:123:        pi.getAxis("bottom").setStyle(showValues=False)
+src/cryodaq/gui/dashboard/temp_plot_widget.py:143:            item.setDownsampling(auto=True, method="peak")
+src/cryodaq/gui/dashboard/temp_plot_widget.py:193:        self._log_button.setText("Log Y" if checked else "Lin Y")
+src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:60:        self.setObjectName("dynamicSensorGrid")
+src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:71:        self._grid_widget.setObjectName("sensorGridContainer")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:36:        self.setObjectName("etaDisplay")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:45:        self._title_label = QLabel("ETA")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:46:        self._title_label.setObjectName("etaDisplayTitle")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:58:        self._value_label.setObjectName("etaDisplayValue")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:71:        self._confidence_label.setObjectName("etaDisplayConfidence")
+src/cryodaq/gui/dashboard/phase_content/eta_display.py:86:        label: str = "ETA",
+src/cryodaq/gui/dashboard/phase_content/milestone_list.py:25:        self.setObjectName("milestoneList")
+src/cryodaq/gui/dashboard/phase_content/milestone_list.py:32:        self._empty_label.setObjectName("milestoneEmpty")
+src/cryodaq/gui/dashboard/phase_content/milestone_list.py:57:            phase_name = label_for(ms.get("phase"))
+src/cryodaq/gui/dashboard/phase_content/hero_readout.py:21:        self.setObjectName("heroReadout")
+src/cryodaq/gui/dashboard/phase_content/hero_readout.py:31:        self._value_label.setObjectName("heroReadoutValue")
+src/cryodaq/gui/dashboard/phase_content/hero_readout.py:44:        self._unit_label.setObjectName("heroReadoutUnit")
+src/cryodaq/gui/dashboard/phase_content/hero_readout.py:56:        self._annotation_label.setObjectName("heroReadoutAnnotation")
+src/cryodaq/gui/dashboard/phase_content/__init__.py:7:__all__ = ["EtaDisplay", "HeroReadout", "MilestoneList"]
+src/cryodaq/gui/dashboard/quick_log_block.py:39:        self.setObjectName("QuickLogBlock")
+src/cryodaq/gui/dashboard/quick_log_block.py:65:        self._input.setObjectName("quickLogInput")
+src/cryodaq/gui/dashboard/quick_log_block.py:86:        self._send_btn.setObjectName("quickLogSendBtn")
+src/cryodaq/gui/dashboard/quick_log_block.py:116:        self._empty_label.setObjectName("quickLogEmpty")
+src/cryodaq/gui/dashboard/quick_log_block.py:164:        ts_raw = entry.get("timestamp", "")
+src/cryodaq/gui/dashboard/quick_log_block.py:171:        message_raw = entry.get("message", "")
+src/cryodaq/gui/dashboard/quick_log_block.py:190:        lbl.setToolTip(entry.get("message", ""))
+src/cryodaq/gui/_theme_loader.py:27:THEMES_DIR = _REPO_ROOT / "config" / "themes"
+src/cryodaq/gui/_theme_loader.py:28:SETTINGS_FILE = _REPO_ROOT / "config" / "settings.local.yaml"
+src/cryodaq/gui/_theme_loader.py:33:        "BACKGROUND",
+src/cryodaq/gui/_theme_loader.py:40:        "BORDER",
+src/cryodaq/gui/_theme_loader.py:43:        "FOREGROUND",
+src/cryodaq/gui/_theme_loader.py:48:        "ACCENT",
+src/cryodaq/gui/_theme_loader.py:86:    name = data.get("theme", DEFAULT_THEME)
+src/cryodaq/gui/_theme_loader.py:169:    data["theme"] = name
+src/cryodaq/gui/_theme_loader.py:191:                "name": pack.get("__meta_name__", pack_file.stem),
+src/cryodaq/gui/_theme_loader.py:192:                "description": pack.get("__meta_description__", ""),
+src/cryodaq/gui/zmq_client.py:37:        timestamp=datetime.fromtimestamp(d["timestamp"], tz=UTC),
+src/cryodaq/gui/zmq_client.py:39:        channel=d["channel"],
+src/cryodaq/gui/zmq_client.py:40:        value=d["value"],
+src/cryodaq/gui/zmq_client.py:41:        unit=d["unit"],
+src/cryodaq/gui/zmq_client.py:42:        status=ChannelStatus(d["status"]),
+src/cryodaq/gui/zmq_client.py:44:        metadata=d.get("metadata", {}),
+src/cryodaq/gui/zmq_client.py:59:        reply = bridge.send_command({"cmd": "safety_status"})
+src/cryodaq/gui/zmq_client.py:152:                if msg_type == "heartbeat":
+src/cryodaq/gui/zmq_client.py:158:                    # "warning" because the launcher must restart the
+src/cryodaq/gui/zmq_client.py:164:                        d.get("message", "command timeout"),
+src/cryodaq/gui/zmq_client.py:167:                if msg_type == "warning":
+src/cryodaq/gui/zmq_client.py:216:            return {"ok": False, "error": "ZMQ bridge subprocess not running"}
+src/cryodaq/gui/zmq_client.py:229:            return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__}: {exc})"}
+src/cryodaq/gui/zmq_client.py:266:                    future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
+src/cryodaq/gui/zmq_client.py:313:        return {"ok": False, "error": "ZMQ bridge not initialized"}
+src/cryodaq/gui/app.py:42:    fonts_dir = Path(__file__).parent / "resources" / "fonts"
+src/cryodaq/gui/app.py:104:        font.setFeature(QFont.Tag("tnum"), 1)
+src/cryodaq/gui/app.py:137:    app.setStyle("Fusion")
+src/cryodaq/gui/app.py:221:    setup_logging("gui", level=resolve_log_level())
+src/cryodaq/gui/app.py:237:        theme="dark",
+src/cryodaq/gui/app.py:239:        custom_colors={"primary": theme.QDARKTHEME_ACCENT},
+src/cryodaq/gui/app.py:247:    app.setApplicationName("CryoDAQ")
+src/cryodaq/gui/app.py:255:            "CryoDAQ",
+src/cryodaq/gui/widgets/shift_handover.py:125:        operators = config.get("operators", [])
+src/cryodaq/gui/widgets/shift_handover.py:140:        apply_button_style(self._run_checks_btn, "neutral")
+src/cryodaq/gui/widgets/shift_handover.py:169:        worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+src/cryodaq/gui/widgets/shift_handover.py:179:                "name": "Engine подключён",
+src/cryodaq/gui/widgets/shift_handover.py:181:                "detail": "OK" if engine_ok else "Engine не отвечает",
+src/cryodaq/gui/widgets/shift_handover.py:184:                "name": "Критических алармов нет",
+src/cryodaq/gui/widgets/shift_handover.py:186:                "detail": "OK" if engine_ok else "Невозможно проверить",
+src/cryodaq/gui/widgets/shift_handover.py:210:            {"name": c["name"], "ok": c["ok"], "detail": c["detail"]} for c in self._checks
+src/cryodaq/gui/widgets/shift_handover.py:215:                "cmd": "log_entry",
+src/cryodaq/gui/widgets/shift_handover.py:216:                "message": f"Заступление на смену: {operator}",
+src/cryodaq/gui/widgets/shift_handover.py:217:                "author": operator,
+src/cryodaq/gui/widgets/shift_handover.py:218:                "source": "shift_handover",
+src/cryodaq/gui/widgets/shift_handover.py:219:                "tags": ["shift_start"],
+src/cryodaq/gui/widgets/shift_handover.py:220:                "metadata": json.dumps(
+src/cryodaq/gui/widgets/shift_handover.py:223:                        "operator": operator,
+src/cryodaq/gui/widgets/shift_handover.py:224:                        "checks": checks_summary,
+src/cryodaq/gui/widgets/shift_handover.py:310:                "cmd": "log_entry",
+src/cryodaq/gui/widgets/shift_handover.py:311:                "message": " | ".join(message_parts),
+src/cryodaq/gui/widgets/shift_handover.py:312:                "author": self._operator,
+src/cryodaq/gui/widgets/shift_handover.py:313:                "source": "shift_handover",
+src/cryodaq/gui/widgets/shift_handover.py:314:                "tags": ["shift_periodic"],
+src/cryodaq/gui/widgets/shift_handover.py:315:                "metadata": json.dumps(
+src/cryodaq/gui/widgets/shift_handover.py:318:                        "status": status,
+src/cryodaq/gui/widgets/shift_handover.py:319:                        "readings": self._readings_label.text(),
+src/cryodaq/gui/widgets/shift_handover.py:334:_SHIFT_EVENT_TAGS: frozenset[str] = frozenset({"phase", "experiment", "safety_fault", "alarm_ack"})
+src/cryodaq/gui/widgets/shift_handover.py:387:        raw_ts = entry.get("timestamp")
+src/cryodaq/gui/widgets/shift_handover.py:395:        tags = entry.get("tags") or []
+src/cryodaq/gui/widgets/shift_handover.py:400:        message = str(entry.get("message", "")).strip() or "—"
+src/cryodaq/gui/widgets/shift_handover.py:401:        author = str(entry.get("author", "")).strip()
+src/cryodaq/gui/widgets/shift_handover.py:423:        transition = str(entry.get("transition", "")).strip() or "—"
+src/cryodaq/gui/widgets/shift_handover.py:424:        level = str(entry.get("level", "")).strip()
+src/cryodaq/gui/widgets/shift_handover.py:426:        message = str(entry.get("message", "")).strip()
+src/cryodaq/gui/widgets/shift_handover.py:440:    ``per_channel`` is ``{channel: {"min": ..., "max": ...}}``. Missing
+src/cryodaq/gui/widgets/shift_handover.py:457:        t_min = stats.get("min")
+src/cryodaq/gui/widgets/shift_handover.py:458:        t_max = stats.get("max")
+src/cryodaq/gui/widgets/shift_handover.py:480:    name = str(exp.get("name") or exp.get("title") or "—").strip()
+src/cryodaq/gui/widgets/shift_handover.py:481:    operator = str(exp.get("operator", "")).strip()
+src/cryodaq/gui/widgets/shift_handover.py:482:    phases = payload.get("phases") or exp.get("phases") or []
+src/cryodaq/gui/widgets/shift_handover.py:491:            phase_name = str(phase.get("phase", "")).strip() or "—"
+src/cryodaq/gui/widgets/shift_handover.py:700:                "limit": 500,
+src/cryodaq/gui/widgets/shift_handover.py:706:                "cmd": "alarm_v2_history",
+src/cryodaq/gui/widgets/shift_handover.py:709:                "limit": 500,
+src/cryodaq/gui/widgets/shift_handover.py:715:                "cmd": "readings_history",
+src/cryodaq/gui/widgets/shift_handover.py:722:                "channels": None,
+src/cryodaq/gui/widgets/shift_handover.py:726:        _dispatch({"cmd": "experiment_status"}, self._on_experiment_reply)
+src/cryodaq/gui/widgets/shift_handover.py:733:            entries = result.get("entries") or []
+src/cryodaq/gui/widgets/shift_handover.py:740:                and any(tag in _SHIFT_EVENT_TAGS for tag in (entry.get("tags") or []))
+src/cryodaq/gui/widgets/shift_handover.py:750:            history = result.get("history") or []
+src/cryodaq/gui/widgets/shift_handover.py:759:            data = result.get("data") or {}
+src/cryodaq/gui/widgets/shift_handover.py:772:                    per_channel[channel] = {"min": min(values), "max": max(values)}
+src/cryodaq/gui/widgets/shift_handover.py:828:                "cmd": "log_entry",
+src/cryodaq/gui/widgets/shift_handover.py:829:                "message": message,
+src/cryodaq/gui/widgets/shift_handover.py:830:                "author": self._operator,
+src/cryodaq/gui/widgets/shift_handover.py:831:                "source": "shift_handover",
+src/cryodaq/gui/widgets/shift_handover.py:832:                "tags": ["shift_end"],
+src/cryodaq/gui/widgets/shift_handover.py:887:        apply_button_style(self._start_btn, "primary", compact=True)
+src/cryodaq/gui/widgets/shift_handover.py:893:        apply_button_style(self._end_btn, "warning", compact=True)
+src/cryodaq/gui/widgets/shift_handover.py:1038:                "cmd": "log_entry",
+src/cryodaq/gui/widgets/shift_handover.py:1039:                "message": f"Пропущена периодическая проверка (оператор: {self._operator})",
+src/cryodaq/gui/widgets/shift_handover.py:1040:                "author": self._operator,
+src/cryodaq/gui/widgets/shift_handover.py:1041:                "source": "shift_handover",
+src/cryodaq/gui/widgets/shift_handover.py:1042:                "tags": ["shift_periodic_missed"],
+src/cryodaq/gui/widgets/shift_handover.py:1043:                "metadata": json.dumps(
+src/cryodaq/gui/widgets/pressure_panel.py:111:        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+src/cryodaq/gui/widgets/pressure_panel.py:114:        pi.setLabel("left", "Давление", units="мбар", color="#AAAAAA")
+src/cryodaq/gui/widgets/pressure_panel.py:115:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/pressure_panel.py:116:        pi.setLabel("bottom", "Время", color="#AAAAAA")
+src/cryodaq/gui/widgets/pressure_panel.py:121:        for ax_name in ("left", "bottom"):
+src/cryodaq/gui/widgets/overview_panel.py:169:        apply_status_label_style(self._safety_label, "success")
+src/cryodaq/gui/widgets/overview_panel.py:175:        apply_status_label_style(self._uptime_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:181:        apply_status_label_style(self._alarm_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:187:        apply_status_label_style(self._keithley_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:193:        apply_status_label_style(self._cooldown_label, "accent")
+src/cryodaq/gui/widgets/overview_panel.py:200:        apply_status_label_style(self._disk_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:220:        if state in {"FAULT_LATCHED", "FAULT"}:
+src/cryodaq/gui/widgets/overview_panel.py:221:            apply_status_label_style(self._safety_label, "error", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:222:        elif state == "RUNNING":
+src/cryodaq/gui/widgets/overview_panel.py:223:            apply_status_label_style(self._safety_label, "info", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:224:        elif state in {"READY", "RUN_PERMITTED"}:
+src/cryodaq/gui/widgets/overview_panel.py:225:            apply_status_label_style(self._safety_label, "warning", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:227:            apply_status_label_style(self._safety_label, "success", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:233:            apply_status_label_style(self._alarm_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:243:            apply_status_label_style(self._alarm_label, "error", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:248:            apply_status_label_style(self._keithley_label, "success")
+src/cryodaq/gui/widgets/overview_panel.py:251:            apply_status_label_style(self._keithley_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:272:            apply_status_label_style(self._disk_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:275:            apply_status_label_style(self._disk_label, "error", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:278:            apply_status_label_style(self._disk_label, "warning")
+src/cryodaq/gui/widgets/overview_panel.py:281:            apply_status_label_style(self._disk_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:564:            visible = info.get("visible", True)
+src/cryodaq/gui/widgets/overview_panel.py:719:        title = QLabel("Keithley")
+src/cryodaq/gui/widgets/overview_panel.py:721:        apply_status_label_style(title, "muted", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:726:        apply_status_label_style(self._smua_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:731:        apply_status_label_style(self._smub_label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:739:        self._channel_state: dict[str, str] = {"smua": "off", "smub": "off"}
+src/cryodaq/gui/widgets/overview_panel.py:762:                if channel_state != "fault":
+src/cryodaq/gui/widgets/overview_panel.py:763:                    self._channel_state[channel] = "off"
+src/cryodaq/gui/widgets/overview_panel.py:769:            "smua",
+src/cryodaq/gui/widgets/overview_panel.py:771:            state=self._channel_state["smua"],
+src/cryodaq/gui/widgets/overview_panel.py:775:            "smub",
+src/cryodaq/gui/widgets/overview_panel.py:777:            state=self._channel_state["smub"],
+src/cryodaq/gui/widgets/overview_panel.py:780:            any(state != "off" for state in self._channel_state.values())
+src/cryodaq/gui/widgets/overview_panel.py:793:        if state == "fault":
+src/cryodaq/gui/widgets/overview_panel.py:795:            apply_status_label_style(label, "error", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:799:            apply_status_label_style(label, "success", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:803:            apply_status_label_style(label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:805:        v = data.get("voltage", 0.0)
+src/cryodaq/gui/widgets/overview_panel.py:806:        i = data.get("current", 0.0)
+src/cryodaq/gui/widgets/overview_panel.py:807:        r = data.get("resistance", 0.0)
+src/cryodaq/gui/widgets/overview_panel.py:808:        p = data.get("power", 0.0)
+src/cryodaq/gui/widgets/overview_panel.py:811:            "fault": "АВАРИЯ",
+src/cryodaq/gui/widgets/overview_panel.py:816:            apply_status_label_style(label, "success", bold=True)
+src/cryodaq/gui/widgets/overview_panel.py:818:            apply_status_label_style(label, "muted")
+src/cryodaq/gui/widgets/overview_panel.py:878:        self._worker = ZmqCommandWorker({"cmd": "experiment_status"})
+src/cryodaq/gui/widgets/overview_panel.py:894:        name = exp.get("name", "")
+src/cryodaq/gui/widgets/overview_panel.py:902:                "preparation": "Подготовка",
+src/cryodaq/gui/widgets/overview_panel.py:903:                "vacuum": "Откачка",
+src/cryodaq/gui/widgets/overview_panel.py:904:                "cooldown": "Захолаживание",
+src/cryodaq/gui/widgets/overview_panel.py:905:                "measurement": "Измерение",
+src/cryodaq/gui/widgets/overview_panel.py:906:                "warmup": "Растепление",
+src/cryodaq/gui/widgets/overview_panel.py:907:                "teardown": "Разборка",
+src/cryodaq/gui/widgets/overview_panel.py:966:        apply_button_style(submit_btn, "primary", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:996:                "cmd": "log_entry",
+src/cryodaq/gui/widgets/overview_panel.py:997:                "message": text,
+src/cryodaq/gui/widgets/overview_panel.py:998:                "source": "overview",
+src/cryodaq/gui/widgets/overview_panel.py:1020:            {"cmd": "log_get", "limit": 5, "current_experiment": True}
+src/cryodaq/gui/widgets/overview_panel.py:1029:        entries = result.get("entries", [])
+src/cryodaq/gui/widgets/overview_panel.py:1035:            ts = str(entry.get("timestamp", ""))
+src/cryodaq/gui/widgets/overview_panel.py:1038:            msg = str(entry.get("message", "")).splitlines()[0] if entry.get("message") else ""
+src/cryodaq/gui/widgets/overview_panel.py:1145:            apply_button_style(btn, "neutral", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:1159:        apply_button_style(self._btn_all, "neutral", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:1165:        self._log_btn = QPushButton("Lin Y")
+src/cryodaq/gui/widgets/overview_panel.py:1167:        apply_button_style(self._log_btn, "neutral", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:1172:        png_btn = QPushButton("PNG")
+src/cryodaq/gui/widgets/overview_panel.py:1174:        apply_button_style(png_btn, "neutral", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:1178:        csv_btn = QPushButton("CSV")
+src/cryodaq/gui/widgets/overview_panel.py:1180:        apply_button_style(csv_btn, "neutral", compact=True)
+src/cryodaq/gui/widgets/overview_panel.py:1194:        temp_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/widgets/overview_panel.py:1195:        self._plot = pg.PlotWidget(axisItems={"bottom": temp_axis})
+src/cryodaq/gui/widgets/overview_panel.py:1199:        pressure_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/widgets/overview_panel.py:1200:        self._pressure_plot = pg.PlotWidget(axisItems={"bottom": pressure_axis})
+src/cryodaq/gui/widgets/overview_panel.py:1220:            "left",
+src/cryodaq/gui/widgets/overview_panel.py:1229:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/overview_panel.py:1230:        pi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
+src/cryodaq/gui/widgets/overview_panel.py:1234:        for axis_name in ("left", "bottom", "top", "right"):
+src/cryodaq/gui/widgets/overview_panel.py:1247:            item.setDownsampling(auto=True, method="peak")
+src/cryodaq/gui/widgets/overview_panel.py:1259:            "left",
+src/cryodaq/gui/widgets/overview_panel.py:1261:            units="mbar",
+src/cryodaq/gui/widgets/overview_panel.py:1267:        ppi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/overview_panel.py:1268:        ppi.setLabel("bottom", "\u0412\u0440\u0435\u043c\u044f", color="#AAAAAA")
+src/cryodaq/gui/widgets/overview_panel.py:1273:        for axis_name in ("left", "bottom", "top", "right"):
+src/cryodaq/gui/widgets/overview_panel.py:1281:        self._pressure_plot_item.setDownsampling(auto=True, method="peak")
+src/cryodaq/gui/widgets/overview_panel.py:1286:        self._plot.getPlotItem().getAxis("left").setWidth(_AXIS_WIDTH)
+src/cryodaq/gui/widgets/overview_panel.py:1287:        self._pressure_plot.getPlotItem().getAxis("left").setWidth(_AXIS_WIDTH)
+src/cryodaq/gui/widgets/overview_panel.py:1339:            item.setDownsampling(auto=True, method="peak")
+src/cryodaq/gui/widgets/overview_panel.py:1350:                old_name = item.opts.get("name", "")
+src/cryodaq/gui/widgets/overview_panel.py:1352:                    item.opts["name"] = new_name
+src/cryodaq/gui/widgets/overview_panel.py:1416:        if reading.unit == "mbar":
+src/cryodaq/gui/widgets/overview_panel.py:1429:            if self._keithley_strip._channel_state["smua"] == "on":
+src/cryodaq/gui/widgets/overview_panel.py:1433:            if self._keithley_strip._channel_state["smub"] == "on":
+src/cryodaq/gui/widgets/overview_panel.py:1441:            state_name = str(reading.metadata.get("state", "off"))
+src/cryodaq/gui/widgets/overview_panel.py:1444:            if self._keithley_strip._channel_state["smua"] == "on":
+src/cryodaq/gui/widgets/overview_panel.py:1448:            elif self._keithley_strip._channel_state["smua"] == "fault":
+src/cryodaq/gui/widgets/overview_panel.py:1450:            if self._keithley_strip._channel_state["smub"] == "on":
+src/cryodaq/gui/widgets/overview_panel.py:1454:            elif self._keithley_strip._channel_state["smub"] == "fault":
+src/cryodaq/gui/widgets/overview_panel.py:1470:            state_name = reading.metadata.get("state", "")
+src/cryodaq/gui/widgets/overview_panel.py:1619:                    source = "experiment"
+src/cryodaq/gui/widgets/overview_panel.py:1670:            "cmd": "readings_history",
+src/cryodaq/gui/widgets/overview_panel.py:1673:            "channels": channels if channels else None,
+src/cryodaq/gui/widgets/overview_panel.py:1687:        data: dict[str, list] = result.get("data", {})
+src/cryodaq/gui/widgets/overview_panel.py:1697:                existing_min_ts = buf[0][0] if buf else float("inf")
+src/cryodaq/gui/widgets/overview_panel.py:1715:                        self._pressure_buffer[0][0] if self._pressure_buffer else float("inf")
+src/cryodaq/gui/widgets/overview_panel.py:1729:            earliest = float("inf")
+src/cryodaq/gui/widgets/overview_panel.py:1735:            if earliest < float("inf"):
+src/cryodaq/gui/widgets/overview_panel.py:1743:        self._log_btn.setText("Log Y" if self._is_log_y else "Lin Y")
+src/cryodaq/gui/widgets/overview_panel.py:1758:            self._plot.setBackground("white")
+src/cryodaq/gui/widgets/overview_panel.py:1759:            self._plot.grab().save(path, "PNG")
+src/cryodaq/gui/widgets/connection_settings.py:42:_CONN_TYPES = {"lakeshore_218s": "GPIB", "keithley_2604b": "USB-TMC", "thyracont_vsp63d": "Serial"}
+src/cryodaq/gui/widgets/connection_settings.py:65:            self._instruments = raw.get("instruments", [])
+src/cryodaq/gui/widgets/connection_settings.py:113:        apply_button_style(add_btn, "primary")
+src/cryodaq/gui/widgets/connection_settings.py:120:        apply_button_style(apply_btn, "primary")
+src/cryodaq/gui/widgets/connection_settings.py:139:        name_edit = QLineEdit(inst.get("name", ""))
+src/cryodaq/gui/widgets/connection_settings.py:141:        widgets["name"] = name_edit
+src/cryodaq/gui/widgets/connection_settings.py:146:        current_type = inst.get("type", "lakeshore_218s")
+src/cryodaq/gui/widgets/connection_settings.py:150:        widgets["type"] = type_combo
+src/cryodaq/gui/widgets/connection_settings.py:153:        addr_edit = QLineEdit(inst.get("resource", ""))
+src/cryodaq/gui/widgets/connection_settings.py:156:        widgets["resource"] = addr_edit
+src/cryodaq/gui/widgets/connection_settings.py:161:        baud_spin.setValue(inst.get("baudrate", 9600))
+src/cryodaq/gui/widgets/connection_settings.py:163:        widgets["baudrate"] = baud_spin
+src/cryodaq/gui/widgets/connection_settings.py:171:        widgets["poll"] = poll_spin
+src/cryodaq/gui/widgets/connection_settings.py:180:        apply_button_style(del_btn, "danger", compact=True)
+src/cryodaq/gui/widgets/connection_settings.py:185:        widgets["actions"] = action_widget
+src/cryodaq/gui/widgets/connection_settings.py:193:            "type": "lakeshore_218s",
+src/cryodaq/gui/widgets/connection_settings.py:194:            "name": f"Прибор_{len(self._instruments) + 1}",
+src/cryodaq/gui/widgets/connection_settings.py:195:            "resource": "",
+src/cryodaq/gui/widgets/connection_settings.py:206:            name = self._instruments[row].get("name", "?")
+src/cryodaq/gui/widgets/connection_settings.py:227:                "type": w["type"].currentText(),
+src/cryodaq/gui/widgets/connection_settings.py:228:                "name": w["name"].text(),
+src/cryodaq/gui/widgets/connection_settings.py:229:                "resource": w["resource"].text(),
+src/cryodaq/gui/widgets/connection_settings.py:230:                "poll_interval_s": w["poll"].value(),
+src/cryodaq/gui/widgets/connection_settings.py:232:            if inst["type"] == "thyracont_vsp63d":
+src/cryodaq/gui/widgets/connection_settings.py:233:                inst["baudrate"] = w["baudrate"].value()
+src/cryodaq/gui/widgets/connection_settings.py:235:            if row < len(self._instruments) and "channels" in self._instruments[row]:
+src/cryodaq/gui/widgets/connection_settings.py:236:                inst["channels"] = self._instruments[row]["channels"]
+src/cryodaq/gui/widgets/connection_settings.py:243:                {"instruments": instruments},
+src/cryodaq/gui/widgets/preflight_dialog.py:33:    status: Literal["ok", "warning", "error"]
+src/cryodaq/gui/widgets/preflight_dialog.py:37:_STATUS_ICON = {"ok": "✅", "warning": "⚠️", "error": "❌"}
+src/cryodaq/gui/widgets/preflight_dialog.py:40:    "warning": theme.STATUS_WARNING,
+src/cryodaq/gui/widgets/preflight_dialog.py:41:    "error": theme.STATUS_FAULT,
+src/cryodaq/gui/widgets/preflight_dialog.py:74:            ({"cmd": "safety_status"}, self._on_safety_result),
+src/cryodaq/gui/widgets/preflight_dialog.py:75:            ({"cmd": "alarm_v2_status"}, self._on_alarm_result),
+src/cryodaq/gui/widgets/preflight_dialog.py:76:            ({"cmd": "get_sensor_diagnostics"}, self._on_diag_result),
+src/cryodaq/gui/widgets/preflight_dialog.py:88:                state = result.get("state", "")
+src/cryodaq/gui/widgets/preflight_dialog.py:89:                if state in ("fault", "fault_latched"):
+src/cryodaq/gui/widgets/preflight_dialog.py:94:                    self._checks.append(PreFlightCheck("Safety state", "error", detail))
+src/cryodaq/gui/widgets/preflight_dialog.py:96:                    self._checks.append(PreFlightCheck("Safety state", "ok", state or "—"))
+src/cryodaq/gui/widgets/preflight_dialog.py:99:                    PreFlightCheck("Engine подключён", "error", result.get("error", "нет ответа"))
+src/cryodaq/gui/widgets/preflight_dialog.py:101:                self._checks.append(PreFlightCheck("Safety state", "error", "Engine недоступен"))
+src/cryodaq/gui/widgets/preflight_dialog.py:103:            self._checks.append(PreFlightCheck("Engine подключён", "error", str(exc)))
+src/cryodaq/gui/widgets/preflight_dialog.py:104:            self._checks.append(PreFlightCheck("Safety state", "error", "Engine недоступен"))
+src/cryodaq/gui/widgets/preflight_dialog.py:111:                active = result.get("active", {})
+src/cryodaq/gui/widgets/preflight_dialog.py:118:                    self._checks.append(PreFlightCheck("Алармы", "warning", detail))
+src/cryodaq/gui/widgets/preflight_dialog.py:123:                    PreFlightCheck("Алармы", "warning", result.get("error", "Статус недоступен"))
+src/cryodaq/gui/widgets/preflight_dialog.py:126:            self._checks.append(PreFlightCheck("Алармы", "warning", "Проверка недоступна"))
+src/cryodaq/gui/widgets/preflight_dialog.py:133:                summary = result.get("summary", {})
+src/cryodaq/gui/widgets/preflight_dialog.py:134:                critical = summary.get("critical", 0)
+src/cryodaq/gui/widgets/preflight_dialog.py:135:                warning = summary.get("warning", 0)
+src/cryodaq/gui/widgets/preflight_dialog.py:138:                        PreFlightCheck("Датчики", "warning", f"{critical} критичных")
+src/cryodaq/gui/widgets/preflight_dialog.py:142:                        PreFlightCheck("Датчики", "warning", f"{warning} с предупреждениями")
+src/cryodaq/gui/widgets/preflight_dialog.py:147:                self._checks.append(PreFlightCheck("Датчики", "warning", "Диагностика недоступна"))
+src/cryodaq/gui/widgets/preflight_dialog.py:149:            self._checks.append(PreFlightCheck("Датчики", "warning", "Проверка недоступна"))
+src/cryodaq/gui/widgets/preflight_dialog.py:174:                    PreFlightCheck("Диск", "error", f"{free_gb:.1f} ГБ (критически мало)")
+src/cryodaq/gui/widgets/preflight_dialog.py:177:                self._checks.append(PreFlightCheck("Диск", "warning", f"{free_gb:.1f} ГБ"))
+src/cryodaq/gui/widgets/preflight_dialog.py:181:            self._checks.append(PreFlightCheck("Диск", "warning", f"Не удалось проверить: {exc}"))
+src/cryodaq/gui/widgets/preflight_dialog.py:248:        has_errors = any(c.status == "error" for c in self._checks)
+src/cryodaq/gui/widgets/preflight_dialog.py:249:        has_warnings = any(c.status == "warning" for c in self._checks)
+src/cryodaq/gui/widgets/preflight_dialog.py:253:            summary_color = _STATUS_COLOR["error"]
+src/cryodaq/gui/widgets/preflight_dialog.py:256:            summary_color = _STATUS_COLOR["warning"]
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:38:    "stable": ("→", _COLOR_YELLOW),
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:39:    "rising": ("↑", _COLOR_RED),
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:40:    "anomaly": ("⚠", _COLOR_RED),
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:46:    "stable": "Стабильно",
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:47:    "rising": "Рост!",
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:48:    "anomaly": "Аномалия",
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:197:        pi.setLabel("left", "log₁₀(P), мбар", color="#AAAAAA")
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:198:        pi.setLabel("bottom", "Время (с от старта)", color="#AAAAAA")
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:199:        for ax_name in ("left", "bottom"):
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:242:        worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, parent=self)
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:250:        if result.get("status") == "no_data":
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:297:        self._set_trend(p.get("trend", "insufficient_data"))
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:300:        p_ult = p.get("p_ultimate_mbar", float("nan"))
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:306:            "exponential": "Экспонента",
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:308:            "combined": "Комбинированная",
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:313:        confidence = p.get("confidence", 0.0)
+src/cryodaq/gui/widgets/vacuum_trend_panel.py:394:                labelOpts={"color": _COLOR_RED, "position": 0.95},
+src/cryodaq/gui/widgets/shared/prediction_widget.py:186:            axis_items["left"] = ScientificLogAxisItem(orientation="left")
+src/cryodaq/gui/widgets/shared/prediction_widget.py:191:            pi.setLabel("left", self._y_label, units=self._y_unit, color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/prediction_widget.py:196:            left_axis = pi.getAxis("left")
+src/cryodaq/gui/widgets/shared/prediction_widget.py:199:            pi.setLabel("left", self._y_label, color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/prediction_widget.py:200:        pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/prediction_widget.py:201:        date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/widgets/shared/prediction_widget.py:202:        plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/widgets/shared/prediction_widget.py:237:        frame.setObjectName("predictionReadout")
+src/cryodaq/gui/widgets/shared/pressure_plot.py:143:        self._plot = pg.PlotWidget(axisItems={"left": ScientificLogAxisItem(orientation="left")})
+src/cryodaq/gui/widgets/shared/pressure_plot.py:146:        pi.setLabel("left", "Давление", units="мбар", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/pressure_plot.py:147:        left_axis = pi.getAxis("left")
+src/cryodaq/gui/widgets/shared/pressure_plot.py:155:            pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/pressure_plot.py:156:            date_axis = pg.DateAxisItem(orientation="bottom")
+src/cryodaq/gui/widgets/shared/pressure_plot.py:157:            self._plot.setAxisItems({"bottom": date_axis})
+src/cryodaq/gui/widgets/shared/pressure_plot.py:159:            pi.setLabel("bottom", "Время", units="с", color=theme.PLOT_LABEL_COLOR)
+src/cryodaq/gui/widgets/shared/pressure_plot.py:160:            pi.getAxis("bottom").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/analytics_panel.py:48:    "transition": "Переход (S-bend)",
+src/cryodaq/gui/widgets/analytics_panel.py:50:    "stabilizing": "Стабилизация",
+src/cryodaq/gui/widgets/analytics_panel.py:224:        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+src/cryodaq/gui/widgets/analytics_panel.py:241:        for ax_name in ("left", "bottom"):
+src/cryodaq/gui/widgets/analytics_panel.py:248:        pi.setLabel("left", "R_thermal", units="К/Вт", color="#AAAAAA")
+src/cryodaq/gui/widgets/analytics_panel.py:252:        pi.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/analytics_panel.py:253:        pi.setLabel("bottom", "Время", color="#AAAAAA")
+src/cryodaq/gui/widgets/analytics_panel.py:298:            labelOpts={"color": "#2ECC40", "position": 0.95},
+src/cryodaq/gui/widgets/analytics_panel.py:385:        progress = meta.get("progress", 0.0)
+src/cryodaq/gui/widgets/analytics_panel.py:390:        phase = meta.get("phase", "")
+src/cryodaq/gui/widgets/analytics_panel.py:435:        pi.setLabel("left", "R_thermal", units="К/Вт", color="#AAAAAA")
+src/cryodaq/gui/widgets/analytics_panel.py:436:        pi.setLabel("bottom", "Время", color="#AAAAAA")
+src/cryodaq/gui/widgets/analytics_panel.py:467:        pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
+src/cryodaq/gui/widgets/analytics_panel.py:468:        pi.setLabel("bottom", "Время от старта (ч)", color="#AAAAAA")
+src/cryodaq/gui/widgets/common.py:45:        "info": f"color: {theme.TEXT_MUTED};",
+src/cryodaq/gui/widgets/common.py:46:        "success": f"color: {theme.STATUS_OK};",
+src/cryodaq/gui/widgets/common.py:47:        "warning": f"color: {theme.STATUS_CAUTION};",
+src/cryodaq/gui/widgets/common.py:48:        "error": f"color: {theme.STATUS_FAULT};",
+src/cryodaq/gui/widgets/common.py:60:        self._apply("info", text)
+src/cryodaq/gui/widgets/common.py:63:        self._apply("success", text)
+src/cryodaq/gui/widgets/common.py:66:        self._apply("warning", text)
+src/cryodaq/gui/widgets/common.py:69:        self._apply("error", text)
+src/cryodaq/gui/widgets/common.py:78:        "muted": theme.TEXT_MUTED,
+src/cryodaq/gui/widgets/common.py:79:        "info": theme.TEXT_MUTED,  # legacy: info == muted in callers
+src/cryodaq/gui/widgets/common.py:80:        "success": theme.STATUS_OK,
+src/cryodaq/gui/widgets/common.py:81:        "warning": theme.STATUS_CAUTION,  # see StatusBanner note
+src/cryodaq/gui/widgets/common.py:82:        "error": theme.STATUS_FAULT,
+src/cryodaq/gui/widgets/common.py:83:        "accent": theme.TEXT_ACCENT,
+src/cryodaq/gui/widgets/common.py:90:    button: QPushButton, variant: str = "neutral", *, compact: bool = False
+src/cryodaq/gui/widgets/common.py:95:        "neutral": (theme.SURFACE_ELEVATED, theme.STONE_300, theme.TEXT_SECONDARY),
+src/cryodaq/gui/widgets/common.py:96:        "primary": (theme.ACCENT_400, theme.ACCENT_500, theme.TEXT_INVERSE),
+src/cryodaq/gui/widgets/common.py:97:        "warning": (theme.STATUS_WARNING, theme.STATUS_CAUTION, theme.TEXT_INVERSE),
+src/cryodaq/gui/widgets/common.py:98:        "danger": (theme.STATUS_FAULT, theme.STATUS_FAULT, theme.TEXT_INVERSE),
+src/cryodaq/gui/widgets/common.py:100:    bg, hover, fg = variants.get(variant, variants["neutral"])
+src/cryodaq/gui/widgets/channel_editor.py:79:        apply_button_style(reset_btn, "neutral")
+src/cryodaq/gui/widgets/channel_editor.py:84:        apply_button_style(apply_btn, "primary")
+src/cryodaq/gui/widgets/channel_editor.py:104:            edit = QLineEdit(info.get("name", ""))
+src/cryodaq/gui/widgets/channel_editor.py:110:            cb.setChecked(info.get("visible", True))
+src/cryodaq/gui/widgets/temp_panel.py:243:            name = cfg.get("name", f"Канал {idx + 1}")
+src/cryodaq/gui/widgets/temp_panel.py:281:            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+src/cryodaq/gui/widgets/temp_panel.py:293:        plot_item.setLabel("left", "Температура", units="К", color="#AAAAAA")
+src/cryodaq/gui/widgets/temp_panel.py:294:        plot_item.getAxis("left").enableAutoSIPrefix(False)
+src/cryodaq/gui/widgets/temp_panel.py:295:        plot_item.setLabel("bottom", "Время", color="#AAAAAA")
+src/cryodaq/gui/widgets/temp_panel.py:300:        for axis_name in ("left", "bottom", "top", "right"):
+src/cryodaq/gui/widgets/temp_panel.py:307:        time_axis = plot_item.getAxis("bottom")
+src/cryodaq/gui/widgets/temp_panel.py:315:            item = pw.plot([], [], pen=pen, name=cfg.get("name", channel_id))
+src/cryodaq/gui/widgets/temp_panel.py:402:            card.mousePressEvent(type("_FakeEvent", (), {"button": lambda self: Qt.LeftButton})())
+src/cryodaq/gui/widgets/experiment_dialogs.py:28:            self._template_combo.addItem(str(template["name"]), template)
+src/cryodaq/gui/widgets/experiment_dialogs.py:68:            "cmd": "experiment_start",
+src/cryodaq/gui/widgets/experiment_dialogs.py:70:            "title": title,
+src/cryodaq/gui/widgets/experiment_dialogs.py:71:            "name": title,
+src/cryodaq/gui/widgets/experiment_dialogs.py:72:            "operator": self._operator_edit.text().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:73:            "sample": self._sample_edit.text().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:74:            "cryostat": self._cryostat_edit.text().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:75:            "description": self._description_edit.toPlainText().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:76:            "notes": self._notes_edit.toPlainText().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:93:            edit.setPlaceholderText(str(field.get("default", "")))
+src/cryodaq/gui/widgets/experiment_dialogs.py:107:        self._title_edit = QLineEdit(str(active_experiment.get("title", "")))
+src/cryodaq/gui/widgets/experiment_dialogs.py:108:        self._sample_edit = QLineEdit(str(active_experiment.get("sample", "")))
+src/cryodaq/gui/widgets/experiment_dialogs.py:109:        self._description_edit = QTextEdit(str(active_experiment.get("description", "")))
+src/cryodaq/gui/widgets/experiment_dialogs.py:111:        self._notes_edit = QTextEdit(str(active_experiment.get("notes", "")))
+src/cryodaq/gui/widgets/experiment_dialogs.py:114:        self._status_combo.addItem("Завершён", "COMPLETED")
+src/cryodaq/gui/widgets/experiment_dialogs.py:115:        self._status_combo.addItem("Прерван", "ABORTED")
+src/cryodaq/gui/widgets/experiment_dialogs.py:146:            "cmd": "experiment_finalize",
+src/cryodaq/gui/widgets/experiment_dialogs.py:148:            "title": self._title_edit.text().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:149:            "sample": self._sample_edit.text().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:150:            "description": self._description_edit.toPlainText().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:151:            "notes": self._notes_edit.toPlainText().strip(),
+src/cryodaq/gui/widgets/experiment_dialogs.py:152:            "status": str(self._status_combo.currentData()),

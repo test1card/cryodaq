@@ -81,7 +81,7 @@ class TempPlotWidget(QWidget):
         toolbar.addWidget(self._time_selector)
         toolbar.addStretch()
 
-        self._log_button = QPushButton("Lin Y")
+        self._log_button = QPushButton("Лин Y")
         self._log_button.setCheckable(True)
         self._log_button.setFixedHeight(24)
         self._log_button.clicked.connect(self._on_log_y_toggled)
@@ -190,7 +190,7 @@ class TempPlotWidget(QWidget):
     def _on_log_y_toggled(self, checked: bool) -> None:
         self._is_log_y = checked
         self._plot.getPlotItem().setLogMode(x=False, y=checked)
-        self._log_button.setText("Log Y" if checked else "Lin Y")
+        self._log_button.setText("Лог Y" if checked else "Лин Y")
         self._style_time_button(self._log_button, checked)
 
     # ------------------------------------------------------------------

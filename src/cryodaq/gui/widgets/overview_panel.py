@@ -1162,7 +1162,7 @@ class OverviewPanel(QWidget):
 
         btn_bar.addStretch()
 
-        self._log_btn = QPushButton("Lin Y")
+        self._log_btn = QPushButton("Лин Y")
         self._log_btn.setFixedSize(QSize(60, 24))
         apply_button_style(self._log_btn, "neutral", compact=True)
         self._log_btn.clicked.connect(self._toggle_log)
@@ -1740,7 +1740,7 @@ class OverviewPanel(QWidget):
     def _toggle_log(self) -> None:
         self._is_log_y = not self._is_log_y
         self._plot.getPlotItem().setLogMode(x=False, y=self._is_log_y)
-        self._log_btn.setText("Log Y" if self._is_log_y else "Lin Y")
+        self._log_btn.setText("Лог Y" if self._is_log_y else "Лин Y")
 
     @Slot()
     def _on_export_png(self) -> None:

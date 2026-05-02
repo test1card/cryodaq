@@ -1,93 +1,80 @@
-# Analytics tab — operator guide
+# Вкладка Аналитика — руководство оператора
 
-## Phase-gated widget layout
+## Раскладка виджетов по фазам
 
-The Analytics tab shows different widgets depending on the current experiment phase.
-Each phase shows up to 3 widgets (main slot + two side slots):
+Вкладка Аналитика отображает разные виджеты в зависимости от текущей фазы эксперимента.
+В каждой фазе показывается до 3 виджетов (основной слот + два боковых):
 
-| Phase | Main (½ screen) | Top right (¼) | Bottom right (¼) |
+| Фаза | Основной (½ экрана) | Справа сверху (¼) | Справа снизу (¼) |
 |---|---|---|---|
-| preparation | Temperature channels | Pressure | Sensor health |
-| vacuum | Vacuum projection | Temperature channels | Pressure |
-| cooldown | Cooldown trajectory | Temperature channels | R_thermal (F8) |
-| measurement | R_thermal (live) | Temperature channels | Keithley power |
-| warmup | Temperature history | Pressure | Past cooldowns |
-| disassembly | Experiment summary | — | — |
-| (no experiment) | Temperature channels | Pressure | Sensor health |
+| Подготовка | Каналы температуры | Давление | Здоровье датчиков |
+| Вакуумирование | Прогноз вакуума | Каналы температуры | Давление |
+| Захолаживание | Траектория охлаждения | Каналы температуры | R тепловое (F8) |
+| Измерение | R тепловое (прямой эфир) | Каналы температуры | Мощность Keithley |
+| Отогрев | История температуры | Давление | Прошлые охлаждения |
+| Разборка | Сводка эксперимента | — | — |
+| (без эксперимента) | Каналы температуры | Давление | Здоровье датчиков |
 
-## Plot-by-plot behavior
+## Поведение виджетов
 
-### Cooldown trajectory (cooldown phase, main slot)
+### Траектория охлаждения (фаза захолаживания, основной слот)
 
-Shows the predicted cooldown trajectory (T_cold vs time) with a confidence band,
-rendered only when the system is actively cooling.
+Отображает прогнозируемую траекторию охлаждения (T_cold по времени) с доверительной полосой.
+Строится только при активном охлаждении системы.
 
-**Empty / no overlay:** The prediction requires T_cold to be dropping at
->5 K/h for at least 10 consecutive minutes (`CooldownDetector` confirmation window).
-The widget shows "Охлаждение не активно — прогноз недоступен" when:
-- System is at base temperature (T_cold ≈ 4 K) — physically at steady state
-- System has not started cooling yet (operator advanced to cooldown phase before
-  turning on the cryocooler)
-- Cooling rate < 5 K/h (early warmup or slow start)
+**Пусто / нет наложения:** Прогноз требует снижения T_cold со скоростью
+>5 K/ч в течение не менее 10 последовательных минут (окно подтверждения `CooldownDetector`).
+Виджет показывает «Охлаждение не активно — прогноз недоступен» если:
+- Система при базовой температуре (T_cold ≈ 4 K) — физически в стационарном состоянии
+- Охлаждение ещё не началось (оператор перешёл в фазу захолаживания до включения криоохладителя)
+- Скорость охлаждения < 5 K/ч (ранний разогрев или медленный старт)
 
-This is **expected behavior**. The prediction will appear automatically once
-the detector confirms active cooldown.
+Это **ожидаемое поведение**. Прогноз появится автоматически, как только детектор подтвердит активное охлаждение.
 
-### Vacuum projection (vacuum phase, main slot)
+### Прогноз вакуума (фаза вакуумирования, основной слот)
 
-Shows projected pressure P(t) with ±1σ confidence band from the vacuum trend predictor.
+Отображает прогнозируемое давление P(t) с доверительной полосой ±1σ от предиктора тренда вакуума.
 
-**Empty / no overlay:** Requires at least 60 pressure readings accumulated in the
-predictor buffer. Empty on first open; populates within ~10 minutes of pumping.
+**Пусто / нет наложения:** Требуется накопление не менее 60 показаний давления в буфере предиктора.
+Пусто при первом открытии; заполняется в течение ~10 минут откачки.
 
-**Not visible in other phases:** Vacuum projection is only mounted during the vacuum
-phase. If you see an empty area where you expect it — check the current experiment phase.
+**Не отображается в других фазах:** Прогноз вакуума монтируется только в фазе вакуумирования.
+Если на ожидаемом месте пусто — проверьте текущую фазу эксперимента.
 
-### Temperature channels (every phase, top right slot)
+### Каналы температуры (все фазы, слот справа сверху)
 
-Shows live temperature readings from all configured LakeShore 218S channels.
+Отображает текущие показания температуры всех настроенных каналов LakeShore 218S.
 
-**Empty on first open:** This widget receives live readings from the broker; it does
-not pre-fetch historical data. The first reading arrives within one poll cycle
-(typically 2s after opening the tab). The "Ожидание данных…" placeholder is shown
-until the first reading arrives.
+**Пусто при первом открытии:** Виджет получает данные от брокера в реальном времени; исторические данные не предзагружаются. Первое показание поступает в течение одного цикла опроса (обычно через 2 с после открытия вкладки). До прихода первого показания отображается заглушка «Ожидание данных…».
 
-### R_thermal (measurement phase, main slot)
+### R тепловое (фаза измерения, основной слот)
 
-Shows live thermal resistance R_thermal with a SteadyStatePredictor asymptote overlay.
+Отображает тепловое сопротивление R тепловое в реальном времени с наложением асимптоты SteadyStatePredictor.
 
-**Asymptote overlay:** Appears once the predictor has ≥30% convergence (typically
-several minutes after entering measurement phase). The dashed line shows the predicted
-R_thermal steady-state value.
+**Наложение асимптоты:** Появляется при достижении предиктором ≥30% сходимости (обычно через несколько минут после начала фазы измерения). Пунктирная линия показывает предсказанное стационарное значение R теплового.
 
-**"данные источника ожидают (зависит от F8)" (cooldown phase):** In cooldown phase,
-the bottom-right slot shows the R_thermal placeholder. F8 = cooldown ML upgrade
-(research feature, not yet implemented). This text is expected.
+**«данные источника ожидают (зависит от F8)» (фаза захолаживания):** В фазе захолаживания слот справа снизу отображает заглушку R теплового. F8 = обновление ML охлаждения (исследовательская функция, ещё не реализована). Этот текст ожидаем.
 
-### Experiment summary (disassembly phase, main slot)
+### Сводка эксперимента (фаза разборки, основной слот)
 
-Shows experiment duration, phase breakdown, channel statistics, alarm count, and
-artifact links. Populated on enter of disassembly phase.
+Отображает продолжительность эксперимента, разбивку по фазам, статистику каналов, количество тревог и ссылки на артефакты. Заполняется при входе в фазу разборки.
 
-## Common questions
+## Часто задаваемые вопросы
 
-**"All plots empty on the Analytics tab"**
+**«Все графики на вкладке Аналитика пусты»**
 
-Most common cause: the experiment is in a phase where predictions have no data yet.
+Наиболее частая причина: эксперимент находится в фазе, где прогнозные данные ещё не накоплены.
 
-Check list:
-1. What is the current experiment phase? (shown in the experiment overlay)
-2. Is the system at base temperature? (T_cold ≈ 4K → cooldown trajectory empty = expected)
-3. Did you just open the Analytics tab? (temperature channels fill within 2s)
-4. Is the cryocooler actually running? (cooldown trajectory needs active cooling)
+Что проверить:
+1. Какова текущая фаза эксперимента? (отображается в оверлее эксперимента)
+2. Система при базовой температуре? (T_cold ≈ 4K → траектория охлаждения пуста — ожидаемо)
+3. Вы только что открыли вкладку Аналитика? (каналы температуры заполняются в течение 2 с)
+4. Криоохладитель действительно работает? (траектория охлаждения требует активного охлаждения)
 
-**"Vacuum projection not showing"**
+**«Прогноз вакуума не отображается»**
 
-Vacuum projection is only shown during the `vacuum` phase. If you're in cooldown or
-measurement phase, this widget is not mounted. Use the Аналитика → vacuum phase
-to see vacuum projection.
+Прогноз вакуума показывается только в фазе `вакуумирования`. В фазе захолаживания или измерения этот виджет не монтируется. Для просмотра прогноза вакуума перейдите на Аналитика → фаза вакуумирования.
 
-**"Temperature channels empty for a long time"**
+**«Каналы температуры пусты долгое время»**
 
-If "Ожидание данных…" persists >5 seconds, the engine may not be publishing or the
-ZMQ bridge may need a restart. Check the connection indicator in the status bar.
+Если «Ожидание данных…» сохраняется более 5 секунд, возможно, движок не публикует данные или мост ZMQ требует перезапуска. Проверьте индикатор соединения в строке состояния.
