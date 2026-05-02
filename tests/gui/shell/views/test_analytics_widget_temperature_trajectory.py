@@ -304,3 +304,37 @@ def test_curve_legend_uses_channel_manager_name(app):
     finally:
         # Clean up: remove test channel name.
         mgr.set_name("Т_legend_test", "")
+
+
+def test_fetch_history_sends_full_channel_labels(app):
+    """_fetch_history must send full labels ('Т7 Детектор'), not short IDs
+    ('Т7'). SQLiteWriter stores readings under full labels; short IDs yield
+    zero results. Gemini bonus finding from F-X v3 audit, closed in v0.52.4."""
+    from cryodaq.core.channel_manager import get_channel_manager
+
+    mgr = get_channel_manager()
+    mgr._channels["Т_label_test"] = {
+        "name": "Тестовый Label",
+        "is_cold": True,
+        "visible": True,
+        "group": "криостат",
+    }
+    try:
+        with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            TemperatureTrajectoryWidget()
+
+        cmd = mock_cls.call_args[0][0]
+        channels = cmd.get("channels", [])
+
+        # Named channels must appear as full labels (short_id + space + name).
+        # Channels with no registered name legitimately appear as short IDs
+        # (get_display_name returns short_id when name is absent).
+        assert "Т_label_test Тестовый Label" in channels, (
+            f"Named channel not sent as full label. channels={channels}"
+        )
+        assert "Т_label_test" not in channels, (
+            "Named channel sent as bare short ID — SQLite query would return 0 rows."
+        )
+    finally:
+        mgr._channels.pop("Т_label_test", None)

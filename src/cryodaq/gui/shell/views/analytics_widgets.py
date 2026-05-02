@@ -332,7 +332,8 @@ class TemperatureTrajectoryWidget(QWidget):
 
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        channels = self._channel_mgr.get_cold_channels() or None
+        cold_ids = self._channel_mgr.get_cold_channels() or []
+        channels = [self._channel_mgr.get_display_name(ch) for ch in cold_ids] or None
         cmd = {
             "cmd": "readings_history",
             "from_ts": time.time() - 7 * 24 * 3600,
@@ -524,19 +525,31 @@ class CooldownPredictionWidget(QWidget):
             log_y=False,
         )
 
-        # Empty-state label shown when cooldown is not active (e.g. system
-        # at base temperature or cryocooler not yet started).
-        self._idle_label = QLabel("Охлаждение не активно\nПрогноз недоступен")
-        self._idle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._idle_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
-        self._idle_label.setVisible(True)
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._idle_label)
         root.addWidget(self._inner)
+
+        # Idle placeholder as pg.TextItem on the plot canvas — plot uses
+        # full vertical space rather than being clipped by a label above it.
+        self._placeholder = pg.TextItem(
+            "Охлаждение не активно — прогноз недоступен",
+            anchor=(0.5, 0.5),
+            color=QColor(theme.MUTED_FOREGROUND),
+        )
+        _ph_font = QFont(theme.FONT_BODY)
+        _ph_font.setPixelSize(theme.FONT_SIZE_BASE)
+        self._placeholder.setFont(_ph_font)
+
+        _vb = self._inner._plot.getPlotItem().getViewBox()
+        _vb.addItem(self._placeholder, ignoreBounds=True)
+        _vb.sigRangeChanged.connect(self._reposition_placeholder)
+        self._reposition_placeholder()
+        self._placeholder.setVisible(True)
+
+    def _reposition_placeholder(self) -> None:
+        vb = self._inner._plot.getPlotItem().getViewBox()
+        xr, yr = vb.viewRange()
+        self._placeholder.setPos((xr[0] + xr[1]) / 2, (yr[0] + yr[1]) / 2)
 
     def set_cooldown_data(self, data) -> None:
         if data is None:
@@ -556,9 +569,9 @@ class CooldownPredictionWidget(QWidget):
                 upper,
                 ci_level_pct=67.0,
             )
-            self._idle_label.setVisible(False)
+            self._placeholder.setVisible(False)
         else:
-            self._idle_label.setVisible(True)
+            self._placeholder.setVisible(True)
 
 
 class RThermalLiveWidget(QWidget):

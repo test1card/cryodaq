@@ -173,6 +173,48 @@ def test_keithley_power_smua_smub_grid(app):
 # ----------------------------------------------------------------------
 
 
+def test_cooldown_prediction_placeholder_is_pg_textitem(app):
+    """CooldownPredictionWidget idle placeholder must be pg.TextItem on the
+    plot canvas, not a QLabel above the plot (v0.52.4 UX fix)."""
+    import pyqtgraph as pg
+
+    w = aw.CooldownPredictionWidget()
+    assert isinstance(w._placeholder, pg.TextItem), (
+        "Placeholder must be pg.TextItem, not QLabel — plot should use full vertical space."
+    )
+    assert w._placeholder.isVisible()
+
+
+def test_cooldown_prediction_placeholder_hides_on_data(app):
+    """Placeholder hides when predicted trajectory arrives."""
+    from unittest.mock import MagicMock
+
+    import pyqtgraph as pg
+
+    w = aw.CooldownPredictionWidget()
+    assert w._placeholder.isVisible()
+
+    data = MagicMock()
+    data.actual_trajectory = [(1000.0, 200.0), (2000.0, 100.0)]
+    data.predicted_trajectory = [(2000.0, 100.0), (3000.0, 50.0)]
+    data.ci_trajectory = [(2000.0, 90.0, 110.0), (3000.0, 40.0, 60.0)]
+    w.set_cooldown_data(data)
+    assert not w._placeholder.isVisible()
+
+
+def test_cooldown_prediction_placeholder_shows_when_no_prediction(app):
+    """Placeholder re-appears when data arrives with no predicted trajectory."""
+    from unittest.mock import MagicMock
+
+    w = aw.CooldownPredictionWidget()
+    data = MagicMock()
+    data.actual_trajectory = [(1000.0, 200.0)]
+    data.predicted_trajectory = []
+    data.ci_trajectory = []
+    w.set_cooldown_data(data)
+    assert w._placeholder.isVisible()
+
+
 @pytest.mark.parametrize(
     "widget_id",
     [
