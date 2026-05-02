@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-04-28 after v0.39.0 release (HEAD `955bb71`, B1 closed).
+> **Living document.** Updated 2026-05-03 after v0.51.0 release (F-X shipped). F-A/B/C/D retired; F-P1/2/3 planned for v0.52.0. See §Priority order below.
 > Companion to `PROJECT_STATUS.md` (infrastructure state) and
 > `docs/phase-ui-1/phase_ui_v2_roadmap.md` (UI rebuild phases).
 >
@@ -57,6 +57,15 @@
 | F32 | RAG indexer (Phase 2) | ⬜ | M | M |
 | F33 | Assistant Archive query interface (Phase 3) | ⬜ | M+ | M |
 | F34 | GUI chat overlay (Phase 4, deferred) | ⬜ | M | L |
+| F-X | Physical-state alarms — CooldownAlarm + VacuumGuard, predictor-based, phase-decoupled, WATCHDOG | ✅ DONE (shipped v0.51.0) | M | H |
+| F-Y | Diagnostic mode rework (AnomalyResponseAgent) | ⬜ PLANNED v0.53.0 — gated on C6 hardware verification | M | H |
+| F-A | Anomaly detection widget | ❌ RETIRED — surface area covered by F-X v3 alarm path + F-P live overlays + F-Y diagnostic output. Re-spec only on concrete operator request. See F-table for disposition. | M | L |
+| F-B | τ-scale formulation | ❌ RETIRED — superseded by F-X v3 physical-state alarms. Re-spec only on concrete physics requirement. See F-table for disposition. | L | M |
+| F-C | Slider integration | ❌ RETIRED — superseded; was UX for retired F-B. See F-table for disposition. | M | L |
+| F-D | Physics prior | ❌ RETIRED — superseded by F-X v3 predictor-based approach. See F-table for disposition. | L | M |
+| F-P1 | Cooldown trajectory overlay (Analytics tab, temperature) | ⬜ PLANNED v0.52.0 | S | H |
+| F-P2 | Vacuum leak projection overlay (Analytics tab, pressure) | ⬜ PLANNED v0.52.0 | S/M | H |
+| F-P3 | TIM thermal conductivity asymptote (Analytics tab, R_thermal) | ⬜ PLANNED v0.52.0 | S | H |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -712,6 +721,121 @@ operational alarm definitions need physics review.
 Pre-H5-fix exploration of Unix-domain socket fallback. Now superseded
 by H5 fix (no longer blocks anything). Worktree retained for
 reference; can be deleted on future cleanup pass.
+
+---
+
+## Priority order — post-2026-05-02 (v0.51.0 ship)
+
+F-X — Physical-state alarms ✅ SHIPPED v0.51.0
+F-P1/2/3 — Prediction overlays on Analytics tab (v0.52.0)
+F-Y — Diagnostic mode rework (v0.53.0, gated on C6)
+F33 — Archive query interface, structured + Гемма formatting (v0.54.0)
+F31/F32 — Sinks foundation + RAG indexer (after F33 v1)
+
+Retired this session: F-A, F-B, F-C, F-D.
+Independent tracks: F33, F31, F32.
+
+---
+
+### F-X — Physical-state alarms
+
+**Status:** ✅ DONE (shipped v0.51.0, 2026-05-02).
+**Effort:** M. **ROI:** H.
+
+Predictor-based phase-aware alarms: CooldownAlarm (uses cooldown_predictor
+trajectory) + VacuumGuard (uses VacuumTrendPredictor). Both in WATCHDOG mode —
+alarms track physics state, not raw channel thresholds.
+
+Stuck finding C6 (P1): T11/T12 cold-channel labeling conflict between
+`safety.yaml`/`interlocks.yaml` (say T12=cold) and `channels.yaml` (T11=cold).
+Ships with `channels.yaml` interpretation pending hardware verification.
+
+---
+
+### F-Y — Diagnostic mode rework
+
+**Status:** ⬜ PLANNED v0.53.0. Gated on C6 hardware verification.
+**Effort:** M. **ROI:** H.
+
+AnomalyResponseAgent in diagnostic mode (not suggestion mode). Requires F-X
+alarm noise reduction and real-world operator data from v0.51.0 deployment.
+
+---
+
+### F-A — Anomaly detection widget
+
+**Status:** ❌ RETIRED — architect decision 2026-05-03.
+
+Surface area covered by: F-X v3 alarm path + F-P live overlays + F-Y diagnostic
+output. Re-spec only on concrete operator request. All existing spec content
+preserved above (do not delete).
+
+---
+
+### F-B — τ-scale formulation
+
+**Status:** ❌ RETIRED — architect decision 2026-05-03.
+
+Superseded by F-X v3 physical-state alarms which implement the correct
+physics-based timing. Re-spec only on concrete physics requirement.
+
+---
+
+### F-C — Slider integration
+
+**Status:** ❌ RETIRED — architect decision 2026-05-03.
+
+Was UX for retired F-B. No longer has a target feature to integrate with.
+
+---
+
+### F-D — Physics prior
+
+**Status:** ❌ RETIRED — architect decision 2026-05-03.
+
+Superseded by F-X v3 predictor-based approach which subsumes the intended
+physics constraint encoding.
+
+---
+
+### F-P1 — Cooldown trajectory overlay (Analytics tab)
+
+**Status:** ⬜ PLANNED v0.52.0.
+**Effort:** S. **ROI:** H.
+
+Predictor `future_T_cold_mean` ± σ envelope on Analytics temperature plot
+during cooldown phase. Reuses existing `CooldownPredictionWidget` +
+`PredictionWidget` infrastructure — no new engine work required.
+Data already flows: `cooldown_service.py` publishes `future_t` /
+`future_T_cold_mean` / `future_T_cold_upper` / `future_T_cold_lower` in metadata;
+`main_window_v2.py` maps these into `CooldownData.predicted_trajectory` +
+`ci_trajectory`.
+
+---
+
+### F-P2 — Vacuum leak projection overlay (Analytics tab)
+
+**Status:** ⬜ PLANNED v0.52.0.
+**Effort:** S/M. **ROI:** H.
+
+`VacuumTrendPredictor` output → projected P-vs-time on Analytics pressure plot
+(vacuum phase). Reuses `VacuumPredictionWidget` + `PredictionWidget`
+infrastructure. Implementation: self-contained poll (10s), accumulates raw
+pressure via `set_pressure_reading()`, converts `extrapolation_t` /
+`extrapolation_logP` / `residual_std` → `central` / `lower` / `upper` (unix-ts,
+mbar), ±1σ CI band.
+
+---
+
+### F-P3 — TIM thermal conductivity asymptote (Analytics tab)
+
+**Status:** ⬜ PLANNED v0.52.0.
+**Effort:** S. **ROI:** H.
+
+`SteadyStatePredictor` applied to R_thermal readings → predicted R_thermal
+asymptote on Analytics conductivity plot (measurement phase). Implementation:
+add predictor + horizontal dashed asymptote line + ±σ confidence band to
+`RThermalLiveWidget`. Show only when `percent_settled ≥ 30%` and `valid=True`.
 
 ---
 
