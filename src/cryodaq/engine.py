@@ -41,8 +41,11 @@ from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvent, AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.cooldown_alarm import CooldownAlarm
+from cryodaq.core.physical_alarms_config import load_physical_alarms_config
+from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
     CalibrationCommandError,
@@ -1197,6 +1200,41 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Alarm Engine v2: config/alarms_v3.yaml не найден, v2 отключён")
 
+    # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
+    _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
+    _cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(_phys_alarms_yaml)
+
+    # Resolve model path relative to project root (not process cwd)
+    _model_path_str = _cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")
+    if not Path(_model_path_str).is_absolute():
+        _cooldown_cfg["predictor_model_path"] = str(_PROJECT_ROOT / _model_path_str)
+
+    _cooldown_alarm: CooldownAlarm | None = None
+    if _cooldown_cfg.get("enabled", True):
+        _cooldown_alarm = CooldownAlarm(
+            cfg=_cooldown_cfg,
+            state_tracker=_alarm_v2_state_tracker,
+            alarm_state_mgr=alarm_v2_state_mgr,
+            event_bus=event_bus,
+        )
+        logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
+    else:
+        logger.info("CooldownAlarm: отключён в конфиге")
+
+    _vacuum_guard: VacuumGuard | None = None
+    if _vacuum_cfg.get("enabled", True):
+        try:
+            _vacuum_guard = VacuumGuard(
+                cfg=_vacuum_cfg,
+                state_tracker=_alarm_v2_state_tracker,
+                alarm_state_mgr=alarm_v2_state_mgr,
+                event_bus=event_bus,
+            )
+        except Exception as exc:
+            logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
+    else:
+        logger.info("VacuumGuard: отключён в конфиге")
+
     # --- Sensor Diagnostics Engine ---
     _plugins_cfg_path = _cfg("plugins")
     _plugins_raw: dict[str, Any] = {}
@@ -1720,6 +1758,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                             experiment_id=_exp_info.get("experiment_id"),
                         )
                     )
+                    if _cooldown_alarm is not None:
+                        _cooldown_alarm.notify_experiment_finalized()
                 elif result.get("ok") and action == "experiment_advance_phase":
                     phase = cmd.get("phase", "?")
                     await event_logger.log_event("phase", f"Фаза: → {phase}")
@@ -1830,6 +1870,35 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                 )
                 return {"ok": True, "status": "queued"}
+            if action == "cooldown_alarm.arm":
+                if _cooldown_alarm is None:
+                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+                ok = _cooldown_alarm.arm()
+                return {"ok": ok, "state": _cooldown_alarm.state.name}
+            if action == "cooldown_alarm.disarm":
+                if _cooldown_alarm is None:
+                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+                _cooldown_alarm.disarm()
+                return {"ok": True, "state": "DISARMED"}
+            if action == "cooldown_alarm.status":
+                if _cooldown_alarm is None:
+                    return {"state": "UNAVAILABLE"}
+                _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
+                _t_cold_val = (
+                    _t_cold_state.value
+                    if _t_cold_state is not None and not _t_cold_state.is_stale
+                    else None
+                )
+                return {
+                    "state": _cooldown_alarm.state.name,
+                    "eta_h": _cooldown_alarm.current_eta_h,
+                    "progress": _cooldown_alarm.current_progress,
+                    "t_cold": _t_cold_val,
+                }
+            if action == "vacuum_guard.status":
+                if _vacuum_guard is None:
+                    return {"state": "UNAVAILABLE"}
+                return {"state": _vacuum_guard.state.name}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -2117,6 +2186,115 @@ async def _run_engine(*, mock: bool = False) -> None:
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
         alarm_v2_tick_task = asyncio.create_task(_alarm_v2_tick(), name="alarm_v2_tick")
+
+    async def _cooldown_alarm_tick_loop() -> None:
+        """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
+        interval = float(_cooldown_cfg.get("eval_interval_s", 30))
+        _last_triggered_id = "cooldown_alarm"
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                transition = await _cooldown_alarm.tick()  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.error("CooldownAlarm tick error: %s", exc)
+                continue
+            if transition == "TRIGGERED":
+                _active = alarm_v2_state_mgr.get_active()
+                # CooldownAlarm fires under "cooldown_alarm" OR "cooldown_watchdog"
+                _ev = _active.get("cooldown_alarm") or _active.get("cooldown_watchdog")
+                if _ev is not None:
+                    _last_triggered_id = _ev.alarm_id
+                    if telegram_bot is not None:
+                        _pt = asyncio.create_task(
+                            telegram_bot._send_to_all(
+                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
+                            ),
+                            name=f"phys_alarm_tg_{_ev.alarm_id}",
+                        )
+                        _alarm_dispatch_tasks.add(_pt)
+                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="alarm_fired",
+                            timestamp=datetime.now(UTC),
+                            payload={
+                                "alarm_id": _ev.alarm_id,
+                                "level": _ev.level,
+                                "message": _ev.message,
+                                "channels": _ev.channels,
+                                "values": _ev.values,
+                            },
+                            experiment_id=experiment_manager.active_experiment_id,
+                        )
+                    )
+            elif transition == "CLEARED":
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type="alarm_cleared",
+                        timestamp=datetime.now(UTC),
+                        payload={"alarm_id": _last_triggered_id},
+                        experiment_id=experiment_manager.active_experiment_id,
+                    )
+                )
+
+    async def _vacuum_guard_tick_loop() -> None:
+        """Independent tick for VacuumGuard at its own configured cadence (F-X v3)."""
+        interval = float(_vacuum_cfg.get("eval_interval_s", 30))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                transition = await _vacuum_guard.tick()  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.error("VacuumGuard tick error: %s", exc)
+                continue
+            if transition == "TRIGGERED":
+                _active = alarm_v2_state_mgr.get_active()
+                _ev = _active.get("vacuum_guard")
+                if _ev is not None:
+                    if telegram_bot is not None:
+                        _pt = asyncio.create_task(
+                            telegram_bot._send_to_all(
+                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
+                            ),
+                            name="phys_alarm_tg_vacuum_guard",
+                        )
+                        _alarm_dispatch_tasks.add(_pt)
+                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="alarm_fired",
+                            timestamp=datetime.now(UTC),
+                            payload={
+                                "alarm_id": _ev.alarm_id,
+                                "level": _ev.level,
+                                "message": _ev.message,
+                                "channels": _ev.channels,
+                                "values": _ev.values,
+                            },
+                            experiment_id=experiment_manager.active_experiment_id,
+                        )
+                    )
+            elif transition == "CLEARED":
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type="alarm_cleared",
+                        timestamp=datetime.now(UTC),
+                        payload={"alarm_id": "vacuum_guard"},
+                        experiment_id=experiment_manager.active_experiment_id,
+                    )
+                )
+
+    cooldown_alarm_task: asyncio.Task | None = None
+    vacuum_guard_task: asyncio.Task | None = None
+    if _cooldown_alarm is not None:
+        cooldown_alarm_task = asyncio.create_task(
+            _cooldown_alarm_tick_loop(), name="cooldown_alarm_tick"
+        )
+    if _vacuum_guard is not None:
+        vacuum_guard_task = asyncio.create_task(
+            _vacuum_guard_tick_loop(), name="vacuum_guard_tick"
+        )
+
     sd_feed_task: asyncio.Task | None = None
     sd_tick_task: asyncio.Task | None = None
     if sensor_diag is not None:
@@ -2204,6 +2382,18 @@ async def _run_engine(*, mock: bool = False) -> None:
         sd_tick_task.cancel()
         try:
             await sd_tick_task
+        except asyncio.CancelledError:
+            pass
+    if cooldown_alarm_task is not None:
+        cooldown_alarm_task.cancel()
+        try:
+            await cooldown_alarm_task
+        except asyncio.CancelledError:
+            pass
+    if vacuum_guard_task is not None:
+        vacuum_guard_task.cancel()
+        try:
+            await vacuum_guard_task
         except asyncio.CancelledError:
             pass
 

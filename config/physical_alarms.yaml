@@ -1,0 +1,56 @@
+# Physical alarms configuration — F-X v3
+# CooldownAlarm (predictor-based trajectory deviation) and VacuumGuard (P×T guard).
+# All values have hard-coded fallback defaults in module if this file is missing.
+# Engine restart required to apply changes (no hot-reload).
+
+cooldown:
+  enabled: true
+  eval_interval_s: 30
+
+  # Trajectory deviation alarm (predictor-based)
+  k_p: 2.5                          # progress σ multiplier (2.5σ deviation)
+  sustained_min: 5                  # number of consecutive ticks before fire
+  base_temp_K: 5.0                  # T_cold threshold below which alarm auto-disarms
+  base_epsilon_K: 1.0               # ε in "T_cold > base + ε" guard against asymptotic noise
+
+  # ETA slip — informational message in alarm body, not fire criterion
+  eta_slip_window_min: 60           # 1h lookback for slip calculation
+  eta_slip_message_threshold_h: 0.5 # only mention slip if > 30 min/hour drift
+
+  # Auto-disarm criteria
+  auto_disarm_progress: 0.95
+
+  # Watchdog mode — activated automatically after AUTO_DISARMED (cooldown complete).
+  # Monitors T_cold against a fixed threshold; fires WARNING if T_cold climbs
+  # above base_temp_K + watchdog_margin_K for watchdog_sustained_min consecutive ticks.
+  # Clears when operator calls disarm() or experiment is finalized.
+  watchdog_enabled: true
+  watchdog_margin_K: 1.0             # T11 threshold = base_temp_K + this (default 6.0 K)
+  watchdog_sustained_s: 300          # seconds T11 must stay above threshold before firing
+  watchdog_level: WARNING
+
+  # Channels (must match channels.yaml short IDs — T11=2-я ступень, T12=Азотная плита)
+  cold_channel: "Т11"
+  warm_channel: "Т12"
+
+  # Predictor model location (relative to repo root or absolute)
+  predictor_model_path: "data/cooldown_model/predictor_model.json"
+
+vacuum:
+  enabled: true
+  eval_interval_s: 30
+
+  # Pressure channel as published by broker (Thyracont VSP63D_1)
+  pressure_channel: "VSP63D_1/pressure"
+
+  # Reference temperature channel for arm/disarm gating
+  reference_temp_channel: "Т12"
+  arm_threshold_K: 260.0            # T_ref < this → arm vacuum guard
+  disarm_threshold_K: 270.0         # T_ref > this → disarm (10K hysteresis)
+
+  # Pressure thresholds (mbar) with one-decade deadband
+  fire_pressure_mbar: 1.0e-2
+  clear_pressure_mbar: 1.0e-3
+  sustained_s: 30                   # P > fire_pressure must persist this long
+
+  severity: CRITICAL
