@@ -27,8 +27,8 @@ def _make_ch(ch: str, value: float, stale: bool = False) -> ChannelState:
 def _make_alarm(model_dir: Path | None = None, cfg_overrides: dict | None = None):
     """Return (alarm, tracker, alarm_mgr, event_bus)."""
     cfg = {
-        "cold_channel": "Т11",
-        "warm_channel": "Т12",
+        "cold_channel": "Т12",
+        "warm_channel": "Т11",
         "k_p": 2.5,
         "sustained_min": 3,
         "base_temp_K": 5.0,
@@ -208,7 +208,7 @@ async def test_auto_disarm_on_high_progress():
     fake_pred.progress = 0.97
     fake_pred.t_remaining_hours = 1.0
 
-    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т11" in ch else 80.0)
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т12" in ch else 80.0)
     with patch("cryodaq.analytics.cooldown_predictor.predict", return_value=fake_pred):
         with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):
             await alarm.tick()
@@ -225,7 +225,7 @@ async def test_auto_disarm_on_base_temp():
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
 
-    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т11" in ch else 80.0)
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т12" in ch else 80.0)
     with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
         mock_pred.return_value = MagicMock(progress=0.92, t_remaining_hours=2.0)
         with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):
@@ -277,7 +277,7 @@ async def test_auto_disarmed_enters_watchdog_when_enabled():
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
 
-    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т11" in ch else 80.0)
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т12" in ch else 80.0)
     with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
         mock_pred.return_value = MagicMock(progress=0.92, t_remaining_hours=2.0)
         with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):
@@ -294,7 +294,7 @@ async def test_auto_disarmed_stays_terminal_when_watchdog_disabled():
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
 
-    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т11" in ch else 80.0)
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т12" in ch else 80.0)
     with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
         mock_pred.return_value = MagicMock(progress=0.92, t_remaining_hours=2.0)
         with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):

@@ -217,8 +217,8 @@ def replay(
     predictor_model_path: str | None = None,
 ) -> dict[str, Any]:
     cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(physical_alarms_yaml)
-    cold_ch = cooldown_cfg.get("cold_channel", "Т11")
-    warm_ch = cooldown_cfg.get("warm_channel", "Т12")
+    cold_ch = cooldown_cfg.get("cold_channel", "Т12")
+    warm_ch = cooldown_cfg.get("warm_channel", "Т11")
     k_p = float(cooldown_cfg.get("k_p", 2.5))
     model_path_str = predictor_model_path or cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")
 

@@ -68,12 +68,12 @@ channels:
     is_cold: true
     group: компрессор
   Т11:
-    name: Теплообменник 1
+    name: Плита 1-й ступени
     visible: true
     is_cold: true
     group: компрессор
   Т12:
-    name: Теплообменник 2
+    name: 2-я ступень
     visible: true
     is_cold: true
     group: компрессор

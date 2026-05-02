@@ -25,13 +25,16 @@ cooldown:
   # above base_temp_K + watchdog_margin_K for watchdog_sustained_min consecutive ticks.
   # Clears when operator calls disarm() or experiment is finalized.
   watchdog_enabled: true
-  watchdog_margin_K: 1.0             # T11 threshold = base_temp_K + this (default 6.0 K)
-  watchdog_sustained_s: 300          # seconds T11 must stay above threshold before firing
+  watchdog_margin_K: 1.0             # Т12 threshold = base_temp_K + this (default 6.0 K)
+  watchdog_sustained_s: 300          # seconds Т12 must stay above threshold before firing
   watchdog_level: WARNING
 
-  # Channels (must match channels.yaml short IDs — T11=2-я ступень, T12=Азотная плита)
-  cold_channel: "Т11"
-  warm_channel: "Т12"
+  # Channels (must match channels.yaml short IDs).
+  # Hardware mapping verified by architect at lab 2026-05-03 (C6 resolved):
+  #   Т11 — пассивная плита на 1-й ступени GM-cooler (~40K floor)
+  #   Т12 — 2-я ступень GM-cooler, холодная точка (~2.9K floor)
+  cold_channel: "Т12"
+  warm_channel: "Т11"
 
   # Predictor model location (relative to repo root or absolute)
   predictor_model_path: "data/cooldown_model/predictor_model.json"

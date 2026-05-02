@@ -48,8 +48,8 @@ def _format_pressure(p: float) -> str:
 # the rheostat. All temperature channels are metrologically calibrated,
 # but only these two qualify as fixed quantitative references for
 # TopWatchBar T-min / T-max display.
-T_MIN_CHANNEL = "Т11"  # U+0422 Cyrillic Т
-T_MAX_CHANNEL = "Т12"  # U+0422 Cyrillic Т
+T_MIN_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-cooler (~2.9K floor)
+T_MAX_CHANNEL = "Т11"  # U+0422 Cyrillic Т — плита 1-й ступени GM-cooler (~40K floor)
 
 
 def _fmt_elapsed(start_iso: str) -> str:

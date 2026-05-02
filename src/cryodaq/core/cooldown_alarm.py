@@ -65,8 +65,8 @@ class CooldownAlarm:
         self._alarm_state_mgr = alarm_state_mgr
         self._event_bus = event_bus
 
-        self._cold_ch: str = cfg.get("cold_channel", "Т11")
-        self._warm_ch: str = cfg.get("warm_channel", "Т12")
+        self._cold_ch: str = cfg.get("cold_channel", "Т12")
+        self._warm_ch: str = cfg.get("warm_channel", "Т11")
         self._k_p: float = float(cfg.get("k_p", 2.5))
         self._sustained_min: int = int(cfg.get("sustained_min", 5))
         self._base_temp_K: float = float(cfg.get("base_temp_K", 5.0))

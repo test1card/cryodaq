@@ -27,8 +27,8 @@ _COOLDOWN_DEFAULTS: dict[str, Any] = {
     "eta_slip_window_min": 60,
     "eta_slip_message_threshold_h": 0.5,
     "auto_disarm_progress": 0.95,
-    "cold_channel": "Т11",
-    "warm_channel": "Т12",
+    "cold_channel": "Т12",
+    "warm_channel": "Т11",
     "predictor_model_path": "data/cooldown_model/predictor_model.json",
 }
 

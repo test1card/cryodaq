@@ -126,16 +126,16 @@ def test_cold_temp_updates_tmin_tmax(app, mock_channel_mgr):
     # like Т1 / Т7 must NOT populate the min/max cells.
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
-    # Т11 -> T min cell
+    # Т12 -> T min cell (2-я ступень, холодная точка ~2.9K)
     bar.on_reading(
         _make_reading(
-            "\u042211 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 1", 4.2
+            "\u042212 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 2", 4.2
         )
     )
-    # Т12 -> T max cell
+    # Т11 -> T max cell (плита 1-й ступени ~40K)
     bar.on_reading(
         _make_reading(
-            "\u042212 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 2", 76.5
+            "\u042211 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 1", 76.5
         )
     )
     assert "4.20" in bar._ctx_tmin_value.text()

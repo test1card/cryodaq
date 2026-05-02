@@ -16,8 +16,8 @@ def test_include_patterns_match_cyrillic_channels():
     real_channels = [
         "Т9 Компрессор вход",
         "Т10 Компрессор выход",
-        "Т11 Теплообменник 1",
-        "Т12 Теплообменник 2",
+        "Т11 Плита 1-й ступени",
+        "Т12 2-я ступень",
         "Т17 Зеркало 1",
     ]
     for channel in real_channels:

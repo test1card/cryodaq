@@ -24,14 +24,14 @@ def test_loads_valid_yaml(tmp_path):
     cooldown:
       enabled: true
       k_p: 3.0
-      cold_channel: "Т11"
+      cold_channel: "Т12"
     vacuum:
       enabled: true
       fire_pressure_mbar: 5.0e-3
     """)
     cd, vd = load_physical_alarms_config(p)
     assert cd["k_p"] == 3.0
-    assert cd["cold_channel"] == "Т11"
+    assert cd["cold_channel"] == "Т12"
     assert vd["fire_pressure_mbar"] == pytest.approx(5.0e-3)
 
 
