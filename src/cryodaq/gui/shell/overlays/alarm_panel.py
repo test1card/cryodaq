@@ -37,9 +37,11 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QTableWidget,
@@ -264,6 +266,13 @@ class AlarmPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"#alarmPanel {{ background-color: {theme.BACKGROUND}; }}")
 
+        # Cooldown control widget refs (set in _build_cooldown_control)
+        self._cooldown_arm_btn: QPushButton | None = None
+        self._cooldown_status_lbl: QLabel | None = None
+        self._cooldown_eta_lbl: QLabel | None = None
+        self._cooldown_progress: QProgressBar | None = None
+        self._cooldown_poll_in_flight: bool = False
+
         self._build_ui()
         self._reading_signal.connect(self._handle_reading)
 
@@ -271,6 +280,10 @@ class AlarmPanel(QWidget):
         self._v2_poll_timer.setInterval(_V2_POLL_INTERVAL_MS)
         self._v2_poll_timer.timeout.connect(self._poll_v2_status)
         # Polling starts only when shell pushes set_connected(True).
+
+        self._cooldown_poll_timer = QTimer(self)
+        self._cooldown_poll_timer.setInterval(5000)
+        self._cooldown_poll_timer.timeout.connect(self._poll_cooldown_status)
 
     # ------------------------------------------------------------------
     # UI
@@ -302,6 +315,42 @@ class AlarmPanel(QWidget):
 
         self._body_stack.setCurrentWidget(self._body_empty_page)
         root.addWidget(self._body_stack, stretch=1)
+        root.addWidget(self._build_cooldown_control())
+
+    def _build_cooldown_control(self) -> QGroupBox:
+        """Small widget for CooldownAlarm arm/disarm and status display."""
+        group = QGroupBox("Контроль захолаживания")
+        group.setObjectName("cooldownControl")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
+        layout.setSpacing(theme.SPACE_2)
+
+        # Row 1: status + button
+        row1 = QHBoxLayout()
+        self._cooldown_status_lbl = QLabel("Не активен")
+        self._cooldown_status_lbl.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        row1.addWidget(self._cooldown_status_lbl, stretch=1)
+
+        self._cooldown_arm_btn = QPushButton("Запустить")
+        self._cooldown_arm_btn.setEnabled(False)
+        self._cooldown_arm_btn.clicked.connect(self._on_cooldown_arm_clicked)
+        row1.addWidget(self._cooldown_arm_btn)
+        layout.addLayout(row1)
+
+        # Row 2: ETA + progress (hidden until WATCHING+)
+        row2 = QHBoxLayout()
+        self._cooldown_eta_lbl = QLabel("")
+        self._cooldown_eta_lbl.setVisible(False)
+        row2.addWidget(self._cooldown_eta_lbl, stretch=1)
+
+        self._cooldown_progress = QProgressBar()
+        self._cooldown_progress.setRange(0, 100)
+        self._cooldown_progress.setVisible(False)
+        self._cooldown_progress.setMaximumHeight(12)
+        row2.addWidget(self._cooldown_progress)
+        layout.addLayout(row2)
+
+        return group
 
     def _build_unified_empty_page(self) -> QWidget:
         """Full-overlay centered empty state when both alarm lists are empty."""
@@ -488,8 +537,15 @@ class AlarmPanel(QWidget):
         if connected:
             if not self._v2_poll_timer.isActive():
                 self._v2_poll_timer.start()
+            if not self._cooldown_poll_timer.isActive():
+                self._cooldown_poll_timer.start()
+            if self._cooldown_arm_btn is not None:
+                self._cooldown_arm_btn.setEnabled(True)
         else:
             self._v2_poll_timer.stop()
+            self._cooldown_poll_timer.stop()
+            if self._cooldown_arm_btn is not None:
+                self._cooldown_arm_btn.setEnabled(False)
         self._apply_ack_enabled()
 
     def update_v2_status(self, payload: dict) -> None:
@@ -801,6 +857,110 @@ class AlarmPanel(QWidget):
             return
         if result.get("ok"):
             self.update_v2_status(result)
+
+    # ------------------------------------------------------------------
+    # Cooldown alarm control
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _poll_cooldown_status(self) -> None:
+        if not self._connected or self._cooldown_poll_in_flight:
+            return
+        self._cooldown_poll_in_flight = True
+        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self)
+        worker.finished.connect(self._on_cooldown_status)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_cooldown_status(self, result: dict) -> None:
+        self._cooldown_poll_in_flight = False
+        self._workers = [w for w in self._workers if w.isRunning()]
+        if not isinstance(result, dict):
+            return
+        state = result.get("state", "UNAVAILABLE")
+        progress = result.get("progress")
+        eta_h = result.get("eta_h")
+        t_cold = result.get("t_cold")
+        self._update_cooldown_ui(state, progress, eta_h, t_cold=t_cold)
+
+    def _update_cooldown_ui(
+        self,
+        state: str,
+        progress: float | None,
+        eta_h: float | None,
+        *,
+        t_cold: float | None = None,
+    ) -> None:
+        if self._cooldown_status_lbl is None:
+            return
+        watching = state in ("WATCHING", "FIRED")
+        watchdog_active = state in ("WATCHDOG", "WATCHDOG_FIRED")
+        _STATE_LABELS = {
+            "DISARMED": "Не активен",
+            "ARMED": "Активен (сбор базы...)",
+            "WATCHING": "Активен",
+            "FIRED": "ПРЕДУПРЕЖДЕНИЕ: захолаживание не по плану",
+            "AUTO_DISARMED": "Авто-остановка (достигнута база) — можно перезапустить",
+            "WATCHDOG": "Контроль измерения активен",
+            "WATCHDOG_FIRED": "Предупреждение: холодная ступень нагревается",
+            "UNAVAILABLE": "Недоступен",
+        }
+        self._cooldown_status_lbl.setText(_STATE_LABELS.get(state, state))
+        color = theme.FOREGROUND
+        if state in ("FIRED", "WATCHDOG_FIRED"):
+            color = "#e55"
+        elif state in ("ARMED", "WATCHING", "WATCHDOG"):
+            color = theme.FOREGROUND
+        elif state in ("DISARMED", "UNAVAILABLE"):
+            color = theme.MUTED_FOREGROUND
+        self._cooldown_status_lbl.setStyleSheet(f"color: {color};")
+
+        if self._cooldown_arm_btn is not None:
+            active = state in ("ARMED", "WATCHING", "FIRED", "WATCHDOG", "WATCHDOG_FIRED")
+            self._cooldown_arm_btn.setText("Остановить" if active else "Запустить")
+            self._cooldown_arm_btn.clicked.disconnect()
+            if active:
+                self._cooldown_arm_btn.clicked.connect(self._on_cooldown_disarm_clicked)
+            else:
+                self._cooldown_arm_btn.clicked.connect(self._on_cooldown_arm_clicked)
+            self._cooldown_arm_btn.setEnabled(
+                self._connected and state != "UNAVAILABLE"
+            )
+
+        # ETA + progress bar: shown for WATCHING/FIRED; hidden for WATCHDOG modes
+        if self._cooldown_eta_lbl is not None:
+            if watchdog_active:
+                # Show current T11 reading instead of ETA
+                self._cooldown_eta_lbl.setVisible(t_cold is not None)
+                if t_cold is not None:
+                    self._cooldown_eta_lbl.setText(f"Т11: {t_cold:.2f} K")
+            else:
+                self._cooldown_eta_lbl.setVisible(watching and eta_h is not None)
+                if watching and eta_h is not None:
+                    self._cooldown_eta_lbl.setText(f"ETA: {eta_h:.1f} ч")
+
+        if self._cooldown_progress is not None:
+            self._cooldown_progress.setVisible(watching and progress is not None)
+            if watching and progress is not None:
+                self._cooldown_progress.setValue(int(progress * 100))
+
+    @Slot()
+    def _on_cooldown_arm_clicked(self) -> None:
+        if not self._connected:
+            return
+        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.arm"}, parent=self)
+        worker.finished.connect(lambda r: self._on_cooldown_status(r))
+        self._workers.append(worker)
+        worker.start()
+
+    @Slot()
+    def _on_cooldown_disarm_clicked(self) -> None:
+        if not self._connected:
+            return
+        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.disarm"}, parent=self)
+        worker.finished.connect(lambda r: self._on_cooldown_status(r))
+        self._workers.append(worker)
+        worker.start()
 
     # ------------------------------------------------------------------
     # Enablement

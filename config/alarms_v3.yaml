@@ -4,8 +4,8 @@
 #
 # Криовакуумный стенд, проект Миллиметрон, АКЦ ФИАН
 #
-# Калиброванные датчики:  Т11 (Азотная плита, 1-я ступень)
-#                         Т12 (2-я ступень, холодная точка)
+# Калиброванные датчики:  Т11 (2-я ступень, холодная точка, 3–8 K)
+#                         Т12 (Азотная плита, 1-я ступень, 30–80 K)
 # Остальные:              только fault-детекция (0 K / 350+ K)
 #
 # Физическое обоснование: alarm_tz_physics_v3.md
@@ -110,17 +110,23 @@ global_alarms:
     notify: [gui]
     gui_action: highlight_red
 
-  # --- Fault на калиброванных (те же границы, но отдельно для ясности) ---
+  # T11/T12 measurement thresholds removed 2026-05-02 — replaced by F-X v3
+  # CooldownAlarm (predictor-based) and VacuumGuard.
+  # See config/physical_alarms.yaml.
+
+  # --- Fault detection for calibrated sensors (retained — not replaced by F-X v3) ---
+  # Detects impossible raw values (<1K or >350K) indicating sensor hardware failure.
+  # CooldownAlarm/VacuumGuard do not cover this — they evaluate physical state, not
+  # sensor validity. This alarm remains a CRITICAL safety guard.
   calibrated_sensor_fault:
     alarm_type: threshold
     channels: [Т11, Т12]
     check: outside_range
     range: [1.0, 350.0]         # K — нижняя граница 1K (ниже калибровки DT-670)
-    level: CRITICAL              # CRITICAL — потеря калиброванного датчика опасна
+    level: CRITICAL
     message: >
-      КАЛИБРОВАННЫЙ датчик {channel}: {value} K — fault.
-      Количественный контроль ПОТЕРЯН.
-      ДЕЙСТВИЕ: немедленная проверка.
+      Датчик {channel}: {value} K — fault (за пределами [1, 350] K).
+      Аппаратный сбой или потеря контакта.
     notify: [gui, telegram, sound]
     side_effect: exclude_channel
 
@@ -224,52 +230,15 @@ phase_alarms:
       message: "Скорость охлаждения {channel} > 5 K/мин ({value} K/мин)."
       notify: [gui, telegram]
 
-    cooldown_stall:
-      alarm_type: composite
-      operator: AND
-      conditions:
-        - channel: Т12
-          check: rate_near_zero
-          rate_threshold: 0.1    # K/мин
-          rate_window_s: 900     # 15 мин
-        - channel: Т12
-          check: above
-          threshold: 150  # threshold_expr not implemented; using static threshold (~100K setpoint + 50K)
-      level: WARNING
-      message: "Охлаждение остановилось, Т12 далеко от setpoint."
-      notify: [gui, telegram]
-
   measurement:
-    detector_drift:
-      alarm_type: threshold
-      channel: Т12
-      check: deviation_from_setpoint
-      setpoint_source: T12_setpoint
-      threshold: 0.5             # K
-      sustained_s: 60
-      level: WARNING
-      message: "Т12 отклонился от setpoint на > 0.5 K > 60с."
-      notify: [gui]
-
-    detector_unstable:
-      alarm_type: threshold
-      channel: Т12
-      check: deviation_from_setpoint
-      setpoint_source: T12_setpoint
-      threshold: 2.0
-      sustained_s: 10
-      level: CRITICAL
-      message: "Т12 ушёл от setpoint на > 2 K. Измерения невалидны."
-      notify: [gui, telegram, sound]
-
     shield_warming:
       alarm_type: rate
-      channel: Т11               # азотная плита — индикатор 1-й ступени
+      channel: Т12               # азотная плита — индикатор 1-й ступени (F-X: Т12=nitrogen plate)
       check: rate_above
       threshold: 0.5             # K/мин
       rate_window_s: 300
       level: WARNING
-      message: "Азотная плита (Т11) нагревается при measurement."
+      message: "Азотная плита (Т12) нагревается при measurement."
       notify: [gui, telegram]
 
   warmup:

@@ -9,6 +9,63 @@
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-05-02 — F-X v3: Physical-state alarms
+
+### F-X v3: Physical-state alarms (CooldownAlarm + VacuumGuard)
+
+Replaces the zone-band alarm model (F-X v2, never tagged) with two
+physics-grounded alarms that do not couple to `ExperimentPhase`.
+
+### Added
+- `CooldownAlarm` (`core/cooldown_alarm.py`): predictor-based trajectory
+  deviation alarm. Operator-armed. Loads `model/predictor_model.json`
+  lazily on arm. Fires when cooldown lags expected progress by > 2.5σ
+  for ≥5 consecutive ticks. ETA slip reported in message when > 0.5 h/h.
+  Auto-disarms when progress ≥ 0.95 or T_cold ≤ base + ε. Operator can
+  re-arm after auto-disarm for the next cooldown cycle.
+  When cooldown reaches base temp (auto-disarm threshold), transitions to
+  WATCHDOG mode (configurable via `watchdog_enabled`). WATCHDOG monitors
+  T11 only and fires WARNING if T11 climbs above `base_temp_K +
+  watchdog_margin_K` sustained `watchdog_sustained_s` seconds. Clears
+  when T11 recovers. Disarms on operator stop or experiment finalize.
+  Closes the post-cooldown monitoring gap identified by Codex P1 review.
+- `VacuumGuard` (`core/vacuum_guard.py`): fully automatic P × T_ref alarm.
+  Arms when T_ref < 260 K; fires when P > 1e-2 mbar sustained ≥ 30 s;
+  deadband 260/270 K on T_ref, one decade on pressure. Stale sensor during
+  FIRED state preserves alarm instead of clearing.
+- `config/physical_alarms.yaml`: tunables for both modules. All values
+  fall back to hard-coded defaults when file absent — engine always starts.
+- `core/physical_alarms_config.py`: fail-open YAML loader with per-key
+  type validation and non-dict subsection guard.
+- Engine: `_physical_alarms_tick` task at `min(cooldown_interval, vacuum_interval)`.
+  Dispatches `alarm_fired`/`alarm_cleared` events and Telegram notifications
+  on transitions, same as alarm_v2 path.
+- ZMQ commands: `cooldown_alarm.arm`, `cooldown_alarm.disarm`,
+  `cooldown_alarm.status`, `vacuum_guard.status`.
+- GUI: "Контроль захолаживания" group in `AlarmPanel` (arm/disarm button,
+  status label, ETA, progress bar). 5 s poll via existing ZmqCommandWorker.
+  WATCHDOG states show T11 live reading instead of ETA/progress.
+- Replay harness refactored (`tools/replay_alarm_history.py`): compares
+  legacy alarms_v3 threshold model vs predictor-based alarm decisions on
+  historical SQLite data. Nearest-timestamp temperature pairing; parses
+  `outside_range`, `above`, `below` threshold shapes.
+- 40+ new tests: `test_cooldown_alarm.py` (20), `test_vacuum_guard.py` (11),
+  `test_physical_alarms_config.py` (7), `test_alarm_v2_legacy_cleanup.py` (2).
+
+### Changed
+- `config/alarms_v3.yaml`: deleted 3 absolute-threshold rules targeting
+  T11/T12 (`cooldown_stall`, `detector_drift`, `detector_unstable`) —
+  superseded by CooldownAlarm predictor-based evaluation.
+  `calibrated_sensor_fault` retained — detects impossible raw values
+  (< 1 K or > 350 K) indicating sensor hardware failure; not covered by
+  physical alarms. Message revised to factual wording per operator guidance.
+  `shield_warming` channel corrected Т11 → Т12 (Т12 = nitrogen plate).
+
+### Reference
+- Branch: `feat/f-x-v3-physical-alarms`
+- Spec: `CC_PROMPT_F_X_V3_PHYSICAL_ALARMS.md`
+- Config: `config/physical_alarms.yaml`
+
 ## [0.50.0] — 2026-05-01 — F27 Composition photos via Telegram bot
 
 ### Added
