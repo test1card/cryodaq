@@ -63,9 +63,9 @@
 | F-B | τ-scale formulation | ❌ RETIRED — superseded by F-X v3 physical-state alarms. Re-spec only on concrete physics requirement. See F-table for disposition. | L | M |
 | F-C | Slider integration | ❌ RETIRED — superseded; was UX for retired F-B. See F-table for disposition. | M | L |
 | F-D | Physics prior | ❌ RETIRED — superseded by F-X v3 predictor-based approach. See F-table for disposition. | L | M |
-| F-P1 | Cooldown trajectory overlay (Analytics tab, temperature) | ⬜ PLANNED v0.52.0 | S | H |
-| F-P2 | Vacuum leak projection overlay (Analytics tab, pressure) | ⬜ PLANNED v0.52.0 | S/M | H |
-| F-P3 | TIM thermal conductivity asymptote (Analytics tab, R_thermal) | ⬜ PLANNED v0.52.0 | S | H |
+| F-P1 | Cooldown trajectory overlay (Analytics tab, temperature) | ✅ DONE (shipped v0.52.0) | S | H |
+| F-P2 | Vacuum leak projection overlay (Analytics tab, pressure) | ✅ DONE (shipped v0.52.0) | S/M | H |
+| F-P3 | TIM thermal conductivity asymptote (Analytics tab, R_thermal) | ✅ DONE (shipped v0.52.0) | S | H |
 
 Effort: **S** ≤200 LOC, **M** 200-600 LOC, **L** >600 LOC.
 ROI: **H** user value immediate, **M** clear but deferred, **L** nice-to-have.
@@ -800,7 +800,7 @@ physics constraint encoding.
 
 ### F-P1 — Cooldown trajectory overlay (Analytics tab)
 
-**Status:** ⬜ PLANNED v0.52.0.
+**Status:** ✅ DONE (shipped v0.52.0, 2026-05-03).
 **Effort:** S. **ROI:** H.
 
 Predictor `future_T_cold_mean` ± σ envelope on Analytics temperature plot
@@ -815,7 +815,7 @@ Data already flows: `cooldown_service.py` publishes `future_t` /
 
 ### F-P2 — Vacuum leak projection overlay (Analytics tab)
 
-**Status:** ⬜ PLANNED v0.52.0.
+**Status:** ✅ DONE (shipped v0.52.0, 2026-05-03).
 **Effort:** S/M. **ROI:** H.
 
 `VacuumTrendPredictor` output → projected P-vs-time on Analytics pressure plot
@@ -829,7 +829,7 @@ mbar), ±1σ CI band.
 
 ### F-P3 — TIM thermal conductivity asymptote (Analytics tab)
 
-**Status:** ⬜ PLANNED v0.52.0.
+**Status:** ✅ DONE (shipped v0.52.0, 2026-05-03).
 **Effort:** S. **ROI:** H.
 
 `SteadyStatePredictor` applied to R_thermal readings → predicted R_thermal

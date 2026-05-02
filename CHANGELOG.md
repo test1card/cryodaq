@@ -9,6 +9,53 @@
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-05-03 — F-P prediction overlays on Analytics tab
+
+### Added
+
+- **F-P2 Vacuum leak projection overlay** (`VacuumPredictionWidget`): self-contained
+  10s poll to `get_vacuum_trend` ZMQ command. Converts engine's relative
+  extrapolation arrays to absolute unix timestamps and mbar pressure units.
+  ±1σ confidence band from `residual_std`. Raw pressure history accumulated
+  via `set_pressure_reading()`. Graceful: clears on no-data/error, visible
+  only during vacuum phase (via `analytics_layout.yaml`).
+- **F-P3 TIM thermal conductivity asymptote overlay** (`RThermalLiveWidget`):
+  `SteadyStatePredictor` (window=600s, interval=30s) applied to R_thermal
+  history. Horizontal dashed asymptote line + ±σ confidence band rendered
+  when `percent_settled ≥ 30%` and `valid=True`. Duplicate-prevention via
+  `_last_r_ts`. Hides when history is empty or predictor not converged.
+  Visible only during measurement phase.
+- **F-P1 cooldown trajectory overlay**: confirmed pre-existing. `CooldownPredictionWidget`
+  already renders prediction line + CI band from `cooldown_service.py` trajectory
+  data via `main_window_v2._cooldown_reading_to_data()`. No new code.
+
+### Visual design
+
+All overlays use design system tokens exclusively:
+- Prediction line: `STATUS_INFO`, `PLOT_LINE_WIDTH`, `Qt.DashLine`
+- Confidence band: `STATUS_INFO` at alpha=64 (~25% opacity)
+Matches `PredictionWidget` canonical convention.
+
+### Reference
+
+Architect session 2026-05-03 weekend.
+Multi-verifier audit (Codex gpt-5.5 + Gemini 0.38.2) — 1 iteration.
+Codex P2 fixes applied (stale overlay cleared on no-data/error paths).
+
+### Test baseline
+
+2414 passed, 4 skipped (baseline 2396 + 18 new F-P tests).
+
+### Tags
+
+- `v0.52.0` → commit `160f4ac` (feat(f-p) commit, post-amend)
+- `v0.51.0` → commit `65b9f92` (prior release, NOT YET PUSHED — gated on C6)
+
+### Selected commits in this release
+
+- `9f67ac4` docs(roadmap): retire F-A/F-B/F-C/F-D, plan F-P1/2/3
+- `160f4ac` feat(f-p): prediction overlays on Analytics tab
+
 ## [0.51.0] — 2026-05-02 — F-X v3: Physical-state alarms
 
 ### F-X v3: Physical-state alarms (CooldownAlarm + VacuumGuard)
