@@ -99,8 +99,16 @@ async def test_fault_sets_state_before_emergency_off() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_sqlite_stop_after_write(tmp_path) -> None:
+async def test_sqlite_stop_after_write(tmp_path, monkeypatch) -> None:
     """stop() after write_immediate must not lose data."""
+    import cryodaq.storage.sqlite_writer as _sw_mod
+
+    # The WAL-version guard fires on first SQLiteWriter() in the process.
+    # Force one clean pass with the bypass env var so subsequent tests in this
+    # session also skip the guard (global _SQLITE_VERSION_CHECKED stays True).
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    _sw_mod._SQLITE_VERSION_CHECKED = False
+
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
