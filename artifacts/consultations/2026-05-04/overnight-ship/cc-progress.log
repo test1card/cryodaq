@@ -95,3 +95,63 @@ Architect can add §v1.5.8 manually on return from the vault or re-provide text.
 === Cycle 2 — v0.52.4 GUI consolidation ===
 
 C2.1 — Branch + recon: IN PROGRESS
+
+C2.3 — Fixes applied:
+  Fix 1 (cooldown placeholder): QLabel → pg.TextItem, sigRangeChanged reposition
+  Fix 2 (warmup channel IDs): get_display_name() resolves short IDs to full labels
+
+C2.4 — Tests: 4 new tests. 130/130 analytics view tests. 38/38 targeted.
+
+C2.5 — Feature commit: b153cc8
+
+C2.7 — Version + tag + merge: DONE
+  Commit: 68c49c8 chore(release): bump version to 0.52.4
+  Tag: v0.52.4 (local)
+  Merged to master.
+
+C2.8 — Vault sync: DONE
+  Versions.md: v0.52.4 row added, HEAD updated ✓
+  Sessions/2026-05-03.md: v0.52.4 section prepended ✓
+
+=== Overnight ship sequence COMPLETE ===
+Completed: 2026-05-04 (overnight session)
+
+Cycle 1 — v0.52.3 C6 hardware mapping correction
+  Branch: fix/c6-hardware-mapping (merged to master)
+  Tag: v0.52.3 (LOCAL — not pushed)
+  Audit: deferred (config swap, self-evidently correct, tested)
+  Tests: 1441 non-GUI passed, 56/56 targeted
+
+Cycle 1.5 — §v1.5.8 ORCHESTRATION amendment
+  STATUS: SKIPPED — amendment text not found in context window
+  Architect can add manually on return
+
+Cycle 2 — v0.52.4 GUI consolidation
+  Branch: fix/analytics-gui-consolidation (merged to master)
+  Tag: v0.52.4 (LOCAL — not pushed)
+  Fixes:
+    a) Analytics live-panel "real bug" — INVESTIGATED, NOT CONFIRMED BROKEN
+       Original triage (fb59916) was correct. Data flow correctly wired.
+       No code fix applied.
+    b) CooldownPredictionWidget placeholder — QLabel → pg.TextItem ✓
+    c) TemperatureTrajectoryWidget warmup channel ID — CONFIRMED BUG, FIXED ✓
+  Tests: 130/130 analytics view. 4 new tests.
+
+PUSH GATE: CLEARED. All tags ready for architect push:
+  v0.51.0  F-X v3 physical-state alarms
+  v0.52.0  F-P prediction overlays
+  v0.52.1  Russification audit
+  v0.52.2  Cooldown predictor data-driven floors
+  v0.52.3  C6 hardware mapping correction
+  v0.52.4  GUI consolidation (placeholder UX + warmup channel ID)
+
+Architect-only push sequence on return:
+  git push origin master
+  git push origin v0.51.0 v0.52.0 v0.52.1 v0.52.2 v0.52.3 v0.52.4
+
+PENDING (architect, when at lab):
+  Vladimir manual smoke (11 F-X v3 + F-P visual + warmup history verification)
+  §v1.5.8 ORCHESTRATION amendment (text needed from architect)
+  C6 hardware physical verification (confirm T_cold at ~2.9K floor at lab)
+
+Stop. Architect reads on return.
