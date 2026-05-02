@@ -523,8 +523,19 @@ class CooldownPredictionWidget(QWidget):
             y_unit="K",
             log_y=False,
         )
+
+        # Empty-state label shown when cooldown is not active (e.g. system
+        # at base temperature or cryocooler not yet started).
+        self._idle_label = QLabel("Охлаждение не активно\nПрогноз недоступен")
+        self._idle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._idle_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        self._idle_label.setVisible(True)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(self._idle_label)
         root.addWidget(self._inner)
 
     def set_cooldown_data(self, data) -> None:
@@ -545,6 +556,9 @@ class CooldownPredictionWidget(QWidget):
                 upper,
                 ci_level_pct=67.0,
             )
+            self._idle_label.setVisible(False)
+        else:
+            self._idle_label.setVisible(True)
 
 
 class RThermalLiveWidget(QWidget):
