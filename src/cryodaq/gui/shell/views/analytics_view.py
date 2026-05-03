@@ -150,6 +150,11 @@ class AnalyticsView(QWidget):
         self._last_vacuum_prediction: dict | None = None
         self._last_experiment_status: dict | None = None
 
+        # Per-(setter_name, phase) set: suppresses repeat WARNINGs for the
+        # same silent-skip within one phase so 33 Hz data streams don't flood
+        # the log. Cleared on every phase transition via _apply_layout.
+        self._warned_setters: set[tuple[str, str | None]] = set()
+
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         self._grid.setSpacing(theme.SPACE_3)
@@ -216,6 +221,8 @@ class AnalyticsView(QWidget):
         return dict(self._active)
 
     def _apply_layout(self, phase_key: str) -> None:
+        # New phase → new widget set → prior silent-skip warnings are stale.
+        self._warned_setters.clear()
         new_slots = _slots_for(phase_key, self._layout_config)
 
         # Drop widgets whose slot now wants a different ID (or is empty).
@@ -276,13 +283,16 @@ class AnalyticsView(QWidget):
                 fn(*args)
                 forwarded = True
         if not forwarded and self._active:
-            logger.warning(
-                "%s: no active widget in phase=%r implements setter; data dropped. "
-                "Active widgets: %s",
-                method,
-                self._phase,
-                [type(w).__name__ for w in self._active.values()],
-            )
+            key = (method, self._phase)
+            if key not in self._warned_setters:
+                self._warned_setters.add(key)
+                logger.warning(
+                    "%s: no active widget in phase=%r implements setter; data dropped. "
+                    "Active widgets: %s",
+                    method,
+                    self._phase,
+                    [type(w).__name__ for w in self._active.values()],
+                )
 
     @staticmethod
     def _forward_to(widgets: list[QWidget], method: str, *args) -> None:

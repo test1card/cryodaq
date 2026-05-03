@@ -440,9 +440,9 @@ class MainWindowV2(QMainWindow):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (Codex B.5.5 F3)
             # B.8: the v2 AnalyticsView exposes set_cooldown /
-            # set_r_thermal / set_fault setters instead of a generic
-            # on_reading sink. The shell adapts specific analytics
-            # channels into the typed snapshots below.
+            # set_r_thermal setters instead of a generic on_reading sink.
+            # The shell adapts specific analytics channels into the typed
+            # snapshots below.
             # F4: _adapt_reading_to_analytics now handles None view internally
             # via _push_analytics — remove the prior None guard.
             self._adapt_reading_to_analytics(reading)

@@ -340,3 +340,73 @@ def test_forward_warning_on_setter_with_no_recipient(qt_app, caplog):
     assert any("set_cooldown_data" in m for m in messages), (
         f"Expected WARNING about set_cooldown_data; got: {messages}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# T1 — WARNING fires only ONCE per (method, phase), not per reading
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_forward_warning_fires_once_per_phase_not_per_reading(qt_app, caplog):
+    """Calling a setter 100 times with no recipient in the active phase
+    must produce exactly ONE WARNING, not 100."""
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        view = AnalyticsView()
+        # disassembly: only ExperimentSummaryWidget active — no temperature handler.
+        view.set_phase("disassembly")
+        assert view.active_widgets()
+        with caplog.at_level(logging.WARNING, logger="cryodaq.gui.shell.views.analytics_view"):
+            reading = _temperature_reading("Т1 Криостат верх", 80.0)
+            for _ in range(100):
+                view.set_temperature_readings({"Т1 Криостат верх": reading})
+    temp_warnings = [
+        r for r in caplog.records
+        if "set_temperature_readings" in r.getMessage()
+    ]
+    assert len(temp_warnings) == 1, (
+        f"Expected exactly 1 WARNING for set_temperature_readings; got {len(temp_warnings)}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# T7 — append-style widgets issue readings_history on construction
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_temperature_overview_widget_issues_readings_history_on_construction(qt_app):
+    """TemperatureOverviewWidget must call ZmqCommandWorker with
+    cmd='readings_history' during __init__ so it can backfill history
+    after a phase swap."""
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        instance = MagicMock()
+        mock_cls.return_value = instance
+        _widget = aw.TemperatureOverviewWidget()
+    # At least one ZmqCommandWorker was constructed.
+    assert mock_cls.called, "ZmqCommandWorker was never instantiated"
+    # The first call must have been for readings_history.
+    call_args = mock_cls.call_args_list[0]
+    cmd_dict = call_args[0][0] if call_args[0] else call_args[1].get("cmd_dict", {})
+    assert cmd_dict.get("cmd") == "readings_history", (
+        f"Expected first ZmqCommandWorker call to be readings_history; got {cmd_dict}"
+    )
+    # The worker's finished signal must have been connected and start() called.
+    instance.finished.connect.assert_called_once()
+    instance.start.assert_called_once()
+
+
+def test_pressure_current_widget_issues_readings_history_on_construction(qt_app):
+    """PressureCurrentWidget must call ZmqCommandWorker with
+    cmd='readings_history' during __init__."""
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        instance = MagicMock()
+        mock_cls.return_value = instance
+        _widget = aw.PressureCurrentWidget()
+    assert mock_cls.called, "ZmqCommandWorker was never instantiated"
+    call_args = mock_cls.call_args_list[0]
+    cmd_dict = call_args[0][0] if call_args[0] else call_args[1].get("cmd_dict", {})
+    assert cmd_dict.get("cmd") == "readings_history", (
+        f"Expected first ZmqCommandWorker call to be readings_history; got {cmd_dict}"
+    )
+    instance.finished.connect.assert_called_once()
+    instance.start.assert_called_once()
