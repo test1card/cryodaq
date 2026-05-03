@@ -208,10 +208,12 @@ class TemperatureOverviewWidget(QWidget):
         super().__init__(parent)
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._series: dict[str, _ChannelSeries] = {}
+        self._history_worker = None
         self._build_ui()
         self._window_controller = get_time_window_controller()
         self._apply_window(self._window_controller.get_window())
         self._window_controller.window_changed.connect(self._apply_window)
+        self._fetch_history()
 
     def _build_ui(self) -> None:
         card = _card("analyticsTemperatureOverview")
@@ -273,6 +275,52 @@ class TemperatureOverviewWidget(QWidget):
             return
         now = time.time()
         pi.setXRange(now - window.seconds, now, padding=0)
+
+    def _fetch_history(self) -> None:
+        import time as _time
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        channel_mgr = get_channel_manager()
+        cold_ids = channel_mgr.get_cold_channels() or []
+        channels = [channel_mgr.get_display_name(ch) for ch in cold_ids] or None
+        window = self._window_controller.get_window()
+        import math as _math
+        span = window.seconds if _math.isfinite(window.seconds) else 7 * 24 * 3600.0
+        cmd = {
+            "cmd": "readings_history",
+            "from_ts": _time.time() - span,
+            "to_ts": _time.time(),
+            "channels": channels,
+            "limit_per_channel": 5000,
+        }
+        self._history_worker = ZmqCommandWorker(cmd, parent=self)
+        self._history_worker.finished.connect(self._on_history_loaded)
+        self._history_worker.start()
+
+    @Slot(dict)
+    def _on_history_loaded(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        data: dict[str, list] = result.get("data", {})
+        for channel, points in data.items():
+            if not points:
+                continue
+            series = self._series.setdefault(channel, _ChannelSeries())
+            for entry in points:
+                series.xs.append(float(entry[0]))
+                series.ys.append(float(entry[1]))
+        for series in self._series.values():
+            if len(series.xs) > 1:
+                pairs = sorted(zip(series.xs, series.ys))
+                series.xs[:] = [p[0] for p in pairs]
+                series.ys[:] = [p[1] for p in pairs]
+        for ch_id, series in self._series.items():
+            if ch_id not in self._curves:
+                curve = self._plot.plot([], [], pen=series_pen(len(self._curves)), name=ch_id)
+                self._curves[ch_id] = curve
+            self._curves[ch_id].setData(x=series.xs, y=series.ys)
+        self._apply_window(self._window_controller.get_window())
 
 
 class TemperatureTrajectoryWidget(QWidget):
@@ -719,10 +767,12 @@ class PressureCurrentWidget(QWidget):
         self._plot = PressurePlot()
         lay.addWidget(self._plot, stretch=1)
         self._series: list[tuple[float, float]] = []
+        self._history_worker = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(card)
+        self._fetch_history()
 
     def set_pressure_reading(self, reading: Reading) -> None:
         if reading is None:
@@ -734,6 +784,44 @@ class PressureCurrentWidget(QWidget):
         xs = [t for t, _ in self._series]
         ys = [v for _, v in self._series]
         self._plot.set_series(xs, ys)
+
+    def _fetch_history(self) -> None:
+        import time as _time
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        controller = get_time_window_controller()
+        window = controller.get_window()
+        import math as _math
+        span = window.seconds if _math.isfinite(window.seconds) else 24 * 3600.0
+        cmd = {
+            "cmd": "readings_history",
+            "from_ts": _time.time() - span,
+            "to_ts": _time.time(),
+            "unit": "мбар",
+            "limit_per_channel": 5000,
+        }
+        self._history_worker = ZmqCommandWorker(cmd, parent=self)
+        self._history_worker.finished.connect(self._on_history_loaded)
+        self._history_worker.start()
+
+    @Slot(dict)
+    def _on_history_loaded(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        data: dict[str, list] = result.get("data", {})
+        for channel, points in data.items():
+            if not points:
+                continue
+            for entry in points:
+                self._series.append((float(entry[0]), float(entry[1])))
+        if self._series:
+            self._series.sort(key=lambda p: p[0])
+            if len(self._series) > 5000:
+                self._series = self._series[-5000:]
+            xs = [t for t, _ in self._series]
+            ys = [v for _, v in self._series]
+            self._plot.set_series(xs, ys)
 
 
 class SensorHealthSummaryWidget(QWidget):

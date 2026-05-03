@@ -440,9 +440,9 @@ class MainWindowV2(QMainWindow):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (Codex B.5.5 F3)
             # B.8: the v2 AnalyticsView exposes set_cooldown /
-            # set_r_thermal / set_fault setters instead of a generic
-            # on_reading sink. The shell adapts specific analytics
-            # channels into the typed snapshots below.
+            # set_r_thermal setters instead of a generic on_reading sink.
+            # The shell adapts specific analytics channels into the typed
+            # snapshots below.
             # F4: _adapt_reading_to_analytics now handles None view internally
             # via _push_analytics — remove the prior None guard.
             self._adapt_reading_to_analytics(reading)
@@ -482,6 +482,26 @@ class MainWindowV2(QMainWindow):
             data = self._cooldown_reading_to_data(reading)
             if data is not None:
                 self._push_analytics("set_cooldown", data)
+        elif channel.startswith("analytics/r_thermal"):
+            # R_thermal live reading — forward metadata as RThermalData.
+            from cryodaq.gui.shell.views.analytics_view import RThermalData
+            meta = reading.metadata or {}
+            history = meta.get("history") or []
+            self._push_analytics(
+                "set_r_thermal",
+                RThermalData(
+                    current_value=float(reading.value) if reading.value is not None else None,
+                    delta_per_minute=meta.get("delta_per_minute"),
+                    last_updated_ts=reading.timestamp.timestamp(),
+                    history=list(history),
+                ),
+            )
+        elif channel == "analytics/instrument_health":
+            health = reading.metadata.get("health") if reading.metadata else None
+            self._push_analytics("set_instrument_health", health)
+        elif channel == "analytics/vacuum_prediction":
+            prediction = reading.metadata if reading.metadata else None
+            self._push_analytics("set_vacuum_prediction", prediction)
 
     @staticmethod
     def _cooldown_reading_to_data(reading: Reading):
@@ -540,19 +560,27 @@ class MainWindowV2(QMainWindow):
         future_mean = meta.get("future_T_cold_mean")
         future_upper = meta.get("future_T_cold_upper")
         future_lower = meta.get("future_T_cold_lower")
+        # future_t is hours-from-now (plugin contract). Convert to absolute
+        # Unix timestamps so CooldownPredictionWidget's DateAxisItem renders
+        # a human-readable date rather than 1970-01-01.
+        future_t_abs: list[float] = []
+        if isinstance(future_t, list):
+            import time as _time
+            now_ts = _time.time()
+            future_t_abs = [now_ts + float(h) * 3600.0 for h in future_t]
         if (
-            isinstance(future_t, list)
+            future_t_abs
             and isinstance(future_mean, list)
-            and len(future_t) == len(future_mean)
+            and len(future_t_abs) == len(future_mean)
         ):
-            predicted = list(zip(future_t, future_mean, strict=False))
+            predicted = list(zip(future_t_abs, future_mean, strict=False))
         if (
-            isinstance(future_t, list)
+            future_t_abs
             and isinstance(future_upper, list)
             and isinstance(future_lower, list)
-            and len(future_t) == len(future_upper) == len(future_lower)
+            and len(future_t_abs) == len(future_upper) == len(future_lower)
         ):
-            ci_traj = list(zip(future_t, future_lower, future_upper, strict=False))
+            ci_traj = list(zip(future_t_abs, future_lower, future_upper, strict=False))
 
         return CooldownData(
             t_hours=t_hours,

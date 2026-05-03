@@ -14,11 +14,10 @@ Connects to:
 
 Data flow:
 - Shell routes data via setter methods preserved from the B.8
-  contract (:meth:`set_cooldown`, :meth:`set_r_thermal`,
-  :meth:`set_fault`) plus new III.C setters
-  (:meth:`set_temperature_readings`, :meth:`set_pressure_reading`,
-  :meth:`set_keithley_readings`, :meth:`set_instrument_health`,
-  :meth:`set_vacuum_prediction`).
+  contract (:meth:`set_cooldown`, :meth:`set_r_thermal`) plus new
+  III.C setters (:meth:`set_temperature_readings`,
+  :meth:`set_pressure_reading`, :meth:`set_keithley_readings`,
+  :meth:`set_instrument_health`, :meth:`set_vacuum_prediction`).
 - Each setter iterates the active widget instances and forwards to
   those that expose a matching method (duck-typing). Inactive
   widgets are discarded when the layout swaps.
@@ -28,6 +27,7 @@ Public API preserved for existing wiring tests; new setters additive.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +38,8 @@ from PySide6.QtWidgets import QGridLayout, QWidget
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.views import analytics_widgets
+
+logger = logging.getLogger(__name__)
 
 _LAYOUT_CONFIG_PATH = Path(__file__).resolve().parents[5] / "config" / "analytics_layout.yaml"
 _FALLBACK_KEY = "__fallback__"
@@ -141,16 +143,17 @@ class AnalyticsView(QWidget):
         # so a fresh layout reflects the current state immediately.
         self._last_cooldown: CooldownData | None = None
         self._last_r_thermal: RThermalData | None = None
-        # None sentinel = set_fault never called. Empty-default tuple
-        # would otherwise skip replay after an explicit `set_fault(False, "")`
-        # clear, which III.C Codex flagged as a latent replay-contract hole.
-        self._last_fault: tuple[bool, str] | None = None
         self._last_temperature_readings: dict[str, Reading] = {}
         self._last_pressure_reading: Reading | None = None
         self._last_keithley_readings: dict[str, Reading] = {}
         self._last_instrument_health: dict[str, str] | None = None
         self._last_vacuum_prediction: dict | None = None
         self._last_experiment_status: dict | None = None
+
+        # Per-(setter_name, phase) set: suppresses repeat WARNINGs for the
+        # same silent-skip within one phase so 33 Hz data streams don't flood
+        # the log. Cleared on every phase transition via _apply_layout.
+        self._warned_setters: set[tuple[str, str | None]] = set()
 
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
@@ -183,10 +186,6 @@ class AnalyticsView(QWidget):
     def set_r_thermal(self, data: RThermalData | None) -> None:
         self._last_r_thermal = data
         self._forward("set_r_thermal_data", data)
-
-    def set_fault(self, faulted: bool, reason: str = "") -> None:
-        self._last_fault = (faulted, reason)
-        self._forward("set_fault", faulted, reason)
 
     def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
         # Keep the latest value per channel for replay on layout swap.
@@ -222,6 +221,8 @@ class AnalyticsView(QWidget):
         return dict(self._active)
 
     def _apply_layout(self, phase_key: str) -> None:
+        # New phase → new widget set → prior silent-skip warnings are stale.
+        self._warned_setters.clear()
         new_slots = _slots_for(phase_key, self._layout_config)
 
         # Drop widgets whose slot now wants a different ID (or is empty).
@@ -269,11 +270,29 @@ class AnalyticsView(QWidget):
             self._grid.addWidget(widget, 1, 1, 1, 1)
 
     def _forward(self, method: str, *args) -> None:
-        """Call ``method(*args)`` on every active widget that defines it."""
+        """Call ``method(*args)`` on every active widget that defines it.
+
+        Logs a WARNING when no active widget implements the setter — data is
+        being silently dropped. Guard: only warns when there *are* active
+        widgets, so the warning is not emitted during empty-layout transitions.
+        """
+        forwarded = False
         for widget in self._active.values():
             fn = getattr(widget, method, None)
             if callable(fn):
                 fn(*args)
+                forwarded = True
+        if not forwarded and self._active:
+            key = (method, self._phase)
+            if key not in self._warned_setters:
+                self._warned_setters.add(key)
+                logger.warning(
+                    "%s: no active widget in phase=%r implements setter; data dropped. "
+                    "Active widgets: %s",
+                    method,
+                    self._phase,
+                    [type(w).__name__ for w in self._active.values()],
+                )
 
     @staticmethod
     def _forward_to(widgets: list[QWidget], method: str, *args) -> None:
@@ -296,8 +315,6 @@ class AnalyticsView(QWidget):
             self._forward_to(widgets, "set_cooldown_data", self._last_cooldown)
         if self._last_r_thermal is not None:
             self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)
-        if self._last_fault is not None:
-            self._forward_to(widgets, "set_fault", *self._last_fault)
         if self._last_temperature_readings:
             self._forward_to(
                 widgets, "set_temperature_readings", self._last_temperature_readings

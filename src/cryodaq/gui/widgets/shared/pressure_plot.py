@@ -195,6 +195,8 @@ class PressurePlot(QWidget):
         fallback = self._compute_and_apply_y_range()
         clamped_values = [v if v > 0 else fallback for v in self._last_values]
         self._curve.setData(x=self._last_times, y=clamped_values)
+        if not self._forward_looking:
+            self._apply_window(get_time_window_controller().get_window())
 
     def _compute_and_apply_y_range(self) -> float:
         """Set Y range from values inside the visible X window.

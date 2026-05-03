@@ -9,6 +9,81 @@
 
 ## [Unreleased]
 
+## [0.52.6] — 2026-05-04 — fix(analytics): deep-audit Tier-1 fixes (T1-T5, T7-T8)
+
+### Fixed
+
+- **T3 — vacuum_prediction X-axis 1970–2025** (`prediction_widget.py:226-231`).
+  `InfiniteLine` "now" marker was constructed at `pos=0` (Unix epoch) with no
+  `ignoreBounds=True`. autoRange included the 1970 origin, spanning 55 years.
+  Fixed: `pos=time.time()` at construction; `ignoreBounds=True` on `addItem`;
+  `_update_now_marker()` now called from both `set_history` and `set_prediction`.
+
+- **T4 — cooldown forecast X-axis showing 1970-01-01** (`main_window_v2.py`).
+  `_cooldown_reading_to_data` built predicted trajectory by zipping
+  `future_t` (hours-from-now) directly into `CooldownData` tuples consumed by
+  a `pg.DateAxisItem` (Unix seconds). 2.5 h rendered as 1970-01-01 00:00:02.
+  Fixed: `future_t_abs = [now_ts + h * 3600 for h in future_t]`.
+
+- **T5 — PressurePlot frozen X window** (`pressure_plot.py:171-197`).
+  `set_series()` updated Y range and curve data but never reapplied the time
+  window. `_apply_window` only fired at construction and on controller signal.
+  Same class as v0.52.5 Bug B — not propagated to `PressurePlot`. Fixed by
+  calling `_apply_window(get_time_window_controller().get_window())` at end of
+  `set_series` when `not self._forward_looking`.
+
+- **T7 — phase swap zeroed history** (`analytics_widgets.py`).
+  Append-style widgets (`TemperatureOverviewWidget`, `PressureCurrentWidget`)
+  received only the last single cached reading on construction (not time-series
+  history). Fixed: both widgets now call `_fetch_history()` from `__init__`,
+  issuing a `readings_history` ZMQ command (async `ZmqCommandWorker`) to
+  backfill the configured time window.
+
+- **T2 — 4 analytics channels unrouted** (`main_window_v2.py`).
+  `_adapt_reading_to_analytics` only handled `cooldown_predictor/cooldown_eta`.
+  `analytics/r_thermal*`, `analytics/instrument_health`, and
+  `analytics/vacuum_prediction` were silently dropped. All three now routed
+  through `_push_analytics`. `set_experiment_status` was already wired via
+  `_on_experiment_status_received`.
+
+- **T1 — `set_fault` dead API deleted** (`analytics_view.py:187-189`).
+  `set_fault` existed in `AnalyticsView` with no widget in any layout
+  implementing it. `BottomStatusBar` already surfaces fault state.
+  Method, cache, and replay path all removed. `_forward` now logs a WARNING
+  (once per (setter, phase) pair — not per reading) when a setter call has
+  zero recipients in the active layout.
+
+### Added
+
+- **T8 — contract integration test** (`tests/integration/test_analytics_contract.py`).
+  11 tests driving the full `_reading_received.emit → _dispatch_reading →
+  AnalyticsView → widget` path with realistic long-form channel names.
+  Asserts: curve count, X-axis range (no 1970 epoch), cooldown absolute
+  timestamps, self-fetch on construction, WARNING deduplication (1 warn per
+  (method, phase), not per reading), `set_fault` absence, and
+  `set_experiment_status` reaching `ExperimentSummaryWidget`.
+
+### Deferred to v0.53.0
+
+- **T6** — channel-ID normalization at dispatch boundary (affects
+  calibration, conductivity, and other consumers — needs staged rollout with
+  Protocol-based static checks).
+
+### Reference
+
+- Deep audit synthesis: `artifacts/consultations/2026-05-04/analytics-deep-audit/synthesis.md`
+- 4-of-4 consultant consensus on Tier-1 findings (Codex, Gemini, GLM, Kimi)
+- Architect ratifications: 8 questions, session 2026-05-04
+- Multi-verifier ship audit: Gemini PASS iter 2; Codex iter 2 blocked by usage limit
+
+### Test baseline
+
+152 passed (141 baseline + 11 new contract tests), 0 skipped.
+
+### Tags
+
+- `v0.52.6` — fix/analytics-v0.52.6-structural → master
+
 ## [0.52.5] — 2026-05-04 — fix(gui): analytics live-panel real bug (metaswarm)
 
 ### Fixed

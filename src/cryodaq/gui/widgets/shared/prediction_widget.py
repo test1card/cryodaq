@@ -20,6 +20,7 @@ safety semantic).
 from __future__ import annotations
 
 import math
+import time
 from bisect import bisect_left
 
 import pyqtgraph as pg
@@ -223,12 +224,17 @@ class PredictionWidget(QWidget):
         pi.addItem(self._ci_band)
 
         # Now marker — vertical dashed line rendered via InfiniteLine.
+        # `pos=time.time()` keeps the marker at "now" by default so the
+        # axis autorange does not span the Unix epoch (1970) before the
+        # first set_history/set_prediction lands. ``ignoreBounds=True`` on
+        # ``pi.addItem`` keeps the marker out of autoRange computations.
         self._now_line = pg.InfiniteLine(
             angle=90,
+            pos=time.time(),
             pen=pg.mkPen(color=QColor(theme.BORDER), style=Qt.DashLine),
             movable=False,
         )
-        pi.addItem(self._now_line)
+        pi.addItem(self._now_line, ignoreBounds=True)
 
         return plot
 
@@ -307,6 +313,7 @@ class PredictionWidget(QWidget):
             x=[t for t, _ in self._upper_ci],
             y=self._coerce_ys([v for _, v in self._upper_ci]),
         )
+        self._update_now_marker()
         self._refresh_readout()
 
     def set_horizon(self, hours: float) -> None:
