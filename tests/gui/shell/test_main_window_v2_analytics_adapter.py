@@ -88,7 +88,10 @@ def test_cooldown_eta_reading_populates_analytics_view():
         },
     )
 
+    import time as _time
+    before_ts = _time.time()
     w._dispatch_reading(reading)
+    after_ts = _time.time()
     # Panel's stored snapshot matches the translated CooldownData.
     snap = w._analytics_view._last_cooldown
     assert isinstance(snap, CooldownData)
@@ -98,14 +101,27 @@ def test_cooldown_eta_reading_populates_analytics_view():
     # progress fraction → percent
     assert abs(snap.progress_pct - 42.5) < 1e-9
     assert snap.phase == "phase1"
-    # predicted trajectory zipped from future_t + future_T_cold_mean
-    assert snap.predicted_trajectory == [(0.0, 295.0), (3.0, 150.0), (7.0, 50.0)]
-    # CI trajectory zipped with lower/upper order
-    assert snap.ci_trajectory == [
-        (0.0, 295.0, 295.0),
-        (3.0, 140.0, 160.0),
-        (7.0, 45.0, 55.0),
-    ]
+    # T4 fix: future_t (hours-from-now) is converted to absolute Unix
+    # timestamps so the DateAxisItem renders a real date instead of 1970.
+    # Predicted trajectory: 3 entries with hours [0.0, 3.0, 7.0] →
+    # timestamps [now, now+3h, now+7h] paired with the temperature list.
+    assert len(snap.predicted_trajectory) == 3
+    for (ts, _v), expected_hours in zip(
+        snap.predicted_trajectory, [0.0, 3.0, 7.0]
+    ):
+        assert before_ts + expected_hours * 3600 - 1 <= ts <= after_ts + expected_hours * 3600 + 1
+    assert [v for _, v in snap.predicted_trajectory] == [295.0, 150.0, 50.0]
+    # CI trajectory: same time-axis treatment, with lower/upper order.
+    assert len(snap.ci_trajectory) == 3
+    for (ts, lo, hi), expected_hours, expected_lo, expected_hi in zip(
+        snap.ci_trajectory,
+        [0.0, 3.0, 7.0],
+        [295.0, 140.0, 45.0],
+        [295.0, 160.0, 55.0],
+    ):
+        assert before_ts + expected_hours * 3600 - 1 <= ts <= after_ts + expected_hours * 3600 + 1
+        assert lo == expected_lo
+        assert hi == expected_hi
     # actual_trajectory stays empty — plugin doesn't publish it.
     assert snap.actual_trajectory == []
     # phase_boundaries — plugin doesn't publish them either.
