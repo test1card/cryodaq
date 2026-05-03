@@ -434,7 +434,7 @@ class MainWindowV2(QMainWindow):
                     self._analytics_view.set_keithley_readings({channel: reading})
         # F4: route pressure gauge readings to analytics view + shell cache.
         # VSP63D publishes on channels ending with /pressure, unit мбар.
-        if reading.unit == "мбар" and channel.endswith("/pressure"):
+        if reading.unit in ("мбар", "mbar") and channel.endswith("/pressure"):
             self._push_analytics("set_pressure_reading", reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in

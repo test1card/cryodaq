@@ -209,9 +209,9 @@ class TemperatureOverviewWidget(QWidget):
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._series: dict[str, _ChannelSeries] = {}
         self._build_ui()
-        controller = get_time_window_controller()
-        self._apply_window(controller.get_window())
-        controller.window_changed.connect(self._apply_window)
+        self._window_controller = get_time_window_controller()
+        self._apply_window(self._window_controller.get_window())
+        self._window_controller.window_changed.connect(self._apply_window)
 
     def _build_ui(self) -> None:
         card = _card("analyticsTemperatureOverview")
@@ -252,6 +252,11 @@ class TemperatureOverviewWidget(QWidget):
                 curve = self._plot.plot([], [], pen=series_pen(len(self._curves)), name=ch_id)
                 self._curves[ch_id] = curve
             self._curves[ch_id].setData(x=series.xs, y=series.ys)
+        # Scroll the X window to keep live data visible; _apply_window was
+        # called once at __init__ with the T₀ snapshot — without this call
+        # every batch, the right edge stays frozen at T₀ and live readings
+        # (timestamps > T₀) fall outside the visible range.
+        self._apply_window(self._window_controller.get_window())
 
     # ------------------------------------------------------------------
     # Window control

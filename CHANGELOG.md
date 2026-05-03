@@ -9,6 +9,56 @@
 
 ## [Unreleased]
 
+## [0.52.5] — 2026-05-04 — fix(gui): analytics live-panel real bug (metaswarm)
+
+### Fixed
+
+- **PressureCurrentWidget never received live data** (`main_window_v2.py:437`).
+  The dispatch guard checked `reading.unit == "мбар"` (Cyrillic) but the
+  Thyracont VSP63D driver publishes `unit="mbar"` (Latin ASCII) in all code
+  paths (real, mock, parse_v1). Guard condition expanded to
+  `unit in ("мбар", "mbar")`. `channel.endswith("/pressure")` was correct
+  and unchanged. Root cause identified by 4-consultant metaswarm (Codex +
+  Gemini + GLM); confirmed by reading driver source.
+
+- **TemperatureOverviewWidget showed empty plot despite receiving data**
+  (`analytics_widgets.py:207-214`). `_apply_window()` was called once at
+  widget construction (`__init__`) with no data present. pyqtgraph's
+  `pi.autoRange()` internally calls `setRange(disableAutoRange=True)`,
+  disabling the X autorange that was just enabled. Subsequent live readings
+  (Unix timestamps ~1.7×10⁹) fell completely outside the frozen default X
+  range. Fixed by storing `_window_controller` as an instance attribute and
+  calling `_apply_window(self._window_controller.get_window())` at the end
+  of each `set_temperature_readings()` batch, keeping the X right edge
+  rolling with current time. Root cause identified by Codex in the metaswarm;
+  confirmed by pyqtgraph `ViewBox.setRange(disableAutoRange=True)` source.
+
+### Tests
+
+- `test_mbar_latin_pressure_reading_reaches_analytics`: verifies that a
+  `unit="mbar"` pressure reading with `channel="VSP63D_1/pressure"` reaches
+  `_analytics_snapshot["set_pressure_reading"]` after dispatch.
+- `test_temperature_overview_xaxis_scrolls_with_live_readings`: verifies that
+  after `set_temperature_readings()`, the X-axis right edge is within 10s of
+  the reading's timestamp (not frozen at the empty-data default range).
+
+### Process
+
+Two prior CC code-analysis cycles reached wrong conclusions ("expected
+behavior", "correctly wired"). Escalated to 4-consultant metaswarm per
+§v1.5.8.4. Consultants: Codex gpt-5.5 high (precise bug location), Gemini
+2.5 Pro (architectural drift analysis), GLM-5.1 (normalization class verdict),
+Kimi K2.6 (LOST — null API response). Synthesis + source verification
+superseded all prior analysis.
+
+### Test baseline
+
+11 passed (9 baseline + 2 new), 0 skipped.
+
+### Tags
+
+- `v0.52.5` — fix/analytics-live-panel-real-bug → master
+
 ## [0.52.4] — 2026-05-04 — fix(gui): analytics UX + warmup channel ID
 
 ### Fixed

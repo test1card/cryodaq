@@ -304,3 +304,69 @@ def test_static_adapter_method_is_pure():
     assert data.t_hours == 7.0
     assert abs(data.ci_hours - 0.5) < 1e-9
     assert abs(data.progress_pct - 30.0) < 1e-9
+
+
+# ── v0.52.5 regression tests ──────────────────────────────────────────
+
+
+def test_mbar_latin_pressure_reading_reaches_analytics():
+    """Regression v0.52.5 Bug A: Thyracont VSP63D publishes unit='mbar'
+    (Latin ASCII). The dispatch guard must accept both 'мбар' (Cyrillic)
+    and 'mbar' (Latin) — previously only the Cyrillic form was accepted,
+    silently dropping every pressure reading before it reached analytics."""
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+
+    reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="VSP63D_1",
+        channel="VSP63D_1/pressure",
+        value=1.5e-6,
+        unit="mbar",  # Latin — what the driver actually publishes
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    w._dispatch_reading(reading)
+
+    assert "set_pressure_reading" in w._analytics_snapshot, (
+        "Pressure reading with unit='mbar' was silently dropped; "
+        "main_window_v2.py guard must accept both 'мбар' and 'mbar'"
+    )
+
+
+def test_temperature_overview_xaxis_scrolls_with_live_readings():
+    """Regression v0.52.5 Bug B: TemperatureOverviewWidget._apply_window()
+    was called once at __init__, then pyqtgraph's pi.autoRange() disabled
+    the autorange by calling setRange() with disableAutoRange=True.
+    Live readings (Unix timestamps ~1.7e9) fell outside the frozen
+    default range, producing an empty plot.
+    After the fix, set_temperature_readings() re-calls _apply_window() on
+    every batch, keeping the right X edge at 'now'."""
+    import time
+
+    from cryodaq.gui.shell.views.analytics_widgets import TemperatureOverviewWidget
+
+    _app()
+    widget = TemperatureOverviewWidget()
+    now = time.time()
+
+    reading = Reading(
+        timestamp=datetime.fromtimestamp(now, tz=UTC),
+        instrument_id="LS218_1",
+        channel="Т1 Криостат верх",
+        value=77.3,
+        unit="K",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    widget.set_temperature_readings({"Т1 Криостат верх": reading})
+
+    pi = widget._plot.getPlotItem()
+    _, xmax = pi.getViewBox().viewRange()[0]
+    assert xmax >= now - 10, (
+        f"X-axis right edge ({xmax:.1f}) is earlier than reading timestamp "
+        f"({now:.1f}); the X-axis is frozen at the default range — "
+        "v0.52.5 regression: set_temperature_readings must call _apply_window()"
+    )
