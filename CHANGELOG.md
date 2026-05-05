@@ -9,6 +9,54 @@
 
 ## [Unreleased]
 
+## [0.52.7] — 2026-05-05 — fix(analytics): tab-click crash hotfix
+
+### Fixed
+
+- **Analytics tab crash on click** (SIGABRT: "QThread: Destroyed while
+  thread is still running") when any active experiment is in vacuum,
+  cooldown, measurement, warmup, or disassembly phase.
+
+  Root cause: v0.52.6 T7 added `_fetch_history()` calls (spawning
+  `ZmqCommandWorker` QThreads) to `TemperatureOverviewWidget` and
+  `PressureCurrentWidget` constructors. These two widgets occupy the
+  fallback layout. When `_ensure_overlay("analytics")` was clicked with
+  an active experiment, `AnalyticsView.__init__()` eagerly applied the
+  fallback layout (constructing both widgets and starting their workers),
+  then `_ensure_overlay` immediately called `set_phase(active_phase)`,
+  destroying the fallback widgets via `deleteLater()` before their
+  QThread workers completed.
+
+  Structural fix: `AnalyticsView` no longer applies any layout in
+  `__init__`. The first `set_phase()` call applies the layout directly
+  into the correct phase slot. `_ensure_overlay` always calls
+  `widget.set_phase(current_phase_or_None)` exactly once after
+  construction. Widgets are built in their final position and never
+  immediately destroyed.
+
+### Reference
+
+- Diagnosis: `artifacts/regressions/v0.52.7-anal-crash/diagnosis.md`
+- Confirmed crash class: H1 (QThread destroyed mid-flight)
+- All 5 affected phases confirmed: vacuum, cooldown, measurement, warmup, disassembly
+- Latent S22/D.3 (closeEvent worker-cleanup pattern): deferred to v0.53.0
+
+### Tests
+
+- 7 existing tests updated to reflect new contract: `view.set_phase(None)`
+  required before accessing `active_widgets()` (previously implied by eager
+  `__init__` layout).
+- 2 new regression tests: `test_lazy_open_with_active_experiment_*` and
+  `test_lazy_open_without_active_experiment_uses_fallback`.
+
+### Test baseline
+
+2444 passed (2442 baseline + 2 new), 4 skipped, 0 failures.
+
+### Tags
+
+- `v0.52.7` — fix/analytics-v0.52.7-eager-layout → master
+
 ## [0.52.6] — 2026-05-04 — fix(analytics): deep-audit Tier-1 fixes (T1-T5, T7-T8)
 
 ### Fixed

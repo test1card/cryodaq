@@ -39,6 +39,7 @@ def _reset(app):
 
 def test_initial_layout_uses_fallback(app):
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     slots = view.active_widgets()
     assert analytics_widgets.id_of(slots["main"]) == "temperature_overview"
     assert analytics_widgets.id_of(slots["top_right"]) == "pressure_current"
@@ -109,6 +110,7 @@ def test_teardown_alias_maps_to_disassembly(app):
 
 def test_widget_preserved_when_same_id_across_phases(app):
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     # Fallback has top_right == pressure_current.
     orig_pressure = view.active_widgets()["top_right"]
     # Preparation reuses top_right == pressure_current.
@@ -198,6 +200,7 @@ def test_set_r_thermal_none_shows_dash(app):
 
 def test_set_pressure_reading_forwards_to_pressure_widget(app):
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     # Fallback has pressure_current in top_right.
     reading = Reading(
         timestamp=datetime.now(UTC),
@@ -214,6 +217,7 @@ def test_set_pressure_reading_forwards_to_pressure_widget(app):
 
 def test_set_instrument_health_forwards_to_sensor_widget(app):
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     view.set_instrument_health({"Т1": "OK", "Т2": "WARNING"})
     sensor_widget = view.active_widgets()["bottom_right"]
     assert "Т1" in sensor_widget._chips
@@ -242,6 +246,7 @@ def test_phase_swap_does_not_duplicate_samples_in_preserved_widget(app):
     the layout preserves it across a phase swap — otherwise the series
     would duplicate on every phase transition."""
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     reading = Reading(
         timestamp=datetime.now(UTC),
         instrument_id="VSP63D_1",

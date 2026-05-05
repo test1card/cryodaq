@@ -342,9 +342,16 @@ class MainWindowV2(QMainWindow):
         # Phase is sourced from _latest_experiment_status (not the snapshot cache)
         # since it drives layout, not widget data.
         if name == "analytics":
+            # Always call set_phase exactly once — applies the correct phase
+            # layout (or fallback if no active experiment). AnalyticsView no
+            # longer applies any layout in __init__, so this call is what
+            # constructs widgets in their final position. Without it, active
+            # widgets dict would be empty and no data would render.
+            _current_phase: str | None = None
             if self._latest_experiment_status:
-                current_phase = self._latest_experiment_status.get("current_phase")
-                widget.set_phase(str(current_phase) if current_phase else None)
+                _cp = self._latest_experiment_status.get("current_phase")
+                _current_phase = str(_cp) if _cp else None
+            widget.set_phase(_current_phase)
             for setter_name, args in self._analytics_snapshot.items():
                 fn = getattr(widget, setter_name, None)
                 if callable(fn):

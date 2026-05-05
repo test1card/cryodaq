@@ -116,6 +116,7 @@ def test_phase_sequence_does_not_carry_over_stale_widgets(app):
 def test_temperature_reading_forwarded_to_overview_in_fallback(app):
     """Temperature reading must reach TemperatureOverviewWidget in fallback."""
     view = AnalyticsView()
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
     view.set_temperature_readings({"Т1": _reading("Т1", 295.0)})
     widget = view.active_widgets().get("main")
     assert isinstance(widget, aw.TemperatureOverviewWidget)
