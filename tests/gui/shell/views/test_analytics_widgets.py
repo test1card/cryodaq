@@ -296,3 +296,29 @@ def test_temperature_overview_window_change_applies_xrange(app):
         span = x_hi - x_lo
         # Expect span ≈ 21600 s, allow ±10% for autoRange jitter.
         assert 19440 <= span <= 23760, f"Unexpected X span {span} for HOUR_6"
+
+
+def test_pressure_current_selector_survives_set_series(app):
+    """Regression (Codex v0.52.8 FAIL): PressurePlot.set_series() reapplies
+    global controller window. Local selector window must be re-applied after
+    each set_series call so the operator's choice is not overridden."""
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = PressureCurrentWidget()
+        w._window_selector.set_window(TimeWindow.HOUR_1)
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="VSP63D_1",
+            channel="VSP63D_1/pressure",
+            value=1e-6,
+            unit="мбар",
+            metadata={},
+        )
+        w.set_pressure_reading(reading)
+        pi = w._plot.plot_item.getPlotItem()
+        x_lo, x_hi = pi.getViewBox().viewRange()[0]
+        span = x_hi - x_lo
+        # Expect ≈ 3600 s for HOUR_1 (±10%).
+        assert 3240 <= span <= 3960, (
+            f"Local HOUR_1 selector overridden by global controller after set_series: span={span}"
+        )

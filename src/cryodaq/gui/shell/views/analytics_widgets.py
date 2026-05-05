@@ -810,6 +810,9 @@ class PressureCurrentWidget(QWidget):
         lay.addLayout(header)
         self._plot = PressurePlot()
         # Override PressurePlot's global controller subscription with local selector.
+        # The get_time_window_controller() call here is the ONLY remaining use
+        # of the global controller in this widget — it exists solely to sever
+        # PressurePlot's default subscription, not to apply any window value.
         try:
             get_time_window_controller().window_changed.disconnect(self._plot._apply_window)
         except (TypeError, RuntimeError):
@@ -838,6 +841,10 @@ class PressureCurrentWidget(QWidget):
         xs = [t for t, _ in self._series]
         ys = [v for _, v in self._series]
         self._plot.set_series(xs, ys)
+        # PressurePlot.set_series() re-applies the global controller window as
+        # part of its v0.52.5 X-scroll fix. Re-apply local selector window
+        # immediately after so the operator's choice is not overridden.
+        self._plot._apply_window(self._window_selector.get_window())
 
     def _fetch_history(self) -> None:
         import time as _time
@@ -888,6 +895,7 @@ class PressureCurrentWidget(QWidget):
             xs = [t for t, _ in self._series]
             ys = [v for _, v in self._series]
             self._plot.set_series(xs, ys)
+            self._plot._apply_window(self._window_selector.get_window())
 
 
 class SensorHealthSummaryWidget(QWidget):
