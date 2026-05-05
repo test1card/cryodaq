@@ -9,6 +9,44 @@
 
 ## [Unreleased]
 
+## [0.52.8] — 2026-05-05 — fix(analytics): per-widget time-window selector
+
+### Fixed
+
+- **TemperatureOverview and PressureCurrent live data invisible at default
+  time window.** Both widgets subscribed to GlobalTimeWindowController whose
+  default TimeWindow.ALL returns infinite span (7-day history fetch). With
+  autoRange spanning days, minute-scale live updates were physically
+  invisible (~10 ppm X shift per new sample).
+
+  Reproduced 2026-05-05 with [D3] instrumentation: window=Всё, X-range
+  ~351 730 s, Y-range 328 K. T11 series grew 26→28 within seconds (live
+  data flowing) but trace tip movement was sub-pixel.
+
+  Fixed: shared TimeWindowSelector widget (5 buttons: 1мин/1ч/6ч/24ч/Всё,
+  default 1ч). TemperatureOverview and PressureCurrent each own a local
+  selector; global controller remains for future widgets. Widening the
+  window triggers a debounced (1 s) readings_history re-fetch.
+
+### Added
+
+- `cryodaq.gui.widgets.shared.time_window_selector.TimeWindowSelector` —
+  reusable 5-button time-window selector emitting TimeWindow enum on change.
+
+### Reference
+
+- D1/D2 instrumentation retained in prediction_widget.py and
+  VacuumPredictionWidget for lab PC capture session. Not in scope here.
+- D3 instrumentation removed (defect confirmed and fixed).
+
+### Test baseline
+
+Tests: 161+ passed (exact count from full suite at commit time).
+
+### Tags
+
+- `v0.52.8` — fix/analytics-v0.52.8-window-selector → master
+
 ## [0.52.7] — 2026-05-05 — fix(analytics): tab-click crash hotfix
 
 ### Fixed
