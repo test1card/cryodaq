@@ -331,7 +331,8 @@ def test_forward_warning_on_setter_with_no_recipient(qt_app, caplog):
     SensorHealthSummaryWidget] — none implement set_cooldown_data. The
     forward must log a WARNING describing the dropped call."""
     view = AnalyticsView()
-    # The fallback layout is mounted by AnalyticsView.__init__; assert we have
+    view.set_phase(None)  # new contract: layout applied on first set_phase call
+    # The fallback layout is now mounted; assert we have
     # active widgets but none implement set_cooldown_data.
     assert view.active_widgets()
     with caplog.at_level(logging.WARNING, logger="cryodaq.gui.shell.views.analytics_view"):
@@ -410,3 +411,80 @@ def test_pressure_current_widget_issues_readings_history_on_construction(qt_app)
     )
     instance.finished.connect.assert_called_once()
     instance.start.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# v0.52.7 regression — lazy-open crash: no double construction
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_lazy_open_with_active_experiment_does_not_construct_then_destroy(
+    qt_app, monkeypatch
+):
+    """v0.52.7 regression: clicking Analytics during vacuum/cooldown/etc
+    used to construct fallback widgets then immediately destroy them via
+    set_phase, killing in-flight ZmqCommandWorkers parented to the
+    destroyed widgets.
+
+    With the structural fix, AnalyticsView's first set_phase call applies
+    the active phase layout directly — no fallback widgets built only to
+    be torn down immediately.
+    """
+    from collections import Counter
+
+    constructed_widget_ids: list[str] = []
+    original_create = aw.create
+
+    def tracking_create(widget_id: str):
+        constructed_widget_ids.append(widget_id)
+        return original_create(widget_id)
+
+    monkeypatch.setattr(aw, "create", tracking_create)
+
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = MainWindowV2()
+        _stop_timers(w)
+        try:
+            w._latest_experiment_status = {
+                "current_phase": "vacuum",
+                "active_experiment": {"experiment_id": "test_v0.52.7"},
+            }
+            w._ensure_overlay("analytics")
+            qt_app.processEvents()
+        finally:
+            w.close()
+
+    counts = Counter(constructed_widget_ids)
+    # Each widget constructed at most once — no fallback-then-phase double construction.
+    assert all(n == 1 for n in counts.values()), (
+        f"Some widgets constructed more than once — fallback-then-phase race: {counts}"
+    )
+    # sensor_health_summary only lives in fallback and preparation; must NOT
+    # appear when active phase is vacuum.
+    assert "sensor_health_summary" not in counts, (
+        "sensor_health_summary was constructed — fallback was applied before vacuum phase"
+    )
+
+
+def test_lazy_open_without_active_experiment_uses_fallback(qt_app):
+    """When no active experiment, _ensure_overlay must apply fallback layout
+    (temperature_overview, pressure_current, sensor_health_summary)."""
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = MainWindowV2()
+        _stop_timers(w)
+        try:
+            # Default: _latest_experiment_status is None
+            assert w._latest_experiment_status is None
+            w._ensure_overlay("analytics")
+            qt_app.processEvents()
+            view = w._analytics_view
+            assert view is not None
+            active = view.active_widgets()
+            widget_types = {type(widget).__name__ for widget in active.values()}
+            assert "TemperatureOverviewWidget" in widget_types
+            assert "PressureCurrentWidget" in widget_types
+            assert "SensorHealthSummaryWidget" in widget_types
+        finally:
+            w.close()

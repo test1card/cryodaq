@@ -136,6 +136,7 @@ class AnalyticsView(QWidget):
         self.setStyleSheet(f"#analyticsView {{ background-color: {theme.BACKGROUND}; }}")
 
         self._phase: str | None = None
+        self._layout_applied: bool = False
         self._layout_config = _load_layout_config()
         self._active: dict[str, QWidget] = {}
 
@@ -158,17 +159,24 @@ class AnalyticsView(QWidget):
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         self._grid.setSpacing(theme.SPACE_3)
-
-        self._apply_layout(_FALLBACK_KEY)
+        # Layout is intentionally NOT applied here. _ensure_overlay in
+        # MainWindowV2 calls set_phase() exactly once after construction,
+        # which applies the layout in the correct final slot. Eager layout
+        # in __init__ would construct fallback widgets that get immediately
+        # destroyed when set_phase swaps to the active phase — killing any
+        # in-flight ZmqCommandWorker QThreads parented to those widgets.
 
     # ------------------------------------------------------------------
     # Public API — phase
     # ------------------------------------------------------------------
 
     def set_phase(self, phase: str | None) -> None:
-        if phase == self._phase:
+        # First call always applies layout (even when phase is None →
+        # fallback). Subsequent identical-phase calls early-return as before.
+        if self._layout_applied and phase == self._phase:
             return
         self._phase = phase
+        self._layout_applied = True
         key = _resolve_phase_key(phase, self._layout_config)
         self._apply_layout(key)
 
