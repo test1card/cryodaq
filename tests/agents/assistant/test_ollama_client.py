@@ -242,6 +242,7 @@ async def test_close_noop_when_no_session() -> None:
 
 
 @pytest.mark.smoke
+@pytest.mark.ollama
 async def test_smoke_real_ollama() -> None:
     """Real Ollama inference — requires: ollama serve + model pulled.
 
