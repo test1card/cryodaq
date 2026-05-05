@@ -73,6 +73,7 @@ cryodaq-engine = "cryodaq.engine:main"
 cryodaq-gui = "cryodaq.gui.app:main"
 cryodaq = "cryodaq.launcher:main"
 cryodaq-cooldown = "cryodaq.tools.cooldown_cli:main"
+cryodaq-replay-curve = "cryodaq.replay.cli:main"
 # Frozen entry points — used by PyInstaller spec. Call freeze_support()
 # BEFORE importing PySide6 / cryodaq submodules to avoid Windows fork bomb.
 cryodaq-frozen = "cryodaq._frozen_main:main_launcher"
