@@ -49,6 +49,7 @@ from cryodaq.gui.state.time_window import (
 )
 from cryodaq.gui.widgets.shared.prediction_widget import PredictionWidget
 from cryodaq.gui.widgets.shared.pressure_plot import PressurePlot
+from cryodaq.gui.widgets.shared.time_window_selector import TimeWindowSelector
 
 # ---------------------------------------------------------------------------
 # Widget IDs — must match YAML
@@ -209,18 +210,25 @@ class TemperatureOverviewWidget(QWidget):
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._series: dict[str, _ChannelSeries] = {}
         self._history_worker = None
+        self._last_history_fetch_ts: float = 0.0
+        self._window_selector = TimeWindowSelector()
         self._build_ui()
-        self._window_controller = get_time_window_controller()
-        self._apply_window(self._window_controller.get_window())
-        self._window_controller.window_changed.connect(self._apply_window)
+        self._window_selector.window_changed.connect(self._apply_window)
         self._fetch_history()
+        self._apply_window(self._window_selector.get_window())
 
     def _build_ui(self) -> None:
         card = _card("analyticsTemperatureOverview")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         lay.setSpacing(theme.SPACE_2)
-        lay.addWidget(_title_label("Температурные каналы"))
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(theme.SPACE_2)
+        header.addWidget(_title_label("Температурные каналы"))
+        header.addStretch()
+        header.addWidget(self._window_selector)
+        lay.addLayout(header)
         self._plot = pg.PlotWidget()
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
@@ -258,7 +266,7 @@ class TemperatureOverviewWidget(QWidget):
         # called once at __init__ with the T₀ snapshot — without this call
         # every batch, the right edge stays frozen at T₀ and live readings
         # (timestamps > T₀) fall outside the visible range.
-        self._apply_window(self._window_controller.get_window())
+        self._apply_window(self._window_selector.get_window())
 
     # ------------------------------------------------------------------
     # Window control
@@ -272,19 +280,37 @@ class TemperatureOverviewWidget(QWidget):
         if not math.isfinite(window.seconds):
             pi.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
             pi.autoRange()
+            # Trigger history backfill if switching to ALL with sparse data.
+            self._maybe_refetch_history(window)
             return
         now = time.time()
         pi.setXRange(now - window.seconds, now, padding=0)
+        self._maybe_refetch_history(window)
+
+    def _maybe_refetch_history(self, window: TimeWindow) -> None:
+        import math
+        import time
+        if time.time() - self._last_history_fetch_ts < 1.0:
+            return
+        # Check if any series has enough data to cover the window.
+        requested_secs = window.seconds if math.isfinite(window.seconds) else 7 * 24 * 3600.0
+        for series in self._series.values():
+            if len(series.xs) >= 2:
+                span = series.xs[-1] - series.xs[0]
+                if span >= requested_secs * 0.9:
+                    return  # sufficient data
+        self._fetch_history()
 
     def _fetch_history(self) -> None:
         import time as _time
 
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
+        self._last_history_fetch_ts = _time.time()
         channel_mgr = get_channel_manager()
         cold_ids = channel_mgr.get_cold_channels() or []
         channels = [channel_mgr.get_display_name(ch) for ch in cold_ids] or None
-        window = self._window_controller.get_window()
+        window = self._window_selector.get_window()
         import math as _math
         span = window.seconds if _math.isfinite(window.seconds) else 7 * 24 * 3600.0
         cmd = {
@@ -320,7 +346,7 @@ class TemperatureOverviewWidget(QWidget):
                 curve = self._plot.plot([], [], pen=series_pen(len(self._curves)), name=ch_id)
                 self._curves[ch_id] = curve
             self._curves[ch_id].setData(x=series.xs, y=series.ys)
-        self._apply_window(self._window_controller.get_window())
+        self._apply_window(self._window_selector.get_window())
 
 
 class TemperatureTrajectoryWidget(QWidget):
@@ -524,6 +550,16 @@ class VacuumPredictionWidget(QWidget):
 
     @Slot(dict)
     def _on_trend_result(self, result: dict) -> None:
+        # D2 INSTRUMENTATION — remove before fix commit
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.vacuum")
+        _dbglog.warning(
+            "[D2] _on_trend_result: ok=%s status=%s extrap_t_n=%d residual_std=%s",
+            result.get("ok"),
+            result.get("status"),
+            len(result.get("extrapolation_t") or []),
+            result.get("residual_std"),
+        )
         if not result.get("ok") or result.get("status") == "no_data":
             # Clear any previously-rendered forecast so no stale overlay persists
             # after a bridge restart, disabled predictor, or empty buffer.
@@ -759,12 +795,30 @@ class PressureCurrentWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._window_selector = TimeWindowSelector()
+        self._last_history_fetch_ts: float = 0.0
         card = _card("analyticsPressureCurrent")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         lay.setSpacing(theme.SPACE_2)
-        lay.addWidget(_title_label("Давление"))
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(theme.SPACE_2)
+        header.addWidget(_title_label("Давление"))
+        header.addStretch()
+        header.addWidget(self._window_selector)
+        lay.addLayout(header)
         self._plot = PressurePlot()
+        # Override PressurePlot's global controller subscription with local selector.
+        try:
+            get_time_window_controller().window_changed.disconnect(self._plot._apply_window)
+        except (TypeError, RuntimeError):
+            pass
+        self._window_selector.window_changed.connect(self._plot._apply_window)
+        self._plot._apply_window(self._window_selector.get_window())
+        self._window_selector.window_changed.connect(
+            lambda w: self._maybe_refetch_history(w)
+        )
         lay.addWidget(self._plot, stretch=1)
         self._series: list[tuple[float, float]] = []
         self._history_worker = None
@@ -790,8 +844,8 @@ class PressureCurrentWidget(QWidget):
 
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        controller = get_time_window_controller()
-        window = controller.get_window()
+        self._last_history_fetch_ts = _time.time()
+        window = self._window_selector.get_window()
         import math as _math
         span = window.seconds if _math.isfinite(window.seconds) else 24 * 3600.0
         cmd = {
@@ -804,6 +858,18 @@ class PressureCurrentWidget(QWidget):
         self._history_worker = ZmqCommandWorker(cmd, parent=self)
         self._history_worker.finished.connect(self._on_history_loaded)
         self._history_worker.start()
+
+    def _maybe_refetch_history(self, window: TimeWindow) -> None:
+        import math
+        import time
+        if time.time() - self._last_history_fetch_ts < 1.0:
+            return
+        requested_secs = window.seconds if math.isfinite(window.seconds) else 24 * 3600.0
+        if self._series:
+            span = self._series[-1][0] - self._series[0][0]
+            if span >= requested_secs * 0.9:
+                return
+        self._fetch_history()
 
     @Slot(dict)
     def _on_history_loaded(self, result: dict) -> None:

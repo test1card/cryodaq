@@ -7,12 +7,18 @@ from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.views import analytics_widgets as aw
-from cryodaq.gui.state.time_window import reset_time_window_controller
+from cryodaq.gui.shell.views.analytics_widgets import (
+    PressureCurrentWidget,
+    TemperatureOverviewWidget,
+)
+from cryodaq.gui.state.time_window import TimeWindow, reset_time_window_controller
 
 
 @pytest.fixture(scope="session")
@@ -187,10 +193,6 @@ def test_cooldown_prediction_placeholder_is_pg_textitem(app):
 
 def test_cooldown_prediction_placeholder_hides_on_data(app):
     """Placeholder hides when predicted trajectory arrives."""
-    from unittest.mock import MagicMock
-
-    import pyqtgraph as pg
-
     w = aw.CooldownPredictionWidget()
     assert w._placeholder.isVisible()
 
@@ -204,8 +206,6 @@ def test_cooldown_prediction_placeholder_hides_on_data(app):
 
 def test_cooldown_prediction_placeholder_shows_when_no_prediction(app):
     """Placeholder re-appears when data arrives with no predicted trajectory."""
-    from unittest.mock import MagicMock
-
     w = aw.CooldownPredictionWidget()
     data = MagicMock()
     data.actual_trajectory = [(1000.0, 200.0)]
@@ -254,3 +254,45 @@ def test_cooldown_history_is_real_widget_not_placeholder(app):
 def test_experiment_summary_widget_constructs(app):
     w = aw.create("experiment_summary")
     assert isinstance(w, aw.ExperimentSummaryWidget)
+
+
+# ----------------------------------------------------------------------
+# Per-widget time-window selector (v0.52.8)
+# ----------------------------------------------------------------------
+
+
+def test_temperature_overview_has_local_selector_default_1h(app):
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = TemperatureOverviewWidget()
+    assert w._window_selector.get_window() is TimeWindow.HOUR_1
+
+
+def test_pressure_current_has_local_selector_default_1h(app):
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = PressureCurrentWidget()
+    assert w._window_selector.get_window() is TimeWindow.HOUR_1
+
+
+def test_temperature_overview_window_change_applies_xrange(app):
+    with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        w = TemperatureOverviewWidget()
+        # Push one fake reading so series exists.
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218_1",
+            channel="Т1",
+            value=100.0,
+            unit="K",
+            metadata={},
+        )
+        w.set_temperature_readings({"Т1": reading})
+        # Change window to HOUR_6 (21600 s).
+        w._window_selector.set_window(TimeWindow.HOUR_6)
+        pi = w._plot.getPlotItem()
+        x_lo, x_hi = pi.getViewBox().viewRange()[0]
+        span = x_hi - x_lo
+        # Expect span ≈ 21600 s, allow ±10% for autoRange jitter.
+        assert 19440 <= span <= 23760, f"Unexpected X span {span} for HOUR_6"
