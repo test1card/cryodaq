@@ -9,6 +9,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Test suite no longer requires Ollama daemon by default.** Pytest now
+  registers an `ollama` marker; `addopts` deselects it (`-m 'not ollama'`).
+  The single live-Ollama test (`test_smoke_real_ollama`) is composed
+  `@pytest.mark.smoke + @pytest.mark.ollama`. All other tests in
+  `tests/agents/assistant/` use `AsyncMock` / `MagicMock` — no additional
+  marking required.
+
+  Run Ollama-dependent tests explicitly: `pytest -m ollama`.
+  Full suite (without Ollama): `pytest` — 2452 passed, 1 deselected.
+
+  Note: a background `ollama serve` daemon is still likely the actual source
+  of pytest-time RAM pressure on dev laptops (lazy client init in
+  `OllamaClient.__init__` means imports do not contact the network).
+  This change is defensive — no test silently takes a live dependency.
+
 ## [0.52.8] — 2026-05-05 — fix(analytics): per-widget time-window selector
 
 ### Fixed
