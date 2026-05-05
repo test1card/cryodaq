@@ -164,7 +164,11 @@ def load_curves(data_dir: Path) -> list[ReferenceCurve]:
     for fp in json_files:
         try:
             d = json.loads(fp.read_text(encoding="utf-8"))
-            t_h = np.array(d["elapsed_hours"], dtype=float)
+            t_h_raw = d.get("t_hours") or d.get("elapsed_hours")
+            if t_h_raw is None:
+                logger.warning("Пропуск %s: ни 't_hours', ни 'elapsed_hours' не найдены", fp.name)
+                continue
+            t_h = np.array(t_h_raw, dtype=float)
             tc = np.array(d["T_cold"], dtype=float)
             tw = np.array(d.get("T_warm", []), dtype=float)
             if len(t_h) < MIN_SAMPLES:
@@ -1184,7 +1188,10 @@ def ingest_curve(
     # Load new curve
     try:
         d = json.loads(new_curve_json.read_text(encoding="utf-8"))
-        t_h = np.array(d["elapsed_hours"], dtype=float)
+        t_h_raw = d.get("t_hours") or d.get("elapsed_hours")
+        if t_h_raw is None:
+            raise KeyError("ни 't_hours', ни 'elapsed_hours' не найдены")
+        t_h = np.array(t_h_raw, dtype=float)
         tc = np.array(d["T_cold"], dtype=float)
         tw = np.array(d.get("T_warm", []), dtype=float)
         if len(tw) == 0 or len(tw) != len(tc):
@@ -1346,7 +1353,7 @@ def ingest_from_raw_arrays(
     tmp_data = {
         "source_file": name,
         "date": date,
-        "elapsed_hours": t_hours.tolist(),
+        "t_hours": t_hours.tolist(),
         "T_cold": T_cold.tolist(),
         "T_warm": T_warm.tolist(),
         "duration_hours": float(t_hours[-1]),
