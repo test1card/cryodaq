@@ -7,7 +7,7 @@
 
 ---
 
-## [Unreleased]
+## [0.52.9] — 2026-05-05 — chore(tests): ollama marker
 
 ### Changed
 
