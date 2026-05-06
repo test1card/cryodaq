@@ -58,6 +58,33 @@ def _write_sqlite_db(path: Path) -> None:
     conn.close()
 
 
+def _write_empty_readings_db(path: Path) -> None:
+    """SQLite file with valid readings schema but zero rows."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE readings "
+        "(timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _write_readings_db(path: Path, *, ts_start: float, n_rows: int) -> None:
+    """SQLite file with n_rows of readings starting at ts_start (POSIX seconds)."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE readings "
+        "(timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
+    )
+    for i in range(n_rows):
+        conn.execute(
+            "INSERT INTO readings VALUES (?,?,?,?,?,?)",
+            (ts_start + i, "Т12", 290.0 - i * 2, "K", "ok", "test"),
+        )
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Source resolution — no ZMQ required
 # ---------------------------------------------------------------------------
@@ -338,3 +365,64 @@ async def test_replay_engine_cooldown_history_unavailable(tmp_path):
         req.close(linger=0)
         ctx.term()
         await _stop_engine(engine, source_task)
+
+
+# ---------------------------------------------------------------------------
+# DirectoryReplay base_offset edge cases (Stage 4c, Codex P2-B fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_skips_empty_first_file(tmp_path):
+    """Empty first DB must not collapse global_base_offset to 0.0."""
+    from cryodaq.drivers.base import Reading
+
+    # First file: empty SQLite with valid schema, zero rows
+    empty_db = tmp_path / "data_2026-01-01.db"
+    _write_empty_readings_db(empty_db)
+
+    # Second file: rows with old (2023) timestamps
+    full_db = tmp_path / "data_2026-01-02.db"
+    _write_readings_db(full_db, ts_start=1672531200.0, n_rows=5)
+
+    replay = DirectoryReplay(tmp_path, speed=1000.0, loop=False)
+    received: list[Reading] = []
+
+    async def cb(r: Reading) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    assert len(received) == 5
+    # Confirm timestamps shifted to wall-clock now (not original 2023)
+    from datetime import UTC, datetime
+    now_ts = datetime.now(tz=UTC).timestamp()
+    for r in received:
+        delta = abs(r.timestamp.timestamp() - now_ts)
+        assert delta < 60, (
+            f"Reading timestamp {r.timestamp} not shifted to now: "
+            f"delta={delta}s expected <60s"
+        )
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_all_empty_returns_cleanly(tmp_path, caplog):
+    """All-empty directory returns without crashing or publishing."""
+    import logging
+
+    from cryodaq.drivers.base import Reading
+
+    _write_empty_readings_db(tmp_path / "data_2026-01-01.db")
+    _write_empty_readings_db(tmp_path / "data_2026-01-02.db")
+
+    replay = DirectoryReplay(tmp_path, speed=1000.0, loop=False)
+    received: list[Reading] = []
+
+    async def cb(r: Reading) -> None:
+        received.append(r)
+
+    with caplog.at_level(logging.WARNING, logger="cryodaq.replay_engine.sources"):
+        await replay.run(cb)
+
+    assert len(received) == 0
+    assert any("all data_*.db files" in r.message for r in caplog.records)

@@ -169,12 +169,24 @@ class DirectoryReplay:
         if not db_files:
             logger.warning("DirectoryReplay: no data_*.db files in %s", self._data_dir)
             return
-        # Compute one time origin from the first row of the first file so
-        # timestamps stay monotonic across all files (not re-based per file).
-        first_rows = _load_db_rows(db_files[0])
-        global_base_offset = (
-            datetime.now(tz=UTC).timestamp() - first_rows[0][0] if first_rows else 0.0
-        )
+        # Compute one time origin from the first row of the first non-empty
+        # file so timestamps stay monotonic across all files. Walking past
+        # empty files defends against half-rotated empty .db at the start
+        # of the sort order, which would otherwise leave the offset at 0.0
+        # and emit raw historical timestamps for every file (Defect-1
+        # regression for multi-file sessions).
+        first_rows: list = []
+        for _db in db_files:
+            first_rows = _load_db_rows(_db)
+            if first_rows:
+                break
+        if not first_rows:
+            logger.warning(
+                "DirectoryReplay: all data_*.db files in %s are empty",
+                self._data_dir,
+            )
+            return
+        global_base_offset = datetime.now(tz=UTC).timestamp() - first_rows[0][0]
         self._running = True
         while self._running:
             for db_path in db_files:
