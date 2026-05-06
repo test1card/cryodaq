@@ -198,6 +198,18 @@ class AnalyticsView(QWidget):
     def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
         # Keep the latest value per channel for replay on layout swap.
         self._last_temperature_readings.update(readings)
+        # [D2-TEMP] dispatcher trace — shows what reaches the temperature widget
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.temp")
+        if not hasattr(self, "_d2_dispatch_seen"):
+            self._d2_dispatch_seen = 0
+        self._d2_dispatch_seen += 1
+        if self._d2_dispatch_seen <= 5 or self._d2_dispatch_seen % 200 == 0:
+            _dbglog.warning(
+                "[D2-TEMP] dispatch call#%d: temp_keys=%s",
+                self._d2_dispatch_seen,
+                list(readings.keys())[:3] if readings else None,
+            )
         self._forward("set_temperature_readings", readings)
 
     def set_pressure_reading(self, reading: Reading) -> None:

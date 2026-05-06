@@ -1037,6 +1037,33 @@ async def _run_engine(*, mock: bool = False) -> None:
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR)
     await writer.start_immediate()
+    # [D2-TEMP] one-shot: log distinct channel names in today's SQLite
+    async def _d2_log_distinct_channels() -> None:
+        await asyncio.sleep(15)  # let some readings accumulate
+        try:
+            import sqlite3
+            from datetime import date as _date
+            db_path = _DATA_DIR / f"data_{_date.today().isoformat()}.db"
+            if not db_path.exists():
+                logger.warning("[D2-TEMP] today DB not found: %s", db_path)
+                return
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT channel FROM readings ORDER BY channel"
+                ).fetchall()
+                channels_in_db = [r[0] for r in rows]
+                logger.warning(
+                    "[D2-TEMP] distinct channels in SQLite (n=%d): %s",
+                    len(channels_in_db),
+                    channels_in_db[:30],
+                )
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("[D2-TEMP] distinct channels probe failed: %s", exc)
+
+    asyncio.create_task(_d2_log_distinct_channels(), name="d2_distinct_channels")
     # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
     # engine event loop and SafetyManager so a disk-full error in the
     # writer thread can latch a safety fault via run_coroutine_threadsafe.
@@ -1792,11 +1819,27 @@ async def _run_engine(*, mock: bool = False) -> None:
                 from_ts = cmd.get("from_ts")
                 to_ts = cmd.get("to_ts")
                 limit = int(cmd.get("limit_per_channel", 3600))
+                # [D2-TEMP] log query parameters
+                logger.warning(
+                    "[D2-TEMP] readings_history query: n_channels=%s first_3=%s from=%.0f to=%.0f limit=%d",
+                    len(channels) if channels else None,
+                    channels[:3] if channels else None,
+                    from_ts or 0,
+                    to_ts or 0,
+                    limit,
+                )
                 data = await writer.read_readings_history(
                     channels=channels,
                     from_ts=float(from_ts) if from_ts is not None else None,
                     to_ts=float(to_ts) if to_ts is not None else None,
                     limit_per_channel=limit,
+                )
+                # [D2-TEMP] log result
+                logger.warning(
+                    "[D2-TEMP] readings_history result: n_keys=%d total_pts=%d first_keys=%s",
+                    len(data),
+                    sum(len(v) for v in data.values()),
+                    list(data.keys())[:3],
                 )
                 # Serialize: {channel: [[ts, value], ...]}
                 return {

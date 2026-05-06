@@ -248,6 +248,18 @@ class TemperatureOverviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.temp")
+        if not hasattr(self, "_d2_live_seen"):
+            self._d2_live_seen = 0
+        self._d2_live_seen += 1
+        if self._d2_live_seen <= 5 or self._d2_live_seen % 100 == 0:
+            _dbglog.warning(
+                "[D2-TEMP] set_temperature_readings call#%d: keys=%s curves_now=%d",
+                self._d2_live_seen,
+                list(readings.keys())[:3],
+                len(self._curves),
+            )
         for ch_id, reading in readings.items():
             ts = reading.timestamp.timestamp()
             series = self._series.setdefault(ch_id, _ChannelSeries())
@@ -320,12 +332,28 @@ class TemperatureOverviewWidget(QWidget):
             "channels": channels,
             "limit_per_channel": 5000,
         }
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.temp")
+        _dbglog.warning(
+            "[D2-TEMP] _fetch_history sending: channels=%s span=%.0fs from_ts=%.0f",
+            channels[:3] if channels else None,
+            span,
+            cmd["from_ts"],
+        )
         self._history_worker = ZmqCommandWorker(cmd, parent=self)
         self._history_worker.finished.connect(self._on_history_loaded)
         self._history_worker.start()
 
     @Slot(dict)
     def _on_history_loaded(self, result: dict) -> None:
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.temp")
+        _dbglog.warning(
+            "[D2-TEMP] _on_history_loaded: ok=%s data_keys=%s data_total_pts=%d",
+            result.get("ok"),
+            list((result.get("data") or {}).keys())[:3],
+            sum(len(v) for v in (result.get("data") or {}).values()),
+        )
         if not result.get("ok"):
             return
         data: dict[str, list] = result.get("data", {})
