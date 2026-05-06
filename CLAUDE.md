@@ -4,6 +4,27 @@
 
 # CryoDAQ
 
+## Чтение перед началом сессии (READ FIRST — mandatory)
+
+Перед любой задачей читай в указанном порядке:
+
+1. `docs/ORCHESTRATION.md` — контракт сессии: branch discipline, merge rules,
+   multi-model dispatch, autonomy bands, artifact locations. Сам документ
+   декларирует «read this document first».
+2. `CLAUDE.md` (этот файл) — module index, architectural invariants,
+   key rules. Загружается автоматически.
+3. `.claude/skills/multi-model-consultation.md` — обязательно перед
+   запросом ревью у Codex / Gemini / GLM / Kimi / DeepSeek. Содержит
+   routing matrix, anti-patterns, identity-leak gotchas.
+4. `docs/CODEX_SELF_REVIEW_PLAYBOOK.md` — обязательно перед каждым commit
+   на feature/hotfix ветке. Описывает Stage 6 Codex review loop.
+5. `docs/design-system/README.md` — обязательно перед любой работой
+   с GUI / widget / styling. Точка входа в design system.
+
+При работе по spec из vault — также читать spec end-to-end до начала
+кодирования. Spec frontmatter `status: RATIFIED` означает: не
+перерешивать архитектурные вопросы.
+
 ## Источник истины по UI/визуальному дизайну
 
 Единый источник правды для всего operator-facing UI — `docs/design-system/`.
