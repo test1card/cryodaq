@@ -2162,6 +2162,36 @@ async def _run_engine(*, mock: bool = False) -> None:
     await plugin_pipeline.start()
     if cooldown_service is not None:
         await cooldown_service.start()
+    # [D4-COOLDOWN] Site E — one-shot startup path probe
+    async def _d4_cooldown_probe() -> None:
+        await asyncio.sleep(15)
+        try:
+            _deployed = _PROJECT_ROOT / "data" / "cooldown_model" / "predictor_model.json"
+            _canonical = _PROJECT_ROOT / "cooldown_v5" / "predictor_model.json"
+            logger.warning(
+                "[D4-COOLDOWN] Site E paths: deployed=%s exists=%s size=%s | "
+                "canonical=%s exists=%s size=%s",
+                _deployed,
+                _deployed.exists(),
+                _deployed.stat().st_size if _deployed.exists() else "n/a",
+                _canonical,
+                _canonical.exists(),
+                _canonical.stat().st_size if _canonical.exists() else "n/a",
+            )
+            if cooldown_service is not None:
+                logger.warning(
+                    "[D4-COOLDOWN] Site E service: model_loaded=%s "
+                    "channel_cold=%r channel_warm=%r running=%s",
+                    cooldown_service._model is not None,
+                    cooldown_service._channel_cold,
+                    cooldown_service._channel_warm,
+                    cooldown_service._running,
+                )
+            else:
+                logger.warning("[D4-COOLDOWN] Site E service: cooldown_service is None")
+        except Exception as _d4_exc:
+            logger.warning("[D4-COOLDOWN] Site E probe failed: %s", _d4_exc)
+    asyncio.create_task(_d4_cooldown_probe(), name="d4_cooldown_probe")
     if periodic_reporter is not None:
         await periodic_reporter.start()
     if telegram_bot is not None:
