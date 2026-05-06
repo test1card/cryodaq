@@ -10,7 +10,11 @@ look forward, not backward. History is always full because
 prediction confidence depends on the full observed series, so
 hiding part of it has no meaning.
 
-Forward horizon is selectable via a 6-button strip (1/3/6/12/24/48 ч).
+Forward horizon is selectable via a 6-button strip (1/3/6/12/24/48 ч);
+the strip controls the plot's forward X-axis range only. The right-side
+readout panel is always populated for ALL six horizons in parallel — one
+row per horizon — so the operator can read every lookup without clicking.
+
 Uncertainty band rendered as :class:`pyqtgraph.FillBetweenItem`
 between ``lower_ci`` and ``upper_ci`` series, semi-transparent tint
 derived from :data:`theme.STATUS_INFO` (neutral informational — NOT
@@ -110,6 +114,8 @@ class PredictionWidget(QWidget):
         self._upper_ci: list[tuple[float, float]] = []
         self._ci_level_pct: float = 67.0
         self._horizon_buttons: dict[float, QPushButton] = {}
+        # One readout row per horizon: caption / value / ci labels.
+        self._horizon_rows: dict[float, dict[str, QLabel]] = {}
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -252,28 +258,49 @@ class PredictionWidget(QWidget):
         layout.setContentsMargins(theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2)
         layout.setSpacing(theme.SPACE_1)
 
-        self._horizon_caption_label = QLabel(self._horizon_caption())
-        self._horizon_caption_label.setFont(_label_font())
-        self._horizon_caption_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
-        layout.addWidget(self._horizon_caption_label)
-
-        self._predicted_value_label = QLabel("—")
-        self._predicted_value_label.setFont(_value_font())
-        self._predicted_value_label.setStyleSheet(
+        section_title = QLabel("Прогноз")
+        section_title.setFont(_label_font())
+        section_title.setStyleSheet(
             f"color: {theme.FOREGROUND}; background: transparent; border: none;"
         )
-        layout.addWidget(self._predicted_value_label)
+        layout.addWidget(section_title)
 
-        self._ci_label = QLabel("")
-        self._ci_label.setFont(_label_font())
-        self._ci_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
-        layout.addWidget(self._ci_label)
+        for hrs in _HORIZON_OPTIONS_HOURS:
+            layout.addWidget(self._build_horizon_row(hrs))
         layout.addStretch()
         return frame
+
+    def _build_horizon_row(self, hrs: float) -> QWidget:
+        """Build the per-horizon readout row (caption / value / CI).
+
+        Stored references in ``self._horizon_rows[hrs]`` let the refresh
+        path address each row's labels independently of the horizon
+        selector button strip.
+        """
+        row = QWidget()
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        caption = QLabel(self._format_horizon_caption(hrs))
+        caption.setFont(_label_font())
+        caption.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        row_layout.addWidget(caption)
+
+        value = QLabel("—")
+        value.setFont(_value_font())
+        value.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        row_layout.addWidget(value)
+
+        ci = QLabel("")
+        ci.setFont(_label_font())
+        ci.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        row_layout.addWidget(ci)
+
+        self._horizon_rows[hrs] = {"caption": caption, "value": value, "ci": ci}
+        return row
 
     # ------------------------------------------------------------------
     # Public API
@@ -317,13 +344,14 @@ class PredictionWidget(QWidget):
         self._refresh_readout()
 
     def set_horizon(self, hours: float) -> None:
+        # The horizon strip controls the plot's forward X-range only; the
+        # readout panel always shows every horizon, so we deliberately do
+        # NOT refresh the readout here.
         hours = float(hours)
         if hours == self._horizon_hours:
             return
         self._horizon_hours = hours
         self._apply_horizon_styles()
-        self._horizon_caption_label.setText(self._horizon_caption())
-        self._refresh_readout()
         self.horizon_changed.emit(hours)
 
     def get_horizon(self) -> float:
@@ -338,8 +366,7 @@ class PredictionWidget(QWidget):
             return [v if v > 0 else 1e-12 for v in values]
         return list(values)
 
-    def _horizon_caption(self) -> str:
-        hrs = self._horizon_hours
+    def _format_horizon_caption(self, hrs: float) -> str:
         hrs_text = f"{int(hrs) if hrs == int(hrs) else hrs}"
         return f"Через {hrs_text} ч"
 
@@ -353,33 +380,44 @@ class PredictionWidget(QWidget):
         self._now_line.setPos(now)
 
     def _refresh_readout(self) -> None:
+        """Populate every horizon row from the latest history + prediction.
+
+        Empty state (no history and no central): all rows show "—" with
+        empty CI text. Non-empty state: each row computes its own
+        ``now + hrs * 3600`` interpolation against ``_central`` /
+        ``_lower_ci`` / ``_upper_ci`` independently of the selected plot
+        horizon.
+        """
         if self._history:
             now = self._history[-1][0]
         elif self._central:
             now = self._central[0][0]
         else:
-            self._predicted_value_label.setText("—")
-            self._ci_label.setText("")
+            for row in self._horizon_rows.values():
+                row["value"].setText("—")
+                row["ci"].setText("")
             return
-        target_t = now + self._horizon_hours * 3600.0
-        central = _interpolate_at(self._central, target_t)
-        lower = _interpolate_at(self._lower_ci, target_t)
-        upper = _interpolate_at(self._upper_ci, target_t)
-        if central is None:
-            self._predicted_value_label.setText("—")
-            self._ci_label.setText("")
-            return
-        self._predicted_value_label.setText(self._format_value(central))
-        if lower is not None and upper is not None:
-            half_ci = (upper - lower) / 2.0
-            # Russian label: «ДИ» = доверительный интервал (confidence
-            # interval). Keeps operator-facing copy consistent with
-            # the rest of the overlay.
-            self._ci_label.setText(
-                f"± {self._format_value(abs(half_ci))}, {self._ci_level_pct:.0f}% ДИ"
-            )
-        else:
-            self._ci_label.setText("")
+
+        for hrs, row in self._horizon_rows.items():
+            target_t = now + hrs * 3600.0
+            central = _interpolate_at(self._central, target_t)
+            lower = _interpolate_at(self._lower_ci, target_t)
+            upper = _interpolate_at(self._upper_ci, target_t)
+            if central is None:
+                row["value"].setText("—")
+                row["ci"].setText("")
+                continue
+            row["value"].setText(self._format_value(central))
+            if lower is not None and upper is not None:
+                half_ci = (upper - lower) / 2.0
+                # Russian label: «ДИ» = доверительный интервал (confidence
+                # interval). Keeps operator-facing copy consistent with
+                # the rest of the overlay.
+                row["ci"].setText(
+                    f"± {self._format_value(abs(half_ci))}, {self._ci_level_pct:.0f}% ДИ"
+                )
+            else:
+                row["ci"].setText("")
 
     def _format_value(self, value: float) -> str:
         if not math.isfinite(value):

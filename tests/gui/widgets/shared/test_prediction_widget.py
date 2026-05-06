@@ -85,11 +85,15 @@ def test_horizon_change_same_value_is_noop(app):
     assert seen == []
 
 
-def test_horizon_change_updates_readout_caption(app):
+def test_readout_rows_have_static_horizon_captions(app):
+    """Each row's caption is fixed to its own horizon; captions no longer
+    follow the selected button."""
     w = PredictionWidget("Cooldown", "T", "K")
-    w.set_horizon(3.0)
-    assert "3" in w._horizon_caption_label.text()
-    assert "ч" in w._horizon_caption_label.text()
+    for hrs in _HORIZON_OPTIONS_HOURS:
+        caption = w._horizon_rows[hrs]["caption"].text()
+        hrs_text = f"{int(hrs) if hrs == int(hrs) else hrs}"
+        assert hrs_text in caption
+        assert "ч" in caption
 
 
 def test_readout_value_reflects_central_at_horizon(app):
@@ -101,8 +105,7 @@ def test_readout_value_reflects_central_at_horizon(app):
     lower = [(now, 48.0), (now + 24 * 3600.0, 58.0)]
     upper = [(now, 52.0), (now + 24 * 3600.0, 62.0)]
     w.set_prediction(central, lower, upper, ci_level_pct=67.0)
-    w.set_horizon(24.0)
-    text = w._predicted_value_label.text()
+    text = w._horizon_rows[24.0]["value"].text()
     assert "60" in text and "K" in text
 
 
@@ -127,10 +130,61 @@ def test_log_y_readout_uses_scientific_notation(app):
     lower = [(now, 0.5e-5), (now + horizon_s, 1e-6)]
     upper = [(now, 2e-5), (now + horizon_s, 6.5e-6)]
     w.set_prediction(central, lower, upper, ci_level_pct=95.0)
-    w.set_horizon(24.0)
-    text = w._predicted_value_label.text()
+    text = w._horizon_rows[24.0]["value"].text()
     assert "e" in text  # scientific notation
     assert "мбар" in text
+
+
+def test_prediction_readout_shows_all_horizons(app):
+    """All 6 horizon rows render non-empty value labels after set_prediction."""
+    import time as _time
+
+    w = PredictionWidget("Cooldown", "T", "K")
+    now = _time.time()
+    w.set_history([(now, 77.0)])
+    central = [(now + h * 3600.0, 100.0 - h) for h in range(50)]
+    lower = [(t, v - 2.0) for t, v in central]
+    upper = [(t, v + 2.0) for t, v in central]
+    w.set_prediction(central, lower, upper, ci_level_pct=67.0)
+
+    for hrs in _HORIZON_OPTIONS_HOURS:
+        row = w._horizon_rows[hrs]
+        assert row["value"].text() != "—", f"Row {hrs}h has empty value"
+        assert row["ci"].text() != "", f"Row {hrs}h has empty CI"
+        assert "67% ДИ" in row["ci"].text()
+
+
+def test_prediction_readout_empty_state(app):
+    """Without a prediction or history, all 6 rows show — placeholder."""
+    w = PredictionWidget("Cooldown", "T", "K")
+    for hrs in _HORIZON_OPTIONS_HOURS:
+        row = w._horizon_rows[hrs]
+        assert row["value"].text() == "—"
+        assert row["ci"].text() == ""
+
+
+def test_prediction_horizon_buttons_drive_plot_range_not_readout(app):
+    """Clicking a horizon button changes _horizon_hours (plot X-range driver)
+    but leaves the populated readout rows untouched."""
+    import time as _time
+
+    w = PredictionWidget("Cooldown", "T", "K")
+    now = _time.time()
+    w.set_history([(now, 77.0)])
+    central = [(now + h * 3600.0, 100.0 - h) for h in range(50)]
+    lower = [(t, v - 2.0) for t, v in central]
+    upper = [(t, v + 2.0) for t, v in central]
+    w.set_prediction(central, lower, upper, ci_level_pct=67.0)
+
+    snapshot = {hrs: w._horizon_rows[hrs]["value"].text() for hrs in _HORIZON_OPTIONS_HOURS}
+
+    # Switch the plot horizon to 6 ч.
+    w._horizon_buttons[6.0].click()
+    assert w.get_horizon() == 6.0
+
+    # Readout rows are unchanged — every horizon still populated.
+    for hrs in _HORIZON_OPTIONS_HOURS:
+        assert w._horizon_rows[hrs]["value"].text() == snapshot[hrs]
 
 
 def test_left_axis_auto_si_prefix_disabled_linear_y(app):
