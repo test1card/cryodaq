@@ -1,6 +1,6 @@
 ---
 name: cryodaq-team-lead
-description: "Orchestrate Claude Code agent teams for CryoDAQ — a LabVIEW replacement for cryogenic lab instrumentation (АКЦ ФИАН, Millimetron). Master-track scope: engine, drivers, storage, analytics, reporting, web, notifications, core, safety, configs, build, tests. GUI excluded (owned by feat/ui-phase-1). Safety-critical: 6-state SafetyManager FSM, fail-on-silence, crash-safe SQLite WAL. 3 instrument types (5 instances), 24 temperature channels."
+description: "Orchestrate Claude Code agent teams for CryoDAQ — a LabVIEW replacement for cryogenic lab instrumentation (АКЦ ФИАН, Millimetron). Full codebase on master (UI phase 1 complete, feat/ui-phase-1 merged 2026-05). Safety-critical: 6-state SafetyManager FSM, fail-on-silence, crash-safe SQLite WAL. 3 instrument types (5 instances), 24 temperature channels."
 ---
 
 # Team Lead — CryoDAQ (master track)
@@ -11,15 +11,6 @@ You are the team lead for CryoDAQ on the **master** branch. You NEVER implement 
 
 1. Verify `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set.
 2. Remind user to enable **delegate mode** (`Shift+Tab`).
-
-## Branch ownership
-
-| Branch | Owns | Does NOT touch |
-|---|---|---|
-| `master` | engine, drivers, storage, analytics, reporting, web, notifications, core, safety, configs, build, tests | `src/cryodaq/gui/` |
-| `feat/ui-phase-1` | `src/cryodaq/gui/`, `tests/gui/` | engine internals |
-
-**This skill is for master-track agents only.** GUI lives in `src/cryodaq/gui/` and is owned by the `feat/ui-phase-1` branch. Master-track agents do not read or modify GUI files.
 
 ## Project context
 
@@ -73,7 +64,7 @@ Data must be on disk BEFORE it reaches any subscriber. Flow: Driver → Schedule
 
 Source OFF is the resting state. Running requires continuous proof of health (SafetyManager in RUNNING state).
 
-**Nuances (verified in DOC_REALITY_MAP.md):**
+**Nuances:**
 - Fail-on-silence: stale data >10s → FAULT + emergency_off — but **only fires while state=RUNNING**. Outside RUNNING, stale data blocks readiness via preconditions.
 - Rate limit: dT/dt >5 K/min → FAULT — but 5 K/min is a **configurable default** in `safety.yaml`, not a hard invariant.
 - Keithley connect forces OUTPUT_OFF on both SMU channels — but if force-OFF **fails**, it logs CRITICAL and continues (best-effort, not guaranteed).
@@ -110,7 +101,6 @@ Engine runs weeks. Every buffer has fixed max size. Bounded queues in DataBroker
 ## Authoritative documents
 
 - `CLAUDE.md` — primary CC instructions, module index, key rules
-- `DOC_REALITY_MAP.md` — doc-vs-code correspondence map with verified invariants
 - `docs/architecture.md` — layered architecture, ZMQ protocol, data flow
 - `docs/deployment.md` — lab PC deployment guide
 
