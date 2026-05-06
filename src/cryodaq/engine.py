@@ -1047,19 +1047,23 @@ async def _run_engine(*, mock: bool = False) -> None:
             if not db_path.exists():
                 logger.warning("[D2-TEMP] today DB not found: %s", db_path)
                 return
-            conn = sqlite3.connect(str(db_path), timeout=5)
-            try:
-                rows = conn.execute(
-                    "SELECT DISTINCT channel FROM readings ORDER BY channel"
-                ).fetchall()
-                channels_in_db = [r[0] for r in rows]
-                logger.warning(
-                    "[D2-TEMP] distinct channels in SQLite (n=%d): %s",
-                    len(channels_in_db),
-                    channels_in_db[:30],
-                )
-            finally:
-                conn.close()
+
+            def _query() -> list[str]:
+                conn = sqlite3.connect(str(db_path), timeout=5)
+                try:
+                    rows = conn.execute(
+                        "SELECT DISTINCT channel FROM readings ORDER BY channel"
+                    ).fetchall()
+                    return [r[0] for r in rows]
+                finally:
+                    conn.close()
+
+            channels_in_db = await asyncio.to_thread(_query)
+            logger.warning(
+                "[D2-TEMP] distinct channels in SQLite (n=%d): %s",
+                len(channels_in_db),
+                channels_in_db[:30],
+            )
         except Exception as exc:
             logger.warning("[D2-TEMP] distinct channels probe failed: %s", exc)
 

@@ -348,11 +348,15 @@ class TemperatureOverviewWidget(QWidget):
     def _on_history_loaded(self, result: dict) -> None:
         import logging as _dbg_log
         _dbglog = _dbg_log.getLogger("cryodaq.dbg.temp")
+        _d2_data = result.get("data") or {}
+        _d2_all_ts = [e[0] for pts in _d2_data.values() for e in pts if pts]
         _dbglog.warning(
-            "[D2-TEMP] _on_history_loaded: ok=%s data_keys=%s data_total_pts=%d",
+            "[D2-TEMP] _on_history_loaded: ok=%s data_keys=%s total_pts=%d ts_range=[%.0f, %.0f]",
             result.get("ok"),
-            list((result.get("data") or {}).keys())[:3],
-            sum(len(v) for v in (result.get("data") or {}).values()),
+            list(_d2_data.keys())[:3],
+            sum(len(v) for v in _d2_data.values()),
+            min(_d2_all_ts) if _d2_all_ts else 0,
+            max(_d2_all_ts) if _d2_all_ts else 0,
         )
         if not result.get("ok"):
             return
