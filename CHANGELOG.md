@@ -7,6 +7,30 @@
 
 ---
 
+## [0.54.0] — unreleased — feat(query): channel landmarks for AI
+
+### Added
+
+- **F-ChannelLandmarks** — system-level channel identity layer.
+  `config/physical_alarms.yaml` gains an optional `landmarks:` section that
+  pins hardware-fixed channels (Т11/Т12 — GM-cooler stages) to canonical
+  roles plus operator-phrasing aliases (e.g. «азотная плита» → Т11).
+
+  - New `cryodaq.core.physical_alarms_config.load_channel_landmarks()` parses
+    the section; missing/malformed config returns `{}` (engine never aborts).
+  - `ChannelManager.set_landmarks()` / `get_landmarks()` carry the map across
+    the engine; populated at startup, read by the query agent.
+  - `IntentClassifier._build_channel_hint()` now emits a two-tier listing —
+    landmarks first with aliases, experiment channels second — and tells
+    Gemma that landmark aliases beat experiment-level naming on collisions.
+
+  Resolves the production "азотная плита → Т12" misclassification.
+
+  Backward-compat: omitting the `landmarks:` section preserves the prior
+  v0.53.x prompt structure (single «Доступные каналы» list).
+
+---
+
 ## [0.52.9] — 2026-05-05 — chore(tests): ollama marker
 
 ### Changed

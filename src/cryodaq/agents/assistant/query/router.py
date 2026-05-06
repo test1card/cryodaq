@@ -54,6 +54,14 @@ class QueryRouter:
             if norm_id != raw_s and norm_id in all_ids:
                 resolved.append(norm_id)
                 continue
+            # F-ChannelLandmarks: consult landmark aliases (Т11/Т12) BEFORE
+            # falling through to experiment-level name matching, so the
+            # priority promised by the classifier prompt also holds at the
+            # resolver layer when Gemma echoes an alias verbatim.
+            landmark_id = self._channel_manager.find_by_landmark_alias(raw_s)
+            if landmark_id:
+                resolved.append(landmark_id)
+                continue
             match_id = self._channel_manager.find_by_name(raw_s)
             if match_id:
                 resolved.append(match_id)

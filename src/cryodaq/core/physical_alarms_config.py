@@ -3,6 +3,7 @@
 Graceful degradation: missing or partial YAML returns hard-coded defaults.
 No exceptions raised at load time — engine must start regardless.
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,7 +63,10 @@ def _merge_with_defaults(loaded: dict, defaults: dict) -> dict:
             except (TypeError, ValueError):
                 logger.warning(
                     "physical_alarms.yaml: '%s' type mismatch (got %s, expected %s), using default %r",
-                    key, type(val).__name__, type(default_val).__name__, default_val,
+                    key,
+                    type(val).__name__,
+                    type(default_val).__name__,
+                    default_val,
                 )
                 continue
         result[key] = val
@@ -87,7 +91,9 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
         return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
 
     if not isinstance(raw, dict):
-        logger.warning("physical_alarms.yaml: expected mapping, got %s — using defaults", type(raw).__name__)
+        logger.warning(
+            "physical_alarms.yaml: expected mapping, got %s — using defaults", type(raw).__name__
+        )
         return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
 
     cooldown_raw = raw.get("cooldown")
@@ -112,3 +118,69 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
     vacuum_cfg = _merge_with_defaults(vacuum_raw, _VACUUM_DEFAULTS)
 
     return cooldown_cfg, vacuum_cfg
+
+
+def load_channel_landmarks(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the ``landmarks:`` section from physical_alarms.yaml.
+
+    Returns a dict keyed by channel ID — for example::
+
+        {
+            "Т11": {
+                "role": "warm_stage",
+                "physical": "1-я ступень GM-cooler, ~40K при работе",
+                "aliases": ["азотная плита", "плита", ...],
+            },
+            ...
+        }
+
+    Aliases are normalized to lowercased, stripped strings so downstream
+    consumers (the IntentClassifier prompt builder) can match operator
+    phrasing case-insensitively without re-normalizing on every query.
+
+    Returns an empty dict on any failure (missing file, missing section,
+    malformed entry, YAML error). Never raises — landmarks are an
+    optional layer; engine startup must not depend on them.
+    """
+    if not path.exists():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        logger.warning("physical_alarms.yaml landmarks: YAML error — %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    landmarks_raw = raw.get("landmarks")
+    if landmarks_raw is None:
+        return {}
+    if not isinstance(landmarks_raw, dict):
+        logger.warning(
+            "physical_alarms.yaml: 'landmarks' section is not a mapping (got %s) — ignoring",
+            type(landmarks_raw).__name__,
+        )
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for ch_id, entry in landmarks_raw.items():
+        if not isinstance(entry, dict):
+            logger.warning(
+                "physical_alarms.yaml landmarks[%s]: not a mapping — skipping",
+                ch_id,
+            )
+            continue
+        aliases_raw = entry.get("aliases", [])
+        if not isinstance(aliases_raw, list):
+            logger.warning(
+                "physical_alarms.yaml landmarks[%s].aliases: not a list — using []",
+                ch_id,
+            )
+            aliases_raw = []
+        aliases = [str(a).strip().lower() for a in aliases_raw if a]
+        out[str(ch_id)] = {
+            "role": str(entry.get("role", "")),
+            "physical": str(entry.get("physical", "")),
+            "aliases": aliases,
+        }
+    return out

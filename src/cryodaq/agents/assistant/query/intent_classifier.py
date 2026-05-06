@@ -26,29 +26,82 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_INTENT = QueryIntent(category=QueryCategory.UNKNOWN)
 
 
+def _build_landmark_hint(channel_manager: ChannelManager) -> str:
+    """Render the system-level landmark section of the classifier prompt.
+
+    Landmark channels (Т11/Т12) are physically pinned to GM-cooler stages
+    and never migrate between experiments, so the classifier must always
+    resolve their aliases (e.g. "азотная плита") to the same channel_id —
+    even when an experiment-level channels.yaml entry happens to drift
+    onto a similar phrasing. Returns an empty string when no landmarks
+    are installed (backward-compat fallback).
+    """
+    landmarks = channel_manager.get_landmarks()
+    if not landmarks:
+        return ""
+    lines: list[str] = ["КАНАЛЫ-LANDMARKS (фиксированы физически, не меняются):"]
+    for ch_id in sorted(landmarks):
+        entry = landmarks[ch_id]
+        aliases = list(entry.get("aliases", []))
+        physical = entry.get("physical", "")
+        headline = aliases[0] if aliases else physical or ch_id
+        if physical:
+            lines.append(f"  {ch_id} — {headline} ({physical})")
+        else:
+            lines.append(f"  {ch_id} — {headline}")
+        rest = aliases[1:] if aliases else []
+        if rest:
+            lines.append("    также может называться: " + ", ".join(rest))
+    return "\n".join(lines)
+
+
 def _build_channel_hint(channel_manager: ChannelManager | None) -> str:
     """Build channel reference table for classifier prompt.
 
     Reads CURRENT ChannelManager state on every call — reflects all renames
-    done via GUI ChannelEditor since engine startup (late binding).
+    done via GUI ChannelEditor since engine startup (late binding). Emits a
+    two-tier list when landmarks are installed:
+
+      1. Hardware-pinned landmark channels (Т11/Т12 with aliases) first.
+      2. Experiment-level channels.yaml entries below, with an explicit
+         note that landmarks take priority on alias collisions.
     """
     if channel_manager is None:
         return ""
+    landmark_block = _build_landmark_hint(channel_manager)
     rows: list[str] = []
     for ch_id, ch_data in channel_manager.get_all().items():
         if not channel_manager.is_visible(ch_id):
             continue
         name = ch_data.get("name", "")
-        rows.append(f"  {ch_id} → \"{name}\"" if name else f"  {ch_id}")
-    if not rows:
+        rows.append(f'  {ch_id} → "{name}"' if name else f"  {ch_id}")
+    if not rows and not landmark_block:
         return ""
-    return (
-        "\n\nДоступные каналы (channel_id → название):\n"
-        + "\n".join(rows)
-        + "\n\nКогда оператор называет канал по имени (например "
-        "\"азотная плита\", \"болометр\", \"детектор\"), "
+
+    parts: list[str] = ["\n"]
+    if landmark_block:
+        parts.append("\n" + landmark_block + "\n")
+    if rows:
+        header = (
+            "\nКАНАЛЫ ТЕКУЩЕГО ЭКСПЕРИМЕНТА (имена меняются от эксперимента к эксперименту):"
+            if landmark_block
+            else "\nДоступные каналы (channel_id → название):"
+        )
+        parts.append(header + "\n" + "\n".join(rows) + "\n")
+    if landmark_block:
+        parts.append(
+            "\nВАЖНО: landmark-каналы приоритетнее experiment-каналов "
+            "при матчинге названий. Если оператор говорит фразу из списка "
+            "алиасов landmark — отдавай landmark channel_id, даже если в "
+            "текущем эксперименте какое-то имя совпадает.\n"
+        )
+    parts.append(
+        "\nКогда оператор называет канал по имени (например "
+        '"азотная плита", "болометр", "детектор"), '
         "найди соответствующий channel_id и положи в target_channels.\n"
     )
+    return "".join(parts)
+
 
 _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 
@@ -62,9 +115,7 @@ def _parse_intent(raw: str) -> QueryIntent:
     # Strip markdown code fences if present
     if raw.startswith("```"):
         lines = raw.splitlines()
-        raw = "\n".join(
-            line for line in lines if not line.startswith("```")
-        ).strip()
+        raw = "\n".join(line for line in lines if not line.startswith("```")).strip()
 
     try:
         data: dict[str, Any] = json.loads(raw)

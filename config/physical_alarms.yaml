@@ -57,3 +57,36 @@ vacuum:
   sustained_s: 30                   # P > fire_pressure must persist this long
 
   severity: CRITICAL
+
+# Channel landmarks — F-ChannelLandmarks (system-level, hardware-pinned).
+# Т11 / Т12 are physically bolted to GM-cooler stages and never migrate
+# between experiments. The query agent consults these aliases BEFORE
+# experiment-level channels.yaml names so an operator phrase like
+# "азотная плита" always resolves to Т11 even if a per-experiment alias
+# happened to drift onto another channel.
+landmarks:
+  Т11:
+    role: warm_stage
+    physical: "1-я ступень GM-cooler, ~40K при работе"
+    aliases:
+      - "азотная плита"
+      - "плита"
+      - "плита 1-й ступени"
+      - "первая ступень"
+      - "первая ступень GM"
+      - "1-я ступень"
+      - "т warm"
+      - "t warm"
+      - "warm channel"
+  Т12:
+    role: cold_stage
+    physical: "2-я ступень GM-cooler, ~2.9K при работе"
+    aliases:
+      - "вторая ступень"
+      - "вторая ступень GM"
+      - "2-я ступень"
+      - "холодная точка"
+      - "холодный палец"
+      - "т cold"
+      - "t cold"
+      - "cold channel"

@@ -44,7 +44,10 @@ from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetp
 from cryodaq.core.alarm_v2 import AlarmEvent, AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.cooldown_alarm import CooldownAlarm
-from cryodaq.core.physical_alarms_config import load_physical_alarms_config
+from cryodaq.core.physical_alarms_config import (
+    load_channel_landmarks,
+    load_physical_alarms_config,
+)
 from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
@@ -1203,6 +1206,22 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
     _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
     _cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(_phys_alarms_yaml)
+
+    # F-ChannelLandmarks: install hardware-pinned landmark map (Т11/Т12 with
+    # operator-phrasing aliases) on the shared ChannelManager. The query
+    # agent's IntentClassifier reads it via channel_manager.get_landmarks()
+    # to resolve phrases like "азотная плита" to the correct channel even
+    # when an experiment-level alias has drifted onto another channel.
+    try:
+        _landmarks = load_channel_landmarks(_phys_alarms_yaml)
+        get_channel_manager().set_landmarks(_landmarks)
+        if _landmarks:
+            logger.info(
+                "ChannelLandmarks: загружены для каналов %s",
+                ", ".join(sorted(_landmarks)),
+            )
+    except Exception as exc:
+        logger.warning("ChannelLandmarks: ошибка загрузки — %s", exc, exc_info=True)
 
     # Resolve model path relative to project root (not process cwd)
     _model_path_str = _cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")

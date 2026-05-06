@@ -67,6 +67,11 @@ class ChannelManager:
 
     def __init__(self, config_path: Path | None = None) -> None:
         self._channels: dict[str, dict[str, Any]] = {}
+        # Hardware-pinned landmark channels (Т11/Т12) populated by the
+        # engine from physical_alarms.yaml. Default empty so direct
+        # ChannelManager() construction (tests, GUI standalone) keeps
+        # working without an alarms file.
+        self._landmarks: dict[str, dict[str, Any]] = {}
         self._config_path: Path = config_path or _DEFAULT_CONFIG
         self._callbacks: list[Any] = []
         self.load()
@@ -167,6 +172,54 @@ class ChannelManager:
     def get_all_visible(self) -> list[str]:
         """Получить список видимых channel_id."""
         return [ch_id for ch_id, info in self._channels.items() if info.get("visible", True)]
+
+    # ------------------------------------------------------------------
+    # Landmarks (system-level, hardware-pinned channels — F-ChannelLandmarks)
+    # ------------------------------------------------------------------
+
+    def set_landmarks(self, landmarks: dict[str, dict[str, Any]]) -> None:
+        """Install the hardware-pinned landmark map (e.g. Т11/Т12 with aliases).
+
+        Engine populates this from ``config/physical_alarms.yaml`` at startup
+        via :func:`cryodaq.core.physical_alarms_config.load_channel_landmarks`.
+        Stored by reference (no deep copy) — callers must not mutate the
+        passed dict after handing it over.
+        """
+        self._landmarks = dict(landmarks) if landmarks else {}
+
+    def get_landmarks(self) -> dict[str, dict[str, Any]]:
+        """Return the landmark map (channel_id → {role, physical, aliases}).
+
+        Empty dict when no landmarks have been installed (default state),
+        so consumers can call this unconditionally.
+        """
+        return dict(self._landmarks)
+
+    def find_by_landmark_alias(self, name: str) -> str | None:
+        """Resolve a landmark alias phrase (case-insensitive) to its channel ID.
+
+        Returns the landmark channel_id when ``name`` appears in any landmark's
+        ``aliases`` list (also matches the channel_id itself for the no-op case).
+        Returns ``None`` when no landmark matches — callers fall through to
+        experiment-level name matching.
+
+        This is the runtime counterpart of the priority text in the classifier
+        prompt: even if Gemma echoes the operator phrase verbatim instead of
+        the canonical ID, the resolver hits landmarks before experiment names
+        and returns the right channel.
+        """
+        if not self._landmarks:
+            return None
+        needle = name.strip().lower()
+        if not needle:
+            return None
+        for ch_id, entry in self._landmarks.items():
+            if needle == ch_id.strip().lower():
+                return ch_id
+            for alias in entry.get("aliases", []):
+                if needle == str(alias).strip().lower():
+                    return ch_id
+        return None
 
     # Latin↔Cyrillic visually-confusable map (e.g. Latin T → Cyrillic Т)
     _LATIN_TO_CYRILLIC: dict[int, str] = str.maketrans(
