@@ -36,13 +36,20 @@ class SQLiteReplay:
     def stop(self) -> None:
         self._running = False
 
-    async def run(self, publish_cb: PublishCallback) -> None:
+    async def run(
+        self, publish_cb: PublishCallback, *, base_offset: float | None = None
+    ) -> None:
         self._running = True
         while self._running:
             rows = _load_db_rows(self._db_path)
             if not rows:
                 logger.warning("SQLiteReplay: no rows in %s", self._db_path.name)
                 break
+            _base_offset = (
+                base_offset
+                if base_offset is not None
+                else datetime.now(tz=UTC).timestamp() - rows[0][0]
+            )
             prev_ts: float | None = None
             for row in rows:
                 if not self._running:
@@ -58,7 +65,7 @@ class SQLiteReplay:
                 except ValueError:
                     status = ChannelStatus.OK
                 reading = Reading(
-                    timestamp=datetime.fromtimestamp(ts_posix, tz=UTC),
+                    timestamp=datetime.fromtimestamp(ts_posix + _base_offset, tz=UTC),
                     instrument_id=inst_id,
                     channel=channel,
                     value=value,
@@ -162,13 +169,19 @@ class DirectoryReplay:
         if not db_files:
             logger.warning("DirectoryReplay: no data_*.db files in %s", self._data_dir)
             return
+        # Compute one time origin from the first row of the first file so
+        # timestamps stay monotonic across all files (not re-based per file).
+        first_rows = _load_db_rows(db_files[0])
+        global_base_offset = (
+            datetime.now(tz=UTC).timestamp() - first_rows[0][0] if first_rows else 0.0
+        )
         self._running = True
         while self._running:
             for db_path in db_files:
                 if not self._running:
                     return
                 self._current = SQLiteReplay(db_path, speed=self._speed)
-                await self._current.run(publish_cb)
+                await self._current.run(publish_cb, base_offset=global_base_offset)
             if not self._loop:
                 break
         self._running = False

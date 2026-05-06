@@ -307,6 +307,7 @@ class LauncherWindow(QMainWindow):
         # actually runs. (Codex Phase 2b Block A P1.)
         self._restart_pending: bool = False
         self._shutdown_requested: bool = False
+        self._replay_engine_failed: bool = False
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
@@ -337,8 +338,13 @@ class LauncherWindow(QMainWindow):
         # --- Engine ---
         self._start_engine()
 
-        # Start ZMQ bridge subprocess
-        self._bridge.start()
+        # Start ZMQ bridge subprocess — skip if replay engine failed to start
+        # so the bridge doesn't silently attach to a live engine.
+        if self._replay_engine_failed:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(200, self._show_replay_engine_failure)
+        else:
+            self._bridge.start()
 
         if tray_only:
             self._main_window = None
@@ -409,13 +415,17 @@ class LauncherWindow(QMainWindow):
             self._check_predictor_bootstrap_hint()
         if _is_port_busy(_ZMQ_PORT):
             if _ping_engine():
-                logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
-                self._engine_external = True
-                return
-            logger.warning(
-                "Порт %d занят, но CryoDAQ engine не отвечает — запускаем новый",
-                _ZMQ_PORT,
-            )
+                if self._replay_source is None:
+                    logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
+                    self._engine_external = True
+                    return
+                # Replay mode: don't hijack the live engine. The replay engine
+                # subprocess will raise on port collision unless --force-replay is set.
+            else:
+                logger.warning(
+                    "Порт %d занят, но CryoDAQ engine не отвечает — запускаем новый",
+                    _ZMQ_PORT,
+                )
 
         # Probe lock file via flock — OS-agnostic, no read_text on Windows
         from cryodaq.paths import get_data_dir
@@ -449,11 +459,16 @@ class LauncherWindow(QMainWindow):
                 for _ in range(30):
                     time.sleep(0.5)
                     if _is_port_busy(_ZMQ_PORT):
-                        logger.info("Engine ready — connecting")
-                        self._engine_external = True
-                        return
-                logger.error("Engine holds lock but port not ready. Run: cryodaq-engine --force")
-                return
+                        if self._replay_source is None:
+                            logger.info("Engine ready — connecting")
+                            self._engine_external = True
+                            return
+                        break  # replay mode: don't hijack live engine
+                else:
+                    logger.error(
+                        "Engine holds lock but port not ready. Run: cryodaq-engine --force"
+                    )
+                    return
             finally:
                 if probe_fd is not None:
                     try:
@@ -577,9 +592,36 @@ class LauncherWindow(QMainWindow):
         for attempt in range(max_attempts):
             time.sleep(interval_s)
             if _is_port_busy(_ZMQ_PORT):
+                # In replay mode, verify our subprocess bound the port rather than a
+                # pre-existing live engine. If the subprocess already exited it lost
+                # the port race — treat this as a startup failure, not "ready".
+                if (
+                    self._replay_source is not None
+                    and self._engine_proc is not None
+                    and self._engine_proc.poll() is not None
+                ):
+                    logger.error(
+                        "Replay engine exited before port was ready "
+                        "(port collision with a live engine?). "
+                        "Stop the real engine first, or use --force-replay."
+                    )
+                    self._replay_engine_failed = True
+                    return
                 logger.info("Engine ready (attempt %d/%d)", attempt + 1, max_attempts)
                 return
         logger.warning("Engine did not respond after %d attempts, proceeding anyway", max_attempts)
+
+    def _show_replay_engine_failure(self) -> None:
+        """Show error and close when the replay engine could not start."""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            self,
+            "Replay Engine Failed",
+            "The replay engine could not start.\n\n"
+            "Port 5555 is already in use by a live engine.\n"
+            "Stop the real engine first, or use --force-replay to override.",
+        )
+        self.close()
 
     def _stop_engine(self) -> None:
         """Остановить engine подпроцесс."""
@@ -1472,6 +1514,8 @@ def main() -> None:
     )
     if not args.tray:
         window.show()
+        if replay_source is not None:
+            window.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
 
     # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill)
     # and SIGINT (Ctrl+C) cleanly shut down the engine subprocess rather than
