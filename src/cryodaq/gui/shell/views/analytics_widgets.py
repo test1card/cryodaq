@@ -606,7 +606,20 @@ class VacuumPredictionWidget(QWidget):
 
 
 class CooldownPredictionWidget(QWidget):
-    """Linear-Y prediction widget wrapped for cooldown forecast."""
+    """Linear-Y prediction widget wrapped for cooldown forecast.
+
+    F-MockPredictor: when CooldownDetector backend is IDLE (Mac mock on
+    already-cooled data), feed actual readings into a SteadyStatePredictor
+    and render a horizontal asymptote line + ±sigma band + "Стационарное
+    состояние ≈ X K" badge in place of the empty placeholder. Mirrors the
+    pattern in :class:`RThermalLiveWidget` verbatim.
+    """
+
+    # Predictor convergence threshold: show overlay when ≥30% settled
+    # (matches RThermalLiveWidget).
+    _SETTLE_THRESHOLD: float = 30.0
+    # Internal predictor key — channel-id-agnostic, only the widget feeds it.
+    _PRED_CHANNEL = "cold_stage"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -632,19 +645,70 @@ class CooldownPredictionWidget(QWidget):
         _ph_font.setPixelSize(theme.FONT_SIZE_BASE)
         self._placeholder.setFont(_ph_font)
 
+        # F-MockPredictor: steady-state badge (replaces placeholder when stationary).
+        self._steady_badge = pg.TextItem(
+            "",
+            anchor=(0.5, 0.5),
+            color=QColor(theme.STATUS_INFO),
+        )
+        _badge_font = QFont(theme.FONT_BODY)
+        _badge_font.setPixelSize(theme.FONT_SIZE_BASE)
+        _badge_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+        self._steady_badge.setFont(_badge_font)
+        self._steady_badge.setVisible(False)
+
+        # F-MockPredictor: asymptote ±sigma band (rendered behind line).
+        band_color = QColor(theme.STATUS_INFO)
+        band_color.setAlpha(64)
+        self._asym_band = pg.LinearRegionItem(
+            values=[0.0, 0.0],
+            orientation="horizontal",
+            brush=pg.mkBrush(band_color),
+            movable=False,
+        )
+        self._asym_band.setVisible(False)
+        self._inner._plot.addItem(self._asym_band)
+
+        # F-MockPredictor: asymptote dashed line.
+        self._asym_line = pg.InfiniteLine(
+            angle=0,
+            pen=pg.mkPen(
+                color=QColor(theme.STATUS_INFO),
+                width=theme.PLOT_LINE_WIDTH,
+                style=Qt.DashLine,
+            ),
+            label="T∞",
+            labelOpts={"color": theme.STATUS_INFO, "position": 0.95},
+        )
+        self._asym_line.setVisible(False)
+        self._inner._plot.addItem(self._asym_line)
+
         _vb = self._inner._plot.getPlotItem().getViewBox()
         _vb.addItem(self._placeholder, ignoreBounds=True)
-        _vb.sigRangeChanged.connect(self._reposition_placeholder)
-        self._reposition_placeholder()
+        _vb.addItem(self._steady_badge, ignoreBounds=True)
+        _vb.sigRangeChanged.connect(self._reposition_overlays)
+
+        # F-MockPredictor: SteadyStatePredictor (params verbatim from RThermalLiveWidget).
+        self._ss_predictor = SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
+        self._last_ts_seen: float = 0.0
+
+        self._reposition_overlays()
         self._placeholder.setVisible(True)
 
-    def _reposition_placeholder(self) -> None:
+    def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
         xr, yr = vb.viewRange()
-        self._placeholder.setPos((xr[0] + xr[1]) / 2, (yr[0] + yr[1]) / 2)
+        cx = (xr[0] + xr[1]) / 2
+        cy = (yr[0] + yr[1]) / 2
+        self._placeholder.setPos(cx, cy)
+        self._steady_badge.setPos(cx, cy)
 
     def set_cooldown_data(self, data) -> None:
         if data is None:
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
+            self._placeholder.setVisible(True)
             return
         # CooldownData from analytics_view has actual_trajectory,
         # predicted_trajectory, ci_trajectory (t, lo, hi triples).
@@ -652,6 +716,15 @@ class CooldownPredictionWidget(QWidget):
         predicted = getattr(data, "predicted_trajectory", []) or []
         ci = getattr(data, "ci_trajectory", []) or []
         self._inner.set_history([(t, v) for (t, v) in actual])
+
+        # Feed only new actual points into the predictor (avoid double-feed).
+        if actual:
+            for ts, val in actual:
+                if ts > self._last_ts_seen:
+                    self._ss_predictor.add_point(self._PRED_CHANNEL, ts, val)
+                    self._last_ts_seen = ts
+            self._ss_predictor.update(time.time())
+
         if predicted and ci:
             lower = [(t, lo) for (t, lo, _hi) in ci]
             upper = [(t, hi) for (t, _lo, hi) in ci]
@@ -661,8 +734,33 @@ class CooldownPredictionWidget(QWidget):
                 upper,
                 ci_level_pct=67.0,
             )
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
             self._placeholder.setVisible(False)
+            return
+
+        # No active prediction — check for steady-state asymptote.
+        pred = self._ss_predictor.get_prediction(self._PRED_CHANNEL)
+        if (
+            pred is not None
+            and pred.valid
+            and pred.percent_settled >= self._SETTLE_THRESHOLD
+        ):
+            t_inf = pred.t_predicted
+            sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
+            self._asym_line.setPos(t_inf)
+            self._asym_band.setRegion([t_inf - sigma, t_inf + sigma])
+            self._asym_line.setVisible(True)
+            self._asym_band.setVisible(True)
+            self._steady_badge.setPlainText(f"Стационарное состояние ≈ {t_inf:.2f} K")
+            self._steady_badge.setVisible(True)
+            self._placeholder.setVisible(False)
+            self._reposition_overlays()
         else:
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
             self._placeholder.setVisible(True)
 
 

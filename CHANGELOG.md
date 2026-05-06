@@ -33,6 +33,15 @@
 
 ### Added
 
+- **F-MockPredictor** — `CooldownPredictionWidget` now renders a horizontal
+  asymptote line + ±sigma band + "Стационарное состояние ≈ X K" badge when
+  the embedded `SteadyStatePredictor` reports a settled fit (`percent_settled
+  ≥ 30%`) while the `CooldownDetector` backend is IDLE. Replaces the prior
+  empty "Охлаждение не активно" placeholder on Mac mock and any other
+  already-cooled stream. Pattern mirrors `RThermalLiveWidget` verbatim
+  (window 600 s, update 30 s, settle threshold 30 %, `STATUS_INFO` tokens).
+  Backend (`CooldownDetector`, `CooldownService`) untouched.
+
 - **F-ChannelLandmarks** — system-level channel identity layer.
   `config/physical_alarms.yaml` gains an optional `landmarks:` section that
   pins hardware-fixed channels (Т11/Т12 — GM-cooler stages) to canonical
