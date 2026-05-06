@@ -45,8 +45,8 @@ agent:
     format_model: gemma4:e2b
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 10.0
-    format_timeout_s: 20.0
+    intent_timeout_s: 20.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
+    format_timeout_s: 40.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
     rate_limit:
       max_queries_per_chat_per_hour: 60
 
@@ -65,7 +65,7 @@ agent:
     format_model: gemma4:e2b
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 15.0
-    format_timeout_s: 30.0
+    intent_timeout_s: 20.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
+    format_timeout_s: 40.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
     rate_limit:
       max_queries_per_chat_per_hour: 60

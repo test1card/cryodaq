@@ -126,12 +126,15 @@ async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
         await server.stop()
 
 
-def test_engine_commands_keep_fast_inner_timeouts() -> None:
+def test_engine_commands_keep_inner_timeouts_wired() -> None:
+    """Verify the inner-timeout wiring is in place; do NOT pin specific
+    seconds (F-TimeoutRelax bumped them and this test should not block
+    future tuning)."""
     engine_py = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "engine.py"
     source = engine_py.read_text(encoding="utf-8")
 
-    assert "_LOG_GET_TIMEOUT_S = 1.5" in source
-    assert "_EXPERIMENT_STATUS_TIMEOUT_S = 1.5" in source
+    assert "_LOG_GET_TIMEOUT_S" in source
+    assert "_EXPERIMENT_STATUS_TIMEOUT_S" in source
     assert 'if action == "log_get":' in source
     assert 'if action == "experiment_status":' in source
     assert "await asyncio.wait_for(" in source

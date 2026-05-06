@@ -55,7 +55,7 @@ class AssistantConfig:
     enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"
     default_model: str = "gemma4:e4b"
-    timeout_s: float = 30.0
+    timeout_s: float = 60.0
     temperature: float = 0.3
     max_tokens: int = 2048  # gemma4:e4b is thinking-first; needs 2048+ for thought + response
     max_concurrent_inferences: int = 2
@@ -86,8 +86,8 @@ class AssistantConfig:
     query_format_model: str | None = None
     query_intent_temperature: float = 0.1
     query_format_temperature: float = 0.3
-    query_intent_timeout_s: float = 10.0
-    query_format_timeout_s: float = 20.0
+    query_intent_timeout_s: float = 20.0
+    query_format_timeout_s: float = 40.0
     query_max_per_chat_per_hour: int = 60
 
     def get_periodic_report_interval_s(self) -> float:

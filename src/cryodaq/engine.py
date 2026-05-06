@@ -98,8 +98,8 @@ _DATA_DIR = get_data_dir()
 
 # Интервал самодиагностики (секунды)
 _WATCHDOG_INTERVAL_S = 30.0
-_LOG_GET_TIMEOUT_S = 1.5
-_EXPERIMENT_STATUS_TIMEOUT_S = 1.5
+_LOG_GET_TIMEOUT_S = 5.0
+_EXPERIMENT_STATUS_TIMEOUT_S = 5.0
 
 
 async def _periodic_report_tick(

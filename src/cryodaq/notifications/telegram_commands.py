@@ -359,13 +359,13 @@ class TelegramCommandBot:
         try:
             response = await asyncio.wait_for(
                 self._query_agent.handle_query(text, chat_id=chat_id),
-                timeout=30.0,
+                timeout=60.0,
             )
             await self._send(chat_id, response)
         except TimeoutError:
             await self._send(
                 chat_id,
-                "🤖 Гемма: запрос обрабатывался слишком долго (>30s). Попробуй короче.",
+                "🤖 Гемма: запрос обрабатывался слишком долго (>60s). Попробуй короче.",
             )
         except Exception as exc:
             logger.error("Query agent error: %s", exc, exc_info=True)

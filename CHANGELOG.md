@@ -9,6 +9,28 @@
 
 ## [0.54.0] — unreleased — feat(query): channel landmarks for AI
 
+### Changed
+
+- **F-TimeoutRelax** — command/query timeout values relaxed for slower
+  hardware (cold-start Ollama on a laggy operator laptop).
+
+  - `engine.py`: `_LOG_GET_TIMEOUT_S` and `_EXPERIMENT_STATUS_TIMEOUT_S`
+    raised from 1.5 s to 5.0 s. Both commands read from SQLite +
+    experiment manager (~50 ms typical, ~500 ms p99 under load); 5 s
+    gives ~10× headroom for cold-cache or IO contention without
+    affecting the user-visible latency budget.
+  - `notifications/telegram_commands.py`: per-query Telegram dispatch
+    `wait_for(...)` raised from 30 s to 60 s, matching the operator
+    message text. Cold-start Ollama can spend 20–40 s loading the
+    model into RAM; subsequent queries stay fast.
+  - `agents/assistant/live/agent.py` `AssistantConfig` defaults raised
+    2× across the board: `timeout_s` 30→60, `query_intent_timeout_s`
+    10→20, `query_format_timeout_s` 20→40. YAML overrides are
+    unchanged.
+
+  Safety-critical timeouts (ZMQ heartbeats, watchdogs, fault-on-silence
+  thresholds) are NOT touched.
+
 ### Added
 
 - **F-ChannelLandmarks** — system-level channel identity layer.
