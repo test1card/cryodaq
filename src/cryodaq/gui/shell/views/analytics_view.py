@@ -188,16 +188,6 @@ class AnalyticsView(QWidget):
     # ------------------------------------------------------------------
 
     def set_cooldown(self, data: CooldownData | None) -> None:
-        # [D4-COOLDOWN] Site D
-        import logging as _lg
-        _d4 = _lg.getLogger("cryodaq.dbg.cooldown")
-        self._d4_dispatch = getattr(self, "_d4_dispatch", 0) + 1
-        if self._d4_dispatch <= 5 or self._d4_dispatch % 100 == 0:
-            _d4.warning(
-                "[D4-COOLDOWN] Site D dispatch call#%d: data_present=%s",
-                self._d4_dispatch,
-                data is not None,
-            )
         self._last_cooldown = data
         self._forward("set_cooldown_data", data)
 

@@ -644,22 +644,6 @@ class CooldownPredictionWidget(QWidget):
         self._placeholder.setPos((xr[0] + xr[1]) / 2, (yr[0] + yr[1]) / 2)
 
     def set_cooldown_data(self, data) -> None:
-        # [D4-COOLDOWN] Site C
-        import logging as _lg
-        _d4 = _lg.getLogger("cryodaq.dbg.cooldown")
-        self._d4_widget = getattr(self, "_d4_widget", 0) + 1
-        if self._d4_widget <= 5 or self._d4_widget % 50 == 0:
-            _actual = len(getattr(data, "actual_trajectory", []) or []) if data else 0
-            _pred = len(getattr(data, "predicted_trajectory", []) or []) if data else 0
-            _d4.warning(
-                "[D4-COOLDOWN] Site C widget call#%d: data=%s actual=%d pred=%d "
-                "placeholder_visible=%s",
-                self._d4_widget,
-                type(data).__name__ if data else "None",
-                _actual,
-                _pred,
-                self._placeholder.isVisible(),
-            )
         if data is None:
             return
         # CooldownData from analytics_view has actual_trajectory,

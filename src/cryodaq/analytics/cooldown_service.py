@@ -269,18 +269,6 @@ class CooldownService:
         except Exception as exc:
             logger.error("Ошибка загрузки модели охлаждения: %s", exc)
 
-        # [D4-COOLDOWN] Site A — startup probe
-        _d4 = logging.getLogger("cryodaq.dbg.cooldown")
-        _d4.warning(
-            "[D4-COOLDOWN] Site A start: model_dir=%s model_file_exists=%s "
-            "model_loaded=%s channel_cold=%r channel_warm=%r",
-            self._model_dir,
-            (self._model_dir / "predictor_model.json").exists(),
-            self._model is not None,
-            self._channel_cold,
-            self._channel_warm,
-        )
-
         self._running = True
         self._consume_task = asyncio.create_task(
             self._consume_loop(),
@@ -364,24 +352,7 @@ class CooldownService:
 
     async def _do_predict(self) -> None:
         """Выполнить прогнозирование и опубликовать результат."""
-        # [D4-COOLDOWN] Site B — tick instrumentation
-        _d4 = logging.getLogger("cryodaq.dbg.cooldown")
-        self._d4_tick = getattr(self, "_d4_tick", 0) + 1
-        _d4_n = self._d4_tick
-        if _d4_n <= 3 or _d4_n % 10 == 0:
-            _d4.warning(
-                "[D4-COOLDOWN] Site B tick#%d: model=%s T_cold=%s T_warm=%s "
-                "phase=%s buffer=%d",
-                _d4_n,
-                self._model is not None,
-                self._last_T_cold,
-                self._last_T_warm,
-                self._detector.phase.value,
-                len(self._buffer),
-            )
-
         if self._model is None:
-            _d4.warning("[D4-COOLDOWN] Site B early-exit#%d: reason=model_none", _d4_n)
             return
 
         phase = self._detector.phase
@@ -390,14 +361,6 @@ class CooldownService:
         T_cold = self._last_T_cold
         T_warm = self._last_T_warm
         if T_cold is None or T_warm is None:
-            _d4.warning(
-                "[D4-COOLDOWN] Site B early-exit#%d: reason=channels_none "
-                "T_cold=%s T_warm=%s phase=%s",
-                _d4_n,
-                T_cold,
-                T_warm,
-                phase.value,
-            )
             return
 
         # Compute elapsed time
