@@ -993,6 +993,26 @@ If CC is running without architect during a multi-model session:
 
 ---
 
+### 7.9 Capitulating to by-design findings without architect check
+
+**What happened (v0.52.11, 2026-05-06):** Codex flagged `make bootstrap-predictor`
+as broken because `cooldown_v5/predictor_model.json` was not in the committed tree
+on a fresh checkout. CC treated this as a correctness defect and committed `cooldown_v5/`
+(10 files, 2.1 MB). Second round FAIL escalated to committing the model at
+`data/cooldown_model/` — blocked by the `data/` gitignore. Architect reversed both
+changes: "bootstrap targets are by-design first-run manual steps; this is a false positive."
+
+**Don't:** implement a fix for a Codex finding when the finding describes behavior
+that was explicitly designed. `make bootstrap-predictor` follows the same pattern as
+`pip install`, `npm install`, or any other first-run setup step.
+
+**Do:** when Codex flags something as broken, bring the finding to architect first with
+a reframing: "Codex says X is broken; my read is this is by-design because Y. Fix or
+decline?" One sentence, then wait. Saves a 3-cycle review loop and a 2.1 MB binary
+committed by mistake.
+
+---
+
 *This skill is living. If a rule here becomes wrong, flag it in
 session ledger under "Open for next architect session". Architect
 updates this file via normal commit. Do not silently diverge.*

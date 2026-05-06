@@ -34,6 +34,8 @@ def _check_port_available(addr: str, *, force: bool) -> None:
     Without --force-replay, raises RuntimeError if another process holds the
     port.  This prevents the replay engine from silently stealing ports from
     a running real engine after it frees them via _bind_with_retry retries.
+    Wildcard bind addresses (tcp://*:N, tcp://0.0.0.0:N) are normalized to
+    127.0.0.1 for the connectivity check.
     """
     if force:
         return
@@ -41,11 +43,16 @@ def _check_port_available(addr: str, *, force: bool) -> None:
         _, hostport = addr.rsplit("//", 1)
         host, port_str = hostport.rsplit(":", 1)
         port = int(port_str)
+        # Normalize wildcard bind addresses → loopback for connectivity check.
+        check_host = "127.0.0.1" if host in ("*", "", "0.0.0.0") else host
     except (ValueError, AttributeError):
         return
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        in_use = sock.connect_ex((host, port)) == 0
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            in_use = sock.connect_ex((check_host, port)) == 0
+    except OSError:
+        return  # Resolution or network error — skip check, don't block startup
     if in_use:
         raise RuntimeError(
             f"[spec Q1] Port {port} ({addr}) is already in use — "
