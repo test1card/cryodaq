@@ -22,7 +22,7 @@ Do NOT:
 
 DO:
 - At the CC prompt line, write `/codex` followed by the prompt body
-  (starting with `Model: gpt-5.4` and `Reasoning effort: high` on
+  (starting with `Model: gpt-5.5` and `Reasoning effort: high` on
   the first two lines).
 - Send. Wait for response. Read verdict.
 
@@ -34,16 +34,16 @@ If the command returns «unknown command» or errors out:
 
 The model / reasoning flags can be passed two ways — use BOTH:
 1. Inline CLI-style after the command (if the plugin accepts them):
-   `/codex --model gpt-5.4 --reasoning high`
+   `/codex --model gpt-5.5 --reasoning high`
 2. As first two lines of the prompt body:
    ```
-   Model: gpt-5.4
+   Model: gpt-5.5
    Reasoning effort: high
    ```
 Belt + suspenders. Codex honors whichever gets parsed.
 
 After the response arrives, verify the response header reports the
-actual model used was `gpt-5.4` (NOT `o3`). If the response says o3:
+actual model used was `gpt-5.5` (NOT `o3`). If the response says o3:
 - Retry once with the flags clearly specified.
 - If still o3: record «Codex stuck on o3 — verdict unreliable» in
   the block's report and treat the review as DEFERRED (push commit,
@@ -239,7 +239,7 @@ The VERY FIRST two lines of the prompt body (before "Working dir:")
 must be:
 
 ```
-Model: gpt-5.4
+Model: gpt-5.5
 Reasoning effort: high
 ```
 
@@ -255,7 +255,7 @@ for the authoritative invocation rules. Do NOT duplicate them here.
 
 Short reminder:
 - `/codex` is a slash command. Just type it followed by the prompt.
-- First two lines of prompt body: `Model: gpt-5.4` + `Reasoning
+- First two lines of prompt body: `Model: gpt-5.5` + `Reasoning
   effort: high`. Plus inline flags if the plugin accepts them.
 - Do NOT search the filesystem for the command.
 - Do NOT run `/codex --help` — don't fish for flag syntax; set the
@@ -266,9 +266,9 @@ Short reminder:
 ### Example invocation (CC-side)
 
 ```
-/codex --model gpt-5.4 --reasoning high
+/codex --model gpt-5.5 --reasoning high
 
-Model: gpt-5.4
+Model: gpt-5.5
 Reasoning effort: high
 
 Working dir: /Users/vladimir/Projects/cryodaq
@@ -286,7 +286,7 @@ prompt body. Belt + suspenders. Don't worry about which path works;
 provide both.
 
 CC reads Codex's response inline, parses the first-line verdict,
-confirms the response header reports gpt-5.4 (NOT o3), and proceeds
+confirms the response header reports gpt-5.5 (NOT o3), and proceeds
 per the loop rules above. If the response came from o3, retry once
 with the override. If still o3: treat as DEFERRED, push the commit,
 move on.
@@ -299,7 +299,7 @@ When amending for a Codex-identified fix, the next /codex call uses
 a SHORTER prompt focused only on the residual check:
 
 ```
-Model: gpt-5.4
+Model: gpt-5.5
 Reasoning effort: high
 
 Working dir: /Users/vladimir/Projects/cryodaq
