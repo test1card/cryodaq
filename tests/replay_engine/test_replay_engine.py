@@ -249,6 +249,8 @@ async def test_replay_engine_curve_data_pub(tmp_path):
     sub.setsockopt(zmq.LINGER, 0)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
+    # ZMQ slow-joiner: give connection time to establish before source publishes.
+    await asyncio.sleep(0.05)
     readings = []
     try:
         deadline = asyncio.get_event_loop().time() + 3.0
