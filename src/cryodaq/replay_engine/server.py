@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from cryodaq.core.broker import DataBroker
 from cryodaq.core.zmq_bridge import (
     DEFAULT_CMD_ADDR,
     DEFAULT_PUB_ADDR,
@@ -20,6 +23,7 @@ from cryodaq.core.zmq_bridge import (
     ZMQPublisher,
 )
 from cryodaq.drivers.base import Reading
+from cryodaq.paths import get_config_dir, get_project_root
 from cryodaq.replay_engine.sources import resolve_source
 
 logger = logging.getLogger("cryodaq.replay_engine")
@@ -117,6 +121,9 @@ class ReplayEngine:
         self._session_start: float = 0.0
         self._readings_published: int = 0
         self._watchdog_task: asyncio.Task | None = None
+        self._broker: DataBroker | None = None
+        # CooldownService instance once wired (Any to avoid eager import).
+        self._cooldown_service: Any | None = None
 
     async def start(self) -> None:
         # Spec Q1: refuse if ports are already bound (another engine running).
@@ -133,7 +140,12 @@ class ReplayEngine:
             warm_channel=self._warm_channel,
         )
 
-        self._pub_queue = asyncio.Queue(maxsize=10_000)
+        # F-ReplayPredictor: insert DataBroker between source and PUB queue so
+        # CooldownService can subscribe to readings and publish derived metrics
+        # (analytics/cooldown_predictor/cooldown_eta) back into the same fan-out.
+        self._broker = DataBroker()
+        self._pub_queue = await self._broker.subscribe("zmq_pub", maxsize=10_000)
+
         self._pub = ZMQPublisher(self._pub_addr)
         await self._pub.start(self._pub_queue)
         logger.info("ZMQPublisher bound: %s", self._pub_addr)
@@ -142,13 +154,15 @@ class ReplayEngine:
         await self._cmd.start()
         logger.info("ZMQCommandServer bound: %s", self._cmd_addr)
 
-        self._watchdog_task = asyncio.create_task(
-            self._watchdog_loop(), name="replay_watchdog"
-        )
+        # Best-effort: bolt on CooldownService if cooldown.yaml + model exist.
+        # Predictor is non-critical for replay — failures must not abort startup.
+        await self._maybe_start_cooldown_service()
+
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop(), name="replay_watchdog")
 
     async def run_source(self) -> None:
-        """Feed readings from the source into the PUB queue.  Blocks until done."""
-        if self._source is None or self._pub_queue is None:
+        """Feed readings from the source into the broker.  Blocks until done."""
+        if self._source is None or self._broker is None:
             raise RuntimeError("ReplayEngine.start() must be called before run_source()")
         logger.info("Replay source started: %s", self._source_path)
         await self._source.run(self._publish_reading)
@@ -167,6 +181,14 @@ class ReplayEngine:
             self._watchdog_task = None
         if self._source is not None:
             self._source.stop()
+        # Stop CooldownService BEFORE tearing down ZMQ so its tasks unwind
+        # cleanly while the broker is still alive.
+        if self._cooldown_service is not None:
+            try:
+                await self._cooldown_service.stop()
+            except Exception:
+                logger.exception("CooldownService stop raised; continuing shutdown")
+            self._cooldown_service = None
         if self._cmd is not None:
             await self._cmd.stop()
         if self._pub is not None:
@@ -199,9 +221,97 @@ class ReplayEngine:
     # ------------------------------------------------------------------
 
     async def _publish_reading(self, reading: Reading) -> None:
-        assert self._pub_queue is not None
+        # Route every reading through the broker; the "zmq_pub" subscription
+        # forwards to ZMQPublisher, and CooldownService (if wired) consumes
+        # T_cold/T_warm to compute cooldown_eta.
+        assert self._broker is not None
         self._readings_published += 1
-        await self._pub_queue.put(reading)
+        await self._broker.publish(reading)
+        # broker.publish is non-yielding (put_nowait); at speed=0.0 the source
+        # loop has no internal sleeps, so without this yield ZMQPublisher and
+        # SUB consumers can starve until the entire source drains.
+        await asyncio.sleep(0)
+
+    async def _maybe_start_cooldown_service(self) -> None:
+        """Best-effort wire-up of CooldownService onto the replay broker.
+
+        Activates only when ``config/cooldown.yaml`` declares
+        ``cooldown.enabled: true`` AND the predictor model file exists.
+        Any failure logs a warning and leaves ``self._cooldown_service`` None;
+        the predictor is not load-bearing for replay mode.
+
+        Channel-name override: ``cooldown.yaml`` ships with real-lab channel
+        names (Т7/Т5) which differ from the canonical replay channels
+        (Т12/Т11). We force the replay channels here so the predictor sees
+        the same names the source publishes — without mutating the on-disk
+        config used by the real engine.
+        """
+        try:
+            cooldown_cfg_path = get_config_dir() / "cooldown.yaml"
+            if not cooldown_cfg_path.exists():
+                logger.info(
+                    "cooldown.yaml not found at %s — predictor disabled in replay",
+                    cooldown_cfg_path,
+                )
+                return
+            with cooldown_cfg_path.open(encoding="utf-8") as fh:
+                cd_raw = yaml.safe_load(fh) or {}
+            cd_cfg: dict[str, Any] = dict(cd_raw.get("cooldown", {}))
+            if not cd_cfg.get("enabled", False):
+                logger.info("cooldown.enabled=False — predictor disabled in replay")
+                return
+
+            # Channel override (replay is the authority on channel names here).
+            prev_cold = cd_cfg.get("channel_cold")
+            prev_warm = cd_cfg.get("channel_warm")
+            cd_cfg["channel_cold"] = self._cold_channel
+            cd_cfg["channel_warm"] = self._warm_channel
+            if prev_cold and prev_cold != self._cold_channel:
+                logger.info(
+                    "Channel override (replay): cooldown.yaml channel_cold='%s' -> '%s'",
+                    prev_cold,
+                    self._cold_channel,
+                )
+            if prev_warm and prev_warm != self._warm_channel:
+                logger.info(
+                    "Channel override (replay): cooldown.yaml channel_warm='%s' -> '%s'",
+                    prev_warm,
+                    self._warm_channel,
+                )
+
+            model_dir_str = cd_cfg.get("model_dir", "data/cooldown_model")
+            model_dir = Path(model_dir_str)
+            if not model_dir.is_absolute():
+                model_dir = get_project_root() / model_dir
+            if not (model_dir / "predictor_model.json").exists():
+                logger.info(
+                    "Predictor model not found at %s — predictor disabled in replay",
+                    model_dir / "predictor_model.json",
+                )
+                return
+
+            from cryodaq.analytics.cooldown_service import CooldownService
+
+            assert self._broker is not None
+            self._cooldown_service = CooldownService(
+                broker=self._broker,
+                config=cd_cfg,
+                model_dir=model_dir,
+            )
+            await self._cooldown_service.start()
+            logger.info(
+                "CooldownService started in replay engine (cold='%s' warm='%s' model_dir=%s)",
+                self._cold_channel,
+                self._warm_channel,
+                model_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CooldownService failed to start in replay; predictor disabled: %s",
+                exc,
+                exc_info=True,
+            )
+            self._cooldown_service = None
 
     async def _handle_command(self, cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")

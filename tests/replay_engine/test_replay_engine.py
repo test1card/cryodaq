@@ -154,14 +154,27 @@ async def _stop_engine(engine, source_task) -> None:
 @pytest.mark.asyncio
 async def test_replay_engine_heartbeat(tmp_path):
     """PUB socket delivers readings within 2 s — proves bridge sub_drain_loop
-    would emit heartbeats when connected to the replay engine."""
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    would emit heartbeats when connected to the replay engine.
+
+    Subscribe BEFORE creating the source task to mitigate the ZMQ slow-joiner
+    race (same pattern as test_replay_engine_curve_data_pub).
+    """
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    j = tmp_path / "curve.json"
+    _write_curve_json(j)
+    engine = ReplayEngine(j, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
+    await engine.start()
+
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
     sub.setsockopt(zmq.RCVTIMEO, 2000)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
+    await asyncio.sleep(0.05)  # Let ZMQ subscription establish before source.
+
+    source_task = asyncio.create_task(engine.run_source(), name="test_source")
     try:
         parts = await asyncio.wait_for(sub.recv_multipart(), timeout=2.0)
         assert len(parts) == 2
@@ -185,6 +198,7 @@ async def test_replay_engine_safety_status(tmp_path):
         await req.send_string('{"cmd": "safety_status"}')
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         import json as _json
+
         reply = _json.loads(raw)
         assert reply["ok"] is True
         assert reply["state"] == "replay"
@@ -212,6 +226,7 @@ async def test_replay_engine_current_phase(tmp_path):
     try:
         await req.send_string('{"cmd": "current_phase"}')
         import json as _json
+
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is True
@@ -234,6 +249,7 @@ async def test_replay_engine_rejects_set_target(tmp_path):
     try:
         await req.send_string('{"cmd": "set_target", "channel": "T11", "value": 4.2}')
         import json as _json
+
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is False
@@ -255,6 +271,7 @@ async def test_replay_engine_rejects_keithley_command(tmp_path):
     try:
         await req.send_string('{"cmd": "keithley_emergency_off"}')
         import json as _json
+
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is False
@@ -331,6 +348,7 @@ async def test_replay_engine_experiment_status(tmp_path):
     try:
         await req.send_string('{"cmd": "experiment_status"}')
         import json as _json
+
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is True
@@ -357,6 +375,7 @@ async def test_replay_engine_cooldown_history_unavailable(tmp_path):
     try:
         await req.send_string('{"cmd": "cooldown_history_get"}')
         import json as _json
+
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is False
@@ -396,12 +415,12 @@ async def test_directory_replay_skips_empty_first_file(tmp_path):
     assert len(received) == 5
     # Confirm timestamps shifted to wall-clock now (not original 2023)
     from datetime import UTC, datetime
+
     now_ts = datetime.now(tz=UTC).timestamp()
     for r in received:
         delta = abs(r.timestamp.timestamp() - now_ts)
         assert delta < 60, (
-            f"Reading timestamp {r.timestamp} not shifted to now: "
-            f"delta={delta}s expected <60s"
+            f"Reading timestamp {r.timestamp} not shifted to now: delta={delta}s expected <60s"
         )
 
 
