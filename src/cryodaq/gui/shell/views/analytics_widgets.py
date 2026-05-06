@@ -297,6 +297,9 @@ class TemperatureOverviewWidget(QWidget):
             return
         now = time.time()
         pi.setXRange(now - window.seconds, now, padding=0)
+        # Y must autoscale to data; X-pinning alone leaves Y at pyqtgraph
+        # default ~[0,1], hiding 77-300K curves while legend still renders.
+        pi.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
         self._maybe_refetch_history(window)
 
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
