@@ -54,6 +54,25 @@ pip install -e ".[web]"
 
 Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
 
+### Bootstrap predictor model
+
+При развёртывании CryoDAQ на новой машине модель предиктора охлаждения
+необходимо скопировать из канонического источника.
+
+```bash
+make bootstrap-predictor
+```
+
+Эта команда копирует `cooldown_v5/predictor_model.json` в
+`data/cooldown_model/predictor_model.json`. Ручной аналог:
+
+```bash
+mkdir -p data/cooldown_model
+cp cooldown_v5/predictor_model.json data/cooldown_model/
+```
+
+Если модель не развёрнута, лаунчер выводит подсказку при старте.
+
 ## 4. Локальная конфигурация
 
 Создайте machine-specific overrides:

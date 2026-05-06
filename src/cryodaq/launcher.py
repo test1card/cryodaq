@@ -388,8 +388,25 @@ class LauncherWindow(QMainWindow):
         except (OSError, ProcessLookupError):
             return False
 
+    def _check_predictor_bootstrap_hint(self) -> None:
+        """Log a one-line INFO suggesting bootstrap when model is missing
+        but canonical source is present. Operator-explicit only — no auto-copy.
+        """
+        from cryodaq.paths import get_project_root
+
+        root = get_project_root()
+        deployed = root / "data" / "cooldown_model" / "predictor_model.json"
+        canonical = root / "cooldown_v5" / "predictor_model.json"
+        if not deployed.exists() and canonical.exists():
+            logger.info(
+                "Cooldown predictor model not deployed. "
+                "Run `make bootstrap-predictor` to copy from cooldown_v5/."
+            )
+
     def _start_engine(self, *, wait: bool = True) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
+        if self._replay_source is None:
+            self._check_predictor_bootstrap_hint()
         if _is_port_busy(_ZMQ_PORT):
             if _ping_engine():
                 logger.info("Engine уже запущен (порт %d, ping OK) — подключаемся", _ZMQ_PORT)
