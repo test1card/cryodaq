@@ -315,6 +315,7 @@ class PredictionWidget(QWidget):
         self._history_curve.setData(x=xs, y=ys)
         self._update_now_marker()
         self._refresh_readout()
+        self._apply_x_range()
 
     def set_prediction(
         self,
@@ -342,6 +343,7 @@ class PredictionWidget(QWidget):
         )
         self._update_now_marker()
         self._refresh_readout()
+        self._apply_x_range()
 
     def set_horizon(self, hours: float) -> None:
         # The horizon strip controls the plot's forward X-range only; the
@@ -352,6 +354,7 @@ class PredictionWidget(QWidget):
             return
         self._horizon_hours = hours
         self._apply_horizon_styles()
+        self._apply_x_range()
         self.horizon_changed.emit(hours)
 
     def get_horizon(self) -> float:
@@ -378,6 +381,24 @@ class PredictionWidget(QWidget):
         else:
             return
         self._now_line.setPos(now)
+
+    def _apply_x_range(self) -> None:
+        """Anchor the plot's X-range to history-start … now + horizon.
+
+        Right edge tracks wall-clock ``time.time()`` so the view stays
+        anchored as data flows in; left edge is the first history sample
+        (full history visible). Empty-history fallback uses a 60-second
+        lookback so the now-line and forward range remain visible without
+        the autorange spanning the Unix epoch.
+        """
+        now = time.time()
+        if self._history:
+            left = self._history[0][0]
+        else:
+            left = now - 60.0
+        right = now + self._horizon_hours * 3600.0
+        view = self._plot.getPlotItem().getViewBox()
+        view.setXRange(left, right, padding=0)
 
     def _refresh_readout(self) -> None:
         """Populate every horizon row from the latest history + prediction.

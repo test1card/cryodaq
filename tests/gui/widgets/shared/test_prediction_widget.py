@@ -187,6 +187,60 @@ def test_prediction_horizon_buttons_drive_plot_range_not_readout(app):
         assert w._horizon_rows[hrs]["value"].text() == snapshot[hrs]
 
 
+def test_horizon_button_sets_plot_x_range(app):
+    """Clicking a horizon button updates plot X-range right edge to
+    now + horizon hours, left edge to history start."""
+    import time as _time
+
+    w = PredictionWidget("Cooldown", "T", "K")
+    now = _time.time()
+    history = [(now - 3600.0, 300.0), (now, 100.0)]
+    w.set_history(history)
+
+    w.set_horizon(6.0)
+    left, right = w._plot.getPlotItem().getViewBox().viewRange()[0]
+
+    expected_right = _time.time() + 6.0 * 3600.0
+    assert abs(right - expected_right) < 60.0, f"right={right} expected≈{expected_right}"
+    assert abs(left - (now - 3600.0)) < 60.0, f"left={left} expected≈{now - 3600.0}"
+
+
+def test_horizon_change_reanchors_after_set_prediction(app):
+    """set_prediction re-applies X-range so plot tracks wall-clock now —
+    right edge never goes backward as new prediction frames arrive."""
+    import time as _time
+
+    w = PredictionWidget("Cooldown", "T", "K")
+    now = _time.time()
+    w.set_history([(now - 60.0, 100.0)])
+    w.set_horizon(1.0)
+
+    initial_right = w._plot.getPlotItem().getViewBox().viewRange()[0][1]
+
+    central = [(now + h * 60.0, 100.0 - h) for h in range(120)]
+    w.set_prediction(central, central, central, ci_level_pct=67.0)
+
+    new_right = w._plot.getPlotItem().getViewBox().viewRange()[0][1]
+    # Right edge re-anchors on the latest time.time() call inside
+    # _apply_x_range; tolerance for clock-tick sensitivity.
+    assert new_right >= initial_right - 1.0
+
+
+def test_empty_history_x_range_uses_minute_lookback(app):
+    """No history → left edge falls back to now - 60s, never the Unix epoch.
+    Right edge still anchors on now + horizon."""
+    import time as _time
+
+    w = PredictionWidget("Cooldown", "T", "K")
+    now = _time.time()
+    w.set_horizon(3.0)
+
+    left, right = w._plot.getPlotItem().getViewBox().viewRange()[0]
+    assert left > now - 120.0, f"left={left} suggests epoch fallback"
+    expected_right = _time.time() + 3.0 * 3600.0
+    assert abs(right - expected_right) < 60.0, f"right={right} expected≈{expected_right}"
+
+
 def test_left_axis_auto_si_prefix_disabled_linear_y(app):
     """IV.1 finding 2 — cooldown Y axis must stay in K across 300→4 K range.
 
