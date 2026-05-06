@@ -1,6 +1,6 @@
 ---
 name: cryodaq-team-lead
-description: "Orchestrate Claude Code agent teams for CryoDAQ — a LabVIEW replacement for cryogenic lab instrumentation (АКЦ ФИАН, Millimetron). Full codebase on master (UI phase 1 complete, feat/ui-phase-1 merged 2026-05). Safety-critical: 6-state SafetyManager FSM, fail-on-silence, crash-safe SQLite WAL. 3 instrument types (5 instances), 24 temperature channels."
+description: "Orchestrate Claude Code agent teams for CryoDAQ — a LabVIEW replacement for cryogenic lab instrumentation (АКЦ ФИАН, Millimetron). Full codebase on master (UI phase 1 complete as of 2026-05). Safety-critical: 6-state SafetyManager FSM, fail-on-silence, crash-safe SQLite WAL. 3 instrument types (5 instances), 24 temperature channels."
 ---
 
 # Team Lead — CryoDAQ (master track)
