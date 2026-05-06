@@ -271,3 +271,41 @@ def test_launcher_replay_listing_handles_malformed_json(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "bad_curve.json" in out
     assert "ошибка чтения" in out
+
+
+# ---------------------------------------------------------------------------
+# Regression: Stage 4b D2 introduced a duplicate `from PySide6.QtCore import
+# QTimer` inside LauncherWindow.__init__ that shadowed the module-level
+# binding for the entire method (Python LEGB: any local assignment makes the
+# name function-local for the whole scope), causing UnboundLocalError on
+# line ~328 where self._async_timer = QTimer(self) is constructed.
+# ---------------------------------------------------------------------------
+
+
+def test_launcher_init_no_duplicate_qtimer_import() -> None:
+    """LauncherWindow.__init__ must not contain `from PySide6.QtCore import QTimer`.
+
+    The redundant inner import (added in Stage 4b for the replay-engine-failed
+    branch) shadows the module-level binding and breaks every launcher startup
+    with UnboundLocalError on the early QTimer(self) constructor calls.
+    """
+    import inspect
+
+    from cryodaq.launcher import LauncherWindow
+
+    init_src = inspect.getsource(LauncherWindow.__init__)
+    assert "from PySide6.QtCore import QTimer" not in init_src, (
+        "Duplicate QTimer import inside __init__ shadows module-level binding"
+    )
+
+
+def test_launcher_qtimer_module_import_present() -> None:
+    """Module top must still import QTimer for the rest of the file to work."""
+    import inspect
+
+    from cryodaq import launcher
+
+    src = inspect.getsource(launcher)
+    # Anything before the first 'class ' is module-level; QTimer must appear there
+    pre_class = src.split("class ", 1)[0]
+    assert "QTimer" in pre_class, "QTimer must be imported at module top"

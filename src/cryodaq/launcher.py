@@ -341,7 +341,6 @@ class LauncherWindow(QMainWindow):
         # Start ZMQ bridge subprocess — skip if replay engine failed to start
         # so the bridge doesn't silently attach to a live engine.
         if self._replay_engine_failed:
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(200, self._show_replay_engine_failure)
         else:
             self._bridge.start()
