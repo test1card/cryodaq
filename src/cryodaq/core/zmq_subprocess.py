@@ -150,6 +150,11 @@ def zmq_bridge_main(
                 if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                     with contextlib.suppress(queue.Full):
                         data_queue.put_nowait({"__type": "heartbeat", "ts": now})
+                    logger.warning(  # [D3-REPLAY] — remove in revert commit
+                        "[D3-REPLAY] bridge heartbeat emitted ts=%.1f interval=%.1fs",
+                        now,
+                        now - last_heartbeat,
+                    )
                     last_heartbeat = now
         finally:
             sub.close(linger=0)

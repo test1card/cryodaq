@@ -52,6 +52,11 @@ def main() -> None:
     parser.add_argument("--cmd-addr", type=str, default=DEFAULT_CMD_ADDR)
     parser.add_argument("--cold-channel", type=str, default="Т12")
     parser.add_argument("--warm-channel", type=str, default="Т11")
+    parser.add_argument(
+        "--force-replay",
+        action="store_true",
+        help="Skip port-in-use check (spec Q1). Use only when real engine is stopped.",
+    )
     args = parser.parse_args()
 
     try:
@@ -70,6 +75,7 @@ async def _run(args: argparse.Namespace) -> None:
         cmd_addr=args.cmd_addr,
         cold_channel=args.cold_channel,
         warm_channel=args.warm_channel,
+        force=args.force_replay,
     )
 
     loop = asyncio.get_running_loop()

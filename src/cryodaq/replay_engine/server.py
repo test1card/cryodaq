@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,33 @@ from cryodaq.drivers.base import Reading
 from cryodaq.replay_engine.sources import resolve_source
 
 logger = logging.getLogger("cryodaq.replay_engine")
+
+
+def _check_port_available(addr: str, *, force: bool) -> None:
+    """Refuse to start if a ZMQ TCP port is already bound (spec Q1).
+
+    Without --force-replay, raises RuntimeError if another process holds the
+    port.  This prevents the replay engine from silently stealing ports from
+    a running real engine after it frees them via _bind_with_retry retries.
+    """
+    if force:
+        return
+    try:
+        _, hostport = addr.rsplit("//", 1)
+        host, port_str = hostport.rsplit(":", 1)
+        port = int(port_str)
+    except (ValueError, AttributeError):
+        return
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        in_use = sock.connect_ex((host, port)) == 0
+    if in_use:
+        raise RuntimeError(
+            f"[spec Q1] Port {port} ({addr}) is already in use — "
+            f"another engine is likely running. "
+            f"Stop the real engine first, or pass --force-replay to override."
+        )
+
 
 # Commands that mutate hardware state — always rejected in replay mode.
 _READONLY_PREFIXES: tuple[str, ...] = (
@@ -64,6 +92,7 @@ class ReplayEngine:
         cmd_addr: str = DEFAULT_CMD_ADDR,
         cold_channel: str = "Т12",
         warm_channel: str = "Т11",
+        force: bool = False,
     ) -> None:
         self._source_path = source_path
         self._speed = speed
@@ -73,6 +102,7 @@ class ReplayEngine:
         self._cmd_addr = cmd_addr
         self._cold_channel = cold_channel
         self._warm_channel = warm_channel
+        self._force = force
 
         self._pub: ZMQPublisher | None = None
         self._cmd: ZMQCommandServer | None = None
@@ -82,6 +112,10 @@ class ReplayEngine:
         self._readings_published: int = 0  # [D3-REPLAY]
 
     async def start(self) -> None:
+        # Spec Q1: refuse if ports are already bound (another engine running).
+        _check_port_available(self._pub_addr, force=self._force)
+        _check_port_available(self._cmd_addr, force=self._force)
+
         self._session_start = time.time()
         logger.info(  # [D3-REPLAY]
             "[D3-REPLAY] ReplayEngine.start: source=%s speed=%.1fx phase=%s loop=%s",
