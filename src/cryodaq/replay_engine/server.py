@@ -117,6 +117,7 @@ class ReplayEngine:
         self._source = None
         self._session_start: float = 0.0
         self._readings_published: int = 0  # [D3-REPLAY]
+        self._watchdog_task: asyncio.Task | None = None  # [D3-REPLAY]
 
     async def start(self) -> None:
         # Spec Q1: refuse if ports are already bound (another engine running).
@@ -150,6 +151,10 @@ class ReplayEngine:
         await self._cmd.start()
         logger.info("[D3-REPLAY] ZMQCommandServer bound: %s", self._cmd_addr)  # [D3-REPLAY]
 
+        self._watchdog_task = asyncio.create_task(  # [D3-REPLAY]
+            self._watchdog_loop(), name="replay_watchdog"
+        )
+
     async def run_source(self) -> None:
         """Feed readings from the source into the PUB queue.  Blocks until done."""
         if self._source is None or self._pub_queue is None:
@@ -162,6 +167,13 @@ class ReplayEngine:
         )
 
     async def stop(self) -> None:
+        if self._watchdog_task is not None:  # [D3-REPLAY]
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         if self._source is not None:
             self._source.stop()
         if self._cmd is not None:
@@ -169,6 +181,34 @@ class ReplayEngine:
         if self._pub is not None:
             await self._pub.stop()
         logger.info("[D3-REPLAY] ReplayEngine stopped")  # [D3-REPLAY]
+
+    async def _watchdog_loop(self) -> None:
+        """Periodic HEARTBEAT log matching engine.py _watchdog cadence.  [D3-REPLAY]
+
+        Emitted every 30 s so logs/replay_engine.log shows the same
+        HEARTBEAT entries as logs/engine.log, enabling side-by-side
+        comparison during Stage 3 parity evidence run.
+        Remove in commit 3c with all other [D3-REPLAY] tags.
+        """
+        _WATCHDOG_INTERVAL_S = 30.0
+        try:
+            while True:
+                await asyncio.sleep(_WATCHDOG_INTERVAL_S)
+                uptime_s = time.time() - self._session_start
+                hours, remainder = divmod(int(uptime_s), 3600)
+                minutes, secs = divmod(remainder, 60)
+                logger.warning(  # [D3-REPLAY] WARNING so it appears in log regardless of level
+                    "[D3-REPLAY] HEARTBEAT | uptime=%02d:%02d:%02d | "
+                    "readings_published=%d | source=%s | speed=%.1fx",
+                    hours,
+                    minutes,
+                    secs,
+                    self._readings_published,
+                    self._source_path.name if self._source_path else "?",
+                    self._speed,
+                )
+        except asyncio.CancelledError:
+            return
 
     # ------------------------------------------------------------------
     # Internal
