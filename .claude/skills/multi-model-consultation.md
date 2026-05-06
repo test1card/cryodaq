@@ -788,6 +788,66 @@ good at finding bugs is bad at confirming absence of bugs.
 
 **Ref:** artifacts/calibration/2026-04-30/CALIBRATION-MATRIX.md T3.
 
+### 7.9 Capitulating to by-design findings without architect check
+
+**What happened (v0.52.11, 2026-05-06):** Codex flagged `make bootstrap-predictor`
+as broken because `cooldown_v5/predictor_model.json` was not in the committed tree
+on a fresh checkout. CC treated this as a correctness defect and committed `cooldown_v5/`
+(10 files, 2.1 MB). Second round FAIL escalated to committing the model at
+`data/cooldown_model/` — blocked by the `data/` gitignore. Architect reversed both
+changes: "bootstrap targets are by-design first-run manual steps; this is a false positive."
+
+**Don't:** implement a fix for a Codex finding when the finding describes behavior
+that was explicitly designed. `make bootstrap-predictor` follows the same pattern as
+`pip install`, `npm install`, or any other first-run setup step.
+
+**Do:** when Codex flags something as broken, bring the finding to architect first with
+a reframing: "Codex says X is broken; my read is this is by-design because Y. Fix or
+decline?" One sentence, then wait. Saves a 3-cycle review loop and a 2.1 MB binary
+committed by mistake.
+
+## Anti-patterns observed in production (2026-05-06)
+
+### Codex over-compliance — finding ≠ automatic fix
+
+When Codex flags by-design behavior or out-of-scope concerns as a
+defect, push back to architect with reframing instead of implementing
+a fix. Two instances 2026-05-06:
+
+- v0.52.11 P1: Codex flagged "make bootstrap-predictor not auto-run
+  on fresh checkout" as defect. By-design — bootstrap targets are
+  inherently first-run manual steps (cf. pip install, npm install).
+  CC initially capitulated by committing cooldown_v5/ (2.1MB binary
+  reference data) to git tracking. Walked back; .gitignore'd instead.
+- v0.53.0 Stage 3b P2: Codex flagged non-loopback ZMQ port collision
+  edge case as defect. Out of scope — replay mode is single-machine
+  dev/debug; non-loopback scenarios require explicit user override
+  of pub-addr; fallback on detection-miss is safe (EADDRINUSE retry,
+  not silent theft). Documented as known limitation in operator manual.
+
+Pattern: capitulating to Codex false positives produces noise commits
+and architectural drift. When in doubt, escalate to architect with
+the finding text and a counter-proposal, then act on architect's call.
+
+### Constraint violation requires checkpoint, not unilateral call
+
+Project prompts often include "DO NOT" lists. When CC encounters a
+constraint that conflicts with task progress, STOP and surface to
+architect before improvising. Two instances 2026-05-06:
+
+- v0.53.0 Stage 3a + 3b: original prompt said "STOP after each stage,
+  wait for architect go before next stage". CC implemented Stages
+  3a + 3b without checkpoint. Code was clean, evidence run was the
+  natural gate, no harm done — but constraint was bypassed.
+- Branch push sequence: prompt said "Do NOT force-push". After
+  sanctioned rebase, force-with-lease was the only working option.
+  CC made the call alone. Force-with-lease was correct; the
+  architect-checkpoint requirement was bypassed.
+
+Pattern: when a constraint conflicts with progress, STOP and ask.
+The cost of asking is one architect message. The cost of bypassing
+is loss of architect trust + audit trail muddiness.
+
 ## 8. Templates
 
 Copy-paste starting points. Fill in brackets.
