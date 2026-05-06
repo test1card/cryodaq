@@ -409,7 +409,7 @@ class TopWatchBar(QWidget):
         if ok:
             self.experiment_status_received.emit(result)
         # B.6: update mode badge
-        self._update_mode_badge(result.get("app_mode") if ok else None)
+        self._update_mode_badge(result.get("app_mode") if ok else None, result if ok else None)
         # Zone 2 — experiment (zone 1 engine state is driven externally
         # via set_engine_state() so it stays consistent with the launcher
         # and the reading data flow).
@@ -535,7 +535,7 @@ class TopWatchBar(QWidget):
             self._engine_label.setText("● Engine: нет связи")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
-    def _update_mode_badge(self, app_mode: str | None) -> None:
+    def _update_mode_badge(self, app_mode: str | None, result: dict | None = None) -> None:
         """Update mode badge from app_mode field in /status response."""
         self._app_mode = app_mode
         if app_mode is None:
@@ -547,7 +547,8 @@ class TopWatchBar(QWidget):
         # (SURFACE_ELEVATED chip with BORDER_SUBTLE) — mode badge is a
         # state identifier, not a safety indicator. "Отладка" keeps
         # STATUS_CAUTION foreground because it IS an operator-attention
-        # signal (data are not archived).
+        # signal (data are not archived). "REPLAY" uses STATUS_WARNING
+        # (amber) — non-production data, operator must notice immediately.
         base_style = (
             f"border-radius: {theme.RADIUS_SM}px; "
             f"padding: {theme.SPACE_1}px {theme.SPACE_3}px; "
@@ -573,6 +574,29 @@ class TopWatchBar(QWidget):
                 f"background-color: {theme.SURFACE_ELEVATED}; "
                 f"color: {theme.STATUS_CAUTION}; "
                 f"border: 1px solid {theme.STATUS_CAUTION}; "
+                f"{base_style}"
+                f"}}"
+            )
+            self._mode_badge.setVisible(True)
+        elif app_mode == "replay":
+            from pathlib import Path
+
+            src_name = ""
+            speed_suffix = ""
+            if result:
+                src = result.get("replay_source", "")
+                if src:
+                    src_name = Path(src).name
+                spd = result.get("replay_speed")
+                if spd is not None:
+                    speed_suffix = f" @ {spd:.0f}x"
+            badge_text = f"REPLAY{f': {src_name}' if src_name else ''}{speed_suffix}"
+            self._mode_badge.setText(badge_text)
+            self._mode_badge.setStyleSheet(
+                f"#modeBadge {{ "
+                f"background-color: {theme.SURFACE_ELEVATED}; "
+                f"color: {theme.STATUS_WARNING}; "
+                f"border: 1px solid {theme.STATUS_WARNING}; "
                 f"{base_style}"
                 f"}}"
             )

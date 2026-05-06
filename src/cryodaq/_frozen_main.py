@@ -90,6 +90,10 @@ def _dispatch() -> None:
         from cryodaq.gui.app import main
 
         main()
+    elif mode == "replay-engine":
+        from cryodaq.replay_engine.__main__ import main
+
+        main()
     else:
         from cryodaq.launcher import main
 

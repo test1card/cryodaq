@@ -231,13 +231,15 @@ class ReplayEngine:
         if action == "experiment_status":
             return {
                 "ok": True,
-                "app_mode": "debug",
+                "app_mode": "replay",
                 "active_experiment": None,
                 "current_phase": self._phase,
                 "phase_started_at": self._session_start,
                 "phases": [],
                 "run_records": [],
                 "templates": [],
+                "replay_source": str(self._source_path),
+                "replay_speed": self._speed,
             }
 
         if action == "cooldown_history_get":

@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
+import sys
 from pathlib import Path
 
 from cryodaq.core.zmq_bridge import DEFAULT_CMD_ADDR, DEFAULT_PUB_ADDR
@@ -17,6 +19,48 @@ from cryodaq.logging_setup import setup_logging
 from cryodaq.replay_engine.server import ReplayEngine
 
 logger = logging.getLogger("cryodaq.replay_engine")
+
+
+def _acquire_engine_lock() -> int:
+    """Acquire .engine.lock exclusive flock — same contract as cryodaq.engine."""
+    from cryodaq.paths import get_data_dir
+
+    lock_path = get_data_dir() / ".engine.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        logger.error(
+            "CryoDAQ engine уже запущен (%s). Остановите его перед запуском replay.",
+            lock_path,
+        )
+        raise SystemExit(1)
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def _release_engine_lock(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        from cryodaq.paths import get_data_dir
+
+        (get_data_dir() / ".engine.lock").unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -59,10 +103,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    lock_fd = _acquire_engine_lock()
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
         pass
+    finally:
+        _release_engine_lock(lock_fd)
 
 
 async def _run(args: argparse.Namespace) -> None:

@@ -89,6 +89,73 @@ _ENGINE_STDERR_MAX_BYTES = 50 * 1024 * 1024
 _ENGINE_STDERR_BACKUP_COUNT = 3
 _ENGINE_STDERR_LOGGER_NAME = "cryodaq.launcher.engine_stderr"
 
+_REPLAY_LIST_SENTINEL = "__list__"
+
+
+def _print_replay_sources() -> None:
+    """List available replay sources — curves and SQLite files — then return."""
+    import json
+    import sqlite3
+    from datetime import datetime
+
+    from cryodaq.paths import get_data_dir
+
+    data_dir = get_data_dir()
+    cooldown_dir = data_dir.parent / "cooldown_v5"
+
+    print("\nДоступные источники replay:\n")
+
+    print("Кривые охлаждения (cooldown_v5/):")
+    curve_count = 0
+    if cooldown_dir.is_dir():
+        for json_path in sorted(cooldown_dir.glob("*.json")):
+            if json_path.name == "predictor_model.json":
+                continue
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                duration = data.get("duration_hours", "?")
+                t_cold = data.get("T_cold_final", "?")
+                dur_str = (
+                    f"{duration:.1f}h" if isinstance(duration, (int, float)) else str(duration)
+                )
+                t_str = f"{t_cold:.1f}K" if isinstance(t_cold, (int, float)) else str(t_cold)
+                print(f"  {json_path.name} — длительность {dur_str}, T_cold_final {t_str}")
+            except Exception:
+                print(f"  {json_path.name} — ошибка чтения")
+            curve_count += 1
+    if curve_count == 0:
+        print("  (нет файлов)")
+
+    print()
+
+    print("Записи SQLite (data/):")
+    db_count = 0
+    if data_dir.is_dir():
+        for db_path in sorted(data_dir.glob("data_*.db")):
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+                row = con.execute(
+                    "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM readings"
+                ).fetchone()
+                con.close()
+                count, ts_min, ts_max = row
+                if ts_min and ts_max:
+                    fmt = "%Y-%m-%d %H:%M"
+                    range_str = (
+                        f"{datetime.fromtimestamp(ts_min).strftime(fmt)}"
+                        f" — {datetime.fromtimestamp(ts_max).strftime(fmt)}"
+                    )
+                else:
+                    range_str = "нет данных"
+                print(f"  {db_path.name} — {count} записей, {range_str}")
+            except Exception:
+                print(f"  {db_path.name} — ошибка чтения")
+            db_count += 1
+    if db_count == 0:
+        print("  (нет файлов)")
+
+    print("\nУкажите путь:  cryodaq --replay <путь-к-источнику>\n")
+
 
 def _create_engine_stderr_logger() -> tuple[logging.Logger, logging.Handler, Path]:
     """Build a dedicated rotating logger for forwarded engine stderr lines."""
@@ -204,12 +271,22 @@ class LauncherWindow(QMainWindow):
         mock: bool = False,
         tray_only: bool = False,
         lock_fd: int | None = None,
+        replay_source: Path | None = None,
+        replay_speed: float = 5.0,
+        replay_phase: str = "cooldown",
+        replay_loop: bool = False,
+        force_replay: bool = False,
     ) -> None:
         super().__init__()
         self._app = app
         self._mock = mock
         self._tray_only = tray_only
         self._lock_fd = lock_fd
+        self._replay_source = replay_source
+        self._replay_speed = replay_speed
+        self._replay_phase = replay_phase
+        self._replay_loop = replay_loop
+        self._force_replay = force_replay
         self._engine_proc: subprocess.Popen | None = None
         self._engine_stderr_handler: logging.Handler | None = None
         self._engine_stderr_logger: logging.Logger | None = None
@@ -237,7 +314,10 @@ class LauncherWindow(QMainWindow):
         self._last_alarm_count: int = 0
         self._safety_worker: ZmqCommandWorker | None = None
 
-        self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
+        if replay_source is not None:
+            self.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
+        else:
+            self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
         self.setMinimumSize(1360, 860)
 
         # --- Asyncio ---
@@ -365,24 +445,49 @@ class LauncherWindow(QMainWindow):
                         pass
 
         logger.info("Запуск engine как подпроцесса...")
-        # In a PyInstaller frozen build, sys.executable IS the bundled exe
-        # (not a Python interpreter). Re-invoke ourselves with --mode=engine
-        # which _frozen_main._dispatch() routes to cryodaq.engine.main().
-        # In dev mode, fall back to "python -m cryodaq.engine".
-        if getattr(sys, "frozen", False):
-            python = sys.executable
-            cmd = [python, "--mode=engine"]
+        if self._replay_source is not None:
+            if getattr(sys, "frozen", False):
+                cmd = [
+                    sys.executable, "--mode=replay-engine",
+                    "--source", str(self._replay_source),
+                    "--speed", str(self._replay_speed),
+                    "--phase", self._replay_phase,
+                ]
+            else:
+                python = sys.executable
+                if sys.platform == "win32":
+                    pythonw = Path(python).parent / "pythonw.exe"
+                    if pythonw.exists():
+                        python = str(pythonw)
+                cmd = [
+                    python, "-m", "cryodaq.replay_engine",
+                    "--source", str(self._replay_source),
+                    "--speed", str(self._replay_speed),
+                    "--phase", self._replay_phase,
+                ]
+            if self._replay_loop:
+                cmd.append("--loop")
+            if self._force_replay:
+                cmd.append("--force-replay")
         else:
-            python = sys.executable
-            if sys.platform == "win32":
-                pythonw = Path(python).parent / "pythonw.exe"
-                if pythonw.exists():
-                    python = str(pythonw)
-            cmd = [python, "-m", "cryodaq.engine"]
+            # In a PyInstaller frozen build, sys.executable IS the bundled exe
+            # (not a Python interpreter). Re-invoke ourselves with --mode=engine
+            # which _frozen_main._dispatch() routes to cryodaq.engine.main().
+            # In dev mode, fall back to "python -m cryodaq.engine".
+            if getattr(sys, "frozen", False):
+                python = sys.executable
+                cmd = [python, "--mode=engine"]
+            else:
+                python = sys.executable
+                if sys.platform == "win32":
+                    pythonw = Path(python).parent / "pythonw.exe"
+                    if pythonw.exists():
+                        python = str(pythonw)
+                cmd = [python, "-m", "cryodaq.engine"]
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        if self._mock:
+        if self._mock and self._replay_source is None:
             env["CRYODAQ_MOCK"] = "1"
         # IV.4 F2: propagate the GUI-persisted debug-mode flag to the
         # engine subprocess so the engine uses DEBUG logging without
@@ -395,7 +500,7 @@ class LauncherWindow(QMainWindow):
 
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
-        if self._mock:
+        if self._mock and self._replay_source is None:
             cmd.append("--mock")
 
         stderr_logger, stderr_handler, stderr_path = _create_engine_stderr_logger()
@@ -1255,6 +1360,38 @@ def main() -> None:
         action="store_true",
         help="Только иконка в трее — без полного GUI (для автозагрузки)",
     )
+    parser.add_argument(
+        "--replay",
+        nargs="?",
+        const=_REPLAY_LIST_SENTINEL,
+        default=None,
+        metavar="PATH",
+        help="Replay mode: путь к SQLite или curve JSON. Без пути — показать доступные источники.",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=5.0,
+        metavar="N",
+        help="Коэффициент ускорения replay (default: 5).",
+    )
+    parser.add_argument(
+        "--replay-phase",
+        type=str,
+        default="cooldown",
+        metavar="PHASE",
+        help="Зафиксировать фазу для analytics (cooldown/measurement/heating). Default: cooldown.",
+    )
+    parser.add_argument(
+        "--replay-loop",
+        action="store_true",
+        help="Зациклить replay после конца файла.",
+    )
+    parser.add_argument(
+        "--force-replay",
+        action="store_true",
+        help="Пропустить проверку занятости ZMQ-портов (override port-collision check).",
+    )
     args, remaining = parser.parse_known_args()
 
     from cryodaq.logging_setup import resolve_log_level, setup_logging
@@ -1262,6 +1399,17 @@ def main() -> None:
     setup_logging("launcher", level=resolve_log_level())
 
     mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
+
+    replay_source: Path | None = None
+    if args.replay is not None:
+        if args.replay == _REPLAY_LIST_SENTINEL:
+            _print_replay_sources()
+            sys.exit(0)
+        replay_source = Path(args.replay)
+
+    if mock and replay_source is not None:
+        print("Ошибка: --mock и --replay взаимно исключают друг друга.", file=sys.stderr)
+        sys.exit(1)
 
     app = QApplication(remaining)
     app.setApplicationName("CryoDAQ")
@@ -1294,7 +1442,17 @@ def main() -> None:
         )
         sys.exit(0)
 
-    window = LauncherWindow(app, mock=mock, tray_only=args.tray, lock_fd=lock_fd)
+    window = LauncherWindow(
+        app,
+        mock=mock,
+        tray_only=args.tray,
+        lock_fd=lock_fd,
+        replay_source=replay_source,
+        replay_speed=args.replay_speed,
+        replay_phase=args.replay_phase,
+        replay_loop=args.replay_loop,
+        force_replay=args.force_replay,
+    )
     if not args.tray:
         window.show()
 

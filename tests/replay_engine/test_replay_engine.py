@@ -289,7 +289,7 @@ async def test_replay_engine_curve_data_pub(tmp_path):
 
 @pytest.mark.asyncio
 async def test_replay_engine_experiment_status(tmp_path):
-    """experiment_status returns ok=True with app_mode=debug and configured phase."""
+    """experiment_status returns ok=True with app_mode=replay and configured phase."""
     from cryodaq.replay_engine.server import ReplayEngine
 
     j = tmp_path / "curve.json"
@@ -307,7 +307,9 @@ async def test_replay_engine_experiment_status(tmp_path):
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
         reply = _json.loads(raw)
         assert reply["ok"] is True
-        assert reply["app_mode"] == "debug"
+        assert reply["app_mode"] == "replay"
+        assert "replay_source" in reply
+        assert "replay_speed" in reply
         assert reply["active_experiment"] is None
         assert reply["current_phase"] == "cooldown"
         assert "phase_started_at" in reply
