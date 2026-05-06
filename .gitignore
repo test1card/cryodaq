@@ -66,6 +66,9 @@ logs/
 # Runtime SQLite databases (per-machine, not portable)
 data/
 
+# Reference curves and predictor model — operator-supplied, not source-controlled
+cooldown_v5/
+
 # Agent orchestration workspaces (all untracked, gitignored per
 # docs/ORCHESTRATION.md §6.4)
 .worktrees/
@@ -78,3 +81,6 @@ agentswarm/
 
 # Node.js (added 2026-04-27 — stray npm artifacts; deps never tracked)
 node_modules/
+
+# chutes dispatch script (contains API key — never commit)
+dispatch_chutes.py
