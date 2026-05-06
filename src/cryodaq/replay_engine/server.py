@@ -160,7 +160,7 @@ class ReplayEngine:
                 "phase": self._phase,
                 "phase_started_at": self._session_start,
             }
-            logger.debug("[D3-REPLAY] REP reply current_phase: phase=%s", self._phase)  # [D3-R]
+            logger.debug("[D3-REPLAY] REP reply current_phase: phase=%s", self._phase)  # noqa: E501 [D3-REPLAY]
             return reply
 
         if action == "/status":
@@ -173,6 +173,18 @@ class ReplayEngine:
                 "temperature_targets": {},
                 "safety_state": "replay",
                 "alarms": [],
+            }
+
+        if action == "experiment_status":
+            return {
+                "ok": True,
+                "app_mode": "debug",
+                "active_experiment": None,
+                "current_phase": self._phase,
+                "phase_started_at": self._session_start,
+                "phases": [],
+                "run_records": [],
+                "templates": [],
             }
 
         if action == "cooldown_history_get":

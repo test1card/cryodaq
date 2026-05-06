@@ -274,6 +274,36 @@ async def test_replay_engine_curve_data_pub(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_replay_engine_experiment_status(tmp_path):
+    """experiment_status returns ok=True with app_mode=debug and configured phase."""
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    j = tmp_path / "curve.json"
+    _write_curve_json(j)
+    engine = ReplayEngine(j, speed=0.0, phase="cooldown", pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
+    await engine.start()
+    source_task = asyncio.create_task(engine.run_source())
+    ctx = zmq.asyncio.Context()
+    req = ctx.socket(zmq.REQ)
+    req.setsockopt(zmq.LINGER, 0)
+    req.connect(_TEST_CMD)
+    try:
+        await req.send_string('{"cmd": "experiment_status"}')
+        import json as _json
+        raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
+        reply = _json.loads(raw)
+        assert reply["ok"] is True
+        assert reply["app_mode"] == "debug"
+        assert reply["active_experiment"] is None
+        assert reply["current_phase"] == "cooldown"
+        assert "phase_started_at" in reply
+    finally:
+        req.close(linger=0)
+        ctx.term()
+        await _stop_engine(engine, source_task)
+
+
+@pytest.mark.asyncio
 async def test_replay_engine_cooldown_history_unavailable(tmp_path):
     """/cooldown_history_get returns predictor_unavailable_in_replay before Stage 5."""
     engine, source_task = await _start_engine_with_curve(tmp_path)

@@ -102,6 +102,14 @@ async def _run(args: argparse.Namespace) -> None:
             pass
 
     await engine.stop()
+
+    # P2: propagate source failure so the CLI exits non-zero on errors.
+    if source_task.done() and not source_task.cancelled():
+        exc = source_task.exception()
+        if exc is not None:
+            logger.error("Replay source failed: %s", exc)
+            raise exc
+
     logger.info("Replay engine shut down")
 
 
