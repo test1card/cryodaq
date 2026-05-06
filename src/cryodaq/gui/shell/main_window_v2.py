@@ -419,6 +419,14 @@ class MainWindowV2(QMainWindow):
             self._analytics_temperature_snapshot[channel] = reading
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({channel: reading})
+            # F-MockPredictor: also route the canonical cold-stage channel
+            # through the cooldown widget's SteadyStatePredictor so the
+            # asymptote can render in IDLE / mock streams. CooldownData
+            # carries no actual_trajectory by contract — this is the live
+            # data feed.
+            short_id = channel.split(" ", 1)[0] if " " in channel else channel
+            if short_id == "Т12":
+                self._push_analytics("set_cold_temperature_reading", reading)
         if (
             "/smua/" in channel
             or "/smub/" in channel

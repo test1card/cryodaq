@@ -40,7 +40,18 @@
   empty "Охлаждение не активно" placeholder on Mac mock and any other
   already-cooled stream. Pattern mirrors `RThermalLiveWidget` verbatim
   (window 600 s, update 30 s, settle threshold 30 %, `STATUS_INFO` tokens).
-  Backend (`CooldownDetector`, `CooldownService`) untouched.
+
+  Cold-stage temperatures flow in via a new
+  `CooldownPredictionWidget.set_cold_temperature_reading()` setter, fed by
+  `MainWindowV2._dispatch_reading` whenever a K-unit reading arrives on
+  the canonical Т12 landmark channel. `CooldownData.actual_trajectory`
+  remains intentionally empty — it is a snapshot of `CooldownService`
+  output, and the live cold-stage stream stays a widget-owned concern
+  (mirrors `VacuumPredictionWidget`'s raw-buffer pattern). Stale forecast
+  curves are now cleared from the inner `PredictionWidget` whenever the
+  state machine leaves the active-prediction branch, so the asymptote and
+  placeholder no longer sit on top of an outdated trajectory. Backend
+  (`CooldownDetector`, `CooldownService`, `SteadyStatePredictor`) untouched.
 
 - **F-ChannelLandmarks** — system-level channel identity layer.
   `config/physical_alarms.yaml` gains an optional `landmarks:` section that

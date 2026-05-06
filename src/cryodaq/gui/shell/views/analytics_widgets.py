@@ -609,10 +609,13 @@ class CooldownPredictionWidget(QWidget):
     """Linear-Y prediction widget wrapped for cooldown forecast.
 
     F-MockPredictor: when CooldownDetector backend is IDLE (Mac mock on
-    already-cooled data), feed actual readings into a SteadyStatePredictor
-    and render a horizontal asymptote line + ±sigma band + "Стационарное
-    состояние ≈ X K" badge in place of the empty placeholder. Mirrors the
-    pattern in :class:`RThermalLiveWidget` verbatim.
+    already-cooled data), feed cold-stage temperature readings into a
+    SteadyStatePredictor and render a horizontal asymptote line + ±sigma
+    band + "Стационарное состояние ≈ X K" badge in place of the empty
+    placeholder. Mirrors the pattern in :class:`RThermalLiveWidget` and
+    :class:`VacuumPredictionWidget`: the widget owns its own raw buffer
+    + setter, since CooldownData.actual_trajectory is intentionally empty
+    in the production adapter (a snapshot of CooldownService output).
     """
 
     # Predictor convergence threshold: show overlay when ≥30% settled
@@ -620,6 +623,12 @@ class CooldownPredictionWidget(QWidget):
     _SETTLE_THRESHOLD: float = 30.0
     # Internal predictor key — channel-id-agnostic, only the widget feeds it.
     _PRED_CHANNEL = "cold_stage"
+    # Cap raw-buffer size (mirrors VacuumPredictionWidget._MAX_RAW_PTS).
+    _MAX_RAW_PTS: int = 5000
+    # Canonical cold-stage landmark id from config/physical_alarms.yaml.
+    # MainWindowV2 routes only readings whose channel resolves to this id;
+    # configuration-decoupling is left to a future spec per architect.
+    _COLD_LANDMARK: str = "Т12"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -691,9 +700,34 @@ class CooldownPredictionWidget(QWidget):
         # F-MockPredictor: SteadyStatePredictor (params verbatim from RThermalLiveWidget).
         self._ss_predictor = SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
         self._last_ts_seen: float = 0.0
+        # Raw cold-stage readings — fed by set_cold_temperature_reading()
+        # because CooldownData.actual_trajectory is empty in production
+        # (intentional contract — see _cooldown_reading_to_data adapter).
+        self._raw_cold_buffer: list[tuple[float, float]] = []
 
         self._reposition_overlays()
         self._placeholder.setVisible(True)
+
+    def set_cold_temperature_reading(self, reading) -> None:
+        """Receive one cold-stage temperature reading (Т12 by default).
+
+        Mirrors :meth:`VacuumPredictionWidget.set_pressure_reading`: the
+        widget owns its raw buffer, feeds the SteadyStatePredictor with new
+        timestamps only, and pushes history into the inner plot so the
+        operator sees the actual data line under the eventual asymptote.
+        """
+        if reading is None:
+            return
+        ts = reading.timestamp.timestamp()
+        val = float(reading.value)
+        self._raw_cold_buffer.append((ts, val))
+        if len(self._raw_cold_buffer) > self._MAX_RAW_PTS:
+            del self._raw_cold_buffer[: len(self._raw_cold_buffer) - self._MAX_RAW_PTS]
+        if ts > self._last_ts_seen:
+            self._ss_predictor.add_point(self._PRED_CHANNEL, ts, val)
+            self._last_ts_seen = ts
+        self._ss_predictor.update(time.time())
+        self._inner.set_history(list(self._raw_cold_buffer))
 
     def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
@@ -705,25 +739,19 @@ class CooldownPredictionWidget(QWidget):
 
     def set_cooldown_data(self, data) -> None:
         if data is None:
+            # Clear any stale forecast curves left from a prior active push
+            # (mirrors VacuumPredictionWidget._on_trend_result no-data path).
+            self._inner.set_prediction([], [], [], ci_level_pct=67.0)
             self._asym_line.setVisible(False)
             self._asym_band.setVisible(False)
             self._steady_badge.setVisible(False)
             self._placeholder.setVisible(True)
             return
-        # CooldownData from analytics_view has actual_trajectory,
-        # predicted_trajectory, ci_trajectory (t, lo, hi triples).
-        actual = getattr(data, "actual_trajectory", []) or []
+        # CooldownData from analytics_view has predicted_trajectory and
+        # ci_trajectory (t, lo, hi triples). actual_trajectory is empty by
+        # contract — cold-stage readings flow in via set_cold_temperature_reading.
         predicted = getattr(data, "predicted_trajectory", []) or []
         ci = getattr(data, "ci_trajectory", []) or []
-        self._inner.set_history([(t, v) for (t, v) in actual])
-
-        # Feed only new actual points into the predictor (avoid double-feed).
-        if actual:
-            for ts, val in actual:
-                if ts > self._last_ts_seen:
-                    self._ss_predictor.add_point(self._PRED_CHANNEL, ts, val)
-                    self._last_ts_seen = ts
-            self._ss_predictor.update(time.time())
 
         if predicted and ci:
             lower = [(t, lo) for (t, lo, _hi) in ci]
@@ -740,7 +768,11 @@ class CooldownPredictionWidget(QWidget):
             self._placeholder.setVisible(False)
             return
 
-        # No active prediction — check for steady-state asymptote.
+        # No active prediction — clear any prior forecast curves so the
+        # asymptote / placeholder doesn't sit on top of stale data.
+        self._inner.set_prediction([], [], [], ci_level_pct=67.0)
+
+        # Then check for steady-state asymptote.
         pred = self._ss_predictor.get_prediction(self._PRED_CHANNEL)
         if (
             pred is not None

@@ -150,6 +150,9 @@ class AnalyticsView(QWidget):
         self._last_instrument_health: dict[str, str] | None = None
         self._last_vacuum_prediction: dict | None = None
         self._last_experiment_status: dict | None = None
+        # F-MockPredictor: cold-stage live reading routed via
+        # set_cold_temperature_reading; replayed on phase swap.
+        self._last_cold_temperature_reading: Reading | None = None
 
         # Per-(setter_name, phase) set: suppresses repeat WARNINGs for the
         # same silent-skip within one phase so 33 Hz data streams don't flood
@@ -219,6 +222,12 @@ class AnalyticsView(QWidget):
     def set_experiment_status(self, status: dict | None) -> None:
         self._last_experiment_status = status
         self._forward("set_experiment_status", status)
+
+    def set_cold_temperature_reading(self, reading: Reading) -> None:
+        """F-MockPredictor: forward a cold-stage temperature reading to widgets
+        that own a SteadyStatePredictor for stationarity detection."""
+        self._last_cold_temperature_reading = reading
+        self._forward("set_cold_temperature_reading", reading)
 
     # ------------------------------------------------------------------
     # Layout management
@@ -344,4 +353,10 @@ class AnalyticsView(QWidget):
         if self._last_experiment_status is not None:
             self._forward_to(
                 widgets, "set_experiment_status", self._last_experiment_status
+            )
+        if self._last_cold_temperature_reading is not None:
+            self._forward_to(
+                widgets,
+                "set_cold_temperature_reading",
+                self._last_cold_temperature_reading,
             )

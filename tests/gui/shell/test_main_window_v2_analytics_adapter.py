@@ -386,3 +386,71 @@ def test_temperature_overview_xaxis_scrolls_with_live_readings():
         f"({now:.1f}); the X-axis is frozen at the default range — "
         "v0.52.5 regression: set_temperature_readings must call _apply_window()"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F-MockPredictor — cold-stage reading wiring (v0.54.0 cycle 2)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _t_reading(channel: str, value: float = 4.5) -> Reading:
+    return Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218_1",
+        channel=channel,
+        value=value,
+        unit="K",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+
+
+def test_cold_stage_reading_routed_to_analytics_view():
+    """Т12 readings (canonical cold-stage landmark) must be pushed into
+    AnalyticsView via set_cold_temperature_reading and cached in the
+    F4 lazy-replay snapshot, while non-Т12 K-unit readings must NOT
+    trigger the cold-stage forwarder.
+    """
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    assert isinstance(w._analytics_view, AnalyticsView)
+
+    # Canonical short-id form.
+    short_reading = _t_reading("Т12", value=4.51)
+    w._dispatch_reading(short_reading)
+    assert w._analytics_view._last_cold_temperature_reading is short_reading
+    assert w._analytics_snapshot.get("set_cold_temperature_reading") == (short_reading,)
+
+    # Long-form "Т12 <label>" must also route through the canonical short id.
+    long_reading = _t_reading("Т12 Холодная плита", value=4.52)
+    w._dispatch_reading(long_reading)
+    assert w._analytics_view._last_cold_temperature_reading is long_reading
+
+    # A non-Т12 cold-channel reading must NOT replace the cached cold-stage
+    # value — only Т12 feeds the asymptote predictor.
+    w._dispatch_reading(_t_reading("Т11 Тёплая плита", value=77.0))
+    assert w._analytics_view._last_cold_temperature_reading is long_reading
+
+
+def test_cold_stage_reading_skipped_when_unit_not_kelvin():
+    """Defensive: a Т12-named reading reported in non-K units (sensor fault
+    metadata) must not be routed — the K-unit guard already gates this,
+    but the dispatch path makes the assumption explicit."""
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+
+    bogus = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218_1",
+        channel="Т12",
+        value=4.5,
+        unit="Ом",  # not K
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    w._dispatch_reading(bogus)
+    assert w._analytics_view._last_cold_temperature_reading is None
