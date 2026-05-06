@@ -240,17 +240,29 @@ async def test_replay_engine_rejects_keithley_command(tmp_path):
 
 @pytest.mark.asyncio
 async def test_replay_engine_curve_data_pub(tmp_path):
-    """Curve replay PUBs >=10 readings with T11/T12 channels."""
+    """Curve replay PUBs >=10 readings with T11/T12 channels.
+
+    SUB must subscribe and establish connection BEFORE source_task starts,
+    otherwise speed=0.0 publishes all readings before the slow-joiner connects.
+    """
     import msgpack
 
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    j = tmp_path / "curve.json"
+    _write_curve_json(j)
+    engine = ReplayEngine(j, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
+    await engine.start()
+
+    # Subscribe before source task so all readings are seen (slow-joiner fix).
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
-    # ZMQ slow-joiner: give connection time to establish before source publishes.
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.05)  # Let ZMQ subscription establish
+
+    source_task = asyncio.create_task(engine.run_source(), name="test_source")
     readings = []
     try:
         deadline = asyncio.get_event_loop().time() + 3.0
