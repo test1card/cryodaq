@@ -41,20 +41,15 @@ from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvent, AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.cooldown_alarm import CooldownAlarm
-from cryodaq.core.physical_alarms_config import (
-    load_channel_landmarks,
-    load_physical_alarms_config,
-)
-from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
     CalibrationCommandError,
 )
 from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.channel_state import ChannelStateTracker
+from cryodaq.core.cooldown_alarm import CooldownAlarm
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
@@ -69,12 +64,17 @@ from cryodaq.core.housekeeping import (
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.physical_alarms_config import (
+    load_channel_landmarks,
+    load_physical_alarms_config,
+)
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.smu_channel import normalize_smu_channel
+from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
@@ -266,6 +266,50 @@ async def _run_operator_log_command(
         return {"ok": True, "entries": [entry.to_payload() for entry in entries]}
 
     raise ValueError(f"Unsupported operator log command: {action}")
+
+
+async def _handle_assistant_query_command(
+    query_agent: Any,
+    cmd: dict[str, Any],
+    *,
+    timeout_s: float = 60.0,
+) -> dict[str, Any]:
+    """Dispatch ``assistant.query`` GUI/Telegram command to AssistantQueryAgent.
+
+    F34: extracted as a module-level helper so the dispatch logic is unit-
+    testable without spinning up the full engine. Mirrors the exception
+    hierarchy of :class:`AssistantQueryAgent.handle_query` (never raises;
+    returns a Russian error string-shaped dict on every failure path).
+    """
+    query = str(cmd.get("query", "")).strip()
+    chat_id = cmd.get("chat_id", "gui")
+    if not query:
+        return {"ok": False, "error": "Пустой запрос."}
+    if query_agent is None:
+        return {
+            "ok": False,
+            "error": (
+                "AssistantQueryAgent не сконфигурирован "
+                "(query_enabled=false в agent.yaml)."
+            ),
+        }
+    try:
+        response = await asyncio.wait_for(
+            query_agent.handle_query(query, chat_id=chat_id),
+            timeout=timeout_s,
+        )
+        return {"ok": True, "response": response}
+    except TimeoutError:
+        return {
+            "ok": False,
+            "error": (
+                f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). "
+                "Попробуй короче."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("assistant.query error: %s", exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
 
 
 def _run_calibration_command(
@@ -1918,6 +1962,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if _vacuum_guard is None:
                     return {"state": "UNAVAILABLE"}
                 return {"state": _vacuum_guard.state.name}
+            if action == "assistant.query":
+                # F34: Гемма chat overlay reuses F30 AssistantQueryAgent.
+                return await _handle_assistant_query_command(_query_agent, cmd)
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)

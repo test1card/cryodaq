@@ -37,6 +37,7 @@ from cryodaq.gui import theme
 _PHOSPHOR_ICONS: dict[str, str] = {
     "alarms": "ph.bell-simple",
     "analytics": "ph.chart-line-up",
+    "assistant_chat": "ph.chat-circle",
     "conductivity": "ph.thermometer-simple",
     "experiment": "ph.flask",
     "home": "ph.house",
@@ -121,6 +122,10 @@ _OVERLAY_ITEMS = [
     ("conductivity", "thermometer.svg", "Теплопроводность"),
     ("alarms", "bell.svg", "Алармы"),
     ("log", "file-text.svg", "Служебный лог"),
+    # F34: Гемма chat overlay between log and instruments. The Lucide
+    # SVG fallback is not on disk — Phosphor `ph.chat-circle` (registered
+    # in _PHOSPHOR_ICONS) renders without it.
+    ("assistant_chat", "message-circle.svg", "Помощник Гемма"),
     ("instruments", "cpu.svg", "Приборы"),
 ]
 _MORE_NAME = "more"

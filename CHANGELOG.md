@@ -33,6 +33,19 @@
 
 ### Added
 
+- **F34** — GUI chat overlay для ассистента Гемма. Новая панель
+  `AssistantChatPanel` (`gui/shell/overlays/assistant_chat_panel.py`)
+  переиспользует backend F30 `AssistantQueryAgent`: оператор задаёт
+  свободный текстовый вопрос, GUI шлёт ZMQ-команду `assistant.query`
+  через неблокирующий `ZmqCommandWorker`, движок диспатчит запрос в
+  `_handle_assistant_query_command` (timeout 60 с), ответ рендерится
+  bubble-ами (оператор справа на ACCENT, ассистент слева на
+  SURFACE_CARD, ошибки `STATUS_WARNING` с префиксом ⚠). История —
+  только in-session, без диска. Иконка ToolRail — Phosphor
+  `ph.chat-circle`, слот «Помощник Гемма» между «Служебный лог» и
+  «Приборы». `AssistantQueryAgent`, `IntentClassifier`, `QueryRouter`,
+  `OutputRouter`, `ZMQCommandServer`, Telegram-bot — без изменений.
+
 - **F-MockPredictor** — `CooldownPredictionWidget` now renders a horizontal
   asymptote line + ±sigma band + "Стационарное состояние ≈ X K" badge when
   the embedded `SteadyStatePredictor` reports a settled fit (`percent_settled
