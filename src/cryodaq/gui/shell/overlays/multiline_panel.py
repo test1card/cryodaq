@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -58,6 +59,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
 
 logger = logging.getLogger(__name__)
@@ -220,6 +222,17 @@ class MultiLinePanel(QWidget):
         # `_confirm_resets`); production keeps the safety prompt.
         self._confirm_resets: bool = True
 
+        # v0.55.11 — burst capture state. Worker refs retained so QThread
+        # GC does not race the reply.
+        self._burst_workers: list[ZmqCommandWorker] = []
+        self._burst_in_flight: bool = False  # True while operator pressed
+        # Start but engine has not echoed status yet — coarser than
+        # server-side `active` so the UI never strands the button.
+        self._burst_active_server: bool = False
+        self._burst_poll_timer = QTimer(self)
+        self._burst_poll_timer.setInterval(500)
+        self._burst_poll_timer.timeout.connect(self._poll_burst_status)
+
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -311,6 +324,42 @@ class MultiLinePanel(QWidget):
         env_row.addWidget(self._env_p_label, stretch=1)
         env_row.addWidget(self._env_rh_label, stretch=1)
         root.addLayout(env_row)
+
+        # --- Burst capture (v0.55.11) ---
+        # Architect: actuator workflow needs full hardware cadence
+        # captured to disk for post-hoc analysis. Continuous-mode only;
+        # the engine rejects multiline.burst_start in averaged mode and
+        # the panel surfaces the rejection text on the status label.
+        burst_row = QHBoxLayout()
+        burst_row.setSpacing(theme.SPACE_3)
+        burst_caption = QLabel("Захват вибрации:")
+        burst_caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        burst_row.addWidget(burst_caption)
+        self._burst_duration_spin = QSpinBox()
+        self._burst_duration_spin.setRange(1, 600)
+        self._burst_duration_spin.setValue(10)
+        self._burst_duration_spin.setSuffix(" с")
+        self._burst_duration_spin.setToolTip(
+            "Длительность захвата (1..600 с). По истечении — авто-стоп + запись Parquet."
+        )
+        burst_row.addWidget(self._burst_duration_spin)
+        self._burst_button = QPushButton("Записать")
+        self._burst_button.setToolTip(
+            "Доступно только в continuous mode. Раw cycles записываются в "
+            "data/experiments/<id>/multiline_burst_<ts>.parquet (если "
+            "эксперимент активен) либо в data/multiline_bursts/."
+        )
+        self._burst_button.clicked.connect(self._on_burst_clicked)
+        burst_row.addWidget(self._burst_button)
+        burst_row.addStretch(1)
+        self._burst_status_label = QLabel("Готов")
+        self._burst_status_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; "
+            f"font-family: '{theme.FONT_MONO}'; "
+            f"font-feature-settings: 'tnum';"
+        )
+        burst_row.addWidget(self._burst_status_label)
+        root.addLayout(burst_row)
 
         # --- Footer ---
         self._footer_label = QLabel("Нет данных.")
@@ -595,3 +644,110 @@ class MultiLinePanel(QWidget):
             if res != QMessageBox.StandardButton.Yes:
                 return
         self.reset_all()
+
+    # ------------------------------------------------------------------
+    # v0.55.11 — burst capture
+    # ------------------------------------------------------------------
+
+    def _on_burst_clicked(self) -> None:
+        """Toggle burst capture: idle → start; active → stop early."""
+        if self._burst_active_server or self._burst_in_flight:
+            self._send_burst_command("multiline.burst_stop", {})
+            return
+        duration = int(self._burst_duration_spin.value())
+        self._burst_in_flight = True
+        self._burst_button.setEnabled(False)
+        self._burst_status_label.setText(f"Запуск ({duration} с)...")
+        self._send_burst_command(
+            "multiline.burst_start",
+            {"duration_s": duration},
+        )
+
+    def _send_burst_command(self, action: str, extra: dict) -> None:
+        cmd = {"cmd": action, **extra}
+        worker = ZmqCommandWorker(cmd, parent=self)
+        # Capture command in lambda so the response handler knows which
+        # branch to interpret. Workers retained on self._burst_workers
+        # to defeat Qt's QThread GC race.
+        worker.finished.connect(
+            lambda result, c=action: self._on_burst_response(c, result)
+        )
+        self._burst_workers.append(worker)
+        worker.start()
+
+    def _on_burst_response(self, action: str, result: dict | None) -> None:
+        # Drop finished workers so the list does not grow unbounded.
+        self._burst_workers = [w for w in self._burst_workers if w.isRunning()]
+        if not isinstance(result, dict):
+            self._burst_in_flight = False
+            self._burst_button.setEnabled(True)
+            self._burst_status_label.setText("Engine не ответил")
+            return
+        if not result.get("ok"):
+            self._burst_in_flight = False
+            self._burst_active_server = False
+            self._burst_button.setEnabled(True)
+            self._burst_button.setText("Записать")
+            err = str(result.get("error", "ошибка"))
+            # Preserve operator-actionable Russian phrasing the engine
+            # already emits; truncate so it fits the status row.
+            self._burst_status_label.setText(err[:80])
+            self._burst_poll_timer.stop()
+            return
+        if action == "multiline.burst_start":
+            self._burst_in_flight = False
+            self._burst_active_server = True
+            self._burst_button.setText("Остановить")
+            self._burst_button.setEnabled(True)
+            self._burst_duration_spin.setEnabled(False)
+            duration = result.get("duration_s")
+            if duration is not None:
+                self._burst_status_label.setText(
+                    f"Запись (авто-стоп через {int(float(duration))} с)…"
+                )
+            else:
+                self._burst_status_label.setText("Запись (без авто-стопа)…")
+            if not self._burst_poll_timer.isActive():
+                self._burst_poll_timer.start()
+            return
+        if action == "multiline.burst_stop":
+            self._burst_active_server = False
+            self._burst_button.setText("Записать")
+            self._burst_button.setEnabled(True)
+            self._burst_duration_spin.setEnabled(True)
+            self._burst_poll_timer.stop()
+            if result.get("saved") and result.get("path"):
+                self._burst_status_label.setText(
+                    f"Сохранено: {result['path']}"
+                )
+            else:
+                self._burst_status_label.setText("Цикла не было — пусто")
+            return
+        if action == "multiline.burst_status":
+            active = bool(result.get("active"))
+            cycle_count = int(result.get("cycle_count", 0) or 0)
+            elapsed_s = float(result.get("elapsed_s", 0.0) or 0.0)
+            if active:
+                self._burst_active_server = True
+                self._burst_status_label.setText(
+                    f"Запись {elapsed_s:.1f} с, {cycle_count} кадров"
+                )
+            else:
+                # Active flipped server-side (likely auto-stop fired);
+                # request the path via burst_stop so the operator gets
+                # confirmation of where the file landed.
+                if self._burst_active_server:
+                    self._burst_active_server = False
+                    self._burst_button.setText("Записать")
+                    self._burst_duration_spin.setEnabled(True)
+                    self._burst_poll_timer.stop()
+                    self._burst_status_label.setText(
+                        f"Авто-стоп ({cycle_count} кадров) — запись..."
+                    )
+                    self._send_burst_command("multiline.burst_stop", {})
+
+    def _poll_burst_status(self) -> None:
+        if not self._burst_active_server:
+            self._burst_poll_timer.stop()
+            return
+        self._send_burst_command("multiline.burst_status", {})

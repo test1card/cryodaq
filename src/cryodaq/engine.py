@@ -407,6 +407,111 @@ async def _handle_rag_search_command(
         return {"ok": False, "error": str(exc)}
 
 
+async def _handle_multiline_burst_command(
+    action: str,
+    cmd: dict[str, Any],
+    *,
+    drivers_by_name: dict[str, Any],
+    experiment_manager: Any | None,
+    experiments_root: Any | None,
+    auto_stop_tasks: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Dispatch ``multiline.burst_*`` GUI commands to a MultiLine driver.
+
+    Module-level helper mirrors the F34/RAG dispatch pattern so the
+    unit tests can exercise the burst lifecycle without spinning up
+    the full engine. Returns Russian error string-shaped dicts on every
+    failure path so the GUI surfaces a stable shape.
+
+    ``auto_stop_tasks`` (when supplied) is a dict the engine uses to
+    track auto-stop timers per driver; tests pass an empty dict so the
+    timer scheduling path is observable.
+    """
+    name = str(cmd.get("name", "")).strip()
+    if not name:
+        # Default to the first MultiLine driver if exactly one is
+        # configured — keeps the GUI single-instrument case ergonomic.
+        ml_names = [
+            n
+            for n, d in drivers_by_name.items()
+            if d.__class__.__name__ == "MultiLineDriver"
+        ]
+        if len(ml_names) == 1:
+            name = ml_names[0]
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    "MultiLine instance not specified and "
+                    f"{len(ml_names)} configured — pass `name` explicitly."
+                ),
+            }
+    driver = drivers_by_name.get(name)
+    if driver is None or driver.__class__.__name__ != "MultiLineDriver":
+        return {
+            "ok": False,
+            "error": f"MultiLine driver '{name}' не сконфигурирован.",
+        }
+
+    if action == "multiline.burst_status":
+        try:
+            return {"ok": True, **driver.burst_status()}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("multiline.burst_status error: %s", exc, exc_info=True)
+            return {"ok": False, "error": str(exc)}
+
+    if action == "multiline.burst_start":
+        duration_s = cmd.get("duration_s")
+        try:
+            duration = float(duration_s) if duration_s is not None else None
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "duration_s must be a number"}
+        if duration is not None and (duration <= 0 or duration > 600):
+            return {
+                "ok": False,
+                "error": "duration_s must be in (0, 600]",
+            }
+        active_id: str | None = None
+        if experiment_manager is not None:
+            try:
+                active_id = experiment_manager.active_experiment_id
+            except Exception:  # noqa: BLE001
+                active_id = None
+        try:
+            await driver.burst_start(experiment_id=active_id)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
+        if duration is not None and auto_stop_tasks is not None:
+            # The auto-stop task lives on the engine event loop; the
+            # caller schedules it because asyncio.create_task here would
+            # bind to the test loop and not get cleaned up. Engine
+            # closure passes a real dict so the task ref is retained.
+            auto_stop_tasks[name] = {
+                "duration_s": duration,
+                "scheduled_at": time.monotonic(),
+            }
+        return {
+            "ok": True,
+            "name": name,
+            "duration_s": duration,
+            "experiment_id": active_id,
+        }
+
+    if action == "multiline.burst_stop":
+        try:
+            path = await driver.burst_stop(experiments_root=experiments_root)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("multiline.burst_stop error: %s", exc, exc_info=True)
+            return {"ok": False, "error": str(exc)}
+        if path is None:
+            return {"ok": True, "path": None, "saved": False}
+        if auto_stop_tasks is not None:
+            auto_stop_tasks.pop(name, None)
+        return {"ok": True, "path": str(path), "saved": True}
+
+    return {"ok": False, "error": f"unknown burst action: {action}"}
+
+
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -1732,6 +1837,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         except asyncio.CancelledError:
             return
 
+    # v0.55.11 — auto-stop bookkeeping for multiline.burst_start. The
+    # meta dict is populated by the helper (intent); the tasks dict is
+    # populated at the dispatch site (materialised on the engine loop).
+    _multiline_burst_auto_stop_meta: dict[str, dict[str, Any]] = {}
+    _multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]] = {}
+
     # Обработчик команд от GUI — через SafetyManager
     async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
         action = cmd.get("cmd", "")
@@ -2203,6 +2314,63 @@ async def _run_engine(*, mock: bool = False) -> None:
                 # v0.55.6 — knowledge-base GUI overlay calls this from
                 # ZmqCommandWorker. Helper extracted for unit-testing.
                 return await _handle_rag_search_command(_rag_searcher, cmd)
+            if action.startswith("multiline.burst_"):
+                # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
+                # button + status poll + manual stop.
+                response = await _handle_multiline_burst_command(
+                    action,
+                    cmd,
+                    drivers_by_name=drivers_by_name,
+                    experiment_manager=experiment_manager,
+                    experiments_root=_DATA_DIR / "experiments",
+                    auto_stop_tasks=_multiline_burst_auto_stop_meta,
+                )
+                # Schedule auto-stop on the engine loop if duration_s
+                # was set — the helper records intent in the meta dict;
+                # this site materialises the task so it runs on the
+                # right loop and gets cleaned up automatically.
+                if (
+                    response.get("ok")
+                    and action == "multiline.burst_start"
+                    and response.get("duration_s") is not None
+                ):
+                    target_name = response.get("name", "")
+                    duration_s = float(response["duration_s"])
+
+                    async def _auto_stop(driver_name: str = target_name,
+                                         delay_s: float = duration_s) -> None:
+                        try:
+                            await asyncio.sleep(delay_s)
+                            d = drivers_by_name.get(driver_name)
+                            if d is None:
+                                return
+                            try:
+                                path = await d.burst_stop(
+                                    experiments_root=_DATA_DIR / "experiments",
+                                )
+                                logger.info(
+                                    "MultiLine '%s' burst auto-stopped after %.1fs → %s",
+                                    driver_name, delay_s, path,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.error(
+                                    "MultiLine '%s' auto-stop failed: %s",
+                                    driver_name, exc, exc_info=True,
+                                )
+                        finally:
+                            _multiline_burst_auto_stop_tasks.pop(driver_name, None)
+
+                    _t = asyncio.create_task(
+                        _auto_stop(),
+                        name=f"multiline_burst_auto_stop_{target_name}",
+                    )
+                    # Cancel any pre-existing auto-stop for the same
+                    # driver — operator restarting the timer wins.
+                    prev = _multiline_burst_auto_stop_tasks.get(target_name)
+                    if prev is not None and not prev.done():
+                        prev.cancel()
+                    _multiline_burst_auto_stop_tasks[target_name] = _t
+                return response
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)

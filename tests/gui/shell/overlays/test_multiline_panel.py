@@ -288,3 +288,98 @@ def test_footer_updates_on_reading(panel: MultiLinePanel) -> None:
     txt = panel._footer_label.text()
     assert "Каналов: 2" in txt
     assert "Последнее обновление" in txt
+
+
+# ---------------------------------------------------------------------------
+# v0.55.11 — burst capture UI
+# ---------------------------------------------------------------------------
+
+
+def test_burst_initial_state_is_idle(panel: MultiLinePanel) -> None:
+    assert panel._burst_button.text() == "Записать"
+    assert panel._burst_duration_spin.value() == 10
+    assert panel._burst_status_label.text() == "Готов"
+    assert panel._burst_active_server is False
+    assert not panel._burst_poll_timer.isActive()
+
+
+def test_burst_response_start_ok_flips_to_recording(panel: MultiLinePanel) -> None:
+    """Engine confirmed start — UI must enter recording state."""
+    panel._burst_in_flight = True
+    panel._on_burst_response(
+        "multiline.burst_start",
+        {"ok": True, "name": "MultiLine_1", "duration_s": 10, "experiment_id": None},
+    )
+    assert panel._burst_active_server is True
+    assert panel._burst_button.text() == "Остановить"
+    assert panel._burst_button.isEnabled()
+    assert not panel._burst_duration_spin.isEnabled()
+    assert "Запись" in panel._burst_status_label.text()
+    assert panel._burst_poll_timer.isActive()
+
+
+def test_burst_response_start_error_in_averaged_mode(panel: MultiLinePanel) -> None:
+    """Engine rejects burst in averaged mode → UI surfaces the error."""
+    panel._burst_in_flight = True
+    panel._on_burst_response(
+        "multiline.burst_start",
+        {"ok": False, "error": "Burst capture requires continuous mode"},
+    )
+    assert panel._burst_active_server is False
+    assert panel._burst_button.text() == "Записать"
+    assert panel._burst_button.isEnabled()
+    assert "continuous" in panel._burst_status_label.text()
+    assert not panel._burst_poll_timer.isActive()
+
+
+def test_burst_response_stop_with_path(panel: MultiLinePanel) -> None:
+    """Successful stop shows the saved path in the status label."""
+    panel._burst_active_server = True
+    panel._on_burst_response(
+        "multiline.burst_stop",
+        {"ok": True, "saved": True, "path": "/data/experiments/x/multiline_burst.parquet"},
+    )
+    assert panel._burst_active_server is False
+    assert panel._burst_button.text() == "Записать"
+    assert panel._burst_duration_spin.isEnabled()
+    assert "Сохранено" in panel._burst_status_label.text()
+    assert "multiline_burst.parquet" in panel._burst_status_label.text()
+    assert not panel._burst_poll_timer.isActive()
+
+
+def test_burst_response_stop_empty_buffer(panel: MultiLinePanel) -> None:
+    """Stop with no cycles received — status reflects empty save."""
+    panel._burst_active_server = True
+    panel._on_burst_response(
+        "multiline.burst_stop",
+        {"ok": True, "saved": False, "path": None},
+    )
+    assert panel._burst_active_server is False
+    assert "Цикла не было" in panel._burst_status_label.text()
+
+
+def test_burst_response_status_during_active_burst(panel: MultiLinePanel) -> None:
+    panel._burst_active_server = True
+    panel._on_burst_response(
+        "multiline.burst_status",
+        {"ok": True, "active": True, "elapsed_s": 4.5, "cycle_count": 23},
+    )
+    assert "4.5" in panel._burst_status_label.text()
+    assert "23" in panel._burst_status_label.text()
+
+
+def test_burst_response_engine_disconnect(panel: MultiLinePanel) -> None:
+    """ZMQ worker returned non-dict (None) — UI must not strand."""
+    panel._burst_in_flight = True
+    panel._on_burst_response("multiline.burst_start", None)
+    assert panel._burst_in_flight is False
+    assert panel._burst_button.isEnabled()
+    assert "не ответил" in panel._burst_status_label.text()
+
+
+def test_burst_duration_spin_constraints(panel: MultiLinePanel) -> None:
+    """Architect-mandated 1..600 s range."""
+    panel._burst_duration_spin.setValue(0)  # below min
+    assert panel._burst_duration_spin.value() == 1
+    panel._burst_duration_spin.setValue(601)  # above max
+    assert panel._burst_duration_spin.value() == 600
