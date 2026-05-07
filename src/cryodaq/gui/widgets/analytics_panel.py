@@ -241,16 +241,16 @@ class AnalyticsPanel(QWidget):
         for ax_name in ("left", "bottom"):
             ax = pi.getAxis(ax_name)
             if ax:
-                ax.setPen(pg.mkPen(color="#444444"))
-                ax.setTextPen(pg.mkPen(color="#AAAAAA"))
+                ax.setPen(pg.mkPen(color=theme.PLOT_GRID_COLOR))
+                ax.setTextPen(pg.mkPen(color=theme.PLOT_LABEL_COLOR))
 
         # Метки осей по умолчанию (режим R_thermal)
-        pi.setLabel("left", "R_thermal", units="К/Вт", color="#AAAAAA")
+        pi.setLabel("left", "R_thermal", units="К/Вт", color=theme.PLOT_LABEL_COLOR)
         # Disable pyqtgraph autoSIPrefix for the whole axis lifetime.
         # Both modes (R_thermal К/Вт and Температура К) reuse this same
         # left-axis object; setting once in _init_plot is enough.
         pi.getAxis("left").enableAutoSIPrefix(False)
-        pi.setLabel("bottom", "Время", color="#AAAAAA")
+        pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
 
         # --- Линии ---
 
@@ -432,8 +432,8 @@ class AnalyticsPanel(QWidget):
     def _refresh_r_thermal_plot(self) -> None:
         """Режим без cooldown: показать R_thermal по времени."""
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "R_thermal", units="К/Вт", color="#AAAAAA")
-        pi.setLabel("bottom", "Время", color="#AAAAAA")
+        pi.setLabel("left", "R_thermal", units="К/Вт", color=theme.PLOT_LABEL_COLOR)
+        pi.setLabel("bottom", "Время", color=theme.PLOT_LABEL_COLOR)
         pi.setLogMode(x=False, y=False)
 
         # Скрыть cooldown-элементы
@@ -464,8 +464,8 @@ class AnalyticsPanel(QWidget):
     def _refresh_cooldown_plot(self) -> None:
         """Режим cooldown: живая T_cold + прогноз + CI полоса."""
         pi = self._plot.getPlotItem()
-        pi.setLabel("left", "Температура", units="К", color="#AAAAAA")
-        pi.setLabel("bottom", "Время от старта (ч)", color="#AAAAAA")
+        pi.setLabel("left", "Температура", units="К", color=theme.PLOT_LABEL_COLOR)
+        pi.setLabel("bottom", "Время от старта (ч)", color=theme.PLOT_LABEL_COLOR)
         pi.setLogMode(x=False, y=True)
 
         # Скрыть R_thermal линию
