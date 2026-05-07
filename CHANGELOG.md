@@ -7,7 +7,9 @@
 
 ---
 
-## [0.55.0] — unreleased
+## [Unreleased]
+
+(autonomous run 2026-05-07 work — pending v0.55.0 tag)
 
 ### Fixed
 
@@ -144,6 +146,139 @@
 
   Backward-compat: omitting the `landmarks:` section preserves the prior
   v0.53.x prompt structure (single «Доступные каналы» list).
+
+---
+
+## [0.53.2] — 2026-05-06 — fix(analytics): predictor readout stack + horizon button wiring
+
+Closing commit: `c48b501`.
+
+### Changed
+
+- **Predictor readout** — заменён single-horizon readout на стек из 6
+  горизонтов (1/3/6/12/24/48ч). Каждая строка показывает значение и CI
+  независимо. Cycle 1 (`88f7331`).
+- **Horizon button X-range wiring** — кнопки заголовка управляют
+  X-диапазоном графика через `_apply_x_range()` (cycle 2, `c48b501`).
+  Right edge = `time.time() + horizon*3600`, left edge = первый history
+  sample, fallback `now - 60s` если empty. Re-anchor on `set_horizon` /
+  `set_history` / `set_prediction`.
+
+### Fixed
+
+- **Latent inert-buttons bug** — pre-existing `horizon_changed` сигнал
+  не имел production consumer; cycle 2 wired buttons directly с
+  preservation сигнала для backward compat. Codex caught в cycle 1
+  FAIL/HIGH.
+
+### Tests
+
+- 6 new widget tests (15 → 21); 188 passed broader regression.
+- Codex PASS cycle 2 of 3.
+
+---
+
+## [0.53.1] — 2026-05-06 — feat: F-ReplayPredictor — CooldownService over replay stream
+
+Closing commit: `fcd717f`.
+
+### Added
+
+- **F-ReplayPredictor** — bolt `CooldownService` onto `ReplayEngine` via
+  DataBroker insertion. CooldownService subscribes to broker, processes
+  readings, publishes derived metrics back through broker → PUB → ZMQ
+  socket. Predictor widget активируется при replay реальных cooldown
+  curves в Mac mock. Defensive channel override (Т12/Т11) в
+  `ReplayEngine` handles `cooldown.yaml` drift без затрагивания real-lab
+  config.
+
+### Fixed
+
+- Slow-joiner regression в `test_replay_engine_heartbeat`, caught when
+  broker insertion shifted timing. Mitigated через
+  subscribe-before-source pattern (Stage 4b in v0.53.0).
+
+### Filed
+
+- F-ConfigChannelDrift — real-lab `cooldown.yaml` mapping alignment
+  (closed in subsequent unreleased v0.55.0 batch).
+
+### Tests
+
+- 3 new tests; 178/178 stable across 3 consecutive runs.
+- Codex PASS cycle 2 of 3 (cycle 1 fixture-on-clean-checkout issue).
+- Architect smoke 2026-05-06 21:45: predictor activates end-to-end on
+  `cooldown_v5` curve at `speed=50`, full ~17h trajectory + ±2.73K 67%
+  CI envelope rendering; «Через 1 ч: 64.66 K» readout populated.
+
+---
+
+## [0.53.0] — 2026-05-06 — feat: F-Replay — 5-stage replay mode + predictor bootstrap
+
+Closing commit: `a502814` (late hotfix moved tag forward from
+`1bd3b13`).
+
+### Added
+
+- **F-Replay 5-stage replay mode**:
+  - Stage 1 (`4efac0c`) — schema fix.
+  - Stage 2 (`7795ab9`) — replay transforms + CLI.
+  - Stage 3 (`7d0a22c`) — `replay_engine`: PUB+REP+heartbeat parity,
+    port refuse, `--force-replay` flag.
+  - Stage 4 (`fef291d`) — launcher `--replay`, `TopWatchBar` badge,
+    source listing.
+  - Stage 4b (`33dc1b0`) — UX polish: timestamp shift, badge dispatch,
+    title persistence.
+  - Stage 4c (`1bd3b13`) — `DirectoryReplay` non-empty-first-file fix.
+  - Stage 5 (`e4da30a`) — predictor bootstrap hint + operator doc.
+
+### Fixed
+
+- **Late hotfix** (`a502814`) — `QTimer` shadowing fix from Stage 4b
+  regression caught в architect smoke test. Tag moved here from
+  `1bd3b13`.
+
+### Filed
+
+- F-ReplayPhases (closed in subsequent unreleased v0.55.0 batch).
+- F-LegacyChannelMap (closed in subsequent unreleased v0.55.0 batch).
+
+### Codex review
+
+- P2 findings declined per architect call: non-loopback collision,
+  hardcoded predictor path, `--force-replay`+live engine combo — все
+  deferred to follow-up specs.
+
+### Tests
+
+- 1472 passed full regression.
+
+---
+
+## [0.52.11] — 2026-05-06 — chore: cooldown_v5/ in .gitignore
+
+Closing commit: `788cd27`.
+
+### Changed
+
+- `cooldown_v5/` reference data added to `.gitignore` —
+  operator-supplied curves should not live in the repository.
+
+### Notes
+
+- Predictor model bootstrap (cooled-mock activation) deferred to v0.53.0
+  replay mode.
+
+---
+
+## [0.52.10] — 2026-05-06 — hotfix(diag): revert D2-TEMP instrumentation
+
+Closing commit: `bc36b1d`.
+
+### Fixed
+
+- **Temperature panel Y-axis autoRange** on Mac mock — 4-commit arc;
+  D2-TEMP instrumentation reverted.
 
 ---
 
