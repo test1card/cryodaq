@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,52 @@ class TCPTransport:
         """Send command, await one response line."""
         await self.send_line(command)
         return await self.recv_line()
+
+    async def write_command(self, command: str) -> None:
+        """Send a fire-and-forget command (no response expected).
+
+        Public alias for :meth:`send_line` used by continuous-mode
+        protocols where the server pushes streaming answers asynchronously
+        rather than reply-once-per-request. Reuses the same CRLF framing
+        and write semantics as :meth:`send_line`.
+        """
+        await self.send_line(command)
+
+    async def read_lines_async(self) -> AsyncIterator[str]:
+        """Yield lines pushed by the server.
+
+        Used by continuous-mode protocols (Etalon ``startmeasnogui``):
+        caller sends the command that triggers server pushes, then
+        iterates over this generator until the transport is closed or
+        the server signals end-of-stream.
+
+        Lines are CRLF-stripped and decoded as ASCII (replace on bad
+        bytes, matching :meth:`recv_line`). Idle periods of up to
+        ``read_timeout_s`` seconds are tolerated — they yield no value
+        and the loop continues — so a quiet measurement cycle does not
+        kill the listener. EOF and explicit close terminate the
+        iterator cleanly.
+        """
+        if self._reader is None:
+            raise TCPTransportError("Transport not open")
+        reader = self._reader
+        while True:
+            if reader.at_eof():
+                return
+            try:
+                line_bytes = await asyncio.wait_for(
+                    reader.readline(),
+                    timeout=self._read_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                # Idle period — give caller a chance to cancel the task
+                # by yielding control, then keep listening.
+                await asyncio.sleep(0)
+                continue
+            if not line_bytes:
+                # Empty bytes from readline() == peer closed connection.
+                return
+            yield line_bytes.decode("ascii", errors="replace").rstrip("\r\n")
 
     async def close(self) -> None:
         if self._writer is not None:
