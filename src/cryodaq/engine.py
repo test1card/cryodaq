@@ -2532,6 +2532,30 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Корректное завершение ---
     logger.info("═══ Завершение CryoDAQ Engine ═══")
 
+    # F31 H3: drain in-flight sink dispatches before downstream teardown.
+    # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
+    # that are mid-flight at SIGTERM time; cancelling them mid-flight
+    # corrupts vault notes and aborts webhook POSTs. Cap at 10s.
+    if _alarm_dispatch_tasks:
+        logger.info(
+            "Draining %d in-flight dispatch task(s) before shutdown",
+            len(_alarm_dispatch_tasks),
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *_alarm_dispatch_tasks, return_exceptions=True
+                ),
+                timeout=10.0,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Sink drain timed out (10s); cancelling %d remaining",
+                len(_alarm_dispatch_tasks),
+            )
+            for t in _alarm_dispatch_tasks:
+                t.cancel()
+
     watchdog_task.cancel()
     try:
         await watchdog_task
