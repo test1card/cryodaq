@@ -63,6 +63,12 @@ logger = logging.getLogger(__name__)
 
 _BANNER_AUTO_CLEAR_MS = 4000
 
+# Text-view heights composed from SPACE_* tokens so RULE-SPACE-001 holds.
+# MD = three multi-line snippets (notes / runs / artifacts).
+# SM = compact list of result keys.
+_TEXT_VIEW_HEIGHT_MD = theme.SPACE_6 * 2 + theme.SPACE_2  # 72px
+_TEXT_VIEW_HEIGHT_SM = theme.SPACE_6 + theme.SPACE_4 + theme.SPACE_2  # 56px
+
 _SORT_OPTIONS: tuple[tuple[str, str, bool], ...] = (
     # (label, sort_by, descending)
     ("Сначала новые", "start_time", True),
@@ -590,7 +596,7 @@ class ArchivePanel(QWidget):
         self._notes_view = QPlainTextEdit()
         self._notes_view.setReadOnly(True)
         self._notes_view.setMaximumBlockCount(500)
-        self._notes_view.setFixedHeight(72)
+        self._notes_view.setFixedHeight(_TEXT_VIEW_HEIGHT_MD)
         _style_input(self._notes_view)
         layout.addWidget(self._notes_view)
 
@@ -604,21 +610,21 @@ class ArchivePanel(QWidget):
         layout.addWidget(self._caption("Прогоны:"))
         self._runs_view = QPlainTextEdit()
         self._runs_view.setReadOnly(True)
-        self._runs_view.setFixedHeight(72)
+        self._runs_view.setFixedHeight(_TEXT_VIEW_HEIGHT_MD)
         _style_input(self._runs_view)
         layout.addWidget(self._runs_view)
 
         layout.addWidget(self._caption("Артефакты:"))
         self._artifacts_view = QPlainTextEdit()
         self._artifacts_view.setReadOnly(True)
-        self._artifacts_view.setFixedHeight(72)
+        self._artifacts_view.setFixedHeight(_TEXT_VIEW_HEIGHT_MD)
         _style_input(self._artifacts_view)
         layout.addWidget(self._artifacts_view)
 
         layout.addWidget(self._caption("Результаты:"))
         self._results_view = QPlainTextEdit()
         self._results_view.setReadOnly(True)
-        self._results_view.setFixedHeight(56)
+        self._results_view.setFixedHeight(_TEXT_VIEW_HEIGHT_SM)
         _style_input(self._results_view)
         layout.addWidget(self._results_view)
 
