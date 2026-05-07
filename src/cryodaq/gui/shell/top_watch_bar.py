@@ -231,21 +231,32 @@ class TopWatchBar(QWidget):
 
     def _build_persistent_context(self) -> None:
         """Add 4-value persistent context strip to the watch bar."""
-        label_style = f"color: {theme.TEXT_MUTED}; font-size: 11px;"
+        # v0.55.2 ds-007: route inline font sizes/weights through tokens.
+        label_style = (
+            f"color: {theme.TEXT_MUTED}; font-size: {theme.FONT_SIZE_XS}px;"
+        )
         value_style = (
             f"color: {theme.TEXT_PRIMARY}; "
-            f"font-size: 12px; "
-            f"font-weight: 600; "
+            f"font-size: {theme.FONT_SIZE_SM}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
             f"font-family: '{theme.FONT_MONO}', monospace;"
         )
 
         self._context_frame = QFrame(self)
         self._context_frame.setObjectName("topWatchBarContext")
+        # v0.55.2 ds-006: padding 2px 8px expressed via SPACE_1 // 2 + SPACE_2
+        # (2 is the same micro-step we pin in sensor_cell.py; folding both
+        # callsites onto SPACE_HALF is a v0.56 follow-up).
         self._context_frame.setStyleSheet(
-            "#topWatchBarContext { background-color: transparent; padding: 2px 8px; }"
+            "#topWatchBarContext { "
+            "background-color: transparent; "
+            f"padding: {theme.SPACE_1 // 2}px {theme.SPACE_2}px; "
+            "}"
         )
         ctx = QHBoxLayout(self._context_frame)
-        ctx.setContentsMargins(8, 2, 8, 2)
+        ctx.setContentsMargins(
+            theme.SPACE_2, theme.SPACE_1 // 2, theme.SPACE_2, theme.SPACE_1 // 2
+        )
         ctx.setSpacing(theme.SPACE_3)
 
         # Pressure
@@ -302,7 +313,9 @@ class TopWatchBar(QWidget):
     def _make_ctx_dot() -> QLabel:
         """Middle dot separator for items within persistent context strip."""
         dot = QLabel(" \u00b7 ")  # · middle dot
-        dot.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: 11px;")
+        dot.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px;"
+        )
         return dot
 
     # ------------------------------------------------------------------
@@ -328,7 +341,7 @@ class TopWatchBar(QWidget):
         else:
             self._ctx_pressure_value.setStyleSheet(
                 f"color: {theme.TEXT_PRIMARY}; "
-                f"font-size: 12px; font-weight: 600; "
+                f"font-size: {theme.FONT_SIZE_SM}px; font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
                 f"font-family: '{theme.FONT_MONO}', monospace;"
             )
         self._ctx_pressure_value.setText(text)
