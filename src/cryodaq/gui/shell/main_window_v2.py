@@ -40,6 +40,7 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.assistant_chat_panel import AssistantChatPanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
+from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
@@ -133,6 +134,7 @@ class MainWindowV2(QMainWindow):
         "source": ("_keithley_panel", lambda self: KeithleyPanel()),
         "analytics": ("_analytics_view", lambda self: AnalyticsView()),
         "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
+        "multiline": ("_multiline_panel", lambda self: MultiLinePanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
         "assistant_chat": ("_assistant_chat_panel", lambda self: AssistantChatPanel()),
         "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
@@ -153,6 +155,7 @@ class MainWindowV2(QMainWindow):
         self._keithley_panel: KeithleyPanel | None = None
         self._analytics_view: AnalyticsView | None = None
         self._conductivity_panel: ConductivityPanel | None = None
+        self._multiline_panel: MultiLinePanel | None = None
 
         # F4 lazy-open snapshot replay cache (F3-Cycle1).
         # Last-value setters: dict[setter_name → last args tuple].
@@ -296,6 +299,13 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
+        # v0.55.6: replay connection state into MultiLine overlay. Same
+        # contract as the other measurement overlays.
+        if name == "multiline":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
         # Phase II.7: replay connection state into Calibration overlay.
         if name == "calibration":
             derived_connected = False
@@ -414,6 +424,12 @@ class MainWindowV2(QMainWindow):
             and self._conductivity_panel is not None
         ):
             self._conductivity_panel.on_reading(reading)
+        # v0.55.6 \u2014 Etalon MultiLine length + environment readings. Filter
+        # is intentionally pre-MultiLinePanel to avoid wasted slot calls
+        # on every \u0422* reading. The panel itself also filters internally,
+        # but doing it here keeps the dispatch hot path tight.
+        if "MultiLine" in channel and self._multiline_panel is not None:
+            self._multiline_panel.on_reading(reading)
         # F3-Cycle2: route temperature readings to analytics view + shell cache.
         # This is intentional parallel routing — calibration_panel and analytics_view
         # are independent consumers: calibration uses readings for curve fitting;
@@ -649,6 +665,8 @@ class MainWindowV2(QMainWindow):
         # Phase II.5: mirror to Conductivity overlay (same contract).
         if self._conductivity_panel is not None:
             self._conductivity_panel.set_connected(connected)
+        if self._multiline_panel is not None:
+            self._multiline_panel.set_connected(connected)
         # Phase II.7: mirror to Calibration overlay (same contract).
         if self._calibration_panel is not None:
             self._calibration_panel.set_connected(connected)

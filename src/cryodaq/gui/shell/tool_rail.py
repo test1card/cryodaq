@@ -44,6 +44,7 @@ _PHOSPHOR_ICONS: dict[str, str] = {
     "instruments": "ph.cpu",
     "log": "ph.note-pencil",
     "more": "ph.dots-three",
+    "multiline": "ph.ruler",
     "new_experiment": "ph.plus-circle",
     "source": "ph.lightning",
 }
@@ -120,6 +121,12 @@ _OVERLAY_ITEMS = [
     ("source", "zap.svg", "Источник мощности"),
     ("analytics", "trending-up.svg", "Аналитика"),
     ("conductivity", "thermometer.svg", "Теплопроводность"),
+    # v0.55.6 — F-MultiLine GUI surface. SVG fallback file is absent;
+    # the Phosphor mapping `ph.ruler` (registered in _PHOSPHOR_ICONS)
+    # renders without it. Placed next to conductivity because both are
+    # measurement-domain overlays operators reach for in the same
+    # mental cluster.
+    ("multiline", "ruler.svg", "MultiLine"),
     ("alarms", "bell.svg", "Тревоги"),
     ("log", "file-text.svg", "Служебный лог"),
     # F34: Гемма chat overlay between log and instruments. The Lucide
