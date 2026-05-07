@@ -178,3 +178,61 @@ def test_status_from_errors_clean():
         daq_error=0,
     )
     assert MultiLineDriver._status_from_errors(ch) == ChannelStatus.OK
+
+
+# ---------------------------------------------------------------------------
+# v0.55.6.1 — channel_count config + 1..32 validation
+# ---------------------------------------------------------------------------
+
+
+def test_channel_count_resolves_to_implicit_range_when_no_explicit_list() -> None:
+    driver = MultiLineDriver("ML1", "localhost", channel_count=8, mock=True)
+    assert driver._channel_numbers == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_explicit_channel_numbers_override_channel_count() -> None:
+    driver = MultiLineDriver(
+        "ML1",
+        "localhost",
+        channel_numbers=[2, 5, 7],
+        channel_count=99,  # ignored when explicit list present
+        mock=True,
+    )
+    assert driver._channel_numbers == [2, 5, 7]
+
+
+def test_default_channels_when_no_config_provided() -> None:
+    driver = MultiLineDriver("ML1", "localhost", mock=True)
+    assert driver._channel_numbers == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_invalid_channel_count_lower_bound_rejected(count: int) -> None:
+    with pytest.raises(ValueError, match="1..32"):
+        MultiLineDriver("ML1", "localhost", channel_count=count, mock=True)
+
+
+def test_invalid_channel_count_upper_bound_rejected() -> None:
+    with pytest.raises(ValueError, match="1..32"):
+        MultiLineDriver("ML1", "localhost", channel_count=33, mock=True)
+
+
+def test_invalid_explicit_channel_id_rejected() -> None:
+    with pytest.raises(ValueError, match="channel id"):
+        MultiLineDriver("ML1", "localhost", channel_numbers=[0, 1, 2], mock=True)
+    with pytest.raises(ValueError, match="channel id"):
+        MultiLineDriver("ML1", "localhost", channel_numbers=[1, 2, 33], mock=True)
+
+
+def test_duplicate_channel_ids_rejected() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        MultiLineDriver("ML1", "localhost", channel_numbers=[1, 2, 2, 3], mock=True)
+
+
+def test_max_32_channels_accepted() -> None:
+    driver = MultiLineDriver(
+        "ML1", "localhost", channel_count=32, mock=True
+    )
+    assert len(driver._channel_numbers) == 32
+    assert driver._channel_numbers[0] == 1
+    assert driver._channel_numbers[-1] == 32

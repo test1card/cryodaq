@@ -129,6 +129,14 @@ class MultiLineDriver(InstrumentDriver):
     driver's: read_channels returns [] on transport error.
     """
 
+    # v0.55.6.1: Etalon MultiLine hardware ships with up to 32 laser
+    # channels; the operator picks the active set per deployment. The
+    # driver enforces 1..32 because the protocol's `latestlengthvalid`
+    # query degenerates outside that band (zero or repeated indices
+    # produce an empty channeldata response and silently lose data).
+    _MIN_CHANNELS = 1
+    _MAX_CHANNELS = 32
+
     def __init__(
         self,
         name: str,
@@ -136,6 +144,7 @@ class MultiLineDriver(InstrumentDriver):
         *,
         port: int = 2001,
         channel_numbers: list[int] | None = None,
+        channel_count: int | None = None,
         connect_timeout_s: float = 5.0,
         read_timeout_s: float = 10.0,
         mock: bool = False,
@@ -143,13 +152,39 @@ class MultiLineDriver(InstrumentDriver):
         super().__init__(name, mock=mock)
         self._host = host
         self._port = port
-        self._channel_numbers = list(channel_numbers) if channel_numbers else [1, 2, 3, 4]
+        # Resolve channel set. ``channel_numbers`` (explicit list) wins
+        # over ``channel_count`` (count-only sugar) so an operator can
+        # pin a specific laser subset (e.g. [2, 5, 7] when one mirror
+        # is replaced) without rewriting the implicit-range default.
+        if channel_numbers:
+            resolved = list(channel_numbers)
+        elif channel_count is not None:
+            resolved = list(range(1, int(channel_count) + 1))
+        else:
+            resolved = [1, 2, 3, 4]
+        self._validate_channel_numbers(resolved)
+        self._channel_numbers = resolved
         self._connect_timeout_s = connect_timeout_s
         self._read_timeout_s = read_timeout_s
         self._transport: TCPTransport | None = None
         self._mock_nominal_lengths_mm = {
             ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers
         }
+
+    @classmethod
+    def _validate_channel_numbers(cls, channels: list[int]) -> None:
+        if len(channels) < cls._MIN_CHANNELS or len(channels) > cls._MAX_CHANNELS:
+            raise ValueError(
+                f"MultiLine channel set must have {cls._MIN_CHANNELS}..{cls._MAX_CHANNELS} "
+                f"entries, got {len(channels)}"
+            )
+        for ch in channels:
+            if not isinstance(ch, int) or ch < 1 or ch > cls._MAX_CHANNELS:
+                raise ValueError(
+                    f"MultiLine channel id must be int in 1..{cls._MAX_CHANNELS}, got {ch!r}"
+                )
+        if len(set(channels)) != len(channels):
+            raise ValueError(f"MultiLine channel set must be unique, got {channels}")
 
     async def connect(self) -> None:
         if self._connected:

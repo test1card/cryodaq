@@ -1045,11 +1045,18 @@ def _load_drivers(
         elif itype == "etalon_multiline":
             from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
 
+            # v0.55.6.1: accept either explicit ``channels`` list or the
+            # convenience ``channel_count`` integer (1..32). Driver
+            # validates the resolved set; failure raises ValueError and
+            # the engine drops the entry with the existing logger path.
+            _ml_channels = entry.get("channels")
+            _ml_channel_count = entry.get("channel_count")
             driver = MultiLineDriver(
                 name,
                 host=str(entry.get("host", "localhost")),
                 port=int(entry.get("port", 2001)),
-                channel_numbers=list(entry.get("channels", [1, 2, 3, 4])),
+                channel_numbers=list(_ml_channels) if _ml_channels else None,
+                channel_count=(int(_ml_channel_count) if _ml_channel_count else None),
                 connect_timeout_s=float(entry.get("connect_timeout_s", 5.0)),
                 read_timeout_s=float(entry.get("read_timeout_s", 10.0)),
                 mock=mock,
