@@ -76,7 +76,10 @@ def test_measurement_layout_main_is_r_thermal_live(app):
     view.set_phase("measurement")
     slots = view.active_widgets()
     assert analytics_widgets.id_of(slots["main"]) == "r_thermal_live"
-    assert analytics_widgets.id_of(slots["bottom_right"]) == "keithley_power"
+    # v0.55.2 A2: Keithley moved out of Analytics — measurement mirrors
+    # cooldown's r_thermal_placeholder so the right column reads as
+    # "thermal-only" across both phases.
+    assert analytics_widgets.id_of(slots["bottom_right"]) == "r_thermal_placeholder"
 
 
 def test_disassembly_layout_has_empty_right_slots(app):
@@ -127,8 +130,10 @@ def test_inactive_widget_discarded_on_phase_change(app):
     pressure_in_vacuum = slots_before["bottom_right"]
     view.set_phase("measurement")
     slots_after = view.active_widgets()
-    # measurement: bottom_right = keithley_power. Pressure gone.
-    assert analytics_widgets.id_of(slots_after["bottom_right"]) == "keithley_power"
+    # measurement: bottom_right = r_thermal_placeholder (post v0.55.2 A2;
+    # was keithley_power, but Keithley now lives only in its own tab).
+    # Pressure gone.
+    assert analytics_widgets.id_of(slots_after["bottom_right"]) == "r_thermal_placeholder"
     assert pressure_in_vacuum is not slots_after["bottom_right"]
 
 

@@ -28,7 +28,9 @@ phases:
   measurement:
     main: r_thermal_live
     top_right: temperature_overview
-    bottom_right: keithley_power
+    # v0.55.2 A2: Keithley belongs in the Keithley tab only — Analytics
+    # mirrors COOLDOWN's r_thermal_placeholder during measurement.
+    bottom_right: r_thermal_placeholder
 
   warmup:
     main: temperature_trajectory
