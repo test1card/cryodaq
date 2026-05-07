@@ -15,8 +15,11 @@ from cryodaq.agents.rag.document_loader import (
     DocumentChunk,
     load_experiment_metadata,
     load_operator_log_entries,
+    load_procedure_documents,
+    load_reference_documents,
     load_vault_notes,
 )
+from cryodaq.agents.rag.loaders.pdf_loader import load_pdf_documents
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +58,30 @@ async def build_index(
     embedding_dim: int = _EMBEDDING_DIM,
     table_name: str = "cryodaq_corpus",
     progress_cb: Callable[[int, int], Any] | None = None,
+    pdf_dir: Path | None = None,
+    procedures_dir: Path | None = None,
+    reference_root: Path | None = None,
 ) -> dict:
     """Build (or rebuild) the RAG index. Returns a stats dict.
 
     Embedding dimension mismatches are logged and zero-vector-substituted
     so a single bad chunk does not abort the whole build.
+
+    v0.55.7.1 (F-KnowledgeBaseExpansion) — three new optional sources:
+
+    pdf_dir
+        Knowledge corpus folder с equipment manual PDFs (e.g.
+        ``data/knowledge/equipment_manuals``). Page-aware chunks via
+        :func:`cryodaq.agents.rag.loaders.pdf_loader.load_pdf_documents`.
+    procedures_dir
+        Markdown procedures folder (e.g. ``data/knowledge/procedures``).
+        H1 → title; subdir → category.
+    reference_root
+        Repo root для project reference docs (operator_manual, README,
+        CHANGELOG). CHANGELOG is section-aware per version.
+
+    All three are optional; existing callers (CLI, RAGIndexSink before
+    v0.55.7.1) keep working without modification.
     """
     chunks: list[DocumentChunk] = []
     chunks.extend(load_experiment_metadata(experiments_dir))
@@ -67,6 +89,12 @@ async def build_index(
         chunks.extend(load_vault_notes(vault_dir))
     if sqlite_path is not None:
         chunks.extend(load_operator_log_entries(sqlite_path))
+    if pdf_dir is not None:
+        chunks.extend(load_pdf_documents(pdf_dir))
+    if procedures_dir is not None:
+        chunks.extend(load_procedure_documents(procedures_dir))
+    if reference_root is not None:
+        chunks.extend(load_reference_documents(reference_root))
 
     logger.info("RAG: %d chunks loaded", len(chunks))
     if not chunks:

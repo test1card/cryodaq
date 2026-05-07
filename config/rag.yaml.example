@@ -12,6 +12,17 @@ rag:
   db_path: "data/rag_index"
   vault_dir: "~/CryoDAQ-Vault/experiments"
 
+  # F-KnowledgeBaseExpansion (v0.55.7.1): operator-facing corpus root.
+  # CLI + engine bootstrap append three sub-corpora from this folder:
+  #   ${knowledge_dir}/equipment_manuals/  → PDF (page-aware chunks)
+  #   ${knowledge_dir}/procedures/         → Markdown procedures
+  #                                          (subdir → category;
+  #                                          README.md skipped)
+  #   project-root reference docs           → operator_manual,
+  #                                          README, CHANGELOG (latter
+  #                                          section-aware per version)
+  knowledge_dir: "data/knowledge"
+
   # Chunking
   chunk_max_chars: 1000
   chunk_overlap: 100

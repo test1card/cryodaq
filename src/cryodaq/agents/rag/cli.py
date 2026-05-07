@@ -12,7 +12,7 @@ import yaml
 from cryodaq.agents.rag.embeddings import EmbeddingsClient
 from cryodaq.agents.rag.indexer import build_index
 from cryodaq.agents.rag.searcher import RagSearcher
-from cryodaq.paths import get_config_dir, get_data_dir
+from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 
 
 def _load_rag_config() -> dict:
@@ -65,6 +65,16 @@ def index_main() -> None:
         vault_dir = Path(rag_cfg["vault_dir"]).expanduser()
     sqlite_path = None if args.no_sqlite else _find_latest_sqlite()
 
+    # v0.55.7.1 — knowledge corpus paths. The defaults match the
+    # PHASE 1 folder layout; rag.yaml's `knowledge_dir` overrides root,
+    # subdir names follow the convention ${knowledge_dir}/{equipment_manuals,procedures}.
+    knowledge_dir = Path(
+        rag_cfg.get("knowledge_dir", get_data_dir() / "knowledge")
+    ).expanduser()
+    pdf_dir = knowledge_dir / "equipment_manuals"
+    procedures_dir = knowledge_dir / "procedures"
+    reference_root = get_project_root()
+
     embeddings_client = _make_embeddings(rag_cfg)
 
     def _progress(done: int, total: int) -> None:
@@ -74,6 +84,9 @@ def index_main() -> None:
     print(f"  experiments: {experiments_dir}")
     print(f"  vault: {vault_dir}")
     print(f"  operator_log: {sqlite_path}")
+    print(f"  knowledge.pdf_dir: {pdf_dir}")
+    print(f"  knowledge.procedures_dir: {procedures_dir}")
+    print(f"  knowledge.reference_root: {reference_root}")
 
     try:
         stats = asyncio.run(
@@ -84,6 +97,9 @@ def index_main() -> None:
                 db_path=db_path,
                 embeddings_client=embeddings_client,
                 progress_cb=_progress,
+                pdf_dir=pdf_dir,
+                procedures_dir=procedures_dir,
+                reference_root=reference_root,
             )
         )
     finally:
