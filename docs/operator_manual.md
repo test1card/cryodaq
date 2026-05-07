@@ -573,4 +573,72 @@ restart engine. Алиасы для T1-T10/T13-T24 **давать вредно**
   данных до сходимости, порог `percent_settled ≥ 30 %`). Для валидации полноценного прогноза
   охлаждения используйте replay mode (v0.53.0+), который воспроизводит реальные траектории.
 
+## База знаний
+
+С v0.55.7.1 CryoDAQ ships с встроенной базой знаний (RAG), которая
+отвечает на вопросы оператора через Telegram (`/ask`), GUI чат
+(встроен в KnowledgeBasePanel) и категорийный поиск sidebar.
+
+### Что в базе
+
+Автоматически индексируется:
+
+- `data/knowledge/equipment_manuals/` — PDF документация оборудования
+  (Etalon MultiLine v2.2, LakeShore 218S, Keithley 2600B Reference,
+  Thyracont VSP63D — total ~1100 страниц).
+- `data/knowledge/procedures/` — markdown процедуры (захолаживание,
+  аварийное отключение, troubleshooting). Subdir → category.
+- `data/knowledge/reference/` — operator_manual, README, README.en,
+  CHANGELOG (последний — section-aware по версиям).
+- `data/experiments/<id>/metadata.json` — past experiments.
+- `data/data_*.db` operator_log table — журнал оператора.
+
+### Как добавить новый PDF
+
+1. Drop PDF в `data/knowledge/equipment_manuals/<имя>.pdf`.
+2. В GUI открыть KnowledgeBasePanel → нажать «Обновить индекс».
+3. Подождать (зависит от размера, ~1 минута на сотню страниц на
+   M-series Mac с qwen3-embedding:0.6b).
+4. Toast «Индекс обновлён: N chunks» — можно сразу спрашивать в чате.
+
+Альтернативно — restart engine. Bootstrap (PHASE 6) auto-запускается
+on empty index и забирает всё из `data/knowledge/`. Если индекс уже
+populated — bootstrap idempotent, просто skip'ает.
+
+### Как написать новую процедуру
+
+1. Создать `data/knowledge/procedures/<имя>.md`.
+2. Первая строка — `# Заголовок процедуры` (H1 используется как title
+   для citations в чате).
+3. Subdirs становятся категориями (`troubleshooting/` → category).
+4. «Обновить индекс» в GUI или restart engine.
+
+### Embedding model
+
+Используется `qwen3-embedding:0.6b` через Ollama (1024-dim,
+multilingual, MTEB top-tier). Установить:
+
+```
+ollama pull qwen3-embedding:0.6b
+```
+
+Без этой модели RAG indexer падает с `OllamaModelMissingError`.
+
+### Цитирование источников
+
+`prettify_source_label` производит operator-readable citation labels:
+
+| source_kind         | пример                                |
+| ------------------- | ------------------------------------- |
+| equipment_manual    | `Etalon MultiLine — стр. 5`           |
+| procedure           | `Процедура: Аварийное отключение`     |
+| operator_manual     | `Operator Manual`                     |
+| readme / readme_en  | `Project README` / `Project README (EN)` |
+| changelog           | `CHANGELOG v0.55.7`                   |
+| experiment_metadata | `Эксперимент: Cooldown S-001 — 2026-04-15` |
+| operator_log        | `Журнал: Vladimir — 2026-04-15`       |
+
+Same labels appear в GUI snippet cards и в Гемма ответах в чате —
+оператор узнаёт документ по виду одинаково в обоих местах.
+
 Документ описывает текущее реализованное состояние и не обещает будущие функции.
