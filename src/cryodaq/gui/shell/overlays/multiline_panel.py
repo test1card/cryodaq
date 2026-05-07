@@ -196,11 +196,28 @@ class _Chip(QLabel):
 
 
 class MultiLinePanel(QWidget):
-    """Etalon MultiLine measurement overlay."""
+    """Etalon MultiLine measurement overlay.
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    v0.55.15 (Codex audit SCOPE 5 finding 5.1) — accepts an optional
+    ``instrument_id`` so a deployment with multiple Etalon MultiLine
+    instruments (e.g. ``MultiLine_1`` and ``MultiLine_2``) routes each
+    instrument's readings into its own panel. Default ``None`` keeps
+    the legacy substring-match behaviour for single-instrument
+    deployments.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        instrument_id: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("MultiLinePanel")
+
+        # v0.55.15 — when set, channels must start with
+        # ``f"{instrument_id}/"`` to be accepted by ``on_reading``.
+        self._instrument_id: str | None = instrument_id
 
         self._connected: bool = False
         self._last_reading_mono: float = 0.0
@@ -391,7 +408,7 @@ class MultiLinePanel(QWidget):
         if reading is None:
             return
         channel = getattr(reading, "channel", "") or ""
-        if "MultiLine" not in channel:
+        if not self._channel_belongs_to_panel(channel):
             return
         try:
             value = float(reading.value)
@@ -416,8 +433,59 @@ class MultiLinePanel(QWidget):
                 self._refresh_env_labels()
 
     def set_connected(self, connected: bool) -> None:
+        was_connected = self._connected
         self._connected = bool(connected)
         self._chip.set_state("ok" if self._connected else "off")
+        # v0.55.15 (Codex audit SCOPE 5 finding 5.2) — when the engine
+        # transitions from connected → disconnected, mark every value
+        # cell as stale instead of leaving the last reading frozen on
+        # screen. Operators previously had to read the chip badge to
+        # know if the displayed value was current.
+        if was_connected and not self._connected:
+            self._mark_all_stale()
+
+    @property
+    def instrument_id(self) -> str | None:
+        """v0.55.15 — instance scoping for multi-instrument deployments."""
+        return self._instrument_id
+
+    def channel_belongs_to_panel(self, channel: str) -> bool:
+        """v0.55.15 (Codex audit SCOPE 5 finding 5.1) — instrument_id
+        scoping. When ``instrument_id`` is set, only channels prefixed
+        with ``"{instrument_id}/"`` are accepted; otherwise fall back
+        to the legacy ``"MultiLine" in channel`` substring match for
+        single-instrument deployments.
+
+        Public so the shell-level reading dispatcher can pre-gate
+        routing without re-implementing the rule.
+        """
+        if not channel:
+            return False
+        if self._instrument_id is not None:
+            return channel.startswith(self._instrument_id + "/")
+        return "MultiLine" in channel
+
+    # Internal alias kept private for backwards-compat callers inside
+    # the panel; new shell-level callers should prefer the public form.
+    _channel_belongs_to_panel = channel_belongs_to_panel
+
+    def _mark_all_stale(self) -> None:
+        """Render every value cell as stale + flag the footer.
+
+        Does NOT discard buffer history (the plot trace stays for
+        post-disconnect inspection); only the per-channel value /
+        delta / window text is dimmed to a missing-value marker.
+        """
+        for ch_num in self._states:
+            row = self._row_for_channel(ch_num)
+            if row is None:
+                continue
+            for col in (_COL_VALUE, _COL_DELTA, _COL_WINDOW):
+                item = self._table.item(row, col)
+                if item is not None:
+                    item.setText(_MISSING_VALUE_TEXT)
+                    item.setForeground(self.palette().mid())
+        self._footer_label.setText("Связь потеряна — последние значения устарели.")
 
     def set_mock(self, mock: bool) -> None:
         if mock:

@@ -279,12 +279,17 @@ class AssistantChatPanel(QWidget):
             # Drop the inflight worker reference so the next send is allowed.
             sender = self.sender()
             if isinstance(sender, ZmqCommandWorker) and sender in self._workers:
-                # Keep the QThread alive until it finishes naturally; remove it
-                # from the retention list once done so we don't grow unbounded.
+                # v0.55.15 (Codex audit SCOPE 5 finding 5.4) — actually
+                # remove the QThread from the retention list. The previous
+                # comment claimed cleanup but only called wait(0) (a no-op
+                # zero-timeout join), so workers grew unbounded across an
+                # operator session.
                 try:
                     sender.wait(0)
                 except RuntimeError:
                     pass
+                self._workers.remove(sender)
+                sender.deleteLater()
             self._inflight = None
             self.set_busy(False)
 

@@ -165,6 +165,12 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        # v0.55.15 (Codex audit SCOPE 5 finding 5.7) — MultiLine readings
+        # cache. Accumulates the latest reading per channel so a panel
+        # opened after readings start arriving still gets a populated
+        # table on the very first refresh, instead of needing a fresh
+        # cycle from the engine to populate.
+        self._multiline_snapshot: dict[str, Reading] = {}
         # Track active experiment ID to detect boundaries for cache invalidation.
         self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
@@ -306,6 +312,12 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
+            # v0.55.15 (Codex audit SCOPE 5 finding 5.7) — replay every
+            # cached MultiLine reading so the panel's table populates
+            # immediately rather than waiting for the next engine cycle.
+            for ch, reading in self._multiline_snapshot.items():
+                if widget.channel_belongs_to_panel(ch):
+                    widget.on_reading(reading)
         # v0.55.6: knowledge-base overlay only needs the chip-style
         # connected state for its embedded chat panel; no readings flow.
         if name == "knowledge_base":
@@ -435,8 +447,16 @@ class MainWindowV2(QMainWindow):
         # is intentionally pre-MultiLinePanel to avoid wasted slot calls
         # on every \u0422* reading. The panel itself also filters internally,
         # but doing it here keeps the dispatch hot path tight.
-        if "MultiLine" in channel and self._multiline_panel is not None:
-            self._multiline_panel.on_reading(reading)
+        # v0.55.15 (Codex audit SCOPE 5 finding 5.1) — record into the
+        # replay cache so a panel opened later sees the recent history,
+        # then forward to the live panel via its public scoping helper.
+        if "MultiLine" in channel:
+            self._multiline_snapshot[channel] = reading
+            if (
+                self._multiline_panel is not None
+                and self._multiline_panel.channel_belongs_to_panel(channel)
+            ):
+                self._multiline_panel.on_reading(reading)
         # F3-Cycle2: route temperature readings to analytics view + shell cache.
         # This is intentional parallel routing — calibration_panel and analytics_view
         # are independent consumers: calibration uses readings for curve fitting;
