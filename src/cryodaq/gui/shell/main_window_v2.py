@@ -37,7 +37,6 @@ from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 from cryodaq.gui.shell.overlay_container import OverlayContainer
 from cryodaq.gui.shell.overlays.alarm_panel import AlarmPanel
 from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
-from cryodaq.gui.shell.overlays.assistant_chat_panel import AssistantChatPanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
@@ -138,7 +137,6 @@ class MainWindowV2(QMainWindow):
         "multiline": ("_multiline_panel", lambda self: MultiLinePanel()),
         "knowledge_base": ("_knowledge_base_panel", lambda self: KnowledgeBasePanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
-        "assistant_chat": ("_assistant_chat_panel", lambda self: AssistantChatPanel()),
         "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
         "archive": ("_archive_panel", lambda self: ArchivePanel()),
         "calibration": ("_calibration_panel", lambda self: CalibrationPanel()),
@@ -170,7 +168,6 @@ class MainWindowV2(QMainWindow):
         # Track active experiment ID to detect boundaries for cache invalidation.
         self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
-        self._assistant_chat_panel: AssistantChatPanel | None = None
         self._instrument_panel: InstrumentsPanel | None = None
         self._archive_panel: ArchivePanel | None = None
         self._calibration_panel: CalibrationPanel | None = None

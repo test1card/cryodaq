@@ -57,7 +57,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.gui import theme
-from cryodaq.gui.shell.overlays.assistant_chat_panel import AssistantChatPanel
+from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)

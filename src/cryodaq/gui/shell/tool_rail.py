@@ -37,11 +37,14 @@ from cryodaq.gui import theme
 _PHOSPHOR_ICONS: dict[str, str] = {
     "alarms": "ph.bell-simple",
     "analytics": "ph.chart-line-up",
-    "assistant_chat": "ph.chat-circle",
     "conductivity": "ph.thermometer-simple",
     "experiment": "ph.flask",
     "home": "ph.house",
     "instruments": "ph.cpu",
+    # v0.55.6.1: knowledge base promoted from More menu to main ToolRail
+    # (replaces standalone Помощник Гемма chat overlay; the chat lives
+    # inside this panel as page 1 of the QStackedWidget).
+    "knowledge_base": "ph.brain",
     "log": "ph.note-pencil",
     "more": "ph.dots-three",
     "multiline": "ph.ruler",
@@ -129,21 +132,19 @@ _OVERLAY_ITEMS = [
     ("multiline", "ruler.svg", "MultiLine"),
     ("alarms", "bell.svg", "Тревоги"),
     ("log", "file-text.svg", "Служебный лог"),
-    # F34: Гемма chat overlay between log and instruments. The Lucide
-    # SVG fallback is not on disk — Phosphor `ph.chat-circle` (registered
-    # in _PHOSPHOR_ICONS) renders without it.
-    ("assistant_chat", "message-circle.svg", "Помощник Гемма"),
+    # v0.55.6.1: knowledge base — RAG sidebar + embedded Гемма chat —
+    # promoted from More menu to the main rail, replaces the standalone
+    # F34 «Помощник Гемма» overlay (architect 2026-05-07: «база знаний
+    # уже в ToolRail … чат с геммой убираем вообще»). Embedded chat in
+    # the knowledge-base panel is the single chat surface now.
+    ("knowledge_base", "brain.svg", "База знаний"),
     ("instruments", "cpu.svg", "Приборы"),
 ]
 _MORE_NAME = "more"
 _MORE_ICON = "more-horizontal.svg"
 _MORE_ITEMS = [
     ("archive", "Архив"),
-    # v0.55.6 — RAG-backed knowledge base (categories sidebar + embedded
-    # Гемма chat). Lives next to «Архив» so operators reach for both
-    # past-experiment artefacts and procedural knowledge in the same
-    # cluster. Standalone overlay rather than refactor of archive_panel.
-    ("knowledge_base", "База знаний"),
+    # v0.55.6.1: «База знаний» promoted to main ToolRail — see _OVERLAY_ITEMS.
     ("calibration", "Калибровка"),
     ("settings", "Настройки"),
     ("__separator__", ""),
