@@ -284,3 +284,67 @@ def test_alarm_history_returns_zero_counts_when_history_empty() -> None:
     assert result.triggered_count == 0
     assert result.cleared_count == 0
     assert result.by_alarm_id == {}
+
+
+# ---------------------------------------------------------------------------
+# Async offload — Cycle-2 fix for Codex finding on dc5350b
+# ---------------------------------------------------------------------------
+
+
+def test_list_recent_offloads_filesystem_scan_to_thread(monkeypatch) -> None:
+    """``ExperimentManager.list_archive_entries`` does synchronous filesystem
+    I/O; the adapter must hand it to ``asyncio.to_thread`` so the live
+    query event loop stays responsive."""
+    import asyncio
+
+    from cryodaq.agents.assistant.query.adapters import archive_adapter
+
+    seen: list[str] = []
+
+    original_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        seen.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(archive_adapter.asyncio, "to_thread", spy_to_thread)
+
+    em = _ExperimentManagerStub([])
+    adapter = ArchiveAdapter(em)
+    _run(adapter.list_recent(days=7))
+
+    assert "list_archive_entries" in seen
+
+
+def test_get_detail_offloads_archive_lookup_and_metadata_read(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    from cryodaq.agents.assistant.query.adapters import archive_adapter
+
+    seen: list[str] = []
+
+    original_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        seen.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(archive_adapter.asyncio, "to_thread", spy_to_thread)
+
+    md_path = tmp_path / "metadata.json"
+    md_path.write_text(json.dumps({"phases": []}), encoding="utf-8")
+    entry = _ArchiveEntryStub(
+        experiment_id="exp-1",
+        start_time=datetime(2025, 12, 1, tzinfo=UTC),
+        end_time=datetime(2025, 12, 2, tzinfo=UTC),
+        metadata_path=md_path,
+    )
+    em = _ExperimentManagerStub([entry])
+    adapter = ArchiveAdapter(em)
+    _run(adapter.get_detail("exp-1"))
+
+    assert "get_archive_item" in seen
+    # ``Path.read_text`` is a bound method — its __name__ is "read_text".
+    assert any(name == "read_text" for name in seen)

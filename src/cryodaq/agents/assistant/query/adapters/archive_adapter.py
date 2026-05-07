@@ -11,6 +11,7 @@ summaries, matching the architect's resolution in the F33 spec.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -60,7 +61,12 @@ class ArchiveAdapter:
             return None
         try:
             start_date = datetime.now(UTC) - timedelta(days=int(days))
-            entries = self._em.list_archive_entries(
+            # ExperimentManager.list_archive_entries() scans the filesystem
+            # and reads every metadata.json synchronously. Offload to a
+            # thread so the Telegram / GUI query event loop stays responsive
+            # for large archives. Cycle-2 fix for Codex finding on dc5350b.
+            entries = await asyncio.to_thread(
+                self._em.list_archive_entries,
                 start_date=start_date,
                 sort_by="start_time",
                 descending=True,
@@ -87,13 +93,22 @@ class ArchiveAdapter:
         if not ident:
             return None
         try:
-            entry = self._em.get_archive_item(ident)
+            # Cycle-2 fix: get_archive_item rescans the archive directory and
+            # reads every metadata.json under it. Offload to a thread to keep
+            # the query event loop responsive.
+            entry = await asyncio.to_thread(self._em.get_archive_item, ident)
             if entry is None:
                 return None
 
             metadata: dict[str, Any] = {}
             try:
-                metadata = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+                # Cycle-2 fix: metadata.json read is synchronous file I/O —
+                # offload so a slow disk or large file does not block the loop.
+                metadata = json.loads(
+                    await asyncio.to_thread(
+                        entry.metadata_path.read_text, encoding="utf-8"
+                    )
+                )
             except Exception as meta_exc:  # noqa: BLE001
                 logger.debug(
                     "ArchiveAdapter.get_detail: metadata.json read failed for %s: %s",
