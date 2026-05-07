@@ -606,3 +606,28 @@ def test_full_channel_id_falls_through_to_short() -> None:
     engine.update()
     diag = engine.get_diagnostics()["T8 \u041a\u0430\u043b\u0438\u0431\u0440\u043e\u0432\u043a\u0430"]
     assert diag.health_score == -1
+
+
+def test_health_to_status_treats_warm_sentinel_as_ok() -> None:
+    """v0.55.2 A4: -1 ("not scored") must map to ok so warm channels
+    don't trigger the F10 alarm publisher.
+    """
+    from cryodaq.core.sensor_diagnostics import _health_to_status
+
+    assert _health_to_status(-1) == "ok"
+    assert _health_to_status(0) == "critical"  # 0 is still scored
+    assert _health_to_status(60) == "warning"
+    assert _health_to_status(95) == "ok"
+
+
+def test_summary_excludes_warm_channels_from_buckets() -> None:
+    engine = SensorDiagnosticsEngine()
+    engine.set_channel_cold_map({"T1": True, "T16": False})
+    _push_noisy(engine, "T1", 4.2, sigma=0.001, n=500)  # cold, healthy
+    _push_noisy(engine, "T16", 298.0, sigma=0.5, n=500)  # warm reference
+    engine.update()
+    summary = engine.get_summary()
+    # T16 should NOT count as critical despite its 0.5K noise sigma.
+    assert summary.critical == 0
+    assert summary.healthy == 1
+    assert summary.total_channels == 2  # both still visible

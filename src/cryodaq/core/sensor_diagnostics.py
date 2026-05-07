@@ -122,9 +122,14 @@ def _health_to_status(health_score: int) -> str:
     """Map health score (0-100) to alarm severity string.
 
     Mapping: >=80 → ok, 50-79 → warning, <50 → critical.
-    Existing SensorDiagnosticsEngine uses health_score, not a status enum;
-    this bridge derives status for F10 alarm-publishing logic.
+    v0.55.2 A4: warm reference channels skip scoring entirely and
+    return health_score=-1; treat that as "ok" so the alarm publisher
+    does not fire spurious diagnostic alarms against the warm refs.
+    Existing SensorDiagnosticsEngine uses health_score, not a status
+    enum; this bridge derives status for F10 alarm-publishing logic.
     """
+    if health_score < 0:
+        return "ok"
     if health_score >= 80:
         return "ok"
     if health_score >= 50:
@@ -390,10 +395,15 @@ class SensorDiagnosticsEngine:
                 worst_score=100,
                 worst_flags=[],
             )
-        healthy = sum(1 for d in diags if d.health_score >= 80)
-        warning = sum(1 for d in diags if 50 <= d.health_score < 80)
-        critical = sum(1 for d in diags if d.health_score < 50)
-        worst = min(diags, key=lambda d: d.health_score)
+        # v0.55.2 A4: warm reference channels carry health_score=-1
+        # ("not scored"). Exclude them from the healthy/warning/critical
+        # buckets and from the worst-of search so they don't drag the
+        # summary into a spurious red.
+        scored = [d for d in diags if d.health_score >= 0]
+        healthy = sum(1 for d in scored if d.health_score >= 80)
+        warning = sum(1 for d in scored if 50 <= d.health_score < 80)
+        critical = sum(1 for d in scored if d.health_score < 50)
+        worst = min(scored, key=lambda d: d.health_score) if scored else diags[0]
         return DiagnosticsSummary(
             total_channels=len(diags),
             healthy=healthy,
