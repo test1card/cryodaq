@@ -25,7 +25,7 @@ def _alarm_event(experiment_id: str = "exp-001") -> EngineEvent:
         timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
         payload={
             "alarm_id": "test_alarm",
-            "level": "WARNING",
+            "level": "CRITICAL",  # v0.55.5 — proactive narrative is CRITICAL-only
             "channels": ["T1", "T2"],
             "values": {"T1": 8.5, "T2": 9.1},
             "message": "Temperature above threshold",

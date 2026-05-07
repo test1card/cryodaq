@@ -21,7 +21,7 @@ from cryodaq.core.event_bus import EngineEvent, EventBus
 
 def _alarm_event(
     alarm_id: str = "test_alarm",
-    level: str = "WARNING",
+    level: str = "CRITICAL",  # v0.55.5 — proactive narrative is CRITICAL-only
     experiment_id: str | None = "exp-001",
 ) -> EngineEvent:
     return EngineEvent(
@@ -427,22 +427,27 @@ async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_sensor_anomaly_critical_handler_dispatches(tmp_path: Path) -> None:
+async def test_sensor_anomaly_critical_proactive_disabled_v0_55_5(tmp_path: Path) -> None:
+    """v0.55.5 — sensor_anomaly_critical no longer triggers Гемма proactive.
+
+    Sensor health is operator-visible on the GUI Diagnostics tab and folded
+    into the hourly digest; proactive LLM narrative on every diagnostic
+    CRITICAL was creating Telegram noise without operator value.
+    """
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
     event_logger = AsyncMock()
     event_logger.log_event = AsyncMock()
-    ollama = _make_mock_ollama("Датчик T1 показывает избыточный шум. Проверьте контакты.")
+    ollama = _make_mock_ollama("ignored")
     cfg = _make_config(
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=True,
-        sensor_anomaly_critical_enabled=True,
+        sensor_anomaly_critical_enabled=True,  # legacy flag — superseded by v0.55.5 filter
     )
     agent, bus = _make_agent(
         config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
     )
-    insight_q = await bus.subscribe("test_sa_insight", maxsize=10)
     await agent.start()
 
     event = EngineEvent(
@@ -454,31 +459,16 @@ async def test_sensor_anomaly_critical_handler_dispatches(tmp_path: Path) -> Non
             "channels": ["T1"],
             "values": {"T1": 4.2},
             "message": "Excessive noise detected",
-            "health_score": 30,
-            "fault_flags": ["noise"],
         },
         experiment_id="exp-001",
     )
     await bus.publish(event)
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.05)
 
-    ollama.generate.assert_awaited_once()
-    call_kwargs = ollama.generate.call_args[1]
-    assert call_kwargs["system"] is not None
-    assert "датчик" in call_kwargs["system"].lower()
+    ollama.generate.assert_not_awaited()
+    telegram._send_to_all.assert_not_awaited()
+    event_logger.log_event.assert_not_awaited()
 
-    telegram._send_to_all.assert_awaited_once()
-    event_logger.log_event.assert_awaited_once()
-
-    insight_events = []
-    while not insight_q.empty():
-        e = insight_q.get_nowait()
-        if e.event_type == "assistant_insight":
-            insight_events.append(e)
-    assert len(insight_events) == 1
-    assert insight_events[0].payload["trigger_event_type"] == "sensor_anomaly_critical"
-
-    bus.unsubscribe("test_sa_insight")
     await agent.stop()
 
 

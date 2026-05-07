@@ -370,14 +370,25 @@ class AssistantLiveAgent:
         if event.event_type == "alarm_fired":
             if not self._config.alarm_fired_enabled:
                 return False
-            level = event.payload.get("level", "INFO")
-            return _MIN_LEVELS.get(level, 0) >= _MIN_LEVELS.get(
-                self._config.alarm_min_level, 1
-            )
+            # v0.55.5 — Гемма proactive narrative is reserved for physics
+            # CRITICAL events; sensor-health alarms (sensor_fault*, diag:*)
+            # carry no operator-actionable narrative beyond the deterministic
+            # GUI/digest paths and previously caused Telegram spam on
+            # flapping diagnostics. Hourly summary captures non-CRITICAL.
+            alarm_id = str(event.payload.get("alarm_id", ""))
+            if alarm_id.startswith("sensor_fault") or alarm_id.startswith("diag:"):
+                return False
+            level = str(event.payload.get("level", "INFO")).upper()
+            if _MIN_LEVELS.get(level, 0) < _MIN_LEVELS.get("CRITICAL", 2):
+                return False
+            return True
         if event.event_type in {"experiment_finalize", "experiment_stop", "experiment_abort"}:
             return self._config.experiment_finalize_enabled
         if event.event_type == "sensor_anomaly_critical":
-            return self._config.sensor_anomaly_critical_enabled
+            # v0.55.5 — sensor diagnostics CRITICAL is not a physics signal;
+            # operator already sees it on the Diagnostics tab. Hourly digest
+            # surfaces aggregated counts without burning the LLM budget.
+            return False
         if event.event_type == "shift_handover_request":
             return self._config.shift_handover_request_enabled
         if event.event_type == "periodic_report_request":
