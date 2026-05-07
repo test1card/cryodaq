@@ -9,153 +9,163 @@
 
 ## [Unreleased]
 
-_Pending v0.55.5 work — see active spec._
+_Ожидается работа над v0.55.5 — см. активную спецификацию._
 
 ---
 
-## [0.55.4] — 2026-05-07 — feat(safety): cooldown alarm policy + Т11/Т12 critical channels + Алармы→Тревоги rename
+## [0.55.4] — 2026-05-07 — политика CooldownAlarm + Т11/Т12 как critical channels + переименование «Алармы» → «Тревоги»
 
-### Added
+### Добавлено
 
-- **CooldownAlarm policy** — `auto_arm: True` by default, gated by
-  `SteadyStatePredictor` quasi-steady detection (no fire while still
-  cooling); watchdog disabled by default until per-deployment tuning
-  (commit `a1ba0b6`).
+- **Политика CooldownAlarm** — `auto_arm: True` по умолчанию, с
+  фильтром через `SteadyStatePredictor` (не срабатывает пока идёт
+  охлаждение); watchdog по умолчанию отключён до тонкой настройки
+  под конкретное развёртывание (коммит `a1ba0b6`).
 
-### Changed
+### Изменено
 
-- **safety.yaml `critical_channels`** — narrowed to `Т11` / `Т12`
-  (positionally fixed GM-cooler stages) only. Other thermometer
-  channels are no longer load-bearing for the safety FSM
-  (commit `50909e3`).
-- **Operator-facing strings** — «Алармы» → «Тревоги» across 11 call
-  sites (menu, toolbar, status bar, dialog titles). Class names
-  (`AlarmPanel`, `AlarmManager`, etc.) and filenames preserved — code
-  identifiers stay English/`Alarm*` (commit `e642ba9`).
+- **`critical_channels` в `safety.yaml`** — сужено до `Т11` / `Т12`
+  (позиционно зафиксированные ступени GM-cooler-а). Остальные
+  термометрические каналы больше не несущие для FSM безопасности
+  (коммит `50909e3`).
+- **Операторские строки** — «Алармы» → «Тревоги» в 11 точках
+  (меню, тулбар, статус-бар, заголовки диалогов). Имена классов
+  (`AlarmPanel`, `AlarmManager` и т.д.) и имена файлов сохранены —
+  кодовые идентификаторы остаются на английском (`Alarm*`)
+  (коммит `e642ba9`).
 
-### Fixed
+### Исправлено
 
-- **SeverityChip acknowledged styling** — now applies in the v1 alarm
-  path. Was only fixed in the v2 path in v0.55.2; v1 retained the
-  unmuted colour, leaving a "still angry" chip on acknowledged alarms
-  (commit `0918a86`).
-- **TopWatchBar counter format** — short_id vs full_name mismatch
-  caused «0/16 норма» freeze on populated experiments. The bar now
-  stamps readings under the short channel id, matching the
-  counter-source registry (commit `abfedb9`).
+- **Стиль подтверждённых тревог в SeverityChip** — теперь применяется
+  и в v1-ветке alarm engine. В v0.55.2 фикс был внесён только в
+  v2-ветку; v1 сохраняла яркий цвет, оставляя «всё ещё срабатывающий»
+  чип на подтверждённых тревогах (коммит `0918a86`).
+- **Формат счётчика в TopWatchBar** — несоответствие short_id и
+  full_name приводило к зависанию «0/16 норма» на заполненных
+  экспериментах. Теперь бар штампует показания под коротким id
+  канала, согласованно с реестром источников счётчика
+  (коммит `abfedb9`).
 
 ### Closing commit
 
-- `1a196e6` (chore: 0.55.3 → 0.55.4 version bump).
+- `1a196e6` (chore: bump версии 0.55.3 → 0.55.4).
 
 ---
 
-## [0.55.3] — 2026-05-07 — feat: quasi-steady regime + expected_value API
+## [0.55.3] — 2026-05-07 — квазистационарный режим + API `expected_value`
 
-### Added
+### Добавлено
 
-- **`SteadyStatePredictor` quasi-steady detection** — residual + slope
-  gate identifies when a channel has reached a quasi-stationary regime
-  (cooled but still drifting). Tunables exposed in
-  `config/cooldown.yaml` (commits `2ab8c5a`, `230571f`).
-- **`CooldownService.expected_value(channel, ts)` API** — query the
-  predicted steady-state value at a future timestamp. Backed by the
-  steady-state predictor (commit `8983f88`).
-- **GUI quasi-steady label** — `CooldownPredictionWidget` renders a
-  «Стационарное состояние» label when the predictor reports a settled
-  fit during IDLE state (commit `6036c9d`).
+- **Детектор квазистационарного режима в `SteadyStatePredictor`** —
+  фильтр по остаткам и наклону определяет, что канал вышел в
+  квазистационарный режим (охладился, но всё ещё дрейфует).
+  Параметры вынесены в `config/cooldown.yaml`
+  (коммиты `2ab8c5a`, `230571f`).
+- **API `CooldownService.expected_value(channel, ts)`** — запрос
+  предсказанного стационарного значения на будущий момент времени.
+  Опирается на `SteadyStatePredictor` (коммит `8983f88`).
+- **Метка квазистационарности в GUI** — `CooldownPredictionWidget`
+  отображает метку «Стационарное состояние», когда предиктор
+  сообщает об устойчивой подгонке в режиме IDLE (коммит `6036c9d`).
 
-### Tests
+### Тесты
 
-- `test_steady_state` — synthetic quasi-steady fixtures (`e7d8b8d`).
-- `test_cooldown_service.expected_value` — API behaviour (`97e61e4`).
-- `test_gui` — quasi-steady widget rendering (`8ded90b`).
+- `test_steady_state` — синтетические фикстуры квазистационарного
+  режима (`e7d8b8d`).
+- `test_cooldown_service.expected_value` — поведение API (`97e61e4`).
+- `test_gui` — рендер виджета квазистационарного состояния
+  (`8ded90b`).
 
 ### Closing commit
 
-- `2da7e64` (chore: 0.55.2 → 0.55.3 version bump).
+- `2da7e64` (chore: bump версии 0.55.2 → 0.55.3).
 
 ---
 
-## [0.55.2] — 2026-05-07 — fix(gui): design + behavior sweep (16 fixes)
+## [0.55.2] — 2026-05-07 — общий проход по дизайну и поведению GUI (16 исправлений)
 
-GUI design + behavior sweep — 16 fixes (7 architect items, 14
-design-system items, 1 cycle-2 follow-up). Mostly token-derivation
-cleanup: hex literals removed, hardcoded sizes pulled from `theme.py`
-tokens, acknowledged alarm chips visually muted.
+Сводный проход по GUI: 16 исправлений (7 пунктов от архитектора,
+14 пунктов по design system, 1 follow-up второго цикла). В основном
+расчистка по токенам — удалены hex-литералы, фиксированные размеры
+переведены на токены `theme.py`, чипы подтверждённых тревог
+визуально приглушены.
 
-### Fixed
+### Исправлено
 
-- **Sensor diagnostics — warm channels** — keep warm reference
-  channels out of alarm + diagnostics summary; no longer
-  double-counted (commits `c7030f5`, `475b2bf`).
-- **Archive label / chat bubble width** — derive from `SPACE_*`
-  tokens (commit `caa151f`).
-- **Keithley panel** — drop arithmetic on `FONT_LABEL_SIZE` token
-  (commit `417758b`).
-- **Operator log** — token-derive author column width and message
-  height (commit `01c3a3c`).
-- **Quick log block** — token-derive input padding and button size
-  (commit `56330d3`).
-- **Top watch bar** — token-derive context-strip type and spacing
-  (commit `d1e60a7`); seed visible channels OK at construction so the
-  bar is not blank during cold-start (commit `62e2546`).
-- **Sensor cell** — token-derive spacing, padding, hint font
-  (commit `337c19d`).
-- **Conductivity panel** — top toolbar layout + 2-column channel grid
-  (commit `2ea27ce`).
-- **Phase stepper** — fill past pills with `STATUS_OK` (was a raw
-  colour literal) (commit `5081319`).
-- **Analytics — MEASUREMENT phase** — drop Keithley card from the
-  MEASUREMENT phase layout (belongs to other phases only)
-  (commit `10b86f5`).
-- **Archive panel** — text-view heights from `SPACE_*` tokens
-  (commit `2942b2b`).
-- **Analytics plot** — replace trace + axis hex literals with palette
-  tokens (commits `c20a7ca`, `f603615`).
-- **Alarm panel** — visually mute acknowledged alarms (severity chip
-  desaturated) (commit `9139b8a`).
+- **Диагностика датчиков — тёплые каналы** — тёплые опорные каналы
+  больше не попадают в alarm-сводку и сводку диагностики; не
+  считаются дважды (коммиты `c7030f5`, `475b2bf`).
+- **Ширина метки в архиве и chat-bubble** — выводится из токенов
+  `SPACE_*` (коммит `caa151f`).
+- **Панель Keithley** — убрана арифметика над токеном
+  `FONT_LABEL_SIZE` (коммит `417758b`).
+- **Журнал оператора** — ширина колонки автора и высота сообщения
+  выведены из токенов (коммит `01c3a3c`).
+- **Quick log block** — отступы инпута и размер кнопки выведены из
+  токенов (коммит `56330d3`).
+- **Top watch bar** — тип шрифта и spacing для контекстной полосы
+  выведены из токенов (коммит `d1e60a7`); видимые каналы помечаются
+  «норма» при конструировании, чтобы бар не был пустым при холодном
+  старте (коммит `62e2546`).
+- **Sensor cell** — spacing, padding, hint-шрифт выведены из токенов
+  (коммит `337c19d`).
+- **Панель теплопроводности** — верхний тулбар + двухколоночная
+  сетка каналов (коммит `2ea27ce`).
+- **Phase stepper** — прошедшие «таблетки» заполняются `STATUS_OK`
+  (раньше использовался прямой цветовой литерал) (коммит `5081319`).
+- **Аналитика — фаза MEASUREMENT** — карточка Keithley убрана из
+  layout-а MEASUREMENT (относится только к другим фазам)
+  (коммит `10b86f5`).
+- **Панель архива** — высоты текстовых view выведены из токенов
+  `SPACE_*` (коммит `2942b2b`).
+- **График аналитики** — hex-литералы для трасс и осей заменены на
+  токены палитры (коммиты `c20a7ca`, `f603615`).
+- **Панель тревог** — подтверждённые тревоги визуально приглушены
+  (severity chip обесцвечивается) (коммит `9139b8a`).
 
 ### Closing commit
 
-- `74b3bdb` (chore: 0.55.1 → 0.55.2 version bump).
+- `74b3bdb` (chore: bump версии 0.55.1 → 0.55.2).
 
 ---
 
-## [0.55.1] — 2026-05-07 — fix: audit fixes (H1-H7 + H9 + S1 + V1)
+## [0.55.1] — 2026-05-07 — батч аудит-фиксов (H1-H7 + H9 + S1 + V1)
 
-Audit-fix batch addressing async-loop blocking, fire-and-forget GC,
-error swallowing, and one security item from the v0.55.0 audit.
+Батч исправлений по аудиту: блокировка async-loop, fire-and-forget
+GC, проглатывание ошибок и один пункт по безопасности из аудита
+v0.55.0.
 
-### Changed
+### Изменено
 
-- **F-TimeoutRelax cold-start envelope** — extended 25 s → 50 s for
-  cold-start Ollama on slow operator laptops (commit `51c1dd8`).
-- **Web server bind** — `127.0.0.1` (was `0.0.0.0`); documented as
-  loopback-only deployment, not LAN-facing (commit `eb84e44`).
+- **Окно холодного старта F-TimeoutRelax** — увеличено с 25 с до 50 с
+  для cold-start Ollama на медленных операторских ноутбуках
+  (коммит `51c1dd8`).
+- **Bind веб-сервера** — `127.0.0.1` (было `0.0.0.0`);
+  задокументировано как развёртывание только на loopback, не
+  LAN-facing (коммит `eb84e44`).
 
-### Fixed
+### Исправлено
 
-- **F31 sinks — async offload** — metadata read + vault write
-  off-loaded to `asyncio.to_thread` (no blocking I/O on event loop)
-  (commit `ba11330`).
-- **Replay — async offload** — SQLite load off-loaded to
-  `asyncio.to_thread` (commit `75315eb`).
-- **F32 RAG searcher** — guard query embedding dim mismatch with a
-  defensive shape-check (avoids LanceDB exception on stale corpora)
-  (commit `36d15e2`).
-- **ChartDispatcher** — keep strong reference to fire-and-forget task
-  set so GC does not collect in-flight chart dispatches
-  (commit `eb023c1`).
-- **Engine shutdown** — drain in-flight sink dispatches before
-  closing the engine (was racing on KeyboardInterrupt)
-  (commit `cfc847e`).
-- **Web command failures** — log engine-command failures, do not
-  swallow them (commit `040b6ab`).
-- **F31 summary key** — read `summary_metadata`, not `summary` (key
-  rename was incomplete in v0.55.0) (commit `f44abf3`).
-- **Package version** — bumped 0.52.9 → 0.55.1 in `pyproject.toml`
-  (was lagging behind tag chain) (commit `cb6bff3`).
+- **F31 sinks — async offload** — чтение метаданных и запись в vault
+  вынесены через `asyncio.to_thread` (никакого блокирующего I/O в
+  event loop) (коммит `ba11330`).
+- **Replay — async offload** — загрузка из SQLite вынесена через
+  `asyncio.to_thread` (коммит `75315eb`).
+- **Поиск F32 RAG** — защита от расхождения размерностей embedding-ов
+  запроса через защитную shape-проверку (избегаем исключения от
+  LanceDB на устаревших корпусах) (коммит `36d15e2`).
+- **ChartDispatcher** — сохраняем strong-ref на set fire-and-forget
+  задач, чтобы GC не собирал диспатчи графиков на лету
+  (коммит `eb023c1`).
+- **Останов движка** — дренируем in-flight диспатчи sinks перед
+  закрытием движка (была гонка на KeyboardInterrupt)
+  (коммит `cfc847e`).
+- **Ошибки команд в web** — логируем сбои engine-команд, не
+  проглатываем их (коммит `040b6ab`).
+- **Ключ summary в F31** — читаем `summary_metadata`, а не `summary`
+  (переименование ключа было неполным в v0.55.0) (коммит `f44abf3`).
+- **Версия пакета** — bump 0.52.9 → 0.55.1 в `pyproject.toml` (отстал
+  от цепочки тегов) (коммит `cb6bff3`).
 
 ### Closing commit
 
@@ -163,1604 +173,1851 @@ error swallowing, and one security item from the v0.55.0 audit.
 
 ---
 
-## [0.55.0] — 2026-05-07 — chore: CHANGELOG audit + autonomous-run-2026-05-07 wrap-up
+## [0.55.0] — 2026-05-07 — закрытие autonomous-run-2026-05-07 + аудит CHANGELOG
 
-Tag-only release that locks in autonomous-run-2026-05-07 work
-(catalogued under [0.54.0] per the architect's umbrella rule) and
-ships two CHANGELOG-discipline patches.
+Tag-only релиз, закрепляющий работу autonomous-run-2026-05-07
+(каталогизирована под [0.54.0] по правилу-зонтику архитектора) и
+выкатывающий два дисциплинарных патча по CHANGELOG.
 
-### Changed
+### Изменено
 
-- **F-CHANGELOG-Audit** — filled gaps for v0.52.10..v0.53.2
-  (commit `2771584`) and redistributed Keep-a-Changelog subsections
-  (Added/Changed/Fixed) for v0.53.x retrospectively
-  (commit `ff9bead`). Brings the historical tail up to current
-  discipline.
+- **F-CHANGELOG-Audit** — заполнены пробелы для v0.52.10..v0.53.2
+  (коммит `2771584`) и перераспределены подсекции Keep a Changelog
+  (Added/Changed/Fixed) для v0.53.x ретроспективно
+  (коммит `ff9bead`). Приводит исторический «хвост» к текущей
+  дисциплине.
 
-### Note
+### Замечание
 
-The bulk of autonomous-run-2026-05-07 features (F31 sinks, F32 RAG
+Основная масса фич autonomous-run-2026-05-07 (F31 sinks, F32 RAG
 indexer, F-MultiLine Stage 1, F-LegacyChannelMap, F-ConfigChannelDrift)
-were committed in this version's range (`v0.54.0..v0.55.0`) but are
-catalogued under [0.54.0] per the architect's umbrella rule —
-v0.54.0 = autonomous-run-2026-05-07. v0.55.0 itself is the tag bump
-that closed out the run.
+закоммичена в диапазоне этой версии (`v0.54.0..v0.55.0`), но
+каталогизирована под [0.54.0] по правилу-зонтику архитектора:
+v0.54.0 = autonomous-run-2026-05-07. Сама v0.55.0 — это tag bump,
+закрывающий run.
 
 ### Closing commit
 
-- `1ee46a5` (test: F32 cycle 3 — deterministic mock embeddings).
+- `1ee46a5` (test: F32 цикл 3 — детерминированные mock embeddings).
 
 ---
 
-## [0.54.0] — 2026-05-07 — feat: autonomous-run-2026-05-07 umbrella (channel landmarks + sinks + RAG + MultiLine + replay maps + bot polish + chat overlay)
+## [0.54.0] — 2026-05-07 — зонтик autonomous-run-2026-05-07 (channel landmarks + sinks + RAG + MultiLine + replay maps + bot polish + chat overlay)
 
-Umbrella release for autonomous-run-2026-05-07 work. Combines the
-F-ChannelLandmarks / F-TimeoutRelax / F-MockPredictor / F33 / F34 /
-F-BotPolish features tagged at v0.54.0 with the F31 / F32 /
-F-MultiLine Stage 1 / F-LegacyChannelMap / F-ConfigChannelDrift work
-that committed under the v0.55.0 tag. Per architect rule, all
-autonomous-run features sit under one umbrella: v0.54.0.
+Зонтичный релиз для работы autonomous-run-2026-05-07. Объединяет
+фичи F-ChannelLandmarks / F-TimeoutRelax / F-MockPredictor / F33 /
+F34 / F-BotPolish, помеченные тегом v0.54.0, с работой F31 / F32 /
+F-MultiLine Stage 1 / F-LegacyChannelMap / F-ConfigChannelDrift,
+закоммиченной под тегом v0.55.0. По правилу архитектора все фичи
+autonomous-run сидят под одним зонтиком — v0.54.0.
 
-### Added
+### Добавлено
 
-- **F-ChannelLandmarks** — system-level channel identity layer.
-  `config/physical_alarms.yaml` gains an optional `landmarks:` section
-  that pins hardware-fixed channels (Т11/Т12 — GM-cooler stages) to
-  canonical roles plus operator-phrasing aliases (e.g. «азотная
-  плита» → Т11).
+- **F-ChannelLandmarks** — слой системного тождества каналов. В
+  `config/physical_alarms.yaml` появляется опциональная секция
+  `landmarks:`, которая прикрепляет hardware-fixed каналы (Т11/Т12 —
+  ступени GM-cooler-а) к каноническим ролям плюс к операторским
+  алиасам (например, «азотная плита» → Т11).
 
-  - New `cryodaq.core.physical_alarms_config.load_channel_landmarks()`
-    parses the section; missing/malformed config returns `{}` (engine
-    never aborts).
-  - `ChannelManager.set_landmarks()` / `get_landmarks()` carry the map
-    across the engine; populated at startup, read by the query agent.
-  - `IntentClassifier._build_channel_hint()` now emits a two-tier
-    listing — landmarks first with aliases, experiment channels
-    second — and tells Gemma that landmark aliases beat
-    experiment-level naming on collisions.
+  - Новая функция
+    `cryodaq.core.physical_alarms_config.load_channel_landmarks()`
+    парсит секцию; отсутствие или некорректность конфигурации даёт
+    `{}` (движок не падает).
+  - `ChannelManager.set_landmarks()` / `get_landmarks()` несут карту
+    через движок; заполняется на старте, читается query-агентом.
+  - `IntentClassifier._build_channel_hint()` теперь формирует
+    двухуровневый список — сначала landmarks с алиасами, потом
+    каналы эксперимента — и сообщает Гемме, что landmark-алиасы
+    перевешивают именование на уровне эксперимента при коллизиях.
 
-  Resolves the production «азотная плита → Т12» misclassification.
-  Backward-compat: omitting the `landmarks:` section preserves the
-  prior v0.53.x prompt structure (single «Доступные каналы» list)
-  (commit `8f0af9a`).
+  Закрывает production-баг с классификацией «азотная плита → Т12».
+  Обратная совместимость: пропуск секции `landmarks:` сохраняет
+  старую структуру промпта v0.53.x (единый список «Доступные
+  каналы») (коммит `8f0af9a`).
 
-- **F33 — archive query agent** — `AssistantQueryAgent` now answers
-  questions about experiment archive and alarm history. Three new
-  `QueryCategory` values:
+- **F33 — архивный query-агент** — `AssistantQueryAgent` теперь
+  отвечает на вопросы об архиве экспериментов и истории тревог.
+  Три новых значения `QueryCategory`:
 
   - `archive_list` — «какие эксперименты были на этой неделе» /
-    «покажи архив за месяц». Returns list of cards (experiment_id,
-    title, sample, operator, started, status). Default window —
-    7 days.
+    «покажи архив за месяц». Возвращает список карточек
+    (experiment_id, title, sample, operator, started, status). Окно
+    по умолчанию — 7 дней.
   - `archive_detail` — «детали эксперимента <ID>» / «сколько часов
-    длился cooldown в <ID>». Returns full card (sample, operator,
-    status, duration, phases, cooldown metrics from metadata.json).
+    длился cooldown в <ID>». Возвращает полную карточку (sample,
+    operator, status, duration, фазы, метрики cooldown из
+    metadata.json).
   - `alarm_history` — «сколько раз сработал overheat за неделю» /
-    «статистика тревог». Returns triggered/cleared count + breakdown
-    by `alarm_id`.
+    «статистика тревог». Возвращает счётчики triggered/cleared плюс
+    разбивку по `alarm_id`.
 
-  All three categories are read-only via the new `ArchiveAdapter`
-  wrapping `ExperimentManager.list_archive_entries` /
-  `get_archive_item` and `AlarmStateManager.get_history`. SQL-DSL and
-  write capabilities are explicitly out of scope. F30 query agent
-  core, IntentClassifier algorithm, and `experiment_adapter` are
-  unchanged. Cycle 2 (commit `0a21cba`) offloaded archive filesystem
-  scans to `asyncio.to_thread` (commit `dc5350b`, cycle 2 `0a21cba`).
+  Все три категории — read-only через новый `ArchiveAdapter`,
+  оборачивающий `ExperimentManager.list_archive_entries` /
+  `get_archive_item` и `AlarmStateManager.get_history`. SQL-DSL и
+  write-capabilities явно вне scope. Ядро F30 query-агента,
+  алгоритм `IntentClassifier` и `experiment_adapter` без изменений.
+  Цикл 2 (коммит `0a21cba`) вынес сканы файловой системы архива
+  в `asyncio.to_thread` (коммит `dc5350b`, цикл 2 `0a21cba`).
 
-- **F34 — GUI chat overlay** — new `AssistantChatPanel`
-  (`gui/shell/overlays/assistant_chat_panel.py`) reuses the F30
-  backend `AssistantQueryAgent`. Operator types a free-form question;
-  GUI sends ZMQ command `assistant.query` via the non-blocking
-  `ZmqCommandWorker`; engine dispatches to
-  `_handle_assistant_query_command` (timeout 25 s — fits inside the
-  ZMQ REP server's 30 s slow-command envelope; command added to
-  `_SLOW_COMMANDS` in `core/zmq_bridge.py`). Response renders as
-  bubbles (operator right on `ACCENT`, assistant left on
-  `SURFACE_CARD`, errors `STATUS_WARNING` with ⚠ prefix). History is
-  in-session only (no disk). ToolRail icon — Phosphor
-  `ph.chat-circle`, slot «Помощник Гемма» between «Служебный лог» and
-  «Приборы». The Telegram path retains its 60 s budget via
-  `telegram_commands.py` (separate path — not over ZMQ).
+- **F34 — GUI chat overlay** — новый `AssistantChatPanel`
+  (`gui/shell/overlays/assistant_chat_panel.py`) переиспользует
+  F30-бэкенд `AssistantQueryAgent`. Оператор печатает свободный
+  вопрос; GUI шлёт ZMQ-команду `assistant.query` через
+  неблокирующий `ZmqCommandWorker`; движок диспатчит в
+  `_handle_assistant_query_command` (таймаут 25 с — укладывается
+  в 30-секундный envelope медленных команд REP-сервера; команда
+  добавлена в `_SLOW_COMMANDS` в `core/zmq_bridge.py`). Ответ
+  рендерится в bubble-ах (оператор справа на `ACCENT`, ассистент
+  слева на `SURFACE_CARD`, ошибки `STATUS_WARNING` с префиксом ⚠).
+  История — только in-session (без диска). Иконка ToolRail — Phosphor
+  `ph.chat-circle`, слот «Помощник Гемма» между «Служебный лог» и
+  «Приборы». Telegram-путь сохраняет 60-секундный бюджет через
+  `telegram_commands.py` (отдельный путь — не через ZMQ).
   `AssistantQueryAgent`, `IntentClassifier`, `QueryRouter`,
-  `OutputRouter`, and `ZMQCommandServer` class are unchanged
-  (commit `0ab42f2`, cycle 3 `a5eccb9`).
+  `OutputRouter` и класс `ZMQCommandServer` без изменений
+  (коммит `0ab42f2`, цикл 3 `a5eccb9`).
 
-- **F-BotPolish** — four point fixes in the Gemma pipeline addressing
-  observed lab issues 2026-05-07.
+- **F-BotPolish** — четыре точечных исправления в pipeline Геммы по
+  наблюдаемым лабораторным проблемам 2026-05-07.
 
-  1. *Markdown→HTML in `OutputRouter`*: Gemma emits Markdown per
-     prompts (`ALARM_SUMMARY_SYSTEM`); the Telegram bot sends with
-     `parse_mode=HTML`, so until now `*` and `**` rendered literally.
-     Conversion (`**bold**` → `<b>bold</b>`, `*it*` → `<i>it</i>`,
-     `` `c` `` → `<code>c</code>`, headings `#` stripped) applies
-     **only** to target `TELEGRAM`. `OPERATOR_LOG` and `GUI_INSIGHT`
-     keep raw Markdown. Bullet markers (`* item`) are not converted —
-     the italic regex requires symbols between markers.
-  2. *Float formatting in `ContextBuilder`*: values are rounded once
-     at the seam (`AlarmContext.values: dict[str, Any]`) — cryogenic
-     channels (Т*) → 1 decimal, pressure (|v| < 1e-3 or > 1e6) →
-     2 sig fig scientific, others → 2 decimals. Eliminates 12-digit
-     «4.347123…» bleeding into the prompt.
-  3. *Sanity hint on implausible values*: `T_cryo > 500 K` or
-     `< −50 K` is flagged in `recent_readings_text` as «вероятно сбой
-     сенсора»; Gemma now phrases the answer as a sensor fault, not as
-     «check cooling».
-  4. *Event-level dedup in `AssistantLiveAgent._event_loop`*:
-     identical `alarm_fired` events within a 30 s window (by
-     `alarm_id` + bucket) are dropped before the slice handler —
-     alarms that briefly clear and re-fire no longer produce
-     duplicate Telegram narratives.
+  1. *Markdown → HTML в `OutputRouter`*: Гемма выдаёт Markdown по
+     промптам (`ALARM_SUMMARY_SYSTEM`); Telegram-бот шлёт с
+     `parse_mode=HTML`, поэтому до сих пор `*` и `**` рендерились
+     буквально. Конверсия (`**bold**` → `<b>bold</b>`, `*it*` →
+     `<i>it</i>`, `` `c` `` → `<code>c</code>`, заголовки `#`
+     срезаются) применяется **только** к target `TELEGRAM`.
+     `OPERATOR_LOG` и `GUI_INSIGHT` оставляют сырой Markdown. Маркеры
+     bullet-ов (`* item`) не конвертируются — italic-regex требует
+     символов между маркерами.
+  2. *Форматирование float в `ContextBuilder`*: значения округляются
+     один раз на стыке (`AlarmContext.values: dict[str, Any]`) —
+     криоканалы (Т*) → 1 знак, давление (|v| < 1e-3 или > 1e6) →
+     2 значащих в scientific, прочие → 2 знака. Убирает протекание
+     12-разрядных «4.347123…» в промпт.
+  3. *Sanity-hint на неправдоподобных значениях*: `T_cryo > 500 K`
+     или `< −50 K` помечается в `recent_readings_text` как «вероятно
+     сбой сенсора»; Гемма теперь формулирует ответ как сбой датчика,
+     а не как «check cooling».
+  4. *Дедуп на уровне событий в `AssistantLiveAgent._event_loop`*:
+     одинаковые события `alarm_fired` в окне 30 с (по `alarm_id` +
+     bucket) отбрасываются до slice-обработчика — тревоги, которые
+     кратковременно сбрасываются и снова срабатывают, больше не
+     порождают дубликаты Telegram-нарративов.
 
-  Cycle 2 (commit `bfe49d2`) widened to a sliding dedup window plus
-  channel-aware pressure detection. Slice handlers, F30 query agent
-  path, `ALARM_SUMMARY_SYSTEM` prompt, `TelegramNotifier`, and
-  `parse_mode=HTML` in `TelegramCommandBot._send()` are unchanged
-  (commit `53981a1`).
+  Цикл 2 (коммит `bfe49d2`) расширил до скользящего окна дедупа
+  плюс channel-aware определения давления. Slice-обработчики, путь
+  F30 query-агента, промпт `ALARM_SUMMARY_SYSTEM`, `TelegramNotifier`
+  и `parse_mode=HTML` в `TelegramCommandBot._send()` без изменений
+  (коммит `53981a1`).
 
-- **F-MockPredictor** — `CooldownPredictionWidget` renders a
-  horizontal asymptote line + ±sigma band + «Стационарное состояние
-  ≈ X K» badge when the embedded `SteadyStatePredictor` reports a
-  settled fit (`percent_settled ≥ 30 %`) while the `CooldownDetector`
-  backend is IDLE. Replaces the empty «Охлаждение не активно»
-  placeholder on Mac mock and any other already-cooled stream.
-  Pattern mirrors `RThermalLiveWidget` verbatim (window 600 s, update
-  30 s, settle threshold 30 %, `STATUS_INFO` tokens). Cycle 2
-  (commit `f45bc42`) fed cold-stage temperatures via a new
-  `CooldownPredictionWidget.set_cold_temperature_reading()` setter,
-  invoked by `MainWindowV2._dispatch_reading` whenever a K-unit
-  reading arrives on the canonical Т12 landmark channel. Stale
-  forecast curves are now cleared from the inner `PredictionWidget`
-  whenever the state machine leaves the active-prediction branch.
-  Backend (`CooldownDetector`, `CooldownService`,
-  `SteadyStatePredictor`) untouched (commit `5276fc1`, cycle 2
-  `f45bc42`).
+- **F-MockPredictor** — `CooldownPredictionWidget` рисует
+  горизонтальную асимптоту + полосу ±σ + бейдж «Стационарное
+  состояние ≈ X K», когда встроенный `SteadyStatePredictor`
+  сообщает об устойчивой подгонке (`percent_settled ≥ 30 %`), а
+  бэкенд `CooldownDetector` находится в IDLE. Заменяет пустой
+  плейсхолдер «Охлаждение не активно» на Mac mock и на любом другом
+  уже-охлаждённом потоке. Шаблон повторяет `RThermalLiveWidget`
+  буквально (окно 600 с, обновление 30 с, порог settle 30 %,
+  токены `STATUS_INFO`). Цикл 2 (коммит `f45bc42`) подаёт
+  температуру холодной ступени через новый сеттер
+  `CooldownPredictionWidget.set_cold_temperature_reading()`,
+  который вызывается из `MainWindowV2._dispatch_reading` каждый раз,
+  когда приходит K-показание на каноническом landmark-канале Т12.
+  Устаревшие forecast-кривые теперь очищаются во внутреннем
+  `PredictionWidget`, когда state machine уходит из active-prediction
+  ветки. Бэкенд (`CooldownDetector`, `CooldownService`,
+  `SteadyStatePredictor`) без изменений (коммит `5276fc1`,
+  цикл 2 `f45bc42`).
 
-- **F31 — operator-facing sinks** — new `cryodaq.sinks` module with
-  two sinks: `VaultSink` (writes Markdown note with YAML frontmatter
-  to a filesystem vault directory on experiment finalize / stop /
-  abort) and `WebhookSink` (POSTs the JSON-serialized
-  `ExperimentExport` to a configured URL). `SinkRegistry` loads sinks
-  from `config/sinks.yaml` (or `sinks.local.yaml` override) and fans
-  out concurrently. Dispatch is fire-and-forget —
-  `experiment_finalize` does not block on sinks; failures captured in
-  `SinkResult` and exposed through the new `sinks_status` ZMQ command
-  (last-20 results buffer). New config: `config/sinks.yaml.example`.
-  Pre-requisite for F32 (RAG indexer). Cycle 2 (commit `f456938`):
-  `dispatch()` never propagates exceptions from a misbehaving sink
-  (commit `fb4c43b`, cycle 2 `f456938`).
+- **F31 — операторские sinks** — новый модуль `cryodaq.sinks` с
+  двумя sink-ами: `VaultSink` (пишет Markdown-заметку с YAML
+  frontmatter в каталог vault-а файловой системы при experiment
+  finalize / stop / abort) и `WebhookSink` (POST-ит
+  JSON-сериализованный `ExperimentExport` на сконфигурированный URL).
+  `SinkRegistry` грузит sinks из `config/sinks.yaml` (или override
+  `sinks.local.yaml`) и веером шлёт параллельно. Диспатч —
+  fire-and-forget — `experiment_finalize` не блокируется на sinks;
+  сбои фиксируются в `SinkResult` и экспонируются через новую
+  ZMQ-команду `sinks_status` (буфер последних 20 результатов).
+  Новый конфиг: `config/sinks.yaml.example`. Предусловие для F32
+  (RAG indexer). Цикл 2 (коммит `f456938`): `dispatch()` никогда
+  не пробрасывает исключения от некорректно работающего sink-а
+  (коммит `fb4c43b`, цикл 2 `f456938`).
 
-- **F32 Stage 1 — RAG indexer** — standalone semantic search
-  foundation over the experiment archive (metadata + F31 vault notes
-  + operator log entries). New module `cryodaq.agents.rag` with
-  `document_loader` (chunking + corpus walkers), `indexer` (LanceDB
-  persistence), and `searcher` (top-K cosine lookup with optional
-  `source_kind` filter). Embeddings come from Ollama
-  `multilingual-e5-small` via a small `EmbeddingsClient` wrapping the
-  existing `OllamaClient.embed()`. New CLI scripts
-  `cryodaq-rag-index` and `cryodaq-rag-search`. Stage 2
-  (`AssistantQueryAgent` integration) is out of scope and lives in a
-  separate spec. New deps: `lancedb` (Mac arm64 wheel verified). New
-  config: `config/rag.yaml.example`. Cycle 2 (commit `56e0f76`)
-  pushed `source_kind` filter into LanceDB `WHERE` clause. Cycle 3
-  (commit `1ee46a5`) added deterministic mock embeddings + baseline
-  guard (commit `3cf3506`, cycle 2 `56e0f76`, cycle 3 `1ee46a5`).
+- **F32 Stage 1 — RAG indexer** — самостоятельный фундамент
+  семантического поиска по архиву экспериментов (метаданные +
+  vault-заметки F31 + записи operator log). Новый модуль
+  `cryodaq.agents.rag` c `document_loader` (чанкинг + walker-ы по
+  корпусам), `indexer` (персистенс в LanceDB) и `searcher`
+  (top-K cosine lookup с опциональным фильтром `source_kind`).
+  Эмбеддинги — от Ollama `multilingual-e5-small` через тонкий
+  `EmbeddingsClient`, оборачивающий существующий
+  `OllamaClient.embed()`. Новые CLI-скрипты `cryodaq-rag-index` и
+  `cryodaq-rag-search`. Stage 2 (интеграция с
+  `AssistantQueryAgent`) вне scope-а и живёт в отдельной
+  спецификации. Новые зависимости: `lancedb` (Mac arm64 wheel
+  проверен). Новый конфиг: `config/rag.yaml.example`. Цикл 2
+  (коммит `56e0f76`) спустил фильтр `source_kind` в `WHERE` LanceDB.
+  Цикл 3 (коммит `1ee46a5`) добавил детерминированные mock
+  embeddings и baseline-гарду (коммит `3cf3506`, цикл 2 `56e0f76`,
+  цикл 3 `1ee46a5`).
 
-- **F-MultiLine Stage 1** — Etalon MultiLine TCP/IP integration:
-  interferometric length metrology over a new line-based ASCII TCP
-  transport. New driver type `etalon_multiline` registered in the
-  engine; readings publish on `<name>/length_ch<N>` (mm) plus
-  `<name>/env_<temperature|pressure|humidity>`. Mock mode required
-  for development without `MultiLine.exe` (lab-PC-only). Stage 2
-  features (deformation analysis, channel alignment, MLAC/AC
-  operations, frontend splitter/shutter control) are out of scope and
-  live in a separate spec. New module:
-  `cryodaq.drivers.transport.tcp` — first new transport class since
-  project inception, mirrors the `serial.py` asyncio cleanup +
-  error-wrapping pattern. Cycle 2 (commit `7f190fa`) flagged all
-  10 error fields as `SENSOR_ERROR` (commit `2ebde3b`, cycle 2
-  `7f190fa`).
+- **F-MultiLine Stage 1** — интеграция Etalon MultiLine TCP/IP:
+  интерферометрическая длинометрия через новый line-based ASCII TCP
+  транспорт. Новый тип драйвера `etalon_multiline` зарегистрирован
+  в движке; показания публикуются на `<name>/length_ch<N>` (мм)
+  плюс `<name>/env_<temperature|pressure|humidity>`. Mock mode
+  обязателен для разработки без `MultiLine.exe` (lab-PC-only).
+  Stage 2 (анализ деформации, выравнивание каналов, MLAC/AC
+  операции, управление frontend splitter/shutter) — вне scope-а и
+  живёт в отдельной спецификации. Новый модуль:
+  `cryodaq.drivers.transport.tcp` — первый новый транспортный
+  класс с момента старта проекта, повторяет паттерн asyncio cleanup
+  + error-wrapping из `serial.py`. Цикл 2 (коммит `7f190fa`)
+  пометил все 10 полей ошибок как `SENSOR_ERROR` (коммит `2ebde3b`,
+  цикл 2 `7f190fa`).
 
-- **F-LegacyChannelMap** — `--legacy-channel-era` flag on the
-  launcher and the standalone replay engine. Loads a predefined
-  channel-rename map (`pre-2025-02` covers the thermal-bridge era:
-  Т10→Т12, Т9→Т10, Т8→Т9) and applies it on the SQLite/Directory
-  replay path so old recordings publish under the post-bridge
-  canonical labels (Т11/Т12). CurveReplay (`cooldown_v5/*.json`) is
-  post-bridge era and is not touched. New module:
-  `cryodaq.replay_engine.legacy_channel_maps` (commit `b096a2d`).
+- **F-LegacyChannelMap** — флаг `--legacy-channel-era` на лончере и
+  на standalone replay-движке. Грузит предзаданную карту
+  переименования каналов (`pre-2025-02` покрывает эпоху
+  thermal-bridge: Т10→Т12, Т9→Т10, Т8→Т9) и применяет её на
+  SQLite/Directory replay-пути, чтобы старые записи публиковались
+  под post-bridge каноническими метками (Т11/Т12). CurveReplay
+  (`cooldown_v5/*.json`) относится к post-bridge эре и не
+  затрагивается. Новый модуль:
+  `cryodaq.replay_engine.legacy_channel_maps` (коммит `b096a2d`).
 
-### Changed
+### Изменено
 
-- **F-TimeoutRelax** — command/query timeout values relaxed for
-  slower hardware (cold-start Ollama on a laggy operator laptop).
+- **F-TimeoutRelax** — таймауты команд и запросов ослаблены под
+  более медленное железо (cold-start Ollama на тормозящем
+  операторском ноутбуке).
 
-  - `engine.py`: `_LOG_GET_TIMEOUT_S` and
-    `_EXPERIMENT_STATUS_TIMEOUT_S` raised from 1.5 s to 5.0 s. Both
-    commands read from SQLite + experiment manager (~50 ms typical,
-    ~500 ms p99 under load); 5 s gives ~10× headroom for cold-cache
-    or IO contention without affecting the user-visible latency
-    budget.
+  - `engine.py`: `_LOG_GET_TIMEOUT_S` и
+    `_EXPERIMENT_STATUS_TIMEOUT_S` подняты с 1.5 с до 5.0 с. Обе
+    команды читают из SQLite + experiment manager (~50 мс типично,
+    ~500 мс p99 под нагрузкой); 5 с дают ~10× запас на cold-cache
+    или IO-конкуренцию без влияния на бюджет latency, видимый
+    оператору.
   - `notifications/telegram_commands.py`: per-query Telegram dispatch
-    `wait_for(...)` raised from 30 s to 60 s, matching the operator
-    message text. Cold-start Ollama can spend 20–40 s loading the
-    model into RAM; subsequent queries stay fast.
+    `wait_for(...)` поднят с 30 с до 60 с, согласованно с текстом
+    операторского сообщения. Cold-start Ollama может потратить
+    20–40 с на загрузку модели в RAM; последующие запросы остаются
+    быстрыми.
   - `agents/assistant/live/agent.py` `AssistantConfig` defaults
-    raised 2× across the board: `timeout_s` 30→60,
+    подняты в 2 раза по всему фронту: `timeout_s` 30→60,
     `query_intent_timeout_s` 10→20, `query_format_timeout_s` 20→40.
-    YAML overrides are unchanged.
+    YAML-override-ы без изменений.
 
-  Safety-critical timeouts (ZMQ heartbeats, watchdogs,
-  fault-on-silence thresholds) are NOT touched (commit `35e78ee`).
+  Safety-критичные таймауты (ZMQ heartbeat-ы, watchdog-и, пороги
+  fault-on-silence) НЕ затрагиваются (коммит `35e78ee`).
 
-### Fixed
+### Исправлено
 
-- **F-ConfigChannelDrift** — `config/cooldown.yaml` channel mapping
-  aligned with C6 / F-ChannelLandmarks canonical Т11/Т12. Pre-fix the
-  file referenced pre-C6 names (`Т7 Детектор` / `Т5 Экран 77К`),
-  which meant the cooldown predictor on the real lab PC watched
-  detector temperature instead of the 2nd-stage GM cooler.
-  Replay-mode was already correct via the v0.53.1 defensive override;
-  this aligns the real-lab path (commit `3f0abeb`).
+- **F-ConfigChannelDrift** — мэппинг каналов в
+  `config/cooldown.yaml` приведён к каноническим Т11/Т12 из C6 /
+  F-ChannelLandmarks. До фикса файл ссылался на pre-C6 имена
+  (`Т7 Детектор` / `Т5 Экран 77К`), что означало: cooldown predictor
+  на реальном лабораторном PC смотрел температуру детектора вместо
+  второй ступени GM-cooler-а. Replay-mode уже был корректен через
+  defensive override v0.53.1; этот фикс выравнивает real-lab путь
+  (коммит `3f0abeb`).
 
 ### Closing commit
 
-- `0a21cba` (fix: F33 cycle 2 archive offload).
+- `0a21cba` (fix: F33 цикл 2 — offload архива).
 
 ---
 
-## [0.53.2] — 2026-05-06 — fix(analytics): predictor readout stack + horizon button wiring
+## [0.53.2] — 2026-05-06 — стек считывания предиктора + проводка кнопок горизонта
 
 Closing commit: `c48b501`.
 
-### Added
+### Добавлено
 
-- **Stacked predictor readout** — single-horizon readout заменён на стек
-  из 6 горизонтов (1/3/6/12/24/48ч). Каждая строка показывает значение
-  и CI независимо. Cycle 1 (`88f7331`).
+- **Стек считывания предиктора** — single-horizon readout заменён на
+  стек из 6 горизонтов (1/3/6/12/24/48 ч). Каждая строка показывает
+  значение и CI независимо. Цикл 1 (`88f7331`).
 
-### Changed
+### Изменено
 
-- **Horizon button X-range wiring** — кнопки заголовка управляют
-  X-диапазоном графика через `_apply_x_range()` (cycle 2, `c48b501`).
-  Right edge = `time.time() + horizon*3600`, left edge = первый history
-  sample, fallback `now - 60s` если empty. Re-anchor on `set_horizon` /
-  `set_history` / `set_prediction`.
+- **Проводка X-диапазона по кнопкам горизонта** — кнопки в заголовке
+  управляют X-диапазоном графика через `_apply_x_range()` (цикл 2,
+  `c48b501`). Правый край = `time.time() + horizon*3600`, левый край —
+  первая выборка истории, fallback `now - 60 s` если пусто.
+  Re-anchor на `set_horizon` / `set_history` / `set_prediction`.
 
-### Fixed
+### Исправлено
 
-- **Latent inert-buttons bug** — pre-existing `horizon_changed` сигнал
-  не имел production consumer; cycle 2 wired buttons directly с
-  preservation сигнала для backward compat. Codex caught в cycle 1
-  FAIL/HIGH.
+- **Скрытый баг с неактивными кнопками** — существовавший сигнал
+  `horizon_changed` не имел production-консьюмера; цикл 2 завёл
+  кнопки напрямую с сохранением сигнала для обратной совместимости.
+  Поймал Codex в цикле 1 FAIL/HIGH.
 
-### Tests
+### Тесты
 
-- 6 new widget tests (15 → 21); 188 passed broader regression.
-- Codex PASS cycle 2 of 3.
+- 6 новых widget-тестов (15 → 21); 188 пройдено в более широкой
+  регрессии.
+- Codex PASS цикл 2 из 3.
 
 ---
 
-## [0.53.1] — 2026-05-06 — feat: F-ReplayPredictor — CooldownService over replay stream
+## [0.53.1] — 2026-05-06 — F-ReplayPredictor — CooldownService поверх replay-потока
 
 Closing commit: `fcd717f`.
 
-### Added
+### Добавлено
 
-- **F-ReplayPredictor** — bolt `CooldownService` onto `ReplayEngine`.
-  Predictor widget активируется при replay реальных cooldown curves в
-  Mac mock.
+- **F-ReplayPredictor** — `CooldownService` присоединён к
+  `ReplayEngine`. Виджет предиктора активируется при replay-е
+  реальных cooldown-кривых на Mac mock.
 
-### Changed
+### Изменено
 
-- **ReplayEngine instrumentation** — DataBroker inserted between source
-  and PUB queue. CooldownService subscribes to the broker, processes
-  readings, and publishes derived metrics back through broker → PUB →
-  ZMQ socket.
-- Defensive channel override (Т12/Т11) in `ReplayEngine` handles
-  `cooldown.yaml` drift without touching real-lab config.
+- **Инструментовка ReplayEngine** — `DataBroker` вставлен между
+  источником и PUB-очередью. `CooldownService` подписывается на
+  брокера, обрабатывает показания и публикует производные метрики
+  обратно через broker → PUB → ZMQ-сокет.
+- Defensive override каналов (Т12/Т11) в `ReplayEngine` гасит дрейф
+  `cooldown.yaml`, не трогая конфиг реальной лаборатории.
 
-### Fixed
+### Исправлено
 
-- Slow-joiner regression в `test_replay_engine_heartbeat`, caught when
-  broker insertion shifted timing. Mitigated через
-  subscribe-before-source pattern (Stage 4b in v0.53.0).
+- Slow-joiner регрессия в `test_replay_engine_heartbeat`, всплыла
+  когда вставка брокера сдвинула тайминги. Митигирована через
+  паттерн subscribe-before-source (Stage 4b в v0.53.0).
 
-### Filed
+### Заведено
 
-- F-ConfigChannelDrift — real-lab `cooldown.yaml` mapping alignment
-  (closed in subsequent unreleased v0.55.0 batch).
+- F-ConfigChannelDrift — выравнивание мэппинга в реал-лабораторном
+  `cooldown.yaml` (закрыто в последующем unreleased-батче v0.55.0).
 
-### Tests
+### Тесты
 
-- 3 new tests; 178/178 stable across 3 consecutive runs.
-- Codex PASS cycle 2 of 3 (cycle 1 fixture-on-clean-checkout issue).
-- Architect smoke 2026-05-06 21:45: predictor activates end-to-end on
-  `cooldown_v5` curve at `speed=50`, full ~17h trajectory + ±2.73K 67%
-  CI envelope rendering; «Через 1 ч: 64.66 K» readout populated.
+- 3 новых теста; 178/178 стабильно за 3 последовательных прогона.
+- Codex PASS цикл 2 из 3 (цикл 1 — проблема с фикстурой на чистом
+  checkout-е).
+- Архитекторский smoke 2026-05-06 21:45: предиктор активируется
+  end-to-end на `cooldown_v5` curve при `speed=50`, рендерится
+  полная траектория ~17 ч + envelope CI 67% ±2.73 K; readout
+  «Через 1 ч: 64.66 K» заполнен.
 
 ---
 
-## [0.53.0] — 2026-05-06 — feat: F-Replay — 5-stage replay mode + predictor bootstrap
+## [0.53.0] — 2026-05-06 — F-Replay — 5-stage replay mode + predictor bootstrap
 
-Closing commit: `a502814` (late hotfix moved tag forward from
-`1bd3b13`).
+Closing commit: `a502814` (late hotfix двинул тег от `1bd3b13`).
 
-### Added
+### Добавлено
 
-- **F-Replay replay mode** — 5-stage operator-visible replay path:
-  - Stage 1 (`4efac0c`) — schema fix.
-  - Stage 2 (`7795ab9`) — replay transforms + CLI.
-  - Stage 4 (`fef291d`) — launcher `--replay`, `TopWatchBar` badge,
-    source listing.
-  - Stage 4b (`33dc1b0`) — UX polish: timestamp shift, badge dispatch,
-    title persistence.
-  - Stage 5 (`e4da30a`) — predictor bootstrap hint + operator doc.
+- **Replay mode F-Replay** — 5-этапный operator-visible путь replay-а:
+  - Этап 1 (`4efac0c`) — фикс схемы.
+  - Этап 2 (`7795ab9`) — replay-трансформации + CLI.
+  - Этап 4 (`fef291d`) — `--replay` на лончере, бейдж `TopWatchBar`,
+    листинг источников.
+  - Этап 4b (`33dc1b0`) — UX-полировка: сдвиг timestamp-а, dispatch
+    бейджа, персистенс заголовка.
+  - Этап 5 (`e4da30a`) — bootstrap-подсказка предиктора + операторская
+    документация.
 
-### Changed
+### Изменено
 
-- **`replay_engine` cmd-plane parity** — Stage 3 (`7d0a22c`) brought
-  PUB+REP+heartbeat parity with the live engine, port-refuse handling,
-  and a `--force-replay` flag.
+- **Паритет cmd-plane у `replay_engine`** — этап 3 (`7d0a22c`) принёс
+  паритет PUB+REP+heartbeat с live-движком, обработку refuse порта
+  и флаг `--force-replay`.
 
-### Fixed
+### Исправлено
 
-- **Stage 4c** (`1bd3b13`) — `DirectoryReplay` non-empty-first-file
-  edge case.
-- **Late hotfix** (`a502814`) — `QTimer` shadowing fix from Stage 4b
-  regression caught in architect smoke test. Tag moved here from
+- **Этап 4c** (`1bd3b13`) — edge case в `DirectoryReplay`, когда
+  первый файл не пустой.
+- **Late hotfix** (`a502814`) — фикс затенения `QTimer` из регрессии
+  этапа 4b, пойманной в архитекторском smoke. Тег перенесён сюда с
   `1bd3b13`.
 
-### Filed
+### Заведено
 
-- F-ReplayPhases (closed in subsequent unreleased v0.55.0 batch).
-- F-LegacyChannelMap (closed in subsequent unreleased v0.55.0 batch).
+- F-ReplayPhases (закрыто в последующем unreleased-батче v0.55.0).
+- F-LegacyChannelMap (закрыто в последующем unreleased-батче v0.55.0).
 
 ### Codex review
 
-- P2 findings declined per architect call: non-loopback collision,
-  hardcoded predictor path, `--force-replay`+live engine combo — все
-  deferred to follow-up specs.
+- P2-находки отклонены по архитекторскому колл-у: коллизия non-loopback,
+  захардкоженный путь предиктора, комбинация `--force-replay`+live
+  engine — все отложены в follow-up спецификации.
 
-### Tests
+### Тесты
 
-- 1472 passed full regression.
+- 1472 пройдено в полной регрессии.
 
 ---
 
-## [0.52.11] — 2026-05-06 — chore: cooldown_v5/ in .gitignore
+## [0.52.11] — 2026-05-06 — `cooldown_v5/` в `.gitignore`
 
 Closing commit: `788cd27`.
 
-### Changed
+### Изменено
 
-- `cooldown_v5/` reference data added to `.gitignore` —
-  operator-supplied curves should not live in the repository.
+- Опорные данные `cooldown_v5/` добавлены в `.gitignore` —
+  кривые от оператора не должны жить в репозитории.
 
-### Notes
+### Замечания
 
-- Predictor model bootstrap (cooled-mock activation) deferred to v0.53.0
-  replay mode.
+- Bootstrap модели предиктора (активация cooled-mock) отложен на
+  v0.53.0 replay mode.
 
 ---
 
-## [0.52.10] — 2026-05-06 — hotfix(diag): revert D2-TEMP instrumentation
+## [0.52.10] — 2026-05-06 — hotfix: откат инструментовки D2-TEMP
 
 Closing commit: `bc36b1d`.
 
-### Fixed
+### Исправлено
 
-- **Temperature panel Y-axis autoRange** on Mac mock — 4-commit arc;
-  D2-TEMP instrumentation reverted.
+- **autoRange по Y-оси на температурной панели** на Mac mock —
+  4-коммитная серия; инструментовка D2-TEMP откачена.
 
 ---
 
-## [0.52.9] — 2026-05-05 — chore(tests): ollama marker
+## [0.52.9] — 2026-05-05 — chore(tests): маркер ollama
 
-### Changed
+### Изменено
 
-- **Test suite no longer requires Ollama daemon by default.** Pytest now
-  registers an `ollama` marker; `addopts` deselects it (`-m 'not ollama'`).
-  The single live-Ollama test (`test_smoke_real_ollama`) is composed
-  `@pytest.mark.smoke + @pytest.mark.ollama`. All other tests in
-  `tests/agents/assistant/` use `AsyncMock` / `MagicMock` — no additional
-  marking required.
+- **Тестовый набор больше не требует Ollama-демон по умолчанию.**
+  Pytest теперь регистрирует маркер `ollama`; `addopts` исключает
+  его (`-m 'not ollama'`). Единственный live-Ollama тест
+  (`test_smoke_real_ollama`) собран как `@pytest.mark.smoke +
+  @pytest.mark.ollama`. Все остальные тесты в
+  `tests/agents/assistant/` используют `AsyncMock` / `MagicMock` —
+  дополнительная маркировка не требуется.
 
-  Run Ollama-dependent tests explicitly: `pytest -m ollama`.
-  Full suite (without Ollama): `pytest` — 2452 passed, 1 deselected.
+  Запуск Ollama-зависимых тестов явно: `pytest -m ollama`.
+  Полный набор (без Ollama): `pytest` — 2452 пройдено, 1 исключён.
 
-  Note: a background `ollama serve` daemon is still likely the actual source
-  of pytest-time RAM pressure on dev laptops (lazy client init in
-  `OllamaClient.__init__` means imports do not contact the network).
-  This change is defensive — no test silently takes a live dependency.
+  Замечание: фоновый демон `ollama serve` всё ещё, вероятно,
+  реальный источник RAM-нагрузки во время pytest-а на dev-ноутах
+  (lazy client init в `OllamaClient.__init__` означает, что импорты
+  не идут в сеть). Это изменение — защитное: никакой тест не
+  тащит live-зависимость молча.
 
-## [0.52.8] — 2026-05-05 — fix(analytics): per-widget time-window selector
+## [0.52.8] — 2026-05-05 — per-widget селектор временного окна
 
-### Fixed
+### Исправлено
 
-- **TemperatureOverview and PressureCurrent live data invisible at default
-  time window.** Both widgets subscribed to GlobalTimeWindowController whose
-  default TimeWindow.ALL returns infinite span (7-day history fetch). With
-  autoRange spanning days, minute-scale live updates were physically
-  invisible (~10 ppm X shift per new sample).
+- **Live-данные TemperatureOverview и PressureCurrent невидимы при
+  временном окне по умолчанию.** Оба виджета подписывались на
+  `GlobalTimeWindowController`, чей дефолт `TimeWindow.ALL` возвращает
+  бесконечный диапазон (7-дневная подгрузка истории). С autoRange
+  на масштаб дней live-обновления масштаба минут были физически
+  невидимы (~10 ppm сдвига по X на каждое новое измерение).
 
-  Reproduced 2026-05-05 with [D3] instrumentation: window=Всё, X-range
-  ~351 730 s, Y-range 328 K. T11 series grew 26→28 within seconds (live
-  data flowing) but trace tip movement was sub-pixel.
+  Воспроизведено 2026-05-05 с инструментовкой [D3]: window=Всё,
+  X-range ~351 730 с, Y-range 328 K. Серия T11 росла 26→28 за
+  секунды (live-данные шли), но движение хвоста трассы было
+  субпиксельным.
 
-  Fixed: shared TimeWindowSelector widget (5 buttons: 1мин/1ч/6ч/24ч/Всё,
-  default 1ч). TemperatureOverview and PressureCurrent each own a local
-  selector; global controller remains for future widgets. Widening the
-  window triggers a debounced (1 s) readings_history re-fetch.
+  Исправление: общий виджет `TimeWindowSelector` (5 кнопок:
+  1 мин / 1 ч / 6 ч / 24 ч / Всё, по умолчанию 1 ч).
+  TemperatureOverview и PressureCurrent имеют каждый свой локальный
+  селектор; глобальный контроллер остаётся для будущих виджетов.
+  Расширение окна триггерит debounced (1 с) повторную подгрузку
+  через `readings_history`.
 
-### Added
+### Добавлено
 
 - `cryodaq.gui.widgets.shared.time_window_selector.TimeWindowSelector` —
-  reusable 5-button time-window selector emitting TimeWindow enum on change.
+  переиспользуемый 5-кнопочный селектор временного окна, эмитит
+  `TimeWindow` enum на изменение.
 
-### Reference
+### Ссылки
 
-- D1/D2 instrumentation retained in prediction_widget.py and
-  VacuumPredictionWidget for lab PC capture session. Not in scope here.
-- D3 instrumentation removed (defect confirmed and fixed).
+- Инструментовка D1/D2 сохранена в `prediction_widget.py` и
+  `VacuumPredictionWidget` для capture-сессии на лабораторном PC.
+  Здесь не в scope.
+- Инструментовка D3 удалена (дефект подтверждён и исправлен).
 
-### Test baseline
+### Тестовая база
 
-Tests: 161+ passed (exact count from full suite at commit time).
+Тесты: 161+ пройдено (точное число — из полного прогона на момент
+коммита).
 
-### Tags
+### Теги
 
 - `v0.52.8` — fix/analytics-v0.52.8-window-selector → master
 
-## [0.52.7] — 2026-05-05 — fix(analytics): tab-click crash hotfix
+## [0.52.7] — 2026-05-05 — hotfix падения при клике на вкладку аналитики
 
-### Fixed
+### Исправлено
 
-- **Analytics tab crash on click** (SIGABRT: "QThread: Destroyed while
-  thread is still running") when any active experiment is in vacuum,
-  cooldown, measurement, warmup, or disassembly phase.
+- **Падение вкладки аналитики при клике** (SIGABRT: "QThread:
+  Destroyed while thread is still running"), когда любой активный
+  эксперимент находится в фазе vacuum, cooldown, measurement, warmup
+  или disassembly.
 
-  Root cause: v0.52.6 T7 added `_fetch_history()` calls (spawning
-  `ZmqCommandWorker` QThreads) to `TemperatureOverviewWidget` and
-  `PressureCurrentWidget` constructors. These two widgets occupy the
-  fallback layout. When `_ensure_overlay("analytics")` was clicked with
-  an active experiment, `AnalyticsView.__init__()` eagerly applied the
-  fallback layout (constructing both widgets and starting their workers),
-  then `_ensure_overlay` immediately called `set_phase(active_phase)`,
-  destroying the fallback widgets via `deleteLater()` before their
-  QThread workers completed.
+  Корневая причина: T7 в v0.52.6 добавил вызовы `_fetch_history()`
+  (порождающие QThread-ы `ZmqCommandWorker`) в конструкторы
+  `TemperatureOverviewWidget` и `PressureCurrentWidget`. Эти два
+  виджета занимают fallback-layout. Когда
+  `_ensure_overlay("analytics")` нажимался при активном
+  эксперименте, `AnalyticsView.__init__()` эагерно применял
+  fallback-layout (создавая оба виджета и запуская их workers),
+  после чего `_ensure_overlay` сразу вызывал
+  `set_phase(active_phase)`, уничтожая fallback-виджеты через
+  `deleteLater()` до завершения их QThread-workers.
 
-  Structural fix: `AnalyticsView` no longer applies any layout in
-  `__init__`. The first `set_phase()` call applies the layout directly
-  into the correct phase slot. `_ensure_overlay` always calls
-  `widget.set_phase(current_phase_or_None)` exactly once after
-  construction. Widgets are built in their final position and never
-  immediately destroyed.
+  Структурный фикс: `AnalyticsView` больше не применяет никакого
+  layout в `__init__`. Первый вызов `set_phase()` применяет layout
+  прямо в нужный phase-слот. `_ensure_overlay` всегда вызывает
+  `widget.set_phase(current_phase_or_None)` ровно один раз после
+  создания. Виджеты строятся на финальной позиции и никогда не
+  уничтожаются сразу.
 
-### Reference
+### Ссылки
 
-- Diagnosis: `artifacts/regressions/v0.52.7-anal-crash/diagnosis.md`
-- Confirmed crash class: H1 (QThread destroyed mid-flight)
-- All 5 affected phases confirmed: vacuum, cooldown, measurement, warmup, disassembly
-- Latent S22/D.3 (closeEvent worker-cleanup pattern): deferred to v0.53.0
+- Диагноз: `artifacts/regressions/v0.52.7-anal-crash/diagnosis.md`.
+- Подтверждённый класс падения: H1 (QThread destroyed mid-flight).
+- Подтверждены все 5 затронутых фаз: vacuum, cooldown, measurement,
+  warmup, disassembly.
+- Латентный S22/D.3 (паттерн worker-cleanup в `closeEvent`):
+  отложен до v0.53.0.
 
-### Tests
+### Тесты
 
-- 7 existing tests updated to reflect new contract: `view.set_phase(None)`
-  required before accessing `active_widgets()` (previously implied by eager
-  `__init__` layout).
-- 2 new regression tests: `test_lazy_open_with_active_experiment_*` and
-  `test_lazy_open_without_active_experiment_uses_fallback`.
+- 7 существующих тестов обновлены под новый контракт:
+  `view.set_phase(None)` обязателен перед доступом к
+  `active_widgets()` (ранее предполагался эагерным layout-ом
+  в `__init__`).
+- 2 новых регрессионных теста: `test_lazy_open_with_active_experiment_*`
+  и `test_lazy_open_without_active_experiment_uses_fallback`.
 
-### Test baseline
+### Тестовая база
 
-2444 passed (2442 baseline + 2 new), 4 skipped, 0 failures.
+2444 пройдено (2442 baseline + 2 новых), 4 пропущено, 0 падений.
 
-### Tags
+### Теги
 
 - `v0.52.7` — fix/analytics-v0.52.7-eager-layout → master
 
-## [0.52.6] — 2026-05-04 — fix(analytics): deep-audit Tier-1 fixes (T1-T5, T7-T8)
+## [0.52.6] — 2026-05-04 — Tier-1 фиксы по глубокому аудиту аналитики (T1-T5, T7-T8)
 
-### Fixed
+### Исправлено
 
-- **T3 — vacuum_prediction X-axis 1970–2025** (`prediction_widget.py:226-231`).
-  `InfiniteLine` "now" marker was constructed at `pos=0` (Unix epoch) with no
-  `ignoreBounds=True`. autoRange included the 1970 origin, spanning 55 years.
-  Fixed: `pos=time.time()` at construction; `ignoreBounds=True` on `addItem`;
-  `_update_now_marker()` now called from both `set_history` and `set_prediction`.
+- **T3 — X-ось `vacuum_prediction` 1970–2025**
+  (`prediction_widget.py:226-231`). Маркер «now» (`InfiniteLine`)
+  создавался с `pos=0` (Unix epoch) без `ignoreBounds=True`.
+  autoRange захватывал 1970-й origin и растягивался на 55 лет.
+  Исправлено: `pos=time.time()` в момент создания;
+  `ignoreBounds=True` при `addItem`; `_update_now_marker()` теперь
+  вызывается и из `set_history`, и из `set_prediction`.
 
-- **T4 — cooldown forecast X-axis showing 1970-01-01** (`main_window_v2.py`).
-  `_cooldown_reading_to_data` built predicted trajectory by zipping
-  `future_t` (hours-from-now) directly into `CooldownData` tuples consumed by
-  a `pg.DateAxisItem` (Unix seconds). 2.5 h rendered as 1970-01-01 00:00:02.
-  Fixed: `future_t_abs = [now_ts + h * 3600 for h in future_t]`.
+- **T4 — X-ось cooldown-прогноза показывала 1970-01-01**
+  (`main_window_v2.py`). `_cooldown_reading_to_data` строил
+  прогнозную траекторию, зипая `future_t` (часы-от-сейчас) прямо
+  в `CooldownData`-кортежи, которые потребляет `pg.DateAxisItem`
+  (Unix-секунды). 2.5 ч рендерилось как 1970-01-01 00:00:02.
+  Исправлено: `future_t_abs = [now_ts + h * 3600 for h in future_t]`.
 
-- **T5 — PressurePlot frozen X window** (`pressure_plot.py:171-197`).
-  `set_series()` updated Y range and curve data but never reapplied the time
-  window. `_apply_window` only fired at construction and on controller signal.
-  Same class as v0.52.5 Bug B — not propagated to `PressurePlot`. Fixed by
-  calling `_apply_window(get_time_window_controller().get_window())` at end of
-  `set_series` when `not self._forward_looking`.
+- **T5 — замороженное X-окно у `PressurePlot`**
+  (`pressure_plot.py:171-197`). `set_series()` обновлял Y-диапазон и
+  данные кривой, но не переприменял временное окно. `_apply_window`
+  срабатывал только при создании и по сигналу контроллера. Класс
+  бага тот же, что у v0.52.5 Bug B — не пробросился до
+  `PressurePlot`. Исправлено вызовом
+  `_apply_window(get_time_window_controller().get_window())` в
+  конце `set_series`, когда `not self._forward_looking`.
 
-- **T7 — phase swap zeroed history** (`analytics_widgets.py`).
-  Append-style widgets (`TemperatureOverviewWidget`, `PressureCurrentWidget`)
-  received only the last single cached reading on construction (not time-series
-  history). Fixed: both widgets now call `_fetch_history()` from `__init__`,
-  issuing a `readings_history` ZMQ command (async `ZmqCommandWorker`) to
-  backfill the configured time window.
+- **T7 — phase swap обнулял историю** (`analytics_widgets.py`).
+  Append-style виджеты (`TemperatureOverviewWidget`,
+  `PressureCurrentWidget`) при создании получали только последнее
+  закэшированное показание (а не историю). Исправлено: оба
+  виджета теперь вызывают `_fetch_history()` из `__init__`,
+  посылая ZMQ-команду `readings_history` (асинхронный
+  `ZmqCommandWorker`) для backfill-а сконфигурированного окна.
 
-- **T2 — 4 analytics channels unrouted** (`main_window_v2.py`).
-  `_adapt_reading_to_analytics` only handled `cooldown_predictor/cooldown_eta`.
-  `analytics/r_thermal*`, `analytics/instrument_health`, and
-  `analytics/vacuum_prediction` were silently dropped. All three now routed
-  through `_push_analytics`. `set_experiment_status` was already wired via
+- **T2 — 4 канала аналитики не маршрутизировались**
+  (`main_window_v2.py`). `_adapt_reading_to_analytics` обрабатывал
+  только `cooldown_predictor/cooldown_eta`. `analytics/r_thermal*`,
+  `analytics/instrument_health` и `analytics/vacuum_prediction`
+  молча отбрасывались. Все три теперь идут через
+  `_push_analytics`. `set_experiment_status` уже был заведён через
   `_on_experiment_status_received`.
 
-- **T1 — `set_fault` dead API deleted** (`analytics_view.py:187-189`).
-  `set_fault` existed in `AnalyticsView` with no widget in any layout
-  implementing it. `BottomStatusBar` already surfaces fault state.
-  Method, cache, and replay path all removed. `_forward` now logs a WARNING
-  (once per (setter, phase) pair — not per reading) when a setter call has
-  zero recipients in the active layout.
+- **T1 — мёртвый API `set_fault` удалён**
+  (`analytics_view.py:187-189`). `set_fault` существовал в
+  `AnalyticsView`, но ни один виджет в layout-ах его не
+  реализовывал. `BottomStatusBar` и так показывает fault-состояние.
+  Метод, кэш и replay-путь — все удалены. `_forward` теперь
+  логирует WARNING (по разу на (setter, phase) пару — не на каждое
+  показание), когда вызов сеттера не имеет ни одного получателя в
+  активном layout-е.
 
-### Added
+### Добавлено
 
-- **T8 — contract integration test** (`tests/integration/test_analytics_contract.py`).
-  11 tests driving the full `_reading_received.emit → _dispatch_reading →
-  AnalyticsView → widget` path with realistic long-form channel names.
-  Asserts: curve count, X-axis range (no 1970 epoch), cooldown absolute
-  timestamps, self-fetch on construction, WARNING deduplication (1 warn per
-  (method, phase), not per reading), `set_fault` absence, and
-  `set_experiment_status` reaching `ExperimentSummaryWidget`.
+- **T8 — контрактный интеграционный тест**
+  (`tests/integration/test_analytics_contract.py`). 11 тестов гоняют
+  полный путь `_reading_received.emit → _dispatch_reading →
+  AnalyticsView → widget` с реалистичными длинными именами каналов.
+  Проверяют: число кривых, X-диапазон (без 1970 epoch), абсолютные
+  cooldown-таймстемпы, self-fetch при создании, дедупликацию
+  WARNING (1 предупреждение на (метод, фазу), не на каждое
+  показание), отсутствие `set_fault` и доставку
+  `set_experiment_status` до `ExperimentSummaryWidget`.
 
-### Deferred to v0.53.0
+### Отложено до v0.53.0
 
-- **T6** — channel-ID normalization at dispatch boundary (affects
-  calibration, conductivity, and other consumers — needs staged rollout with
-  Protocol-based static checks).
+- **T6** — нормализация channel-ID на границе dispatch-а
+  (затрагивает calibration, conductivity и других потребителей —
+  нужен этапный rollout с Protocol-based статическими проверками).
 
-### Reference
+### Ссылки
 
-- Deep audit synthesis: `artifacts/consultations/2026-05-04/analytics-deep-audit/synthesis.md`
-- 4-of-4 consultant consensus on Tier-1 findings (Codex, Gemini, GLM, Kimi)
-- Architect ratifications: 8 questions, session 2026-05-04
-- Multi-verifier ship audit: Gemini PASS iter 2; Codex iter 2 blocked by usage limit
+- Сводка глубокого аудита:
+  `artifacts/consultations/2026-05-04/analytics-deep-audit/synthesis.md`.
+- Консенсус 4 из 4 консультантов по Tier-1 находкам
+  (Codex, Gemini, GLM, Kimi).
+- Ратификации архитектора: 8 вопросов, сессия 2026-05-04.
+- Multi-verifier ship-аудит: Gemini PASS итерация 2; Codex
+  итерация 2 заблокирована usage-лимитом.
 
-### Test baseline
+### Тестовая база
 
-152 passed (141 baseline + 11 new contract tests), 0 skipped.
+152 пройдено (141 baseline + 11 новых контрактных), 0 пропущено.
 
-### Tags
+### Теги
 
 - `v0.52.6` — fix/analytics-v0.52.6-structural → master
 
-## [0.52.5] — 2026-05-04 — fix(gui): analytics live-panel real bug (metaswarm)
+## [0.52.5] — 2026-05-04 — реальный баг live-панели аналитики (metaswarm)
 
-### Fixed
+### Исправлено
 
-- **PressureCurrentWidget never received live data** (`main_window_v2.py:437`).
-  The dispatch guard checked `reading.unit == "мбар"` (Cyrillic) but the
-  Thyracont VSP63D driver publishes `unit="mbar"` (Latin ASCII) in all code
-  paths (real, mock, parse_v1). Guard condition expanded to
-  `unit in ("мбар", "mbar")`. `channel.endswith("/pressure")` was correct
-  and unchanged. Root cause identified by 4-consultant metaswarm (Codex +
-  Gemini + GLM); confirmed by reading driver source.
+- **`PressureCurrentWidget` никогда не получал live-данные**
+  (`main_window_v2.py:437`). Guard диспатча проверял
+  `reading.unit == "мбар"` (кириллица), но драйвер Thyracont VSP63D
+  публикует `unit="mbar"` (латиница) во всех путях (real, mock,
+  parse_v1). Условие guard-а расширено до
+  `unit in ("мбар", "mbar")`. `channel.endswith("/pressure")` был
+  корректен и не менялся. Корневая причина идентифицирована
+  4-консультантской metaswarm (Codex + Gemini + GLM); подтверждена
+  чтением исходника драйвера.
 
-- **TemperatureOverviewWidget showed empty plot despite receiving data**
-  (`analytics_widgets.py:207-214`). `_apply_window()` was called once at
-  widget construction (`__init__`) with no data present. pyqtgraph's
-  `pi.autoRange()` internally calls `setRange(disableAutoRange=True)`,
-  disabling the X autorange that was just enabled. Subsequent live readings
-  (Unix timestamps ~1.7×10⁹) fell completely outside the frozen default X
-  range. Fixed by storing `_window_controller` as an instance attribute and
-  calling `_apply_window(self._window_controller.get_window())` at the end
-  of each `set_temperature_readings()` batch, keeping the X right edge
-  rolling with current time. Root cause identified by Codex in the metaswarm;
-  confirmed by pyqtgraph `ViewBox.setRange(disableAutoRange=True)` source.
+- **`TemperatureOverviewWidget` показывал пустой график при
+  получении данных** (`analytics_widgets.py:207-214`).
+  `_apply_window()` вызывался один раз при создании виджета
+  (`__init__`) при отсутствии данных. `pi.autoRange()` в pyqtgraph
+  внутри зовёт `setRange(disableAutoRange=True)`, отключая X
+  autorange, который только что включили. Последующие live-показания
+  (Unix-таймстемпы ~1.7×10⁹) полностью выпадали из замороженного
+  дефолтного X-диапазона. Исправлено сохранением `_window_controller`
+  как instance-атрибута и вызовом
+  `_apply_window(self._window_controller.get_window())` в конце
+  каждого батча `set_temperature_readings()` — правый край X
+  катится за текущим временем. Корневая причина — от Codex в
+  metaswarm; подтверждена исходником pyqtgraph
+  `ViewBox.setRange(disableAutoRange=True)`.
 
-### Tests
+### Тесты
 
-- `test_mbar_latin_pressure_reading_reaches_analytics`: verifies that a
-  `unit="mbar"` pressure reading with `channel="VSP63D_1/pressure"` reaches
-  `_analytics_snapshot["set_pressure_reading"]` after dispatch.
-- `test_temperature_overview_xaxis_scrolls_with_live_readings`: verifies that
-  after `set_temperature_readings()`, the X-axis right edge is within 10s of
-  the reading's timestamp (not frozen at the empty-data default range).
+- `test_mbar_latin_pressure_reading_reaches_analytics`: проверяет,
+  что показание с `unit="mbar"` и `channel="VSP63D_1/pressure"`
+  доходит до `_analytics_snapshot["set_pressure_reading"]` после
+  диспатча.
+- `test_temperature_overview_xaxis_scrolls_with_live_readings`:
+  проверяет, что после `set_temperature_readings()` правый край
+  X-оси находится в пределах 10 с от таймстемпа показания
+  (не заморожен на дефолтном диапазоне для пустых данных).
 
-### Process
+### Процесс
 
-Two prior CC code-analysis cycles reached wrong conclusions ("expected
-behavior", "correctly wired"). Escalated to 4-consultant metaswarm per
-§v1.5.8.4. Consultants: Codex gpt-5.5 high (precise bug location), Gemini
-2.5 Pro (architectural drift analysis), GLM-5.1 (normalization class verdict),
-Kimi K2.6 (LOST — null API response). Synthesis + source verification
-superseded all prior analysis.
+Два предыдущих цикла CC-анализа кода пришли к неверным выводам
+(«expected behavior», «correctly wired»). Эскалировано до
+4-консультантской metaswarm согласно §v1.5.8.4. Консультанты:
+Codex gpt-5.5 high (точная локализация бага), Gemini 2.5 Pro
+(анализ архитектурного дрейфа), GLM-5.1 (вердикт о классе
+нормализации), Kimi K2.6 (LOST — null API response). Синтез +
+проверка по исходнику отменили все предыдущие анализы.
 
-### Test baseline
+### Тестовая база
 
-11 passed (9 baseline + 2 new), 0 skipped.
+11 пройдено (9 baseline + 2 новых), 0 пропущено.
 
-### Tags
+### Теги
 
 - `v0.52.5` — fix/analytics-live-panel-real-bug → master
 
-## [0.52.4] — 2026-05-04 — fix(gui): analytics UX + warmup channel ID
+## [0.52.4] — 2026-05-04 — UX аналитики + warmup channel ID
 
-### Fixed
+### Исправлено
 
-- **CooldownPredictionWidget idle placeholder** now rendered as `pg.TextItem`
-  on the plot canvas instead of a `QLabel` above the plot. Plot uses full
-  vertical space at all times. Single-line: «Охлаждение не активно — прогноз
-  недоступен». With v0.52.2 data-driven predictor, placeholder appears only
-  for warm-idle state (system warm, cryocooler off) — not at base temperature.
-- **TemperatureTrajectoryWidget._fetch_history()** now sends full channel labels
-  (e.g. `Т7 Детектор`) instead of short IDs (`Т7`). SQLiteWriter stores
-  readings under full labels; short IDs yielded 0 rows for warmup-phase
-  temperature history. Same class as v0.47.4 BrokerSnapshot fix.
-  Gemini bonus finding from F-X v3 audit, now closed.
+- **Idle-плейсхолдер `CooldownPredictionWidget`** теперь рендерится
+  как `pg.TextItem` на canvas-е графика, а не как `QLabel` над
+  графиком. График всегда занимает полную вертикаль. Однострочный
+  текст: «Охлаждение не активно — прогноз недоступен». С
+  data-driven предиктором v0.52.2 плейсхолдер показывается только
+  в warm-idle (система тёплая, cryocooler выключен) — не на базе.
+- **`TemperatureTrajectoryWidget._fetch_history()`** теперь
+  отправляет полные метки каналов (например, `Т7 Детектор`), а не
+  короткие ID (`Т7`). `SQLiteWriter` сохраняет показания под
+  полными метками; короткие ID давали 0 строк для истории
+  температур фазы warmup. Тот же класс, что у фикса BrokerSnapshot
+  в v0.47.4. Бонус-находка Gemini из аудита F-X v3, закрыта.
 
-### Investigation
+### Расследование
 
-Analytics live panels (TemperatureOverviewWidget, PressureCurrentWidget)
-were claimed "actually broken" by CC_PROMPT. Code analysis found them
-**correctly wired** — ≤2s empty on open is expected for live-only widgets.
-Pressure widget is correctly absent from cooldown-phase layout.
-Original triage (commit fb59916) was accurate.
+Live-панели аналитики (`TemperatureOverviewWidget`,
+`PressureCurrentWidget`) были объявлены «actually broken» в
+CC_PROMPT. Анализ кода показал, что они **корректно подключены** —
+≤2 с пустоты при открытии — это ожидаемое поведение live-only
+виджетов. Pressure-виджет корректно отсутствует в layout-е фазы
+cooldown. Изначальная сортировка (коммит `fb59916`) была верна.
 
-### Reference
+### Ссылки
 
-- TemperatureTrajectoryWidget fix: Gemini bonus finding, F-X v3 audit 2026-05-02
-- Placeholder fix: UX gap from fb59916 idle-label implementation
-- 4 new tests, 130/130 analytics view tests passed
+- Фикс `TemperatureTrajectoryWidget`: бонус-находка Gemini, аудит
+  F-X v3 2026-05-02.
+- Фикс плейсхолдера: UX-пробел из реализации idle-метки в `fb59916`.
+- 4 новых теста, 130/130 тестов analytics-view пройдено.
 
-## [0.52.3] — 2026-05-04 — fix(c6): correct Т11/Т12 hardware mapping
+## [0.52.3] — 2026-05-04 — корректное аппаратное соответствие Т11/Т12
 
-### Fixed
+### Исправлено
 
-- **C6 (F-X v3 audit stuck finding)** — `physical_alarms.yaml` had cold/warm
-  channel assignments inverted relative to real lab hardware. Corrected:
-  - `cold_channel: "Т12"` (2-я ступень GM-cooler, ~2.9K floor)
-  - `warm_channel: "Т11"` (плита 1-й ступени, ~40K floor)
-  - `cooldown_alarm.py` and `physical_alarms_config.py` defaults flipped to match
-  - `replay_alarm_history.py` fallbacks flipped
-- Display labels in `channels.yaml` and `channel_manager.py`:
+- **C6 (зависшая находка из аудита F-X v3)** — `physical_alarms.yaml`
+  имел инвертированные cold/warm-каналы относительно реального
+  лабораторного железа. Исправлено:
+  - `cold_channel: "Т12"` (2-я ступень GM-cooler, пол ~2.9 K).
+  - `warm_channel: "Т11"` (плита 1-й ступени, пол ~40 K).
+  - Defaults в `cooldown_alarm.py` и `physical_alarms_config.py`
+    перевёрнуты соответственно.
+  - Fallback-ы в `replay_alarm_history.py` перевёрнуты.
+- Display-метки в `channels.yaml` и `channel_manager.py`:
   «Теплообменник 1» → «Плита 1-й ступени» (Т11);
-  «Теплообменник 2» → «2-я ступень» (Т12). Physically accurate.
-- `top_watch_bar.py`: T_MIN_CHANNEL Т11→Т12, T_MAX_CHANNEL Т12→Т11.
-  T_min cell now correctly shows 2nd-stage cold-head temperature.
-- `interlocks.yaml` `detector_warmup` description clarified (Т12 = 2-я ступень).
-  Threshold (10K, Т12) was already correct; no change.
-- `vacuum_guard.py` `reference_temp_channel` (Т12) confirmed correct; no change.
+  «Теплообменник 2» → «2-я ступень» (Т12). Физически точно.
+- `top_watch_bar.py`: `T_MIN_CHANNEL` Т11→Т12, `T_MAX_CHANNEL`
+  Т12→Т11. Ячейка T_min теперь корректно показывает температуру
+  cold-head 2-й ступени.
+- В `interlocks.yaml` уточнено описание `detector_warmup`
+  (Т12 = 2-я ступень). Порог (10 K, Т12) уже был корректен;
+  без изменений.
+- `vacuum_guard.py` `reference_temp_channel` (Т12) подтверждён;
+  без изменений.
 
-### Reference
+### Ссылки
 
-- C6 stuck finding raised in F-X v3 audit iter 4, 2026-05-02
-- Hardware verification by architect at lab, 2026-05-03
-- Reference curve data provenance consistent with Т12=cold (2.9K floor)
-- **Push gate now CLEARED** for v0.51.0 / v0.52.0 / v0.52.1 / v0.52.2 / v0.52.3
+- Зависшая находка C6 поднята в аудите F-X v3 итер. 4, 2026-05-02.
+- Аппаратная верификация архитектором в лаборатории, 2026-05-03.
+- Происхождение опорной кривой согласовано с Т12=cold (пол 2.9 K).
+- **Push-гейт ОТКРЫТ** для v0.51.0 / v0.52.0 / v0.52.1 / v0.52.2 /
+  v0.52.3.
 
-## [0.52.2] — 2026-05-03 — Cooldown predictor: data-driven floor + quasi-stationary support
+## [0.52.2] — 2026-05-03 — cooldown-предиктор: data-driven пол + поддержка квазистационарного режима
 
-### Changed
+### Изменено
 
-- `CooldownPredictor` `T_cold_end` and `T_warm_end` now derived from reference curve minima
-  at model build time via `_derive_floors()`. Previous hardcoded values (4.0 K, 85.0 K)
-  silently discarded the quasi-stationary regime from ~4 K to the actual 2nd-stage base.
-- Trajectory generation gate raised from `p_now < 0.98` → `p_now < 0.999`; steady-phase
-  classification similarly raised. Prediction now spans the full quasi-stationary regime
-  (T_cold approaching real base, ~2.5–3 K depending on hardware).
-- `compute_progress()` accepts explicit `T_cold_end` / `T_warm_end` parameters; defaults to
-  new fallback constants (`T_COLD_END_FALLBACK = 2.5 K`, `T_WARM_END_FALLBACK = 75.0 K`).
-- `EnsembleModel` gains `T_cold_end` / `T_warm_end` fields populated at build time.
-- `build_model_from_curves()` convenience function consolidates full build pipeline
-  (derive floors → prepare → ensemble).
-- `save_model()` schema bumped to version 2.0; records derived floor values.
-- `load_model()` and `ingest_curve()` use `build_model_from_curves()` — floors always
-  re-derived from curve data, not loaded from stale JSON field.
-- `validate_loo()` derives per-fold floors from training curves.
-- `cooldown_cli.py` `build` / `demo` / `validate` commands updated accordingly.
-- Backward compat: module-level `T_COLD_END` / `T_WARM_END` aliases retained.
+- `CooldownPredictor` `T_cold_end` и `T_warm_end` теперь выводятся
+  из минимумов опорной кривой во время сборки модели через
+  `_derive_floors()`. Прежние захардкоженные значения (4.0 K,
+  85.0 K) молча отбрасывали квазистационарный режим от ~4 K до
+  реальной базы 2-й ступени.
+- Гейт генерации траектории поднят с `p_now < 0.98` до
+  `p_now < 0.999`; классификация steady-фазы аналогично поднята.
+  Прогноз теперь покрывает весь квазистационарный режим (T_cold,
+  выходящая на реальную базу, ~2.5–3 K в зависимости от железа).
+- `compute_progress()` принимает явные `T_cold_end` / `T_warm_end`;
+  defaults — новые fallback-константы (`T_COLD_END_FALLBACK = 2.5 K`,
+  `T_WARM_END_FALLBACK = 75.0 K`).
+- `EnsembleModel` получает поля `T_cold_end` / `T_warm_end`,
+  заполняемые на этапе сборки.
+- Удобная функция `build_model_from_curves()` консолидирует полный
+  build-pipeline (derive floors → prepare → ensemble).
+- `save_model()` — schema bump до версии 2.0; пишет производные
+  значения пола.
+- `load_model()` и `ingest_curve()` используют
+  `build_model_from_curves()` — пол всегда выводится заново из
+  данных кривой, не грузится из устаревшего JSON-поля.
+- `validate_loo()` выводит per-fold пол из обучающих кривых.
+- Команды `build` / `demo` / `validate` в `cooldown_cli.py`
+  обновлены соответственно.
+- Обратная совместимость: алиасы модульного уровня `T_COLD_END` /
+  `T_WARM_END` сохранены.
 
-### Note
+### Замечание
 
-No reference curve data exists on disk (`data/cooldown_model/` absent). Floors will be
-derived automatically on first model build after a real cooldown is ingested via
-`auto_ingest`. Fallback constants (2.5 K / 75.0 K) active until then.
+На диске нет данных опорных кривых (`data/cooldown_model/`
+отсутствует). Пол будет выведен автоматически при первой сборке
+модели после того, как реальный cooldown будет ингестирован через
+`auto_ingest`. До этого момента активны fallback-константы
+(2.5 K / 75.0 K).
 
-## [0.52.1] — 2026-05-03 — Русификация интерфейса
+## [0.52.1] — 2026-05-03 — русификация интерфейса
 
-### Changed
+### Изменено
 
-- Кнопки переключения шкалы Y: «Lin Y» / «Log Y» → «Лин Y» / «Лог Y»
-  (`dashboard/temp_plot_widget.py`, `widgets/overview_panel.py`)
-- Документация оператора `docs/operator/analytics-tab.md` переведена на русский язык полностью
+- Кнопки переключения шкалы Y: «Lin Y» / «Log Y» → «Лин Y» /
+  «Лог Y» (`dashboard/temp_plot_widget.py`,
+  `widgets/overview_panel.py`).
+- Документация оператора `docs/operator/analytics-tab.md` целиком
+  переведена на русский.
 
-## [0.52.0] — 2026-05-03 — F-P prediction overlays on Analytics tab
+## [0.52.0] — 2026-05-03 — F-P prediction overlay-и на вкладке аналитики
 
-### Added
+### Добавлено
 
-- **F-P2 Vacuum leak projection overlay** (`VacuumPredictionWidget`): self-contained
-  10s poll to `get_vacuum_trend` ZMQ command. Converts engine's relative
-  extrapolation arrays to absolute unix timestamps and mbar pressure units.
-  ±1σ confidence band from `residual_std`. Raw pressure history accumulated
-  via `set_pressure_reading()`. Graceful: clears on no-data/error, visible
-  only during vacuum phase (via `analytics_layout.yaml`).
-- **F-P3 TIM thermal conductivity asymptote overlay** (`RThermalLiveWidget`):
-  `SteadyStatePredictor` (window=600s, interval=30s) applied to R_thermal
-  history. Horizontal dashed asymptote line + ±σ confidence band rendered
-  when `percent_settled ≥ 30%` and `valid=True`. Duplicate-prevention via
-  `_last_r_ts`. Hides when history is empty or predictor not converged.
-  Visible only during measurement phase.
-- **F-P1 cooldown trajectory overlay**: confirmed pre-existing. `CooldownPredictionWidget`
-  already renders prediction line + CI band from `cooldown_service.py` trajectory
-  data via `main_window_v2._cooldown_reading_to_data()`. No new code.
+- **F-P2 overlay прогноза вакуумной течи** (`VacuumPredictionWidget`):
+  самостоятельный 10-секундный poll по ZMQ-команде
+  `get_vacuum_trend`. Конвертирует относительные экстраполяционные
+  массивы движка в абсолютные unix-таймстемпы и единицы давления
+  мбар. Полоса ±1σ из `residual_std`. Сырая история давления
+  накапливается через `set_pressure_reading()`. Корректно: чистится
+  при no-data/error, виден только в фазе vacuum (через
+  `analytics_layout.yaml`).
+- **F-P3 overlay асимптоты теплопроводности TIM**
+  (`RThermalLiveWidget`): `SteadyStatePredictor` (window=600 с,
+  interval=30 с) поверх истории `R_thermal`. Горизонтальная
+  пунктирная линия асимптоты + полоса ±σ рендерятся при
+  `percent_settled ≥ 30%` и `valid=True`. Антидубль через
+  `_last_r_ts`. Скрыто, если история пуста или предиктор не
+  сошёлся. Виден только в фазе measurement.
+- **F-P1 overlay траектории cooldown**: подтверждено как
+  существовавшее. `CooldownPredictionWidget` уже рендерит
+  prediction-линию + CI-полосу из данных траектории
+  `cooldown_service.py` через
+  `main_window_v2._cooldown_reading_to_data()`. Нового кода нет.
 
-### Visual design
+### Визуальный дизайн
 
-All overlays use design system tokens exclusively:
-- Prediction line: `STATUS_INFO`, `PLOT_LINE_WIDTH`, `Qt.DashLine`
-- Confidence band: `STATUS_INFO` at alpha=64 (~25% opacity)
-Matches `PredictionWidget` canonical convention.
+Все overlay-и используют исключительно токены design system:
+- Prediction-линия: `STATUS_INFO`, `PLOT_LINE_WIDTH`, `Qt.DashLine`.
+- Полоса доверия: `STATUS_INFO` при alpha=64 (~25% непрозрачности).
+Соответствует канонической конвенции `PredictionWidget`.
 
-### Reference
+### Ссылки
 
-Architect session 2026-05-03 weekend.
-Multi-verifier audit (Codex gpt-5.5 + Gemini 0.38.2) — 1 iteration.
-Codex P2 fixes applied (stale overlay cleared on no-data/error paths).
+Архитекторская сессия 2026-05-03 (выходные).
+Multi-verifier аудит (Codex gpt-5.5 + Gemini 0.38.2) — 1 итерация.
+Codex P2-фиксы применены (устаревший overlay чистится на путях
+no-data/error).
 
-### Test baseline
+### Тестовая база
 
-2414 passed, 4 skipped (baseline 2396 + 18 new F-P tests).
+2414 пройдено, 4 пропущено (baseline 2396 + 18 новых F-P-тестов).
 
-### Tags
+### Теги
 
-- `v0.52.0` → commit `160f4ac` (feat(f-p) commit, post-amend)
-- `v0.51.0` → commit `65b9f92` (prior release, NOT YET PUSHED — gated on C6)
+- `v0.52.0` → коммит `160f4ac` (commit feat(f-p), post-amend).
+- `v0.51.0` → коммит `65b9f92` (предыдущий релиз, ЕЩЁ НЕ ЗАПУШЕН —
+  гейтован на C6).
 
-### Selected commits in this release
+### Ключевые коммиты этого релиза
 
-- `9f67ac4` docs(roadmap): retire F-A/F-B/F-C/F-D, plan F-P1/2/3
-- `160f4ac` feat(f-p): prediction overlays on Analytics tab
+- `9f67ac4` docs(roadmap): retire F-A/F-B/F-C/F-D, plan F-P1/2/3.
+- `160f4ac` feat(f-p): prediction overlays on Analytics tab.
 
-## [0.51.0] — 2026-05-02 — F-X v3: Physical-state alarms
+## [0.51.0] — 2026-05-02 — F-X v3: тревоги физического состояния
 
-### F-X v3: Physical-state alarms (CooldownAlarm + VacuumGuard)
+### F-X v3: тревоги физического состояния (CooldownAlarm + VacuumGuard)
 
-Replaces the zone-band alarm model (F-X v2, never tagged) with two
-physics-grounded alarms that do not couple to `ExperimentPhase`.
+Заменяет модель тревог по zone-band (F-X v2, никогда не помечалась
+тегом) двумя физически обоснованными тревогами, не связанными с
+`ExperimentPhase`.
 
-### Added
-- `CooldownAlarm` (`core/cooldown_alarm.py`): predictor-based trajectory
-  deviation alarm. Operator-armed. Loads `model/predictor_model.json`
-  lazily on arm. Fires when cooldown lags expected progress by > 2.5σ
-  for ≥5 consecutive ticks. ETA slip reported in message when > 0.5 h/h.
-  Auto-disarms when progress ≥ 0.95 or T_cold ≤ base + ε. Operator can
-  re-arm after auto-disarm for the next cooldown cycle.
-  When cooldown reaches base temp (auto-disarm threshold), transitions to
-  WATCHDOG mode (configurable via `watchdog_enabled`). WATCHDOG monitors
-  T11 only and fires WARNING if T11 climbs above `base_temp_K +
-  watchdog_margin_K` sustained `watchdog_sustained_s` seconds. Clears
-  when T11 recovers. Disarms on operator stop or experiment finalize.
-  Closes the post-cooldown monitoring gap identified by Codex P1 review.
-- `VacuumGuard` (`core/vacuum_guard.py`): fully automatic P × T_ref alarm.
-  Arms when T_ref < 260 K; fires when P > 1e-2 mbar sustained ≥ 30 s;
-  deadband 260/270 K on T_ref, one decade on pressure. Stale sensor during
-  FIRED state preserves alarm instead of clearing.
-- `config/physical_alarms.yaml`: tunables for both modules. All values
-  fall back to hard-coded defaults when file absent — engine always starts.
-- `core/physical_alarms_config.py`: fail-open YAML loader with per-key
-  type validation and non-dict subsection guard.
-- Engine: `_physical_alarms_tick` task at `min(cooldown_interval, vacuum_interval)`.
-  Dispatches `alarm_fired`/`alarm_cleared` events and Telegram notifications
-  on transitions, same as alarm_v2 path.
-- ZMQ commands: `cooldown_alarm.arm`, `cooldown_alarm.disarm`,
+### Добавлено
+- `CooldownAlarm` (`core/cooldown_alarm.py`): тревога по отклонению
+  траектории на основе предиктора. Включается оператором. Загружает
+  `model/predictor_model.json` лениво при arm-е. Срабатывает, если
+  cooldown отстаёт от ожидаемого прогресса > 2.5σ на ≥5
+  последовательных тиках. Slip ETA сообщается, если > 0.5 ч/ч.
+  Авто-disarm при прогрессе ≥ 0.95 или T_cold ≤ база + ε. Оператор
+  может перевключить после авто-disarm-а для следующего цикла
+  cooldown.
+  При достижении базы (порог авто-disarm-а) переходит в режим
+  WATCHDOG (конфигурируется `watchdog_enabled`). WATCHDOG смотрит
+  только на T11 и шлёт WARNING, если T11 поднимается выше
+  `base_temp_K + watchdog_margin_K` непрерывно
+  `watchdog_sustained_s` секунд. Сбрасывается при восстановлении
+  T11. Disarm-ится на operator stop или experiment finalize.
+  Закрывает пробел post-cooldown мониторинга, найденный в P1 ревью
+  Codex.
+- `VacuumGuard` (`core/vacuum_guard.py`): полностью автоматическая
+  тревога P × T_ref. Включается при T_ref < 260 K; срабатывает при
+  P > 1e-2 мбар непрерывно ≥ 30 с; deadband 260/270 K на T_ref,
+  одна декада на давлении. Stale-сенсор в состоянии FIRED
+  сохраняет тревогу, не сбрасывая её.
+- `config/physical_alarms.yaml`: настройки обоих модулей. Все
+  значения откатываются на захардкоженные defaults при отсутствии
+  файла — движок всегда стартует.
+- `core/physical_alarms_config.py`: fail-open YAML-загрузчик с
+  per-key type-валидацией и guard-ом не-dict подсекций.
+- Движок: задача `_physical_alarms_tick` с интервалом
+  `min(cooldown_interval, vacuum_interval)`. Диспатчит события
+  `alarm_fired`/`alarm_cleared` и Telegram-уведомления на
+  переходах, как путь alarm_v2.
+- ZMQ-команды: `cooldown_alarm.arm`, `cooldown_alarm.disarm`,
   `cooldown_alarm.status`, `vacuum_guard.status`.
-- GUI: "Контроль захолаживания" group in `AlarmPanel` (arm/disarm button,
-  status label, ETA, progress bar). 5 s poll via existing ZmqCommandWorker.
-  WATCHDOG states show T11 live reading instead of ETA/progress.
-- Replay harness refactored (`tools/replay_alarm_history.py`): compares
-  legacy alarms_v3 threshold model vs predictor-based alarm decisions on
-  historical SQLite data. Nearest-timestamp temperature pairing; parses
-  `outside_range`, `above`, `below` threshold shapes.
-- 40+ new tests: `test_cooldown_alarm.py` (20), `test_vacuum_guard.py` (11),
-  `test_physical_alarms_config.py` (7), `test_alarm_v2_legacy_cleanup.py` (2).
+- GUI: группа «Контроль захолаживания» в `AlarmPanel` (кнопка
+  arm/disarm, метка статуса, ETA, progress bar). 5-секундный poll
+  через существующий `ZmqCommandWorker`. В состояниях WATCHDOG
+  вместо ETA/progress показывается live-показание T11.
+- Replay harness переработан (`tools/replay_alarm_history.py`):
+  сравнивает legacy threshold-модель `alarms_v3` против
+  predictor-based решений на исторических данных SQLite.
+  Сопоставление ближайшего таймстемпа температуры; парсит формы
+  `outside_range`, `above`, `below`.
+- 40+ новых тестов: `test_cooldown_alarm.py` (20),
+  `test_vacuum_guard.py` (11), `test_physical_alarms_config.py` (7),
+  `test_alarm_v2_legacy_cleanup.py` (2).
 
-### Changed
-- `config/alarms_v3.yaml`: deleted 3 absolute-threshold rules targeting
+### Изменено
+- `config/alarms_v3.yaml`: удалены 3 absolute-threshold правила на
   T11/T12 (`cooldown_stall`, `detector_drift`, `detector_unstable`) —
-  superseded by CooldownAlarm predictor-based evaluation.
-  `calibrated_sensor_fault` retained — detects impossible raw values
-  (< 1 K or > 350 K) indicating sensor hardware failure; not covered by
-  physical alarms. Message revised to factual wording per operator guidance.
-  `shield_warming` channel corrected Т11 → Т12 (Т12 = nitrogen plate).
+  заменены predictor-based оценкой `CooldownAlarm`.
+  `calibrated_sensor_fault` сохранено — детектит невозможные raw-
+  значения (< 1 K или > 350 K), сигнализирующие об отказе железа
+  сенсора; не покрывается физическими тревогами. Сообщение
+  переписано в фактологической формулировке по операторскому
+  guidance. Канал `shield_warming` исправлен Т11 → Т12
+  (Т12 = плита N₂).
 
-### Reference
-- Branch: `feat/f-x-v3-physical-alarms`
-- Spec: `CC_PROMPT_F_X_V3_PHYSICAL_ALARMS.md`
-- Config: `config/physical_alarms.yaml`
+### Ссылки
+- Ветка: `feat/f-x-v3-physical-alarms`.
+- Спецификация: `CC_PROMPT_F_X_V3_PHYSICAL_ALARMS.md`.
+- Конфиг: `config/physical_alarms.yaml`.
 
-## [0.50.0] — 2026-05-01 — F27 Composition photos via Telegram bot
+## [0.50.0] — 2026-05-01 — F27 Фотографии композиции через Telegram-бот
 
-### Added
-- Operator sends experiment composition photo via Telegram → bot
-  confirms target experiment via inline keyboard ([Да] / [Нет] /
-  [Другой эксперимент]) → photo persisted to
-  `<artifact_dir>/composition/<ts>_<seq>.{jpg,png}` with sidecar
-  metadata JSON.
-- GUI ExperimentOverlay shows composition photos in new
-  "Композиция эксперимента" section with thumbnails + click-to-
-  full-size dialog.
-- GUI ArchivePanel shows composition gallery for archived
-  experiments.
-- ChannelManager LATE BINDING in caption parsing — channel
-  mentions resolved via fresh ChannelManager state per call.
-- ZMQ event `experiment.photo_attached` published on attach,
-  GUI auto-refreshes.
-- Pillow added as dependency for image validation.
-- 50 new tests covering photo handler, attach API, GUI
-  rendering, channel extraction.
+### Добавлено
+- Оператор отправляет фотографию композиции эксперимента через
+  Telegram → бот подтверждает целевой эксперимент через inline-
+  клавиатуру ([Да] / [Нет] / [Другой эксперимент]) → фото
+  сохраняется в `<artifact_dir>/composition/<ts>_<seq>.{jpg,png}`
+  с sidecar JSON-метаданными.
+- GUI `ExperimentOverlay` показывает фотографии композиции в новом
+  разделе «Композиция эксперимента» — с превьюшками и
+  click-to-full-size диалогом.
+- GUI `ArchivePanel` показывает галерею композиции для архивных
+  экспериментов.
+- LATE BINDING `ChannelManager` в парсинге caption-а — упоминания
+  каналов резолвятся через свежее состояние `ChannelManager` на
+  каждый вызов.
+- ZMQ-событие `experiment.photo_attached` публикуется при
+  присоединении, GUI авто-обновляется.
+- Зависимость Pillow добавлена для валидации изображений.
+- 50 новых тестов, покрывающих обработчик фото, attach API, GUI-
+  рендер, извлечение каналов.
 
-### Reference
-- ARCHITECT REQUEST: 2026-05-01 post-v0.47.4
-- Spec: CC_PROMPT_F27_COMPOSITION_PHOTOS.md
+### Ссылки
+- ARCHITECT REQUEST: 2026-05-01 post-v0.47.4.
+- Спецификация: CC_PROMPT_F27_COMPOSITION_PHOTOS.md.
 
-## [0.47.4] — 2026-05-01 — HF: Comprehensive F30 query agent fix-up (Tracks A-F)
+## [0.47.4] — 2026-05-01 — HF: комплексный фикс F30 query agent (треки A-F)
 
-Aggregates all outstanding F30 Live Query Agent regressions и pending features
-from real-world testing 2026-05-01. Supersedes planned v0.47.1/v0.47.2/v0.47.3
-hotfixes with a single comprehensive branch.
+Агрегирует все накопленные регрессии F30 Live Query Agent и
+ожидаемые фичи из реального тестирования 2026-05-01. Заменяет
+запланированные хотфиксы v0.47.1 / v0.47.2 / v0.47.3 одним
+комплексным бранчем.
 
-### Added
-- **Track A**: `agent.yaml` query section с `enabled: true` — query agent now
-  actually starts (was disabled by missing config key, causing slash-only fallback).
-- **Track B**: Late-binding display name resolution in `IntentClassifier`
-  (`_build_channel_hint()` reads ChannelManager fresh per call). `ChannelManager.find_by_name()`
-  case-insensitive exact+substring match. `QueryRouter._resolve_target_channels()` fallback.
-- **Track C**: `BrokerSnapshot.oldest_age_s()`, `display_name()`, `latest_with_labels()`,
-  `channel_manager` param. `CompositeStatus.snapshot_empty` + `snapshot_age_s`.
-  `CompositeAdapter` uses dynamic K-unit channel discovery.
-  Warming-up branch in agent: "поток данных только запускается".
-- **Track D**: `render_temperature_chart()` → PNG via matplotlib. `ChartDispatcher.dispatch()`
-  fire-and-forget with `add_done_callback(_log_task_exception)`. `send_photo()` on
-  `TelegramCommandBot`. Charts attached to composite_status + range_stats queries.
-- **Track E**: `ru_labels.py` — `phase_display_name()`, `experiment_status_display()`,
-  `ru_bool()`. Full russification of all FORMAT_* prompts. `GREETING` category added.
-  `test_format_prompts_no_english_leakage` regression test.
-- **Track F**: `FORMAT_COMPOSITE_STATUS_USER` anti-pattern guard — НЕ начинай +
-  "Прогноз захолаживания" label + concrete bad example (НЕ ДЕЛАЙ ТАК).
-- SSL config knob (v0.47.1 invariant): `verify_ssl` param wired to both
-  `TelegramNotifier` and `TelegramCommandBot` via `aiohttp.TCPConnector(ssl=...)`.
-  WARNING logged when disabled. `test_telegram_ssl_verification.py` created.
-- ≥90 new tests across all tracks.
+### Добавлено
+- **Трек A**: секция `query` в `agent.yaml` с `enabled: true` —
+  query-агент теперь реально стартует (был выключен из-за
+  отсутствия ключа конфига, что давало slash-only fallback).
+- **Трек B**: late-binding резолв display name в
+  `IntentClassifier` (`_build_channel_hint()` читает
+  `ChannelManager` свежим на каждый вызов).
+  `ChannelManager.find_by_name()` — case-insensitive exact +
+  substring. Fallback в `QueryRouter._resolve_target_channels()`.
+- **Трек C**: `BrokerSnapshot.oldest_age_s()`, `display_name()`,
+  `latest_with_labels()`, параметр `channel_manager`.
+  `CompositeStatus.snapshot_empty` + `snapshot_age_s`.
+  `CompositeAdapter` использует динамическое обнаружение K-unit
+  каналов. Ветка warming-up в агенте: «поток данных только
+  запускается».
+- **Трек D**: `render_temperature_chart()` → PNG через matplotlib.
+  `ChartDispatcher.dispatch()` fire-and-forget с
+  `add_done_callback(_log_task_exception)`. `send_photo()` на
+  `TelegramCommandBot`. Графики прицепляются к
+  composite_status + range_stats запросам.
+- **Трек E**: `ru_labels.py` — `phase_display_name()`,
+  `experiment_status_display()`, `ru_bool()`. Полная русификация
+  всех FORMAT_*-промптов. Категория `GREETING` добавлена.
+  Регрессионный тест `test_format_prompts_no_english_leakage`.
+- **Трек F**: anti-pattern guard в `FORMAT_COMPOSITE_STATUS_USER` —
+  «НЕ начинай» + метка «Прогноз захолаживания» + конкретный плохой
+  пример («НЕ ДЕЛАЙ ТАК»).
+- Регулятор SSL (инвариант v0.47.1): параметр `verify_ssl` заведён
+  в `TelegramNotifier` и `TelegramCommandBot` через
+  `aiohttp.TCPConnector(ssl=...)`. WARNING логируется при
+  выключении. Создан `test_telegram_ssl_verification.py`.
+- ≥90 новых тестов по всем трекам.
 
-### Fixed
-- **CRITICAL**: "Я понимаю только slash-команды" on all queries — `query_enabled` was
-  False (missing `query:` section in agent.yaml). Fixed by adding `query: enabled: true`.
-- "Что на азотной плите?" now resolves to Т12 via ChannelManager late-binding.
-- Composite response no longer starts with "Т7 Детектор," (anti-pattern guard).
-- "в фазе cooldown" → "в фазе захолаживания" (full russification).
-- Empty BrokerSnapshot on engine startup → "поток данных только запускается" instead of "температуры отсутствуют".
-- Charts now attach to composite_status queries (dispatcher + send_photo wired).
-- `ChannelManager.find_by_name`: empty-name guard prevents false substring matches.
+### Исправлено
+- **CRITICAL**: «Я понимаю только slash-команды» на всех запросах —
+  `query_enabled` был False (отсутствовала секция `query:` в
+  `agent.yaml`). Исправлено добавлением `query: enabled: true`.
+- «Что на азотной плите?» теперь резолвится в Т12 через late-binding
+  `ChannelManager`.
+- Composite-ответ больше не начинается с «Т7 Детектор,»
+  (anti-pattern guard).
+- «в фазе cooldown» → «в фазе захолаживания» (полная русификация).
+- Пустой `BrokerSnapshot` при старте движка → «поток данных только
+  запускается» вместо «температуры отсутствуют».
+- Графики теперь прицепляются к composite_status-запросам
+  (dispatcher + send_photo заведены).
+- `ChannelManager.find_by_name`: guard на пустое имя предотвращает
+  ложные substring-совпадения.
 
-### Test baseline
-- ≥291 passed, 0 new failures (pre-existing failures unchanged)
+### Тестовая база
+- ≥291 пройдено, 0 новых падений (предсуществовавшие падения без
+  изменений).
 
-### Reference
-- CC_PROMPT_HF_V0.47.2_FIXUP_REGRESSION_BLOCK.md
+### Ссылки
+- CC_PROMPT_HF_V0.47.2_FIXUP_REGRESSION_BLOCK.md.
 
-## [0.47.3] — 2026-05-01 — HF: Display name resolution в Intent Classifier (LATE BINDING)
+## [0.47.3] — 2026-05-01 — HF: резолв display name в Intent Classifier (LATE BINDING)
 
-Hotfix для реального UX-бага: оператор переименовал каналы через GUI
-ChannelEditor, но Гемма не resolve'ила запросы по display name. "Что на
-азотной плите?" игнорировало Т12 и возвращало generic mix.
+Хотфикс для реального UX-бага: оператор переименовал каналы через
+GUI `ChannelEditor`, но Гемма не резолвила запросы по display name.
+«Что на азотной плите?» игнорировало Т12 и возвращало generic-микс.
 
-Ключевое архитектурное решение: **LATE BINDING** — классификатор читает
-ChannelManager при КАЖДОМ вызове `classify()`. Engine restart НЕ НУЖЕН.
-Operator names sensors during preparation phase, then queries Гемма in
-measurement phase — all renames reflected immediately.
+Ключевое архитектурное решение: **LATE BINDING** — классификатор
+читает `ChannelManager` при КАЖДОМ вызове `classify()`. Restart
+движка НЕ НУЖЕН. Оператор именует датчики на этапе подготовки,
+затем спрашивает Гемму в measurement-фазе — все переименования
+сразу же отражаются.
 
-### Added
-- `IntentClassifier` принимает `channel_manager: ChannelManager | None`.
-  Строит таблицу channel_id → display_name в system prompt при КАЖДОМ
-  `classify()` вызове (late binding). GUI ChannelEditor renames picked up
-  on next query without engine restart.
-- `ChannelManager.find_by_name(name)` — case-insensitive exact + substring
-  match: display name → channel ID. Two-pass to avoid substring bias.
-- `QueryRouter` принимает `channel_manager`. Метод `_resolve_target_channels()`
-  валидирует и fuzzy-матчит `target_channels` из classifier против текущего
-  ChannelManager state (late binding).
-- 22 новых теста: `tests/agents/assistant/test_display_name_resolution.py`
-  — covering classifier hint rebuild, rename mid-session (LATE BINDING),
-  router resolution, ChannelManager.find_by_name.
+### Добавлено
+- `IntentClassifier` принимает `channel_manager: ChannelManager |
+  None`. Строит таблицу channel_id → display_name в system-промпте
+  при КАЖДОМ вызове `classify()` (late binding). Переименования
+  через GUI `ChannelEditor` подхватываются на следующем запросе
+  без рестарта движка.
+- `ChannelManager.find_by_name(name)` — case-insensitive exact +
+  substring: display name → channel ID. Двухпроходной алгоритм,
+  чтобы избежать substring-смещения.
+- `QueryRouter` принимает `channel_manager`. Метод
+  `_resolve_target_channels()` валидирует и fuzzy-матчит
+  `target_channels` из классификатора против текущего состояния
+  `ChannelManager` (late binding).
+- 22 новых теста:
+  `tests/agents/assistant/test_display_name_resolution.py` —
+  покрывают перестроение hint классификатора, rename mid-session
+  (LATE BINDING), резолв в роутере, `ChannelManager.find_by_name`.
 
-### Fixed
-- "Что на азотной плите?" — Гемма resolves operator vocabulary
-  (renamed via ChannelEditor) к channel IDs.
-- Sensor renaming через GUI ChannelEditor немедленно отражается в Гемма
-  responses на NEXT query — NO engine restart needed.
-- `ChannelManager.find_by_name`: substring second pass теперь пропускает
-  каналы без поля `name` (пустая строка `""` всегда подстрока любого
-  запроса — bug fix).
+### Исправлено
+- «Что на азотной плите?» — Гемма резолвит операторскую
+  терминологию (переименованную через `ChannelEditor`) в
+  channel ID.
+- Переименование датчиков через GUI `ChannelEditor` сразу же
+  отражается в ответах Геммы на СЛЕДУЮЩИЙ запрос — restart движка
+  НЕ требуется.
+- `ChannelManager.find_by_name`: второй проход substring теперь пропускает
+  каналы без поля `name` (пустая строка `""` всегда была подстрокой
+  любого запроса — баг-фикс).
 
-### Test baseline
-- 50 passed (22 new + 28 existing classifier/router)
-- 0 failures
+### Тестовая база
+- 50 пройдено (22 новых + 28 существующих classifier/router).
+- 0 падений.
 
-### Tags
-- `v0.47.3` — (pending Phase D tag)
+### Теги
+- `v0.47.3` — (ожидает Phase D tag).
 
-### Reference
-- ARCHITECT REQUEST: realworld testing 2026-05-01 13:06
-- HF spec: CC_PROMPT_HF_V0.47.3_DISPLAY_NAME_RESOLUTION.md
+### Ссылки
+- ARCHITECT REQUEST: реальное тестирование 2026-05-01 13:06.
+- HF-спецификация: CC_PROMPT_HF_V0.47.3_DISPLAY_NAME_RESOLUTION.md.
 
 ## [0.47.0] — 2026-05-01 — F30 Live Query Agent
 
-Implements the Live Query Agent (F30): operators can now send free-text
-Telegram messages or `/ask <query>` commands to query current engine state.
-Three-step pipeline: intent classification (gemma4:e2b, temp 0.1) →
-deterministic service adapter fetch → Russian format response (temp 0.3).
+Реализует Live Query Agent (F30): операторы могут слать произвольные
+Telegram-сообщения или `/ask <query>`-команды для запроса текущего
+состояния движка. Трёхэтапный pipeline: классификация интента
+(gemma4:e2b, temp 0.1) → детерминированный fetch через
+service-adapter → форматный русский ответ (temp 0.3).
 
-### Added
-- `AssistantQueryAgent` orchestrator: classify → fetch → format pipeline
-  with rate limiting (60/hr per chat), audit log per query, full "never
-  raises" contract.
+### Добавлено
+- Оркестратор `AssistantQueryAgent`: pipeline classify → fetch →
+  format с rate-limit-ом (60/час на чат), audit log на каждый
+  запрос, контракт «никогда не бросает».
 - `IntentClassifier`: gemma4:e2b, temperature=0.1, max_tokens=2048,
-  fallback to UNKNOWN on parse failure or timeout.
-- `QueryRouter`: deterministic dispatch of QueryIntent to 7 ServiceAdapters.
-- 7 ServiceAdapters: `BrokerSnapshot`, `CooldownAdapter`, `VacuumAdapter`,
-  `SQLiteAdapter`, `AlarmAdapter`, `ExperimentAdapter`, `CompositeAdapter`.
-  CompositeAdapter parallelizes fetch via `asyncio.gather`.
-- `BrokerSnapshot`: new read-only subscriber pattern — latest-per-channel
-  cache on top of DataBroker (which is pure pub/sub with no snapshot API).
-- Russian format prompt templates per category (current_value, eta_cooldown,
-  eta_vacuum, range_stats, phase_info, alarm_status, composite_status,
-  out_of_scope_historical, out_of_scope_general, unknown). Anti-hallucination
-  instructions, Unicode-only (no LaTeX), conversational tone.
-- `TelegramCommandBot`: free-text and `/ask <query>` routes to query agent.
-  Allowlist defense-in-depth in `_handle_text()`. Stub fallback when query
-  agent absent.
-- `AssistantConfig`: `query.*` config section (enabled, model overrides,
-  temperatures, timeouts, rate_limit). `query_enabled` defaults to False.
-- Engine wiring: constructs query agent when `agent.query.enabled`, starts
-  `BrokerSnapshot`, late-binds to `TelegramCommandBot`, stops on shutdown.
-- `CooldownService.last_prediction()` method exposing cached prediction dict.
-- `AlarmEngine.get_active_alarm_details()` method for structured alarm info.
+  fallback на UNKNOWN при ошибке парса или таймауте.
+- `QueryRouter`: детерминированный dispatch `QueryIntent` в 7
+  ServiceAdapter-ов.
+- 7 ServiceAdapter-ов: `BrokerSnapshot`, `CooldownAdapter`,
+  `VacuumAdapter`, `SQLiteAdapter`, `AlarmAdapter`,
+  `ExperimentAdapter`, `CompositeAdapter`. `CompositeAdapter`
+  параллелит fetch через `asyncio.gather`.
+- `BrokerSnapshot`: новый read-only subscriber-паттерн —
+  latest-per-channel кэш поверх `DataBroker` (который остаётся
+  чистым pub/sub без snapshot-API).
+- Шаблоны русских format-промптов на каждую категорию
+  (current_value, eta_cooldown, eta_vacuum, range_stats,
+  phase_info, alarm_status, composite_status,
+  out_of_scope_historical, out_of_scope_general, unknown).
+  Анти-галлюцинационные инструкции, только Unicode (без LaTeX),
+  разговорный тон.
+- `TelegramCommandBot`: маршруты для свободного текста и
+  `/ask <query>` к query-агенту. Allowlist как defense-in-depth
+  в `_handle_text()`. Stub-fallback при отсутствии query-агента.
+- `AssistantConfig`: секция конфига `query.*` (enabled,
+  model-override-ы, температуры, таймауты, rate_limit).
+  `query_enabled` по умолчанию False.
+- Wiring движка: создаёт query-агента при `agent.query.enabled`,
+  стартует `BrokerSnapshot`, делает late-bind к
+  `TelegramCommandBot`, останавливает на shutdown-е.
+- Метод `CooldownService.last_prediction()`, экспонирующий
+  закэшированный dict прогноза.
+- Метод `AlarmEngine.get_active_alarm_details()` для структурной
+  информации об активных тревогах.
 
-### Fixed
-- gemma4:e2b thinking-model issue: `max_tokens` raised from 256 → 2048 to
-  give CoT reasoning room before producing the JSON response.
-- `INTENT_CLASSIFIER_SYSTEM`: `{{`/`}}` → `{`/`}` (not a format string —
-  literal double braces were confusing the model).
-- `INTENT_CLASSIFIER_SYSTEM` `current_value` rule: added bare channel
-  patterns (`T1?`, `channel?`) to prevent misrouting to `out_of_scope_general`.
+### Исправлено
+- Проблема thinking-модели gemma4:e2b: `max_tokens` поднят
+  256 → 2048, чтобы дать CoT-резонингу место перед выдачей
+  JSON-ответа.
+- `INTENT_CLASSIFIER_SYSTEM`: `{{`/`}}` → `{`/`}` (не
+  format-строка — литеральные двойные скобки сбивали модель).
+- Правило `current_value` в `INTENT_CLASSIFIER_SYSTEM`: добавлены
+  bare-паттерны каналов (`T1?`, `channel?`), чтобы избежать
+  misrouting в `out_of_scope_general`.
 
-### Test baseline
-- 166 tests passing (49 new vs v0.46.1 baseline of 117)
-- New test files: `test_query_adapters.py` (19), `test_intent_classifier.py`
-  (28), `test_query_agent.py` (12), `test_telegram_query_integration.py` (9)
+### Тестовая база
+- 166 тестов проходит (49 новых против baseline-а v0.46.1 — 117).
+- Новые test-файлы: `test_query_adapters.py` (19),
+  `test_intent_classifier.py` (28), `test_query_agent.py` (12),
+  `test_telegram_query_integration.py` (9).
 
-### Phase F audit
-- Codex gpt-5.5 (high reasoning): PASS after 3 fix-up cycles.
-  6 findings addressed (1 HIGH, 3 MEDIUM, 2 LOW). 0 residual CRITICAL/HIGH.
+### Аудит Phase F
+- Codex gpt-5.5 (high reasoning): PASS после 3 fix-up циклов.
+  Закрыто 6 находок (1 HIGH, 3 MEDIUM, 2 LOW). 0 остаточных
+  CRITICAL/HIGH.
 
-### Tags
-- `v0.47.0` → TBD (set on merge to master)
+### Теги
+- `v0.47.0` → TBD (выставляется при merge в master).
 
-### Selected commits in this release
-- `02aa9dd` docs(roadmap): renumber F30+ for Live Query Agent insertion
-- `e0254d9` feat(f30): query adapters + BrokerSnapshot
-- `f3d36d3` feat(f30): intent classifier + router
-- `dbb15d5` feat(f30): AssistantQueryAgent + format prompts
-- `09f78d5` feat(f30): Telegram free-text + /ask integration
-- `1731584` fix(f30): max_tokens 2048 for thinking model + prompt fixes
-- `4acfd48` fix(f30): Codex audit fix-up cycle 1
-- `8852786` fix(f30): Codex audit fix-up cycle 2
-- `4a9800c` fix(f30): Codex audit fix-up cycle 3
+### Ключевые коммиты этого релиза
+- `02aa9dd` docs(roadmap): renumber F30+ for Live Query Agent insertion.
+- `e0254d9` feat(f30): query adapters + BrokerSnapshot.
+- `f3d36d3` feat(f30): intent classifier + router.
+- `dbb15d5` feat(f30): AssistantQueryAgent + format prompts.
+- `09f78d5` feat(f30): Telegram free-text + /ask integration.
+- `1731584` fix(f30): max_tokens 2048 for thinking model + prompt fixes.
+- `4acfd48` fix(f30): Codex audit fix-up cycle 1.
+- `8852786` fix(f30): Codex audit fix-up cycle 2.
+- `4a9800c` fix(f30): Codex audit fix-up cycle 3.
 
-## [0.46.1] — 2026-05-01 — F29 fix-up (swarm audit CF-2/CF-3/CF-5)
+## [0.46.1] — 2026-05-01 — F29 fix-up (swarm-аудит CF-2/CF-3/CF-5)
 
-Patch release incorporating three fixes found by the 8-model swarm audit
-of v0.46.0 (commit `ef0a1eb`). No new functionality; no engine wiring changes.
+Patch-релиз с тремя фиксами, найденными в 8-модельном swarm-аудите
+v0.46.0 (коммит `ef0a1eb`). Никакой новой функциональности; wiring
+движка не менялся.
 
-### Fixed
-- CF-2: SQLite read failure during periodic report context build no longer silently
-  suppresses the hourly report. Failure now logs at WARNING and sets
-  `context_read_failed=True`; handler bypasses `skip_if_idle` so operators receive
-  an empty-data report rather than silence (`context_builder.py`, `agent.py`).
-- CF-3: Phase transitions tagged `"phase"` by the engine were not matching the
-  context builder's `"phase_transition"` filter — phase section always showed
-  `(нет)`. Both tags now accepted; `other_entries` filter updated to exclude
-  `"phase"` entries to avoid double-classification (`context_builder.py`).
-- CF-5: `PERIODIC_REPORT_SYSTEM` now explicitly prohibits LaTeX notation and
-  `$...$` formulas. Removed `\rightarrow` backslash notation which was a Python
-  string escape bug (rendered as CR + `ightarrow` at runtime, `prompts.py`).
+### Исправлено
+- CF-2: сбой чтения SQLite во время сборки контекста периодического
+  отчёта больше не глушит часовой отчёт молча. Сбой теперь логируется
+  WARNING-ом и выставляет `context_read_failed=True`; обработчик
+  обходит `skip_if_idle`, чтобы оператор получил empty-data отчёт,
+  а не молчание (`context_builder.py`, `agent.py`).
+- CF-3: переходы фаз, помеченные движком как `"phase"`, не матчили
+  фильтр `"phase_transition"` в context-builder-е — секция фаз
+  всегда показывала `(нет)`. Теперь принимаются оба тега; фильтр
+  `other_entries` обновлён, чтобы исключать записи `"phase"` и
+  избежать двойной классификации (`context_builder.py`).
+- CF-5: `PERIODIC_REPORT_SYSTEM` теперь явно запрещает нотацию
+  LaTeX и формулы `$...$`. Удалена нотация `\rightarrow` —
+  Python-строковый escape-баг (на рантайме рендерилось как CR +
+  `ightarrow`, `prompts.py`).
 
-### Tests
-- `test_periodic_report_context_read_failure_sets_flag`
-- `test_periodic_report_context_read_failure_bypasses_idle_skip`
-- `test_periodic_report_context_phase_tag_classified_correctly`
-- `test_periodic_report_prompt_prohibits_latex` strengthened (no `\r` control char)
+### Тесты
+- `test_periodic_report_context_read_failure_sets_flag`.
+- `test_periodic_report_context_read_failure_bypasses_idle_skip`.
+- `test_periodic_report_context_phase_tag_classified_correctly`.
+- `test_periodic_report_prompt_prohibits_latex` усилен (без управляющего
+  символа `\r`).
 
-### Test baseline
-- 27 tests passing (3 new vs v0.46.0 baseline of 24)
+### Тестовая база
+- 27 тестов проходит (3 новых против baseline-а v0.46.0 — 24).
 
-### Tags
-- `v0.46.1` → 70bb588
+### Теги
+- `v0.46.1` → `70bb588`.
 
-### Selected commits in this release
-- `70bb588` fix(f29): swarm audit findings CF-2 CF-3 CF-5
+### Ключевые коммиты этого релиза
+- `70bb588` fix(f29): swarm audit findings CF-2 CF-3 CF-5.
 
-## [0.46.0] — 2026-04-30 — F29 Periodic narrative reports
+## [0.46.0] — 2026-04-30 — F29 Периодические нарративные отчёты
 
-### Added
-- F29: configurable Russian-language narrative summary of recent engine activity.
-- New EventBus event type: `periodic_report_request`.
-- Engine timer task `_periodic_report_tick`, controlled by
+### Добавлено
+- F29: конфигурируемая русскоязычная нарративная сводка недавней
+  активности движка.
+- Новый тип события EventBus: `periodic_report_request`.
+- Таймерная задача движка `_periodic_report_tick`, управляемая
   `agent.triggers.periodic_report`.
-- AssistantLiveAgent handler `_handle_periodic_report`.
-- Prompt templates `PERIODIC_REPORT_SYSTEM` / `PERIODIC_REPORT_USER`.
-- Context builder method `build_periodic_report_context`.
-- Skip-if-idle filtering when a window has fewer than
-  `min_events_for_dispatch` events.
-- Output prefix variation: `🤖 Гемма (отчёт за час):`.
-- GUI insight panel chip for periodic reports.
-- F29 smoke harness:
+- Обработчик `_handle_periodic_report` в `AssistantLiveAgent`.
+- Шаблоны промптов `PERIODIC_REPORT_SYSTEM` / `PERIODIC_REPORT_USER`.
+- Метод context-builder-а `build_periodic_report_context`.
+- Фильтр skip-if-idle: окно с числом событий меньше
+  `min_events_for_dispatch` пропускается.
+- Вариация префикса вывода: `🤖 Гемма (отчёт за час):`.
+- Чип GUI insight panel для периодических отчётов.
+- Smoke-харнесс F29:
   `artifacts/scripts/smoke_f29_periodic_report.py`.
 
-### Changed
-- Default assistant model in `config/agent.yaml`: `gemma4:e4b` →
-  `gemma4:e2b` for M5 24GB compatibility.
-- Periodic prompt wording now respects configurable `window_minutes`
-  instead of hardcoding the last hour.
+### Изменено
+- Модель ассистента по умолчанию в `config/agent.yaml`: `gemma4:e4b` →
+  `gemma4:e2b` для совместимости с M5 24GB.
+- Текст периодического промпта теперь учитывает конфигурируемое
+  `window_minutes` вместо захардкоженного «последний час».
 
-### Configuration
-- `config/agent.yaml`: new `triggers.periodic_report` section with
-  `enabled`, `interval_minutes`, `skip_if_idle`, and
+### Конфигурация
+- `config/agent.yaml`: новая секция `triggers.periodic_report` с
+  `enabled`, `interval_minutes`, `skip_if_idle` и
   `min_events_for_dispatch`.
 
-### Tests
-- Added Phase D engine timer tests for publish, disabled no-op, and shutdown
-  cancellation.
-- Added context/prompt regressions for calibration section formatting and
-  non-hourly window wording.
-- Focused F29 slice: 34 tests passing.
-- Smoke: real `gemma4:e2b`, 19.2s wall latency, 94.8% Russian,
-  Telegram/log/GUI/audit dispatch verified, idle skip verified.
+### Тесты
+- Добавлены Phase D engine-таймер тесты на publish, disabled no-op
+  и cancellation на shutdown.
+- Добавлены контекст/промпт регрессии для форматирования секции
+  калибровки и текстов non-hourly окна.
+- Фокусированный F29-срез: 34 теста проходит.
+- Smoke: реальный `gemma4:e2b`, wall-latency 19.2 с, 94.8% русского,
+  диспатч Telegram/log/GUI/audit подтверждён, idle-skip
+  подтверждён.
 
-### Reference
-- Architecture: `artifacts/architecture/assistant-v2-vision.md` §5 Phase 1
-- Spec: `CC_PROMPT_F29_PERIODIC_REPORTS.md`
-- Smoke: `artifacts/handoffs/2026-04-30-f29-cycle1-smoke.md`
-- Audit: `artifacts/consultations/2026-04-30/f29-cycle1-audit/synthesis.md`
+### Ссылки
+- Архитектура: `artifacts/architecture/assistant-v2-vision.md` §5 Phase 1.
+- Спецификация: `CC_PROMPT_F29_PERIODIC_REPORTS.md`.
+- Smoke: `artifacts/handoffs/2026-04-30-f29-cycle1-smoke.md`.
+- Аудит: `artifacts/consultations/2026-04-30/f29-cycle1-audit/synthesis.md`.
 
-## [0.45.0] — 2026-05-01 — F28 Гемма complete (assistant v1)
+## [0.45.0] — 2026-05-01 — F28 Гемма завершено (assistant v1)
 
-### Highlights
-- F28 Гемма local LLM agent fully shipped: Slice A (4 notification
-  triggers) + Slice B (diagnostic suggestions) + Slice C (campaign
-  report intro)
-- Foundation EventBus primitive (Cycle 0) for non-Reading engine events
-- Local Ollama integration with gemma4:e4b model
-- Russian-language operator-facing dispatch (Telegram, operator log,
-  GUI insight panel)
-- DOCX campaign report intro auto-generation (formal Russian, 200-400 words)
-- Audit log discipline: every LLM call recorded for review
-- Brand abstraction: future model migrations are config-only
+### Главное
+- F28 Гемма — локальный LLM-агент полностью отгружен: Slice A
+  (4 уведомительных триггера) + Slice B (диагностические
+  подсказки) + Slice C (intro к отчёту кампании).
+- Фундаментальный примитив EventBus (Cycle 0) для non-Reading
+  событий движка.
+- Локальная интеграция с Ollama, модель `gemma4:e4b`.
+- Русскоязычный операторский диспатч (Telegram, operator log,
+  GUI insight panel).
+- Автогенерация DOCX intro отчёта кампании (формальный русский,
+  200–400 слов).
+- Дисциплина audit log: каждый вызов LLM пишется в журнал.
+- Бренд-абстракция: будущие миграции модели — изменения только
+  в конфиге.
 
-### Added
-- `src/cryodaq/agents/assistant/` — complete assistant module family
-  - `live/agent.py` — AssistantLiveAgent (was GemmaAgent)
-  - `live/prompts.py` — {brand_name} interpolated system prompts
-  - `live/output_router.py` — brand-aware prefix, assistant_insight events
-  - `live/context_builder.py` — engine state → LLM context
-  - `shared/audit.py` — per-call JSON audit records
-  - `shared/ollama_client.py` — async Ollama /api/generate wrapper
-  - `shared/report_intro.py` — sync DOCX intro generator
-  - `shared/retention.py` — 90-day audit log cleanup
-- `src/cryodaq/gui/shell/views/assistant_insight_panel.py`
-  — AssistantInsightPanel with brand_name/brand_emoji params
-- `config/agent.yaml` — new `agent.*` namespace with brand_name, brand_emoji
-- `artifacts/architecture/assistant-v2-vision.md` — full architecture spec
-  for F29-F33 assistant v2 phases
+### Добавлено
+- `src/cryodaq/agents/assistant/` — полное семейство модулей
+  ассистента:
+  - `live/agent.py` — `AssistantLiveAgent` (был `GemmaAgent`).
+  - `live/prompts.py` — system-промпты с интерполяцией
+    `{brand_name}`.
+  - `live/output_router.py` — префикс с учётом бренда, события
+    `assistant_insight`.
+  - `live/context_builder.py` — состояние движка → контекст LLM.
+  - `shared/audit.py` — JSON-записи аудита на каждый вызов.
+  - `shared/ollama_client.py` — async-обёртка для Ollama
+    `/api/generate`.
+  - `shared/report_intro.py` — синхронный генератор DOCX-intro.
+  - `shared/retention.py` — очистка audit log по 90-дневной
+    политике.
+- `src/cryodaq/gui/shell/views/assistant_insight_panel.py` —
+  `AssistantInsightPanel` с параметрами `brand_name` /
+  `brand_emoji`.
+- `config/agent.yaml` — новый namespace `agent.*` с `brand_name`
+  и `brand_emoji`.
+- `artifacts/architecture/assistant-v2-vision.md` — полная
+  спецификация архитектуры для фаз assistant v2 (F29-F33).
 
-### Changed
-- `config/agent.yaml`: `gemma:` namespace → `agent:` namespace
-  (backward compat: `gemma:` still loads with deprecation warning until v0.46.0)
-- AssistantConfig: `from_yaml_path()` / `from_yaml_string()` for namespace detection
-- Audit log path: `data/agents/gemma/audit` → `data/agents/assistant/audit`
-- EventBus event_type: `gemma_insight` → `assistant_insight`
-- ROADMAP: F28 ✅ DONE; F5/F9 RETIRED; F29-F33 added (assistant v2 phases)
+### Изменено
+- `config/agent.yaml`: namespace `gemma:` → `agent:` (обратная
+  совместимость: `gemma:` всё ещё грузится с deprecation-warning
+  до v0.46.0).
+- `AssistantConfig`: `from_yaml_path()` / `from_yaml_string()`
+  для определения namespace-а.
+- Путь audit log: `data/agents/gemma/audit` →
+  `data/agents/assistant/audit`.
+- EventBus `event_type`: `gemma_insight` → `assistant_insight`.
+- ROADMAP: F28 ✅ DONE; F5/F9 RETIRED; F29-F33 добавлены
+  (фазы assistant v2).
 
-### F28 cycles
-- Cycle 0: EventBus foundation
-- Cycle 1: Ollama client + audit + context builder
-- Cycle 2: AssistantLiveAgent + alarm summary (Slice A first)
-- Cycle 3: Slice A complete (4 triggers + GUI panel)
-- Cycle 4: Slice B diagnostic suggestions
-- Cycle 5: Slice C campaign report
-- Cycle 6: brand abstraction + module rename + polish + this release
+### Циклы F28
+- Cycle 0: фундамент EventBus.
+- Cycle 1: Ollama-клиент + audit + context-builder.
+- Cycle 2: `AssistantLiveAgent` + alarm-summary (Slice A первая
+  поставка).
+- Cycle 3: Slice A полностью (4 триггера + GUI-панель).
+- Cycle 4: Slice B — диагностические подсказки.
+- Cycle 5: Slice C — отчёт кампании.
+- Cycle 6: бренд-абстракция + переименование модулей + полировка
+  + этот релиз.
 
-### Architecture
-- Module: `src/cryodaq/agents/assistant/{live,shared}/`
-- Class: `AssistantLiveAgent` (was `GemmaAgent`)
-- Config namespace: `agent.*` (was `gemma.*`, backward compat with warning)
-- Storage: `data/agents/assistant/audit/`
-- Brand-name interpolation throughout prompts and outputs
+### Архитектура
+- Модуль: `src/cryodaq/agents/assistant/{live,shared}/`.
+- Класс: `AssistantLiveAgent` (был `GemmaAgent`).
+- Namespace конфига: `agent.*` (был `gemma.*`, обратная
+  совместимость с warning-ом).
+- Хранение: `data/agents/assistant/audit/`.
+- Интерполяция бренд-имени по всем промптам и выводам.
 
-### Tests
-- 71 agent tests (smoke + unit + integration)
-- Full suite green (~2 090 passing)
-- 11 brand abstraction tests
-- 4 audit retention tests
+### Тесты
+- 71 тест агента (smoke + unit + integration).
+- Полный набор зелёный (~2 090 проходит).
+- 11 тестов бренд-абстракции.
+- 4 теста audit-retention.
 
-### Calibration data
-- 6 multi-model audit sessions in `artifacts/calibration/log.jsonl`
-- Empirical: Codex reliable; GLM strong on review (max_tokens=8192);
-  Qwen3-Coder over-flags; MiniMax deteriorating; Kimi failures
+### Калибровочные данные
+- 6 multi-модельных audit-сессий в
+  `artifacts/calibration/log.jsonl`.
+- Эмпирика: Codex надёжен; GLM силён на review-задаче
+  (`max_tokens=8192`); Qwen3-Coder over-flags; MiniMax
+  деградирует; Kimi падает.
 
-### Documentation
-- README: "Местный AI-ассистент" section
-- Vault note: `~/Vault/CryoDAQ/10 Subsystems/Assistant agent.md`
-- Operator manual: new section 10 (assistant behavior + on/off)
-- Architecture: `artifacts/architecture/assistant-v2-vision.md`
+### Документация
+- README: раздел «Местный AI-ассистент».
+- Vault-заметка: `~/Vault/CryoDAQ/10 Subsystems/Assistant agent.md`.
+- Operator manual: новый раздел 10 (поведение ассистента +
+  on/off).
+- Архитектура: `artifacts/architecture/assistant-v2-vision.md`.
 
-### Tags
-- `v0.45.0` → release commit (see Phase G)
+### Теги
+- `v0.45.0` → release-коммит (см. Phase G).
 
-### Selected commits in this release
-- `adc40d7` — refactor(f28): rename agents/gemma → agents/assistant (Phase A)
-- `00bd20f` — refactor(f28): rename GemmaAgent → AssistantLiveAgent (Phase B)
-- `a1f2811` — feat(f28): brand-name abstraction for assistant (Phase C)
-- `2fed36c` — docs(f28): polish — README, vault note, operator manual, retention (Phase D)
-- `7148432` — test(f28): rename insight panel test + smoke doc (Phase E)
+### Ключевые коммиты этого релиза
+- `adc40d7` — refactor(f28): rename agents/gemma → agents/assistant (Phase A).
+- `00bd20f` — refactor(f28): rename GemmaAgent → AssistantLiveAgent (Phase B).
+- `a1f2811` — feat(f28): brand-name abstraction for assistant (Phase C).
+- `2fed36c` — docs(f28): polish — README, vault note, operator manual, retention (Phase D).
+- `7148432` — test(f28): rename insight panel test + smoke doc (Phase E).
 
-## [0.44.0] — 2026-05-01 — Storage maturity + leak rate
+## [0.44.0] — 2026-05-01 — Зрелость хранилища + leak rate
 
-### Highlights
-- F17: SQLite → Parquet cold rotation with day-by-day archive layout.
-  ArchiveReader replay across both sources.
-- F13: Vacuum leak rate estimator (LeakRateEstimator) with sliding-window OLS,
-  ZMQ commands, atomic history persistence.
-- F26: SQLite WAL gate backport whitelist (3.44.6, 3.50.7) per official SQLite advisory.
+### Главное
+- F17: cold-ротация SQLite → Parquet с day-by-day разметкой
+  архива. `ArchiveReader` для replay-а через оба источника.
+- F13: оценщик скорости течи вакуума (`LeakRateEstimator`) c
+  sliding-window OLS, ZMQ-командами, атомарным персистенсом
+  истории.
+- F26: backport-whitelist для гейта SQLite WAL (3.44.6, 3.50.7)
+  по официальной advisory SQLite.
 
-### Storage (F17, F26)
-- **F17 — ColdRotationService**: rotates SQLite files older than 30 days to Parquet/Zstd;
-  verifies row count before deletion; daemon mode (86400s). Corrupt index.json aborts
-  rotation rather than overwriting. asyncio.Lock guards concurrent runs.
-- **F17 — ArchiveReader**: unified query across SQLite (recent) + Parquet (archive);
-  UTC-normalized day iteration; fails loudly on corrupt index.
-- **F26 — SQLITE_BACKPORT_SAFE whitelist**: `{(3,44,6),(3,50,7)}` bypass the startup gate
-  without env var; adjacent versions still raise. Source: sqlite.org/wal.html advisory.
+### Хранилище (F17, F26)
+- **F17 — `ColdRotationService`**: ротирует SQLite-файлы старше
+  30 дней в Parquet/Zstd; проверяет число строк перед удалением;
+  daemon-режим (86400 с). Поломанный `index.json` обрывает
+  ротацию вместо перезаписи. `asyncio.Lock` защищает от
+  конкурентных запусков.
+- **F17 — `ArchiveReader`**: единый запрос через SQLite (свежее)
+  + Parquet (архив); UTC-нормализованная итерация по дням;
+  громко падает на повреждённом индексе.
+- **F26 — белый список `SQLITE_BACKPORT_SAFE`**: `{(3,44,6),
+  (3,50,7)}` обходят startup-гейт без env-переменной; соседние
+  версии всё равно падают. Источник: advisory с
+  sqlite.org/wal.html.
 
-### Vacuum analytics (F13)
-- **LeakRateEstimator**: sliding-window OLS with FIFO trim, numpy-free regression,
-  R²=0.0 on degenerate input, atomic history persistence to `data/leak_rate_history.json`.
-- **Engine ZMQ commands**: `leak_rate_start` (duration_s validated), `leak_rate_stop`
-  (returns asdict(LeakRateMeasurement)).
-- **Engine broker task**: `_leak_rate_feed()` subscribes pressure samples (unit==mbar),
-  auto-finalizes on window expiry.
-- **Config**: `chamber.volume_l` (operator must set), `chamber.leak_rate.*`.
+### Аналитика вакуума (F13)
+- **`LeakRateEstimator`**: sliding-window OLS с FIFO-обрезкой,
+  numpy-free регрессия, R²=0.0 на вырожденном входе, атомарный
+  персистенс истории в `data/leak_rate_history.json`.
+- **ZMQ-команды движка**: `leak_rate_start` (`duration_s`
+  валидируется), `leak_rate_stop` (возвращает
+  `asdict(LeakRateMeasurement)`).
+- **Broker-задача движка**: `_leak_rate_feed()` подписывается на
+  показания давления (`unit==mbar`), авто-финализирует на
+  истечении окна.
+- **Конфиг**: `chamber.volume_l` (оператор обязан задать),
+  `chamber.leak_rate.*`.
 
-### Operator action required
-- `chamber.volume_l` must be set in `config/instruments.local.yaml` before first
-  leak rate measurement; `finalize()` raises ValueError if volume_l == 0.0.
+### Требуется действие оператора
+- `chamber.volume_l` должно быть выставлено в
+  `config/instruments.local.yaml` до первого замера скорости
+  течи; `finalize()` бросает `ValueError`, если `volume_l == 0.0`.
 
-### Tests
-- 49 new tests across F26 (6) + F17 (16) + F13 (19).
-- Full suite ~2 019 passing.
+### Тесты
+- 49 новых тестов: F26 (6) + F17 (16) + F13 (19).
+- Полный набор ~2 019 проходит.
 
-### Tags
-- `v0.44.0` → F13 merge commit
+### Теги
+- `v0.44.0` → merge-коммит F13.
 
-### Closing commits
-- F26 merge: see `git log --oneline --merges`
-- F17 merge: see `git log --oneline --merges`
-- F13 merge: see `git log --oneline --merges`
+### Closing-коммиты
+- Merge F26: см. `git log --oneline --merges`.
+- Merge F17: см. `git log --oneline --merges`.
+- Merge F13: см. `git log --oneline --merges`.
 
-## [0.43.0] — 2026-04-30 — Overnight feature sprint (F19-F25)
+## [0.43.0] — 2026-04-30 — Overnight-спринт фич (F19-F25)
 
-### Highlights
-- 7 features shipped from a single overnight Sonnet sprint (F19-F25), closing all
-  deferred Task A findings and the F3 polish backlog.
-- Phase A doc/process updates landed direct to master earlier in the session:
-  ORCHESTRATION v1.3 + multi-model-consultation skill v1.1 + plugin disposition.
-- Both feature branches Codex-audited (gpt-5.5 high-reasoning): alarm cluster
-  FAIL→PASS (2 MEDIUM fixes); misc cluster CONDITIONAL→PASS (1 P2 fix).
+### Главное
+- 7 фич отгружены за один Sonnet-спринт ночью (F19-F25), закрыты
+  все отложенные находки Task A и backlog полировки F3.
+- Doc/process Phase A приземлены прямо в master ранее в сессии:
+  ORCHESTRATION v1.3 + skill multi-model-consultation v1.1 +
+  plugin disposition.
+- Обе feature-ветки прошли Codex-аудит (gpt-5.5 high-reasoning):
+  alarm-кластер FAIL → PASS (2 MEDIUM-фикса); misc-кластер
+  CONDITIONAL → PASS (1 P2-фикс).
 
 ### Alarm pipeline (F20, F21, F22)
-- **F20 — Sensor diagnostics aggregation + cooldown**: `_channel_last_notified`
-  dict tracks per-channel state; first notification never suppressed; critical always
-  bypasses cooldown; engine batches >3 simultaneous events into a single Telegram
-  message. Config: `plugins.yaml` `aggregation_threshold: 3`,
-  `escalation_cooldown_s: 120.0`.
-- **F21 — Alarm hysteresis deadband**: `AlarmEvaluator.evaluate()` gains `is_active`
-  + `active_channels: frozenset` params. Deadband filters to originally-triggering
-  channels only (Codex fix: non-triggering channel could inherit alarm state).
-- **F22 — Severity upgrade in-place**: `WARNING→CRITICAL` on same `alarm_id`
-  (`AlarmEvent.level` mutation, `frozen=False`). `SEVERITY_UPGRADED` history event
-  for audit. Prevents duplicate operator notifications per physical anomaly.
+- **F20 — агрегация sensor-диагностики + cooldown**: словарь
+  `_channel_last_notified` отслеживает per-channel состояние;
+  первое уведомление никогда не подавляется; critical всегда
+  обходит cooldown; движок батчит >3 одновременных событий в одно
+  Telegram-сообщение. Конфиг: `plugins.yaml`
+  `aggregation_threshold: 3`, `escalation_cooldown_s: 120.0`.
+- **F21 — гистерезисный deadband для тревог**:
+  `AlarmEvaluator.evaluate()` принимает `is_active` +
+  `active_channels: frozenset`. Deadband фильтрует только
+  изначально-триггернувшие каналы (Codex-фикс: сторонний канал
+  мог наследовать состояние тревоги).
+- **F22 — повышение severity in-place**: `WARNING → CRITICAL` на
+  одном `alarm_id` (мутация `AlarmEvent.level`, `frozen=False`).
+  Событие истории `SEVERITY_UPGRADED` для аудита. Предотвращает
+  дубликаты операторских уведомлений на одну физическую аномалию.
 
-### Independent features (F19, F23, F24, F25)
-- **F19 — ExperimentSummaryWidget enrichment**: clickable DOCX/PDF labels via
-  `_ClickableLabel` + `QDesktopServices`; top-3 alarm names by frequency;
-  per-channel min/max/mean stats (`limit_per_channel=50000` covers ~7 h at 0.5 s
-  cadence; Codex P2 fix from 5000 which covered only ~42 min).
-- **F23 — RateEstimator measurement timestamp**: `safety_manager._collect_loop` now
-  uses `reading.timestamp.timestamp()` instead of `time.monotonic()` (dequeue time),
-  giving correct dT/dt estimates under queue backlog.
-- **F24 — Interlock acknowledge ZMQ command**: `interlock_acknowledge` action exposes
-  `InterlockEngine.acknowledge(name)` — transitions `TRIPPED→ARMED`, `KeyError` for
-  unknown name. Operator re-arms interlock without process restart.
-- **F25 — SQLite WAL startup gate**: `_check_sqlite_version()` raises `RuntimeError`
-  on affected versions `[3.7.0, 3.51.3)` (March 2026 WAL corruption bug).
-  `CRYODAQ_ALLOW_BROKEN_SQLITE=1` bypasses with `WARNING` log. Module flag
-  `_SQLITE_VERSION_CHECKED` prevents repeated checks per process. Backport whitelist
-  refinement deferred to F26 (XS).
+### Независимые фичи (F19, F23, F24, F25)
+- **F19 — обогащение `ExperimentSummaryWidget`**: кликабельные
+  метки DOCX/PDF через `_ClickableLabel` + `QDesktopServices`;
+  топ-3 имени тревог по частоте; per-channel min/max/mean
+  (`limit_per_channel=50000` покрывает ~7 ч при 0.5-с частоте;
+  Codex P2-фикс с 5000, которое покрывало лишь ~42 мин).
+- **F23 — таймстемп измерения в `RateEstimator`**:
+  `safety_manager._collect_loop` теперь использует
+  `reading.timestamp.timestamp()` вместо `time.monotonic()`
+  (времени снятия из очереди), давая корректные dT/dt при
+  бэклоге очереди.
+- **F24 — ZMQ-команда `interlock_acknowledge`**: action
+  `interlock_acknowledge` выставляет `InterlockEngine.acknowledge(name)`
+  — переход `TRIPPED → ARMED`, `KeyError` для неизвестного имени.
+  Оператор перевключает interlock без рестарта процесса.
+- **F25 — стартовый гейт SQLite WAL**: `_check_sqlite_version()`
+  бросает `RuntimeError` на затронутых версиях `[3.7.0, 3.51.3)`
+  (баг WAL corruption март 2026). `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
+  обходит с `WARNING`-логом. Модульный флаг
+  `_SQLITE_VERSION_CHECKED` предотвращает повторные проверки в
+  процессе. Уточнение whitelist-а backport-ов отложено до
+  F26 (XS).
 
-### Doc/process (Phase A — direct to master)
-- ORCHESTRATION v1.3: §14.6 hallucination verification + §15 multi-model dispatch
-  realities (6 subsections on routing, delays, budget, anti-patterns).
-- multi-model-consultation skill v1.1: §2.1 calibrated routing matrix, §3.7
-  formation pattern, §6 budget updates, §7.8 anti-pattern (high-reasoning over-flag).
-- HF3: `update_target()` docstring — slew-rate convergence clarification (Codex T2
-  re-run CONDITIONAL→PASS).
-- Plugin disposition: oh-my-claudecode auto-load disabled for CryoDAQ engine process.
+### Doc/process (Phase A — прямо в master)
+- ORCHESTRATION v1.3: §14.6 верификация галлюцинаций + §15
+  реалии multi-model dispatch (6 подразделов: маршрутизация,
+  задержки, бюджет, анти-паттерны).
+- skill multi-model-consultation v1.1: §2.1 откалиброванная
+  routing-matrix, §3.7 паттерн формирования, §6 обновления
+  бюджета, §7.8 анти-паттерн (high-reasoning over-flag).
+- HF3: docstring `update_target()` — уточнение по slew-rate
+  сходимости (Codex T2 re-run CONDITIONAL → PASS).
+- Disposition плагинов: автозагрузка oh-my-claudecode выключена
+  для процесса движка CryoDAQ.
 
-### Tests
-- 39 new tests across F19-F25 (16 F19, 5 F20, 7 F21, 3 F22, 1 F23, 3 F24, 5 F25).
-- Alarm cluster targeted: 60 passed.
-- Misc cluster targeted: 13 passed.
-- All pass including SQLite 3.50.4 regression fix (fixture teardown isolation).
+### Тесты
+- 39 новых тестов по F19-F25 (16 F19, 5 F20, 7 F21, 3 F22, 1 F23,
+  3 F24, 5 F25).
+- Alarm-кластер таргетно: 60 пройдено.
+- Misc-кластер таргетно: 13 пройдено.
+- Всё проходит, включая регрессионный фикс SQLite 3.50.4
+  (изоляция teardown фикстуры).
 
-### Tags
-- `v0.43.0` → `678aa64c` (misc-cluster merge)
-- alarm-cluster merge → `e0a8f140`
+### Теги
+- `v0.43.0` → `678aa64c` (merge misc-кластера).
+- merge alarm-кластера → `e0a8f140`.
 
-### Selected commits in this release
-- `2e5f34b` — HF3: update_target docstring slew-rate clarification
-- `aaaa38f` — multi-model-consultation v1.1 routing matrix
-- `4115703` — ORCHESTRATION v1.3
-- `20b464b` — plugin disposition (oh-my-claudecode disabled)
-- `42f681d` — F20+F21+F22 alarm cluster
-- `4716219` — F22 severity-upgrade in-place documentation (architect annotation)
-- `673a428` — F19+F23+F24+F25 misc cluster
+### Ключевые коммиты этого релиза
+- `2e5f34b` — HF3: update_target docstring slew-rate clarification.
+- `aaaa38f` — multi-model-consultation v1.1 routing matrix.
+- `4115703` — ORCHESTRATION v1.3.
+- `20b464b` — plugin disposition (oh-my-claudecode disabled).
+- `42f681d` — F20+F21+F22 alarm cluster.
+- `4716219` — F22 severity-upgrade in-place documentation.
+- `673a428` — F19+F23+F24+F25 misc cluster.
 
 ## [0.42.0] — 2026-04-29 — Safety hotfix HF1+HF2
 
-### Highlights
-- **HF1**: `update_target()` docstring clarification — verified delayed-update design. GLM's CRITICAL finding refuted by hypothesis verification: P=const regulation loop in `Keithley2604B.read_channels()` reads `runtime.p_target` every poll cycle, recomputes `target_v = sqrt(p_target * R)`, and issues SCPI. `update_target()` is delayed-update (≤1 s), not a no-op. Direct SCPI write explicitly rejected to preserve slew-rate limiting and compliance checks.
-- **HF2**: `keithley_emergency_off` + `keithley_stop` added to `_SLOW_COMMANDS` in `zmq_bridge.py`. These safety commands now use `HANDLER_TIMEOUT_SLOW_S` (30 s) instead of the fast 2 s envelope. USBTMC slow-path cancellation during fault events is no longer possible.
+### Главное
+- **HF1**: уточнение docstring-а `update_target()` —
+  подтверждённый delayed-update дизайн. CRITICAL-находка GLM
+  опровергнута проверкой гипотезы: цикл регуляции P=const в
+  `Keithley2604B.read_channels()` читает `runtime.p_target` на
+  каждый poll-цикл, пересчитывает `target_v = sqrt(p_target * R)`
+  и выдаёт SCPI. `update_target()` — delayed-update (≤1 с), не
+  no-op. Прямая SCPI-запись явно отклонена, чтобы сохранить
+  slew-rate limiting и compliance-проверки.
+- **HF2**: `keithley_emergency_off` + `keithley_stop` добавлены в
+  `_SLOW_COMMANDS` в `zmq_bridge.py`. Эти safety-команды теперь
+  используют `HANDLER_TIMEOUT_SLOW_S` (30 с) вместо быстрого
+  envelope-а 2 с. Cancellation медленного USBTMC-пути во время
+  fault-событий больше невозможен.
 
-### Source
-2026-04-29 overnight metaswarm session — Task A architectural blind spots audit (6 models × 4 tasks). GLM and Codex flagged these findings. Both findings architect-verified against actual source code before any fix applied.
+### Источник
+Ночная metaswarm-сессия 2026-04-29 — аудит архитектурных слепых
+зон Task A (6 моделей × 4 задачи). GLM и Codex отметили эти
+находки. Обе верифицированы архитектором по реальному исходнику
+до применения фикса.
 
-Verification ledger: `artifacts/handoffs/2026-04-29-task-a-verification.md`
+Лог верификации: `artifacts/handoffs/2026-04-29-task-a-verification.md`.
 
-### Changed
-- `src/cryodaq/core/safety_manager.py` — `update_target()` docstring documents delayed-update design and rejected alternative (direct SCPI write)
-- `src/cryodaq/core/zmq_bridge.py` — `"keithley_emergency_off"` and `"keithley_stop"` added to `_SLOW_COMMANDS` frozenset with explanatory comment
+### Изменено
+- `src/cryodaq/core/safety_manager.py` — docstring
+  `update_target()` документирует delayed-update дизайн и
+  отклонённую альтернативу (прямая SCPI-запись).
+- `src/cryodaq/core/zmq_bridge.py` — `"keithley_emergency_off"` и
+  `"keithley_stop"` добавлены в frozenset `_SLOW_COMMANDS` с
+  поясняющим комментарием.
 
-### Tests
-- 2 new: `test_slow_commands_covers_safety_critical_hardware_ops` (zmq_bridge), `test_update_target_updates_runtime_p_target_immediately` (safety_manager)
-- Full suite: 1931 passed, 4 skipped, 0 failures
+### Тесты
+- 2 новых: `test_slow_commands_covers_safety_critical_hardware_ops`
+  (zmq_bridge), `test_update_target_updates_runtime_p_target_immediately`
+  (safety_manager).
+- Полный набор: 1931 пройдено, 4 пропущено, 0 падений.
 
-### Known Issues
-- 5 deferred Task A findings added to ROADMAP as F21–F25 (not implemented in this release): hysteresis deadband (#1.3), F10 escalation (#1.4), RateEstimator timestamp (#1.7), interlock re-arm (#1.8), SQLite WAL gate (#1.10)
+### Известные ограничения
+- 5 отложенных находок Task A добавлены в ROADMAP как F21–F25
+  (не имплементированы в этом релизе): гистерезисный deadband
+  (#1.3), эскалация F10 (#1.4), таймстемп RateEstimator (#1.7),
+  re-arm interlock-а (#1.8), гейт SQLite WAL (#1.10).
 
-### Tags
-- `v0.42.0` → merge commit `751b4cf`
+### Теги
+- `v0.42.0` → merge-коммит `751b4cf`.
 
-### Selected commits in this release
-- `189c4b7` fix(safety): HF1 update_target docstring + HF2 emergency_off slow timeout
-- `751b4cf` merge: HF1+HF2 safety hotfix (Task A verified findings)
+### Ключевые коммиты этого релиза
+- `189c4b7` fix(safety): HF1 update_target docstring + HF2 emergency_off slow timeout.
+- `751b4cf` merge: HF1+HF2 safety hotfix (Task A verified findings).
 
 ---
 
-## [0.41.0] — 2026-04-29 — F10 sensor diagnostics → alarm integration
+## [0.41.0] — 2026-04-29 — F10: sensor-диагностика → интеграция в alarm
 
-### Highlights
+### Главное
 
-F10 complete. Sensor diagnostics anomaly events now flow through Alarm
-Engine v2: warning alarm at 5 min sustained anomaly, critical at 15 min,
-auto-clear when channel returns to ok. Telegram dispatch for diagnostic
-alarms follows the existing `_alarm_v2_tick` pattern.
+F10 закрыто. Аномальные события sensor-диагностики теперь идут через
+Alarm Engine v2: warning-тревога при 5 мин устойчивой аномалии,
+critical при 15 мин, авто-сброс при возврате канала в ok.
+Telegram-диспатч для диагностических тревог следует существующему
+паттерну `_alarm_v2_tick`.
 
-Implementation: 3-cycle overnight Sonnet batch with Codex audit per cycle.
-Gemini quota exhausted overnight (MODEL_CAPACITY_EXHAUSTED on all 4
-dispatches); architect performed manual structural pass for Cycle 3.
+Реализация: 3-цикл ночной Sonnet-батч с Codex-аудитом на цикл.
+Quota Gemini исчерпан ночью (MODEL_CAPACITY_EXHAUSTED на всех 4
+dispatches); архитектор сделал ручной structural-проход для Cycle 3.
 
-Spec deviation ratified: alarm-publishing config lives in `plugins.yaml`
-(existing `sensor_diagnostics` convention) rather than `alarms_v3.yaml`.
+Ратифицированное отклонение от спека: конфиг публикации тревог
+живёт в `plugins.yaml` (существующая конвенция
+`sensor_diagnostics`), а не в `alarms_v3.yaml`.
 
-F20 added for future polish: Telegram notification aggregation for
-simultaneous multi-channel diagnostic alarms + per-channel escalation
-cooldown. Not blocking; in normal ops ≤16 channels, simultaneous
-criticals indicate genuine catastrophe where flood is preferable to
-silence.
+F20 добавлен для будущей полировки: агрегация Telegram-уведомлений
+для одновременных multi-channel диагностических тревог + per-channel
+escalation cooldown. Не блокирующее; в обычной работе ≤16 каналов,
+одновременные criticals — признак реальной катастрофы, где flood
+предпочтительнее тишины.
 
-### Added
+### Добавлено
 
-- `SensorDiagnosticsEngine.__init__` gains `alarm_publisher`,
-  `warning_duration_s` (default 300 s), `critical_duration_s`
-  (default 900 s) parameters
-- `_AnomalyState` dataclass for per-channel sustained-anomaly tracking
-  (monotonic clock; one-shot publish guards per severity level)
-- `_health_to_status()` bridge maps health_score (0–100) → ok / warning
-  / critical (spec called for status enum; existing engine uses numeric
-  health score)
-- `SensorDiagnosticsEngine.update()` now returns `list[AlarmEvent]` of
-  newly published events so engine tick can dispatch Telegram
+- `SensorDiagnosticsEngine.__init__` получает параметры
+  `alarm_publisher`, `warning_duration_s` (default 300 с),
+  `critical_duration_s` (default 900 с).
+- Dataclass `_AnomalyState` для per-channel отслеживания устойчивой
+  аномалии (монотонные часы; one-shot publish-guard-ы на уровень
+  severity).
+- Мост `_health_to_status()` маппит health_score (0–100) → ok /
+  warning / critical (спек требовал status-enum; существующий
+  движок использует численный health_score).
+- `SensorDiagnosticsEngine.update()` теперь возвращает
+  `list[AlarmEvent]` свежеопубликованных событий, чтобы engine
+  tick мог диспатчить Telegram.
 - `AlarmStateManager.publish_diagnostic_alarm(channel_id, severity,
-  age_seconds)` — idempotent per channel, creates alarm in same shape as
-  rule-evaluated alarms; inherits ACK workflow
-- `AlarmStateManager.clear_diagnostic_alarm(channel_id)` — removes from
-  active and records CLEARED in history
-- Engine wiring: `alarm_v2_state_mgr` injected as `alarm_publisher` into
-  `SensorDiagnosticsEngine`; graceful degradation when
-  `alarm_publishing_enabled: false`
-- `_sensor_diag_tick` dispatches Telegram for returned diagnostic
-  AlarmEvents via `_alarm_dispatch_tasks` (strong-ref management)
-- `config/plugins.yaml` sensor_diagnostics block: `alarm_publishing_enabled`,
-  `warning_duration_s`, `critical_duration_s`, `notify_telegram`
-- 17 new tests: 11 unit (Cycle 1, sensor_diagnostics publishing) +
-  4 unit (Cycle 2, AlarmStateManager) + 2 integration (Cycle 3, pipeline)
-- Vault: 6 new subsystem notes (Analytics view, F4 lazy replay, Web
-  dashboard, Cooldown predictor, Experiment manager, Interlock engine)
+  age_seconds)` — идемпотентен на канал, создаёт тревогу в той же
+  форме, что rule-evaluated alarms; наследует ACK-workflow.
+- `AlarmStateManager.clear_diagnostic_alarm(channel_id)` — удаляет
+  из active и пишет CLEARED в историю.
+- Wiring движка: `alarm_v2_state_mgr` инъектится как
+  `alarm_publisher` в `SensorDiagnosticsEngine`; graceful-degradation
+  при `alarm_publishing_enabled: false`.
+- `_sensor_diag_tick` диспатчит Telegram для возвращённых
+  диагностических `AlarmEvent`-ов через `_alarm_dispatch_tasks`
+  (управление strong-ref-ами).
+- Блок `sensor_diagnostics` в `config/plugins.yaml`:
+  `alarm_publishing_enabled`, `warning_duration_s`,
+  `critical_duration_s`, `notify_telegram`.
+- 17 новых тестов: 11 unit (Cycle 1, публикация sensor_diagnostics)
+  + 4 unit (Cycle 2, `AlarmStateManager`) + 2 integration
+  (Cycle 3, pipeline).
+- Vault: 6 новых subsystem-заметок (Analytics view, F4 lazy replay,
+  Web-дашборд, Cooldown-предиктор, Experiment manager, Interlock
+  engine).
 
-### Test baseline
+### Тестовая база
 
-Pre: 0.40.0 — ~300 tests
-Post: 81 passing (+17 new), 0 regressions
+Pre: 0.40.0 — ~300 тестов.
+Post: 81 проходит (+17 новых), 0 регрессий.
 
-### Tags
+### Теги
 
-- `v0.41.0` — see closing commit below
+- `v0.41.0` — см. closing commit ниже.
 
 ### Closing commit
 
-See `merge: F10 Cycle 3` on master.
+См. `merge: F10 Cycle 3` на master.
 
 ---
 
-## [0.40.0] — 2026-04-29 — F3 Analytics widgets data wiring
+## [0.40.0] — 2026-04-29 — F3: проводка данных к виджетам аналитики
 
-### Highlights
+### Главное
 
-F3 + F4 features complete. 5-cycle overnight Opus batch with dual-verifier
-audits per cycle. 86 new tests, ~1000 LOC. All four analytics widgets
-wired; W4 r_thermal kept as placeholder pending F8.
+Фичи F3 + F4 закрыты. 5-цикл ночной Opus-батч с dual-verifier
+аудитом на цикл. 86 новых тестов, ~1000 LOC. Все четыре виджета
+аналитики подключены; W4 `r_thermal` оставлен как плейсхолдер до
+F8.
 
-Architecture fix caught by audit: `active.get("id")` → `active.get("experiment_id")`
-in `MainWindowV2` cache invalidation — `ExperimentInfo.to_payload()` emits
-`"experiment_id"`, not `"id"`.
+Архитектурный фикс, пойманный аудитом: `active.get("id")` →
+`active.get("experiment_id")` в инвалидации кэша `MainWindowV2` —
+`ExperimentInfo.to_payload()` эмитит `"experiment_id"`, не `"id"`.
 
-F19 added to ROADMAP for deferred W3 enrichment (channel min/max, top-3
-alarms, clickable artifact links).
+F19 добавлен в ROADMAP для отложенного обогащения W3 (channel
+min/max, top-3 alarms, кликабельные ссылки на артефакты).
 
-Closing commit: 3b626a2 (merge: F3 Cycle 5).
+Closing commit: `3b626a2` (merge: F3 Cycle 5).
 
-### Added
+### Добавлено
 
-- **F3 analytics data wiring — W1…W3 + F4 lazy replay** — Five-cycle batch
-  completing Phase III.C analytics placeholder → live data wiring:
-  - **W5 / F4** (Cycle 1): shell-level F4 lazy-open snapshot replay.
-    `MainWindowV2._push_analytics` caches last-value per setter; replayed into
-    `AnalyticsView` on lazy open. 19 new tests. (`feat/f3-cycle1`, merged)
-  - **W1 `temperature_trajectory`** (Cycle 2): `TemperatureTrajectoryWidget` —
-    multi-group `pg.GraphicsLayoutWidget` with per-group PlotItems for
-    independent Y-axis scaling. Fetches 7-day history via `readings_history`
-    ZMQ command on construction. 14 new tests. (`feat/f3-cycle2`)
-  - **W2 `cooldown_history`** (Cycle 3): `CooldownHistoryWidget` — one-shot
-    scatter plot of past cooldown durations. New `cooldown_history_get` engine
-    command mines JSON metadata files per experiment. `list_archive_entries`
-    wrapped in `asyncio.to_thread` (event-loop safety). 21 new tests.
-    (`feat/f3-cycle3`)
-  - **W3 `experiment_summary`** (Cycle 4): `ExperimentSummaryWidget` — header,
-    duration, phase breakdown, alarm count (via existing `alarm_v2_history`
-    command), artifact links. `set_experiment_status` setter added to
-    `AnalyticsView` + `MainWindowV2` routing. 23 new tests. (`feat/f3-cycle4`)
-  - **Cycle 5**: W4 `r_thermal_placeholder` text updated (F8 dependency note);
-    cross-widget lifecycle integration tests (`tests/integration/`, 9 tests);
-    CHANGELOG + ROADMAP updated; F19 added to ROADMAP. (`feat/f3-cycle5`)
-- **New engine command `cooldown_history_get`** — async handler
-  `_run_cooldown_history_command`; reads JSON metadata files, returns past
-  cooldown durations with T1 boundary temperatures.
-- **F19 added to ROADMAP** — deferred W3 enrichment items (channel min/max,
-  top-3 alarm names, clickable artifact links).
+- **Проводка данных аналитики F3 — W1…W3 + F4 lazy replay** —
+  5-цикл батч, закрывающий Phase III.C placeholder → live wiring:
+  - **W5 / F4** (Cycle 1): shell-уровневый F4 lazy-open snapshot
+    replay. `MainWindowV2._push_analytics` кэширует last-value на
+    каждый сеттер; пересдаёт в `AnalyticsView` при lazy open.
+    19 новых тестов. (`feat/f3-cycle1`, merged.)
+  - **W1 `temperature_trajectory`** (Cycle 2):
+    `TemperatureTrajectoryWidget` — multi-group
+    `pg.GraphicsLayoutWidget` с per-group `PlotItem`-ами для
+    независимого Y-масштаба. Фетчит 7-дневную историю через
+    ZMQ-команду `readings_history` при создании. 14 новых тестов.
+    (`feat/f3-cycle2`.)
+  - **W2 `cooldown_history`** (Cycle 3): `CooldownHistoryWidget` —
+    one-shot scatter-plot прошлых длительностей cooldown. Новая
+    engine-команда `cooldown_history_get` собирает JSON-метаданные
+    по экспериментам. `list_archive_entries` обёрнут в
+    `asyncio.to_thread` (event-loop safety). 21 новый тест.
+    (`feat/f3-cycle3`.)
+  - **W3 `experiment_summary`** (Cycle 4):
+    `ExperimentSummaryWidget` — заголовок, длительность, разбивка
+    по фазам, число тревог (через существующую команду
+    `alarm_v2_history`), ссылки на артефакты. Сеттер
+    `set_experiment_status` добавлен в `AnalyticsView` +
+    маршрутизация в `MainWindowV2`. 23 новых теста.
+    (`feat/f3-cycle4`.)
+  - **Cycle 5**: текст `r_thermal_placeholder` для W4 обновлён
+    (нота про зависимость от F8); кросс-виджет lifecycle-
+    интеграционные тесты (`tests/integration/`, 9 тестов);
+    обновлены CHANGELOG + ROADMAP; F19 добавлен в ROADMAP.
+    (`feat/f3-cycle5`.)
+- **Новая engine-команда `cooldown_history_get`** — async-хендлер
+  `_run_cooldown_history_command`; читает JSON-метаданные,
+  возвращает прошлые длительности cooldown с граничными
+  температурами T1.
+- **F19 добавлен в ROADMAP** — отложенные пункты обогащения W3
+  (channel min/max, top-3 alarm names, кликабельные ссылки на
+  артефакты).
 
-### Fixed
+### Исправлено
 
-- **`active.get("experiment_id")` cache invalidation** — pre-existing bug
-  where `active.get("id")` always returned `None` (key mismatch with
-  `ExperimentInfo.to_payload()` which emits `"experiment_id"`). Analytics
-  snapshot never invalidated on experiment boundary. Caught by F3-Cycle4
-  audit. Applied to both `_on_experiment_status_received` and
-  `_active_experiment_id` in `main_window_v2.py`.
+- **Инвалидация кэша `active.get("experiment_id")`** —
+  существовавший баг, в котором `active.get("id")` всегда
+  возвращал `None` (несоответствие ключа с
+  `ExperimentInfo.to_payload()`, эмитящим `"experiment_id"`).
+  Snapshot аналитики никогда не инвалидировался на границе
+  эксперимента. Поймано в аудите F3-Cycle 4. Применено и к
+  `_on_experiment_status_received`, и к `_active_experiment_id`
+  в `main_window_v2.py`.
 
-### Known gaps (deferred to F19)
+### Известные пробелы (отложено в F19)
 
-- W3 channel min/max/mean table per critical channel
-- W3 top-3 most-triggered alarm names
-- W3 clickable artifact links via `QDesktopServices`
-- W4 (`r_thermal_placeholder`) remains placeholder — depends on F8
+- Таблица min/max/mean per critical channel в W3.
+- Топ-3 имени тревог по частоте в W3.
+- Кликабельные ссылки на артефакты в W3 через `QDesktopServices`.
+- W4 (`r_thermal_placeholder`) остаётся плейсхолдером — зависит
+  от F8.
 
-### Test baseline
+### Тестовая база
 
-86 new tests across F3 cycles. Full suite green on master after all 5 merges.
-Pre-existing failures: timezone-drift in `test_experiment_overlay.py` (known),
-flaky ZMQ timing test (passes in isolation).
+86 новых тестов по циклам F3. Полный набор зелёный на master
+после всех 5 merge-ев. Существовавшие падения: timezone-drift в
+`test_experiment_overlay.py` (известно), flaky ZMQ timing тест
+(в изоляции проходит).
 
-- **`.cof` Chebyshev coefficient export** — `export_curve_cof()` added to
-  `CalibrationStore`. Portable text format: per-zone raw Chebyshev
-  coefficients re-evaluatable via `numpy.polynomial.chebyshev.chebval()`
-  without CryoDAQ schema dependency.
-  (`feat(calibration)` `0fed332`, `fix(cof)` `d0e1c7f`)
+- **Экспорт коэффициентов Chebyshev `.cof`** — `export_curve_cof()`
+  добавлен в `CalibrationStore`. Портативный текстовый формат:
+  per-zone сырые Chebyshev-коэффициенты, переoценимые через
+  `numpy.polynomial.chebyshev.chebval()` без зависимости от схемы
+  CryoDAQ. (`feat(calibration)` `0fed332`, `fix(cof)` `d0e1c7f`.)
 
-### Removed
+### Удалено
 
-- **`.330` calibration export removed** — `export_curve_330()` deleted;
-  `import_curve_file()` rejects `.330` suffix with `ValueError`.
-  Existing `.330` files in production data trees are NOT auto-migrated;
-  use manual CSV read or `git restore` for legacy access.
-  `engine.py` `calibration_curve_export` action updated: `curve_330_path`
-  → `curve_cof_path`; `points` arg dropped.
-  GUI calibration overlay updated: `.330` import button removed, `.330`
-  export button replaced with `.cof`.
-  (architect decision 2026-04-25; `0fed332`, `d0e1c7f`, merge `097a26d`,
-  GUI `ba6b997`, `b254de2`)
+- **Экспорт калибровки `.330` удалён** — `export_curve_330()`
+  удалён; `import_curve_file()` отвергает суффикс `.330` с
+  `ValueError`. Существующие `.330` файлы в production-ветках
+  данных НЕ авто-мигрируются; используйте ручное чтение CSV или
+  `git restore` для legacy-доступа. Action
+  `calibration_curve_export` в `engine.py` обновлён:
+  `curve_330_path` → `curve_cof_path`; аргумент `points` убран.
+  GUI calibration-overlay обновлён: кнопка импорта `.330` удалена,
+  кнопка экспорта `.330` заменена на `.cof`. (Решение архитектора
+  2026-04-25; `0fed332`, `d0e1c7f`, merge `097a26d`, GUI
+  `ba6b997`, `b254de2`.)
 
 ---
 
-## [0.39.0] — 2026-04-27 — B1 ZMQ idle-death fixed (H5 confirmed)
+## [0.39.0] — 2026-04-27 — Закрыт B1: ZMQ idle-death (H5 подтверждено)
 
-### Highlights
+### Главное
 
-Closes the 7-day B1 investigation. Root cause: `asyncio.wait_for(socket.recv(),
-timeout=1.0)` cancels the inner pyzmq coroutine every second; after ~50
-cancellations, libzmq reactor state wedges the REP socket permanently.
-Fix: `poll(timeout=1000)` + conditional `recv()` after `POLLIN`.
+Закрывает 7-дневное расследование B1. Корневая причина:
+`asyncio.wait_for(socket.recv(), timeout=1.0)` отменяет внутреннюю
+pyzmq-корутину каждую секунду; после ~50 cancellation-ов состояние
+libzmq-реактора заклинивает REP-сокет навсегда. Фикс:
+`poll(timeout=1000)` + условный `recv()` после `POLLIN`.
 
-### Fixed
+### Исправлено
 
-- `fix(zmq)` `1f88d2e` — `ZMQCommandServer._serve_loop` and
-  `ZMQSubscriber._receive_loop` replaced with poll+recv pattern.
-  Verified: macOS 180/180 commands clean; Ubuntu lab PC verified.
+- `fix(zmq)` `1f88d2e` — `ZMQCommandServer._serve_loop` и
+  `ZMQSubscriber._receive_loop` заменены на паттерн poll+recv.
+  Подтверждено: macOS 180/180 команд чисто; Ubuntu lab PC
+  подтверждён.
 
-### Added
+### Добавлено
 
-- `feat(diag)` `5e7eeac` — `tools/diag_zmq_direct_req.py`: direct REQ to
-  engine REP bypassing bridge subprocess. D3 experiment tool proving
-  engine-side causation. Regression gate: clean 180s = pass.
+- `feat(diag)` `5e7eeac` — `tools/diag_zmq_direct_req.py`: прямой
+  REQ к REP движка в обход bridge-подпроцесса. Инструмент D3-
+  эксперимента, доказавший engine-side причинность. Регрессионный
+  гейт: чистые 180 с = pass.
 
-### Investigation closed
+### Расследование закрыто
 
-- **B1 ZMQ idle-death** — H5 CONFIRMED + FIXED. See
-  `docs/bug_B1_zmq_idle_death_handoff.md` and
+- **B1 ZMQ idle-death** — H5 ПОДТВЕРЖДЕНО + ИСПРАВЛЕНО. См.
+  `docs/bug_B1_zmq_idle_death_handoff.md` и
   `docs/decisions/2026-04-27-d{1,2,3,4}-*.md`.
 
 ### Closing commit
 
-`21a3a28` — release: v0.34.0 (retroactively relabelled v0.39.0)
+`21a3a28` — release: v0.34.0 (retroactively relabelled v0.39.0).
 
 ---
 
 ## [0.38.0] — 2026-04-27 — Production hardening: alarms, drivers, launcher
 
-### Highlights
+### Главное
 
-Production hardening from the overnight Codex batch (Codex-03/04/05).
-Tightens alarm_v2 validation, fixes Thyracont probe inconsistency, and
-adds clean SIGTERM handling so the engine no longer orphans on
-`systemd stop` or Ctrl+C.
+Production hardening из ночного Codex-батча (Codex-03/04/05).
+Подтягивает валидацию alarm_v2, фиксит несоответствие probe-а
+Thyracont и добавляет чистую обработку SIGTERM, чтобы движок больше
+не оставался orphan-ом на `systemd stop` или Ctrl+C.
 
-### Fixed
+### Исправлено
 
-- `fix(alarms)` `1869910` — alarm_v2 threshold validation rejects
-  missing/wrong-type `threshold` fields; eliminates `KeyError` log spam.
-- `fix(thyracont)` `7230c9f` — V1 probe checksum-validates on connect,
-  matching read-path behavior; prevents silent NaN-forever on
-  non-VSP63D hardware.
-- `3215580` — channels.yaml header recovered from stale state.
+- `fix(alarms)` `1869910` — валидация порогов alarm_v2 отвергает
+  отсутствующие/неверного типа `threshold`-поля; убирает спам
+  `KeyError` в логах.
+- `fix(thyracont)` `7230c9f` — V1 probe валидирует контрольную
+  сумму на connect-е, согласованно с поведением read-path-а;
+  предотвращает молчаливый NaN-навсегда на не-VSP63D железе.
+- `3215580` — заголовок `channels.yaml` восстановлен из устаревшего
+  состояния.
 
-### Added
+### Добавлено
 
-- `feat(launcher)` `9a8412e` — SIGTERM/SIGINT handler; engine subprocess
-  receives SIGTERM and exits cleanly on systemd stop / Ctrl+C.
-
-### Closing commit
-
-`9a8412e` — feat(launcher): SIGTERM/SIGINT handler prevents engine orphan on shutdown
-
----
-
-## [0.37.0] — 2026-04-24 — R1 probe retry repair
-
-### Highlights
-
-Bounded-backoff retry in `_validate_bridge_startup()` repairs the
-b2b4fb5 race: the single-shot probe rejected healthy ipc:// bridges
-during engine bind-startup, falsely attributing IV.7's failure to the
-transport layer.
-
-### Fixed
-
-- `fix(diag)` `c3f4f86` — `_validate_bridge_startup()` in
-  `diag_zmq_b1_capture.py` now retries with bounded exponential backoff
-  instead of failing on the first non-OK response.
+- `feat(launcher)` `9a8412e` — обработчик SIGTERM/SIGINT;
+  engine-подпроцесс получает SIGTERM и чисто выходит на
+  systemd stop / Ctrl+C.
 
 ### Closing commit
 
-`cabd854` — docs: Q4 equivalence check synthesis + D1 close
+`9a8412e` — feat(launcher): SIGTERM/SIGINT handler prevents engine orphan on shutdown.
 
 ---
 
-## [0.36.0] — 2026-04-21 — B1 investigation tooling (merged 2026-04-24)
+## [0.37.0] — 2026-04-24 — Починка retry-логики R1 probe
 
-> Authored 2026-04-21 on `codex/safe-merge-b1-truth-recovery` branch,
-> merged to master 2026-04-24. Tag follows topological order, not
-> authorship date.
+### Главное
 
-### Highlights
+Bounded-backoff retry в `_validate_bridge_startup()` чинит гонку
+b2b4fb5: однократный probe отвергал здоровые `ipc://`-bridge во
+время startup-bind-а движка, ложно перекладывая отказ IV.7 на
+transport-слой.
 
-Reusable diagnostic helpers and canonical B1 capture CLI for structured
-ZMQ bridge investigation. JSONL output enables post-hoc analysis and
-cross-run comparison.
+### Исправлено
 
-### Added
-
-- `8b9ce4a` — `tools/_b1_diagnostics.py`: `bridge_snapshot` +
-  `direct_engine_probe` reusable helpers.
-- `cc090be` — `tools/diag_zmq_b1_capture.py`: canonical B1 capture CLI
-  with JSONL output and structured timing.
-- `40553ea`, `033f87b` — alignment passes syncing helpers and CLI with
-  bridge API changes.
-- `62314be` — record direct probe timeouts for post-analysis.
+- `fix(diag)` `c3f4f86` — `_validate_bridge_startup()` в
+  `diag_zmq_b1_capture.py` теперь делает retry с bounded
+  экспоненциальным backoff-ом вместо падения на первый non-OK ответ.
 
 ### Closing commit
 
-`62314be` — tools: record direct probe timeouts in B1 capture CLI
+`cabd854` — docs: Q4 equivalence check synthesis + D1 close.
 
 ---
 
-## [0.35.0] — 2026-04-24 — Agent orchestration governance
+## [0.36.0] — 2026-04-21 — Инструментарий расследования B1 (мерджнуто 2026-04-24)
 
-### Highlights
+> Авторство 2026-04-21 на ветке
+> `codex/safe-merge-b1-truth-recovery`, мерджнуто в master
+> 2026-04-24. Тег следует топологическому порядку, не дате
+> авторства.
 
-Governance infrastructure after the 2026-04-21 agent-swarm chaos
-(duplicate branches, root-markdown flood, no-leader multi-agent drift).
-Establishes the CC-centric swarm model with explicit STOP discipline,
-autonomy band, and artifact layout rules.
+### Главное
 
-### Added
+Переиспользуемые диагностические хелперы и канонический CLI для
+B1-захвата для структурного расследования ZMQ-bridge-а. Вывод JSONL
+позволяет post-hoc анализ и сравнение между запусками.
 
-- `5286fa2` — `docs/ORCHESTRATION.md` v1.1: CC-centric role matrix,
-  branch discipline, artifact layout, STOP discipline (§13), autonomy
-  band (§13.5).
+### Добавлено
+
+- `8b9ce4a` — `tools/_b1_diagnostics.py`: переиспользуемые хелперы
+  `bridge_snapshot` + `direct_engine_probe`.
+- `cc090be` — `tools/diag_zmq_b1_capture.py`: канонический CLI
+  захвата B1 с JSONL-выводом и структурированными таймингами.
+- `40553ea`, `033f87b` — alignment-проходы, синхронизирующие
+  хелперы и CLI с изменениями bridge-API.
+- `62314be` — пишем таймауты direct probe-а для пост-анализа.
+
+### Closing commit
+
+`62314be` — tools: record direct probe timeouts in B1 capture CLI.
+
+---
+
+## [0.35.0] — 2026-04-24 — Governance оркестрации агентов
+
+### Главное
+
+Governance-инфраструктура после агентского хаоса 2026-04-21
+(дублирующие ветки, root-markdown поток, multi-agent drift без
+ведущего). Закрепляет CC-центричную модель swarm-а с явной
+STOP-дисциплиной, autonomy-band-ом и правилами раскладки
+артефактов.
+
+### Добавлено
+
+- `5286fa2` — `docs/ORCHESTRATION.md` v1.1: CC-центричная
+  role-матрица, branch-дисциплина, artifact-layout, STOP-дисциплина
+  (§13), autonomy band (§13.5).
 - `9a1a100` — `.claude/skills/`: multi-model-consultation +
   negative-space skills.
-- `587bea8` — `.gitignore`: exclude agent orchestration workspaces
-  (`.omc/`, `.swarm/`, `.audit-run/`, `agentswarm/`, `.worktrees/`).
+- `587bea8` — `.gitignore`: исключение workspace-ов оркестрации
+  агентов (`.omc/`, `.swarm/`, `.audit-run/`, `agentswarm/`,
+  `.worktrees/`).
 
 ### Closing commit
 
-`af77095` — recon: safe-merge branch commit classification
+`af77095` — recon: safe-merge branch commit classification.
 
 ---
 
-## [0.34.0] — 2026-04-20 — ZMQ cmd-plane hardening + field fixes
+## [0.34.0] — 2026-04-20 — Hardening ZMQ cmd-plane + полевые фиксы
 
-### Highlights
+### Главное
 
-IV.6 ZMQ command-plane hardening: ephemeral REQ-per-command pattern +
-launcher command-channel watchdog. Field fixes from the 2026-04-20
-Ubuntu lab PC session.
+Hardening IV.6 командной плоскости ZMQ: паттерн ephemeral REQ
+на команду + watchdog командного канала на лончере. Полевые фиксы
+из сессии на Ubuntu lab PC 2026-04-20.
 
-### Today — 2026-04-20 session (handoff → GLM-5.1)
+### Сегодня — сессия 2026-04-20 (handoff → GLM-5.1)
 
-This is a tight working record, not a formal release. Full
-handoff context is in `HANDOFF_2026-04-20_GLM.md`; next formal
-release is `0.34.0` once B1 is resolved via IV.7.
+Это плотная рабочая запись, не формальный релиз. Полный
+handoff-контекст в `HANDOFF_2026-04-20_GLM.md`; следующий
+формальный релиз — `0.34.0`, как только B1 будет разрешено через
+IV.7.
 
 **Fixed / shipped:**
 
