@@ -59,3 +59,18 @@ instruments:
     resource: "COM8"                    # АКЦ ФИАН: COM8
     baudrate: 115200                    # АКЦ ФИАН: 115200
     poll_interval_s: 2.0
+
+  # F-MultiLine Stage 1: Etalon MultiLine TCP/IP integration.
+  # MultiLine.exe runs on a Windows PC; CryoDAQ engine connects as TCP client.
+  # `host`: IP of the MultiLine PC, or "localhost" if same machine.
+  # `port`: 2001 per Annex (04-2-Annex-MultiLine_as_server-Online-EN-20.pdf).
+  # `channels`: list of channel numbers to query (typically [1, 2, 3, 4]).
+  # Disable by removing this block until MultiLine PC is networked.
+  - type: etalon_multiline
+    name: "MultiLine_1"
+    host: "192.168.1.50"                # MultiLine PC IP
+    port: 2001
+    channels: [1, 2, 3, 4]
+    poll_interval_s: 2.0
+    connect_timeout_s: 5.0
+    read_timeout_s: 10.0

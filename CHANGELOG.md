@@ -13,6 +13,17 @@
 
 ### Added
 
+- **F-MultiLine Stage 1** — Etalon MultiLine TCP/IP integration:
+  interferometric length metrology over a new line-based ASCII TCP
+  transport. New driver type `etalon_multiline` registered in the
+  engine; readings publish on `<name>/length_ch<N>` (mm) plus
+  `<name>/env_<temperature|pressure|humidity>`. Mock mode required for
+  development without MultiLine.exe (lab-PC-only). Stage 2 features
+  (deformation analysis, channel alignment, MLAC/AC operations,
+  frontend splitter/shutter control) are out of scope and live in a
+  separate spec. New module: `cryodaq.drivers.transport.tcp` (first new
+  transport class since project inception, mirrors the `serial.py`
+  asyncio cleanup + error-wrapping pattern).
 - **F-LegacyChannelMap** — `--legacy-channel-era` flag on the launcher
   and the standalone replay engine. Loads a predefined channel-rename
   map (`pre-2025-02` covers the thermal-bridge era: Т10→Т12, Т9→Т10,

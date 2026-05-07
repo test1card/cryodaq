@@ -52,6 +52,19 @@ instruments:
     baudrate: 9600
     poll_interval_s: 2.0
 
+  # F-MultiLine Stage 1: Etalon MultiLine TCP/IP integration.
+  # Operator override `host` and `channels` in instruments.local.yaml
+  # for the actual lab PC. Defaults below are placeholders; the driver
+  # returns [] on connect failure so the scheduler retries gracefully.
+  - type: etalon_multiline
+    name: "MultiLine_1"
+    host: "localhost"
+    port: 2001
+    channels: [1, 2, 3, 4]
+    poll_interval_s: 2.0
+    connect_timeout_s: 5.0
+    read_timeout_s: 10.0
+
 chamber:
   volume_l: 0.0  # OPERATOR: set actual chamber volume in litres
   leak_rate:

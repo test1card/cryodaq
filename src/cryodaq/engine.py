@@ -960,6 +960,18 @@ def _load_drivers(
             driver = ThyracontVSP63D(
                 name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock
             )
+        elif itype == "etalon_multiline":
+            from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
+
+            driver = MultiLineDriver(
+                name,
+                host=str(entry.get("host", "localhost")),
+                port=int(entry.get("port", 2001)),
+                channel_numbers=list(entry.get("channels", [1, 2, 3, 4])),
+                connect_timeout_s=float(entry.get("connect_timeout_s", 5.0)),
+                read_timeout_s=float(entry.get("read_timeout_s", 10.0)),
+                mock=mock,
+            )
         else:
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
