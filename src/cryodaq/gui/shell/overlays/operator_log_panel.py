@@ -285,7 +285,9 @@ class OperatorLogPanel(QWidget):
         fields_row.addWidget(self._caption("Автор:"))
         self._author_edit = QLineEdit()
         self._author_edit.setPlaceholderText("Имя оператора")
-        self._author_edit.setMaximumWidth(220)
+        # v0.55.2 ds-012: 13 * SPACE_4 + SPACE_3 = 208 + 12 = 220 keeps the
+        # cap on the spacing scale.
+        self._author_edit.setMaximumWidth(13 * theme.SPACE_4 + theme.SPACE_3)
         saved_author = self._settings.value("last_log_author", "")
         if saved_author:
             self._author_edit.setText(str(saved_author))
@@ -305,7 +307,8 @@ class OperatorLogPanel(QWidget):
         # stretch=1 and Expanding size policy below still let the
         # operator drag the splitter for more composition room when
         # they need it.
-        self._message_edit.setMinimumHeight(40)
+        # v0.55.2 ds-011: SPACE_4 + SPACE_5 = 16 + 24 = 40.
+        self._message_edit.setMinimumHeight(theme.SPACE_4 + theme.SPACE_5)
         self._message_edit.setMaximumBlockCount(2000)
         _style_input(self._message_edit)
         layout.addWidget(self._message_edit, stretch=1)
