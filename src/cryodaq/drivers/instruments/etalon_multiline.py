@@ -1,16 +1,25 @@
 """Etalon MultiLine driver — interferometric length metrology over TCP.
 
 Stage 1: latest valid length readings + environment data + connection
-check + mock mode. Stage 2 (deformation analysis, channel alignment,
-MLAC/AC operations, frontend splitter/shutter control) is intentionally
-out of scope and lives in a separate spec.
+check + mock mode (request-response, ``mode=averaged``).
+v0.55.11 (F-MultiLineContinuous): adds continuous-mode operation —
+``startmeasnogui``-driven server push + adaptive decimation for STE
+workflows + burst capture for actuator workflows. Stage 2 (deformation
+analysis, channel alignment, MLAC/AC operations, frontend splitter /
+shutter control) is intentionally out of scope and lives in a separate
+spec.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.transport.tcp import TCPTransport, TCPTransportError
@@ -95,6 +104,16 @@ def _parse_channeldata_response(response: str) -> tuple[list[_ChannelData], int]
     return channels, server_error
 
 
+# v0.55.11 — continuous-mode cycle snapshot. The Etalon protocol bundles
+# per-channel measurement + per-channel env (T/P/RH) into a single
+# `channeldata_` push, so the cycle is fully described by the channel
+# list + a wall-clock timestamp recorded on receipt.
+@dataclass(frozen=True, slots=True)
+class CycleSnapshot:
+    timestamp: float  # Unix wall-clock seconds (used in Reading + Parquet)
+    channels: tuple[_ChannelData, ...]
+
+
 def _parse_environmentdata_response(response: str) -> tuple[float, float, float]:
     """Parse `environmentdata_<T>,<P>,<H>` -> (temp_c, pressure_hpa, humidity_pct)."""
     if not response.startswith("environmentdata_"):
@@ -137,6 +156,11 @@ class MultiLineDriver(InstrumentDriver):
     _MIN_CHANNELS = 1
     _MAX_CHANNELS = 32
 
+    # v0.55.11 — driver operating modes.
+    MODE_AVERAGED = "averaged"
+    MODE_CONTINUOUS = "continuous"
+    _VALID_MODES = (MODE_AVERAGED, MODE_CONTINUOUS)
+
     def __init__(
         self,
         name: str,
@@ -148,6 +172,9 @@ class MultiLineDriver(InstrumentDriver):
         connect_timeout_s: float = 5.0,
         read_timeout_s: float = 10.0,
         mock: bool = False,
+        mode: str = MODE_AVERAGED,
+        target_rate_hz: float = 1.0,
+        burst_dir: Path | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         self._host = host
@@ -166,10 +193,48 @@ class MultiLineDriver(InstrumentDriver):
         self._channel_numbers = resolved
         self._connect_timeout_s = connect_timeout_s
         self._read_timeout_s = read_timeout_s
+        # v0.55.11 — operating mode + decimation rate. Validated up-front
+        # so configuration mistakes surface at engine boot rather than at
+        # the first read_channels() tick.
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"MultiLine mode must be one of {self._VALID_MODES}, got {mode!r}"
+            )
+        if target_rate_hz <= 0:
+            raise ValueError(
+                f"MultiLine target_rate_hz must be > 0, got {target_rate_hz!r}"
+            )
+        self._mode = mode
+        self._target_rate_hz = float(target_rate_hz)
+        self._target_interval_s = 1.0 / self._target_rate_hz
+        # Burst-capture default sink — engine wires its own DATA_DIR-based
+        # path; tests pass tmp_path. None falls back to a CWD-relative
+        # ``data/multiline_bursts`` so a smoke run still has a place to
+        # land the blob.
+        self._burst_dir = burst_dir
         self._transport: TCPTransport | None = None
         self._mock_nominal_lengths_mm = {
             ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers
         }
+        # Continuous-mode state. _last_cycle is a single-slot buffer the
+        # listener task fills; read_channels() snapshots it under the
+        # decimation gate. Burst capture appends every cycle to
+        # _burst_buffer regardless of decimation so the post-hoc Parquet
+        # blob has the full hardware cadence.
+        self._last_cycle: CycleSnapshot | None = None
+        self._last_emit_mono: float | None = None
+        self._listener_task: asyncio.Task[None] | None = None
+        self._first_cycle_logged = False
+        self._listener_started_mono: float | None = None
+        self._burst_active = False
+        self._burst_buffer: list[CycleSnapshot] = []
+        self._burst_started_ts: float | None = None
+        self._burst_started_iso: str | None = None
+        # Active-experiment id is supplied by the engine when burst_stop
+        # is invoked (so the driver does not need an ExperimentManager
+        # back-reference). Storing it in burst_start lets a long-running
+        # burst tag itself even if the experiment is finalised mid-burst.
+        self._burst_experiment_id: str | None = None
 
     @classmethod
     def _validate_channel_numbers(cls, channels: list[int]) -> None:
@@ -206,16 +271,50 @@ class MultiLineDriver(InstrumentDriver):
         except (TCPTransportError, ValueError) as exc:
             logger.error("MultiLine '%s' connect verify failed: %s", self.name, exc)
         self._connected = True
+        # v0.55.11 — spawn the continuous listener AFTER the verify queries
+        # finish; the listener owns the read stream from that point and
+        # any further query() would race it for readline buffer.
+        if self._mode == self.MODE_CONTINUOUS:
+            self._listener_started_mono = time.monotonic()
+            self._first_cycle_logged = False
+            self._listener_task = asyncio.create_task(
+                self._continuous_listener(), name=f"multiline_listener_{self.name}"
+            )
 
     async def disconnect(self) -> None:
+        # v0.55.11 — cancel listener first so its stopmeasnogui handshake
+        # writes to the still-open transport, then close.
+        if self._listener_task is not None:
+            self._listener_task.cancel()
+            try:
+                await asyncio.wait_for(self._listener_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "MultiLine '%s' listener cancel raised: %s", self.name, exc
+                )
+            self._listener_task = None
+        # If a burst was in flight when the operator disconnected, drop
+        # the buffer rather than half-persist it. burst_stop must be the
+        # explicit close path so partial saves are operator-driven.
+        self._burst_active = False
+        self._burst_buffer = []
+        self._burst_started_ts = None
+        self._burst_started_iso = None
+        self._burst_experiment_id = None
         if self._transport is not None:
             await self._transport.close()
             self._transport = None
         self._connected = False
+        self._last_cycle = None
+        self._last_emit_mono = None
 
     async def read_channels(self) -> list[Reading]:
         if self.mock:
             return self._mock_readings()
+        if self._mode == self.MODE_CONTINUOUS:
+            return self._read_channels_continuous()
         if self._transport is None:
             raise TCPTransportError("Driver not connected")
 
@@ -274,6 +373,314 @@ class MultiLineDriver(InstrumentDriver):
             return []
 
         return readings
+
+    # ------------------------------------------------------------------
+    # v0.55.11 — continuous-mode listener + decimated emit + burst API
+    # ------------------------------------------------------------------
+
+    async def _continuous_listener(self) -> None:
+        """Read pushed cycles from the server and fill ``_last_cycle``.
+
+        Sends ``startmeasnogui`` once, then drains the streaming
+        iterator until cancelled. The first parsed cycle records the
+        empirical cycle latency (architect-requested smoke instrument).
+        On cancellation, sends ``stopmeasnogui`` so the server returns
+        to idle rather than continuing to push into a closed socket.
+        Channeldata parse failures are warnings only; the loop survives
+        a single malformed response so a flaky measurement does not
+        kill the entire continuous session.
+        """
+        if self._transport is None:
+            return
+        try:
+            await self._transport.write_command("startmeasnogui")
+            async for line in self._transport.read_lines_async():
+                if not line:
+                    continue
+                if line == "measstarted" or line == "measurementfinished":
+                    continue
+                if line == "measstopped":
+                    break
+                if line.startswith("defanadata_"):
+                    # Deformation analysis — F-MultiLineDeformation scope.
+                    continue
+                if line.startswith("channeldata_"):
+                    try:
+                        channel_data, _server_error = _parse_channeldata_response(line)
+                    except ValueError as exc:
+                        logger.warning(
+                            "MultiLine '%s' cycle parse failed: %s",
+                            self.name, exc,
+                        )
+                        continue
+                    snapshot = CycleSnapshot(
+                        timestamp=time.time(),
+                        channels=tuple(channel_data),
+                    )
+                    self._last_cycle = snapshot
+                    if not self._first_cycle_logged and self._listener_started_mono is not None:
+                        elapsed = time.monotonic() - self._listener_started_mono
+                        logger.info(
+                            "MultiLine '%s' first cycle received after %.2fs",
+                            self.name, elapsed,
+                        )
+                        self._first_cycle_logged = True
+                    if self._burst_active:
+                        self._burst_buffer.append(snapshot)
+        except asyncio.CancelledError:
+            try:
+                if self._transport is not None:
+                    await asyncio.wait_for(
+                        self._transport.write_command("stopmeasnogui"),
+                        timeout=2.0,
+                    )
+            except (TCPTransportError, asyncio.TimeoutError, OSError) as exc:
+                logger.warning(
+                    "MultiLine '%s' stopmeasnogui on cancel failed: %s",
+                    self.name, exc,
+                )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "MultiLine '%s' continuous listener crashed: %s",
+                self.name, exc, exc_info=True,
+            )
+
+    def _read_channels_continuous(self) -> list[Reading]:
+        """Return the decimated cycle as a Reading list (or empty)."""
+        cycle = self._last_cycle
+        if cycle is None:
+            return []
+        # Decimation gate uses monotonic clock so wall-clock skew (NTP
+        # corrections, leap seconds) cannot starve emission. First emit
+        # always passes — _last_emit_mono is None until first read.
+        now_mono = time.monotonic()
+        if self._last_emit_mono is not None:
+            if (now_mono - self._last_emit_mono) < self._target_interval_s:
+                return []
+        self._last_emit_mono = now_mono
+        return self._cycle_to_readings(cycle)
+
+    def _cycle_to_readings(self, cycle: CycleSnapshot) -> list[Reading]:
+        readings: list[Reading] = []
+        ts = datetime.fromtimestamp(cycle.timestamp, tz=UTC)
+        for ch in cycle.channels:
+            status = self._status_from_errors(ch)
+            readings.append(
+                Reading(
+                    timestamp=ts,
+                    channel=f"{self.name}/length_ch{ch.channel_number}",
+                    value=ch.length_mm,
+                    unit="mm",
+                    instrument_id=self.name,
+                    status=status,
+                    metadata={
+                        "intensity_min": ch.intensity_min,
+                        "intensity_max": ch.intensity_max,
+                        "temperature_c": ch.temperature_c,
+                        "pressure_hpa": ch.pressure_hpa,
+                    },
+                )
+            )
+        # Per-channel records carry env (T/P/RH); use the first channel's
+        # values as the cycle-level env reading. Continuous mode does NOT
+        # poll `environmentdata` separately — it would race the listener
+        # for readline buffer (constraint per spec).
+        if cycle.channels:
+            first = cycle.channels[0]
+            readings.append(
+                Reading(
+                    timestamp=ts,
+                    channel=f"{self.name}/env_temperature",
+                    value=first.temperature_c,
+                    unit="°C",
+                    instrument_id=self.name,
+                )
+            )
+            readings.append(
+                Reading(
+                    timestamp=ts,
+                    channel=f"{self.name}/env_pressure",
+                    value=first.pressure_hpa,
+                    unit="hPa",
+                    instrument_id=self.name,
+                )
+            )
+            readings.append(
+                Reading(
+                    timestamp=ts,
+                    channel=f"{self.name}/env_humidity",
+                    value=first.humidity_pct,
+                    unit="%",
+                    instrument_id=self.name,
+                )
+            )
+        return readings
+
+    def burst_status(self) -> dict[str, Any]:
+        elapsed = 0.0
+        if self._burst_started_ts is not None:
+            elapsed = max(0.0, time.time() - self._burst_started_ts)
+        return {
+            "active": self._burst_active,
+            "elapsed_s": elapsed,
+            "cycle_count": len(self._burst_buffer),
+            "started_iso": self._burst_started_iso,
+        }
+
+    async def burst_start(self, *, experiment_id: str | None = None) -> None:
+        if self._mode != self.MODE_CONTINUOUS:
+            raise RuntimeError(
+                "Burst capture requires continuous mode "
+                f"(driver '{self.name}' currently in {self._mode!r})"
+            )
+        if self._burst_active:
+            raise RuntimeError(f"Burst already active for '{self.name}'")
+        self._burst_active = True
+        self._burst_started_ts = time.time()
+        self._burst_started_iso = (
+            datetime.fromtimestamp(self._burst_started_ts, tz=UTC)
+            .strftime("%Y%m%dT%H%M%SZ")
+        )
+        self._burst_experiment_id = experiment_id
+        self._burst_buffer = []
+
+    async def burst_stop(
+        self,
+        *,
+        experiments_root: Path | None = None,
+    ) -> Path | None:
+        """Stop accumulation and persist the buffered cycles to Parquet.
+
+        Returns the artifact path on success, ``None`` when the burst
+        was empty (no cycles received). The caller (engine command
+        handler) supplies ``experiments_root`` so the driver does not
+        need a back-reference to the engine's DATA_DIR — that decoupling
+        keeps the driver unit-testable with ``tmp_path``.
+        """
+        if not self._burst_active:
+            return None
+        self._burst_active = False
+        snapshots = self._burst_buffer
+        started_ts = self._burst_started_ts or time.time()
+        started_iso = self._burst_started_iso or (
+            datetime.fromtimestamp(started_ts, tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        )
+        experiment_id = self._burst_experiment_id
+        # Reset state regardless of whether persist runs — failed persist
+        # must not leave the next burst unable to start.
+        self._burst_buffer = []
+        self._burst_started_ts = None
+        self._burst_started_iso = None
+        self._burst_experiment_id = None
+        if not snapshots:
+            return None
+        return await asyncio.to_thread(
+            self._persist_burst,
+            snapshots,
+            started_iso,
+            experiment_id,
+            experiments_root,
+        )
+
+    def _persist_burst(
+        self,
+        snapshots: list[CycleSnapshot],
+        started_iso: str,
+        experiment_id: str | None,
+        experiments_root: Path | None,
+    ) -> Path:
+        """Write a Parquet blob with all 17 channeldata fields per row.
+
+        Schema (one row per channel per cycle):
+        cycle_ts, channel_index, length_mm, intensity_min, intensity_max,
+        temperature_c, pressure_hpa, humidity_pct,
+        analysis_error, beam_break, temp_error, motion_tolerance_error,
+        intensity_error, usb_error, dll_error, laser_speed_error,
+        laser_temp_error, daq_error.
+        """
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        rows: dict[str, list[Any]] = {
+            "cycle_ts": [],
+            "channel_index": [],
+            "length_mm": [],
+            "intensity_min": [],
+            "intensity_max": [],
+            "temperature_c": [],
+            "pressure_hpa": [],
+            "humidity_pct": [],
+            "analysis_error": [],
+            "beam_break": [],
+            "temp_error": [],
+            "motion_tolerance_error": [],
+            "intensity_error": [],
+            "usb_error": [],
+            "dll_error": [],
+            "laser_speed_error": [],
+            "laser_temp_error": [],
+            "daq_error": [],
+        }
+        for snap in snapshots:
+            for ch in snap.channels:
+                rows["cycle_ts"].append(snap.timestamp)
+                rows["channel_index"].append(ch.channel_number)
+                rows["length_mm"].append(ch.length_mm)
+                rows["intensity_min"].append(ch.intensity_min)
+                rows["intensity_max"].append(ch.intensity_max)
+                rows["temperature_c"].append(ch.temperature_c)
+                rows["pressure_hpa"].append(ch.pressure_hpa)
+                rows["humidity_pct"].append(ch.humidity_pct)
+                rows["analysis_error"].append(ch.analysis_error)
+                rows["beam_break"].append(ch.beam_break)
+                rows["temp_error"].append(ch.temp_error)
+                rows["motion_tolerance_error"].append(ch.motion_tolerance_error)
+                rows["intensity_error"].append(ch.intensity_error)
+                rows["usb_error"].append(ch.usb_error)
+                rows["dll_error"].append(ch.dll_error)
+                rows["laser_speed_error"].append(ch.laser_speed_error)
+                rows["laser_temp_error"].append(ch.laser_temp_error)
+                rows["daq_error"].append(ch.daq_error)
+        out_dir = self._resolve_burst_dir(experiment_id, experiments_root)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Resolve early so a malicious experiment id cannot escape via
+        # path traversal — _resolve_burst_dir already strips separators
+        # and parent refs, but we double-check the final dir is inside
+        # the chosen root.
+        out_path = out_dir / f"multiline_burst_{started_iso}.parquet"
+        table = pa.table(rows)
+        pq.write_table(table, out_path)
+        logger.info(
+            "MultiLine '%s' burst persisted: %d cycles → %s",
+            self.name,
+            len(snapshots),
+            out_path,
+        )
+        return out_path
+
+    def _resolve_burst_dir(
+        self,
+        experiment_id: str | None,
+        experiments_root: Path | None,
+    ) -> Path:
+        """Pick the burst output directory.
+
+        Active experiment → ``<experiments_root>/<experiment_id>/``.
+        No experiment → driver's configured ``_burst_dir`` or
+        ``data/multiline_bursts`` relative to CWD as final fallback.
+
+        ``experiment_id`` is sanitised against directory traversal —
+        callers route operator-supplied ids through here so a malicious
+        id cannot write outside the experiment root.
+        """
+        if experiment_id and experiments_root is not None:
+            safe_id = experiment_id.replace("/", "_").replace("\\", "_")
+            safe_id = safe_id.replace("..", "_")
+            return Path(experiments_root) / safe_id
+        if self._burst_dir is not None:
+            return Path(self._burst_dir)
+        return Path("data") / "multiline_bursts"
 
     @staticmethod
     def _status_from_errors(ch: _ChannelData) -> ChannelStatus:

@@ -56,6 +56,20 @@ instruments:
   # Operator override `host` and `channels` in instruments.local.yaml
   # for the actual lab PC. Defaults below are placeholders; the driver
   # returns [] on connect failure so the scheduler retries gracefully.
+  #
+  # v0.55.11 (F-MultiLineContinuous) — optional continuous-mode keys:
+  #   mode: averaged | continuous       (default: averaged)
+  #   target_rate_hz: <float>           (default: 1.0; only used when
+  #                                      mode=continuous; sets the
+  #                                      decimation rate for emitted
+  #                                      Reading objects — burst capture
+  #                                      bypasses decimation and stores
+  #                                      every cycle in Parquet)
+  # In averaged mode the driver continues to issue latestlengthvalid
+  # per scheduler tick (request-response). Continuous mode spawns a
+  # background listener after `startmeasnogui`; environment readings
+  # arrive bundled inside each channeldata cycle (no separate
+  # environmentdata polling).
   - type: etalon_multiline
     name: "MultiLine_1"
     host: "localhost"
@@ -64,6 +78,8 @@ instruments:
     poll_interval_s: 2.0
     connect_timeout_s: 5.0
     read_timeout_s: 10.0
+    mode: averaged
+    target_rate_hz: 1.0
 
 chamber:
   volume_l: 0.0  # OPERATOR: set actual chamber volume in litres

@@ -1049,6 +1049,12 @@ def _load_drivers(
             # convenience ``channel_count`` integer (1..32). Driver
             # validates the resolved set; failure raises ValueError and
             # the engine drops the entry with the existing logger path.
+            # v0.55.11: also pass ``mode`` (averaged|continuous) and
+            # ``target_rate_hz`` so continuous-mode deployments can
+            # opt-in via config without code changes. Burst dir defaults
+            # to ``<DATA_DIR>/multiline_bursts`` so the fallback path
+            # (no active experiment) lands inside the data root rather
+            # than CWD.
             _ml_channels = entry.get("channels")
             _ml_channel_count = entry.get("channel_count")
             driver = MultiLineDriver(
@@ -1059,6 +1065,9 @@ def _load_drivers(
                 channel_count=(int(_ml_channel_count) if _ml_channel_count else None),
                 connect_timeout_s=float(entry.get("connect_timeout_s", 5.0)),
                 read_timeout_s=float(entry.get("read_timeout_s", 10.0)),
+                mode=str(entry.get("mode", "averaged")),
+                target_rate_hz=float(entry.get("target_rate_hz", 1.0)),
+                burst_dir=_DATA_DIR / "multiline_bursts",
                 mock=mock,
             )
         else:
