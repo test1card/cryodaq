@@ -196,8 +196,10 @@ async def test_fired_recovery_returns_to_watching():
 
 @pytest.mark.asyncio
 async def test_auto_disarm_on_high_progress():
-    """Progress >= 0.95 → AUTO_DISARMED."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    """Progress >= 0.95 → AUTO_DISARMED → WATCHDOG (watchdog_enabled=True)."""
+    # v0.55.4 A3: watchdog_enabled default flipped to False; this test
+    # specifically exercises the watchdog path so opts in explicitly.
+    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={"watchdog_enabled": True})
     alarm._model = _fake_model()
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
@@ -219,8 +221,10 @@ async def test_auto_disarm_on_high_progress():
 
 @pytest.mark.asyncio
 async def test_auto_disarm_on_base_temp():
-    """T_cold <= base_temp_K → AUTO_DISARMED then immediately WATCHDOG (watchdog_enabled default)."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    """T_cold <= base_temp_K → AUTO_DISARMED → WATCHDOG (watchdog_enabled=True)."""
+    # v0.55.4 A3: watchdog_enabled default flipped to False; opt in
+    # explicitly to exercise the watchdog path.
+    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={"watchdog_enabled": True})
     alarm._model = _fake_model()
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
@@ -271,8 +275,8 @@ async def test_cold_channel_stale_skips_tick():
 
 @pytest.mark.asyncio
 async def test_auto_disarmed_enters_watchdog_when_enabled():
-    """AUTO_DISARMED → WATCHDOG immediately when watchdog_enabled=True (default)."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    """AUTO_DISARMED → WATCHDOG when watchdog_enabled=True (opt-in v0.55.4)."""
+    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={"watchdog_enabled": True})
     alarm._model = _fake_model()
     alarm._t_armed = time.monotonic() - 70 * 3600
     alarm._state = CooldownState.WATCHING
@@ -437,3 +441,102 @@ async def test_finalize_disarms_any_active_state():
             f"Expected DISARMED after finalize from {initial_state.name}, "
             f"got {alarm.state.name}"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.55.4 — auto-arm + quasi-steady gate + watchdog default flip
+# ---------------------------------------------------------------------------
+
+
+def test_auto_arm_default_enabled():
+    """v0.55.4 A1: auto_arm defaults to True so the engine wires up
+    auto-arm on cooldown phase entry without operator config.
+    """
+    alarm, _, _, _ = _make_alarm()
+    assert alarm.is_auto_arm_enabled is True
+
+
+def test_auto_arm_can_be_disabled_via_config():
+    alarm, _, _, _ = _make_alarm(cfg_overrides={"auto_arm": False})
+    assert alarm.is_auto_arm_enabled is False
+
+
+def test_watchdog_disabled_by_default():
+    """v0.55.4 A3: watchdog default flipped to False per architect rule.
+    AUTO_DISARMED stays terminal — no automatic WATCHDOG escalation.
+    """
+    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    alarm._model = _fake_model()
+    alarm._t_armed = time.monotonic() - 70 * 3600
+    alarm._state = CooldownState.WATCHING
+
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 4.5 if "Т12" in ch else 80.0)
+    with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
+        mock_pred.return_value = MagicMock(progress=0.92, t_remaining_hours=2.0)
+        with patch(
+            "cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event",
+            new_callable=AsyncMock,
+        ):
+            asyncio.run(alarm.tick())
+    assert alarm.state == CooldownState.AUTO_DISARMED
+
+
+@pytest.mark.asyncio
+async def test_quasi_steady_skips_deviation_check():
+    """v0.55.4 A2: when SteadyStatePredictor reports the cold channel
+    is_quasi_steady=True, the deviation evaluation must short-circuit
+    so gas-desorption drift doesn't masquerade as trajectory divergence.
+    """
+    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    alarm._model = _fake_model()
+    alarm._t_armed = time.monotonic() - 70 * 3600
+    alarm._state = CooldownState.WATCHING
+    alarm._sustained_count = 1
+
+    quasi_pred = MagicMock(is_quasi_steady=True)
+    ss_pred = MagicMock()
+    ss_pred.get_prediction = MagicMock(return_value=quasi_pred)
+    alarm.set_steady_state_predictor(ss_pred)
+
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 6.5 if "Т12" in ch else 80.0)
+    with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
+        mock_pred.return_value = MagicMock(progress=0.5, t_remaining_hours=10.0)
+        with patch(
+            "cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event",
+            new_callable=AsyncMock,
+        ):
+            await alarm.tick()
+
+    # Deviation check skipped — predictor never invoked, sustained reset.
+    mock_pred.assert_not_called()
+    assert alarm._sustained_count == 0
+    assert alarm.state == CooldownState.WATCHING
+
+
+@pytest.mark.asyncio
+async def test_quasi_steady_clears_active_fired():
+    """v0.55.4 A2: a FIRED alarm transitions back to WATCHING and
+    clears via the state manager once the cold channel reports
+    is_quasi_steady=True.
+    """
+    alarm, tracker, alarm_mgr, _ = _make_alarm()
+    alarm._model = _fake_model()
+    alarm._t_armed = time.monotonic() - 70 * 3600
+    alarm._state = CooldownState.FIRED
+    alarm._sustained_count = 5
+
+    quasi_pred = MagicMock(is_quasi_steady=True)
+    ss_pred = MagicMock()
+    ss_pred.get_prediction = MagicMock(return_value=quasi_pred)
+    alarm.set_steady_state_predictor(ss_pred)
+
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 6.5 if "Т12" in ch else 80.0)
+    with patch(
+        "cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event",
+        new_callable=AsyncMock,
+    ):
+        await alarm.tick()
+
+    assert alarm.state == CooldownState.WATCHING
+    assert alarm._sustained_count == 0
+    alarm_mgr.process.assert_any_call("cooldown_alarm", None, {})

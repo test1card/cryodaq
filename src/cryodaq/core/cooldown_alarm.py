@@ -60,10 +60,17 @@ class CooldownAlarm:
         state_tracker: ChannelStateTracker,
         alarm_state_mgr: AlarmStateManager,
         event_bus: EventBus,
+        steady_state_predictor: Any = None,
     ) -> None:
         self._state_tracker = state_tracker
         self._alarm_state_mgr = alarm_state_mgr
         self._event_bus = event_bus
+        # v0.55.4 A2: optional SteadyStatePredictor reference. When the
+        # predictor reports is_quasi_steady=True for the cold channel,
+        # the deviation check is skipped — system already settled,
+        # gas-desorption drift would otherwise look like trajectory
+        # divergence to the curve-fit predictor.
+        self._steady_state_predictor = steady_state_predictor
 
         self._cold_ch: str = cfg.get("cold_channel", "Т12")
         self._warm_ch: str = cfg.get("warm_channel", "Т11")
@@ -75,8 +82,17 @@ class CooldownAlarm:
         self._eta_slip_window_min: float = float(cfg.get("eta_slip_window_min", 60))
         self._eta_slip_threshold_h: float = float(cfg.get("eta_slip_message_threshold_h", 0.5))
 
-        # Watchdog config
-        self._watchdog_enabled: bool = bool(cfg.get("watchdog_enabled", True))
+        # v0.55.4 A1: opt-in auto-arm on cooldown phase entry. Engine
+        # consults `is_auto_arm_enabled` after a phase transition and
+        # calls arm() when true; operator can still disarm manually.
+        self._auto_arm: bool = bool(cfg.get("auto_arm", True))
+
+        # Watchdog config — v0.55.4 A3: default flipped to False per
+        # architect rule. If post-cooldown drift bumps the system back
+        # out of quasi-steady, CooldownAlarm WATCHING catches it via
+        # the predictor — no separate watchdog logic needed for the
+        # contest demo. Single config flip restores it.
+        self._watchdog_enabled: bool = bool(cfg.get("watchdog_enabled", False))
         self._watchdog_margin_K: float = float(cfg.get("watchdog_margin_K", 1.0))
         self._watchdog_level: str = str(cfg.get("watchdog_level", "WARNING"))
         _watchdog_sustained_s: float = float(cfg.get("watchdog_sustained_s", 300.0))
@@ -103,6 +119,21 @@ class CooldownAlarm:
     @property
     def state(self) -> CooldownState:
         return self._state
+
+    @property
+    def is_auto_arm_enabled(self) -> bool:
+        """v0.55.4 A1: engine consults this after a phase transition
+        into cooldown. When True it calls arm() automatically;
+        operator retains manual disarm via «Контроль захолаживания».
+        """
+        return self._auto_arm
+
+    def set_steady_state_predictor(self, predictor: Any) -> None:
+        """Engine wiring for v0.55.4 A2: CooldownService creates the
+        SteadyStatePredictor after CooldownAlarm; this setter lets the
+        engine inject it once both exist without reordering bootstrap.
+        """
+        self._steady_state_predictor = predictor
 
     @property
     def current_eta_h(self) -> float | None:
@@ -235,6 +266,33 @@ class CooldownAlarm:
         if self._state == CooldownState.ARMED:
             self._state = CooldownState.WATCHING
             await self._publish_state_event()
+
+        # v0.55.4 A2 — quasi-steady gate. When SteadyStatePredictor
+        # reports the cold channel is sitting near steady, the curve-fit
+        # cooldown predictor would interpret gas-desorption drift as
+        # trajectory divergence. Skip the deviation check; if currently
+        # FIRED, drop back to WATCHING and clear the alarm. If the system
+        # later warms back up, SteadyStatePredictor will exit
+        # is_quasi_steady=True naturally and this branch stops short-
+        # circuiting — WATCHING resumes the deviation evaluation.
+        if self._steady_state_predictor is not None:
+            try:
+                ss_pred = self._steady_state_predictor.get_prediction(self._cold_ch)
+            except Exception:
+                ss_pred = None
+            if ss_pred is not None and getattr(ss_pred, "is_quasi_steady", False):
+                if self._state == CooldownState.FIRED:
+                    self._state = CooldownState.WATCHING
+                    self._sustained_count = 0
+                    self._alarm_state_mgr.process(ALARM_ID, None, {})
+                    await self._publish_state_event()
+                    logger.info(
+                        "CooldownAlarm: quasi-steady — FIRED → WATCHING (T_cold=%.2f K)",
+                        T_cold,
+                    )
+                else:
+                    self._sustained_count = 0
+                return
 
         # --- Predictor evaluation ---
         try:

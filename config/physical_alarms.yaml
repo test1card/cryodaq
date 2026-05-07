@@ -20,11 +20,23 @@ cooldown:
   # Auto-disarm criteria
   auto_disarm_progress: 0.95
 
+  # v0.55.4 A1: engine auto-calls arm() when an experiment transitions
+  # into the cooldown phase. Operator retains manual disarm via the
+  # «Контроль захолаживания» footer button on the alarm panel.
+  auto_arm: true
+
   # Watchdog mode — activated automatically after AUTO_DISARMED (cooldown complete).
   # Monitors T_cold against a fixed threshold; fires WARNING if T_cold climbs
   # above base_temp_K + watchdog_margin_K for watchdog_sustained_min consecutive ticks.
   # Clears when operator calls disarm() or experiment is finalized.
-  watchdog_enabled: true
+  #
+  # Architect rule (2026-05-07): post-cooldown watchdog disabled by
+  # default. If the system warms back up after settling, the
+  # SteadyStatePredictor exits is_quasi_steady=True, CooldownAlarm
+  # WATCHING resumes the deviation check, and the regular path catches
+  # it — separate watchdog logic is no longer needed for the contest
+  # demo. Single config flip restores it.
+  watchdog_enabled: false
   watchdog_margin_K: 1.0             # Т12 threshold = base_temp_K + this (default 6.0 K)
   watchdog_sustained_s: 300          # seconds Т12 must stay above threshold before firing
   watchdog_level: WARNING

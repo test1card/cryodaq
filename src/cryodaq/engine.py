@@ -1967,6 +1967,25 @@ async def _run_engine(*, mock: bool = False) -> None:
                             experiment_id=_active.experiment_id if _active else None,
                         )
                     )
+                    # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
+                    # entry. Operator can still disarm manually via the
+                    # alarm panel footer button. Idempotent: arm() is a
+                    # no-op if already armed.
+                    if (
+                        phase == "cooldown"
+                        and _cooldown_alarm is not None
+                        and _cooldown_alarm.is_auto_arm_enabled
+                    ):
+                        try:
+                            armed = _cooldown_alarm.arm()
+                            logger.info(
+                                "CooldownAlarm: auto-arm на phase=cooldown → %s",
+                                "ARMED" if armed else "FAILED (no model)",
+                            )
+                        except Exception as _exc:
+                            logger.warning(
+                                "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True
+                            )
                 return result
             if action == "calibration_acquisition_status":
                 return {"ok": True, **calibration_acquisition.stats}
@@ -2124,6 +2143,13 @@ async def _run_engine(*, mock: bool = False) -> None:
                     model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
                 )
                 logger.info("CooldownService создан")
+                # v0.55.4 A2: hand the cooldown_service-owned
+                # SteadyStatePredictor to CooldownAlarm so its WATCHING
+                # path can short-circuit when the system is quasi-steady.
+                if _cooldown_alarm is not None:
+                    _cooldown_alarm.set_steady_state_predictor(
+                        cooldown_service._ss_predictor
+                    )
         except Exception as exc:
             logger.error("Ошибка создания CooldownService: %s", exc)
 
