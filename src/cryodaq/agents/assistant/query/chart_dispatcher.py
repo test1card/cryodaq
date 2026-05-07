@@ -37,6 +37,9 @@ class ChartDispatcher:
 
     def __init__(self, send_photo: SendPhoto) -> None:
         self._send_photo = send_photo
+        # H5: strong-ref task set against asyncio's weak-ref GC of
+        # fire-and-forget tasks. Mirrors engine _alarm_dispatch_tasks.
+        self._tasks: set[asyncio.Task] = set()
 
     def dispatch(
         self,
@@ -55,6 +58,8 @@ class ChartDispatcher:
             self._maybe_send(category, data, chat_id),
             name="chart_dispatch",
         )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         task.add_done_callback(_log_task_exception)
 
     async def _maybe_send(
