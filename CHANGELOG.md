@@ -153,11 +153,14 @@
 
 Closing commit: `c48b501`.
 
+### Added
+
+- **Stacked predictor readout** — single-horizon readout заменён на стек
+  из 6 горизонтов (1/3/6/12/24/48ч). Каждая строка показывает значение
+  и CI независимо. Cycle 1 (`88f7331`).
+
 ### Changed
 
-- **Predictor readout** — заменён single-horizon readout на стек из 6
-  горизонтов (1/3/6/12/24/48ч). Каждая строка показывает значение и CI
-  независимо. Cycle 1 (`88f7331`).
 - **Horizon button X-range wiring** — кнопки заголовка управляют
   X-диапазоном графика через `_apply_x_range()` (cycle 2, `c48b501`).
   Right edge = `time.time() + horizon*3600`, left edge = первый history
@@ -184,13 +187,18 @@ Closing commit: `fcd717f`.
 
 ### Added
 
-- **F-ReplayPredictor** — bolt `CooldownService` onto `ReplayEngine` via
-  DataBroker insertion. CooldownService subscribes to broker, processes
-  readings, publishes derived metrics back through broker → PUB → ZMQ
-  socket. Predictor widget активируется при replay реальных cooldown
-  curves в Mac mock. Defensive channel override (Т12/Т11) в
-  `ReplayEngine` handles `cooldown.yaml` drift без затрагивания real-lab
-  config.
+- **F-ReplayPredictor** — bolt `CooldownService` onto `ReplayEngine`.
+  Predictor widget активируется при replay реальных cooldown curves в
+  Mac mock.
+
+### Changed
+
+- **ReplayEngine instrumentation** — DataBroker inserted between source
+  and PUB queue. CooldownService subscribes to the broker, processes
+  readings, and publishes derived metrics back through broker → PUB →
+  ZMQ socket.
+- Defensive channel override (Т12/Т11) in `ReplayEngine` handles
+  `cooldown.yaml` drift without touching real-lab config.
 
 ### Fixed
 
@@ -220,22 +228,27 @@ Closing commit: `a502814` (late hotfix moved tag forward from
 
 ### Added
 
-- **F-Replay 5-stage replay mode**:
+- **F-Replay replay mode** — 5-stage operator-visible replay path:
   - Stage 1 (`4efac0c`) — schema fix.
   - Stage 2 (`7795ab9`) — replay transforms + CLI.
-  - Stage 3 (`7d0a22c`) — `replay_engine`: PUB+REP+heartbeat parity,
-    port refuse, `--force-replay` flag.
   - Stage 4 (`fef291d`) — launcher `--replay`, `TopWatchBar` badge,
     source listing.
   - Stage 4b (`33dc1b0`) — UX polish: timestamp shift, badge dispatch,
     title persistence.
-  - Stage 4c (`1bd3b13`) — `DirectoryReplay` non-empty-first-file fix.
   - Stage 5 (`e4da30a`) — predictor bootstrap hint + operator doc.
+
+### Changed
+
+- **`replay_engine` cmd-plane parity** — Stage 3 (`7d0a22c`) brought
+  PUB+REP+heartbeat parity with the live engine, port-refuse handling,
+  and a `--force-replay` flag.
 
 ### Fixed
 
+- **Stage 4c** (`1bd3b13`) — `DirectoryReplay` non-empty-first-file
+  edge case.
 - **Late hotfix** (`a502814`) — `QTimer` shadowing fix from Stage 4b
-  regression caught в architect smoke test. Tag moved here from
+  regression caught in architect smoke test. Tag moved here from
   `1bd3b13`.
 
 ### Filed
