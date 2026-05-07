@@ -83,7 +83,10 @@ class PhaseStepper(QWidget):
             # per Phase III.A convention.
             border, bg, fg = theme.ACCENT, theme.SECONDARY, theme.FOREGROUND
         elif state == "past":
-            border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
+            # v0.55.2 A6: per cryodaq-primitives/phase-stepper.md, completed
+            # phases render as a filled STATUS_OK node; pending phases stay
+            # hollow on BORDER. Differentiates progress at a glance.
+            border, bg, fg = theme.STATUS_OK, theme.STATUS_OK, theme.MUTED_FOREGROUND
         else:
             border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
         pill.setStyleSheet(

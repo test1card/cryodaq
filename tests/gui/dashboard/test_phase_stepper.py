@@ -44,6 +44,21 @@ def test_pill_height_compact(app):
         assert pill.maximumHeight() == 24
 
 
+def test_past_phase_uses_status_ok_filled(app):
+    # v0.55.2 A6: passed phases render as filled STATUS_OK to give
+    # operators an at-a-glance progress cue. Spec at
+    # cryodaq-primitives/phase-stepper.md (Completed row).
+    s = PhaseStepper()
+    s.set_current_phase("cooldown")
+    # "preparation" and "vacuum" are past relative to cooldown.
+    past_ss = s._pills["preparation"].styleSheet()
+    assert theme.STATUS_OK in past_ss
+    # Future phases stay hollow on BORDER, no STATUS_OK.
+    future_ss = s._pills["teardown"].styleSheet()
+    assert theme.STATUS_OK not in future_ss
+    assert theme.BORDER in future_ss
+
+
 def test_active_phase_uses_accent_not_status_ok(app):
     # IV.2 B.2 flipped the tier convention: STATUS_OK is reserved for
     # safety/running-status semantics (engine healthy, safety SAFE).
