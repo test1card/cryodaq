@@ -93,8 +93,16 @@ class SensorCell(QFrame):
     def _build_ui(self) -> None:
         self.setObjectName("sensorCell")
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 4, 6, 4)
-        root.setSpacing(2)
+        # v0.55.2 ds-002 / ds-105: horizontal padding 6 sits between SPACE_1
+        # (4) and SPACE_2 (8) — the existing tokens. Holding the existing
+        # cell rhythm is safer for v0.55.2 than rounding to 4 (visibly
+        # tighter) or 8 (visibly looser); flagged for a follow-up that
+        # introduces a tokenised micro-step.
+        root.setContentsMargins(6, theme.SPACE_1, 6, theme.SPACE_1)
+        # v0.55.2 ds-001: vertical inter-row gap is half SPACE_1; same
+        # micro-token gap as above. Express via SPACE_1 // 2 so the
+        # value still traces back to the scale.
+        root.setSpacing(theme.SPACE_1 // 2)
 
         # Channel label (top, dim text, elided)
         self._label_widget = QLabel()
@@ -111,7 +119,7 @@ class SensorCell(QFrame):
         # Value row (center)
         value_row = QHBoxLayout()
         value_row.setContentsMargins(0, 0, 0, 0)
-        value_row.setSpacing(4)
+        value_row.setSpacing(theme.SPACE_1)
 
         self._value_widget = QLabel("\u2014")  # em dash
         self._value_widget.setStyleSheet(
@@ -139,7 +147,7 @@ class SensorCell(QFrame):
         self._status_hint_widget.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; "
             f"font-family: '{theme.FONT_UI}'; "
-            f"font-size: {theme.FONT_LABEL_SIZE - 1}px;"
+            f"font-size: {theme.FONT_SIZE_XS}px;"
         )
         root.addWidget(self._status_hint_widget)
 
@@ -170,7 +178,7 @@ class SensorCell(QFrame):
             f"background-color: {theme.SURFACE_CARD}; "
             f"border: 2px solid {border_color}; "
             f"border-radius: {theme.RADIUS_MD}px; "
-            f"padding: 4px 8px; "
+            f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
             f"}}"
         )
 
@@ -181,7 +189,7 @@ class SensorCell(QFrame):
             f"background-color: {theme.SURFACE_CARD}; "
             f"border: 2px solid {theme.STATUS_STALE}; "
             f"border-radius: {theme.RADIUS_MD}px; "
-            f"padding: 4px 8px; "
+            f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
             f"}}"
         )
 
