@@ -24,7 +24,9 @@ sensor_diagnostics:
   alarm_publishing_enabled: true   # false → diagnostics display only, no alarms
   warning_duration_s: 300.0        # 5 min sustained anomaly → warning alarm
   critical_duration_s: 900.0       # 15 min sustained anomaly → critical alarm
-  notify_telegram: true            # dispatch Telegram when alarm triggered
+  notify_telegram: false           # v0.55.5: sensor-health alarms route to GUI only;
+                                    # hourly periodic_report carries condensed digest. Telegram
+                                    # reserved for one-shot physics-critical events.
   # F20 notification polish
   aggregation_threshold: 3         # >N simultaneous events → single batch Telegram message
   escalation_cooldown_s: 120.0     # suppress re-notification within 2 min of last notify per channel

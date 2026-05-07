@@ -1532,7 +1532,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         if sensor_diag is None:
             return
         interval = _sd_cfg.get("update_interval_s", 10)
-        _notify_telegram = _sd_cfg.get("notify_telegram", True)
+        # v0.55.5: default False — sensor-health alarms route to GUI only
+        # by policy; the hourly periodic_report carries a digest section.
+        _notify_telegram = _sd_cfg.get("notify_telegram", False)
         while True:
             await asyncio.sleep(interval)
             try:
