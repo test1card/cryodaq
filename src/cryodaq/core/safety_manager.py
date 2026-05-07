@@ -683,7 +683,48 @@ class SafetyManager:
             # No running loop (sync caller during tests). Publish skipped.
             pass
 
-    async def _fault(self, reason: str, *, channel: str = "", value: float = 0.0) -> None:
+    async def latch_fault(
+        self,
+        reason: str,
+        source: str,
+        *,
+        channel: str = "",
+        value: float = 0.0,
+    ) -> None:
+        """Public entry point to latch FAULT_LATCHED.
+
+        Triggers ``emergency_off``, latches the safety FSM in
+        ``FAULT_LATCHED``, blocks future ``request_run()`` until the
+        operator acknowledges. Use ТОЛЬКО for verified safety events
+        (sensor disconnect, threshold breach, alarm CRITICAL).
+
+        Args:
+            reason: Human-readable description for audit log + Telegram
+                + operator panel.
+            source: Originating subsystem identifier
+                (e.g. ``"cooldown_alarm"``, ``"interlock"``,
+                ``"manual_emergency"``). Recorded in the operator-log
+                ``author`` field for traceability.
+            channel: Optional hardware channel involved in the fault
+                (forwarded to Keithley channel-state publishing when it
+                names ``smua`` / ``smub``).
+            value: Optional reading value at fault time, included in
+                the operator-log entry.
+
+        Idempotent under FAULT_LATCHED: a second call while already
+        latched is logged once and ignored — duplicate fault events
+        do not stack.
+        """
+        await self._fault(reason=reason, channel=channel, value=value, source=source)
+
+    async def _fault(
+        self,
+        reason: str,
+        *,
+        channel: str = "",
+        value: float = 0.0,
+        source: str = "safety_manager",
+    ) -> None:
         # Early-return guard: ignore concurrent re-entries while already latched.
         # Multiple call sites (SafetyBroker overflow, monitoring loop, channel
         # faults, start_source failure) can fire in the same tick. Without
@@ -738,7 +779,7 @@ class SafetyManager:
         if self._fault_log_callback is not None:
             log_task = asyncio.create_task(
                 self._fault_log_callback(
-                    source="safety_manager",
+                    source=source,
                     message=f"Safety fault: {reason}",
                     channel=channel,
                     value=value,

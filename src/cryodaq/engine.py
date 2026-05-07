@@ -1411,8 +1411,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                 exc_info=True,
             )
             try:
-                await safety_manager._fault(
-                    f"Interlock trip_handler failed: {condition.name}: {exc}",
+                # v0.55.12 — public latch_fault() replaces the private
+                # _fault() call (Codex audit SCOPE 1.1 follow-up).
+                await safety_manager.latch_fault(
+                    reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
+                    source="interlock",
                     channel=reading.channel,
                     value=float(reading.value) if reading.value is not None else 0.0,
                 )
@@ -1517,6 +1520,9 @@ async def _run_engine(*, mock: bool = False) -> None:
             state_tracker=_alarm_v2_state_tracker,
             alarm_state_mgr=alarm_v2_state_mgr,
             event_bus=event_bus,
+            # v0.55.12 — wire SafetyManager so CooldownAlarm CRITICAL
+            # latches the safety FSM (Codex audit SCOPE 1 finding 1.1).
+            safety_manager=safety_manager,
         )
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
     else:
@@ -2161,6 +2167,22 @@ async def _run_engine(*, mock: bool = False) -> None:
                             experiment_id=_active.experiment_id if _active else None,
                         )
                     )
+                    # v0.55.12 — feed every phase transition into the
+                    # CooldownAlarm so it can disarm itself when the
+                    # operator advances away from cooldown (Codex audit
+                    # SCOPE 1 finding 1.2) and clear its cold-start flag
+                    # on a fresh cooldown entry (finding 1.5). Runs
+                    # BEFORE the auto-arm path so a phase=cooldown call
+                    # always sees a cleared flag.
+                    if _cooldown_alarm is not None:
+                        try:
+                            _cooldown_alarm.notify_phase_change(phase)
+                        except Exception as _exc:
+                            logger.warning(
+                                "CooldownAlarm: notify_phase_change ошибка: %s",
+                                _exc,
+                                exc_info=True,
+                            )
                     # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
                     # entry. Operator can still disarm manually via the
                     # alarm panel footer button. Idempotent: arm() is a
@@ -2172,10 +2194,19 @@ async def _run_engine(*, mock: bool = False) -> None:
                     ):
                         try:
                             armed = _cooldown_alarm.arm()
-                            logger.info(
-                                "CooldownAlarm: auto-arm на phase=cooldown → %s",
-                                "ARMED" if armed else "FAILED (no model)",
-                            )
+                            if not armed and _cooldown_alarm.cold_start_skipped:
+                                # v0.55.12 — surface the skip explicitly so
+                                # the operator log shows why auto-arm
+                                # didn't engage on this phase entry.
+                                logger.info(
+                                    "CooldownAlarm: auto-arm skipped — "
+                                    "cold-start detected"
+                                )
+                            else:
+                                logger.info(
+                                    "CooldownAlarm: auto-arm на phase=cooldown → %s",
+                                    "ARMED" if armed else "FAILED (no model)",
+                                )
                         except Exception as _exc:
                             logger.warning(
                                 "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True

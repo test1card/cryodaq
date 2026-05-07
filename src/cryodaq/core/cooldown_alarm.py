@@ -61,6 +61,7 @@ class CooldownAlarm:
         alarm_state_mgr: AlarmStateManager,
         event_bus: EventBus,
         steady_state_predictor: Any = None,
+        safety_manager: Any = None,
     ) -> None:
         self._state_tracker = state_tracker
         self._alarm_state_mgr = alarm_state_mgr
@@ -71,6 +72,11 @@ class CooldownAlarm:
         # gas-desorption drift would otherwise look like trajectory
         # divergence to the curve-fit predictor.
         self._steady_state_predictor = steady_state_predictor
+        # v0.55.12 — public SafetyManager handle for CRITICAL escalation
+        # via latch_fault() (Codex audit SCOPE 1 finding 1.1). Optional
+        # so unit tests that don't care about the safety wiring can
+        # construct the alarm without a SafetyManager mock.
+        self._safety_manager = safety_manager
 
         self._cold_ch: str = cfg.get("cold_channel", "Т12")
         self._warm_ch: str = cfg.get("warm_channel", "Т11")
@@ -102,6 +108,18 @@ class CooldownAlarm:
         model_path_str = cfg.get("predictor_model_path", "data/cooldown_model/predictor_model.json")
         self._model_dir = Path(model_path_str).parent
 
+        # v0.55.12 — cold-start auto-detect (Codex audit SCOPE 1 finding 1.5).
+        # On engine restart with the cryostat already cold, auto_arm fires,
+        # arm() succeeds, and the very first tick triggers AUTO_DISARMED
+        # before the quasi-steady gate runs — leaving the alarm in a
+        # terminal state with watchdog default off. Skip arm() when the
+        # cold channel is already in [base, base + cold_start_skip_margin_K]
+        # AND (if available) SteadyStatePredictor reports quasi-steady.
+        self._cold_start_skip_margin_K: float = float(
+            cfg.get("cold_start_skip_margin_K", 5.0)
+        )
+        self._cold_start_skipped: bool = False
+
         self._state = CooldownState.DISARMED
         self._model = None               # EnsembleModel — loaded on arm()
         self._t_armed: float | None = None
@@ -110,6 +128,12 @@ class CooldownAlarm:
         self._current_progress: float | None = None
         self._current_eta_h: float | None = None
         self._finalize_requested: bool = False
+        # v0.55.12 — monotonic cycle generation, incremented on every
+        # disarm() / phase-away transition. Captured at tick() start;
+        # any in-flight tick that returns to a yield point with a stale
+        # generation aborts before publishing CRITICAL or escalating to
+        # SafetyManager (Codex audit SCOPE 1 finding 1.3).
+        self._cycle_generation: int = 0
 
         # Circular buffer of (wall_time, eta_h) for slip computation
         self._eta_history: collections.deque = collections.deque(
@@ -143,8 +167,79 @@ class CooldownAlarm:
     def current_progress(self) -> float | None:
         return self._current_progress
 
+    @property
+    def cold_start_skipped(self) -> bool:
+        """v0.55.12 — last arm() refused due to cold-start detection.
+
+        Engine reads this after auto-arm to log a clear "cold-start
+        detected, skipping" line; cleared on the next explicit
+        ``notify_phase_change("cooldown")`` call so a subsequent
+        operator-initiated cooldown re-evaluates the gate.
+        """
+        return self._cold_start_skipped
+
+    def _is_cold_start(self) -> bool:
+        """v0.55.12 — true if the cryostat is already at base T.
+
+        Detection rule (architect 2026-05-07): cold channel reading is
+        in ``[base_temp_K, base_temp_K + cold_start_skip_margin_K]`` AND
+        (if available) SteadyStatePredictor reports
+        ``is_quasi_steady=True`` for the cold channel. Stale readings
+        and a missing channel state both yield False — without fresh
+        evidence we err on the side of arming.
+        """
+        cold_state = self._state_tracker.get(self._cold_ch)
+        if cold_state is None or cold_state.is_stale:
+            return False
+
+        base_max = self._base_temp_K + self._cold_start_skip_margin_K
+        if not (self._base_temp_K <= cold_state.value <= base_max):
+            return False
+
+        # SteadyStatePredictor optional. When present, require
+        # quasi-steady on the cold channel before declaring cold-start —
+        # gas-desorption drift / late-evening recovery shouldn't count.
+        if self._steady_state_predictor is not None:
+            try:
+                ss_pred = self._steady_state_predictor.get_prediction(
+                    self._cold_ch
+                )
+            except Exception:
+                return False
+            if ss_pred is None or not getattr(ss_pred, "is_quasi_steady", False):
+                return False
+
+        return True
+
     def arm(self) -> bool:
         """Load predictor model and start monitoring. Returns False if model absent."""
+        # v0.55.12 — cold-start gate (Codex audit SCOPE 1 finding 1.5).
+        # Skip arm() entirely when the cryostat is already at base T;
+        # otherwise the very first tick runs auto_disarm and lands the
+        # alarm in terminal AUTO_DISARMED with watchdog default off.
+        if self._is_cold_start():
+            cold_state = self._state_tracker.get(self._cold_ch)
+            warm_state = self._state_tracker.get(self._warm_ch)
+            cold_str = (
+                f"{cold_state.value:.2f}" if cold_state is not None else "?"
+            )
+            warm_str = (
+                f"{warm_state.value:.2f}" if warm_state is not None else "?"
+            )
+            logger.info(
+                "CooldownAlarm: cold-start detected (T_cold=%s K, T_warm=%s K, "
+                "base=[%.1f, %.1f]) — skipping auto-arm",
+                cold_str,
+                warm_str,
+                self._base_temp_K,
+                self._base_temp_K + self._cold_start_skip_margin_K,
+            )
+            self._cold_start_skipped = True
+            return False
+        # Made it past the gate; clear flag so a stale True from a
+        # previous restart doesn't linger after the system warmed up.
+        self._cold_start_skipped = False
+
         if self._state in (
             CooldownState.AUTO_DISARMED,
             CooldownState.WATCHDOG,
@@ -188,6 +283,11 @@ class CooldownAlarm:
 
     def disarm(self) -> None:
         """Operator-requested stop. Clears all active alarms (both IDs)."""
+        # v0.55.12 — bump cycle generation FIRST so any in-flight tick
+        # that returns to a yield-point sees the stale cycle and aborts
+        # before publishing CRITICAL or escalating to SafetyManager
+        # (Codex audit SCOPE 1 finding 1.3).
+        self._cycle_generation += 1
         self._state = CooldownState.DISARMED
         self._sustained_count = 0
         self._watchdog_sustained_count = 0
@@ -202,8 +302,44 @@ class CooldownAlarm:
         """Called by engine when experiment is finalized. Transitions WATCHDOG → DISARMED."""
         self._finalize_requested = True
 
+    def notify_phase_change(self, new_phase: str) -> None:
+        """v0.55.12 — engine wires this to ``experiment_advance_phase``.
+
+        Two responsibilities (Codex audit SCOPE 1 findings 1.2 + 1.5):
+
+        - When the operator advances *into* the cooldown phase, clear
+          ``cold_start_skipped`` so the auto-arm gate re-evaluates
+          fresh (e.g. cryostat warmed up since the last skip).
+        - When the operator advances to any phase *other than*
+          cooldown while the alarm is active (ARMED / WATCHING / FIRED
+          / AUTO_DISARMED / WATCHDOG / WATCHDOG_FIRED), disarm and
+          clear active alarms — the previous behaviour left the alarm
+          stuck because only ``finalize`` cleared state.
+
+        Idempotent: a no-op if the alarm is already DISARMED and the
+        new phase is not cooldown.
+        """
+        if new_phase == "cooldown":
+            self._cold_start_skipped = False
+            return
+        if self._state == CooldownState.DISARMED:
+            return
+        logger.info(
+            "CooldownAlarm: phase=%s ≠ cooldown — disarming (was %s)",
+            new_phase,
+            self._state.value,
+        )
+        # disarm() bumps the cycle generation, so any in-flight tick
+        # that resumes will detect the stale cycle and abort.
+        self.disarm()
+
     async def tick(self) -> None:
         """Evaluate trajectory. Called every eval_interval_s by engine."""
+        # v0.55.12 — capture cycle generation; re-checked before any
+        # destructive emit (alarm-state publish, latch_fault) to detect
+        # mid-tick disarm/phase-change. Codex audit SCOPE 1 finding 1.3.
+        cycle = self._cycle_generation
+
         # Handle finalize notification — single flag, safe in asyncio single-thread
         if self._finalize_requested:
             self._finalize_requested = False
@@ -348,6 +484,7 @@ class CooldownAlarm:
 
         from cryodaq.core.alarm_v2 import AlarmEvent
 
+        just_fired = False
         if self._sustained_count >= self._sustained_min:
             slip_msg = ""
             if eta_slip_h is not None and eta_slip_h > self._eta_slip_threshold_h:
@@ -369,6 +506,7 @@ class CooldownAlarm:
                 values={self._cold_ch: T_cold, self._warm_ch: T_warm},
             )
             if self._state != CooldownState.FIRED:
+                just_fired = True
                 self._state = CooldownState.FIRED
                 await self._publish_state_event()
         else:
@@ -377,9 +515,51 @@ class CooldownAlarm:
                 self._state = CooldownState.WATCHING
                 await self._publish_state_event()
 
+        # v0.55.12 — cycle re-check before destructive emit (Codex audit
+        # SCOPE 1 finding 1.3). If disarm() or notify_phase_change() ran
+        # while we were awaiting the publish above, the captured cycle is
+        # now stale and we must NOT publish a CRITICAL on a now-DISARMED
+        # alarm.
+        if cycle != self._cycle_generation:
+            logger.info(
+                "CooldownAlarm: tick aborted — cycle invalidated (was %d, now %d)",
+                cycle,
+                self._cycle_generation,
+            )
+            return None
+
         transition = self._alarm_state_mgr.process(
             ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
         )
+
+        # v0.55.12 — escalate CRITICAL to SafetyManager via the public
+        # latch_fault() entry point (Codex audit SCOPE 1 finding 1.1).
+        # Gated on the FIRED-edge so we fire the safety latch once per
+        # cycle, not on every WATCHING tick after the alarm clears or
+        # repeats.
+        if (
+            just_fired
+            and event is not None
+            and event.level == "CRITICAL"
+            and cycle == self._cycle_generation
+            and self._safety_manager is not None
+        ):
+            try:
+                await self._safety_manager.latch_fault(
+                    reason=event.message,
+                    source="cooldown_alarm",
+                )
+            except Exception as exc:
+                # Latch failure is logged but never re-raised — the
+                # tick task must keep running so the alarm-state manager
+                # path still surfaces the CRITICAL via Telegram /
+                # operator log.
+                logger.error(
+                    "CooldownAlarm: latch_fault failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+
         return transition
 
     async def _watchdog_tick(self) -> None:

@@ -31,6 +31,18 @@ _COOLDOWN_DEFAULTS: dict[str, Any] = {
     "cold_channel": "Т12",
     "warm_channel": "Т11",
     "predictor_model_path": "data/cooldown_model/predictor_model.json",
+    # v0.55.12 — these were silently ignored before because absent from
+    # defaults; the merge logic only honours keys it recognises (Codex
+    # audit SCOPE 1 finding 1.4).
+    "auto_arm": True,
+    "watchdog_enabled": False,
+    "watchdog_margin_K": 1.0,
+    "watchdog_sustained_s": 300.0,
+    "watchdog_level": "WARNING",
+    # v0.55.12 — cold-start auto-detect threshold (skip auto-arm if the
+    # cryostat is already at base T at engine restart). Codex audit
+    # SCOPE 1 finding 1.5.
+    "cold_start_skip_margin_K": 5.0,
 }
 
 _VACUUM_DEFAULTS: dict[str, Any] = {
