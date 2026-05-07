@@ -54,7 +54,9 @@ class SQLiteReplay:
     ) -> None:
         self._running = True
         while self._running:
-            rows = _load_db_rows(self._db_path)
+            # H6: offload SQLite load to a thread — large historical files
+            # (~1 GB for 17 h cooldown) block the asyncio loop otherwise.
+            rows = await asyncio.to_thread(_load_db_rows, self._db_path)
             if not rows:
                 logger.warning("SQLiteReplay: no rows in %s", self._db_path.name)
                 break
@@ -198,7 +200,8 @@ class DirectoryReplay:
         # regression for multi-file sessions).
         first_rows: list = []
         for _db in db_files:
-            first_rows = _load_db_rows(_db)
+            # H6: offload SQLite load to a thread.
+            first_rows = await asyncio.to_thread(_load_db_rows, _db)
             if first_rows:
                 break
         if not first_rows:
