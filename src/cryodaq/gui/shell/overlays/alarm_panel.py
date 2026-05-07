@@ -654,7 +654,12 @@ class AlarmPanel(QWidget):
             return item
 
         for row_idx, alarm in enumerate(sorted_alarms):
-            chip = SeverityChip(alarm.severity)
+            # v0.55.4 A1 fix: v0.55.2 only patched the v2 path; the v1
+            # threshold-based table also has acknowledged state on
+            # `alarm.state == "acknowledged"`, so propagate the flag to
+            # SeverityChip and mute the data columns the same way.
+            acknowledged = alarm.state == "acknowledged"
+            chip = SeverityChip(alarm.severity, acknowledged=acknowledged)
             self._table.setCellWidget(row_idx, 0, chip)
             self._table.setItem(row_idx, 1, _cell(alarm.name))
             self._table.setItem(row_idx, 2, _cell(alarm.channel))
@@ -663,6 +668,12 @@ class AlarmPanel(QWidget):
             elapsed = time.monotonic() - alarm.first_triggered
             self._table.setItem(row_idx, 5, _cell(_elapsed_text(elapsed)))
             self._table.setItem(row_idx, 6, _cell(str(alarm.trigger_count), mono_font=True))
+            if acknowledged:
+                muted = QColor(theme.MUTED_FOREGROUND)
+                for col in (1, 2, 3, 4, 5, 6):
+                    item = self._table.item(row_idx, col)
+                    if item is not None:
+                        item.setForeground(muted)
             if alarm.state == "active":
                 btn = _make_ack_button(alarm.severity)
                 btn.clicked.connect(lambda _checked=False, name=alarm.name: self._acknowledge(name))
