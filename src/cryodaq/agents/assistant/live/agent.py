@@ -473,7 +473,7 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: ответ обрезан по таймауту (audit_id=%s)", audit_id)
+            logger.warning("AssistantLiveAgent: ответ обрезан по истечении времени ожидания (audit_id=%s)", audit_id)
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
