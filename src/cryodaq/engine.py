@@ -2260,7 +2260,17 @@ async def _run_engine(*, mock: bool = False) -> None:
                     default_model=_gemma_config.default_model,
                     timeout_s=_gemma_config.timeout_s,
                 )
-                _gemma_ctx = ContextBuilder(writer, experiment_manager)
+                # v0.55.5 — pass a lazy snapshot fn so the hourly periodic
+                # report can include a sensor-health digest without coupling
+                # ContextBuilder to the SensorDiagnosticsEngine instance.
+                _sd_for_ctx = sensor_diag
+                _gemma_ctx = ContextBuilder(
+                    writer,
+                    experiment_manager,
+                    sensor_diag_provider=(
+                        _sd_for_ctx.get_summary if _sd_for_ctx is not None else None
+                    ),
+                )
                 _gemma_audit = AuditLogger(
                     _DATA_DIR / "agents" / "assistant" / "audit",
                     enabled=_gemma_config.audit_enabled,

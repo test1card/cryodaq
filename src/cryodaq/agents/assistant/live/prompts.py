@@ -255,8 +255,12 @@ PERIODIC_REPORT_USER = """\
 
 Активный эксперимент: {active_experiment_summary}
 
-Алармы:
-{alarms_section}
+Физические тревоги:
+{physics_alarms_section}
+
+Здоровье датчиков (snapshot): {sensor_health_section}
+Тревоги по датчикам за окно:
+{sensor_health_alarms_section}
 
 Переходы фаз:
 {phase_transitions_section}
@@ -273,6 +277,9 @@ PERIODIC_REPORT_USER = """\
 Всего событий: {total_event_count}
 
 Сгенерируй краткую сводку для оператора в Telegram. Только русский язык.
+Раздел «Здоровье датчиков» подаётся как агрегат (всего/ОК/ПРЕД/КРИТ);
+не перечисляй отдельные подозрительные каналы, если их > 3 — упомяни
+только worst-канал из snapshot.
 """
 
 

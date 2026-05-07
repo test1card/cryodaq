@@ -48,9 +48,19 @@ class AlarmContext:
 class ContextBuilder:
     """Assembles engine state for LLM prompt construction."""
 
-    def __init__(self, sqlite_reader: Any, experiment_manager: Any) -> None:
+    def __init__(
+        self,
+        sqlite_reader: Any,
+        experiment_manager: Any,
+        sensor_diag_provider: Any | None = None,
+    ) -> None:
+        # v0.55.5 — optional zero-arg callable returning the current
+        # SensorDiagnosticsEngine summary (DiagnosticsSummary). Wired from
+        # engine.py to feed PART D hourly digest. Left None in unit tests
+        # that don't need the digest section.
         self._reader = sqlite_reader
         self._em = experiment_manager
+        self._sensor_diag_provider = sensor_diag_provider
 
     async def build_alarm_context(
         self,
@@ -150,6 +160,16 @@ class ContextBuilder:
                 _ctx_failed = True
 
         alarm_entries = [e for e in entries if "alarm" in e.tags]
+        # v0.55.5 — split alarm entries into physics-meaning vs sensor-health.
+        # Telegram dispatch already filters sensor-health out of one-shot
+        # alarms; the hourly digest reports them as a count plus the worst
+        # channel, while full alarm narratives stay focused on physics.
+        sensor_health_alarm_entries = [
+            e for e in alarm_entries if _is_sensor_health_alarm_entry(e)
+        ]
+        physics_alarm_entries = [
+            e for e in alarm_entries if not _is_sensor_health_alarm_entry(e)
+        ]
         phase_entries = [e for e in entries if "phase_transition" in e.tags or "phase" in e.tags]
         experiment_entries = [e for e in entries if "experiment" in e.tags]
         calibration_entries = [e for e in entries if "calibration" in e.tags]
@@ -183,6 +203,17 @@ class ContextBuilder:
             except Exception:
                 pass
 
+        sensor_health_summary: Any | None = None
+        if self._sensor_diag_provider is not None:
+            try:
+                sensor_health_summary = self._sensor_diag_provider()
+            except Exception:
+                logger.debug(
+                    "PeriodicReportContext: sensor_diag_provider failed",
+                    exc_info=True,
+                )
+                sensor_health_summary = None
+
         return PeriodicReportContext(
             window_minutes=window_minutes,
             active_experiment_id=experiment_id,
@@ -195,6 +226,9 @@ class ContextBuilder:
             other_entries=other_entries,
             total_event_count=total_event_count,
             context_read_failed=_ctx_failed,
+            physics_alarm_entries=physics_alarm_entries,
+            sensor_health_alarm_entries=sensor_health_alarm_entries,
+            sensor_health_summary=sensor_health_summary,
         )
 
     async def build_diagnostic_suggestion_context(
@@ -648,6 +682,10 @@ class PeriodicReportContext:
     other_entries: list[Any] = field(default_factory=list)
     total_event_count: int = 0
     context_read_failed: bool = False
+    # v0.55.5 — physics vs sensor-health split + diagnostics summary snapshot.
+    physics_alarm_entries: list[Any] = field(default_factory=list)
+    sensor_health_alarm_entries: list[Any] = field(default_factory=list)
+    sensor_health_summary: Any | None = None
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
@@ -663,12 +701,80 @@ class PeriodicReportContext:
         return {
             "active_experiment_summary": active_exp,
             "events_section": _format_log_entries(self.other_entries) or "(нет)",
-            "alarms_section": _format_log_entries(self.alarm_entries) or "(нет)",
+            # alarms_section retained for backward compatibility with prompt
+            # templates that still reference it; physics_alarms_section is
+            # the v0.55.5 preferred field. Both expose the physics-only view.
+            "alarms_section": _format_log_entries(self.physics_alarm_entries) or "(нет)",
+            "physics_alarms_section": (
+                _format_log_entries(self.physics_alarm_entries) or "(нет)"
+            ),
+            "sensor_health_section": _format_sensor_health_section(self.sensor_health_summary),
+            "sensor_health_alarms_section": (
+                _format_log_entries(self.sensor_health_alarm_entries) or "(нет)"
+            ),
             "phase_transitions_section": _format_log_entries(self.phase_entries) or "(нет)",
             "operator_entries_section": _format_log_entries(self.operator_entries) or "(нет)",
             "calibration_section": _format_log_entries(self.calibration_entries) or "(нет)",
             "total_event_count": str(self.total_event_count),
         }
+
+
+# v0.55.5 — sensor-health alarm classification heuristic. Operator-log
+# entries don't carry alarm_id directly as a structured field; the alarm
+# id appears as either a tag suffix (e.g. ``alarm_T1_diag``) or as text
+# inside the message. Both paths are checked so we don't miss either
+# classifier; `False` defaults to physics so a misclassified entry stays
+# visible in the alarms section rather than silently disappearing.
+def _is_sensor_health_alarm_entry(entry: Any) -> bool:
+    tags = tuple(getattr(entry, "tags", ()) or ())
+    for t in tags:
+        ts = str(t).lower()
+        if ts.startswith("sensor_fault") or ts.startswith("diag:"):
+            return True
+        # Diagnostic anomaly alarms emitted by SensorDiagnosticsEngine
+        # carry tags like ``diag_t1`` / ``diag-correlation`` depending on
+        # the publisher; accept the prefix without the colon too.
+        if ts.startswith("diag_") or ts.startswith("diag-"):
+            return True
+    msg = str(getattr(entry, "message", "") or "").lower()
+    if "sensor_fault" in msg or "diag:" in msg:
+        return True
+    # Russian operator-message heuristics for sensor-health alarms.
+    sensor_phrases = (
+        "вне диапазона",  # threshold violation on uncalibrated channel
+        "обрыв",
+        "плохой контакт",
+        "избыточный шум",
+        "корреляц",  # correlation drop
+        "дрейф",
+    )
+    if "датчик" in msg and any(p in msg for p in sensor_phrases):
+        return True
+    return False
+
+
+def _format_sensor_health_section(summary: Any) -> str:
+    """Render a one-line health digest for the periodic-report prompt.
+
+    Uses the ``DiagnosticsSummary`` dataclass shape (total_channels,
+    healthy, warning, critical, worst_channel, worst_score, worst_flags).
+    Returns "нет данных" when no summary is available so the prompt
+    template never gets an empty placeholder.
+    """
+    if summary is None:
+        return "нет данных"
+    total = getattr(summary, "total_channels", 0)
+    if total == 0:
+        return "нет данных"
+    healthy = getattr(summary, "healthy", 0)
+    warning = getattr(summary, "warning", 0)
+    critical = getattr(summary, "critical", 0)
+    worst_channel = getattr(summary, "worst_channel", "")
+    worst_score = getattr(summary, "worst_score", 100)
+    line = f"всего {total}, OK {healthy}, ПРЕД {warning}, КРИТ {critical}"
+    if (warning or critical) and worst_channel:
+        line += f"; худший — {worst_channel} (score={worst_score})"
+    return line
 
 
 def _format_log_entries(entries: list[Any]) -> str:
