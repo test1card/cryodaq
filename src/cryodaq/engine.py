@@ -407,6 +407,71 @@ async def _handle_rag_search_command(
         return {"ok": False, "error": str(exc)}
 
 
+async def _bootstrap_rag_index_if_empty(
+    *,
+    db_path: Path,
+    embeddings_client: Any,
+    knowledge_dir: Path,
+    experiments_dir: Path,
+    sqlite_path: Path | None,
+    repo_root: Path,
+) -> None:
+    """Build the RAG index из bundled corpus if it's empty.
+
+    F-KnowledgeBaseExpansion (v0.55.7.1): operator demos на свежем
+    клон должны видеть базу знаний без manual ``cryodaq-rag-index``
+    step. The engine fires this as ``asyncio.create_task`` — the
+    bootstrap progresses в фоне; engine ``ready`` signal is NOT
+    awaited on it. Failures are logged but never propagated; operator
+    briefly sees empty KnowledgeBasePanel, then it populates без
+    restart once embeddings finish.
+
+    Idempotent: probes the index с a 1-result search; non-empty
+    response → skip. Pre-existing tables therefore safe to leave
+    alone (e.g. RAGIndexSink built one earlier in this engine's
+    lifetime, or a manual ``cryodaq-rag-index`` run).
+    """
+    try:
+        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
+
+        searcher = RagSearcher(
+            db_path=db_path, embeddings_client=embeddings_client
+        )
+        sample = await searcher.search("test", top_k=1)
+        if sample:
+            logger.info(
+                "RAG index already populated (%d sample), skipping bootstrap",
+                len(sample),
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        # Probe failure is expected on the very first run (table missing).
+        # Log at INFO — that path IS the bootstrap's reason for existing.
+        logger.info("RAG index probe failed, proceeding with bootstrap: %s", exc)
+
+    logger.info("RAG bootstrap starting from bundled sources в %s", knowledge_dir)
+    try:
+        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
+
+        stats = await build_index(
+            experiments_dir=experiments_dir,
+            vault_dir=None,  # vault не bundled
+            sqlite_path=sqlite_path,
+            db_path=db_path,
+            embeddings_client=embeddings_client,
+            pdf_dir=knowledge_dir / "equipment_manuals",
+            procedures_dir=knowledge_dir / "procedures",
+            reference_root=repo_root,
+        )
+        logger.info(
+            "RAG bootstrap complete: %d chunks indexed в %s",
+            stats.get("indexed", 0),
+            db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
+
+
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -2388,27 +2453,50 @@ async def _run_engine(*, mock: bool = False) -> None:
             _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()
             _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
             _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
-            _rag_emb_model = str(_rag_cfg.get("embedding_model", "multilingual-e5-small"))
-            if _rag_db_path.exists():
-                _rag_emb = EmbeddingsClient(
-                    base_url=_rag_emb_url,
-                    model=_rag_emb_model,
-                )
-                _rag_searcher = RagSearcher(
+            # v0.55.7.1: default fallback aligned с modernized stack —
+            # qwen3-embedding:0.6b (1024d). Older v0.55.7 default
+            # multilingual-e5-small (384d) deprecated due к Ollama
+            # 0.23+ runtime incompatibility for community uploads.
+            _rag_emb_model = str(_rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
+            _rag_knowledge_dir = Path(
+                str(_rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
+            ).expanduser()
+            # v0.55.7.1: create searcher unconditionally — LanceDB
+            # connects lazily on the first .search() call, so an
+            # absent db_path is fine. Bootstrap (below) will populate
+            # the index from the bundled corpus в фоне; the searcher
+            # itself returns [] from search() until the table exists.
+            _rag_db_path.mkdir(parents=True, exist_ok=True)
+            _rag_emb = EmbeddingsClient(
+                base_url=_rag_emb_url,
+                model=_rag_emb_model,
+            )
+            _rag_searcher = RagSearcher(
+                db_path=_rag_db_path,
+                embeddings_client=_rag_emb,
+                table_name=_rag_table,
+            )
+            logger.info(
+                "RAG searcher: инициализирован (db=%s, table=%s, knowledge=%s)",
+                _rag_db_path,
+                _rag_table,
+                _rag_knowledge_dir,
+            )
+            # v0.55.7.1 PHASE 6: fire-and-forget bootstrap. Engine
+            # ready signal does NOT await this; the operator may
+            # briefly see empty KnowledgeBasePanel during first boot
+            # of a fresh deploy, then it populates без restart.
+            asyncio.create_task(
+                _bootstrap_rag_index_if_empty(
                     db_path=_rag_db_path,
                     embeddings_client=_rag_emb,
-                    table_name=_rag_table,
-                )
-                logger.info(
-                    "RAG searcher: инициализирован (db=%s, table=%s)",
-                    _rag_db_path,
-                    _rag_table,
-                )
-            else:
-                logger.info(
-                    "RAG searcher: index path не найден (%s) — RAG отключён",
-                    _rag_db_path,
-                )
+                    knowledge_dir=_rag_knowledge_dir,
+                    experiments_dir=_DATA_DIR / "experiments",
+                    sqlite_path=None,
+                    repo_root=_PROJECT_ROOT,
+                ),
+                name="rag_bootstrap",
+            )
         else:
             logger.info(
                 "RAG searcher: config/rag.yaml отсутствует — RAG отключён"
