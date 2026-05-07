@@ -146,12 +146,20 @@ class AlarmHistoryResult:
 
 @dataclass
 class KnowledgeQueryHit:
-    """F32 Stage 2 (v0.55.7): one chunk match returned by RAGAdapter.search()."""
+    """F32 Stage 2 (v0.55.7): one chunk match returned by RAGAdapter.search().
+
+    v0.55.7.1 (F-KnowledgeBaseExpansion) extends с an optional
+    ``metadata`` dict so :func:`cryodaq.agents.rag.source_labels.prettify_source_label`
+    can render «Etalon MultiLine — стр. 5» style citations. Defaults к
+    empty dict so legacy hits without metadata still serialise — the
+    prettifier falls back to source_kind-based labels in that case.
+    """
 
     source: str
     source_kind: str
     snippet: str
     distance: float  # LanceDB ``_distance`` — lower means closer match.
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass

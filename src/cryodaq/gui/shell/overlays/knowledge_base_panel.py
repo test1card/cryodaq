@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.agents.rag.source_labels import prettify_source_label
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.assistant_chat_panel import AssistantChatPanel
 from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -145,13 +146,16 @@ class _SnippetCard(QFrame):
         layout.setSpacing(theme.SPACE_2)
 
         kind = str(result.get("source_kind", "?"))
-        source_id = str(result.get("source_id", "?"))
         score = result.get("score", 0.0)
         try:
             score_str = f" · score {float(score):.3f}"
         except (TypeError, ValueError):
             score_str = ""
-        header = QLabel(f"<b>{kind}</b> · {source_id}{score_str}")
+        # v0.55.7.1 PHASE 9 — prettify_source_label produces the
+        # operator-facing citation. Falls back gracefully when
+        # source_kind is unknown to the helper.
+        pretty = prettify_source_label(kind, result.get("metadata") or {})
+        header = QLabel(f"<b>{pretty}</b>{score_str}")
         header.setTextFormat(Qt.TextFormat.RichText)
         header.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
         layout.addWidget(header)
