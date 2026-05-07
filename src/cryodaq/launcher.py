@@ -276,6 +276,7 @@ class LauncherWindow(QMainWindow):
         replay_phase: str = "cooldown",
         replay_loop: bool = False,
         force_replay: bool = False,
+        legacy_channel_era: str | None = None,
     ) -> None:
         super().__init__()
         self._app = app
@@ -287,6 +288,7 @@ class LauncherWindow(QMainWindow):
         self._replay_phase = replay_phase
         self._replay_loop = replay_loop
         self._force_replay = force_replay
+        self._legacy_channel_era = legacy_channel_era
         self._engine_proc: subprocess.Popen | None = None
         self._engine_stderr_handler: logging.Handler | None = None
         self._engine_stderr_logger: logging.Logger | None = None
@@ -500,6 +502,8 @@ class LauncherWindow(QMainWindow):
                 cmd.append("--loop")
             if self._force_replay:
                 cmd.append("--force-replay")
+            if self._legacy_channel_era:
+                cmd.extend(["--legacy-channel-era", self._legacy_channel_era])
         else:
             # In a PyInstaller frozen build, sys.executable IS the bundled exe
             # (not a Python interpreter). Re-invoke ourselves with --mode=engine
@@ -1450,6 +1454,14 @@ def main() -> None:
         action="store_true",
         help="Пропустить проверку занятости ZMQ-портов (override port-collision check).",
     )
+    parser.add_argument(
+        "--legacy-channel-era",
+        type=str,
+        default=None,
+        metavar="ERA",
+        help="Использовать карту переименования каналов для указанной эпохи "
+        "(например, 'pre-2025-02'). Применяется только к SQLite/Directory replay.",
+    )
     args, remaining = parser.parse_known_args()
 
     from cryodaq.logging_setup import resolve_log_level, setup_logging
@@ -1510,6 +1522,7 @@ def main() -> None:
         replay_phase=args.replay_phase,
         replay_loop=args.replay_loop,
         force_replay=args.force_replay,
+        legacy_channel_era=args.legacy_channel_era,
     )
     if not args.tray:
         window.show()

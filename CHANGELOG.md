@@ -11,6 +11,16 @@
 
 (autonomous run 2026-05-07 work — pending v0.55.0 tag)
 
+### Added
+
+- **F-LegacyChannelMap** — `--legacy-channel-era` flag on the launcher
+  and the standalone replay engine. Loads a predefined channel-rename
+  map (`pre-2025-02` covers the thermal-bridge era: Т10→Т12, Т9→Т10,
+  Т8→Т9) and applies it on the SQLite/Directory replay path so old
+  recordings publish under the post-bridge canonical labels (Т11/Т12).
+  CurveReplay (`cooldown_v5/*.json`) is post-bridge era and is not
+  touched. New module: `cryodaq.replay_engine.legacy_channel_maps`.
+
 ### Fixed
 
 - **F-ConfigChannelDrift** — `config/cooldown.yaml` channel mapping

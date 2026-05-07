@@ -103,6 +103,7 @@ class ReplayEngine:
         cold_channel: str = "Т12",
         warm_channel: str = "Т11",
         force: bool = False,
+        channel_map: dict[str, str] | None = None,
     ) -> None:
         self._source_path = source_path
         self._speed = speed
@@ -113,6 +114,7 @@ class ReplayEngine:
         self._cold_channel = cold_channel
         self._warm_channel = warm_channel
         self._force = force
+        self._channel_map = channel_map or None
 
         self._pub: ZMQPublisher | None = None
         self._cmd: ZMQCommandServer | None = None
@@ -138,6 +140,7 @@ class ReplayEngine:
             loop=self._loop,
             cold_channel=self._cold_channel,
             warm_channel=self._warm_channel,
+            channel_map=self._channel_map,
         )
 
         # F-ReplayPredictor: insert DataBroker between source and PUB queue so

@@ -101,6 +101,14 @@ def main() -> None:
         action="store_true",
         help="Skip port-in-use check (spec Q1). Use only when real engine is stopped.",
     )
+    parser.add_argument(
+        "--legacy-channel-era",
+        type=str,
+        default=None,
+        metavar="ERA",
+        help="Apply a legacy channel-rename map for the given recording era "
+        "(e.g. 'pre-2025-02'). Affects SQLite/Directory replay only.",
+    )
     args = parser.parse_args()
 
     lock_fd = _acquire_engine_lock()
@@ -113,6 +121,17 @@ def main() -> None:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    channel_map: dict[str, str] | None = None
+    if args.legacy_channel_era:
+        from cryodaq.replay_engine.legacy_channel_maps import get_legacy_map
+
+        channel_map = get_legacy_map(args.legacy_channel_era) or None
+        if channel_map is None:
+            logger.warning(
+                "Unknown --legacy-channel-era %r — no channel rename applied.",
+                args.legacy_channel_era,
+            )
+
     engine = ReplayEngine(
         args.source,
         speed=args.speed,
@@ -123,6 +142,7 @@ async def _run(args: argparse.Namespace) -> None:
         cold_channel=args.cold_channel,
         warm_channel=args.warm_channel,
         force=args.force_replay,
+        channel_map=channel_map,
     )
 
     loop = asyncio.get_running_loop()

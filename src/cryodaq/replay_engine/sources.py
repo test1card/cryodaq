@@ -27,11 +27,24 @@ PublishCallback = Callable[[Reading], Awaitable[None]]
 class SQLiteReplay:
     """Replay a single SQLite daily file, publishing readings at replay speed."""
 
-    def __init__(self, db_path: Path, *, speed: float = 10.0, loop: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        speed: float = 10.0,
+        loop: bool = False,
+        channel_map: dict[str, str] | None = None,
+    ) -> None:
         self._db_path = db_path
         self._speed = max(speed, 0.0)
         self._loop = loop
+        self._channel_map = channel_map or None
         self._running = False
+
+    def _apply_channel_map(self, channel: str) -> str:
+        if self._channel_map is None:
+            return channel
+        return self._channel_map.get(channel, channel)
 
     def stop(self) -> None:
         self._running = False
@@ -67,7 +80,7 @@ class SQLiteReplay:
                 reading = Reading(
                     timestamp=datetime.fromtimestamp(ts_posix + _base_offset, tz=UTC),
                     instrument_id=inst_id,
-                    channel=channel,
+                    channel=self._apply_channel_map(channel),
                     value=value,
                     unit=unit,
                     status=status,
@@ -152,10 +165,18 @@ class CurveReplay:
 class DirectoryReplay:
     """Replay all data_*.db files in a directory in chronological order."""
 
-    def __init__(self, data_dir: Path, *, speed: float = 10.0, loop: bool = False) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        speed: float = 10.0,
+        loop: bool = False,
+        channel_map: dict[str, str] | None = None,
+    ) -> None:
         self._data_dir = data_dir
         self._speed = speed
         self._loop = loop
+        self._channel_map = channel_map or None
         self._running = False
         self._current: SQLiteReplay | None = None
 
@@ -192,7 +213,11 @@ class DirectoryReplay:
             for db_path in db_files:
                 if not self._running:
                     return
-                self._current = SQLiteReplay(db_path, speed=self._speed)
+                self._current = SQLiteReplay(
+                    db_path,
+                    speed=self._speed,
+                    channel_map=self._channel_map,
+                )
                 await self._current.run(publish_cb, base_offset=global_base_offset)
             if not self._loop:
                 break
@@ -206,17 +231,22 @@ def resolve_source(
     loop: bool = False,
     cold_channel: str = "Т12",
     warm_channel: str = "Т11",
+    channel_map: dict[str, str] | None = None,
 ) -> SQLiteReplay | CurveReplay | DirectoryReplay:
     """Dispatch by path type and return the appropriate replay source.
 
     *.db        → SQLiteReplay
     *.json      → CurveReplay (must contain t_hours/T_cold/T_warm)
     directory   → DirectoryReplay
+
+    `channel_map`, when provided, applies on the SQLite paths only —
+    CurveReplay is post-thermal-bridge era and ignores it (per
+    F-LegacyChannelMap).
     """
     if path.is_dir():
-        return DirectoryReplay(path, speed=speed, loop=loop)
+        return DirectoryReplay(path, speed=speed, loop=loop, channel_map=channel_map)
     if path.suffix == ".db":
-        return SQLiteReplay(path, speed=speed, loop=loop)
+        return SQLiteReplay(path, speed=speed, loop=loop, channel_map=channel_map)
     if path.suffix == ".json":
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
