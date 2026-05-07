@@ -26,6 +26,26 @@ def test_top_watch_bar_constructs() -> None:
     assert bar._engine_label is not None
 
 
+def test_seed_visible_channels_marks_them_ok() -> None:
+    """v0.55.2 A5: seed _channel_last_seen so the counter doesn't show
+    "0/N норма • N ожидают" while waiting for the first ZMQ reading.
+    """
+    _app()
+
+    class _FakeChannelMgr:
+        def get_all_visible(self) -> list[str]:
+            return ["Т1 Криостат вер", "Т2 Радиатор", "Pressure"]
+
+    bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+    # Two Т-channels seeded, the non-Т one ignored.
+    assert "Т1 Криостат вер" in bar._channel_last_seen
+    assert "Т2 Радиатор" in bar._channel_last_seen
+    assert "Pressure" not in bar._channel_last_seen
+
+
 def test_experiment_click_emits_signal() -> None:
     _app()
     bar = TopWatchBar()

@@ -113,6 +113,13 @@ class TopWatchBar(QWidget):
 
         self._build_ui()
         self._build_persistent_context()
+        # v0.55.2 A5: presume all visible Т-channels are OK until either a
+        # real reading arrives (which updates the timestamp) or
+        # _STALE_TIMEOUT_S elapses (which kicks them back to "ожидают").
+        # Without this seed the counter shows "0/16 норма • 16 ожидают"
+        # at startup even though the per-cell SensorCells already render
+        # "Норма" from cached/initial state — a visible inconsistency.
+        self._seed_visible_channels_ok()
 
         # 1 Hz polling for zones 1, 2, 3
         self._fast_timer = QTimer(self)
@@ -368,6 +375,23 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
     # ------------------------------------------------------------------
+
+    def _seed_visible_channels_ok(self) -> None:
+        """Seed _channel_last_seen with OK for every visible Т-channel.
+
+        Called once at construction so the zone-3 counter does not flash
+        "0/N норма • N ожидают" while waiting for the first ZMQ reading
+        to arrive. Real readings overwrite the seed; if no reading lands
+        within _STALE_TIMEOUT_S the stale check in _refresh_channels
+        will kick the entries back to "ожидают" — same semantics as
+        before, just with a sane initial state.
+        """
+        if self._channel_mgr is None:
+            return
+        now = time.monotonic()
+        for ch in self._channel_mgr.get_all_visible():
+            if ch.startswith("Т"):
+                self._channel_last_seen.setdefault(ch, (now, ChannelStatus.OK))
 
     def on_reading(self, reading: Reading) -> None:
         """Update per-channel last-seen cache and persistent context."""
