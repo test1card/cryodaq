@@ -10,6 +10,7 @@ import asyncio
 import logging
 import socket
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +69,7 @@ def _check_port_available(addr: str, *, force: bool) -> None:
 _READONLY_PREFIXES: tuple[str, ...] = (
     "set_target",
     "keithley_",
-    "experiment.",
-    "experiment_",
+    "experiment.",   # F30 query agent subspace (experiment.fetch / .list)
     "source_on",
     "source_off",
     "emergency_off",
@@ -78,6 +78,33 @@ _READONLY_PREFIXES: tuple[str, ...] = (
     "shift_",
     "operator_log_add",
 )
+
+# F-ReplayPhases (v0.55.9): experiment_* commands rejected by default in
+# replay (they would create real artifacts on top of historical data),
+# except for these phase-tracking commands which create only metadata
+# markers. The blanket "experiment_" prefix that was previously in
+# _READONLY_PREFIXES has been split out so the allowlist below can
+# carve out the demo-friendly phase commands.
+_REPLAY_ALLOWED_EXPERIMENT_CMDS: frozenset[str] = frozenset({
+    "experiment_create_retroactive",
+    "experiment_advance_phase",
+})
+
+
+def _is_command_blocked(cmd: str) -> bool:
+    """Return True if ``cmd`` should be rejected in replay mode.
+
+    Hard-rejected prefixes (all hardware-mutating) always block. The
+    ``experiment_*`` namespace defaults to rejection except for the
+    explicit allowlist of phase-tracking commands. Everything else
+    falls through and is handled by the dispatcher (or rejected
+    upstream if unknown).
+    """
+    if any(cmd.startswith(p) for p in _READONLY_PREFIXES):
+        return True
+    if cmd.startswith("experiment_"):
+        return cmd not in _REPLAY_ALLOWED_EXPERIMENT_CMDS
+    return False
 
 
 class ReplayEngine:
@@ -126,6 +153,15 @@ class ReplayEngine:
         self._broker: DataBroker | None = None
         # CooldownService instance once wired (Any to avoid eager import).
         self._cooldown_service: Any | None = None
+        # F-ReplayPhases (v0.55.9): metadata-only experiment manager so
+        # the operator can drive phase transitions during a replay
+        # session without touching the live ExperimentManager.
+        from cryodaq.paths import get_data_dir
+        from cryodaq.replay_engine.replay_experiment_stub import (
+            ReplayExperimentStub,
+        )
+
+        self._exp_stub = ReplayExperimentStub(get_data_dir())
 
     async def start(self) -> None:
         # Spec Q1: refuse if ports are already bound (another engine running).
@@ -323,9 +359,13 @@ class ReplayEngine:
             return {"ok": True, "state": "replay", "alarms": []}
 
         if action == "current_phase":
+            # F-ReplayPhases: prefer the stub's phase when an active
+            # replay experiment exists, falling back to the static
+            # session phase otherwise.
+            stub_phase = self._exp_stub.current_phase
             return {
                 "ok": True,
-                "phase": self._phase,
+                "phase": stub_phase or self._phase,
                 "phase_started_at": self._session_start,
             }
 
@@ -335,7 +375,13 @@ class ReplayEngine:
                 "mode": "replay",
                 "replay_source": str(self._source_path),
                 "replay_speed": self._speed,
-                "active_experiment": None,
+                # F-ReplayPhases (v0.55.9): expose the replay-experiment
+                # stub's state so GUI / archive surfaces can render the
+                # active retroactive experiment without polling
+                # experiment_status separately.
+                "active_experiment": self._exp_stub.active_experiment,
+                "phases": self._exp_stub.phases,
+                "current_phase": self._exp_stub.current_phase or self._phase,
                 "temperature_targets": {},
                 "safety_state": "replay",
                 "alarms": [],
@@ -345,10 +391,12 @@ class ReplayEngine:
             return {
                 "ok": True,
                 "app_mode": "replay",
-                "active_experiment": None,
-                "current_phase": self._phase,
+                # F-ReplayPhases: surface the replay-stub state where
+                # previously this returned None unconditionally.
+                "active_experiment": self._exp_stub.active_experiment,
+                "current_phase": self._exp_stub.current_phase or self._phase,
                 "phase_started_at": self._session_start,
-                "phases": [],
+                "phases": self._exp_stub.phases,
                 "run_records": [],
                 "templates": [],
                 "replay_source": str(self._source_path),
@@ -358,7 +406,37 @@ class ReplayEngine:
         if action == "cooldown_history_get":
             return {"ok": False, "reason": "predictor_unavailable_in_replay"}
 
-        if any(action.startswith(p) for p in _READONLY_PREFIXES):
+        # F-ReplayPhases (v0.55.9): allow phase-tracking experiment
+        # commands. ``_is_command_blocked`` rejects everything else
+        # under the existing prefix policy.
+        if action == "experiment_create_retroactive":
+            try:
+                result = self._exp_stub.create_retroactive(
+                    title=cmd.get("title", "Replay session"),
+                    sample=cmd.get("sample", ""),
+                    operator=cmd.get("operator", "replay"),
+                    start_time=cmd.get(
+                        "start_time", datetime.now(UTC).isoformat()
+                    ),
+                    description=cmd.get("description", ""),
+                    notes=cmd.get("notes", ""),
+                    custom_fields=cmd.get("custom_fields"),
+                )
+                return {"ok": True, "experiment": result}
+            except Exception as exc:  # noqa: BLE001 — surface to GUI
+                return {"ok": False, "error": str(exc)}
+
+        if action == "experiment_advance_phase":
+            try:
+                result = self._exp_stub.advance_phase(
+                    phase=cmd.get("phase", "cooldown"),
+                    operator=cmd.get("operator", "operator"),
+                )
+                return {"ok": True, "experiment": result}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc)}
+
+        if _is_command_blocked(action):
             return {"ok": False, "reason": "REPLAY_MODE_READONLY"}
 
         # Unknown commands — reject as readonly rather than error
