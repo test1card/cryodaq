@@ -21,11 +21,13 @@ import numpy as np
 from cryodaq.analytics.base_plugin import DerivedMetric
 from cryodaq.analytics.cooldown_predictor import (
     EnsembleModel,
+    PredictionResult,
     compute_rate_from_history,
     ingest_from_raw_arrays,
     load_model,
     predict,
 )
+from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import Reading
 
@@ -224,6 +226,22 @@ class CooldownService:
 
         # Cached prediction for query agent (F30)
         self._last_prediction: dict[str, Any] | None = None
+        # v0.55.3 — raw PredictionResult kept alongside the dict summary
+        # so expected_value() can interpolate the future_t / future_T_*
+        # arrays for PhysicsAlarmDetector (v0.55.4).
+        self._last_prediction_raw: PredictionResult | None = None
+        # v0.55.3 — quasi-steady regime predictor. Engine feeds it via
+        # cooldown.yaml `steady_state:` block; defaults preserved when
+        # the block is absent so existing deployments do not regress.
+        ss_cfg = config.get("steady_state", {}) or {}
+        self._ss_predictor = SteadyStatePredictor(
+            window_s=float(ss_cfg.get("window_s", 900.0)),
+            update_interval_s=float(ss_cfg.get("update_interval_s", 10.0)),
+            min_points=int(ss_cfg.get("min_points", 30)),
+            min_duration_s=float(ss_cfg.get("min_duration_s", 60.0)),
+            noise_floor_k=float(ss_cfg.get("noise_floor_k", 0.05)),
+            drift_threshold_k_per_h=float(ss_cfg.get("drift_threshold_k_per_h", 1.0)),
+        )
 
     @property
     def phase(self) -> CooldownPhase:
@@ -232,6 +250,62 @@ class CooldownService:
     def last_prediction(self) -> dict[str, Any] | None:
         """Return last computed prediction metadata, or None if not yet predicted."""
         return self._last_prediction
+
+    def expected_value(
+        self, channel: str, ts_monotonic: float
+    ) -> tuple[float, float] | None:
+        """Interpolate expected (T, sigma) at ``ts_monotonic`` for the given channel.
+
+        Returns ``None`` if any precondition is unmet:
+        - no model loaded yet,
+        - cooldown phase outside ``{COOLING, STABILIZING}``,
+        - no cached prediction yet,
+        - channel not in ``{channel_cold, channel_warm}``,
+        - no future trajectory in the cached prediction (pre-COOLING run),
+        - ``ts_monotonic`` falls outside the future_t horizon.
+
+        Implementation note: ``PredictionResult.future_t`` is in HOURS
+        since cooldown_start, ``ts_monotonic`` is wall-clock seconds, so
+        we project ts back through ``self._cooldown_wall_start``.
+        ``future_T_cold_upper / lower`` are mean ± 1σ (see
+        cooldown_predictor.py:625-629), so half the band width is the
+        sigma at that point.
+
+        Designed for v0.55.4 PhysicsAlarmDetector — exposes the trajectory
+        without forcing every consumer to round-trip through the metadata
+        dict.
+        """
+        if self._model is None:
+            return None
+        if self._detector.phase not in (CooldownPhase.COOLING, CooldownPhase.STABILIZING):
+            return None
+        pred = self._last_prediction_raw
+        if pred is None or pred.future_t is None:
+            return None
+        if self._cooldown_wall_start is None:
+            return None
+        if channel == self._channel_cold:
+            mean_arr = pred.future_T_cold_mean
+            upper_arr = pred.future_T_cold_upper
+            lower_arr = pred.future_T_cold_lower
+        elif channel == self._channel_warm:
+            mean_arr = getattr(pred, "future_T_warm_mean", None)
+            upper_arr = getattr(pred, "future_T_warm_upper", None)
+            lower_arr = getattr(pred, "future_T_warm_lower", None)
+        else:
+            return None
+        if mean_arr is None or upper_arr is None or lower_arr is None:
+            return None
+
+        target_h = (ts_monotonic - self._cooldown_wall_start) / 3600.0
+        future_t = pred.future_t
+        if target_h < float(future_t[0]) or target_h > float(future_t[-1]):
+            return None
+        mean_val = float(np.interp(target_h, future_t, mean_arr))
+        upper_val = float(np.interp(target_h, future_t, upper_arr))
+        lower_val = float(np.interp(target_h, future_t, lower_arr))
+        sigma = max(0.0, (upper_val - lower_val) / 2.0)
+        return (mean_val, sigma)
 
     async def start(self) -> None:
         """Запустить сервис: подписка на брокер, загрузка модели, запуск задач."""
@@ -416,6 +490,10 @@ class CooldownService:
             "T_warm": T_warm,
         }
         self._last_prediction = metadata  # cache for F30 query agent
+        # v0.55.3 — keep the raw dataclass so expected_value() can
+        # interpolate future_t / future_T_cold_* without serialising
+        # numpy arrays back from the metadata dict.
+        self._last_prediction_raw = pred
 
         if pred.future_t is not None:
             metadata["future_t"] = pred.future_t.tolist()
