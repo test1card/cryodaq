@@ -39,7 +39,10 @@ _WELCOME_TEXT = (
     "Спроси про температуру, давление, фазу, прогноз охлаждения или активные алармы."
 )
 _ERROR_PREFIX = "⚠ "  # ⚠
-_BUBBLE_MAX_WIDTH = 520  # px — wide enough for paragraph answers, narrow enough to feel chat-like
+# v0.55.2 ds-106: 16 * SPACE_6 + SPACE_2 = 512 + 8 = 520. Wide enough
+# for paragraph answers, narrow enough to feel chat-like — value is
+# now traceable back to the spacing scale.
+_BUBBLE_MAX_WIDTH = 16 * theme.SPACE_6 + theme.SPACE_2
 _QUERY_CHAT_ID = "gui"
 
 

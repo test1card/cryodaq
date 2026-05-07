@@ -663,7 +663,8 @@ class ArchivePanel(QWidget):
         row.setSpacing(theme.SPACE_2)
         cap = QLabel(caption)
         cap.setFont(_label_font())
-        cap.setFixedWidth(96)
+        # v0.55.2 ds-104: 3 * SPACE_6 = 96 — keeps the column on the scale.
+        cap.setFixedWidth(3 * theme.SPACE_6)
         cap.setStyleSheet(
             f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
         )
