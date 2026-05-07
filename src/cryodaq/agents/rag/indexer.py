@@ -21,7 +21,11 @@ from cryodaq.agents.rag.document_loader import (
 logger = logging.getLogger(__name__)
 
 
-_EMBEDDING_DIM = 384  # multilingual-e5-small dimension
+# May 2026: switched to qwen3-embedding:0.6b — top of MTEB multilingual
+# leaderboard (June 2025 score 70.58), 100+ languages, 32k context, official
+# Ollama library entry. Previous: multilingual-e5-small (384d) — qllama/jeffh
+# uploads incompatible with Ollama 0.23+ runtime (subprocess EOF crash).
+_EMBEDDING_DIM = 1024
 
 
 class _EmbeddingsLike(Protocol):

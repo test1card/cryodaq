@@ -32,9 +32,12 @@ def _find_latest_sqlite() -> Path | None:
 
 
 def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
+    # May 2026: default switched к qwen3-embedding:0.6b — top of MTEB
+    # multilingual leaderboard. Previous default (multilingual-e5-small)
+    # deprecated due к Ollama 0.23+ incompatibility for community uploads.
     return EmbeddingsClient(
         base_url=rag_cfg.get("ollama_base_url", "http://localhost:11434"),
-        model=rag_cfg.get("embedding_model", "multilingual-e5-small"),
+        model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
     )
 
 
