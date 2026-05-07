@@ -71,15 +71,17 @@ def test_cooldown_layout_main_is_cooldown_prediction(app):
     assert analytics_widgets.id_of(slots["main"]) == "cooldown_prediction"
 
 
-def test_measurement_layout_main_is_r_thermal_live(app):
+def test_measurement_layout_main_is_temperature_steady_state(app):
     view = AnalyticsView()
     view.set_phase("measurement")
     slots = view.active_widgets()
-    assert analytics_widgets.id_of(slots["main"]) == "r_thermal_live"
-    # v0.55.2 A2: Keithley moved out of Analytics — measurement mirrors
-    # cooldown's r_thermal_placeholder so the right column reads as
-    # "thermal-only" across both phases.
-    assert analytics_widgets.id_of(slots["bottom_right"]) == "r_thermal_placeholder"
+    # v0.55.6.1: temperature_steady_state replaces r_thermal_live as the
+    # measurement-phase headline (architect 2026-05-07: «в фазе измерения
+    # до сих пор R, а не прогноз по температуре»). R_thermal demoted to
+    # top_right, temperature_overview occupies bottom_right.
+    assert analytics_widgets.id_of(slots["main"]) == "temperature_steady_state"
+    assert analytics_widgets.id_of(slots["top_right"]) == "r_thermal_live"
+    assert analytics_widgets.id_of(slots["bottom_right"]) == "temperature_overview"
 
 
 def test_disassembly_layout_has_empty_right_slots(app):
@@ -130,10 +132,10 @@ def test_inactive_widget_discarded_on_phase_change(app):
     pressure_in_vacuum = slots_before["bottom_right"]
     view.set_phase("measurement")
     slots_after = view.active_widgets()
-    # measurement: bottom_right = r_thermal_placeholder (post v0.55.2 A2;
-    # was keithley_power, but Keithley now lives only in its own tab).
-    # Pressure gone.
-    assert analytics_widgets.id_of(slots_after["bottom_right"]) == "r_thermal_placeholder"
+    # v0.55.6.1: measurement bottom_right is now temperature_overview
+    # (was r_thermal_placeholder pre-v0.55.6.1; was keithley_power
+    # before v0.55.2 A2).
+    assert analytics_widgets.id_of(slots_after["bottom_right"]) == "temperature_overview"
     assert pressure_in_vacuum is not slots_after["bottom_right"]
 
 
@@ -191,16 +193,19 @@ def test_set_r_thermal_forwards_to_live_widget(app):
         last_updated_ts=1000.0,
     )
     view.set_r_thermal(data)
-    main = view.active_widgets()["main"]
-    assert "2.345" in main._value_label.text()
+    # v0.55.6.1 — r_thermal_live moved from main to top_right when
+    # temperature_steady_state took the headline slot.
+    r_thermal = view.active_widgets()["top_right"]
+    assert "2.345" in r_thermal._value_label.text()
 
 
 def test_set_r_thermal_none_shows_dash(app):
     view = AnalyticsView()
     view.set_phase("measurement")
     view.set_r_thermal(None)
-    main = view.active_widgets()["main"]
-    assert main._value_label.text() == "—"
+    # v0.55.6.1 — r_thermal_live is the top_right widget in measurement.
+    r_thermal = view.active_widgets()["top_right"]
+    assert r_thermal._value_label.text() == "—"
 
 
 def test_set_pressure_reading_forwards_to_pressure_widget(app):

@@ -26,11 +26,14 @@ phases:
     bottom_right: r_thermal_placeholder
 
   measurement:
-    main: r_thermal_live
-    top_right: temperature_overview
-    # v0.55.2 A2: Keithley belongs in the Keithley tab only — Analytics
-    # mirrors COOLDOWN's r_thermal_placeholder during measurement.
-    bottom_right: r_thermal_placeholder
+    # v0.55.6.1: temperature steady-state asymptote is the headline
+    # widget per architect 2026-05-07 («в фазе измерения до сих пор R,
+    # а не прогноз по температуре (пусть и асимптотический)»).
+    # R_thermal demoted to top_right (still useful for thermal-link
+    # diagnostics), Keithley still confined to its own tab per v0.55.2.
+    main: temperature_steady_state
+    top_right: r_thermal_live
+    bottom_right: temperature_overview
 
   warmup:
     main: temperature_trajectory

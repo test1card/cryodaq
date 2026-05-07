@@ -66,6 +66,13 @@ WIDGET_R_THERMAL_PLACEHOLDER = "r_thermal_placeholder"
 WIDGET_TEMPERATURE_TRAJECTORY = "temperature_trajectory"
 WIDGET_COOLDOWN_HISTORY = "cooldown_history"
 WIDGET_EXPERIMENT_SUMMARY = "experiment_summary"
+# v0.55.6.1 — measurement-phase asymptotic temperature prediction.
+# Architect 2026-05-07: «в фазе измерения до сих пор R, а не прогноз
+# по температуре (пусть и асимптотический)». The widget pairs T11
+# (cooler stage) and T12 (nitrogen plate) with their own
+# SteadyStatePredictor instances and surfaces the asymptote + ±σ band
+# on the same plot.
+WIDGET_TEMPERATURE_STEADY_STATE = "temperature_steady_state"
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -1585,6 +1592,198 @@ def _experiment_summary_placeholder() -> QWidget:
 
 
 # ---------------------------------------------------------------------------
+# v0.55.6.1 — TemperatureSteadyStateWidget
+# ---------------------------------------------------------------------------
+
+
+class TemperatureSteadyStateWidget(QWidget):
+    """Asymptotic temperature prediction for the measurement phase.
+
+    Replaces R_thermal as the headline analytics widget during
+    `measurement` (architect 2026-05-07: «в фазе измерения до сих пор
+    R, а не прогноз по температуре (пусть и асимптотический)»).
+
+    Two SteadyStatePredictor instances — one per landmark stage
+    (Т11 cooler / Т12 nitrogen plate) — share the chart. Each draws:
+    - a live trace (`series_pen` palette index 0/1)
+    - a horizontal asymptote dashed line (STATUS_INFO, DashLine)
+    - a ±σ band (STATUS_INFO at alpha=64) when ≥30% settled
+
+    The hero readout above the plot shows ``Т12 → X.XX K (σ Y.YY)``
+    while settled, falls back to ``Стабилизация…`` until the
+    predictor reports a valid fit. Tracking is per-channel so one
+    stage can settle before the other without blanking the row.
+    """
+
+    _SETTLE_THRESHOLD: float = 30.0
+    # Predictor channel keys mirror the canonical landmark short ids
+    # (config/physical_alarms.yaml). Operator-facing labels stay in
+    # Russian; the keys are internal to SteadyStatePredictor.
+    _LANDMARKS: tuple[tuple[str, str, str], ...] = (
+        # (short_id, predictor_key, display_label)
+        ("Т12", "T12", "Т12"),
+        ("Т11", "T11", "Т11"),
+    )
+    _MAX_RAW_PTS: int = 5000
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._predictors: dict[str, SteadyStatePredictor] = {
+            key: SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
+            for _, key, _ in self._LANDMARKS
+        }
+        self._buffers: dict[str, list[tuple[float, float]]] = {
+            key: [] for _, key, _ in self._LANDMARKS
+        }
+        self._last_ts: dict[str, float] = {key: 0.0 for _, key, _ in self._LANDMARKS}
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        card = _card("analyticsTempSteadyState")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        lay.setSpacing(theme.SPACE_2)
+        lay.addWidget(_title_label("Прогноз асимптоты T11/T12"))
+
+        # Hero readouts — one row per landmark, monospaced.
+        self._hero_labels: dict[str, QLabel] = {}
+        hero_box = QVBoxLayout()
+        hero_box.setSpacing(theme.SPACE_1)
+        for _short, key, label in self._LANDMARKS:
+            row = QLabel(f"{label}: стабилизация…")
+            row.setStyleSheet(
+                f"color: {theme.FOREGROUND}; "
+                f"font-family: '{theme.FONT_MONO}'; "
+                f"font-feature-settings: 'tnum'; "
+                f"background: transparent; border: none;"
+            )
+            hero_box.addWidget(row)
+            self._hero_labels[key] = row
+        lay.addLayout(hero_box)
+
+        self._plot = pg.PlotWidget()
+        apply_plot_style(self._plot)
+        pi = self._plot.getPlotItem()
+        pi.setLabel("left", "T", units="K", color=theme.PLOT_LABEL_COLOR)
+        date_axis = pg.DateAxisItem(orientation="bottom")
+        self._plot.setAxisItems({"bottom": date_axis})
+
+        self._curves: dict[str, pg.PlotDataItem] = {}
+        self._asym_lines: dict[str, pg.InfiniteLine] = {}
+        self._asym_bands: dict[str, pg.LinearRegionItem] = {}
+        for idx, (_short, key, label) in enumerate(self._LANDMARKS):
+            band_color = QColor(theme.STATUS_INFO)
+            band_color.setAlpha(64)
+            band = pg.LinearRegionItem(
+                values=[0.0, 0.0],
+                orientation="horizontal",
+                brush=pg.mkBrush(band_color),
+                movable=False,
+            )
+            band.setVisible(False)
+            self._plot.addItem(band)
+            self._asym_bands[key] = band
+
+            curve = self._plot.plot([], [], pen=series_pen(idx), name=label)
+            self._curves[key] = curve
+
+            asym = pg.InfiniteLine(
+                angle=0,
+                pen=pg.mkPen(
+                    color=QColor(theme.STATUS_INFO),
+                    width=theme.PLOT_LINE_WIDTH,
+                    style=Qt.DashLine,
+                ),
+                label=f"{label}∞",
+                labelOpts={"color": theme.STATUS_INFO, "position": 0.95},
+            )
+            asym.setVisible(False)
+            self._plot.addItem(asym)
+            self._asym_lines[key] = asym
+
+        self._plot.addLegend(offset=(10, 10))
+        lay.addWidget(self._plot, stretch=1)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(card)
+
+    # ------------------------------------------------------------------
+    # Setters used by AnalyticsView duck-typed forwarding
+    # ------------------------------------------------------------------
+
+    def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
+        """Absorb live K-unit readings; filter to landmark short ids.
+
+        AnalyticsView pushes every K-unit reading; this widget cares
+        only about Т11/Т12 (split short-id check matches the same
+        heuristic MainWindowV2 uses to feed CooldownPredictionWidget).
+        """
+        if not readings:
+            return
+        for ch_id, reading in readings.items():
+            short_id = ch_id.split(" ", 1)[0] if " " in ch_id else ch_id
+            key = self._key_for_short_id(short_id)
+            if key is None:
+                continue
+            try:
+                value = float(reading.value)
+            except (TypeError, ValueError):
+                continue
+            ts = reading.timestamp.timestamp()
+            buf = self._buffers[key]
+            buf.append((ts, value))
+            if len(buf) > self._MAX_RAW_PTS:
+                del buf[: len(buf) - self._MAX_RAW_PTS]
+            if ts > self._last_ts[key]:
+                self._predictors[key].add_point(key, ts, value)
+                self._last_ts[key] = ts
+        self._refresh()
+
+    @classmethod
+    def _key_for_short_id(cls, short_id: str) -> str | None:
+        for s, key, _ in cls._LANDMARKS:
+            if short_id == s:
+                return key
+        return None
+
+    def _refresh(self) -> None:
+        now = time.time()
+        for _short, key, label in self._LANDMARKS:
+            buf = self._buffers[key]
+            curve = self._curves[key]
+            asym = self._asym_lines[key]
+            band = self._asym_bands[key]
+            hero = self._hero_labels[key]
+
+            if buf:
+                curve.setData(x=[t for t, _ in buf], y=[v for _, v in buf])
+
+            self._predictors[key].update(now)
+            pred = self._predictors[key].get_prediction(key)
+            if (
+                pred is not None
+                and pred.valid
+                and pred.percent_settled >= self._SETTLE_THRESHOLD
+            ):
+                t_inf = pred.t_predicted
+                sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
+                asym.setPos(t_inf)
+                band.setRegion([t_inf - sigma, t_inf + sigma])
+                asym.setVisible(True)
+                band.setVisible(True)
+                hero.setText(f"{label}: {t_inf:.2f} K (σ {sigma:.2f})")
+            else:
+                asym.setVisible(False)
+                band.setVisible(False)
+                if buf:
+                    last_val = buf[-1][1]
+                    hero.setText(f"{label}: {last_val:.2f} K — стабилизация…")
+                else:
+                    hero.setText(f"{label}: стабилизация…")
+
+
+# ---------------------------------------------------------------------------
 # Registration (module load time)
 # ---------------------------------------------------------------------------
 
@@ -1599,3 +1798,4 @@ register(WIDGET_R_THERMAL_PLACEHOLDER, _r_thermal_placeholder)
 register(WIDGET_TEMPERATURE_TRAJECTORY, TemperatureTrajectoryWidget)
 register(WIDGET_COOLDOWN_HISTORY, CooldownHistoryWidget)
 register(WIDGET_EXPERIMENT_SUMMARY, ExperimentSummaryWidget)
+register(WIDGET_TEMPERATURE_STEADY_STATE, lambda: TemperatureSteadyStateWidget())
