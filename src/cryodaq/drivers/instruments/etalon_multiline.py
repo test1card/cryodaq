@@ -236,6 +236,91 @@ class MultiLineDriver(InstrumentDriver):
         # burst tag itself even if the experiment is finalised mid-burst.
         self._burst_experiment_id: str | None = None
 
+    async def reconfigure_channels(self, new_channels: list[int]) -> list[int]:
+        """v0.55.16.0.1 (smoke hotfix) — runtime channel set update.
+
+        Validates the new selection (same rules as the constructor:
+        1..32, ints, unique, non-empty) and atomically replaces
+        ``self._channel_numbers``. In averaged mode the change takes
+        effect on the next ``read_channels`` poll. In continuous mode
+        the listener is restarted under the new channel set so the
+        Etalon server's selected-channel filter matches what the
+        driver expects.
+
+        Returns the resolved channel list (sorted) so the engine can
+        echo it back to the GUI for display.
+        """
+        # Validate first; raise without touching internal state if bad.
+        normalised = sorted(new_channels)
+        self._validate_channel_numbers(normalised)
+
+        # Atomic state mutation — no awaits between the validation and
+        # the assignment, so an interleaving read_channels poll sees
+        # either the old or the new set, never half.
+        self._channel_numbers = normalised
+        # Refresh mock-mode nominals so a mock deployment reports
+        # plausible lengths for the newly-selected channels.
+        self._mock_nominal_lengths_mm = {
+            ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers
+        }
+
+        # Continuous-mode listener restart: tell the server to stop the
+        # current measurement, then re-spawn the listener which issues
+        # `startmeasnogui` again. The listener cancel + stopmeasnogui
+        # handshake mirrors `disconnect()` so partial-state cleanup is
+        # consistent.
+        #
+        # Codex audit cycle 1 amend (smoke hotfix): originally we
+        # swallowed asyncio.TimeoutError silently and proceeded to
+        # spawn a new listener — which could race a still-unwinding old
+        # task for the read-stream buffer. Now: if the cancel doesn't
+        # complete cleanly, we log CRITICAL and leave the new listener
+        # un-spawned so the operator gets immediate feedback rather
+        # than a silent double-listener race.
+        if (
+            self._mode == self.MODE_CONTINUOUS
+            and self._listener_task is not None
+            and not self._listener_task.done()
+        ):
+            self._listener_task.cancel()
+            cancel_clean = False
+            try:
+                await asyncio.wait_for(self._listener_task, timeout=2.0)
+                cancel_clean = True
+            except asyncio.CancelledError:
+                cancel_clean = True
+            except asyncio.TimeoutError:
+                logger.error(
+                    "MultiLine '%s' reconfigure: listener did not cancel "
+                    "within 2s — refusing to spawn replacement to avoid a "
+                    "double-listener race. Disconnect/reconnect to recover.",
+                    self.name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "MultiLine '%s' reconfigure listener cancel raised: %s",
+                    self.name,
+                    exc,
+                )
+            self._listener_task = None
+            # Drop the last-cycle snapshot so a stale read can't surface
+            # under the new channel filter.
+            self._last_cycle = None
+            self._last_emit_mono = None
+            if (
+                cancel_clean
+                and self._transport is not None
+                and self._connected
+            ):
+                self._listener_started_mono = time.monotonic()
+                self._first_cycle_logged = False
+                self._listener_task = asyncio.create_task(
+                    self._continuous_listener(),
+                    name=f"multiline_listener_{self.name}",
+                )
+
+        return list(self._channel_numbers)
+
     @classmethod
     def _validate_channel_numbers(cls, channels: list[int]) -> None:
         if len(channels) < cls._MIN_CHANNELS or len(channels) > cls._MAX_CHANNELS:

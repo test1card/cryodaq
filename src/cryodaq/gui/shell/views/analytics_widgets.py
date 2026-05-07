@@ -358,6 +358,35 @@ class TemperatureOverviewWidget(QWidget):
             self._curves[ch_id].setData(x=series.xs, y=series.ys)
         self._apply_window(self._window_selector.get_window())
 
+    # ------------------------------------------------------------------
+    # No-op setters (smoke hotfix v0.55.16.0.1)
+    #
+    # AnalyticsView's `_forward()` dispatch logs WARNING when no active
+    # widget in the current phase implements a setter. Because the PART D
+    # measurement layout puts TemperatureOverviewWidget in the bottom-right
+    # slot — not PressureCurrentWidget — the dispatcher would log
+    # "no active widget in phase='measurement'" warnings on every
+    # set_pressure_reading / set_keithley_readings / set_experiment_status
+    # / set_cold_temperature_reading call. Those setters carry data this
+    # widget legitimately doesn't render; the underlying readings still
+    # persist via Scheduler→SQLiteWriter→DataBroker. The no-ops here
+    # turn `forwarded = True` in the dispatcher and silence the warning
+    # without masking truly-missing setters elsewhere.
+    # ------------------------------------------------------------------
+
+    def set_pressure_reading(self, reading) -> None:  # noqa: ARG002
+        """Pressure reading is rendered by PressureCurrentWidget — no-op here."""
+
+    def set_keithley_readings(self, readings) -> None:  # noqa: ARG002
+        """Keithley readings are rendered by KeithleyPowerWidget — no-op here."""
+
+    def set_experiment_status(self, status) -> None:  # noqa: ARG002
+        """Experiment status is rendered elsewhere — no-op here."""
+
+    def set_cold_temperature_reading(self, reading) -> None:  # noqa: ARG002
+        """Cold-stage reading is rendered by VacuumPredictionWidget /
+        CooldownPredictionWidget — no-op here."""
+
 
 class TemperatureTrajectoryWidget(QWidget):
     """Full-experiment temperature history — per-group Y-axis scaling (W1, warmup/main, F3-Cycle2).

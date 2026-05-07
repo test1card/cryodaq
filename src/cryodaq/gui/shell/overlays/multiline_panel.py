@@ -40,9 +40,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -242,6 +243,9 @@ class MultiLinePanel(QWidget):
         # v0.55.11 — burst capture state. Worker refs retained so QThread
         # GC does not race the reply.
         self._burst_workers: list[ZmqCommandWorker] = []
+        # v0.55.16.0.1 (smoke hotfix) — channel-selector ZMQ workers,
+        # retained so the QThread does not GC before the response lands.
+        self._select_channels_workers: list[ZmqCommandWorker] = []
         self._burst_in_flight: bool = False  # True while operator pressed
         # Start but engine has not echoed status yet — coarser than
         # server-side `active` so the UI never strands the button.
@@ -298,6 +302,17 @@ class MultiLinePanel(QWidget):
         self._channel_count_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
         toolbar.addWidget(self._channel_count_label)
         toolbar.addStretch(1)
+        # v0.55.16.0.1 (smoke hotfix) — operator-facing channel selector.
+        # Lets the user pick 1..32 channels at runtime instead of editing
+        # config/instruments.yaml. The engine persists the change to
+        # config/instruments.local.yaml.
+        self._select_channels_btn = QPushButton("Выбрать каналы…")
+        self._select_channels_btn.setToolTip(
+            "Выбрать каналы для опроса (1..32). Изменение применяется "
+            "сразу и сохраняется в config/instruments.local.yaml."
+        )
+        self._select_channels_btn.clicked.connect(self._on_select_channels_clicked)
+        toolbar.addWidget(self._select_channels_btn)
         self._reset_all_btn = QPushButton("Сбросить базу для всех")
         self._reset_all_btn.setToolTip(
             "Установить текущие значения как новую базу для всех каналов"
@@ -712,6 +727,113 @@ class MultiLinePanel(QWidget):
             if res != QMessageBox.StandardButton.Yes:
                 return
         self.reset_all()
+
+    # ------------------------------------------------------------------
+    # v0.55.16.0.1 (smoke hotfix) — channel selector
+    # ------------------------------------------------------------------
+
+    def _on_select_channels_clicked(self) -> None:
+        """Open the selector dialog with current channels pre-checked."""
+        # Lazy import keeps the dialog out of the panel's import graph
+        # for a startup that doesn't need the selector.
+        from cryodaq.gui.shell.overlays.multiline_channel_selector import (
+            MultiLineChannelSelectorDialog,
+        )
+
+        # Use the rendered table state as the pre-check set; falls back
+        # to whatever channels the panel has seen readings for. If the
+        # panel hasn't seen anything yet, the dialog opens empty and
+        # the operator picks fresh.
+        current = sorted(self._states.keys())
+        dialog = MultiLineChannelSelectorDialog(
+            current_selection=current, parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_channels = dialog.selected_channels()
+        if not new_channels:
+            return
+        if new_channels == current:
+            # No-op selection — don't bother the engine.
+            return
+        self._dispatch_set_channels(new_channels)
+
+    def _dispatch_set_channels(self, channels: list[int]) -> None:
+        """Send the new channel set to the engine via ZmqCommandWorker."""
+        worker = ZmqCommandWorker(
+            {"cmd": "multiline.set_channels", "channels": channels},
+            parent=self,
+        )
+        worker.finished.connect(self._on_select_channels_response)
+        self._select_channels_workers.append(worker)
+        self._select_channels_btn.setEnabled(False)
+        self._select_channels_btn.setText("Применяется…")
+        worker.start()
+
+    @Slot(dict)
+    def _on_select_channels_response(self, result: dict) -> None:
+        try:
+            if not isinstance(result, dict) or not result.get("ok"):
+                err = (
+                    str(result.get("error", "ошибка"))
+                    if isinstance(result, dict)
+                    else "engine не ответил"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Не удалось применить выбор каналов",
+                    err[:300],
+                )
+                return
+            new_channels = result.get("current_channels") or []
+            self._apply_channel_set_to_panel(list(new_channels))
+            warn = result.get("persist_warning")
+            if warn:
+                QMessageBox.warning(
+                    self,
+                    "Сохранение не выполнено",
+                    f"Каналы применены runtime, но не записаны в "
+                    f"config/instruments.local.yaml:\n{warn}\n\n"
+                    "Они вернутся к значениям из config при перезапуске engine.",
+                )
+        finally:
+            # Drop finished worker; reset button state.
+            self._select_channels_workers = [
+                w for w in self._select_channels_workers if w.isRunning()
+            ]
+            self._select_channels_btn.setEnabled(True)
+            self._select_channels_btn.setText("Выбрать каналы…")
+
+    def _apply_channel_set_to_panel(self, new_channels: list[int]) -> None:
+        """Reconcile panel state with the engine-confirmed channel set.
+
+        Channels removed from the active set: drop their state, history
+        buffer, plot curve, and table row. Channels newly added: leave
+        creation to the next ``on_reading`` so existing lazy-init paths
+        stay the source of truth for row layout.
+        """
+        target = set(new_channels)
+        existing_states = list(self._states.keys())
+        for ch_num in existing_states:
+            if ch_num in target:
+                continue
+            self._states.pop(ch_num, None)
+            row = self._row_for_channel(ch_num)
+            if row is not None:
+                self._table.removeRow(row)
+            # Drop history buffers + curves whose channel index matches.
+            doomed = [
+                name
+                for name, idx in self._channel_name_to_index.items()
+                if idx == ch_num
+            ]
+            for name in doomed:
+                self._buffers.pop(name, None)
+                self._channel_name_to_index.pop(name, None)
+                curve = self._curves.pop(name, None)
+                if curve is not None:
+                    self._plot_widget.removeItem(curve)
+        self._refresh_channel_count()
 
     # ------------------------------------------------------------------
     # v0.55.11 — burst capture

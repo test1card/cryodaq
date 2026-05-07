@@ -407,6 +407,203 @@ async def _handle_rag_search_command(
         return {"ok": False, "error": str(exc)}
 
 
+async def _handle_multiline_set_channels_command(
+    cmd: dict[str, Any],
+    *,
+    drivers_by_name: dict[str, Any],
+    config_dir: Path,
+) -> dict[str, Any]:
+    """v0.55.16.0.1 (smoke hotfix) — runtime channel-set update for
+    a MultiLine driver.
+
+    Validates the operator-supplied list, calls
+    ``driver.reconfigure_channels()``, and persists the change to
+    ``config/instruments.local.yaml`` (existing override pattern,
+    machine-specific) so the selection survives engine restart. The
+    write is best-effort: a failed persist still keeps the runtime
+    change live and is reported back to the operator so they can
+    re-select after the next restart.
+
+    Module-level so unit tests exercise the lifecycle without
+    spinning up the full engine.
+    """
+    raw_channels = cmd.get("channels")
+    if not isinstance(raw_channels, list):
+        return {"ok": False, "error": "channels must be a list of integers"}
+    try:
+        channels = sorted({int(c) for c in raw_channels})
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "channels must be integers"}
+    if not channels:
+        return {"ok": False, "error": "at least one channel must be selected"}
+    if any(c < 1 or c > 32 for c in channels):
+        return {"ok": False, "error": "channel ids must be in 1..32"}
+
+    name = str(cmd.get("name", "")).strip()
+    if not name:
+        ml_names = [
+            n
+            for n, d in drivers_by_name.items()
+            if d.__class__.__name__ == "MultiLineDriver"
+        ]
+        if len(ml_names) == 1:
+            name = ml_names[0]
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    "MultiLine instance not specified and multiple drivers "
+                    "are configured"
+                ),
+            }
+
+    driver = drivers_by_name.get(name)
+    if driver is None or driver.__class__.__name__ != "MultiLineDriver":
+        return {"ok": False, "error": f"MultiLine driver '{name}' not found"}
+
+    try:
+        applied = await driver.reconfigure_channels(channels)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — surface the message to GUI
+        logger.error(
+            "multiline.set_channels reconfigure failed for '%s': %s",
+            name,
+            exc,
+            exc_info=True,
+        )
+        return {"ok": False, "error": f"reconfigure failed: {exc}"}
+
+    persist_warning: str | None = None
+    try:
+        _persist_multiline_channels_to_local_yaml(
+            config_dir=config_dir,
+            instrument_name=name,
+            channels=applied,
+        )
+    except Exception as exc:  # noqa: BLE001 — non-fatal; runtime change stuck
+        logger.warning(
+            "multiline.set_channels persist failed for '%s': %s — "
+            "change is runtime-only and will revert on engine restart",
+            name,
+            exc,
+        )
+        persist_warning = f"persist failed: {exc}"
+
+    return {
+        "ok": True,
+        "name": name,
+        "current_channels": applied,
+        "persist_warning": persist_warning,
+    }
+
+
+def _persist_multiline_channels_to_local_yaml(
+    *,
+    config_dir: Path,
+    instrument_name: str,
+    channels: list[int],
+) -> None:
+    """Merge the new channel set into ``config/instruments.local.yaml``.
+
+    Builds the merged instrument list from base + local so the result
+    is always a complete superset (engine reads local wholesale; an
+    incomplete local would silently drop base-only entries on restart).
+    Updates the matching ``etalon_multiline`` entry's ``channels``
+    field and writes back.
+
+    Codex audit cycle 1 amend (smoke hotfix): the original helper
+    appended a minimal stub when the local file lacked the MultiLine
+    entry, which would have lost base-only fields like host/port/mode
+    on engine restart. The merged build below copies the full base
+    entry when the local doesn't already have it, so persistence
+    never strips required fields.
+    """
+    import yaml as _yaml
+
+    local_path = config_dir / "instruments.local.yaml"
+    base_path = config_dir / "instruments.yaml"
+
+    base_raw: dict[str, Any] = {}
+    if base_path.exists():
+        base_raw = _yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+    local_raw: dict[str, Any] = {}
+    if local_path.exists():
+        local_raw = _yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+
+    base_instruments = [
+        e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)
+    ]
+    local_instruments = [
+        e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)
+    ]
+
+    # Merge by (type, name) — local entries override base entries with
+    # the same identity. Order: local first (preserves operator
+    # ordering), then base entries that local didn't shadow.
+    def _key(entry: dict) -> tuple[str, str]:
+        return (str(entry.get("type", "")), str(entry.get("name", "")))
+
+    seen: set[tuple[str, str]] = set()
+    merged: list[dict] = []
+    for entry in local_instruments:
+        merged.append(dict(entry))
+        seen.add(_key(entry))
+    for entry in base_instruments:
+        if _key(entry) not in seen:
+            merged.append(dict(entry))
+            seen.add(_key(entry))
+
+    matched = False
+    for entry in merged:
+        if (
+            str(entry.get("type")) == "etalon_multiline"
+            and str(entry.get("name")) == instrument_name
+        ):
+            entry["channels"] = list(channels)
+            matched = True
+            break
+    if not matched:
+        # No matching entry in either base or local — append a minimal
+        # stub. Operator gets the persist_warning reflecting that the
+        # engine may still need a config edit for host/port.
+        merged.append(
+            {
+                "type": "etalon_multiline",
+                "name": instrument_name,
+                "channels": list(channels),
+            }
+        )
+
+    # Codex audit cycle 2 amend: engine loads instruments.local.yaml
+    # WHOLESALE (the _cfg() helper at engine startup picks local over
+    # base if local exists). Top-level keys outside `instruments` —
+    # e.g. `chamber` (leak-rate config) — must therefore be copied from
+    # base too, otherwise persisting a MultiLine channel change silently
+    # drops chamber config on the next restart and leak-rate falls back
+    # to defaults.
+    out_raw: dict[str, Any] = {}
+    for key, value in base_raw.items():
+        if key == "instruments":
+            continue
+        out_raw[key] = value
+    for key, value in local_raw.items():
+        if key == "instruments":
+            continue
+        out_raw[key] = value
+    out_raw["instruments"] = merged
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    with local_path.open("w", encoding="utf-8") as fh:
+        _yaml.safe_dump(
+            out_raw,
+            fh,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+
+
 async def _handle_multiline_burst_command(
     action: str,
     cmd: dict[str, Any],
@@ -2345,6 +2542,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                 # v0.55.6 — knowledge-base GUI overlay calls this from
                 # ZmqCommandWorker. Helper extracted for unit-testing.
                 return await _handle_rag_search_command(_rag_searcher, cmd)
+            if action == "multiline.set_channels":
+                # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
+                # channels via the panel selector dialog.
+                return await _handle_multiline_set_channels_command(
+                    cmd,
+                    drivers_by_name=drivers_by_name,
+                    config_dir=_CONFIG_DIR,
+                )
             if action.startswith("multiline.burst_"):
                 # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
                 # button + status poll + manual stop.
