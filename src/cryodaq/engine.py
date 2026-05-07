@@ -1235,6 +1235,16 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
+
+    # F31: sinks foundation (vault + webhooks). Local override beats base.
+    from cryodaq.sinks import SinkRegistry  # local import keeps engine cold-start fast
+
+    _sink_cfg_path = _CONFIG_DIR / "sinks.local.yaml"
+    if not _sink_cfg_path.exists():
+        _sink_cfg_path = _CONFIG_DIR / "sinks.yaml"
+    sink_registry = SinkRegistry()
+    sink_registry.load_config(_sink_cfg_path)
+
     event_bus = EventBus()
     event_logger = EventLogger(writer, experiment_manager, event_bus=event_bus)
 
@@ -1643,6 +1653,20 @@ async def _run_engine(*, mock: bool = False) -> None:
                 return result
             if action == "safety_status":
                 return {"ok": True, **safety_manager.get_status()}
+            if action == "sinks_status":
+                return {
+                    "ok": True,
+                    "results": [
+                        {
+                            "sink": r.sink_name,
+                            "success": r.success,
+                            "target": r.target,
+                            "error": r.error,
+                            "timestamp": r.timestamp.isoformat(),
+                        }
+                        for r in sink_registry.recent_results[-20:]
+                    ],
+                }
             if action == "safety_acknowledge":
                 reason = cmd.get("reason", "")
                 return await safety_manager.acknowledge_fault(reason)
@@ -1848,6 +1872,67 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                     if _cooldown_alarm is not None:
                         _cooldown_alarm.notify_experiment_finalized()
+
+                    # F31: dispatch experiment export to sinks (fire-and-forget,
+                    # strong-ref against GC via _alarm_dispatch_tasks).
+                    if sink_registry.sinks:
+                        try:
+                            import json as _json
+
+                            from cryodaq.sinks import ExperimentExport
+
+                            _exp_id = _exp_info.get("experiment_id") or ""
+                            _started = _parse_experiment_time(_exp_info.get("start_time"))
+                            _ended = _parse_experiment_time(_exp_info.get("end_time"))
+                            _duration_h: float | None = None
+                            if _started is not None and _ended is not None:
+                                _duration_h = (_ended - _started).total_seconds() / 3600.0
+                            _metadata: dict = {}
+                            if _exp_id:
+                                _meta_path = (
+                                    experiment_manager.data_dir
+                                    / "experiments"
+                                    / _exp_id
+                                    / "metadata.json"
+                                )
+                                if _meta_path.exists():
+                                    try:
+                                        _metadata = _json.loads(
+                                            _meta_path.read_text(encoding="utf-8")
+                                        )
+                                    except (OSError, ValueError) as _exc:
+                                        logger.warning(
+                                            "F31: metadata.json read failed (%s): %s",
+                                            _exp_id,
+                                            _exc,
+                                        )
+                            _export = ExperimentExport(
+                                experiment_id=_exp_id,
+                                title=str(_exp_info.get("title") or ""),
+                                sample=str(_exp_info.get("sample") or ""),
+                                operator=str(_exp_info.get("operator") or ""),
+                                status=str(_exp_info.get("status") or ""),
+                                started_at=_started or datetime.now(UTC),
+                                ended_at=_ended,
+                                duration_h=_duration_h,
+                                template_id=str(_exp_info.get("template_id") or "custom"),
+                                phases=list(_metadata.get("phases", []) or []),
+                                artifact_index=list(_metadata.get("artifact_index", []) or []),
+                                summary=dict(_metadata.get("summary", {}) or {}),
+                                notes=str(_exp_info.get("notes") or ""),
+                                description=str(_exp_info.get("description") or ""),
+                                custom_fields=dict(_exp_info.get("custom_fields") or {}),
+                            )
+                            _t = asyncio.create_task(
+                                sink_registry.dispatch(_export),
+                                name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
+                            )
+                            _alarm_dispatch_tasks.add(_t)
+                            _t.add_done_callback(_alarm_dispatch_tasks.discard)
+                        except Exception as _exc:  # noqa: BLE001 — fire-and-forget
+                            logger.warning(
+                                "F31: sink dispatch setup failed: %s", _exc, exc_info=True
+                            )
                 elif result.get("ok") and action == "experiment_advance_phase":
                     phase = cmd.get("phase", "?")
                     await event_logger.log_event("phase", f"Фаза: → {phase}")

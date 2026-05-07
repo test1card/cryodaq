@@ -13,6 +13,16 @@
 
 ### Added
 
+- **F31 sinks foundation** — new `cryodaq.sinks` module with two sinks:
+  `VaultSink` (writes a Markdown note with YAML frontmatter to a
+  filesystem vault directory on experiment finalize / stop / abort) and
+  `WebhookSink` (POSTs the JSON-serialized `ExperimentExport` to a
+  configured URL). `SinkRegistry` loads sinks from `config/sinks.yaml`
+  (or `sinks.local.yaml` override) and fans out concurrently. Dispatch
+  is fire-and-forget — `experiment_finalize` does not block on sinks;
+  failures are captured in `SinkResult` and exposed through the new
+  `sinks_status` ZMQ command (last-20 results buffer). New config:
+  `config/sinks.yaml.example`. Pre-requisite for F32 (RAG indexer).
 - **F-MultiLine Stage 1** — Etalon MultiLine TCP/IP integration:
   interferometric length metrology over a new line-based ASCII TCP
   transport. New driver type `etalon_multiline` registered in the

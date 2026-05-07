@@ -1,0 +1,22 @@
+# F31 — Sinks configuration. Copy to sinks.local.yaml and customize.
+# `sinks.local.yaml` overrides this file; the local file is gitignored.
+
+sinks:
+  vault:
+    enabled: false
+    directory: "~/CryoDAQ-Vault/experiments"
+
+  webhooks:
+    # Example: AnythingLLM ingest endpoint
+    - enabled: false
+      url: "http://localhost:3001/api/v1/document/upload"
+      timeout_s: 15.0
+      verify_ssl: true
+      extra_headers:
+        Authorization: "Bearer YOUR_API_KEY"
+
+    # Example: generic webhook
+    - enabled: false
+      url: "https://example.com/cryodaq/experiments"
+      timeout_s: 10.0
+      verify_ssl: true
