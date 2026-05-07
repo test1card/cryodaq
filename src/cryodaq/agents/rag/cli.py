@@ -5,23 +5,53 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 import yaml
 
+from cryodaq.agents.assistant.shared.ollama_client import (
+    OllamaModelMissingError,
+    OllamaUnavailableError,
+)
 from cryodaq.agents.rag.embeddings import EmbeddingsClient
 from cryodaq.agents.rag.indexer import build_index
 from cryodaq.agents.rag.searcher import RagSearcher
 from cryodaq.paths import get_config_dir, get_data_dir
 
 
-def _load_rag_config() -> dict:
-    cfg_path = get_config_dir() / "rag.local.yaml"
-    if not cfg_path.exists():
-        cfg_path = get_config_dir() / "rag.yaml"
-    if cfg_path.exists():
-        return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    return {}
+def _resolve_rag_config_path(override: Path | None) -> tuple[Path | None, str]:
+    """v0.55.14 (Codex audit SCOPE 2 finding 2.5) — resolve the RAG
+    config file for the CLI.
+
+    Priority order:
+      1. ``--config`` CLI flag (no fallback — explicit means explicit).
+      2. ``config/rag.local.yaml`` (machine-specific override).
+      3. ``config/rag.yaml`` (live config).
+      4. ``config/rag.yaml.example`` (committed defaults — last resort).
+
+    Returns (path, source_label). ``path`` is ``None`` only if the
+    explicit ``--config`` was given and missing — that case is caller-
+    surfaced as an error. The default path ALWAYS resolves to at least
+    ``rag.yaml.example`` because the example ships in-repo.
+    """
+    if override is not None:
+        return (override if override.exists() else None, f"--config {override}")
+    config_dir = get_config_dir()
+    for candidate, label in (
+        (config_dir / "rag.local.yaml", "rag.local.yaml"),
+        (config_dir / "rag.yaml", "rag.yaml"),
+        (config_dir / "rag.yaml.example", "rag.yaml.example (defaults)"),
+    ):
+        if candidate.exists():
+            return candidate, label
+    return None, "no rag config found"
+
+
+def _load_rag_config(path: Path | None) -> dict:
+    if path is None or not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def _find_latest_sqlite() -> Path | None:
@@ -38,8 +68,23 @@ def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
     )
 
 
+def _add_config_flag(parser: argparse.ArgumentParser) -> None:
+    """v0.55.14 (Codex audit SCOPE 2 finding 2.5) — explicit --config flag."""
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a custom rag config YAML. If absent, falls back to "
+            "config/rag.local.yaml → config/rag.yaml → "
+            "config/rag.yaml.example."
+        ),
+    )
+
+
 def index_main() -> None:
     parser = argparse.ArgumentParser(description="Build CryoDAQ RAG index")
+    _add_config_flag(parser)
     parser.add_argument("--db-path", default=None, help="LanceDB directory path")
     parser.add_argument("--vault-dir", default=None, help="F31 vault directory")
     parser.add_argument(
@@ -50,7 +95,17 @@ def index_main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    cfg = _load_rag_config()
+
+    cfg_path, cfg_source = _resolve_rag_config_path(args.config)
+    if args.config is not None and cfg_path is None:
+        print(
+            f"error: --config {args.config} does not exist",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(f"Config: {cfg_source}")
+
+    cfg = _load_rag_config(cfg_path)
     rag_cfg = cfg.get("rag", {}) or {}
 
     db_path = Path(args.db_path or rag_cfg.get("db_path", get_data_dir() / "rag_index"))
@@ -83,6 +138,26 @@ def index_main() -> None:
                 progress_cb=_progress,
             )
         )
+    except OllamaModelMissingError as exc:
+        # v0.55.14 (Codex audit SCOPE 2 finding 2.2) — friendly message
+        # instead of a bare traceback when the embedding model isn't
+        # installed in the local Ollama instance.
+        print(
+            f"\nerror: embedding model not available in Ollama: {exc}\n"
+            f"  hint: run `ollama pull "
+            f"{rag_cfg.get('embedding_model', 'multilingual-e5-small')}` "
+            f"on the host running ollama",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    except OllamaUnavailableError as exc:
+        print(
+            f"\nerror: cannot reach Ollama: {exc}\n"
+            f"  hint: verify ollama_base_url in {cfg_source} "
+            f"({rag_cfg.get('ollama_base_url', 'http://localhost:11434')})",
+            file=sys.stderr,
+        )
+        sys.exit(4)
     finally:
         asyncio.run(embeddings_client.close())
     print(f"Done: {stats}")
@@ -90,6 +165,7 @@ def index_main() -> None:
 
 def search_main() -> None:
     parser = argparse.ArgumentParser(description="Query CryoDAQ RAG index")
+    _add_config_flag(parser)
     parser.add_argument("query", help="Search query")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--db-path", default=None)
@@ -101,7 +177,15 @@ def search_main() -> None:
     )
     args = parser.parse_args()
 
-    cfg = _load_rag_config()
+    cfg_path, cfg_source = _resolve_rag_config_path(args.config)
+    if args.config is not None and cfg_path is None:
+        print(
+            f"error: --config {args.config} does not exist",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    cfg = _load_rag_config(cfg_path)
     rag_cfg = cfg.get("rag", {}) or {}
     db_path = Path(args.db_path or rag_cfg.get("db_path", get_data_dir() / "rag_index"))
 
@@ -116,6 +200,21 @@ def search_main() -> None:
                 source_kind_filter=args.source_kind,
             )
         )
+    except OllamaModelMissingError as exc:
+        print(
+            f"\nerror: embedding model not available: {exc}\n"
+            f"  hint: run `ollama pull "
+            f"{rag_cfg.get('embedding_model', 'multilingual-e5-small')}`",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    except OllamaUnavailableError as exc:
+        print(
+            f"\nerror: cannot reach Ollama: {exc}\n"
+            f"  hint: verify ollama_base_url in {cfg_source}",
+            file=sys.stderr,
+        )
+        sys.exit(4)
     finally:
         asyncio.run(embeddings_client.close())
 

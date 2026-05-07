@@ -106,6 +106,50 @@ def _build_channel_hint(channel_manager: ChannelManager | None) -> str:
 _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 
 
+# v0.55.14 (Codex audit SCOPE 6 finding 6.4) — allow-list of canonical
+# corpus kinds emitted by ``cryodaq.agents.rag.document_loader``. Any
+# value outside this set (including comma-separated multi-hints, list /
+# dict shapes, or arbitrary strings) collapses to ``None`` so the
+# RAGAdapter searches across the whole corpus rather than passing a
+# malformed ``WHERE`` clause to LanceDB.
+_VALID_SOURCE_KINDS = frozenset({
+    "experiment_metadata",
+    "vault_note",
+    "operator_log",
+})
+
+
+def _normalise_source_kind(raw: Any) -> str | None:
+    """Validate and normalise a classifier-provided ``target_source_kind``.
+
+    Returns ``None`` for: missing/null, the literal strings "null" /
+    "none" / "" (Gemma sometimes emits them), list / dict / multi-value
+    inputs, and any single value not in the canonical corpus-kind
+    allow-list. Otherwise returns the lower-cased canonical kind.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple, dict, set)):
+        # Multi-hint or contradictory hint — refuse rather than picking
+        # arbitrarily; whole-corpus search is the safe default.
+        return None
+    kind_str = str(raw).strip().lower()
+    if not kind_str or kind_str in {"null", "none"}:
+        return None
+    if "," in kind_str or any(c.isspace() for c in kind_str):
+        # Comma-separated or whitespace-glued hints from Gemma
+        # ("vault, operator_log") are ambiguous; collapse rather than
+        # guess at one.
+        return None
+    if kind_str not in _VALID_SOURCE_KINDS:
+        logger.debug(
+            "IntentClassifier: rejecting non-canonical target_source_kind %r",
+            kind_str,
+        )
+        return None
+    return kind_str
+
+
 def _parse_intent(raw: str) -> QueryIntent:
     """Parse LLM JSON output into QueryIntent. Returns UNKNOWN on any error."""
     raw = raw.strip()
@@ -152,14 +196,7 @@ def _parse_intent(raw: str) -> QueryIntent:
         except (TypeError, ValueError):
             pass
 
-    raw_kind = data.get("target_source_kind")
-    if raw_kind is None:
-        target_source_kind: str | None = None
-    else:
-        kind_str = str(raw_kind).strip().lower()
-        # Treat the literal strings "null" / "none" / "" as missing — Gemma
-        # occasionally emits them rather than a real null.
-        target_source_kind = kind_str if kind_str and kind_str not in {"null", "none"} else None
+    target_source_kind = _normalise_source_kind(data.get("target_source_kind"))
 
     return QueryIntent(
         category=QueryCategory(category_str),

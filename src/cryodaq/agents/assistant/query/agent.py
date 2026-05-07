@@ -675,8 +675,13 @@ class AssistantQueryAgent:
     def _kind_label(kind: str) -> str:
         # Localised labels keep the format prompt's "Источники:" block
         # readable without exposing internal corpus-kind identifiers.
+        # v0.55.14 (Codex audit SCOPE 6 finding 6.4 follow-up) — keys
+        # match the canonical names emitted by document_loader.py
+        # (vault_note, not vault); the legacy "vault" alias is kept so
+        # an old index does not regress to the raw identifier.
         return {
             "experiment_metadata": "архив",
+            "vault_note": "vault",
             "vault": "vault",
             "operator_log": "журнал",
         }.get(kind, kind or "источник")

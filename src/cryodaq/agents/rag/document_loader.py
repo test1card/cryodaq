@@ -100,11 +100,18 @@ def load_experiment_metadata(experiments_dir: Path) -> list[DocumentChunk]:
 
         phases = metadata.get("phases", []) or []
         if phases:
-            phase_text = "Фазы: " + "; ".join(
-                f"{p.get('phase')} ({p.get('started_at', '?')} → {p.get('ended_at', 'in progress')})"
-                for p in phases
-            )
-            text_parts.append(phase_text)
+            # v0.55.14 (Codex audit SCOPE 2 finding 2.4) — defensive
+            # parsing: silently drop non-dict phase entries instead of
+            # crashing on `.get()` against a string / list / None.
+            valid_phases = [p for p in phases if isinstance(p, dict)]
+            if valid_phases:
+                phase_text = "Фазы: " + "; ".join(
+                    f"{p.get('phase', '?')} "
+                    f"({p.get('started_at', '?')} → "
+                    f"{p.get('ended_at', 'in progress')})"
+                    for p in valid_phases
+                )
+                text_parts.append(phase_text)
 
         narrative = "\n".join(text_parts).strip()
         if not narrative:
@@ -197,7 +204,10 @@ def load_operator_log_entries(sqlite_path: Path) -> list[DocumentChunk]:
     try:
         for row in cursor:
             log_id, ts, msg, author, exp_id, tags = row
-            text = (msg or "").strip()
+            # v0.55.14 (Codex audit SCOPE 2 finding 2.4) — coerce msg
+            # to str before strip(); a non-text BLOB or None passed
+            # through the SQLite read would otherwise crash the loader.
+            text = str(msg or "").strip()
             if not text:
                 continue
             chunks.append(

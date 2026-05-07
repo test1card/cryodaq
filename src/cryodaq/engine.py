@@ -2592,9 +2592,19 @@ async def _run_engine(*, mock: bool = False) -> None:
         from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
         from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
 
+        # v0.55.14 (Codex audit SCOPE 6 finding 6.8) — config-resolution
+        # priority: rag.local.yaml → rag.yaml → rag.yaml.example.
+        # The v0.55.7 ship report claimed an example fallback existed
+        # but the code didn't implement it; now it does. The example
+        # ships in-repo so RAG defaults are always available.
         _rag_cfg_path = _CONFIG_DIR / "rag.local.yaml"
+        _rag_cfg_source = "rag.local.yaml"
         if not _rag_cfg_path.exists():
             _rag_cfg_path = _CONFIG_DIR / "rag.yaml"
+            _rag_cfg_source = "rag.yaml"
+        if not _rag_cfg_path.exists():
+            _rag_cfg_path = _CONFIG_DIR / "rag.yaml.example"
+            _rag_cfg_source = "rag.yaml.example (defaults)"
         if _rag_cfg_path.exists():
             import yaml as _yaml  # noqa: PLC0415
 
@@ -2615,18 +2625,21 @@ async def _run_engine(*, mock: bool = False) -> None:
                     table_name=_rag_table,
                 )
                 logger.info(
-                    "RAG searcher: инициализирован (db=%s, table=%s)",
+                    "RAG searcher: инициализирован (config=%s, db=%s, table=%s)",
+                    _rag_cfg_source,
                     _rag_db_path,
                     _rag_table,
                 )
             else:
                 logger.info(
-                    "RAG searcher: index path не найден (%s) — RAG отключён",
+                    "RAG searcher: config=%s найден, но index path %s не существует — RAG отключён",
+                    _rag_cfg_source,
                     _rag_db_path,
                 )
         else:
             logger.info(
-                "RAG searcher: config/rag.yaml отсутствует — RAG отключён"
+                "RAG searcher: ни rag.local.yaml/rag.yaml/rag.yaml.example "
+                "не найдены — RAG отключён"
             )
     except Exception as _rag_exc:
         logger.warning("RAG searcher: ошибка инициализации — %s", _rag_exc)

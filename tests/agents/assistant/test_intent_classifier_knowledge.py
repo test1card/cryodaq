@@ -41,9 +41,60 @@ def test_parse_intent_knowledge_query_category() -> None:
     assert intent.category == QueryCategory.KNOWLEDGE_QUERY
 
 
-def test_parse_intent_extracts_target_source_kind_vault() -> None:
+def test_parse_intent_extracts_target_source_kind_vault_note() -> None:
+    """v0.55.14 — canonical kind matches the loader (vault_note, not vault)."""
+    intent = _parse_intent(_knowledge_json(source_kind="vault_note"))
+    assert intent.target_source_kind == "vault_note"
+
+
+def test_parse_intent_rejects_non_canonical_vault_alias() -> None:
+    """v0.55.14 (Codex audit SCOPE 6 finding 6.4) — the legacy "vault"
+    string is NOT in the canonical allow-list; it collapses to None so
+    the WHERE clause matches nothing rather than silently."""
     intent = _parse_intent(_knowledge_json(source_kind="vault"))
-    assert intent.target_source_kind == "vault"
+    assert intent.target_source_kind is None
+
+
+def test_parse_intent_rejects_arbitrary_string() -> None:
+    """v0.55.14 — only canonical kinds survive validation."""
+    intent = _parse_intent(_knowledge_json(source_kind="random_made_up_kind"))
+    assert intent.target_source_kind is None
+
+
+def test_parse_intent_rejects_comma_separated_multi_hint() -> None:
+    """v0.55.14 — Gemma sometimes emits "vault, operator_log"; refuse
+    to guess between contradictory hints."""
+    intent = _parse_intent(_knowledge_json(source_kind="vault_note, operator_log"))
+    assert intent.target_source_kind is None
+
+
+def test_parse_intent_rejects_list_target_source_kind() -> None:
+    """v0.55.14 — a JSON list shape is multi-hint; collapse to None."""
+    raw = json.dumps(
+        {
+            "category": "knowledge_query",
+            "target_channels": None,
+            "time_window_minutes": None,
+            "quantity": "",
+            "target_source_kind": ["vault_note", "operator_log"],
+        }
+    )
+    intent = _parse_intent(raw)
+    assert intent.target_source_kind is None
+
+
+def test_parse_intent_rejects_dict_target_source_kind() -> None:
+    raw = json.dumps(
+        {
+            "category": "knowledge_query",
+            "target_channels": None,
+            "time_window_minutes": None,
+            "quantity": "",
+            "target_source_kind": {"primary": "vault_note"},
+        }
+    )
+    intent = _parse_intent(raw)
+    assert intent.target_source_kind is None
 
 
 def test_parse_intent_extracts_target_source_kind_experiment_metadata() -> None:
@@ -73,8 +124,9 @@ def test_parse_intent_target_source_kind_empty_string_normalised_to_none() -> No
 
 
 def test_parse_intent_target_source_kind_lowercased() -> None:
-    intent = _parse_intent(_knowledge_json(source_kind="VAULT"))
-    assert intent.target_source_kind == "vault"
+    """Case-insensitive matching against the canonical allow-list."""
+    intent = _parse_intent(_knowledge_json(source_kind="VAULT_NOTE"))
+    assert intent.target_source_kind == "vault_note"
 
 
 def test_parse_intent_target_source_kind_absent_field_returns_none() -> None:
@@ -105,12 +157,12 @@ def _make_ollama(text: str) -> MagicMock:
     return client
 
 
-async def test_classifier_emits_knowledge_query_with_vault_kind() -> None:
-    ollama = _make_ollama(_knowledge_json(source_kind="vault", quantity="процедура"))
+async def test_classifier_emits_knowledge_query_with_vault_note_kind() -> None:
+    ollama = _make_ollama(_knowledge_json(source_kind="vault_note", quantity="процедура"))
     clf = IntentClassifier(ollama)
     intent = await clf.classify("как делать калибровку датчика?")
     assert intent.category == QueryCategory.KNOWLEDGE_QUERY
-    assert intent.target_source_kind == "vault"
+    assert intent.target_source_kind == "vault_note"
 
 
 async def test_classifier_emits_knowledge_query_with_experiment_metadata_kind() -> None:

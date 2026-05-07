@@ -24,7 +24,7 @@ INTENT_CLASSIFIER_SYSTEM = """\
   "target_channels": ["список каналов из запроса, или null"],
   "time_window_minutes": <int или null>,
   "quantity": "<краткое описание что спрашивают; для archive_detail — experiment_id если назван>",
-  "target_source_kind": "<для knowledge_query: experiment_metadata | vault | operator_log | null>"
+  "target_source_kind": "<для knowledge_query: experiment_metadata | vault_note | operator_log | null>"
 }
 
 Правила классификации:
@@ -58,12 +58,15 @@ INTENT_CLASSIFIER_SYSTEM = """\
     «какие у нас были проблемы с GPIB?» → knowledge_query
     «расскажи про насос форвакуума» → knowledge_query
     «инструкция по установке образца» → knowledge_query
-  Извлечение target_source_kind:
-    «процедура» / «инструкция» / «как делать» — обычно vault, иногда null.
-    «vault» / «заметки» / «notes» → vault
+  Извлечение target_source_kind (только канонические значения корпуса):
+    «процедура» / «инструкция» / «как делать» — обычно vault_note,
+      иногда null если непонятно.
+    «vault» / «заметки» / «notes» → vault_note
     «эксперимент <X>» / «прошлый» / «архив» → experiment_metadata
     «журнал» / «лог оператора» / «record» → operator_log
-    Если не можешь точно определить — клади null.
+    Если не можешь точно определить — клади null. НЕ комбинируй
+    значения через запятую и НЕ возвращай список — только одно
+    каноническое значение или null.
 - "что такое X", "как работает Y" БЕЗ привязки к лаборатории → out_of_scope_general
 - Прочие исторические вопросы вне четырёх категорий
   (archive_list/archive_detail/alarm_history/knowledge_query) → out_of_scope_historical
