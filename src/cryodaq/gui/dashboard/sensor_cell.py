@@ -36,7 +36,7 @@ _STATUS_LABELS: dict[ChannelStatus, str] = {
     ChannelStatus.OVERRANGE: "Перегрузка",
     ChannelStatus.UNDERRANGE: "Занижение",
     ChannelStatus.SENSOR_ERROR: "Ошибка датчика",
-    ChannelStatus.TIMEOUT: "Таймаут",
+    ChannelStatus.TIMEOUT: "Нет ответа",
 }
 
 # Map ChannelStatus to theme status colors.

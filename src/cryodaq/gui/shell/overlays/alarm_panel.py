@@ -391,7 +391,7 @@ class AlarmPanel(QWidget):
         layout = QHBoxLayout(header)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.SPACE_2)
-        title = QLabel("АЛАРМЫ")
+        title = QLabel("ТРЕВОГИ")
         title.setFont(_title_font())
         title.setStyleSheet(
             f"color: {theme.FOREGROUND}; background: transparent; border: none;"

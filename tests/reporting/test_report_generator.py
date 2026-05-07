@@ -197,7 +197,7 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(
     ).exists()
     text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
-    assert "Алармы" in text
+    assert "Тревоги" in text
     assert "Таблица измеренных величин" in text
 
 
