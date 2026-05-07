@@ -63,8 +63,20 @@ graphify-out/
 graphify-out.stale-pre-merge/
 logs/
 
-# Runtime SQLite databases (per-machine, not portable)
-data/
+# Runtime SQLite databases (per-machine, not portable).
+# F-KnowledgeBaseExpansion (v0.55.7.1): the *contents* of data/ are
+# ignored at the top level so nothing operator-machine-specific
+# (SQLite WAL, agent cache, conductivity logs, parquet bursts) ever
+# gets committed by accident. The knowledge subtree is the one
+# carve-out — Markdown procedures, manuals, and operator-dropped PDFs
+# travel with the repo so a fresh clone has the same RAG corpus the
+# demo expects. The exclusion list (data/knowledge/**/*.lance,
+# data/knowledge/**/*.cache) still blocks the LanceDB index + any
+# embedding cache that could land here later.
+data/*
+!data/knowledge/
+data/knowledge/**/*.lance
+data/knowledge/**/*.cache
 
 # Reference curves and predictor model — operator-supplied, not source-controlled
 cooldown_v5/
