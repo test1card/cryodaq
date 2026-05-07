@@ -33,6 +33,24 @@
 
 ### Added
 
+- **F33** — `AssistantQueryAgent` теперь отвечает на запросы об архиве
+  экспериментов и истории тревог. Три новых `QueryCategory`:
+  - `archive_list` — «какие эксперименты были на этой неделе» / «покажи
+    архив за месяц». Возвращает list карточек (experiment_id, title,
+    sample, operator, started, status). Default window — 7 дней.
+  - `archive_detail` — «детали эксперимента <ID>» / «сколько часов длился
+    cooldown в <ID>». Возвращает полную метку (sample, operator, статус,
+    duration, фазы, cooldown-метрики из metadata.json).
+  - `alarm_history` — «сколько раз сработал overheat за неделю» /
+    «статистика тревог». Возвращает triggered/cleared count + breakdown
+    по `alarm_id`.
+
+  Все три категории — read-only через новый `ArchiveAdapter`, который
+  оборачивает `ExperimentManager.list_archive_entries` /
+  `get_archive_item` и `AlarmStateManager.get_history`. SQL-DSL и write-
+  capabilities явно вне scope. F30 query agent core, IntentClassifier
+  алгоритм и `experiment_adapter` — без изменений.
+
 - **F-BotPolish** — четыре точечных фикса в Гемма-pipeline под наблюдаемые
   лабораторные проблемы 2026-05-07.
   1. *Markdown→HTML на стороне `OutputRouter`*: Гемма по prompts

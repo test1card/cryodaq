@@ -95,6 +95,13 @@ class QueryRouter:
                 return await self._fetch_alarm_status()
             if cat == QueryCategory.COMPOSITE_STATUS:
                 return await self._fetch_composite()
+            # F33 — read-only archive queries.
+            if cat == QueryCategory.ARCHIVE_LIST:
+                return await self._fetch_archive_list(intent)
+            if cat == QueryCategory.ARCHIVE_DETAIL:
+                return await self._fetch_archive_detail(intent, query)
+            if cat == QueryCategory.ALARM_HISTORY:
+                return await self._fetch_alarm_history(intent)
             # Out-of-scope and unknown: no data needed
             return {}
         except Exception as exc:
@@ -165,3 +172,51 @@ class QueryRouter:
     async def _fetch_composite(self) -> dict[str, Any]:
         composite = await self._adapters.composite.status()
         return {"composite_status": composite}
+
+    # ------------------------------------------------------------------
+    # F33 — archive queries
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _days_from_intent(intent: QueryIntent, default_days: int = 7) -> int:
+        """Convert ``time_window_minutes`` (the IntentClassifier's only time
+        knob) to whole days, defaulting to ``default_days`` when absent.
+        Minimum window is 1 day so the LLM cannot ask for "0 days"."""
+        win = intent.time_window_minutes
+        if win is None or win <= 0:
+            return default_days
+        return max(1, int(win) // 1440 or 1)
+
+    async def _fetch_archive_list(self, intent: QueryIntent) -> dict[str, Any]:
+        archive = self._adapters.archive
+        if archive is None:
+            return {"archive_list": None}
+        days = self._days_from_intent(intent)
+        result = await archive.list_recent(days=days)
+        return {"archive_list": result}
+
+    async def _fetch_archive_detail(
+        self, intent: QueryIntent, query: str
+    ) -> dict[str, Any]:
+        archive = self._adapters.archive
+        if archive is None:
+            return {"archive_detail": None}
+        # Heuristic: the IntentClassifier may surface an experiment id via
+        # ``quantity`` or as the only entry in ``target_channels`` (the LLM
+        # sometimes treats it as a "channel"). Fallback to None — adapter
+        # will return None, format prompt frames it as "детали не найдены".
+        candidate = (intent.quantity or "").strip()
+        if not candidate and intent.target_channels:
+            candidate = intent.target_channels[0].strip()
+        if not candidate:
+            return {"archive_detail": None, "query": query}
+        result = await archive.get_detail(candidate)
+        return {"archive_detail": result, "experiment_id": candidate}
+
+    async def _fetch_alarm_history(self, intent: QueryIntent) -> dict[str, Any]:
+        archive = self._adapters.archive
+        if archive is None:
+            return {"alarm_history": None}
+        days = self._days_from_intent(intent)
+        result = await archive.alarm_history_summary(days=days)
+        return {"alarm_history": result}

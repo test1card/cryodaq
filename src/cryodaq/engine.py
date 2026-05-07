@@ -2149,6 +2149,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _gemma_config is not None and _gemma_config.query_enabled:
         try:
             from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
+            from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
             from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
             from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
             from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
@@ -2180,6 +2181,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             _q_sqlite = SQLiteAdapter(writer)
             _q_alarms = AlarmAdapter(alarm_engine)
             _q_experiment = ExperimentAdapter(experiment_manager)
+            _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
             _q_composite = CompositeAdapter(
                 broker_snapshot=_q_broker_snap,
                 cooldown=_q_cooldown,
@@ -2210,6 +2212,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     alarms=_q_alarms,
                     experiment=_q_experiment,
                     composite=_q_composite,
+                    archive=_q_archive,
                 ),
                 intent_model=_gemma_config.query_intent_model,
                 format_model=_gemma_config.query_format_model,

@@ -19,6 +19,10 @@ class QueryCategory(Enum):
     OUT_OF_SCOPE_HISTORICAL = "out_of_scope_historical"
     OUT_OF_SCOPE_GENERAL = "out_of_scope_general"
     UNKNOWN = "unknown"
+    # F33 — read-only access to the experiment archive + alarm history.
+    ARCHIVE_LIST = "archive_list"
+    ARCHIVE_DETAIL = "archive_detail"
+    ALARM_HISTORY = "alarm_history"
 
 
 @dataclass
@@ -101,6 +105,40 @@ class ExperimentStatus:
 
 
 @dataclass
+class ArchiveListResult:
+    """F33: a list of past experiments matching the operator filter."""
+
+    entries: list[dict] = field(default_factory=list)
+    total_count: int = 0
+    filter_summary: str = ""  # e.g. "за последние 7 дней"
+
+
+@dataclass
+class ArchiveDetailResult:
+    """F33: full detail for one archived experiment."""
+
+    experiment_id: str
+    sample: str
+    operator: str
+    status: str
+    started_at: str
+    ended_at: str | None
+    duration_h: float | None
+    phases: list[dict] = field(default_factory=list)
+    cooldown_metrics: dict | None = None
+
+
+@dataclass
+class AlarmHistoryResult:
+    """F33: aggregated alarm transition counts over a time window."""
+
+    window_description: str
+    triggered_count: int = 0
+    cleared_count: int = 0
+    by_alarm_id: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
 class QueryAdapters:
     """Container for all service adapters used by the query agent."""
 
@@ -111,6 +149,7 @@ class QueryAdapters:
     alarms: object
     experiment: object
     composite: object
+    archive: object | None = None  # F33 — optional, defaults to None
 
 
 @dataclass

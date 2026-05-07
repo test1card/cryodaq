@@ -16,7 +16,10 @@ from cryodaq.agents.assistant.live.prompts import format_with_brand
 from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.intent_classifier import IntentClassifier
 from cryodaq.agents.assistant.query.prompts import (
+    FORMAT_ALARM_HISTORY_USER,
     FORMAT_ALARM_STATUS_USER,
+    FORMAT_ARCHIVE_DETAIL_USER,
+    FORMAT_ARCHIVE_LIST_USER,
     FORMAT_COMPOSITE_STATUS_USER,
     FORMAT_CURRENT_VALUE_USER,
     FORMAT_ETA_COOLDOWN_USER,
@@ -242,6 +245,12 @@ class AssistantQueryAgent:
             return self._fmt_alarm_status(query, data)
         if category == QueryCategory.COMPOSITE_STATUS:
             return self._fmt_composite(query, data)
+        if category == QueryCategory.ARCHIVE_LIST:
+            return self._fmt_archive_list(query, data)
+        if category == QueryCategory.ARCHIVE_DETAIL:
+            return self._fmt_archive_detail(query, data)
+        if category == QueryCategory.ALARM_HISTORY:
+            return self._fmt_alarm_history(query, data)
         if category == QueryCategory.OUT_OF_SCOPE_HISTORICAL:
             return FORMAT_OUT_OF_SCOPE_HISTORICAL_USER.format(
                 query=query, brand_name=self._config.brand_name
@@ -501,4 +510,123 @@ class AssistantQueryAgent:
             cooldown_eta_text=cd_text,
             vacuum_eta_text=vac_text,
             alarms_text=alarms_text,
+        )
+
+    # ------------------------------------------------------------------
+    # F33 — archive query format prompts
+    # ------------------------------------------------------------------
+
+    def _fmt_archive_list(self, query: str, data: dict[str, Any]) -> str:
+        result = data.get("archive_list")
+        if result is None:
+            return FORMAT_ARCHIVE_LIST_USER.format(
+                query=query,
+                filter_summary="—",
+                total_count=0,
+                entries_text="(адаптер архива не сконфигурирован)",
+            )
+        entries = result.entries or []
+        if not entries:
+            entries_text = "(нет записей за выбранный период)"
+        else:
+            lines: list[str] = []
+            for entry in entries:
+                exp_id = entry.get("experiment_id") or "?"
+                title = entry.get("title") or ""
+                sample = entry.get("sample") or "—"
+                operator = entry.get("operator") or "—"
+                started = entry.get("start_time") or "—"
+                status = entry.get("status") or "—"
+                head = f"- {exp_id}"
+                if title:
+                    head += f" «{title}»"
+                lines.append(
+                    f"{head}: проба {sample}, оператор {operator}, "
+                    f"начало {started}, статус {status}"
+                )
+            entries_text = "\n".join(lines)
+        return FORMAT_ARCHIVE_LIST_USER.format(
+            query=query,
+            filter_summary=result.filter_summary or "—",
+            total_count=result.total_count,
+            entries_text=entries_text,
+        )
+
+    def _fmt_archive_detail(self, query: str, data: dict[str, Any]) -> str:
+        result = data.get("archive_detail")
+        ident = data.get("experiment_id") or "—"
+        if result is None:
+            return FORMAT_ARCHIVE_DETAIL_USER.format(
+                query=query,
+                experiment_id=ident,
+                sample="—",
+                operator="—",
+                status="—",
+                started_at="—",
+                ended_at="—",
+                duration_str="—",
+                phases_text="(нет данных)",
+                cooldown_text="(не указано)",
+            )
+        if result.duration_h is None:
+            duration_str = "не зафиксировано"
+        else:
+            h_int = int(result.duration_h)
+            mins = int((result.duration_h - h_int) * 60)
+            duration_str = f"{h_int}ч {mins}мин"
+        if result.phases:
+            phase_lines = []
+            for p in result.phases:
+                pname = p.get("phase", "—")
+                p_started = p.get("started_at", "—")
+                p_ended = p.get("ended_at", "—")
+                phase_lines.append(f"- {pname}: {p_started} → {p_ended}")
+            phases_text = "\n".join(phase_lines)
+        else:
+            phases_text = "(нет данных)"
+        cooldown = result.cooldown_metrics
+        if cooldown:
+            cooldown_text = (
+                f"началось {cooldown.get('started_at', '—')}, "
+                f"закончилось {cooldown.get('ended_at', '—')}"
+            )
+        else:
+            cooldown_text = "(нет фазы cooldown в архиве этого эксперимента)"
+        return FORMAT_ARCHIVE_DETAIL_USER.format(
+            query=query,
+            experiment_id=result.experiment_id or ident,
+            sample=result.sample or "—",
+            operator=result.operator or "—",
+            status=result.status or "—",
+            started_at=result.started_at or "—",
+            ended_at=result.ended_at or "не зафиксировано",
+            duration_str=duration_str,
+            phases_text=phases_text,
+            cooldown_text=cooldown_text,
+        )
+
+    def _fmt_alarm_history(self, query: str, data: dict[str, Any]) -> str:
+        result = data.get("alarm_history")
+        if result is None:
+            return FORMAT_ALARM_HISTORY_USER.format(
+                query=query,
+                window_description="—",
+                triggered_count=0,
+                cleared_count=0,
+                by_alarm_id_text="(адаптер архива не сконфигурирован)",
+            )
+        if result.by_alarm_id:
+            top = sorted(
+                result.by_alarm_id.items(), key=lambda kv: kv[1], reverse=True
+            )
+            lines = [f"- {aid} ×{count}" for aid, count in top]
+            by_alarm_id_text = "\n".join(lines)
+        else:
+            by_alarm_id_text = "(тревог не было)"
+        return FORMAT_ALARM_HISTORY_USER.format(
+            query=query,
+            window_description=result.window_description or "—",
+            triggered_count=result.triggered_count,
+            cleared_count=result.cleared_count,
+            by_alarm_id_text=by_alarm_id_text,
         )

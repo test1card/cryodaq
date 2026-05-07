@@ -19,10 +19,11 @@ INTENT_CLASSIFIER_SYSTEM = """\
 {
   "category": "<one of: current_value | eta_cooldown | eta_vacuum | range_stats |
     phase_info | alarm_status | composite_status | greeting |
+    archive_list | archive_detail | alarm_history |
     out_of_scope_historical | out_of_scope_general | unknown>",
   "target_channels": ["список каналов из запроса, или null"],
   "time_window_minutes": <int или null>,
-  "quantity": "<краткое описание что спрашивают>"
+  "quantity": "<краткое описание что спрашивают; для archive_detail — experiment_id если назван>"
 }
 
 Правила классификации:
@@ -36,8 +37,17 @@ INTENT_CLASSIFIER_SYSTEM = """\
 - "в каком диапазоне P", "колебания давления", "min max T" → range_stats
 - "в какой фазе", "фаза эксперимента", "текущая фаза" → phase_info
 - "есть ли тревоги", "что сработало" → alarm_status
-- "что было вчера", "история", "последний месяц", "архив" → out_of_scope_historical
+- "какие эксперименты были", "покажи последние эксперименты",
+  "список cooldown'ов", "что было запущено за неделю/месяц",
+  "архив экспериментов" → archive_list
+- "детали эксперимента <ID>", "сколько часов длился cooldown в <ID>",
+  "T_cold_final у пробы X", "детали последнего эксперимента"
+  (одно конкретное прошлое испытание) → archive_detail
+  (если назван experiment_id — клади его в "quantity")
+- "сколько раз сработал overheat", "статистика тревог за период",
+  "история тревог", "были ли алармы вчера/за неделю" → alarm_history
 - "что такое X", "как работает Y", "объясни" → out_of_scope_general
+- Прочие исторические вопросы вне трёх архивных категорий выше → out_of_scope_historical
 - Не можешь классифицировать → unknown
 
 ВЕРНИ ТОЛЬКО JSON. Никаких пояснений, никакого текста до/после JSON.
@@ -184,6 +194,51 @@ FORMAT_COMPOSITE_STATUS_USER = """\
 Плохой пример (НЕ ДЕЛАЙ ТАК): "Т7 Детектор, сейчас система..."
 
 Сгенерируй сводку (3-5 предложений).
+"""
+
+FORMAT_ARCHIVE_LIST_USER = """\
+Запрос: {query}
+
+Список архивных экспериментов ({filter_summary}, всего {total_count}):
+{entries_text}
+
+Сгенерируй краткий ответ оператору на русском.
+Не выдумывай экспериментов, которых нет в списке.
+Если список пуст — скажи что за этот период архивных эксперимента не было.
+"""
+
+FORMAT_ARCHIVE_DETAIL_USER = """\
+Запрос: {query}
+
+Детали эксперимента {experiment_id}:
+- Проба: {sample}
+- Оператор: {operator}
+- Статус: {status}
+- Запущен: {started_at}
+- Завершён: {ended_at}
+- Продолжительность: {duration_str}
+
+Фазы:
+{phases_text}
+
+Cooldown:
+{cooldown_text}
+
+Сгенерируй краткий ответ. Не выдумывай данных, которых нет выше.
+Если эксперимент не найден — скажи прямо.
+"""
+
+FORMAT_ALARM_HISTORY_USER = """\
+Запрос: {query}
+
+Статистика тревог {window_description}:
+- Сработано: {triggered_count}
+- Снято: {cleared_count}
+
+По типу тревоги:
+{by_alarm_id_text}
+
+Сформулируй краткий итог. Если тревог не было — скажи что за период всё было тихо.
 """
 
 FORMAT_OUT_OF_SCOPE_HISTORICAL_USER = """\
