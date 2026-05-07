@@ -11,10 +11,47 @@ from cryodaq.agents.rag.indexer import build_index
 from cryodaq.agents.rag.searcher import RagSearcher
 
 
+import hashlib
+
+
 class _MockEmbeddings:
+    """Deterministic 384-dim mock — uses md5, not Python's `hash()`.
+
+    PYTHONHASHSEED randomizes Python's built-in `hash()` across
+    processes, which would let a broken `source_kind_filter`
+    implementation pass by luck. md5 is reproducible and
+    process-independent.
+    """
+
     async def embed(self, text: str) -> list[float]:
-        seed = (hash(text[:5]) % 100) / 100.0
+        digest = hashlib.md5(text[:32].encode("utf-8")).digest()
+        seed = digest[0] / 255.0
         return [seed] * 384
+
+
+class _ScriptedMockEmbeddings:
+    """Deterministic mock with explicit vectors for fixed content tags.
+
+    Used by the rare-kind regression test: experiment_metadata chunks
+    must collapse onto the same vector as the query so they monopolize
+    the unfiltered top-K, and the operator_log "needle" row must sit
+    far away in vector space. This guarantees the test would catch a
+    post-fetch filter bug.
+    """
+
+    def __init__(
+        self,
+        *,
+        query: str,
+        rare_marker: str,
+    ) -> None:
+        self._query = query
+        self._rare_marker = rare_marker
+
+    async def embed(self, text: str) -> list[float]:
+        if self._rare_marker in text:
+            return [1.0] * 384  # rare operator_log row — far from query
+        return [0.0] * 384      # query and experiment_metadata — collapsed
 
 
 def _seed(tmp_path: Path) -> None:
@@ -130,7 +167,7 @@ async def test_searcher_source_kind_filter_finds_rare_kind_among_many(tmp_path):
     finally:
         conn.close()
 
-    embeddings = _MockEmbeddings()
+    embeddings = _ScriptedMockEmbeddings(query="needle", rare_marker="needle in haystack")
     db_path = tmp_path / "rag_db"
     await build_index(
         experiments_dir=tmp_path / "experiments",
@@ -141,6 +178,20 @@ async def test_searcher_source_kind_filter_finds_rare_kind_among_many(tmp_path):
     )
 
     searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings)
+
+    # Baseline: experiment_metadata rows share the query's vector
+    # (collapsed at [0.0]*384) while the operator_log row sits at
+    # [1.0]*384 — so an unfiltered top_k=3 must contain ONLY
+    # experiment_metadata rows. If a broken implementation applied
+    # `source_kind_filter` after `.limit(top_k)` it would also receive
+    # only experiment_metadata rows here and the filtered search below
+    # would surface zero results — exactly what we'd want to catch.
+    unfiltered = await searcher.search("needle", top_k=3)
+    assert len(unfiltered) == 3
+    assert all(
+        r.source_kind == "experiment_metadata" for r in unfiltered
+    ), [r.source_kind for r in unfiltered]
+
     rare = await searcher.search(
         "needle", top_k=3, source_kind_filter=["operator_log"]
     )
