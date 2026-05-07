@@ -293,6 +293,89 @@ class ChannelManager:
         short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
         return self._channels.get(short_id, {}).get("group", "")
 
+    # ------------------------------------------------------------------
+    # F-X (v0.55.9) — channel taxonomy + phase-aware alarm bands
+    # ------------------------------------------------------------------
+
+    def get_thermal_zone(self, channel_id: str) -> str | None:
+        """Return the channel's ``thermal_zone`` classification or None.
+
+        F-X (v0.55.9): operator-classified physical context for each
+        channel. One of ``cold_4k``, ``cold_77k``, ``cold_landmark``,
+        ``intermediate``, ``warm_flange``, ``warm_reference``,
+        ``disconnected_reserve``. Channels without the field return
+        ``None`` (legacy migration path — alarm engine then falls back
+        to existing ``alarms_v3.yaml`` rules).
+        """
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        zone = self._channels.get(short_id, {}).get("thermal_zone")
+        return str(zone) if zone else None
+
+    def get_alarm_band(
+        self,
+        channel_id: str,
+        phase: str | None = None,
+    ) -> tuple[float, float] | None:
+        """Return the phase-aware ``[min_K, max_K]`` band for the channel.
+
+        F-X (v0.55.9): resolution order:
+        1. If ``phase`` is supplied AND the channel's ``alarm_band``
+           dict has a key matching it, return that band.
+        2. Else return the ``all_phases`` fallback if defined.
+        3. Else return ``None``.
+
+        ``None`` means the AlarmEngine should fall back to the existing
+        ``alarms_v3.yaml`` threshold rules — F-X bands are additive,
+        not a replacement.
+        """
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        info = self._channels.get(short_id, {})
+        band_cfg = info.get("alarm_band")
+        if not isinstance(band_cfg, dict):
+            return None
+
+        candidate = None
+        if phase:
+            phase_band = band_cfg.get(str(phase).lower())
+            if isinstance(phase_band, list) and len(phase_band) == 2:
+                candidate = phase_band
+        if candidate is None:
+            fallback = band_cfg.get("all_phases")
+            if isinstance(fallback, list) and len(fallback) == 2:
+                candidate = fallback
+        if candidate is None:
+            return None
+
+        try:
+            low = float(candidate[0])
+            high = float(candidate[1])
+        except (TypeError, ValueError):
+            logger.warning(
+                "ChannelManager: alarm_band for %s contains non-numeric "
+                "values (%r); ignoring", short_id, candidate,
+            )
+            return None
+        if low > high:
+            logger.warning(
+                "ChannelManager: alarm_band for %s is reversed [%s..%s]; "
+                "ignoring", short_id, low, high,
+            )
+            return None
+        return (low, high)
+
+    def get_channels_in_zone(self, zone: str) -> list[str]:
+        """Return all channel IDs classified into ``zone``.
+
+        F-X helper for callers that want to iterate by physical context
+        (e.g. "all warm-by-design channels"). Order matches YAML
+        declaration order.
+        """
+        return [
+            ch_id
+            for ch_id, info in self._channels.items()
+            if info.get("thermal_zone") == zone
+        ]
+
     def resolve_channel_reference(self, reference: str) -> str:
         """Resolve a channel reference to its canonical runtime label.
 
