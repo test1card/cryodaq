@@ -580,11 +580,20 @@ class AssistantQueryAgent:
         if result.phases:
             phase_lines = []
             for p in result.phases:
-                pname = p.get("phase", "—")
+                # v0.55.16 (Codex audit SCOPE 3 finding 3.6) — defensive
+                # filter against non-dict phase rows (already filtered
+                # at the loader, but format prompt should not crash if
+                # legacy data slips through) + localise raw English
+                # phase identifiers ("cooldown", "warmup", "preparation",
+                # "measurement") to operator-facing Russian via the
+                # shared `phase_display_name` helper.
+                if not isinstance(p, dict):
+                    continue
+                pname = phase_display_name(p.get("phase"))
                 p_started = p.get("started_at", "—")
                 p_ended = p.get("ended_at", "—")
                 phase_lines.append(f"- {pname}: {p_started} → {p_ended}")
-            phases_text = "\n".join(phase_lines)
+            phases_text = "\n".join(phase_lines) if phase_lines else "(нет данных)"
         else:
             phases_text = "(нет данных)"
         cooldown = result.cooldown_metrics
@@ -594,7 +603,7 @@ class AssistantQueryAgent:
                 f"закончилось {cooldown.get('ended_at', '—')}"
             )
         else:
-            cooldown_text = "(нет фазы cooldown в архиве этого эксперимента)"
+            cooldown_text = "(нет фазы захолаживания в архиве этого эксперимента)"
         return FORMAT_ARCHIVE_DETAIL_USER.format(
             query=query,
             experiment_id=result.experiment_id or ident,

@@ -11,6 +11,79 @@
 
 (autonomous run 2026-05-07 work — pending v0.55.0 tag)
 
+### Audit batch v0.55.12 — v0.55.16
+
+Codex audit on shipped tags v0.54.0 / v0.55.4 / v0.55.6 / v0.55.7
+surfaced six FAIL scopes (29 individual findings — 6 CRITICAL safety,
+11 HIGH, 12+ MEDIUM). Architect chose Option B: full audit picture
+before sprint planning, then sequential hotfix releases.
+
+**v0.55.12** — CooldownAlarm safety (SCOPE 1, 5 PASS-blockers):
+public `SafetyManager.latch_fault(reason, source)` API; CooldownAlarm
+CRITICAL escalates safety FSM via the new entry point; engine
+interlock-escalation path migrated from private `_fault()` to the
+public API; `notify_phase_change()` disarms on phase skip past
+cooldown; `_cycle_generation` guard aborts mid-tick CRITICAL emit on
+stale state; `_COOLDOWN_DEFAULTS` extended with `auto_arm`,
+`watchdog_*`, and `cold_start_skip_margin_K` so YAML overrides are
+honoured (previously silently dropped); `_is_cold_start()` gate in
+`arm()` skips auto-arm when the cryostat is already at base T at
+engine restart, with optional SteadyStatePredictor quasi-steady
+requirement.
+
+**v0.55.14** — RAG indexer + integration (SCOPE 2 + 6, 9
+PASS-blockers): merged v0.55.7 RAG integration into the v0.55.6.1
+mainline (was on a parallel branch); CLI catches Ollama errors with
+exit codes 3/4 and friendly stderr hints; LanceDB rebuild now uses
+`create_table(mode="overwrite")` for atomic manifest commit
+(crash-safe — old index stays canonical until new manifest commits)
+with row-count validation post-commit; defensive parsing in
+`document_loader` for non-dict phase entries and non-string operator
+log messages; CLI gains `--config` flag with explicit
+`rag.yaml.example` fallback; `_normalise_source_kind()` validates
+`target_source_kind` against canonical
+`{experiment_metadata, vault_note, operator_log}` allow-list
+(rejects list / dict / multi-value / comma- and whitespace-glued
+strings); side fix: prompt and `_kind_label` upgraded from buggy
+`vault` to canonical `vault_note` (loader's actual emission);
+`build_index()` offloads sync filesystem walks and LanceDB writes
+via `asyncio.to_thread` so finalize-time rebuilds don't stall the
+event loop; engine RAG fallback to `rag.yaml.example` actually
+implemented (the v0.55.7 ship-report claim was previously code-drift).
+
+**v0.55.15** — GUI overlay lifecycle (SCOPE 5, 5 PASS-blockers):
+`MultiLinePanel(instrument_id=...)` for multi-instance scoping —
+`channel_belongs_to_panel()` enforces the prefix and a future second
+panel won't receive the first's readings; `set_connected(False)`
+clears value/delta/window cells with the missing-value marker plus
+a footer line; public `mark_all_stale()` exposed for shell-level
+force-stale on lazy-open under disconnected engine;
+`_assistant_chat_widget._on_response` now actually removes the
+finished worker from `_workers` and schedules `deleteLater()` (was a
+no-op `wait(0)` before — the QThread refs accumulated unbounded
+across an operator session); `OverlayContainer.unregister(name)` +
+`clear_all()` + `page_names` for dispose semantics, with
+`register()` overwrite path also scheduling `deleteLater()` on the
+displaced widget; new `_multiline_snapshot` cache at the shell level
+replays into a freshly-opened MultiLine panel via the public
+scoping helper, with force-stale after replay when the engine is
+disconnected at lazy-open time.
+
+**v0.55.16** — audit polish: archive-detail format prompt section
+header «Cooldown:» → «Захолаживание:»; phase identifiers in the
+prompt now flow through `phase_display_name` so operator output
+shows «захолаживание» / «измерение» / «отогрев» / «подготовка»
+instead of raw English; `cooldown_metrics` fallback string also
+russified; defensive parsing tests added for malformed
+`metadata.json` and invalid date strings in the F33 archive detail
+path. Vault audit prompt corrected — F32 RAG and F-MultiLine driver
+both first shipped at `v0.55.0`, not `v0.54.0` (the audit prompt's
+target tags were off by one minor version).
+
+Tests: 75+ new regression cases across the four releases. Pre-existing
+flaky tests (test_zmq_bridge_subprocess_threading timing-sensitive
+ZMQ subprocess threading) unchanged — separate from audit scope.
+
 ### Added
 
 - **F-MultiLineContinuous (v0.55.11)** — driver continuous mode for the

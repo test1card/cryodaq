@@ -249,7 +249,7 @@ FORMAT_ARCHIVE_DETAIL_USER = """\
 Фазы:
 {phases_text}
 
-Cooldown:
+Захолаживание:
 {cooldown_text}
 
 Сгенерируй краткий ответ. Не выдумывай данных, которых нет выше.

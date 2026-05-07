@@ -122,7 +122,9 @@ def test_archive_detail_renders_phases_and_cooldown(agent: AssistantQueryAgent) 
     assert "exp-1" in prompt
     assert "детектор-А" in prompt
     assert "20ч 0мин" in prompt
-    assert "cooldown" in prompt
+    # v0.55.16 — phase name localised to Russian via phase_display_name
+    # ("cooldown" → "захолаживание").
+    assert "захолаживание" in prompt
     assert "2025-12-01T09:00" in prompt
 
 
@@ -155,7 +157,8 @@ def test_archive_detail_missing_duration_renders_unknown(agent: AssistantQueryAg
     )
     assert "не зафиксировано" in prompt
     assert "(нет данных)" in prompt
-    assert "(нет фазы cooldown в архиве этого эксперимента)" in prompt
+    # v0.55.16 — fallback string russified ("cooldown" → "захолаживания").
+    assert "(нет фазы захолаживания в архиве этого эксперимента)" in prompt
 
 
 # ---------------------------------------------------------------------------
