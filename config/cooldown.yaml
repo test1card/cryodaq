@@ -1,7 +1,12 @@
+# Channel mapping (2026-05-07, post-C6 + F-ChannelLandmarks):
+# Т11 — пассивная плита на 1-й ступени GM-cooler (~40K floor)
+# Т12 — 2-я ступень GM-cooler, холодная точка (~2.9K floor)
+# These are physically pinned (positionally fixed) channels.
+# Other Т* channels are mobile per-experiment — never reference them here.
 cooldown:
   enabled: true
-  channel_cold: "Т7 Детектор"
-  channel_warm: "Т5 Экран 77К"
+  channel_cold: "Т12"
+  channel_warm: "Т11"
   model_dir: "data/cooldown_model"
   detect:
     start_rate_threshold: -5.0

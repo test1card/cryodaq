@@ -7,6 +7,20 @@
 
 ---
 
+## [0.55.0] — unreleased
+
+### Fixed
+
+- **F-ConfigChannelDrift** — `config/cooldown.yaml` channel mapping
+  aligned with C6 / F-ChannelLandmarks canonical Т11/Т12. Pre-fix the
+  file referenced pre-C6 names (`Т7 Детектор` / `Т5 Экран 77К`), which
+  meant the cooldown predictor on the real lab PC watched detector
+  temperature instead of the 2nd-stage GM cooler. Replay-mode was
+  already correct via the v0.53.1 defensive override; this aligns the
+  real-lab path.
+
+---
+
 ## [0.54.0] — unreleased — feat(query): channel landmarks for AI
 
 ### Changed
