@@ -80,12 +80,18 @@ def _stub_channels(panel: ConductivityPanel, ids: list[str]) -> None:
     panel._plot_items.clear()
     panel._buffers.clear()
     panel._rate_buffers.clear()
-    for ch_id in ids:
+    # v0.55.2 A3: chain checkboxes live in a QGridLayout (2-col compact).
+    # Mirror the production layout so layout-driven tests still resolve.
+    n = len(ids)
+    rows_per_col = max(1, (n + 1) // 2)
+    for idx, ch_id in enumerate(ids):
+        row = idx % rows_per_col
+        col = idx // rows_per_col
         cb = QCheckBox(ch_id)
         cb.stateChanged.connect(lambda state, cid=ch_id: panel._on_check(cid, state))
         panel._checkboxes[ch_id] = cb
-        panel._ch_layout.addWidget(cb)
-    panel._ch_layout.addStretch()
+        panel._ch_layout.addWidget(cb, row, col)
+    panel._ch_layout.setRowStretch(rows_per_col, 1)
 
 
 # ----------------------------------------------------------------------

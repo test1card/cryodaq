@@ -280,6 +280,11 @@ class ConductivityPanel(QWidget):
 
         root.addWidget(self._build_header())
         root.addWidget(self._build_banner())
+        # v0.55.2 A3: top toolbar pulls power-source / channel-counter /
+        # export-CSV out of the cramped chain card and into a horizontal
+        # strip directly under the banner — matches cryodaq-primitives/
+        # conductivity-panel.md "Anatomy".
+        root.addWidget(self._build_toolbar())
 
         main_split = QHBoxLayout()
         main_split.setContentsMargins(0, 0, 0, 0)
@@ -316,6 +321,55 @@ class ConductivityPanel(QWidget):
         self._banner_label.setVisible(False)
         return self._banner_label
 
+    def _build_toolbar(self) -> QWidget:
+        """Top strip with power source, channel counter, and export.
+
+        v0.55.2 A3: per cryodaq-primitives/conductivity-panel.md the
+        spec mandates a top toolbar for these controls so the chain
+        card on the left can devote its space to channel selection
+        rather than fighting with controls at the bottom.
+        """
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_2)
+
+        src_cap = QLabel("Источник P:")
+        src_cap.setFont(_label_font())
+        src_cap.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        layout.addWidget(src_cap)
+
+        self._power_combo = QComboBox()
+        self._power_combo.addItems(list(_POWER_CHANNELS))
+        self._power_combo.currentTextChanged.connect(self._on_power_changed)
+        self._power_channel = self._power_combo.currentText()
+        _style_input(self._power_combo)
+        layout.addWidget(self._power_combo)
+
+        layout.addStretch(1)
+
+        # Channel counter — updates from _on_check / _refresh_chain_counter.
+        self._chain_counter_label = QLabel("Выбрано: 0 датчиков")
+        self._chain_counter_label.setFont(_label_font())
+        self._chain_counter_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
+        layout.addWidget(self._chain_counter_label)
+
+        layout.addStretch(1)
+
+        self._export_btn = QPushButton("Экспорт CSV")
+        # Phase III.D Item 18: CSV export is a secondary action — the
+        # primary autosweep actions («Старт», «Стоп») own the ACCENT
+        # slot; export should be neutral.
+        _style_button(self._export_btn, "neutral")
+        self._export_btn.clicked.connect(self._on_export)
+        layout.addWidget(self._export_btn)
+
+        return bar
+
     def _build_chain_card(self) -> QWidget:
         card = QFrame()
         card.setObjectName("chainCard")
@@ -338,6 +392,9 @@ class ConductivityPanel(QWidget):
         )
         layout.addWidget(caption)
 
+        # v0.55.2 A3: 2-column grid keeps the channel list compact so the
+        # left column stops monopolising vertical space. Scrollable in
+        # case channel count grows past the card height.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -346,35 +403,26 @@ class ConductivityPanel(QWidget):
 
         ch_container = QWidget()
         ch_container.setStyleSheet("background: transparent;")
-        self._ch_layout = QVBoxLayout(ch_container)
+        self._ch_layout = QGridLayout(ch_container)
         self._ch_layout.setContentsMargins(0, 0, 0, 0)
-        self._ch_layout.setSpacing(theme.SPACE_1)
-        for ch_id, display_name in self._all_channels:
+        self._ch_layout.setHorizontalSpacing(theme.SPACE_2)
+        self._ch_layout.setVerticalSpacing(theme.SPACE_1)
+        n_channels = len(self._all_channels)
+        rows_per_col = (n_channels + 1) // 2  # left column gets the extra
+        for idx, (ch_id, display_name) in enumerate(self._all_channels):
+            row = idx % rows_per_col
+            col = idx // rows_per_col
             cb = QCheckBox(display_name)
             cb.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
             cb.stateChanged.connect(lambda state, cid=ch_id: self._on_check(cid, state))
             self._checkboxes[ch_id] = cb
-            self._ch_layout.addWidget(cb)
-        self._ch_layout.addStretch()
+            self._ch_layout.addWidget(cb, row, col)
+        self._ch_layout.setRowStretch(rows_per_col, 1)
         scroll.setWidget(ch_container)
         layout.addWidget(scroll, stretch=1)
 
-        # Power source selector
-        src_cap = QLabel("Источник P:")
-        src_cap.setFont(_label_font())
-        src_cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
-        layout.addWidget(src_cap)
-
-        self._power_combo = QComboBox()
-        self._power_combo.addItems(list(_POWER_CHANNELS))
-        self._power_combo.currentTextChanged.connect(self._on_power_changed)
-        self._power_channel = self._power_combo.currentText()
-        _style_input(self._power_combo)
-        layout.addWidget(self._power_combo)
-
-        # Reorder + export
+        # Reorder buttons stay in the chain card — they act on the
+        # chain ordering itself, not on global controls.
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(theme.SPACE_1)
@@ -388,13 +436,7 @@ class ConductivityPanel(QWidget):
         self._down_btn.clicked.connect(self._on_move_down)
         self._down_btn.setToolTip("Переместить сфокусированный датчик вниз по цепочке.")
         btn_row.addWidget(self._down_btn)
-        self._export_btn = QPushButton("Экспорт CSV")
-        # Phase III.D Item 18: CSV export is a secondary action — the
-        # primary autosweep actions («Старт», «Стоп») own the ACCENT
-        # slot; export should be neutral.
-        _style_button(self._export_btn, "neutral")
-        self._export_btn.clicked.connect(self._on_export)
-        btn_row.addWidget(self._export_btn)
+        btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
         return card
@@ -731,6 +773,14 @@ class ConductivityPanel(QWidget):
         # synchronously from the interaction path is safe and gives
         # the operator immediate feedback.
         self._sync_prediction_stack()
+        self._refresh_chain_counter()
+
+    def _refresh_chain_counter(self) -> None:
+        """Update the toolbar's «Выбрано: N датчиков» readout."""
+        if not hasattr(self, "_chain_counter_label"):
+            return
+        n = len(self._chain)
+        self._chain_counter_label.setText(f"Выбрано: {n} датчиков")
 
     def _sync_prediction_stack(self) -> None:
         """Set the prediction stack to placeholder or table per chain length.

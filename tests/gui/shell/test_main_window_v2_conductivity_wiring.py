@@ -96,7 +96,9 @@ def test_temperature_reading_reaches_overlay():
 
         cb = QCheckBox("Т1")
         w._conductivity_panel._checkboxes["Т1"] = cb
-        w._conductivity_panel._ch_layout.insertWidget(0, cb)
+        # v0.55.2 A3: chain checkboxes live in a QGridLayout (2-col compact);
+        # drop the Т1 stub into the top-left cell.
+        w._conductivity_panel._ch_layout.addWidget(cb, 0, 0)
         cb.stateChanged.connect(lambda state: w._conductivity_panel._on_check("Т1", state))
         cb.setChecked(True)
         # Dispatch the reading through the shell — it should reach the overlay.
