@@ -18,3 +18,13 @@ cooldown:
   rate_window_h: 1.5
   auto_ingest: true
   min_cooldown_hours: 10.0
+  # v0.55.3 — quasi-steady regime tunables for SteadyStatePredictor.
+  # Engine passes this sub-block as kwargs when constructing the
+  # predictor inside CooldownService.
+  steady_state:
+    noise_floor_k: 0.05
+    drift_threshold_k_per_h: 1.0
+    window_s: 900.0
+    update_interval_s: 10.0
+    min_points: 30
+    min_duration_s: 60.0
