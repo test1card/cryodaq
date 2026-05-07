@@ -280,8 +280,10 @@ class AlarmPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"#alarmPanel {{ background-color: {theme.BACKGROUND}; }}")
 
-        # Cooldown control widget refs (set in _build_cooldown_control)
-        self._cooldown_arm_btn: QPushButton | None = None
+        # Cooldown control widget refs (set in _build_cooldown_control).
+        # v0.55.6.1 — manual arm/disarm button removed; the alarm
+        # auto-arms on phase=cooldown and auto-disarms on cooled state.
+        # Status remains operator-visible (label + ETA + progress).
         self._cooldown_status_lbl: QLabel | None = None
         self._cooldown_eta_lbl: QLabel | None = None
         self._cooldown_progress: QProgressBar | None = None
@@ -332,26 +334,34 @@ class AlarmPanel(QWidget):
         root.addWidget(self._build_cooldown_control())
 
     def _build_cooldown_control(self) -> QGroupBox:
-        """Small widget for CooldownAlarm arm/disarm and status display."""
+        """Status footer for CooldownAlarm.
+
+        v0.55.6.1 — read-only: the alarm auto-arms when the experiment
+        enters phase=cooldown (architect 2026-05-07: «он же должен
+        всегда работать, если это аларм»). The arm/disarm button used
+        to clutter this footer with a redundant manual control; status
+        + ETA + progress now telegraph the same information without
+        asking the operator to do anything.
+        """
         group = QGroupBox("Контроль захолаживания")
         group.setObjectName("cooldownControl")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(theme.SPACE_3, theme.SPACE_2, theme.SPACE_3, theme.SPACE_2)
         layout.setSpacing(theme.SPACE_2)
 
-        # Row 1: status + button
+        # Row 1: status (full-width — no button competing for space).
         row1 = QHBoxLayout()
-        self._cooldown_status_lbl = QLabel("Не активен")
+        self._cooldown_status_lbl = QLabel("Ожидает фазы захолаживания")
         self._cooldown_status_lbl.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        self._cooldown_status_lbl.setToolTip(
+            "Контроль включается автоматически при переходе в фазу "
+            "«Захолаживание» и выключается при достижении базовой "
+            "температуры."
+        )
         row1.addWidget(self._cooldown_status_lbl, stretch=1)
-
-        self._cooldown_arm_btn = QPushButton("Запустить")
-        self._cooldown_arm_btn.setEnabled(False)
-        self._cooldown_arm_btn.clicked.connect(self._on_cooldown_arm_clicked)
-        row1.addWidget(self._cooldown_arm_btn)
         layout.addLayout(row1)
 
-        # Row 2: ETA + progress (hidden until WATCHING+)
+        # Row 2: ETA + progress (hidden until WATCHING+).
         row2 = QHBoxLayout()
         self._cooldown_eta_lbl = QLabel("")
         self._cooldown_eta_lbl.setVisible(False)
@@ -553,13 +563,9 @@ class AlarmPanel(QWidget):
                 self._v2_poll_timer.start()
             if not self._cooldown_poll_timer.isActive():
                 self._cooldown_poll_timer.start()
-            if self._cooldown_arm_btn is not None:
-                self._cooldown_arm_btn.setEnabled(True)
         else:
             self._v2_poll_timer.stop()
             self._cooldown_poll_timer.stop()
-            if self._cooldown_arm_btn is not None:
-                self._cooldown_arm_btn.setEnabled(False)
         self._apply_ack_enabled()
 
     def update_v2_status(self, payload: dict) -> None:
@@ -932,37 +938,29 @@ class AlarmPanel(QWidget):
             return
         watching = state in ("WATCHING", "FIRED")
         watchdog_active = state in ("WATCHDOG", "WATCHDOG_FIRED")
+        # v0.55.6.1 — labels framed around auto-arm policy. DISARMED
+        # before any cooldown phase reads as «ожидает фазы», not
+        # «не активен», to telegraph that the alarm is healthy and
+        # waiting rather than disabled.
         _STATE_LABELS = {
-            "DISARMED": "Не активен",
+            "DISARMED": "Ожидает фазы захолаживания",
             "ARMED": "Активен (сбор базы...)",
-            "WATCHING": "Активен",
+            "WATCHING": "Активен — сторож запущен",
             "FIRED": "ПРЕДУПРЕЖДЕНИЕ: захолаживание не по плану",
-            "AUTO_DISARMED": "Авто-остановка (достигнута база) — можно перезапустить",
-            "WATCHDOG": "Контроль измерения активен",
+            "AUTO_DISARMED": "Захолаживание завершено",
+            "WATCHDOG": "Сторож измерения активен",
             "WATCHDOG_FIRED": "Предупреждение: холодная ступень нагревается",
             "UNAVAILABLE": "Недоступен",
         }
         self._cooldown_status_lbl.setText(_STATE_LABELS.get(state, state))
-        color = theme.FOREGROUND
+        color = theme.MUTED_FOREGROUND
         if state in ("FIRED", "WATCHDOG_FIRED"):
-            color = "#e55"
+            color = theme.STATUS_FAULT
         elif state in ("ARMED", "WATCHING", "WATCHDOG"):
-            color = theme.FOREGROUND
-        elif state in ("DISARMED", "UNAVAILABLE"):
-            color = theme.MUTED_FOREGROUND
+            color = theme.ACCENT
+        elif state == "AUTO_DISARMED":
+            color = theme.STATUS_OK
         self._cooldown_status_lbl.setStyleSheet(f"color: {color};")
-
-        if self._cooldown_arm_btn is not None:
-            active = state in ("ARMED", "WATCHING", "FIRED", "WATCHDOG", "WATCHDOG_FIRED")
-            self._cooldown_arm_btn.setText("Остановить" if active else "Запустить")
-            self._cooldown_arm_btn.clicked.disconnect()
-            if active:
-                self._cooldown_arm_btn.clicked.connect(self._on_cooldown_disarm_clicked)
-            else:
-                self._cooldown_arm_btn.clicked.connect(self._on_cooldown_arm_clicked)
-            self._cooldown_arm_btn.setEnabled(
-                self._connected and state != "UNAVAILABLE"
-            )
 
         # ETA + progress bar: shown for WATCHING/FIRED; hidden for WATCHDOG modes
         if self._cooldown_eta_lbl is not None:
@@ -981,23 +979,11 @@ class AlarmPanel(QWidget):
             if watching and progress is not None:
                 self._cooldown_progress.setValue(int(progress * 100))
 
-    @Slot()
-    def _on_cooldown_arm_clicked(self) -> None:
-        if not self._connected:
-            return
-        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.arm"}, parent=self)
-        worker.finished.connect(lambda r: self._on_cooldown_status(r))
-        self._workers.append(worker)
-        worker.start()
-
-    @Slot()
-    def _on_cooldown_disarm_clicked(self) -> None:
-        if not self._connected:
-            return
-        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.disarm"}, parent=self)
-        worker.finished.connect(lambda r: self._on_cooldown_status(r))
-        self._workers.append(worker)
-        worker.start()
+    # v0.55.6.1 — manual arm/disarm click handlers removed; the alarm
+    # auto-arms on the cooldown phase transition (engine-side
+    # cooldown_alarm tick). Backend ZMQ commands cooldown_alarm.arm /
+    # cooldown_alarm.disarm remain in place so smoke tests and the
+    # legacy CLI keep working.
 
     # ------------------------------------------------------------------
     # Enablement
