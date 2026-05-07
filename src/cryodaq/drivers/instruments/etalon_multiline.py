@@ -264,12 +264,37 @@ class MultiLineDriver(InstrumentDriver):
             read_timeout_s=self._read_timeout_s,
         )
         await self._transport.open()
+        # v0.55.13 (Codex audit SCOPE 4 finding 4.6) — partial-failure
+        # cleanup. Before this fix the verify-query exception was logged
+        # and `_connected` was set true with the transport left open,
+        # so a half-broken transport masqueraded as a healthy connection.
+        # Now: a TCPTransportError on the verify query means the link
+        # itself is unhealthy → close transport, clear state, re-raise
+        # so the caller knows the connection failed. A ValueError
+        # (parse-only) is still tolerated because the link works; only
+        # the response was malformed.
         try:
             response = await self._transport.query("isconnected")
             if not _parse_isconnected_response(response):
                 logger.warning("MultiLine '%s': lasers not connected", self.name)
-        except (TCPTransportError, ValueError) as exc:
-            logger.error("MultiLine '%s' connect verify failed: %s", self.name, exc)
+        except TCPTransportError as exc:
+            logger.error(
+                "MultiLine '%s' connect verify failed: %s — closing transport",
+                self.name,
+                exc,
+            )
+            try:
+                await self._transport.close()
+            except Exception as close_exc:  # noqa: BLE001
+                logger.warning(
+                    "MultiLine '%s' transport close after verify-fail: %s",
+                    self.name,
+                    close_exc,
+                )
+            self._transport = None
+            raise
+        except ValueError as exc:
+            logger.error("MultiLine '%s' connect verify parse failed: %s", self.name, exc)
         self._connected = True
         # v0.55.11 — spawn the continuous listener AFTER the verify queries
         # finish; the listener owns the read stream from that point and
@@ -315,11 +340,17 @@ class MultiLineDriver(InstrumentDriver):
             return self._mock_readings()
         if self._mode == self.MODE_CONTINUOUS:
             return self._read_channels_continuous()
-        if self._transport is None:
-            raise TCPTransportError("Driver not connected")
 
         readings: list[Reading] = []
         try:
+            # v0.55.13 (Codex audit SCOPE 4 finding 4.4) — moved the
+            # "driver not connected" check INTO the try block so the
+            # scheduler-side recovery path that already absorbs
+            # TCPTransportError also handles the disconnected case.
+            # Previously this raised outside the try and crashed the
+            # scheduler tick instead of returning an empty reading set.
+            if self._transport is None:
+                raise TCPTransportError("Driver not connected")
             channels_arg = ",".join(str(c) for c in self._channel_numbers)
             response = await self._transport.query(
                 f"latestlengthvalid,{channels_arg}"
