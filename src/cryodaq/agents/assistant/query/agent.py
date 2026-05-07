@@ -24,6 +24,7 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_CURRENT_VALUE_USER,
     FORMAT_ETA_COOLDOWN_USER,
     FORMAT_ETA_VACUUM_USER,
+    FORMAT_KNOWLEDGE_QUERY_USER,
     FORMAT_OUT_OF_SCOPE_GENERAL_USER,
     FORMAT_OUT_OF_SCOPE_HISTORICAL_USER,
     FORMAT_PHASE_INFO_USER,
@@ -251,6 +252,8 @@ class AssistantQueryAgent:
             return self._fmt_archive_detail(query, data)
         if category == QueryCategory.ALARM_HISTORY:
             return self._fmt_alarm_history(query, data)
+        if category == QueryCategory.KNOWLEDGE_QUERY:
+            return self._fmt_knowledge_query(query, data)
         if category == QueryCategory.OUT_OF_SCOPE_HISTORICAL:
             return FORMAT_OUT_OF_SCOPE_HISTORICAL_USER.format(
                 query=query, brand_name=self._config.brand_name
@@ -630,3 +633,50 @@ class AssistantQueryAgent:
             cleared_count=result.cleared_count,
             by_alarm_id_text=by_alarm_id_text,
         )
+
+    # ------------------------------------------------------------------
+    # F32 Stage 2 (v0.55.7) — knowledge query format prompt
+    # ------------------------------------------------------------------
+
+    def _fmt_knowledge_query(self, query: str, data: dict[str, Any]) -> str:
+        result = data.get("knowledge_query")
+        if result is None:
+            return FORMAT_KNOWLEDGE_QUERY_USER.format(
+                query=query,
+                total_hits=0,
+                filter_note="",
+                hits_text="(семантический поиск недоступен — RAG-индекс не сконфигурирован)",
+            )
+        hits = list(result.hits)
+        filter_note = (
+            f" (фильтр source_kind={result.source_kind_filter})"
+            if result.source_kind_filter
+            else ""
+        )
+        if not hits:
+            hits_text = "(совпадений не найдено)"
+        else:
+            lines: list[str] = []
+            for idx, hit in enumerate(hits, start=1):
+                kind_label = self._kind_label(hit.source_kind)
+                lines.append(
+                    f"[Источник {idx}] {kind_label} — {hit.source} "
+                    f"(score={hit.distance:.2f})\n  «{hit.snippet}»"
+                )
+            hits_text = "\n".join(lines)
+        return FORMAT_KNOWLEDGE_QUERY_USER.format(
+            query=query,
+            total_hits=result.total_hits,
+            filter_note=filter_note,
+            hits_text=hits_text,
+        )
+
+    @staticmethod
+    def _kind_label(kind: str) -> str:
+        # Localised labels keep the format prompt's "Источники:" block
+        # readable without exposing internal corpus-kind identifiers.
+        return {
+            "experiment_metadata": "архив",
+            "vault": "vault",
+            "operator_log": "журнал",
+        }.get(kind, kind or "источник")
