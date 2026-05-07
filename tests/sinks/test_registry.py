@@ -128,3 +128,25 @@ async def test_registry_dispatch_with_no_sinks_returns_empty():
     reg = SinkRegistry()
     results = await reg.dispatch(_sample_export())
     assert results == []
+
+
+class _RaisingSink(Sink):
+    name = "raises"
+
+    async def write(self, export: ExperimentExport) -> SinkResult:  # noqa: ARG002
+        raise RuntimeError("buggy sink raised")
+
+
+@pytest.mark.asyncio
+async def test_registry_dispatch_converts_raising_sink_to_failure():
+    """A misbehaving Sink that raises must not propagate out of dispatch()."""
+    reg = SinkRegistry()
+    reg._sinks.extend([_RaisingSink(), _RecordingSink()])
+    results = await reg.dispatch(_sample_export())
+    assert len(results) == 2
+    assert results[0].sink_name == "raises"
+    assert results[0].success is False
+    assert "buggy sink raised" in (results[0].error or "")
+    assert results[1].success is True
+    # Failure must also land in audit buffer.
+    assert any(not r.success for r in reg.recent_results)

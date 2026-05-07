@@ -74,18 +74,41 @@ class SinkRegistry:
             logger.info("WebhookSink registered: %s", url)
 
     async def dispatch(self, export: ExperimentExport) -> list[SinkResult]:
-        """Fire all sinks concurrently. Failures logged; never raises."""
+        """Fire all sinks concurrently. Failures captured in SinkResult; never raises.
+
+        Uses `return_exceptions=True` and converts any sink that misbehaves
+        (raises instead of returning a SinkResult) into a failure entry, so
+        a buggy third-party Sink subclass cannot break the engine.
+        """
         if not self._sinks:
             return []
-        tasks = [sink.write(export) for sink in self._sinks]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
+        coros = [sink.write(export) for sink in self._sinks]
+        raw = await asyncio.gather(*coros, return_exceptions=True)
+        results: list[SinkResult] = []
+        for sink, item in zip(self._sinks, raw, strict=True):
+            if isinstance(item, BaseException):
+                logger.warning(
+                    "Sink %s raised %s — converting to failure",
+                    sink.name,
+                    type(item).__name__,
+                )
+                results.append(
+                    SinkResult(
+                        sink_name=sink.name,
+                        success=False,
+                        target="",
+                        error=f"{type(item).__name__}: {item}",
+                    )
+                )
+            else:
+                results.append(item)
         for r in results:
             self._results_log.append(r)
             if not r.success:
                 logger.warning("Sink %s failed: %s", r.sink_name, r.error)
         if len(self._results_log) > self._max_log:
             self._results_log = self._results_log[-self._max_log :]
-        return list(results)
+        return results
 
     @property
     def recent_results(self) -> list[SinkResult]:
