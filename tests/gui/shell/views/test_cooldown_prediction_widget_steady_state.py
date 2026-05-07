@@ -327,3 +327,60 @@ def test_asymptote_position_and_band(app) -> None:
     lo, hi = w._asym_band.getRegion()
     assert lo == pytest.approx(4.5 - expected_sigma, rel=1e-6)
     assert hi == pytest.approx(4.5 + expected_sigma, rel=1e-6)
+
+
+# v0.55.3 — quasi-steady regime rendering
+def _quasi_steady_pred(
+    t_current: float = 2.95,
+    stddev_k: float = 0.04,
+    drift_rate_k_per_h: float = -0.2,
+) -> SteadyStatePrediction:
+    return SteadyStatePrediction(
+        channel="cold_stage",
+        t_predicted=t_current,
+        t_current=t_current,
+        tau_s=0.0,
+        amplitude=0.0,
+        percent_settled=100.0,
+        confidence=0.5,
+        valid=True,
+        is_quasi_steady=True,
+        drift_rate_k_per_h=drift_rate_k_per_h,
+        stddev_k=stddev_k,
+    )
+
+
+def test_quasi_steady_shows_label_hides_asymptote(app) -> None:
+    w = CooldownPredictionWidget()
+    data = _cooldown_data()
+    pred = _quasi_steady_pred(t_current=2.95, stddev_k=0.04, drift_rate_k_per_h=-0.2)
+
+    with patch.object(w._ss_predictor, "get_prediction", return_value=pred):
+        w.set_cooldown_data(data)
+
+    assert not w._asym_line.isVisible()
+    assert not w._asym_band.isVisible()
+    assert w._steady_badge.isVisible()
+    assert "Стационар" in w._steady_badge.toPlainText()
+    assert "2.95" in w._steady_badge.toPlainText()
+    assert "К/ч" in w._steady_badge.toPlainText()
+
+
+def test_transient_shows_asymptote_no_quasi_steady_label(app) -> None:
+    w = CooldownPredictionWidget()
+    data = _cooldown_data()
+    pred = _steady_pred(t_predicted=4.5, percent_settled=60.0, valid=True)
+    # Default _steady_pred has is_quasi_steady=False (dataclass default).
+    assert pred.is_quasi_steady is False
+
+    with patch.object(w._ss_predictor, "get_prediction", return_value=pred):
+        w.set_cooldown_data(data)
+
+    assert w._asym_line.isVisible()
+    assert w._asym_band.isVisible()
+    assert w._steady_badge.isVisible()
+    # The transient branch uses the legacy "Стационарное состояние ≈" badge,
+    # NOT the quasi-steady "Стационар: T = ..." format.
+    badge_text = w._steady_badge.toPlainText()
+    assert "Стационарное состояние" in badge_text
+    assert "К/ч" not in badge_text
