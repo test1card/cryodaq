@@ -39,6 +39,7 @@ class RagSearcher:
         embeddings_client: _EmbeddingsLike,
         table_name: str = "cryodaq_corpus",
     ) -> None:
+        self._db_path = Path(db_path)
         self._db = lancedb.connect(str(db_path))
         self._table_name = table_name
         self._embeddings = embeddings_client
@@ -50,13 +51,20 @@ class RagSearcher:
         top_k: int = 5,
         source_kind_filter: list[str] | None = None,
     ) -> list[SearchResult]:
+        # v0.56.0 — when the CLI / engine rebuild_index drops and
+        # recreates the table, the cached LanceDB connection's
+        # list_tables() view can lag the on-disk manifest. Reconnect
+        # once before reporting the index as missing so a freshly built
+        # index becomes visible without an engine restart.
         if self._table_name not in self._db.list_tables().tables:
-            logger.warning(
-                "RAG table '%s' not found in %s",
-                self._table_name,
-                getattr(self._db, "uri", "?"),
-            )
-            return []
+            self._db = lancedb.connect(str(self._db_path))
+            if self._table_name not in self._db.list_tables().tables:
+                logger.warning(
+                    "RAG table '%s' not found in %s",
+                    self._table_name,
+                    getattr(self._db, "uri", "?"),
+                )
+                return []
 
         table = self._db.open_table(self._table_name)
         query_vec = await self._embeddings.embed(query)

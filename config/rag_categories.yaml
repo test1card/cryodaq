@@ -7,21 +7,26 @@
 # Customize per deployment by copying this file to
 # config/rag_categories.local.yaml — the panel reads `.local.yaml` first
 # and falls back to this file.
+#
+# v0.56.0 — labels translated to Russian (operator-facing surface);
+# queries are bilingual (RU + EN keywords) because the corpus mixes
+# Russian procedures and English equipment manuals. The qwen3-embedding
+# model is multilingual and handles cross-language retrieval.
 
 categories:
   - id: safety
     label: "📚 Безопасность"
-    query: "safety regulations cryogenic vacuum"
+    query: "безопасность аварийное вакуум криогенный"
     limit: 10
   - id: cryostat
     label: "❄️ Криостат"
-    query: "cryostat operation manual"
+    query: "криостат температура захолаживание"
     limit: 10
   - id: procedures
-    label: "📋 Procedures"
-    query: "experimental procedure CryoDAQ cooldown"
+    label: "📋 Процедуры"
+    query: "процедура захолаживание калибровка эксперимент"
     limit: 10
   - id: manuals
-    label: "📖 Manuals"
-    query: "operator manual instruction"
+    label: "📖 Документация"
+    query: "manual руководство instrument прибор сенсор"
     limit: 10
