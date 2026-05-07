@@ -152,11 +152,21 @@ def _parse_intent(raw: str) -> QueryIntent:
         except (TypeError, ValueError):
             pass
 
+    raw_kind = data.get("target_source_kind")
+    if raw_kind is None:
+        target_source_kind: str | None = None
+    else:
+        kind_str = str(raw_kind).strip().lower()
+        # Treat the literal strings "null" / "none" / "" as missing — Gemma
+        # occasionally emits them rather than a real null.
+        target_source_kind = kind_str if kind_str and kind_str not in {"null", "none"} else None
+
     return QueryIntent(
         category=QueryCategory(category_str),
         target_channels=channels if channels else None,
         time_window_minutes=window,
         quantity=str(data.get("quantity", "")),
+        target_source_kind=target_source_kind,
     )
 
 
