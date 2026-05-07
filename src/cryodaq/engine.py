@@ -199,6 +199,24 @@ def _parse_experiment_time(raw: Any) -> datetime | None:
     return _parse_log_time(raw)
 
 
+def _load_experiment_metadata_sync(meta_path: Path) -> dict:
+    """H2: sync helper for F31 metadata read — wrap in asyncio.to_thread
+    at the call site to avoid blocking the engine event loop."""
+    if not meta_path.exists():
+        return {}
+    try:
+        import json as _json
+
+        return _json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "F31: metadata.json read failed (%s): %s",
+            meta_path.parent.name,
+            exc,
+        )
+        return {}
+
+
 async def _publish_operator_log_entry(
     broker: DataBroker | None,
     entry: OperatorLogEntry,
@@ -1877,8 +1895,6 @@ async def _run_engine(*, mock: bool = False) -> None:
                     # strong-ref against GC via _alarm_dispatch_tasks).
                     if sink_registry.sinks:
                         try:
-                            import json as _json
-
                             from cryodaq.sinks import ExperimentExport
 
                             _exp_id = _exp_info.get("experiment_id") or ""
@@ -1895,17 +1911,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                                     / _exp_id
                                     / "metadata.json"
                                 )
-                                if _meta_path.exists():
-                                    try:
-                                        _metadata = _json.loads(
-                                            _meta_path.read_text(encoding="utf-8")
-                                        )
-                                    except (OSError, ValueError) as _exc:
-                                        logger.warning(
-                                            "F31: metadata.json read failed (%s): %s",
-                                            _exp_id,
-                                            _exc,
-                                        )
+                                # H2: offload metadata read to thread.
+                                _metadata = await asyncio.to_thread(
+                                    _load_experiment_metadata_sync, _meta_path
+                                )
                             _export = ExperimentExport(
                                 experiment_id=_exp_id,
                                 title=str(_exp_info.get("title") or ""),

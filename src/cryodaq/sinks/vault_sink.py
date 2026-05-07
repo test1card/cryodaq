@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -95,16 +96,10 @@ class VaultSink(Sink):
 
     async def write(self, export: ExperimentExport) -> SinkResult:
         try:
-            self._vault_dir.mkdir(parents=True, exist_ok=True)
-            date_str = export.started_at.strftime("%Y-%m-%d")
-            safe_sample = _safe_filename_part(export.sample)
-            short_id = (export.experiment_id or "noid")[:8]
-            filename = f"{date_str}_{safe_sample}_{short_id}.md"
-            target = self._vault_dir / filename
-
             content = _format_experiment_markdown(export)
-            target.write_text(content, encoding="utf-8")
-
+            target = await asyncio.to_thread(
+                self._write_file_sync, export, content
+            )
             logger.info("VaultSink wrote %s (%d bytes)", target, len(content))
             return SinkResult(
                 sink_name=self.name,
@@ -119,3 +114,15 @@ class VaultSink(Sink):
                 target=str(self._vault_dir),
                 error=str(exc),
             )
+
+    def _write_file_sync(self, export: ExperimentExport, content: str) -> Path:
+        """H2: sync helper for to_thread offload — local writes block ms,
+        network mounts (AnythingLLM target) can block seconds."""
+        self._vault_dir.mkdir(parents=True, exist_ok=True)
+        date_str = export.started_at.strftime("%Y-%m-%d")
+        safe_sample = _safe_filename_part(export.sample)
+        short_id = (export.experiment_id or "noid")[:8]
+        filename = f"{date_str}_{safe_sample}_{short_id}.md"
+        target = self._vault_dir / filename
+        target.write_text(content, encoding="utf-8")
+        return target
