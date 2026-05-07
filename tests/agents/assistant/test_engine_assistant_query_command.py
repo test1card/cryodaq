@@ -113,12 +113,40 @@ def test_returns_error_on_handler_exception():
     assert "Ollama недоступна" in result["error"]
 
 
-def test_default_timeout_is_60s():
-    """Default timeout_s argument is 60.0 (matches F-TimeoutRelax convention)."""
+def test_default_timeout_fires_inside_server_envelope():
+    """Default timeout_s must fire BEFORE the server's ``HANDLER_TIMEOUT_SLOW_S``
+    envelope (30 s) so the helper's own Russian error wins over the generic
+    ``handler timeout`` reply from the REP server. Cycle-3 fix for Codex
+    finding on commit 0ab42f2."""
     import inspect
 
+    from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_SLOW_S
+
     sig = inspect.signature(_handle_assistant_query_command)
-    assert sig.parameters["timeout_s"].default == 60.0
+    default = sig.parameters["timeout_s"].default
+    assert default == 25.0
+    assert default < HANDLER_TIMEOUT_SLOW_S, (
+        f"helper timeout {default}s must be < server slow envelope "
+        f"{HANDLER_TIMEOUT_SLOW_S}s"
+    )
+
+
+def test_assistant_query_routed_to_slow_envelope_at_transport_layer():
+    """Cycle-3 fix: ``assistant.query`` is registered as a slow command so
+    the REP server gives the handler the 30 s envelope instead of the 2 s
+    fast default. Without this registration the helper's 25 s wait_for
+    is masked by the server returning ``handler timeout (2s)`` first."""
+    from cryodaq.core.zmq_bridge import (
+        _SLOW_COMMANDS,
+        HANDLER_TIMEOUT_FAST_S,
+        HANDLER_TIMEOUT_SLOW_S,
+        _timeout_for,
+    )
+
+    assert "assistant.query" in _SLOW_COMMANDS
+    assert _timeout_for({"cmd": "assistant.query"}) == HANDLER_TIMEOUT_SLOW_S
+    # Sanity: an unknown command stays on the fast envelope.
+    assert _timeout_for({"cmd": "totally_unknown"}) == HANDLER_TIMEOUT_FAST_S
 
 
 @pytest.mark.parametrize("chat_id", ["gui", "telegram", 12345, None])

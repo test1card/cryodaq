@@ -272,7 +272,7 @@ async def _handle_assistant_query_command(
     query_agent: Any,
     cmd: dict[str, Any],
     *,
-    timeout_s: float = 60.0,
+    timeout_s: float = 25.0,
 ) -> dict[str, Any]:
     """Dispatch ``assistant.query`` GUI/Telegram command to AssistantQueryAgent.
 
@@ -280,6 +280,18 @@ async def _handle_assistant_query_command(
     testable without spinning up the full engine. Mirrors the exception
     hierarchy of :class:`AssistantQueryAgent.handle_query` (never raises;
     returns a Russian error string-shaped dict on every failure path).
+
+    Default ``timeout_s`` (25 s) is chosen to fire inside the surrounding
+    transport budget: the ZMQ REP server caps slow commands at 30 s
+    (``HANDLER_TIMEOUT_SLOW_S`` in ``core/zmq_bridge.py``, with
+    ``"assistant.query"`` registered as a slow command), and the GUI
+    subprocess / client socket timeouts are 35 s. Firing at 25 s lets
+    the helper deliver its own Russian error message before the server
+    envelope kills the handler. Cold-start Ollama (20–40 s loading)
+    may hit this ceiling on the first query; subsequent warm-cache
+    queries land well under 5 s. Telegram path keeps the 60 s budget
+    via ``telegram_commands.py`` because it does not flow through the
+    ZMQ REP server.
     """
     query = str(cmd.get("query", "")).strip()
     chat_id = cmd.get("chat_id", "gui")
@@ -304,7 +316,8 @@ async def _handle_assistant_query_command(
             "ok": False,
             "error": (
                 f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). "
-                "Попробуй короче."
+                "Попробуй ещё раз — модель уже прогрелась — "
+                "или используй Telegram-бота для длинных вопросов."
             ),
         }
     except Exception as exc:  # noqa: BLE001

@@ -38,13 +38,16 @@
   переиспользует backend F30 `AssistantQueryAgent`: оператор задаёт
   свободный текстовый вопрос, GUI шлёт ZMQ-команду `assistant.query`
   через неблокирующий `ZmqCommandWorker`, движок диспатчит запрос в
-  `_handle_assistant_query_command` (timeout 60 с), ответ рендерится
-  bubble-ами (оператор справа на ACCENT, ассистент слева на
-  SURFACE_CARD, ошибки `STATUS_WARNING` с префиксом ⚠). История —
-  только in-session, без диска. Иконка ToolRail — Phosphor
-  `ph.chat-circle`, слот «Помощник Гемма» между «Служебный лог» и
-  «Приборы». `AssistantQueryAgent`, `IntentClassifier`, `QueryRouter`,
-  `OutputRouter`, `ZMQCommandServer`, Telegram-bot — без изменений.
+  `_handle_assistant_query_command` (timeout 25 с — fires inside the
+  ZMQ REP server's 30 s slow-command envelope; команда добавлена в
+  `_SLOW_COMMANDS` в `core/zmq_bridge.py`), ответ рендерится bubble-ами
+  (оператор справа на ACCENT, ассистент слева на SURFACE_CARD, ошибки
+  `STATUS_WARNING` с префиксом ⚠). История — только in-session, без
+  диска. Иконка ToolRail — Phosphor `ph.chat-circle`, слот «Помощник
+  Гемма» между «Служебный лог» и «Приборы». Telegram-путь сохраняет
+  60 с-бюджет через `telegram_commands.py` (отдельный путь, не идёт
+  через ZMQ). `AssistantQueryAgent`, `IntentClassifier`, `QueryRouter`,
+  `OutputRouter`, `ZMQCommandServer` class — без изменений.
 
 - **F-MockPredictor** — `CooldownPredictionWidget` now renders a horizontal
   asymptote line + ±sigma band + "Стационарное состояние ≈ X K" badge when

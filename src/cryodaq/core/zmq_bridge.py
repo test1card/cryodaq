@@ -57,6 +57,12 @@ _SLOW_COMMANDS: frozenset[str] = frozenset(
         # by the fast 2-second envelope during a slow USB transaction.
         "keithley_emergency_off",
         "keithley_stop",
+        # F34: GUI chat overlay routes through AssistantQueryAgent (Ollama
+        # round-trip + audit log + adapter fanout). Fast 2 s envelope is
+        # too tight; the helper's own asyncio.wait_for fires at 25 s,
+        # comfortably inside this 30 s server cap and the 35 s subprocess /
+        # GUI socket timeouts.
+        "assistant.query",
     }
 )
 
