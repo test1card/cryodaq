@@ -46,6 +46,8 @@ dependencies = [
     "pyarrow>=15,<25",
     # F27: composition photo validation and dimension extraction
     "pillow>=10.0,<12",
+    # F32: RAG indexer vector store
+    "lancedb>=0.6.0,<1",
 ]
 
 [project.optional-dependencies]
@@ -74,6 +76,9 @@ cryodaq-gui = "cryodaq.gui.app:main"
 cryodaq = "cryodaq.launcher:main"
 cryodaq-cooldown = "cryodaq.tools.cooldown_cli:main"
 cryodaq-replay-curve = "cryodaq.replay.cli:main"
+# F32 RAG indexer Stage 1
+cryodaq-rag-index = "cryodaq.agents.rag.cli:index_main"
+cryodaq-rag-search = "cryodaq.agents.rag.cli:search_main"
 # Frozen entry points — used by PyInstaller spec. Call freeze_support()
 # BEFORE importing PySide6 / cryodaq submodules to avoid Windows fork bomb.
 cryodaq-frozen = "cryodaq._frozen_main:main_launcher"

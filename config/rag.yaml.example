@@ -1,0 +1,14 @@
+# F32 — RAG indexer configuration. Copy to rag.local.yaml and customize.
+rag:
+  ollama_base_url: "http://localhost:11434"
+  embedding_model: "multilingual-e5-small"
+  embedding_dim: 384
+  db_path: "data/rag_index"
+  vault_dir: "~/CryoDAQ-Vault/experiments"
+
+  # Chunking
+  chunk_max_chars: 1000
+  chunk_overlap: 100
+
+  # Indexing
+  table_name: "cryodaq_corpus"

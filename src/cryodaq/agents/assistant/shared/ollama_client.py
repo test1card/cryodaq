@@ -13,6 +13,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 _GENERATE_PATH = "/api/generate"
+_EMBEDDINGS_PATH = "/api/embeddings"
 
 
 class OllamaUnavailableError(Exception):
@@ -147,3 +148,40 @@ class OllamaClient:
             latency_s=latency_s,
             model=data.get("model", effective_model),
         )
+
+    async def embed(
+        self,
+        text: str,
+        *,
+        model: str = "multilingual-e5-small",
+    ) -> list[float]:
+        """Call Ollama /api/embeddings and return the raw vector.
+
+        F32: distinct from generate() — uses /api/embeddings, returns the
+        raw vector. Embedding model defaults to multilingual-e5-small
+        (architect's stack) but is overridable per call. Embedding model
+        is *not* the same as the generation model; pass it per-call.
+        """
+        url = f"{self._base_url}{_EMBEDDINGS_PATH}"
+        payload = {"model": model, "prompt": text}
+        session = await self._get_session()
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 404:
+                        raise OllamaModelMissingError(model)
+                    data: dict[str, Any] = await resp.json(content_type=None)
+        except aiohttp.ClientConnectorError as exc:
+            raise OllamaUnavailableError(
+                f"Cannot connect to Ollama at {self._base_url}: {exc}"
+            ) from exc
+        except aiohttp.ClientError as exc:
+            raise OllamaUnavailableError(f"Ollama HTTP error: {exc}") from exc
+
+        if "error" in data:
+            err = str(data["error"])
+            if "not found" in err.lower():
+                raise OllamaModelMissingError(model)
+            raise OllamaUnavailableError(f"Ollama embed error: {err}")
+
+        return list(data.get("embedding", []))

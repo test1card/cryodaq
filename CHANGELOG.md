@@ -13,6 +13,17 @@
 
 ### Added
 
+- **F32 Stage 1 RAG indexer** — standalone semantic search foundation
+  over the experiment archive (metadata + F31 vault notes + operator
+  log entries). New module `cryodaq.agents.rag` with `document_loader`
+  (chunking + corpus walkers), `indexer` (LanceDB persistence), and
+  `searcher` (top-K cosine lookup with optional `source_kind` filter).
+  Embeddings come from Ollama `multilingual-e5-small` via a small
+  `EmbeddingsClient` wrapping the existing `OllamaClient.embed()`
+  (added in this commit). New CLI scripts `cryodaq-rag-index` and
+  `cryodaq-rag-search`. Stage 2 (`AssistantQueryAgent` integration) is
+  out of scope and lives in a separate spec. New deps: `lancedb` (Mac
+  arm64 wheel verified). New config: `config/rag.yaml.example`.
 - **F31 sinks foundation** — new `cryodaq.sinks` module with two sinks:
   `VaultSink` (writes a Markdown note with YAML frontmatter to a
   filesystem vault directory on experiment finalize / stop / abort) and
