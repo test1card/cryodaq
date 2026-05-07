@@ -76,6 +76,37 @@ def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> 
     assert closed == [True]
 
 
+def test_api_status_logs_alarm_failure(client, caplog) -> None:
+    """H4: alarm fetch exception logs WARNING with endpoint context."""
+    import logging
+
+    async def _boom(req):
+        if req.get("cmd") == "alarm_v2_status":
+            raise RuntimeError("zmq bridge down")
+        return {"ok": False}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_boom):
+        with caplog.at_level(logging.WARNING, logger="cryodaq.web.server"):
+            resp = client.get("/api/status")
+            assert resp.status_code == 200
+    assert any("alarm fetch failed" in rec.message for rec in caplog.records)
+
+
+def test_api_log_logs_failure(client, caplog) -> None:
+    """H4: api_log exception logs WARNING."""
+    import logging
+
+    async def _boom(req):
+        raise RuntimeError("engine offline")
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_boom):
+        with caplog.at_level(logging.WARNING, logger="cryodaq.web.server"):
+            resp = client.get("/api/log")
+            assert resp.status_code == 200
+            assert resp.json() == {"ok": False, "entries": []}
+    assert any("api_log fetch failed" in rec.message for rec in caplog.records)
+
+
 def test_no_public_bind_in_docs() -> None:
     """S1: operator-facing bind instruction must be 127.0.0.1, not 0.0.0.0."""
     import re

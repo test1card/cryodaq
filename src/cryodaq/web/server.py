@@ -359,13 +359,14 @@ def create_app() -> FastAPI:
             if alarms.get("ok"):
                 base["active_alarms"] = alarms.get("active", {})
                 _state.active_alarms = alarms.get("active", {})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("api_status alarm fetch failed: %s", exc)
         # Experiment/shift data via ZMQ command
         try:
             exp = await _async_engine_command({"cmd": "experiment_status"})
             base["experiment"] = exp if exp.get("ok") else None
-        except Exception:
+        except Exception as exc:
+            logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
         return base
 
@@ -376,8 +377,8 @@ def create_app() -> FastAPI:
             result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):
                 return {"ok": True, "entries": result.get("entries", [])}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("api_log fetch failed: %s", exc)
         return {"ok": False, "entries": []}
 
     @application.get("/history")
