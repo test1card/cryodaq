@@ -23,6 +23,8 @@ class QueryCategory(Enum):
     ARCHIVE_LIST = "archive_list"
     ARCHIVE_DETAIL = "archive_detail"
     ALARM_HISTORY = "alarm_history"
+    # F32 Stage 2 (v0.55.7) — semantic search over indexed RAG corpus.
+    KNOWLEDGE_QUERY = "knowledge_query"
 
 
 @dataclass
@@ -31,6 +33,10 @@ class QueryIntent:
     target_channels: list[str] | None = None
     time_window_minutes: int | None = None
     quantity: str = ""
+    # F32 Stage 2 — optional source-kind hint extracted by IntentClassifier
+    # for KNOWLEDGE_QUERY category. Maps to ``RagSearcher.source_kind_filter``.
+    # Examples: "experiment_metadata", "vault", "operator_log".
+    target_source_kind: str | None = None
 
 
 @dataclass
@@ -139,6 +145,31 @@ class AlarmHistoryResult:
 
 
 @dataclass
+class KnowledgeQueryHit:
+    """F32 Stage 2 (v0.55.7): one chunk match returned by RAGAdapter.search()."""
+
+    source: str
+    source_kind: str
+    snippet: str
+    distance: float  # LanceDB ``_distance`` — lower means closer match.
+
+
+@dataclass
+class KnowledgeQueryResult:
+    """F32 Stage 2 (v0.55.7): top-K semantic-search hits for a single query.
+
+    ``hits`` is sorted ascending by ``distance``. ``total_hits`` reflects hits
+    surviving the adapter's distance threshold (may be smaller than the raw
+    LanceDB ``top_k``).
+    """
+
+    query: str
+    hits: list[KnowledgeQueryHit] = field(default_factory=list)
+    total_hits: int = 0
+    source_kind_filter: str | None = None
+
+
+@dataclass
 class QueryAdapters:
     """Container for all service adapters used by the query agent."""
 
@@ -150,6 +181,7 @@ class QueryAdapters:
     experiment: object
     composite: object
     archive: object | None = None  # F33 — optional, defaults to None
+    rag: object | None = None  # F32 Stage 2 (v0.55.7) — optional
 
 
 @dataclass
