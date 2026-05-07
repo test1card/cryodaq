@@ -8,7 +8,9 @@
 
 Запуск::
 
-    uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+    uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
+
+For LAN access route via SSH tunnel; never bind 0.0.0.0 directly.
 
 Или программно::
 

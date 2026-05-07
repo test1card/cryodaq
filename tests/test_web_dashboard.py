@@ -74,3 +74,23 @@ def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> 
 
     assert _query_history(5) == {}
     assert closed == [True]
+
+
+def test_no_public_bind_in_docs() -> None:
+    """S1: operator-facing bind instruction must be 127.0.0.1, not 0.0.0.0."""
+    import re
+    from pathlib import Path
+
+    server_src = Path(__file__).parent.parent / "src/cryodaq/web/server.py"
+    text = server_src.read_text(encoding="utf-8")
+    # Allow only the warning line that mentions 0.0.0.0 in a "never bind" context.
+    bind_examples = re.findall(r"--host\s+(\S+)", text)
+    assert bind_examples, "expected at least one --host example in docstring"
+    for host in bind_examples:
+        assert host == "127.0.0.1", f"public bind {host!r} found in docs"
+
+    main_src = Path(__file__).parent.parent / "src/cryodaq/gui/shell/main_window_v2.py"
+    main_text = main_src.read_text(encoding="utf-8")
+    main_examples = re.findall(r"--host\s+(\S+?)\s", main_text)
+    for host in main_examples:
+        assert host == "127.0.0.1", f"public bind {host!r} in operator help"

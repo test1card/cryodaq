@@ -776,7 +776,7 @@ class MainWindowV2(QMainWindow):
                 "Web-панель",
                 f"Веб-сервер не запущен на порту {_WEB_PORT}.\n\n"
                 f"Запустите его командой:\n"
-                f"uvicorn cryodaq.web.server:app --host 0.0.0.0 --port {_WEB_PORT}",
+                f"uvicorn cryodaq.web.server:app --host 127.0.0.1 --port {_WEB_PORT}",
             )
             return
         webbrowser.open(f"http://{host}:{_WEB_PORT}")
