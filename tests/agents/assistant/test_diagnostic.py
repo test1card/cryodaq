@@ -137,7 +137,8 @@ async def test_diagnostic_suggestion_runs_after_alarm_summary(tmp_path: Path) ->
     calls = ollama.generate.call_args_list
     # First call uses alarm summary system prompt
     first_system = calls[0][1].get("system", "")
-    assert "аларм" in first_system.lower() or "аларма" in first_system.lower()
+    # v0.55.10 prompt audit normalized «аларм»/«аларма» → «тревога»/«тревоги».
+    assert "тревог" in first_system.lower()
     # Second call uses diagnostic system prompt
     second_system = calls[1][1].get("system", "")
     assert "диагност" in second_system.lower()
