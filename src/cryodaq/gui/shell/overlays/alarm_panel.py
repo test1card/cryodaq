@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -172,19 +172,33 @@ class SeverityChip(QLabel):
     tables.
     """
 
-    def __init__(self, severity: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        severity: str,
+        parent: QWidget | None = None,
+        *,
+        acknowledged: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._severity = severity.upper()
-        label = _SEVERITY_LABELS.get(self._severity, self._severity[:4])
-        color = _SEVERITY_TOKENS.get(self._severity, theme.STATUS_INFO)
+        self._acknowledged = bool(acknowledged)
+        base_label = _SEVERITY_LABELS.get(self._severity, self._severity[:4])
+        if self._acknowledged:
+            label = f"✓ {base_label}"
+            bg_color = theme.SURFACE_MUTED
+            fg_color = theme.MUTED_FOREGROUND
+        else:
+            label = base_label
+            bg_color = _SEVERITY_TOKENS.get(self._severity, theme.STATUS_INFO)
+            fg_color = theme.ON_PRIMARY
         self.setText(label)
         self.setFont(_chip_font())
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             f"QLabel {{"
-            f" background-color: {color};"
-            f" color: {theme.ON_PRIMARY};"
+            f" background-color: {bg_color};"
+            f" color: {fg_color};"
             f" border: none;"
             f" border-radius: {theme.RADIUS_SM}px;"
             f" padding: {theme.SPACE_0}px {theme.SPACE_2}px;"
@@ -700,12 +714,22 @@ class AlarmPanel(QWidget):
                 time_text = "—"
             acknowledged = bool(info.get("acknowledged", False))
 
-            chip = SeverityChip(level)
+            chip = SeverityChip(level, acknowledged=acknowledged)
             self._v2_table.setCellWidget(row_idx, 0, chip)
             self._v2_table.setItem(row_idx, 1, _cell(str(alarm_id), mono_font=True))
             self._v2_table.setItem(row_idx, 2, _cell(message))
             self._v2_table.setItem(row_idx, 3, _cell(channels_text))
             self._v2_table.setItem(row_idx, 4, _cell(time_text))
+            # IV.2 A.2 (v0.55.2): mute non-chip cells when alarm is
+            # acknowledged so operators visibly distinguish "still firing
+            # but seen" from "fresh and demanding attention". The chip
+            # itself is muted via SeverityChip(acknowledged=True) above.
+            if acknowledged:
+                muted = QColor(theme.MUTED_FOREGROUND)
+                for col in (1, 2, 3, 4):
+                    item = self._v2_table.item(row_idx, col)
+                    if item is not None:
+                        item.setForeground(muted)
 
             # IV.2 A.2: v2 rendering previously left the "ПОДТВЕРДИТЬ"
             # button in place even after the engine had recorded the
@@ -723,7 +747,9 @@ class AlarmPanel(QWidget):
             if acknowledged:
                 operator = str(info.get("acknowledged_by") or "").strip()
                 ack_text = "Подтв." if not operator else f"Подтв. ({operator})"
-                self._v2_table.setItem(row_idx, 5, _cell(ack_text))
+                ack_item = _cell(ack_text)
+                ack_item.setForeground(QColor(theme.MUTED_FOREGROUND))
+                self._v2_table.setItem(row_idx, 5, ack_item)
             else:
                 btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
                 btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
