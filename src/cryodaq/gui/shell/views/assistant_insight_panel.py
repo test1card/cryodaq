@@ -35,7 +35,7 @@ _MAX_INSIGHTS = 10
 
 # Trigger type → (short label, status color token)
 _TRIGGER_META: dict[str, tuple[str, str]] = {
-    "alarm_fired": ("АЛАРМ", theme.STATUS_WARNING),
+    "alarm_fired": ("ТРЕВОГА", theme.STATUS_WARNING),
     "experiment_finalize": ("ЭКСП", theme.STATUS_INFO),
     "experiment_stop": ("ЭКСП", theme.STATUS_INFO),
     "experiment_abort": ("ПРЕРВАН", theme.STATUS_FAULT),

@@ -120,7 +120,7 @@ _OVERLAY_ITEMS = [
     ("source", "zap.svg", "Источник мощности"),
     ("analytics", "trending-up.svg", "Аналитика"),
     ("conductivity", "thermometer.svg", "Теплопроводность"),
-    ("alarms", "bell.svg", "Алармы"),
+    ("alarms", "bell.svg", "Тревоги"),
     ("log", "file-text.svg", "Служебный лог"),
     # F34: Гемма chat overlay between log and instruments. The Lucide
     # SVG fallback is not on disk — Phosphor `ph.chat-circle` (registered

@@ -90,7 +90,7 @@ def test_warnings_allow_start(monkeypatch) -> None:
     dialog = _make_dialog(monkeypatch)
     dialog._checks = [
         PreFlightCheck("Engine подключён", "ok", ""),
-        PreFlightCheck("Алармы", "warning", "1 активных: test_alarm"),
+        PreFlightCheck("Тревоги", "warning", "1 активных: test_alarm"),
         PreFlightCheck("Диск", "warning", "8.5 ГБ"),
     ]
     dialog._rebuild_checks_ui()
@@ -121,6 +121,6 @@ def test_active_alarms_warning(monkeypatch) -> None:
             },
         },
     )
-    alarm_checks = [c for c in dialog._checks if c.name == "Алармы"]
+    alarm_checks = [c for c in dialog._checks if c.name == "Тревоги"]
     assert len(alarm_checks) == 1
     assert alarm_checks[0].status == "warning"

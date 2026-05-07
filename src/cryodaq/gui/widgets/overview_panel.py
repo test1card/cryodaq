@@ -177,7 +177,7 @@ class StatusStrip(QFrame):
         layout.addWidget(self._separator())
 
         # Active alarms
-        self._alarm_label = QLabel("0 алармов")
+        self._alarm_label = QLabel("0 тревог")
         apply_status_label_style(self._alarm_label, "muted")
         layout.addWidget(self._alarm_label)
         layout.addWidget(self._separator())
@@ -229,16 +229,16 @@ class StatusStrip(QFrame):
     def set_alarm_count(self, count: int) -> None:
         self._alarm_count = count
         if count == 0:
-            self._alarm_label.setText("0 алармов")
+            self._alarm_label.setText("0 тревог")
             apply_status_label_style(self._alarm_label, "muted")
         else:
             # Правильное склонение
             if count == 1:
-                word = "аларм"
+                word = "тревога"
             elif 2 <= count <= 4:
-                word = "аларма"
+                word = "тревоги"
             else:
-                word = "алармов"
+                word = "тревог"
             self._alarm_label.setText(f"{count} {word}!")
             apply_status_label_style(self._alarm_label, "error", bold=True)
 

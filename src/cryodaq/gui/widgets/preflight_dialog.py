@@ -115,15 +115,15 @@ class PreFlightDialog(QDialog):
                     detail = f"{count} активных: {names}"
                     if count > 3:
                         detail += "..."
-                    self._checks.append(PreFlightCheck("Алармы", "warning", detail))
+                    self._checks.append(PreFlightCheck("Тревоги", "warning", detail))
                 else:
-                    self._checks.append(PreFlightCheck("Алармы", "ok", "0"))
+                    self._checks.append(PreFlightCheck("Тревоги", "ok", "0"))
             else:
                 self._checks.append(
-                    PreFlightCheck("Алармы", "warning", result.get("error", "Статус недоступен"))
+                    PreFlightCheck("Тревоги", "warning", result.get("error", "Статус недоступен"))
                 )
         except Exception:
-            self._checks.append(PreFlightCheck("Алармы", "warning", "Проверка недоступна"))
+            self._checks.append(PreFlightCheck("Тревоги", "warning", "Проверка недоступна"))
         self._check_complete()
 
     @Slot(dict)

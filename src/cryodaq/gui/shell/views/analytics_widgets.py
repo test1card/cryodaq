@@ -1302,9 +1302,9 @@ class ExperimentSummaryWidget(QWidget):
         self._duration_label = self._add_info_row(c_lay, "Продолжительность")
         self._phases_label = self._add_info_row(c_lay, "Фазы")
         self._phases_label.setWordWrap(True)
-        self._alarm_label = self._add_info_row(c_lay, "Алармы")
+        self._alarm_label = self._add_info_row(c_lay, "Тревоги")
         # F19 sub-item 2: top-3 alarm names
-        self._top_alarms_label = self._add_info_row(c_lay, "Топ алармов")
+        self._top_alarms_label = self._add_info_row(c_lay, "Топ тревог")
         self._top_alarms_label.setWordWrap(True)
         # F19 sub-item 1: channel min/max/mean stats
         self._stats_label = self._add_info_row(c_lay, "Каналы")

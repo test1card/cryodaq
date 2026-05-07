@@ -712,9 +712,9 @@ def render_operator_log_section(
 
 
 def render_alarms_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
-    document.add_heading("Алармы", level=1)
+    document.add_heading("Тревоги", level=1)
     if not dataset.alarm_readings:
-        document.add_paragraph("Алармов не зафиксировано ✓")
+        document.add_paragraph("Тревог не зафиксировано ✓")
         return
     for item in dataset.alarm_readings[-20:]:
         document.add_paragraph(

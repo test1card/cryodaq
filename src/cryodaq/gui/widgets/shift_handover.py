@@ -181,7 +181,7 @@ class ShiftStartDialog(QDialog):
                 "detail": "OK" if engine_ok else "Engine не отвечает",
             },
             {
-                "name": "Критических алармов нет",
+                "name": "Критических тревог нет",
                 "ok": engine_ok,
                 "detail": "OK" if engine_ok else "Невозможно проверить",
             },
