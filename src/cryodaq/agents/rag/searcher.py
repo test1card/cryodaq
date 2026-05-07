@@ -61,6 +61,19 @@ class RagSearcher:
         table = self._db.open_table(self._table_name)
         query_vec = await self._embeddings.embed(query)
 
+        # H9: guard query embedding dim. Indexer (cycle 2) has warn+zero-vec
+        # fallback for dim mismatch; searcher passed mismatched vectors to
+        # LanceDB and crashed with schema error. Mirror indexer's pattern.
+        expected_dim = 384  # multilingual-e5-small canonical dim
+        if len(query_vec) != expected_dim:
+            logger.warning(
+                "RAG search: query embedding dim %d != expected %d; "
+                "Ollama embedding model likely misconfigured",
+                len(query_vec),
+                expected_dim,
+            )
+            return []
+
         # Push source_kind_filter into LanceDB's WHERE clause so the
         # vector search itself respects the filter — applying it after
         # `.limit(top_k)` would silently drop valid matches when other
