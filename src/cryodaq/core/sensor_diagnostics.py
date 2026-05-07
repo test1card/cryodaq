@@ -196,6 +196,7 @@ class SensorDiagnosticsEngine:
         alarm_publisher: Any | None = None,
         warning_duration_s: float = 300.0,
         critical_duration_s: float = 900.0,
+        cold_start_grace_s: float | None = None,
     ) -> None:
         cfg = config or {}
         thresholds = cfg.get("thresholds", {})
@@ -244,6 +245,27 @@ class SensorDiagnosticsEngine:
         # F20 escalation cooldown: suppress re-notification within window after alarm cleared
         self._escalation_cooldown_s: float = cfg.get("escalation_cooldown_s", 0.0)
         self._channel_last_notified: dict[str, float] = {}
+        # v0.55.5 — cold-start grace. Suppresses anomaly alarms for the
+        # configured window after the engine declares itself started, so
+        # the first noisy seconds of buffer fill / mock reseed don't fire
+        # a flurry of false positives. Constructor argument wins over
+        # config value so tests can override without a YAML round-trip.
+        if cold_start_grace_s is None:
+            self._cold_start_grace_s = float(cfg.get("cold_start_grace_s", 300.0))
+        else:
+            self._cold_start_grace_s = float(cold_start_grace_s)
+        self._engine_started_mono: float | None = None
+
+    def mark_engine_started(self) -> None:
+        """Stamp the cold-start anchor; subsequent alarms wait out the grace."""
+        self._engine_started_mono = time.monotonic()
+
+    def _is_in_grace_period(self) -> bool:
+        if self._engine_started_mono is None:
+            return False
+        if self._cold_start_grace_s <= 0:
+            return False
+        return (time.monotonic() - self._engine_started_mono) < self._cold_start_grace_s
 
     def set_channel_names(self, names: dict[str, str]) -> None:
         """Set display names for channels."""
@@ -311,6 +333,12 @@ class SensorDiagnosticsEngine:
         Returns list of newly published AlarmEvent objects (non-None returns from
         publish_diagnostic_alarm) so callers can dispatch notifications.
         """
+        # v0.55.5 — during the cold-start grace window we suppress alarm
+        # publishing entirely. We still skip the per-channel state machine
+        # so anomaly accumulation does not start counting against the
+        # warning/critical thresholds while sensors are still seeding.
+        if self._is_in_grace_period():
+            return []
         now_mono = time.monotonic()
         current_channels = set(self._diagnostics.keys())
         new_events: list = []

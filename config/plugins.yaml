@@ -27,6 +27,10 @@ sensor_diagnostics:
   notify_telegram: false           # v0.55.5: sensor-health alarms route to GUI only;
                                     # hourly periodic_report carries condensed digest. Telegram
                                     # reserved for one-shot physics-critical events.
+  cold_start_grace_s: 300.0        # v0.55.5: suppress sensor-diagnostic alarms during
+                                    # the first N seconds after engine start. Buffer-fill
+                                    # transients and mock reseed used to fire false anomalies
+                                    # immediately on boot. Set to 0 to disable.
   # F20 notification polish
   aggregation_threshold: 3         # >N simultaneous events → single batch Telegram message
   escalation_cooldown_s: 120.0     # suppress re-notification within 2 min of last notify per channel

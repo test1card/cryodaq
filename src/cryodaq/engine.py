@@ -2529,6 +2529,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     if sensor_diag is not None:
         sd_feed_task = asyncio.create_task(_sensor_diag_feed(), name="sensor_diag_feed")
         sd_tick_task = asyncio.create_task(_sensor_diag_tick(), name="sensor_diag_tick")
+        # v0.55.5 — anchor the cold-start grace at the moment the feed
+        # and tick tasks are actually live. Doing this here (rather than
+        # in the constructor) avoids counting the engine bootstrap
+        # window as part of the grace.
+        sensor_diag.mark_engine_started()
     vt_feed_task: asyncio.Task | None = None
     vt_tick_task: asyncio.Task | None = None
     if vacuum_trend is not None:
