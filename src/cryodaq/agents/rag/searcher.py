@@ -61,15 +61,21 @@ class RagSearcher:
         table = self._db.open_table(self._table_name)
         query_vec = await self._embeddings.embed(query)
 
-        # Over-fetch so source_kind_filter has room to discard.
-        # `.to_list()` keeps us pandas-free; LanceDB returns dict-rows.
-        rows = table.search(query_vec).limit(top_k * 3).to_list()
+        # Push source_kind_filter into LanceDB's WHERE clause so the
+        # vector search itself respects the filter — applying it after
+        # `.limit(top_k)` would silently drop valid matches when other
+        # kinds happened to be closer in vector space.
+        query_builder = table.search(query_vec)
+        if source_kind_filter:
+            quoted = ", ".join(
+                "'" + str(k).replace("'", "''") + "'" for k in source_kind_filter
+            )
+            query_builder = query_builder.where(f"source_kind IN ({quoted})")
+        rows = query_builder.limit(top_k).to_list()
 
         results: list[SearchResult] = []
         for row in rows:
             kind = row["source_kind"]
-            if source_kind_filter and kind not in source_kind_filter:
-                continue
             metadata_raw = row.get("metadata_json") or "{}"
             try:
                 metadata = json.loads(metadata_raw)
@@ -85,6 +91,4 @@ class RagSearcher:
                     score=float(row.get("_distance", 0.0)),
                 )
             )
-            if len(results) >= top_k:
-                break
         return results
