@@ -220,6 +220,47 @@ class AssistantConfig:
         return cls()
 
 
+class _EventDedup:
+    """Drop duplicate events that fall inside a rolling window.
+
+    F-BotPolish: an alarm that briefly clears (e.g. stale-data → fresh →
+    stale again) re-fires the ``alarm_fired`` event. Without dedup, Gemma
+    issues a fresh narrative on every re-fire, flooding Telegram with
+    near-identical bullets. The 30 s default bucket matches the rate at
+    which an alarm could realistically reflect a meaningful change.
+    """
+
+    def __init__(self, window_s: float = 30.0) -> None:
+        self._window_s = window_s
+        self._seen: dict[str, float] = {}
+
+    def is_new(self, event_id: str) -> bool:
+        now = time.monotonic()
+        # Lazy GC: prune entries older than the window before checking.
+        cutoff = now - self._window_s
+        if self._seen:
+            self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
+        if event_id in self._seen:
+            return False
+        self._seen[event_id] = now
+        return True
+
+
+def _event_dedup_id(event: EngineEvent, *, window_s: float = 30.0) -> str | None:
+    """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
+
+    Only ``alarm_fired`` is bucketed today: the same ``alarm_id`` that fires
+    twice inside the same ``window_s`` bucket is considered redundant. Other
+    event types (experiment_finalize, sensor_anomaly_critical, …) are rare
+    by construction and pass through untouched.
+    """
+    if event.event_type != "alarm_fired":
+        return None
+    alarm_id = str(event.payload.get("alarm_id", "unknown"))
+    bucket = int(time.monotonic() // window_s)
+    return f"alarm:{alarm_id}:{bucket}"
+
+
 class AssistantLiveAgent:
     """Local LLM agent. Operator-facing brand: Гемма."""
 
@@ -245,6 +286,10 @@ class AssistantLiveAgent:
         self._handler_tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
+        # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
+        # so re-firing alarms (stale → fresh → stale) don't flood Telegram
+        # with near-identical Gemma narratives.
+        self._dedup = _EventDedup(window_s=30.0)
 
     async def start(self) -> None:
         """Subscribe to EventBus and begin event processing."""
@@ -289,6 +334,15 @@ class AssistantLiveAgent:
             try:
                 event = await self._queue.get()
                 if self._should_handle(event):
+                    # F-BotPolish: pre-invocation dedup gate — slice handler
+                    # logic itself is unchanged.
+                    dedup_id = _event_dedup_id(event, window_s=self._dedup._window_s)
+                    if dedup_id is not None and not self._dedup.is_new(dedup_id):
+                        logger.debug(
+                            "AssistantLiveAgent: dropping duplicate event %s",
+                            dedup_id,
+                        )
+                        continue
                     t = asyncio.create_task(
                         self._safe_handle(event),
                         name=f"gemma_{event.event_type}",

@@ -23,12 +23,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AlarmContext:
-    """Context for alarm summary generation (Slice A)."""
+    """Context for alarm summary generation (Slice A).
+
+    F-BotPolish: ``values`` is now ``dict[str, Any]`` so the builder can
+    pre-format numeric readings (1-decimal Kelvin, 2-sig-fig scientific
+    pressure) before the prompt template strings them. Existing tests
+    that pass raw floats keep working — strings flow through ``str(v)``
+    in templates the same way floats do.
+    """
 
     alarm_id: str
     level: str
     channels: list[str]
-    values: dict[str, float]
+    values: dict[str, Any]
     phase: str | None
     experiment_id: str | None
     experiment_age_s: float | None
@@ -59,7 +66,7 @@ class ContextBuilder:
         """
         alarm_id = alarm_payload.get("alarm_id", "unknown")
         channels: list[str] = alarm_payload.get("channels", [])
-        values: dict[str, float] = alarm_payload.get("values", {})
+        raw_values: dict[str, Any] = alarm_payload.get("values", {})
         level: str = alarm_payload.get("level", "WARNING")
 
         experiment_id: str | None = getattr(self._em, "active_experiment_id", None)
@@ -73,17 +80,24 @@ class ContextBuilder:
 
         experiment_age_s: float | None = _compute_experiment_age(self._em)
 
+        # F-BotPolish: format raw values once at the seam (1-decimal Kelvin,
+        # 2-sig-fig scientific pressure) and surface implausibility hints in
+        # `recent_readings_text` so Gemma frames sensor faults as faults.
+        formatted_values = _format_values_dict(raw_values)
+        anomaly_text = _build_anomaly_hint_text(raw_values)
+        recent_readings_text = anomaly_text or _readings_stub(channels, lookback_s)
+
         return AlarmContext(
             alarm_id=alarm_id,
             level=level,
             channels=channels,
-            values=values,
+            values=formatted_values,
             phase=phase,
             experiment_id=experiment_id,
             experiment_age_s=experiment_age_s,
             target_temp=None,
             active_interlocks=[],
-            recent_readings_text=_readings_stub(channels, lookback_s),
+            recent_readings_text=recent_readings_text,
             recent_alarms_text=_alarms_stub(recent_alarm_lookback_s),
         )
 
@@ -291,6 +305,90 @@ def _readings_stub(_channels: list[str], _lookback_s: float) -> str:
 
 def _alarms_stub(_lookback_s: float) -> str:
     return "нет данных"
+
+
+# ---------------------------------------------------------------------------
+# F-BotPolish — value formatting + implausibility sanity hints.
+# ---------------------------------------------------------------------------
+
+# Cryogenic temperature channel ids in this codebase always start with the
+# Cyrillic "Т" (U+0422); the Latin "T" path is kept defensively because
+# legacy / external payloads may use the ASCII letter.
+_CRYO_PREFIXES: tuple[str, ...] = ("Т", "T")
+# Hard physical limits for cryogenic-stage thermometers. Above ~500 K the
+# sensor is broken; below 0 K is unphysical and indicates a wiring fault.
+_TEMP_IMPLAUSIBLE_HIGH_K: float = 500.0
+_TEMP_IMPLAUSIBLE_LOW_K: float = -50.0
+
+
+def _is_cryo_channel(channel: str) -> bool:
+    return any(channel.startswith(prefix) for prefix in _CRYO_PREFIXES)
+
+
+def _format_value_for_prompt(value: Any, channel: str = "") -> str:
+    """Render a numeric reading for an LLM prompt in compact form.
+
+    Without this rounding, ``str({"Т1": 4.347123456789})`` leaks 12-digit
+    decimals into the Gemma prompt, which yields confused alarm summaries.
+
+    Bands:
+    - ``|v| < 1e-3`` or ``|v| > 1e6`` → 2-sig-fig scientific (pressure-like).
+    - cryogenic temperature channels (Т*/T*) → 1 decimal place.
+    - everything else → 2 decimals.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(v) < 1e-3 or abs(v) > 1e6:
+        return f"{v:.2e}"
+    if _is_cryo_channel(channel):
+        return f"{v:.1f}"
+    return f"{v:.2f}"
+
+
+def _format_values_dict(values: dict[str, Any]) -> dict[str, str]:
+    return {ch: _format_value_for_prompt(v, ch) for ch, v in values.items()}
+
+
+def _detect_implausible(channel: str, value: Any, unit: str = "K") -> str | None:
+    """Return a short Russian hint when ``value`` is physically impossible.
+
+    Cryogenic temperature sensors should report a cold-stage temperature in
+    the few-Kelvin to a few-hundred-Kelvin band. Anything outside that band
+    is sensor failure, not an experiment alarm to interpret literally; the
+    hint helps the LLM frame the response correctly instead of suggesting
+    the operator "проверить температуру".
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if _is_cryo_channel(channel) and unit == "K":
+        if v > _TEMP_IMPLAUSIBLE_HIGH_K:
+            return (
+                "физически невозможно для криогенного канала, "
+                "вероятно сбой сенсора"
+            )
+        if v < _TEMP_IMPLAUSIBLE_LOW_K:
+            return "отрицательное значение, физически невозможно"
+    return None
+
+
+def _build_anomaly_hint_text(values: dict[str, Any]) -> str:
+    """Compose a multi-line `recent_readings_text` carrying anomaly hints.
+
+    Empty if no implausible values; otherwise lines of the form:
+    ``Т1: 948.0 K — физически невозможно для криогенного канала, …``.
+    """
+    lines: list[str] = []
+    for ch, val in values.items():
+        hint = _detect_implausible(ch, val)
+        if hint is None:
+            continue
+        formatted = _format_value_for_prompt(val, ch)
+        lines.append(f"{ch}: {formatted} K — {hint}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,32 @@
 
 ### Added
 
+- **F-BotPolish** — четыре точечных фикса в Гемма-pipeline под наблюдаемые
+  лабораторные проблемы 2026-05-07.
+  1. *Markdown→HTML на стороне `OutputRouter`*: Гемма по prompts
+     (`ALARM_SUMMARY_SYSTEM`) emit'ит Markdown, Telegram-бот шлёт с
+     `parse_mode=HTML`, поэтому до сих пор `*` и `**` показывались
+     литерально. Конвертация (`**bold**` → `<b>bold</b>`, `*it*` →
+     `<i>it</i>`, `` `c` `` → `<code>c</code>`, заголовки `#` стрипаются)
+     применяется **только** к target `TELEGRAM`. `OPERATOR_LOG` и
+     `GUI_INSIGHT` сохраняют исходный Markdown. Bullet-маркеры (`* item`)
+     не конвертируются — italic-regex требует символов между маркерами.
+  2. *Float-форматирование в `ContextBuilder`*: значения округляются один
+     раз на seam'е (`AlarmContext.values: dict[str, Any]`) — криогенные
+     каналы (Т*) → 1 знак после запятой, давление (|v| < 1e-3 или > 1e6)
+     → 2 sig fig scientific, прочие → 2 знака. Убирает 12-digit «4.347123…»
+     из prompt'а.
+  3. *Sanity-hint на implausible значениях*: T_cryo > 500 K или < −50 K
+     помечается в `recent_readings_text` как «вероятно сбой сенсора», и
+     Гемма формулирует ответ как датчик-фолт, а не как «проверить
+     охлаждение».
+  4. *Event-level dedup в `AssistantLiveAgent._event_loop`*: одинаковые
+     `alarm_fired` события в 30 s окне (по `alarm_id` + bucket) дропаются
+     до slice-handler-а — alarm, который кратко clear'ится и re-fire'ится,
+     больше не порождает дубль-narrative в Telegram. Slice handlers, F30
+     query agent path, ALARM_SUMMARY_SYSTEM prompt, TelegramNotifier и
+     `parse_mode=HTML` в `TelegramCommandBot._send()` — без изменений.
+
 - **F34** — GUI chat overlay для ассистента Гемма. Новая панель
   `AssistantChatPanel` (`gui/shell/overlays/assistant_chat_panel.py`)
   переиспользует backend F30 `AssistantQueryAgent`: оператор задаёт
