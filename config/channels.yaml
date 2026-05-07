@@ -55,7 +55,9 @@ channels:
   Т8:
     name: Калибровка
     visible: true
-    is_cold: true
+    # v0.55.2 A4: calibration reference sits at room temperature; treating
+    # it as cryogenic made SensorDiagnostics flag it КРИТ at every cool-down.
+    is_cold: false
     group: криостат
   Т9:
     name: Компрессор вход

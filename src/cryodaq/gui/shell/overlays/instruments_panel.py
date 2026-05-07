@@ -149,6 +149,11 @@ def _mono_bold_font() -> QFont:
 
 
 def _health_color(score: int) -> str:
+    # v0.55.2 A4: warm reference channels get score=-1 ("not scored");
+    # render in muted neutral so the КРИТ red is reserved for actual
+    # cryogenic faults.
+    if score < 0:
+        return theme.MUTED_FOREGROUND
     if score >= _HEALTH_OK_THRESHOLD:
         return theme.STATUS_OK
     if score >= _HEALTH_WARN_THRESHOLD:
@@ -162,6 +167,9 @@ def _tint_for_health(score: int) -> QColor:
     Alpha values are deliberately low so the tint lies on top of the
     card surface without clashing with the text color.
     """
+    if score < 0:
+        # warm-reference / not-scored row: no tint
+        return QColor(0, 0, 0, 0)
     if score < _HEALTH_WARN_THRESHOLD:
         base = QColor(theme.STATUS_FAULT)
         base.setAlpha(_TINT_ALPHA_FAULT)
@@ -515,7 +523,9 @@ class _SensorDiagSection(QFrame):
                     True,
                     False,
                 ),
-                (str(health), True, True),
+                # v0.55.2 A4: render "—" for warm-reference rows (health=-1)
+                # so the score column doesn't show a confusing negative number.
+                (str(health) if health >= 0 else "—", True, True),
             ]
 
             color = _health_color(health)

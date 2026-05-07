@@ -564,3 +564,45 @@ def test_correlation_groups_resolve_short_to_full() -> None:
     assert d11.correlation is not None, (
         "Correlation should be computed \u2014 short IDs in config must resolve to full runtime names"  # noqa: E501
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.55.2 A4 \u2014 warm reference channels are not health-scored
+# ---------------------------------------------------------------------------
+
+
+def test_warm_reference_channel_not_scored() -> None:
+    """is_cold=False channels return health_score=-1 with warm_reference flag."""
+    engine = SensorDiagnosticsEngine()
+    engine.set_channel_cold_map({"T16": False, "T1": True})
+    # Push noisy warm signal that would normally score badly.
+    _push_noisy(engine, "T16", 298.0, sigma=0.5, n=500)
+    # And a clean cold one to confirm the cold path still runs.
+    _push_noisy(engine, "T1", 4.2, sigma=0.001, n=500)
+    engine.update()
+    diag = engine.get_diagnostics()
+    warm = diag["T16"]
+    assert warm.health_score == -1
+    assert "warm_reference" in warm.fault_flags
+    cold = diag["T1"]
+    assert cold.health_score >= 0
+
+
+def test_unknown_channel_defaults_to_cold() -> None:
+    """No cold map entry \u2192 treated as cold (cryogenic) for backwards compat."""
+    engine = SensorDiagnosticsEngine()
+    # No set_channel_cold_map call.
+    _push_noisy(engine, "T9", 4.2, sigma=0.001, n=500)
+    engine.update()
+    diag = engine.get_diagnostics()["T9"]
+    assert diag.health_score >= 0  # scored normally (default cold=True)
+
+
+def test_full_channel_id_falls_through_to_short() -> None:
+    """Cold map keyed by short ID resolves full '\u04228 \u041a\u0430\u043b\u0438\u0431\u0440\u043e\u0432\u043a\u0430'-style IDs."""
+    engine = SensorDiagnosticsEngine()
+    engine.set_channel_cold_map({"T8": False})
+    _push_noisy(engine, "T8 \u041a\u0430\u043b\u0438\u0431\u0440\u043e\u0432\u043a\u0430", 300.0, sigma=0.5, n=500)
+    engine.update()
+    diag = engine.get_diagnostics()["T8 \u041a\u0430\u043b\u0438\u0431\u0440\u043e\u0432\u043a\u0430"]
+    assert diag.health_score == -1

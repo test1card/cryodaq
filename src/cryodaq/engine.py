@@ -1377,6 +1377,15 @@ async def _run_engine(*, mock: bool = False) -> None:
         sensor_diag.set_channel_names(
             {ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()}
         )
+        # v0.55.2 A4: tell the engine which channels are cryogenic so warm
+        # references (calibration, flange, vacuum case, structural) don't
+        # get scored against cryogenic noise/drift thresholds.
+        sensor_diag.set_channel_cold_map(
+            {
+                ch_id: bool(info.get("is_cold", True))
+                for ch_id, info in _ch_mgr.get_all().items()
+            }
+        )
         logger.info(
             "SensorDiagnostics: enabled, update_interval=%ds, groups=%d, alarm_publishing=%s",
             _sd_cfg.get("update_interval_s", 10),

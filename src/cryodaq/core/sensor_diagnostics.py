@@ -219,6 +219,14 @@ class SensorDiagnosticsEngine:
 
         # channel_id → display name
         self._channel_names: dict[str, str] = {}
+        # channel_id → is_cold flag (cryogenic vs warm reference). v0.55.2
+        # A4: warm reference channels (calibration, structural, vacuum
+        # case) sit at room temperature and would be miscored as КРИТ if
+        # passed through the cryogenic noise/drift thresholds. They are
+        # skipped from health scoring entirely until per-group thresholds
+        # land in v0.56+. Default `True` keeps the original behaviour for
+        # any channel the engine forgets to declare.
+        self._is_cold: dict[str, bool] = {}
 
         # Cached diagnostics
         self._diagnostics: dict[str, ChannelDiagnostics] = {}
@@ -235,6 +243,29 @@ class SensorDiagnosticsEngine:
     def set_channel_names(self, names: dict[str, str]) -> None:
         """Set display names for channels."""
         self._channel_names = dict(names)
+
+    def set_channel_cold_map(self, cold_map: dict[str, bool]) -> None:
+        """Tell the engine which channels are cryogenic.
+
+        Channels with ``is_cold=False`` (warm references — calibration,
+        flange, vacuum case, structural) are excluded from health
+        scoring; the cryogenic noise/drift thresholds make no sense at
+        room temperature. Missing entries default to True (cold) so an
+        unconfigured channel still gets scored.
+        """
+        self._is_cold = dict(cold_map)
+
+    def _is_channel_cold(self, channel_id: str) -> bool:
+        """Return True iff the channel should be scored as cryogenic.
+
+        Looks up both the full and short channel IDs so callers can
+        push readings as "Т1" or "Т1 Криостат вер" — the cold map is
+        keyed by short ID per channels.yaml.
+        """
+        if channel_id in self._is_cold:
+            return self._is_cold[channel_id]
+        short_id = channel_id.split(" ", 1)[0] if " " in channel_id else channel_id
+        return self._is_cold.get(short_id, True)
 
     def push(self, channel_id: str, timestamp: float, value: float) -> None:
         """Add a data point for a channel.
@@ -385,6 +416,26 @@ class SensorDiagnosticsEngine:
     ) -> ChannelDiagnostics:
         current_T = buf[-1][1]
         name = self._channel_names.get(channel_id, channel_id)
+
+        # v0.55.2 A4: warm reference channels sit at room temperature and
+        # never satisfy the cryogenic noise/drift thresholds. Return a
+        # neutral "not scored" diagnostic with health_score=-1 so the
+        # GUI renders a dash instead of КРИТ.
+        if not self._is_channel_cold(channel_id):
+            return ChannelDiagnostics(
+                channel_id=channel_id,
+                channel_name=name,
+                current_T=current_T,
+                noise_std=float("nan"),
+                noise_mK=float("nan"),
+                drift_rate=float("nan"),
+                drift_mK_per_min=float("nan"),
+                outlier_count=0,
+                correlation=None,
+                health_score=-1,
+                fault_flags=["warm_reference"],
+                updated_at=now,
+            )
 
         # Noise (over noise window)
         noise_points = self._window_values(buf, self.noise_window_s)
