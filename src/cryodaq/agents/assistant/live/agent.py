@@ -221,13 +221,15 @@ class AssistantConfig:
 
 
 class _EventDedup:
-    """Drop duplicate events that fall inside a rolling window.
+    """Drop duplicate events that fall inside a sliding ``window_s`` window.
 
-    F-BotPolish: an alarm that briefly clears (e.g. stale-data → fresh →
-    stale again) re-fires the ``alarm_fired`` event. Without dedup, Gemma
-    issues a fresh narrative on every re-fire, flooding Telegram with
-    near-identical bullets. The 30 s default bucket matches the rate at
-    which an alarm could realistically reflect a meaningful change.
+    F-BotPolish: an alarm that briefly clears (stale-data → fresh → stale
+    again) re-fires the ``alarm_fired`` event repeatedly. Without dedup,
+    Gemma issues a fresh narrative on every re-fire, flooding Telegram
+    with near-identical bullets. A *sliding* window is the right semantics
+    here: a flapping alarm produces exactly one narrative for the duration
+    of the flap-burst, and only after the alarm has been quiet for the
+    full window does the next genuine re-fire produce a fresh response.
     """
 
     def __init__(self, window_s: float = 30.0) -> None:
@@ -236,29 +238,37 @@ class _EventDedup:
 
     def is_new(self, event_id: str) -> bool:
         now = time.monotonic()
-        # Lazy GC: prune entries older than the window before checking.
         cutoff = now - self._window_s
-        if self._seen:
-            self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
-        if event_id in self._seen:
+        last = self._seen.get(event_id)
+        if last is not None and last >= cutoff:
+            # Still inside the window — refresh the timestamp so the next
+            # re-fire keeps the window sliding (one narrative per burst).
+            self._seen[event_id] = now
             return False
+        # Fresh sighting — record and lazily prune expired keys to bound
+        # the dict size when many distinct alarm_ids cycle through.
         self._seen[event_id] = now
+        self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
         return True
 
 
-def _event_dedup_id(event: EngineEvent, *, window_s: float = 30.0) -> str | None:
+def _event_dedup_id(event: EngineEvent) -> str | None:
     """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
 
-    Only ``alarm_fired`` is bucketed today: the same ``alarm_id`` that fires
-    twice inside the same ``window_s`` bucket is considered redundant. Other
-    event types (experiment_finalize, sensor_anomaly_critical, …) are rare
-    by construction and pass through untouched.
+    Cycle-2 fix for Codex finding on commit 53981a1: the previous
+    implementation derived the bucket from ``time.monotonic() // window_s``,
+    which let an alarm at ``t=29.9 s`` and a re-fire at ``t=30.1 s`` produce
+    different bucket ids (0 then 1) and pass through despite being 0.2 s
+    apart. The dedup key is now stable per alarm — the rolling-window
+    timestamp logic lives entirely in :class:`_EventDedup`.
+
+    Only ``alarm_fired`` is deduped today; other event types are rare by
+    construction and pass through untouched.
     """
     if event.event_type != "alarm_fired":
         return None
     alarm_id = str(event.payload.get("alarm_id", "unknown"))
-    bucket = int(time.monotonic() // window_s)
-    return f"alarm:{alarm_id}:{bucket}"
+    return f"alarm:{alarm_id}"
 
 
 class AssistantLiveAgent:
@@ -336,7 +346,7 @@ class AssistantLiveAgent:
                 if self._should_handle(event):
                     # F-BotPolish: pre-invocation dedup gate — slice handler
                     # logic itself is unchanged.
-                    dedup_id = _event_dedup_id(event, window_s=self._dedup._window_s)
+                    dedup_id = _event_dedup_id(event)
                     if dedup_id is not None and not self._dedup.is_new(dedup_id):
                         logger.debug(
                             "AssistantLiveAgent: dropping duplicate event %s",

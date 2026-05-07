@@ -12,6 +12,7 @@ from cryodaq.agents.assistant.live.context_builder import (
     _detect_implausible,
     _format_value_for_prompt,
     _format_values_dict,
+    _is_pressure_channel,
 )
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,37 @@ def test_pressure_rendered_as_two_sig_fig_scientific():
     assert _format_value_for_prompt(1.86e-06, "P_main") == "1.86e-06"
     # 12-digit operator-supplied value collapses to scientific form.
     assert _format_value_for_prompt(0.000000123456, "P_main") == "1.23e-07"
+
+
+def test_pressure_mid_magnitude_still_scientific():
+    """Cycle-2 fix for Codex finding on commit 53981a1: a pressure value
+    that lands between the magnitude bands (1e-3 ≤ |v| ≤ 1e6) used to
+    collapse to ``"0.00"``. Channel-name detection now wins over the
+    magnitude fallback."""
+    assert _format_value_for_prompt(1e-3, "P_main") == "1.00e-03"
+    assert _format_value_for_prompt(5e-3, "P_main") == "5.00e-03"
+    assert _format_value_for_prompt(0.5, "P_main") == "5.00e-01"
+
+
+def test_pressure_detected_by_unit_when_channel_unknown():
+    """Unit-based detection covers payloads where the channel id is opaque
+    but the unit is the canonical Cyrillic «мбар»."""
+    assert _format_value_for_prompt(1.5e-3, channel="anon", unit="мбар") == "1.50e-03"
+    assert _format_value_for_prompt(1.5e-3, channel="anon", unit="mbar") == "1.50e-03"
+
+
+def test_pressure_channel_patterns():
+    """Common pressure-channel names should all be detected."""
+    assert _is_pressure_channel("P_main")
+    assert _is_pressure_channel("p_compressor")  # lowercase
+    assert _is_pressure_channel("MV00")
+    assert _is_pressure_channel("V1")
+    assert _is_pressure_channel("VSP63D/pressure")
+    assert _is_pressure_channel("Anon/mbar")
+    # Non-pressure channels.
+    assert not _is_pressure_channel("Т12")
+    assert not _is_pressure_channel("smua/voltage")
+    assert not _is_pressure_channel("")
 
 
 def test_default_two_decimals_for_other_channels():

@@ -325,25 +325,54 @@ def _is_cryo_channel(channel: str) -> bool:
     return any(channel.startswith(prefix) for prefix in _CRYO_PREFIXES)
 
 
-def _format_value_for_prompt(value: Any, channel: str = "") -> str:
+def _is_pressure_channel(channel: str) -> bool:
+    """Heuristic: name-based pressure-channel detection.
+
+    Cycle-2 fix for Codex finding on commit 53981a1: relying on numeric
+    magnitude alone meant ``P_main = 1e-3`` rendered as ``"0.00"`` and
+    ``5e-3`` as ``"0.01"``. Pressure channels in this codebase are named
+    via ``MV…`` / ``V<N>`` (Thyracont VSP63D), ``P_…`` (engine adapters),
+    or ``…/pressure`` (broker routing) and report unit "мбар"/"mbar".
+    """
+    if not channel:
+        return False
+    cl = channel.lower()
+    return (
+        "pressure" in cl
+        or "/mbar" in cl
+        or cl.startswith("p_")
+        or cl.startswith("p/")
+        or cl.startswith("mv")
+        or cl.startswith("v1")
+        or cl.startswith("v2")
+        or cl.startswith("v3")
+    )
+
+
+def _format_value_for_prompt(value: Any, channel: str = "", unit: str = "") -> str:
     """Render a numeric reading for an LLM prompt in compact form.
 
     Without this rounding, ``str({"Т1": 4.347123456789})`` leaks 12-digit
     decimals into the Gemma prompt, which yields confused alarm summaries.
 
-    Bands:
-    - ``|v| < 1e-3`` or ``|v| > 1e6`` → 2-sig-fig scientific (pressure-like).
+    Detection order:
+    - pressure channels (by name OR unit "мбар"/"mbar") → 2-sig-fig scientific.
     - cryogenic temperature channels (Т*/T*) → 1 decimal place.
+    - magnitude band (|v| < 1e-3 or |v| > 1e6) → 2-sig-fig scientific
+      (defensive fallback when channel id is unknown).
     - everything else → 2 decimals.
     """
     try:
         v = float(value)
     except (TypeError, ValueError):
         return str(value)
-    if abs(v) < 1e-3 or abs(v) > 1e6:
+    unit_l = unit.lower() if unit else ""
+    if _is_pressure_channel(channel) or unit_l in {"мбар", "mbar"}:
         return f"{v:.2e}"
     if _is_cryo_channel(channel):
         return f"{v:.1f}"
+    if abs(v) < 1e-3 or abs(v) > 1e6:
+        return f"{v:.2e}"
     return f"{v:.2f}"
 
 
