@@ -40,6 +40,7 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.assistant_chat_panel import AssistantChatPanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
+from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
@@ -135,6 +136,7 @@ class MainWindowV2(QMainWindow):
         "analytics": ("_analytics_view", lambda self: AnalyticsView()),
         "conductivity": ("_conductivity_panel", lambda self: ConductivityPanel()),
         "multiline": ("_multiline_panel", lambda self: MultiLinePanel()),
+        "knowledge_base": ("_knowledge_base_panel", lambda self: KnowledgeBasePanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
         "assistant_chat": ("_assistant_chat_panel", lambda self: AssistantChatPanel()),
         "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
@@ -156,6 +158,7 @@ class MainWindowV2(QMainWindow):
         self._analytics_view: AnalyticsView | None = None
         self._conductivity_panel: ConductivityPanel | None = None
         self._multiline_panel: MultiLinePanel | None = None
+        self._knowledge_base_panel: KnowledgeBasePanel | None = None
 
         # F4 lazy-open snapshot replay cache (F3-Cycle1).
         # Last-value setters: dict[setter_name → last args tuple].
@@ -302,6 +305,13 @@ class MainWindowV2(QMainWindow):
         # v0.55.6: replay connection state into MultiLine overlay. Same
         # contract as the other measurement overlays.
         if name == "multiline":
+            derived_connected = False
+            if self._last_reading_time > 0.0:
+                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+            widget.set_connected(derived_connected)
+        # v0.55.6: knowledge-base overlay only needs the chip-style
+        # connected state for its embedded chat panel; no readings flow.
+        if name == "knowledge_base":
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0

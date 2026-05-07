@@ -139,6 +139,11 @@ _MORE_NAME = "more"
 _MORE_ICON = "more-horizontal.svg"
 _MORE_ITEMS = [
     ("archive", "Архив"),
+    # v0.55.6 — RAG-backed knowledge base (categories sidebar + embedded
+    # Гемма chat). Lives next to «Архив» so operators reach for both
+    # past-experiment artefacts and procedural knowledge in the same
+    # cluster. Standalone overlay rather than refactor of archive_panel.
+    ("knowledge_base", "База знаний"),
     ("calibration", "Калибровка"),
     ("settings", "Настройки"),
     ("__separator__", ""),

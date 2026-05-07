@@ -1,0 +1,27 @@
+# v0.55.6 — Knowledge Base sidebar predefined RAG queries.
+#
+# Each category drives one entry in the knowledge_base_panel's left
+# sidebar. Selecting a category fires `rag.search` with `query` + `limit`,
+# rendering snippet cards on the right pane.
+#
+# Customize per deployment by copying this file to
+# config/rag_categories.local.yaml — the panel reads `.local.yaml` first
+# and falls back to this file.
+
+categories:
+  - id: safety
+    label: "📚 Безопасность"
+    query: "safety regulations cryogenic vacuum"
+    limit: 10
+  - id: cryostat
+    label: "❄️ Криостат"
+    query: "cryostat operation manual"
+    limit: 10
+  - id: procedures
+    label: "📋 Procedures"
+    query: "experimental procedure CryoDAQ cooldown"
+    limit: 10
+  - id: manuals
+    label: "📖 Manuals"
+    query: "operator manual instruction"
+    limit: 10

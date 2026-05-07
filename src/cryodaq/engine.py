@@ -342,6 +342,71 @@ async def _handle_assistant_query_command(
         return {"ok": False, "error": str(exc)}
 
 
+async def _handle_rag_search_command(
+    rag_searcher: Any,
+    cmd: dict[str, Any],
+    *,
+    timeout_s: float = 30.0,
+) -> dict[str, Any]:
+    """Dispatch ``rag.search`` GUI command to the F32 RagSearcher.
+
+    Module-level helper mirrors :func:`_handle_assistant_query_command` so
+    the v0.55.6 knowledge-base overlay's dispatch path is unit-testable
+    without spinning up the engine. Returns a serialised list of
+    SearchResult dicts on success or a Russian error string-shaped dict
+    on every failure (missing index, empty query, timeout, exception).
+    """
+    if rag_searcher is None:
+        return {
+            "ok": False,
+            "error": "RAG индекс не построен. Запустите cryodaq-rag-index.",
+        }
+    query = str(cmd.get("query", "")).strip()
+    if not query:
+        return {"ok": False, "error": "Пустой запрос."}
+    top_k = int(cmd.get("limit", cmd.get("top_k", 10)))
+    raw_filter = cmd.get("source_kind_filter")
+    if raw_filter is None:
+        source_kind_filter: list[str] | None = None
+    elif isinstance(raw_filter, list):
+        source_kind_filter = [str(x) for x in raw_filter]
+    else:
+        source_kind_filter = [str(raw_filter)]
+    try:
+        results = await asyncio.wait_for(
+            rag_searcher.search(
+                query,
+                top_k=top_k,
+                source_kind_filter=source_kind_filter,
+            ),
+            timeout=timeout_s,
+        )
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "chunk_id": r.chunk_id,
+                    "source_kind": r.source_kind,
+                    "source_id": r.source_id,
+                    "text": r.text,
+                    "metadata": r.metadata,
+                    "score": r.score,
+                }
+                for r in results
+            ],
+        }
+    except TimeoutError:
+        return {
+            "ok": False,
+            "error": (
+                f"RAG-поиск занял больше {timeout_s:g}с — возможно Ollama зависла."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("rag.search error: %s", exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -2118,6 +2183,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             if action == "assistant.query":
                 # F34: Гемма chat overlay reuses F30 AssistantQueryAgent.
                 return await _handle_assistant_query_command(_query_agent, cmd)
+            if action == "rag.search":
+                # v0.55.6 — knowledge-base GUI overlay calls this from
+                # ZmqCommandWorker. Helper extracted for unit-testing.
+                return await _handle_rag_search_command(_rag_searcher, cmd)
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -2389,6 +2458,54 @@ async def _run_engine(*, mock: bool = False) -> None:
             logger.warning(
                 "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
             )
+
+    # --- F32 RAG searcher (v0.55.6 — engine wrapper around the indexer
+    #     shipped in v0.55.0 so the GUI knowledge-base overlay can issue
+    #     `rag.search` ZMQ commands without touching LanceDB itself).
+    _rag_searcher: Any = None
+    try:
+        from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
+        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
+
+        _rag_cfg_path = _CONFIG_DIR / "rag.local.yaml"
+        if not _rag_cfg_path.exists():
+            _rag_cfg_path = _CONFIG_DIR / "rag.yaml"
+        if _rag_cfg_path.exists():
+            import yaml as _yaml  # noqa: PLC0415
+
+            _rag_raw = _yaml.safe_load(_rag_cfg_path.read_text(encoding="utf-8")) or {}
+            _rag_cfg = _rag_raw.get("rag", {})
+            _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()
+            _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
+            _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
+            _rag_emb_model = str(_rag_cfg.get("embedding_model", "multilingual-e5-small"))
+            if _rag_db_path.exists():
+                _rag_emb = EmbeddingsClient(
+                    base_url=_rag_emb_url,
+                    model=_rag_emb_model,
+                )
+                _rag_searcher = RagSearcher(
+                    db_path=_rag_db_path,
+                    embeddings_client=_rag_emb,
+                    table_name=_rag_table,
+                )
+                logger.info(
+                    "RAG searcher: инициализирован (db=%s, table=%s)",
+                    _rag_db_path,
+                    _rag_table,
+                )
+            else:
+                logger.info(
+                    "RAG searcher: index path не найден (%s) — RAG отключён",
+                    _rag_db_path,
+                )
+        else:
+            logger.info(
+                "RAG searcher: config/rag.yaml отсутствует — RAG отключён"
+            )
+    except Exception as _rag_exc:
+        logger.warning("RAG searcher: ошибка инициализации — %s", _rag_exc)
+        _rag_searcher = None
 
     # --- Запуск всех подсистем ---
     await safety_manager.start()
