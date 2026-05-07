@@ -1918,7 +1918,12 @@ async def _run_engine(*, mock: bool = False) -> None:
                                 template_id=str(_exp_info.get("template_id") or "custom"),
                                 phases=list(_metadata.get("phases", []) or []),
                                 artifact_index=list(_metadata.get("artifact_index", []) or []),
-                                summary=dict(_metadata.get("summary", {}) or {}),
+                                # F31 H1: metadata.json stores summary under
+                                # "summary_metadata" key (verified against
+                                # ExperimentManager metadata builder). The bare
+                                # "summary" key is empty, producing vault notes
+                                # with empty ## Summary sections.
+                                summary=dict(_metadata.get("summary_metadata", {}) or {}),
                                 notes=str(_exp_info.get("notes") or ""),
                                 description=str(_exp_info.get("description") or ""),
                                 custom_fields=dict(_exp_info.get("custom_fields") or {}),
