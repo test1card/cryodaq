@@ -774,7 +774,21 @@ class CooldownPredictionWidget(QWidget):
 
         # Then check for steady-state asymptote.
         pred = self._ss_predictor.get_prediction(self._PRED_CHANNEL)
-        if (
+        if pred is not None and pred.valid and getattr(pred, "is_quasi_steady", False):
+            # v0.55.3 — quasi-steady regime. Curve fit was bypassed because
+            # the system is sitting near steady; report mean ± stddev plus
+            # the slow drift rate. No asymptote line / band: t_current is
+            # the readout, not an extrapolated asymptote.
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setPlainText(
+                f"Стационар: T = {pred.t_current:.2f} ± {pred.stddev_k:.2f} K, "
+                f"дрейф {pred.drift_rate_k_per_h:+.2f} К/ч"
+            )
+            self._steady_badge.setVisible(True)
+            self._placeholder.setVisible(False)
+            self._reposition_overlays()
+        elif (
             pred is not None
             and pred.valid
             and pred.percent_settled >= self._SETTLE_THRESHOLD
