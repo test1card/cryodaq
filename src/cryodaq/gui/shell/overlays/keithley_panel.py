@@ -157,9 +157,12 @@ def _title_font() -> QFont:
 
 
 def _tick_font() -> QFont:
+    # v0.55.2 ds-013: arithmetic on FONT_LABEL_SIZE (12-2=10) clamps via
+    # max() back up to FONT_SIZE_XS (11) — the clamp was load-bearing,
+    # so the smallest legible tick value really is XS. Use the token
+    # directly per RULE-TYPO-007 (no arithmetic on font tokens).
     font = QFont(theme.FONT_BODY)
-    size = max(theme.FONT_LABEL_SIZE - 2, theme.FONT_SIZE_XS)
-    font.setPixelSize(size)
+    font.setPixelSize(theme.FONT_SIZE_XS)
     return font
 
 
