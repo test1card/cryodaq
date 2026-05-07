@@ -7,6 +7,553 @@
 
 ---
 
+## [Unreleased]
+
+_Pending v0.55.5 work — see active spec._
+
+---
+
+## [0.55.4] — 2026-05-07 — feat(safety): cooldown alarm policy + Т11/Т12 critical channels + Алармы→Тревоги rename
+
+### Added
+
+- **CooldownAlarm policy** — `auto_arm: True` by default, gated by
+  `SteadyStatePredictor` quasi-steady detection (no fire while still
+  cooling); watchdog disabled by default until per-deployment tuning
+  (commit `a1ba0b6`).
+
+### Changed
+
+- **safety.yaml `critical_channels`** — narrowed to `Т11` / `Т12`
+  (positionally fixed GM-cooler stages) only. Other thermometer
+  channels are no longer load-bearing for the safety FSM
+  (commit `50909e3`).
+- **Operator-facing strings** — «Алармы» → «Тревоги» across 11 call
+  sites (menu, toolbar, status bar, dialog titles). Class names
+  (`AlarmPanel`, `AlarmManager`, etc.) and filenames preserved — code
+  identifiers stay English/`Alarm*` (commit `e642ba9`).
+
+### Fixed
+
+- **SeverityChip acknowledged styling** — now applies in the v1 alarm
+  path. Was only fixed in the v2 path in v0.55.2; v1 retained the
+  unmuted colour, leaving a "still angry" chip on acknowledged alarms
+  (commit `0918a86`).
+- **TopWatchBar counter format** — short_id vs full_name mismatch
+  caused «0/16 норма» freeze on populated experiments. The bar now
+  stamps readings under the short channel id, matching the
+  counter-source registry (commit `abfedb9`).
+
+### Closing commit
+
+- `1a196e6` (chore: 0.55.3 → 0.55.4 version bump).
+
+---
+
+## [0.55.3] — 2026-05-07 — feat: quasi-steady regime + expected_value API
+
+### Added
+
+- **`SteadyStatePredictor` quasi-steady detection** — residual + slope
+  gate identifies when a channel has reached a quasi-stationary regime
+  (cooled but still drifting). Tunables exposed in
+  `config/cooldown.yaml` (commits `2ab8c5a`, `230571f`).
+- **`CooldownService.expected_value(channel, ts)` API** — query the
+  predicted steady-state value at a future timestamp. Backed by the
+  steady-state predictor (commit `8983f88`).
+- **GUI quasi-steady label** — `CooldownPredictionWidget` renders a
+  «Стационарное состояние» label when the predictor reports a settled
+  fit during IDLE state (commit `6036c9d`).
+
+### Tests
+
+- `test_steady_state` — synthetic quasi-steady fixtures (`e7d8b8d`).
+- `test_cooldown_service.expected_value` — API behaviour (`97e61e4`).
+- `test_gui` — quasi-steady widget rendering (`8ded90b`).
+
+### Closing commit
+
+- `2da7e64` (chore: 0.55.2 → 0.55.3 version bump).
+
+---
+
+## [0.55.2] — 2026-05-07 — fix(gui): design + behavior sweep (16 fixes)
+
+GUI design + behavior sweep — 16 fixes (7 architect items, 14
+design-system items, 1 cycle-2 follow-up). Mostly token-derivation
+cleanup: hex literals removed, hardcoded sizes pulled from `theme.py`
+tokens, acknowledged alarm chips visually muted.
+
+### Fixed
+
+- **Sensor diagnostics — warm channels** — keep warm reference
+  channels out of alarm + diagnostics summary; no longer
+  double-counted (commits `c7030f5`, `475b2bf`).
+- **Archive label / chat bubble width** — derive from `SPACE_*`
+  tokens (commit `caa151f`).
+- **Keithley panel** — drop arithmetic on `FONT_LABEL_SIZE` token
+  (commit `417758b`).
+- **Operator log** — token-derive author column width and message
+  height (commit `01c3a3c`).
+- **Quick log block** — token-derive input padding and button size
+  (commit `56330d3`).
+- **Top watch bar** — token-derive context-strip type and spacing
+  (commit `d1e60a7`); seed visible channels OK at construction so the
+  bar is not blank during cold-start (commit `62e2546`).
+- **Sensor cell** — token-derive spacing, padding, hint font
+  (commit `337c19d`).
+- **Conductivity panel** — top toolbar layout + 2-column channel grid
+  (commit `2ea27ce`).
+- **Phase stepper** — fill past pills with `STATUS_OK` (was a raw
+  colour literal) (commit `5081319`).
+- **Analytics — MEASUREMENT phase** — drop Keithley card from the
+  MEASUREMENT phase layout (belongs to other phases only)
+  (commit `10b86f5`).
+- **Archive panel** — text-view heights from `SPACE_*` tokens
+  (commit `2942b2b`).
+- **Analytics plot** — replace trace + axis hex literals with palette
+  tokens (commits `c20a7ca`, `f603615`).
+- **Alarm panel** — visually mute acknowledged alarms (severity chip
+  desaturated) (commit `9139b8a`).
+
+### Closing commit
+
+- `74b3bdb` (chore: 0.55.1 → 0.55.2 version bump).
+
+---
+
+## [0.55.1] — 2026-05-07 — fix: audit fixes (H1-H7 + H9 + S1 + V1)
+
+Audit-fix batch addressing async-loop blocking, fire-and-forget GC,
+error swallowing, and one security item from the v0.55.0 audit.
+
+### Changed
+
+- **F-TimeoutRelax cold-start envelope** — extended 25 s → 50 s for
+  cold-start Ollama on slow operator laptops (commit `51c1dd8`).
+- **Web server bind** — `127.0.0.1` (was `0.0.0.0`); documented as
+  loopback-only deployment, not LAN-facing (commit `eb84e44`).
+
+### Fixed
+
+- **F31 sinks — async offload** — metadata read + vault write
+  off-loaded to `asyncio.to_thread` (no blocking I/O on event loop)
+  (commit `ba11330`).
+- **Replay — async offload** — SQLite load off-loaded to
+  `asyncio.to_thread` (commit `75315eb`).
+- **F32 RAG searcher** — guard query embedding dim mismatch with a
+  defensive shape-check (avoids LanceDB exception on stale corpora)
+  (commit `36d15e2`).
+- **ChartDispatcher** — keep strong reference to fire-and-forget task
+  set so GC does not collect in-flight chart dispatches
+  (commit `eb023c1`).
+- **Engine shutdown** — drain in-flight sink dispatches before
+  closing the engine (was racing on KeyboardInterrupt)
+  (commit `cfc847e`).
+- **Web command failures** — log engine-command failures, do not
+  swallow them (commit `040b6ab`).
+- **F31 summary key** — read `summary_metadata`, not `summary` (key
+  rename was incomplete in v0.55.0) (commit `f44abf3`).
+- **Package version** — bumped 0.52.9 → 0.55.1 in `pyproject.toml`
+  (was lagging behind tag chain) (commit `cb6bff3`).
+
+### Closing commit
+
+- `51c1dd8`.
+
+---
+
+## [0.55.0] — 2026-05-07 — chore: CHANGELOG audit + autonomous-run-2026-05-07 wrap-up
+
+Tag-only release that locks in autonomous-run-2026-05-07 work
+(catalogued under [0.54.0] per the architect's umbrella rule) and
+ships two CHANGELOG-discipline patches.
+
+### Changed
+
+- **F-CHANGELOG-Audit** — filled gaps for v0.52.10..v0.53.2
+  (commit `2771584`) and redistributed Keep-a-Changelog subsections
+  (Added/Changed/Fixed) for v0.53.x retrospectively
+  (commit `ff9bead`). Brings the historical tail up to current
+  discipline.
+
+### Note
+
+The bulk of autonomous-run-2026-05-07 features (F31 sinks, F32 RAG
+indexer, F-MultiLine Stage 1, F-LegacyChannelMap, F-ConfigChannelDrift)
+were committed in this version's range (`v0.54.0..v0.55.0`) but are
+catalogued under [0.54.0] per the architect's umbrella rule —
+v0.54.0 = autonomous-run-2026-05-07. v0.55.0 itself is the tag bump
+that closed out the run.
+
+### Closing commit
+
+- `1ee46a5` (test: F32 cycle 3 — deterministic mock embeddings).
+
+---
+
+## [0.54.0] — 2026-05-07 — feat: autonomous-run-2026-05-07 umbrella (channel landmarks + sinks + RAG + MultiLine + replay maps + bot polish + chat overlay)
+
+Umbrella release for autonomous-run-2026-05-07 work. Combines the
+F-ChannelLandmarks / F-TimeoutRelax / F-MockPredictor / F33 / F34 /
+F-BotPolish features tagged at v0.54.0 with the F31 / F32 /
+F-MultiLine Stage 1 / F-LegacyChannelMap / F-ConfigChannelDrift work
+that committed under the v0.55.0 tag. Per architect rule, all
+autonomous-run features sit under one umbrella: v0.54.0.
+
+### Added
+
+- **F-ChannelLandmarks** — system-level channel identity layer.
+  `config/physical_alarms.yaml` gains an optional `landmarks:` section
+  that pins hardware-fixed channels (Т11/Т12 — GM-cooler stages) to
+  canonical roles plus operator-phrasing aliases (e.g. «азотная
+  плита» → Т11).
+
+  - New `cryodaq.core.physical_alarms_config.load_channel_landmarks()`
+    parses the section; missing/malformed config returns `{}` (engine
+    never aborts).
+  - `ChannelManager.set_landmarks()` / `get_landmarks()` carry the map
+    across the engine; populated at startup, read by the query agent.
+  - `IntentClassifier._build_channel_hint()` now emits a two-tier
+    listing — landmarks first with aliases, experiment channels
+    second — and tells Gemma that landmark aliases beat
+    experiment-level naming on collisions.
+
+  Resolves the production «азотная плита → Т12» misclassification.
+  Backward-compat: omitting the `landmarks:` section preserves the
+  prior v0.53.x prompt structure (single «Доступные каналы» list)
+  (commit `8f0af9a`).
+
+- **F33 — archive query agent** — `AssistantQueryAgent` now answers
+  questions about experiment archive and alarm history. Three new
+  `QueryCategory` values:
+
+  - `archive_list` — «какие эксперименты были на этой неделе» /
+    «покажи архив за месяц». Returns list of cards (experiment_id,
+    title, sample, operator, started, status). Default window —
+    7 days.
+  - `archive_detail` — «детали эксперимента <ID>» / «сколько часов
+    длился cooldown в <ID>». Returns full card (sample, operator,
+    status, duration, phases, cooldown metrics from metadata.json).
+  - `alarm_history` — «сколько раз сработал overheat за неделю» /
+    «статистика тревог». Returns triggered/cleared count + breakdown
+    by `alarm_id`.
+
+  All three categories are read-only via the new `ArchiveAdapter`
+  wrapping `ExperimentManager.list_archive_entries` /
+  `get_archive_item` and `AlarmStateManager.get_history`. SQL-DSL and
+  write capabilities are explicitly out of scope. F30 query agent
+  core, IntentClassifier algorithm, and `experiment_adapter` are
+  unchanged. Cycle 2 (commit `0a21cba`) offloaded archive filesystem
+  scans to `asyncio.to_thread` (commit `dc5350b`, cycle 2 `0a21cba`).
+
+- **F34 — GUI chat overlay** — new `AssistantChatPanel`
+  (`gui/shell/overlays/assistant_chat_panel.py`) reuses the F30
+  backend `AssistantQueryAgent`. Operator types a free-form question;
+  GUI sends ZMQ command `assistant.query` via the non-blocking
+  `ZmqCommandWorker`; engine dispatches to
+  `_handle_assistant_query_command` (timeout 25 s — fits inside the
+  ZMQ REP server's 30 s slow-command envelope; command added to
+  `_SLOW_COMMANDS` in `core/zmq_bridge.py`). Response renders as
+  bubbles (operator right on `ACCENT`, assistant left on
+  `SURFACE_CARD`, errors `STATUS_WARNING` with ⚠ prefix). History is
+  in-session only (no disk). ToolRail icon — Phosphor
+  `ph.chat-circle`, slot «Помощник Гемма» between «Служебный лог» and
+  «Приборы». The Telegram path retains its 60 s budget via
+  `telegram_commands.py` (separate path — not over ZMQ).
+  `AssistantQueryAgent`, `IntentClassifier`, `QueryRouter`,
+  `OutputRouter`, and `ZMQCommandServer` class are unchanged
+  (commit `0ab42f2`, cycle 3 `a5eccb9`).
+
+- **F-BotPolish** — four point fixes in the Gemma pipeline addressing
+  observed lab issues 2026-05-07.
+
+  1. *Markdown→HTML in `OutputRouter`*: Gemma emits Markdown per
+     prompts (`ALARM_SUMMARY_SYSTEM`); the Telegram bot sends with
+     `parse_mode=HTML`, so until now `*` and `**` rendered literally.
+     Conversion (`**bold**` → `<b>bold</b>`, `*it*` → `<i>it</i>`,
+     `` `c` `` → `<code>c</code>`, headings `#` stripped) applies
+     **only** to target `TELEGRAM`. `OPERATOR_LOG` and `GUI_INSIGHT`
+     keep raw Markdown. Bullet markers (`* item`) are not converted —
+     the italic regex requires symbols between markers.
+  2. *Float formatting in `ContextBuilder`*: values are rounded once
+     at the seam (`AlarmContext.values: dict[str, Any]`) — cryogenic
+     channels (Т*) → 1 decimal, pressure (|v| < 1e-3 or > 1e6) →
+     2 sig fig scientific, others → 2 decimals. Eliminates 12-digit
+     «4.347123…» bleeding into the prompt.
+  3. *Sanity hint on implausible values*: `T_cryo > 500 K` or
+     `< −50 K` is flagged in `recent_readings_text` as «вероятно сбой
+     сенсора»; Gemma now phrases the answer as a sensor fault, not as
+     «check cooling».
+  4. *Event-level dedup in `AssistantLiveAgent._event_loop`*:
+     identical `alarm_fired` events within a 30 s window (by
+     `alarm_id` + bucket) are dropped before the slice handler —
+     alarms that briefly clear and re-fire no longer produce
+     duplicate Telegram narratives.
+
+  Cycle 2 (commit `bfe49d2`) widened to a sliding dedup window plus
+  channel-aware pressure detection. Slice handlers, F30 query agent
+  path, `ALARM_SUMMARY_SYSTEM` prompt, `TelegramNotifier`, and
+  `parse_mode=HTML` in `TelegramCommandBot._send()` are unchanged
+  (commit `53981a1`).
+
+- **F-MockPredictor** — `CooldownPredictionWidget` renders a
+  horizontal asymptote line + ±sigma band + «Стационарное состояние
+  ≈ X K» badge when the embedded `SteadyStatePredictor` reports a
+  settled fit (`percent_settled ≥ 30 %`) while the `CooldownDetector`
+  backend is IDLE. Replaces the empty «Охлаждение не активно»
+  placeholder on Mac mock and any other already-cooled stream.
+  Pattern mirrors `RThermalLiveWidget` verbatim (window 600 s, update
+  30 s, settle threshold 30 %, `STATUS_INFO` tokens). Cycle 2
+  (commit `f45bc42`) fed cold-stage temperatures via a new
+  `CooldownPredictionWidget.set_cold_temperature_reading()` setter,
+  invoked by `MainWindowV2._dispatch_reading` whenever a K-unit
+  reading arrives on the canonical Т12 landmark channel. Stale
+  forecast curves are now cleared from the inner `PredictionWidget`
+  whenever the state machine leaves the active-prediction branch.
+  Backend (`CooldownDetector`, `CooldownService`,
+  `SteadyStatePredictor`) untouched (commit `5276fc1`, cycle 2
+  `f45bc42`).
+
+- **F31 — operator-facing sinks** — new `cryodaq.sinks` module with
+  two sinks: `VaultSink` (writes Markdown note with YAML frontmatter
+  to a filesystem vault directory on experiment finalize / stop /
+  abort) and `WebhookSink` (POSTs the JSON-serialized
+  `ExperimentExport` to a configured URL). `SinkRegistry` loads sinks
+  from `config/sinks.yaml` (or `sinks.local.yaml` override) and fans
+  out concurrently. Dispatch is fire-and-forget —
+  `experiment_finalize` does not block on sinks; failures captured in
+  `SinkResult` and exposed through the new `sinks_status` ZMQ command
+  (last-20 results buffer). New config: `config/sinks.yaml.example`.
+  Pre-requisite for F32 (RAG indexer). Cycle 2 (commit `f456938`):
+  `dispatch()` never propagates exceptions from a misbehaving sink
+  (commit `fb4c43b`, cycle 2 `f456938`).
+
+- **F32 Stage 1 — RAG indexer** — standalone semantic search
+  foundation over the experiment archive (metadata + F31 vault notes
+  + operator log entries). New module `cryodaq.agents.rag` with
+  `document_loader` (chunking + corpus walkers), `indexer` (LanceDB
+  persistence), and `searcher` (top-K cosine lookup with optional
+  `source_kind` filter). Embeddings come from Ollama
+  `multilingual-e5-small` via a small `EmbeddingsClient` wrapping the
+  existing `OllamaClient.embed()`. New CLI scripts
+  `cryodaq-rag-index` and `cryodaq-rag-search`. Stage 2
+  (`AssistantQueryAgent` integration) is out of scope and lives in a
+  separate spec. New deps: `lancedb` (Mac arm64 wheel verified). New
+  config: `config/rag.yaml.example`. Cycle 2 (commit `56e0f76`)
+  pushed `source_kind` filter into LanceDB `WHERE` clause. Cycle 3
+  (commit `1ee46a5`) added deterministic mock embeddings + baseline
+  guard (commit `3cf3506`, cycle 2 `56e0f76`, cycle 3 `1ee46a5`).
+
+- **F-MultiLine Stage 1** — Etalon MultiLine TCP/IP integration:
+  interferometric length metrology over a new line-based ASCII TCP
+  transport. New driver type `etalon_multiline` registered in the
+  engine; readings publish on `<name>/length_ch<N>` (mm) plus
+  `<name>/env_<temperature|pressure|humidity>`. Mock mode required
+  for development without `MultiLine.exe` (lab-PC-only). Stage 2
+  features (deformation analysis, channel alignment, MLAC/AC
+  operations, frontend splitter/shutter control) are out of scope and
+  live in a separate spec. New module:
+  `cryodaq.drivers.transport.tcp` — first new transport class since
+  project inception, mirrors the `serial.py` asyncio cleanup +
+  error-wrapping pattern. Cycle 2 (commit `7f190fa`) flagged all
+  10 error fields as `SENSOR_ERROR` (commit `2ebde3b`, cycle 2
+  `7f190fa`).
+
+- **F-LegacyChannelMap** — `--legacy-channel-era` flag on the
+  launcher and the standalone replay engine. Loads a predefined
+  channel-rename map (`pre-2025-02` covers the thermal-bridge era:
+  Т10→Т12, Т9→Т10, Т8→Т9) and applies it on the SQLite/Directory
+  replay path so old recordings publish under the post-bridge
+  canonical labels (Т11/Т12). CurveReplay (`cooldown_v5/*.json`) is
+  post-bridge era and is not touched. New module:
+  `cryodaq.replay_engine.legacy_channel_maps` (commit `b096a2d`).
+
+### Changed
+
+- **F-TimeoutRelax** — command/query timeout values relaxed for
+  slower hardware (cold-start Ollama on a laggy operator laptop).
+
+  - `engine.py`: `_LOG_GET_TIMEOUT_S` and
+    `_EXPERIMENT_STATUS_TIMEOUT_S` raised from 1.5 s to 5.0 s. Both
+    commands read from SQLite + experiment manager (~50 ms typical,
+    ~500 ms p99 under load); 5 s gives ~10× headroom for cold-cache
+    or IO contention without affecting the user-visible latency
+    budget.
+  - `notifications/telegram_commands.py`: per-query Telegram dispatch
+    `wait_for(...)` raised from 30 s to 60 s, matching the operator
+    message text. Cold-start Ollama can spend 20–40 s loading the
+    model into RAM; subsequent queries stay fast.
+  - `agents/assistant/live/agent.py` `AssistantConfig` defaults
+    raised 2× across the board: `timeout_s` 30→60,
+    `query_intent_timeout_s` 10→20, `query_format_timeout_s` 20→40.
+    YAML overrides are unchanged.
+
+  Safety-critical timeouts (ZMQ heartbeats, watchdogs,
+  fault-on-silence thresholds) are NOT touched (commit `35e78ee`).
+
+### Fixed
+
+- **F-ConfigChannelDrift** — `config/cooldown.yaml` channel mapping
+  aligned with C6 / F-ChannelLandmarks canonical Т11/Т12. Pre-fix the
+  file referenced pre-C6 names (`Т7 Детектор` / `Т5 Экран 77К`),
+  which meant the cooldown predictor on the real lab PC watched
+  detector temperature instead of the 2nd-stage GM cooler.
+  Replay-mode was already correct via the v0.53.1 defensive override;
+  this aligns the real-lab path (commit `3f0abeb`).
+
+### Closing commit
+
+- `0a21cba` (fix: F33 cycle 2 archive offload).
+
+---
+
+## [0.53.2] — 2026-05-06 — fix(analytics): predictor readout stack + horizon button wiring
+
+Closing commit: `c48b501`.
+
+### Added
+
+- **Stacked predictor readout** — single-horizon readout заменён на стек
+  из 6 горизонтов (1/3/6/12/24/48ч). Каждая строка показывает значение
+  и CI независимо. Cycle 1 (`88f7331`).
+
+### Changed
+
+- **Horizon button X-range wiring** — кнопки заголовка управляют
+  X-диапазоном графика через `_apply_x_range()` (cycle 2, `c48b501`).
+  Right edge = `time.time() + horizon*3600`, left edge = первый history
+  sample, fallback `now - 60s` если empty. Re-anchor on `set_horizon` /
+  `set_history` / `set_prediction`.
+
+### Fixed
+
+- **Latent inert-buttons bug** — pre-existing `horizon_changed` сигнал
+  не имел production consumer; cycle 2 wired buttons directly с
+  preservation сигнала для backward compat. Codex caught в cycle 1
+  FAIL/HIGH.
+
+### Tests
+
+- 6 new widget tests (15 → 21); 188 passed broader regression.
+- Codex PASS cycle 2 of 3.
+
+---
+
+## [0.53.1] — 2026-05-06 — feat: F-ReplayPredictor — CooldownService over replay stream
+
+Closing commit: `fcd717f`.
+
+### Added
+
+- **F-ReplayPredictor** — bolt `CooldownService` onto `ReplayEngine`.
+  Predictor widget активируется при replay реальных cooldown curves в
+  Mac mock.
+
+### Changed
+
+- **ReplayEngine instrumentation** — DataBroker inserted between source
+  and PUB queue. CooldownService subscribes to the broker, processes
+  readings, and publishes derived metrics back through broker → PUB →
+  ZMQ socket.
+- Defensive channel override (Т12/Т11) in `ReplayEngine` handles
+  `cooldown.yaml` drift without touching real-lab config.
+
+### Fixed
+
+- Slow-joiner regression в `test_replay_engine_heartbeat`, caught when
+  broker insertion shifted timing. Mitigated через
+  subscribe-before-source pattern (Stage 4b in v0.53.0).
+
+### Filed
+
+- F-ConfigChannelDrift — real-lab `cooldown.yaml` mapping alignment
+  (closed in subsequent unreleased v0.55.0 batch).
+
+### Tests
+
+- 3 new tests; 178/178 stable across 3 consecutive runs.
+- Codex PASS cycle 2 of 3 (cycle 1 fixture-on-clean-checkout issue).
+- Architect smoke 2026-05-06 21:45: predictor activates end-to-end on
+  `cooldown_v5` curve at `speed=50`, full ~17h trajectory + ±2.73K 67%
+  CI envelope rendering; «Через 1 ч: 64.66 K» readout populated.
+
+---
+
+## [0.53.0] — 2026-05-06 — feat: F-Replay — 5-stage replay mode + predictor bootstrap
+
+Closing commit: `a502814` (late hotfix moved tag forward from
+`1bd3b13`).
+
+### Added
+
+- **F-Replay replay mode** — 5-stage operator-visible replay path:
+  - Stage 1 (`4efac0c`) — schema fix.
+  - Stage 2 (`7795ab9`) — replay transforms + CLI.
+  - Stage 4 (`fef291d`) — launcher `--replay`, `TopWatchBar` badge,
+    source listing.
+  - Stage 4b (`33dc1b0`) — UX polish: timestamp shift, badge dispatch,
+    title persistence.
+  - Stage 5 (`e4da30a`) — predictor bootstrap hint + operator doc.
+
+### Changed
+
+- **`replay_engine` cmd-plane parity** — Stage 3 (`7d0a22c`) brought
+  PUB+REP+heartbeat parity with the live engine, port-refuse handling,
+  and a `--force-replay` flag.
+
+### Fixed
+
+- **Stage 4c** (`1bd3b13`) — `DirectoryReplay` non-empty-first-file
+  edge case.
+- **Late hotfix** (`a502814`) — `QTimer` shadowing fix from Stage 4b
+  regression caught in architect smoke test. Tag moved here from
+  `1bd3b13`.
+
+### Filed
+
+- F-ReplayPhases (closed in subsequent unreleased v0.55.0 batch).
+- F-LegacyChannelMap (closed in subsequent unreleased v0.55.0 batch).
+
+### Codex review
+
+- P2 findings declined per architect call: non-loopback collision,
+  hardcoded predictor path, `--force-replay`+live engine combo — все
+  deferred to follow-up specs.
+
+### Tests
+
+- 1472 passed full regression.
+
+---
+
+## [0.52.11] — 2026-05-06 — chore: cooldown_v5/ in .gitignore
+
+Closing commit: `788cd27`.
+
+### Changed
+
+- `cooldown_v5/` reference data added to `.gitignore` —
+  operator-supplied curves should not live in the repository.
+
+### Notes
+
+- Predictor model bootstrap (cooled-mock activation) deferred to v0.53.0
+  replay mode.
+
+---
+
+## [0.52.10] — 2026-05-06 — hotfix(diag): revert D2-TEMP instrumentation
+
+Closing commit: `bc36b1d`.
+
+### Fixed
+
+- **Temperature panel Y-axis autoRange** on Mac mock — 4-commit arc;
+  D2-TEMP instrumentation reverted.
+
+---
+
 ## [0.52.9] — 2026-05-05 — chore(tests): ollama marker
 
 ### Changed
