@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from cryodaq.sinks.base import ExperimentExport, Sink, SinkResult
+from cryodaq.sinks.rag_index_sink import RAGIndexSink
 from cryodaq.sinks.vault_sink import VaultSink
 from cryodaq.sinks.webhook_sink import WebhookSink
 
@@ -43,6 +44,12 @@ class SinkRegistry:
                   verify_ssl: true
                   extra_headers:
                     Authorization: "Bearer ..."
+              rag_index:           # F32 Stage 2 (v0.55.7)
+                enabled: true
+                rag_config_path: "config/rag.yaml"
+                experiments_dir: "data/experiments"
+                vault_dir: "~/CryoDAQ-Vault/experiments"  # optional
+                sqlite_path: "data/cryodaq.db"            # optional
         """
         if not config_path.exists():
             logger.info("Sinks config not found: %s — sinks disabled", config_path)
@@ -72,6 +79,34 @@ class SinkRegistry:
                 )
             )
             logger.info("WebhookSink registered: %s", url)
+
+        # F32 Stage 2 (v0.55.7) — auto-rebuild the RAG index after each
+        # finalize. Skipped silently when missing or disabled so legacy
+        # sinks.yaml files keep working.
+        rag_cfg = sinks_cfg.get("rag_index") or {}
+        if rag_cfg.get("enabled", False):
+            experiments_dir_raw = rag_cfg.get("experiments_dir")
+            if not experiments_dir_raw:
+                logger.warning(
+                    "RAGIndexSink config missing experiments_dir; skipping"
+                )
+            else:
+                rag_yaml = Path(rag_cfg.get("rag_config_path", "config/rag.yaml"))
+                vault_raw = rag_cfg.get("vault_dir")
+                sqlite_raw = rag_cfg.get("sqlite_path")
+                self._sinks.append(
+                    RAGIndexSink(
+                        rag_config_path=rag_yaml,
+                        experiments_dir=Path(str(experiments_dir_raw)).expanduser(),
+                        vault_dir=(
+                            Path(str(vault_raw)).expanduser() if vault_raw else None
+                        ),
+                        sqlite_path=(
+                            Path(str(sqlite_raw)).expanduser() if sqlite_raw else None
+                        ),
+                    )
+                )
+                logger.info("RAGIndexSink registered: rag_config=%s", rag_yaml)
 
     async def dispatch(self, export: ExperimentExport) -> list[SinkResult]:
         """Fire all sinks concurrently. Failures captured in SinkResult; never raises.
