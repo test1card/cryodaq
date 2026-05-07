@@ -124,7 +124,8 @@ def test_default_timeout_fires_inside_server_envelope():
 
     sig = inspect.signature(_handle_assistant_query_command)
     default = sig.parameters["timeout_s"].default
-    assert default == 25.0
+    # H7: bumped 25 → 50 to absorb Ollama cold-start (20-40s).
+    assert default == 50.0
     assert default < HANDLER_TIMEOUT_SLOW_S, (
         f"helper timeout {default}s must be < server slow envelope "
         f"{HANDLER_TIMEOUT_SLOW_S}s"
@@ -133,8 +134,8 @@ def test_default_timeout_fires_inside_server_envelope():
 
 def test_assistant_query_routed_to_slow_envelope_at_transport_layer():
     """Cycle-3 fix: ``assistant.query`` is registered as a slow command so
-    the REP server gives the handler the 30 s envelope instead of the 2 s
-    fast default. Without this registration the helper's 25 s wait_for
+    the REP server gives the handler the slow envelope instead of the
+    2 s fast default. Without this registration the helper's wait_for
     is masked by the server returning ``handler timeout (2s)`` first."""
     from cryodaq.core.zmq_bridge import (
         _SLOW_COMMANDS,

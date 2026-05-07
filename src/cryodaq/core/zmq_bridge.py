@@ -38,7 +38,7 @@ DEFAULT_TOPIC = b"readings"
 # the operation usually completed a few seconds later. Fast status
 # polls stay on the 2 s envelope; known-slow commands get 30 s.
 HANDLER_TIMEOUT_FAST_S = 2.0
-HANDLER_TIMEOUT_SLOW_S = 30.0
+HANDLER_TIMEOUT_SLOW_S = 55.0  # H7: bumped from 30 — Ollama cold-start
 
 _SLOW_COMMANDS: frozenset[str] = frozenset(
     {

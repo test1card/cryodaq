@@ -28,7 +28,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
 
-_CMD_REPLY_TIMEOUT_S = 35.0  # IV.3 Finding 7: exceeds server 30 s ceiling
+_CMD_REPLY_TIMEOUT_S = 60.0  # H7: bumped from 35 — Ollama cold-start (server 55s)
 
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:

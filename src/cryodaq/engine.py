@@ -290,7 +290,7 @@ async def _handle_assistant_query_command(
     query_agent: Any,
     cmd: dict[str, Any],
     *,
-    timeout_s: float = 25.0,
+    timeout_s: float = 50.0,  # H7: bumped from 25s for Ollama cold-start
 ) -> dict[str, Any]:
     """Dispatch ``assistant.query`` GUI/Telegram command to AssistantQueryAgent.
 
@@ -299,17 +299,16 @@ async def _handle_assistant_query_command(
     hierarchy of :class:`AssistantQueryAgent.handle_query` (never raises;
     returns a Russian error string-shaped dict on every failure path).
 
-    Default ``timeout_s`` (25 s) is chosen to fire inside the surrounding
-    transport budget: the ZMQ REP server caps slow commands at 30 s
-    (``HANDLER_TIMEOUT_SLOW_S`` in ``core/zmq_bridge.py``, with
-    ``"assistant.query"`` registered as a slow command), and the GUI
-    subprocess / client socket timeouts are 35 s. Firing at 25 s lets
-    the helper deliver its own Russian error message before the server
-    envelope kills the handler. Cold-start Ollama (20–40 s loading)
-    may hit this ceiling on the first query; subsequent warm-cache
-    queries land well under 5 s. Telegram path keeps the 60 s budget
-    via ``telegram_commands.py`` because it does not flow through the
-    ZMQ REP server.
+    Default ``timeout_s`` (50 s) is chosen to absorb Ollama cold-start
+    on the first query after engine boot: loading gemma4:e2b takes
+    20–40 s, and the previous 25 s ceiling fired before the model had
+    finished loading, surfacing a Russian "Запрос обрабатывался слишком
+    долго" error on the operator's first GUI query. The surrounding
+    transport budget is bumped in lockstep: ZMQ slow envelope
+    ``HANDLER_TIMEOUT_SLOW_S`` is 55 s (``core/zmq_bridge.py``); GUI
+    client reply timeout is 60 s; Telegram path stays at 60 s via
+    ``telegram_commands.py`` (it does not flow through the ZMQ REP
+    server). Subsequent warm-cache queries land well under 5 s.
     """
     query = str(cmd.get("query", "")).strip()
     chat_id = cmd.get("chat_id", "gui")
