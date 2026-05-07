@@ -1,9 +1,18 @@
-"""F32 — Load + chunk corpus documents for embedding."""
+"""F32 — Load + chunk corpus documents for embedding.
+
+v0.55.7.1 (F-KnowledgeBaseExpansion) extends the original three loaders
+(experiment metadata, vault notes, operator log) with two more:
+``load_procedure_documents`` for markdown procedures dropped under
+``data/knowledge/procedures/`` and ``load_reference_documents`` for the
+project's first-class reference docs (operator manual, README,
+CHANGELOG). PDF ingest lives in :mod:`cryodaq.agents.rag.loaders.pdf_loader`.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,4 +225,179 @@ def load_operator_log_entries(sqlite_path: Path) -> list[DocumentChunk]:
             )
     finally:
         conn.close()
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# v0.55.7.1 — F-KnowledgeBaseExpansion: procedures + reference docs.
+# ---------------------------------------------------------------------------
+
+
+def load_procedure_documents(
+    procedures_dir: Path,
+    *,
+    max_chars: int = 1000,
+    overlap: int = 100,
+) -> list[DocumentChunk]:
+    """Walk ``procedures_dir`` recursively for markdown procedure files.
+
+    The first H1 (``# Title``) becomes the human-readable title used for
+    citations; if absent, the filename (with underscores → spaces) is
+    the fallback. Subdirectories define the procedure category — a file
+    at ``troubleshooting/gpib_disconnect.md`` carries
+    ``category=troubleshooting``; a top-level file lands in ``general``.
+    ``README.md`` is treated as folder description and skipped so the
+    operator can document the corpus without polluting the index.
+    """
+    chunks: list[DocumentChunk] = []
+    if not procedures_dir.exists():
+        return chunks
+
+    md_files = [
+        p
+        for p in sorted(procedures_dir.rglob("*.md"))
+        if p.is_file() and p.name != "README.md"
+    ]
+    logger.info(
+        "Procedure loader: scanning %s, found %d files",
+        procedures_dir,
+        len(md_files),
+    )
+
+    for md_path in md_files:
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Procedure load failed %s: %s", md_path.name, exc)
+            continue
+        if not text.strip():
+            continue
+
+        title = md_path.stem.replace("_", " ").replace("-", " ")
+        for line in text.splitlines():
+            stripped = line.strip()
+            # Match a single-hash heading; the negative-lookahead "## "
+            # check guards against matching H2/H3 levels.
+            if stripped.startswith("# ") and not stripped.startswith("## "):
+                candidate = stripped[2:].strip()
+                if candidate:
+                    title = candidate
+                break
+
+        relative = md_path.relative_to(procedures_dir)
+        category = relative.parts[0] if len(relative.parts) > 1 else "general"
+
+        text_chunks = _chunk_text(text, max_chars=max_chars, overlap=overlap)
+        for idx, chunk_text in enumerate(text_chunks):
+            chunk_id = f"procedure:{relative}:c{idx}"
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=chunk_id,
+                    source_kind="procedure",
+                    source_id=str(relative),
+                    text=chunk_text,
+                    metadata={
+                        "title": title,
+                        "category": category,
+                        "chunk_index": idx,
+                        "source_path": str(relative),
+                    },
+                )
+            )
+
+    logger.info("Procedure loader: %d chunks", len(chunks))
+    return chunks
+
+
+# Reference docs we always pull into the corpus so operator queries
+# about CryoDAQ itself ("how do I read the cooldown predictor?") hit
+# first-party documentation. Each entry is (filename, source_kind,
+# document_name). The loader looks for the file at the repo root first,
+# then under ``docs/``, before giving up.
+_REFERENCE_DOCS: dict[str, tuple[str, str]] = {
+    "operator_manual.md": ("operator_manual", "Operator Manual"),
+    "README.md": ("readme", "Project README"),
+    "README.en.md": ("readme_en", "Project README (EN)"),
+    "CHANGELOG.md": ("changelog", "Changelog"),
+}
+
+
+def load_reference_documents(
+    repo_root: Path,
+    *,
+    max_chars: int = 1500,
+    overlap: int = 100,
+) -> list[DocumentChunk]:
+    """Index project reference docs (operator manual, README, CHANGELOG).
+
+    operator_manual / README go through the standard sliding-window
+    chunker. CHANGELOG.md is section-aware: each ``## [version]`` block
+    becomes its own chunk so a query about a specific release returns
+    that release's notes intact rather than a half-cut window.
+    """
+    chunks: list[DocumentChunk] = []
+
+    for filename, (source_kind, document_name) in _REFERENCE_DOCS.items():
+        candidates = [repo_root / filename, repo_root / "docs" / filename]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Reference load failed %s: %s", filename, exc)
+            continue
+        if not text.strip():
+            continue
+
+        if filename == "CHANGELOG.md":
+            chunks.extend(_chunk_changelog(text, source_kind, document_name))
+            continue
+
+        text_chunks = _chunk_text(text, max_chars=max_chars, overlap=overlap)
+        for idx, chunk_text in enumerate(text_chunks):
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=f"reference:{filename}:c{idx}",
+                    source_kind=source_kind,
+                    source_id=filename,
+                    text=chunk_text,
+                    metadata={
+                        "document_name": document_name,
+                        "chunk_index": idx,
+                    },
+                )
+            )
+
+    logger.info("Reference loader: %d chunks", len(chunks))
+    return chunks
+
+
+def _chunk_changelog(
+    text: str, source_kind: str, document_name: str
+) -> list[DocumentChunk]:
+    """Split CHANGELOG by ``## [version]`` so each release is its own chunk."""
+    chunks: list[DocumentChunk] = []
+    sections = re.split(r"^## \[", text, flags=re.MULTILINE)
+    for idx, section in enumerate(sections):
+        if not section.strip():
+            continue
+        section_text = ("## [" + section) if idx > 0 else section
+        match = re.match(r"^## \[([^\]]+)\]", section_text)
+        version = match.group(1) if match else f"section_{idx}"
+        if len(section_text) > 3000:
+            section_text = section_text[:3000] + "\n[truncated]"
+        chunks.append(
+            DocumentChunk(
+                chunk_id=f"changelog:{version}",
+                source_kind=source_kind,
+                source_id=f"CHANGELOG.md#{version}",
+                text=section_text,
+                metadata={
+                    "document_name": document_name,
+                    "version": version,
+                    "chunk_index": idx,
+                },
+            )
+        )
     return chunks
