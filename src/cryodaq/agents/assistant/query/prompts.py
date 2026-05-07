@@ -19,11 +19,12 @@ INTENT_CLASSIFIER_SYSTEM = """\
 {
   "category": "<one of: current_value | eta_cooldown | eta_vacuum | range_stats |
     phase_info | alarm_status | composite_status | greeting |
-    archive_list | archive_detail | alarm_history |
+    archive_list | archive_detail | alarm_history | knowledge_query |
     out_of_scope_historical | out_of_scope_general | unknown>",
   "target_channels": ["список каналов из запроса, или null"],
   "time_window_minutes": <int или null>,
-  "quantity": "<краткое описание что спрашивают; для archive_detail — experiment_id если назван>"
+  "quantity": "<краткое описание что спрашивают; для archive_detail — experiment_id если назван>",
+  "target_source_kind": "<для knowledge_query: experiment_metadata | vault | operator_log | null>"
 }
 
 Правила классификации:
@@ -46,9 +47,33 @@ INTENT_CLASSIFIER_SYSTEM = """\
   (если назван experiment_id — клади его в "quantity")
 - "сколько раз сработал overheat", "статистика тревог за период",
   "история тревог", "были ли алармы вчера/за неделю" → alarm_history
-- "что такое X", "как работает Y", "объясни" → out_of_scope_general
-- Прочие исторические вопросы вне трёх архивных категорий выше → out_of_scope_historical
+- knowledge_query — семантический поиск по проиндексированной документации
+  (vault notes, метаданные архивных экспериментов, журнал оператора).
+  Это вопросы «как делать X», «что такое Y», «процедура Z», «расскажи о…»
+  про лабораторные практики, процедуры, термины, исторические наблюдения.
+  Примеры:
+    «как делать калибровку датчика?» → knowledge_query
+    «что такое детектор Т7?» → knowledge_query
+    «процедура аварийного отключения» → knowledge_query
+    «какие у нас были проблемы с GPIB?» → knowledge_query
+    «расскажи про насос форвакуума» → knowledge_query
+    «инструкция по установке образца» → knowledge_query
+  Извлечение target_source_kind:
+    «процедура» / «инструкция» / «как делать» — обычно vault, иногда null.
+    «vault» / «заметки» / «notes» → vault
+    «эксперимент <X>» / «прошлый» / «архив» → experiment_metadata
+    «журнал» / «лог оператора» / «record» → operator_log
+    Если не можешь точно определить — клади null.
+- "что такое X", "как работает Y" БЕЗ привязки к лаборатории → out_of_scope_general
+- Прочие исторические вопросы вне четырёх категорий
+  (archive_list/archive_detail/alarm_history/knowledge_query) → out_of_scope_historical
 - Не можешь классифицировать → unknown
+
+Когда сомневаешься между knowledge_query и out_of_scope_general:
+  если вопрос про устройство/процедуру/практику CryoDAQ или криогенной
+  лаборатории — knowledge_query (документация может ответить).
+  Если запрос про общую физику/инженерию без привязки к лаборатории —
+  out_of_scope_general.
 
 ВЕРНИ ТОЛЬКО JSON. Никаких пояснений, никакого текста до/после JSON.
 """
@@ -226,6 +251,29 @@ Cooldown:
 
 Сгенерируй краткий ответ. Не выдумывай данных, которых нет выше.
 Если эксперимент не найден — скажи прямо.
+"""
+
+FORMAT_KNOWLEDGE_QUERY_USER = """\
+Запрос оператора: {query}
+
+Найдено релевантных фрагментов: {total_hits}{filter_note}
+
+Извлечения из проиндексированных источников (отсортированы от лучшего к худшему):
+{hits_text}
+
+Сформулируй ответ оператору на русском языке.
+
+ПРАВИЛА:
+- Используй ТОЛЬКО информацию из извлечений выше. НЕ ДОДУМЫВАЙ факты,
+  которых там нет.
+- Цитируй источники в формате [Источник N], где N — номер фрагмента.
+- В конце ответа добавь блок «Источники:» — список источников с указанием
+  типа (vault / архив / журнал) и краткого имени файла.
+- Длина ответа: 2-5 предложений + блок источников.
+
+Если извлечения не отвечают на вопрос или их нет — скажи прямо
+«в проиндексированной документации не нашлось релевантной информации»
+и предложи переформулировать запрос. Не выдумывай ответ.
 """
 
 FORMAT_ALARM_HISTORY_USER = """\

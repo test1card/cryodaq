@@ -102,6 +102,9 @@ class QueryRouter:
                 return await self._fetch_archive_detail(intent, query)
             if cat == QueryCategory.ALARM_HISTORY:
                 return await self._fetch_alarm_history(intent)
+            # F32 Stage 2 (v0.55.7) — semantic search over RAG corpus.
+            if cat == QueryCategory.KNOWLEDGE_QUERY:
+                return await self._fetch_knowledge_query(intent, query)
             # Out-of-scope and unknown: no data needed
             return {}
         except Exception as exc:
@@ -220,3 +223,26 @@ class QueryRouter:
         days = self._days_from_intent(intent)
         result = await archive.alarm_history_summary(days=days)
         return {"alarm_history": result}
+
+    # ------------------------------------------------------------------
+    # F32 Stage 2 (v0.55.7) — knowledge query
+    # ------------------------------------------------------------------
+
+    async def _fetch_knowledge_query(
+        self, intent: QueryIntent, query: str
+    ) -> dict[str, Any]:
+        """Run semantic search over the RAG corpus.
+
+        ``query`` is preferred over ``intent.quantity`` because the original
+        operator phrasing carries far more retrieval signal than the
+        classifier's brief paraphrase. ``target_source_kind`` (when present)
+        narrows the LanceDB ``WHERE`` clause to a single corpus kind.
+        """
+        adapter = self._adapters.rag
+        if adapter is None or not getattr(adapter, "is_available", False):
+            return {"knowledge_query": None, "query": query}
+        result = await adapter.search(
+            query,
+            source_kind=intent.target_source_kind,
+        )
+        return {"knowledge_query": result, "query": query}

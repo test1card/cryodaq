@@ -2584,99 +2584,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
 
-    # --- AssistantQueryAgent (F30 Live Query) ---
-    _query_agent: Any = None
-    _q_broker_snap: Any = None
-    if _gemma_config is not None and _gemma_config.query_enabled:
-        try:
-            from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
-            from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
-            from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
-            from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
-            from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
-            from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
-            from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
-            from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
-            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
-            from cryodaq.agents.assistant.query.schemas import QueryAdapters
-
-            try:
-                _q_ollama = _gemma_ollama
-                _q_audit = _gemma_audit
-            except NameError:
-                _q_ollama = OllamaClient(
-                    base_url=_gemma_config.ollama_base_url,
-                    default_model=_gemma_config.default_model,
-                    timeout_s=_gemma_config.timeout_s,
-                )
-                _q_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "assistant" / "audit",
-                    enabled=_gemma_config.audit_enabled,
-                )
-
-            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
-            await _q_broker_snap.start()
-
-            _q_cooldown = CooldownAdapter(cooldown_service)
-            _q_vacuum = VacuumAdapter(vacuum_trend)
-            _q_sqlite = SQLiteAdapter(writer)
-            _q_alarms = AlarmAdapter(alarm_engine)
-            _q_experiment = ExperimentAdapter(experiment_manager)
-            _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
-            _q_composite = CompositeAdapter(
-                broker_snapshot=_q_broker_snap,
-                cooldown=_q_cooldown,
-                vacuum=_q_vacuum,
-                alarms=_q_alarms,
-                experiment=_q_experiment,
-            )
-
-            from cryodaq.agents.assistant.query.chart_dispatcher import (
-                ChartDispatcher,  # noqa: PLC0415
-            )
-
-            _q_chart_dispatcher: ChartDispatcher | None = None
-            if telegram_bot is not None:
-                _q_chart_dispatcher = ChartDispatcher(
-                    send_photo=telegram_bot.send_photo
-                )
-
-            _query_agent = AssistantQueryAgent(
-                ollama_client=_q_ollama,
-                audit_logger=_q_audit,
-                config=_gemma_config,
-                adapters=QueryAdapters(
-                    broker_snapshot=_q_broker_snap,
-                    cooldown=_q_cooldown,
-                    vacuum=_q_vacuum,
-                    sqlite=_q_sqlite,
-                    alarms=_q_alarms,
-                    experiment=_q_experiment,
-                    composite=_q_composite,
-                    archive=_q_archive,
-                ),
-                intent_model=_gemma_config.query_intent_model,
-                format_model=_gemma_config.query_format_model,
-                intent_temperature=_gemma_config.query_intent_temperature,
-                format_temperature=_gemma_config.query_format_temperature,
-                intent_timeout_s=_gemma_config.query_intent_timeout_s,
-                format_timeout_s=_gemma_config.query_format_timeout_s,
-                max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
-                channel_manager=get_channel_manager(),
-                chart_dispatcher=_q_chart_dispatcher,
-            )
-
-            if telegram_bot is not None:
-                telegram_bot._query_agent = _query_agent
-            logger.info("AssistantQueryAgent (F30): инициализирован")
-        except Exception as _q_exc:
-            logger.warning(
-                "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
-            )
-
-    # --- F32 RAG searcher (v0.55.6 — engine wrapper around the indexer
-    #     shipped in v0.55.0 so the GUI knowledge-base overlay can issue
-    #     `rag.search` ZMQ commands without touching LanceDB itself).
+    # --- F32 RAG searcher (relocated from post-QueryAdapters in v0.55.7 so
+    #     the AssistantQueryAgent KNOWLEDGE_QUERY adapter can wrap the same
+    #     RagSearcher instance the GUI knowledge-base overlay already uses).
     _rag_searcher: Any = None
     try:
         from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
@@ -2721,6 +2631,99 @@ async def _run_engine(*, mock: bool = False) -> None:
     except Exception as _rag_exc:
         logger.warning("RAG searcher: ошибка инициализации — %s", _rag_exc)
         _rag_searcher = None
+
+    # --- AssistantQueryAgent (F30 Live Query) ---
+    _query_agent: Any = None
+    _q_broker_snap: Any = None
+    if _gemma_config is not None and _gemma_config.query_enabled:
+        try:
+            from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
+            from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
+            from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
+            from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
+            from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
+            from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
+            from cryodaq.agents.assistant.query.adapters.rag_adapter import RAGAdapter
+            from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
+            from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
+            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
+            from cryodaq.agents.assistant.query.schemas import QueryAdapters
+
+            try:
+                _q_ollama = _gemma_ollama
+                _q_audit = _gemma_audit
+            except NameError:
+                _q_ollama = OllamaClient(
+                    base_url=_gemma_config.ollama_base_url,
+                    default_model=_gemma_config.default_model,
+                    timeout_s=_gemma_config.timeout_s,
+                )
+                _q_audit = AuditLogger(
+                    _DATA_DIR / "agents" / "assistant" / "audit",
+                    enabled=_gemma_config.audit_enabled,
+                )
+
+            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
+            await _q_broker_snap.start()
+
+            _q_cooldown = CooldownAdapter(cooldown_service)
+            _q_vacuum = VacuumAdapter(vacuum_trend)
+            _q_sqlite = SQLiteAdapter(writer)
+            _q_alarms = AlarmAdapter(alarm_engine)
+            _q_experiment = ExperimentAdapter(experiment_manager)
+            _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
+            _q_rag = RAGAdapter(_rag_searcher)
+            _q_composite = CompositeAdapter(
+                broker_snapshot=_q_broker_snap,
+                cooldown=_q_cooldown,
+                vacuum=_q_vacuum,
+                alarms=_q_alarms,
+                experiment=_q_experiment,
+            )
+
+            from cryodaq.agents.assistant.query.chart_dispatcher import (
+                ChartDispatcher,  # noqa: PLC0415
+            )
+
+            _q_chart_dispatcher: ChartDispatcher | None = None
+            if telegram_bot is not None:
+                _q_chart_dispatcher = ChartDispatcher(
+                    send_photo=telegram_bot.send_photo
+                )
+
+            _query_agent = AssistantQueryAgent(
+                ollama_client=_q_ollama,
+                audit_logger=_q_audit,
+                config=_gemma_config,
+                adapters=QueryAdapters(
+                    broker_snapshot=_q_broker_snap,
+                    cooldown=_q_cooldown,
+                    vacuum=_q_vacuum,
+                    sqlite=_q_sqlite,
+                    alarms=_q_alarms,
+                    experiment=_q_experiment,
+                    composite=_q_composite,
+                    archive=_q_archive,
+                    rag=_q_rag,
+                ),
+                intent_model=_gemma_config.query_intent_model,
+                format_model=_gemma_config.query_format_model,
+                intent_temperature=_gemma_config.query_intent_temperature,
+                format_temperature=_gemma_config.query_format_temperature,
+                intent_timeout_s=_gemma_config.query_intent_timeout_s,
+                format_timeout_s=_gemma_config.query_format_timeout_s,
+                max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
+                channel_manager=get_channel_manager(),
+                chart_dispatcher=_q_chart_dispatcher,
+            )
+
+            if telegram_bot is not None:
+                telegram_bot._query_agent = _query_agent
+            logger.info("AssistantQueryAgent (F30): инициализирован")
+        except Exception as _q_exc:
+            logger.warning(
+                "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
+            )
 
     # --- Запуск всех подсистем ---
     await safety_manager.start()
