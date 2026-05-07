@@ -122,9 +122,26 @@ async def test_mock_driver_idempotent_connect_and_disconnect():
     assert not driver.connected
 
 
-def test_status_from_errors_beam_break():
+_ERROR_FIELDS = [
+    "analysis_error",
+    "beam_break",
+    "temp_error",
+    "motion_tolerance_error",
+    "intensity_error",
+    "usb_error",
+    "dll_error",
+    "laser_speed_error",
+    "laser_temp_error",
+    "daq_error",
+]
+
+
+@pytest.mark.parametrize("flag", _ERROR_FIELDS)
+def test_status_from_errors_any_flag_trips_sensor_error(flag):
     from cryodaq.drivers.instruments.etalon_multiline import _ChannelData
 
+    flags = {f: 0 for f in _ERROR_FIELDS}
+    flags[flag] = 1
     ch = _ChannelData(
         channel_number=1,
         length_mm=1.0,
@@ -133,16 +150,7 @@ def test_status_from_errors_beam_break():
         temperature_c=20.0,
         pressure_hpa=1013.0,
         humidity_pct=40.0,
-        analysis_error=0,
-        beam_break=1,
-        temp_error=0,
-        motion_tolerance_error=0,
-        intensity_error=0,
-        usb_error=0,
-        dll_error=0,
-        laser_speed_error=0,
-        laser_temp_error=0,
-        daq_error=0,
+        **flags,
     )
     assert MultiLineDriver._status_from_errors(ch) == ChannelStatus.SENSOR_ERROR
 

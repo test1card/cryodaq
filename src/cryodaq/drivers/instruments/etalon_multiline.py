@@ -242,9 +242,21 @@ class MultiLineDriver(InstrumentDriver):
 
     @staticmethod
     def _status_from_errors(ch: _ChannelData) -> ChannelStatus:
-        if ch.beam_break or ch.intensity_error or ch.daq_error:
-            return ChannelStatus.SENSOR_ERROR
-        if ch.analysis_error or ch.dll_error:
+        # Any non-zero error field invalidates the reading. The Annex
+        # protocol exposes 10 distinct error flags per channel record;
+        # silently mapping a subset would let bad data surface as OK.
+        if (
+            ch.analysis_error
+            or ch.beam_break
+            or ch.temp_error
+            or ch.motion_tolerance_error
+            or ch.intensity_error
+            or ch.usb_error
+            or ch.dll_error
+            or ch.laser_speed_error
+            or ch.laser_temp_error
+            or ch.daq_error
+        ):
             return ChannelStatus.SENSOR_ERROR
         return ChannelStatus.OK
 
