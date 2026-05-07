@@ -13,7 +13,7 @@ from collections import deque
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -254,14 +254,20 @@ class AnalyticsPanel(QWidget):
 
         # --- Линии ---
 
+        # Plot palette pulls from theme.PLOT_LINE_PALETTE so theme rotations
+        # propagate without code changes (RULE-COLOR-001).
+        _r_thermal_color = theme.PLOT_LINE_PALETTE[4]  # amber — heat-flow signal
+        _t_cold_color = theme.PLOT_LINE_PALETTE[0]  # steel blue — live cold trace
+        _pred_color = theme.PLOT_LINE_PALETTE[7]  # indigo — predicted continuation
+
         # Линия R_thermal (режим без cooldown)
         self._r_line = self._plot.plot(
-            [], [], pen=pg.mkPen(color="#f0883e", width=2), name="R_thermal"
+            [], [], pen=pg.mkPen(color=_r_thermal_color, width=2), name="R_thermal"
         )
 
         # Живая линия T_cold (синяя сплошная)
         self._t_cold_line = self._plot.plot(
-            [], [], pen=pg.mkPen(color="#58a6ff", width=2), name="T_cold (live)"
+            [], [], pen=pg.mkPen(color=_t_cold_color, width=2), name="T_cold (live)"
         )
         self._t_cold_line.setVisible(False)
 
@@ -269,7 +275,7 @@ class AnalyticsPanel(QWidget):
         self._pred_line = self._plot.plot(
             [],
             [],
-            pen=pg.mkPen(color="#79c0ff", width=2, style=Qt.DashLine),
+            pen=pg.mkPen(color=_pred_color, width=2, style=Qt.DashLine),
             name="Прогноз",
         )
         self._pred_line.setVisible(False)
@@ -280,11 +286,14 @@ class AnalyticsPanel(QWidget):
         self._ci_lower = self._plot.plot([], [], pen=None)
         self._ci_lower.setVisible(False)
 
-        # Полупрозрачная полоса CI
+        # Полупрозрачная полоса CI — derive from the live trace colour so
+        # the band always reads as "uncertainty around T_cold".
+        _ci_color = QColor(_t_cold_color)
+        _ci_color.setAlpha(50)
         self._ci_band = pg.FillBetweenItem(
             self._ci_upper,
             self._ci_lower,
-            brush=pg.mkBrush(88, 166, 255, 50),
+            brush=pg.mkBrush(_ci_color),
         )
         self._plot.addItem(self._ci_band)
         self._ci_band.setVisible(False)
@@ -293,9 +302,9 @@ class AnalyticsPanel(QWidget):
         self._eta_vline = pg.InfiniteLine(
             pos=0,
             angle=90,
-            pen=pg.mkPen(color="#2ECC40", style=Qt.DashLine),
+            pen=pg.mkPen(color=theme.STATUS_OK, style=Qt.DashLine),
             label="4K",
-            labelOpts={"color": "#2ECC40", "position": 0.95},
+            labelOpts={"color": theme.STATUS_OK, "position": 0.95},
         )
         self._plot.addItem(self._eta_vline)
         self._eta_vline.setVisible(False)
