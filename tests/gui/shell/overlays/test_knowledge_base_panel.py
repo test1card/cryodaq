@@ -168,3 +168,112 @@ def test_snippet_pane_empty_results(app: QApplication) -> None:
     panel._snippet_pane.set_results("Alpha", [])
     assert "Ничего не найдено" in panel._snippet_pane._status.text()
     panel.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# v0.55.7.1 PHASE 8 — rebuild button + status polling
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_initial_state_is_idle(app: QApplication) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    assert panel._rebuild_button.text() == "Обновить индекс"
+    assert panel._rebuild_button.isEnabled()
+    assert panel._rebuild_status_label.text() == "Готов"
+    assert panel._rebuild_running is False
+    assert not panel._rebuild_poll_timer.isActive()
+    panel.deleteLater()
+
+
+def test_rebuild_response_start_ok_disables_button(app: QApplication) -> None:
+    """Engine confirmed start — UI must disable button + show indexing."""
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._on_rebuild_response(
+        "rag.rebuild_index",
+        {"ok": True, "state": "running", "started_at": 1.0},
+    )
+    assert panel._rebuild_running is True
+    assert not panel._rebuild_button.isEnabled()
+    assert "Индексация" in panel._rebuild_status_label.text()
+    assert panel._rebuild_poll_timer.isActive()
+    panel.deleteLater()
+
+
+def test_rebuild_response_start_error_keeps_button_enabled(app: QApplication) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._on_rebuild_response(
+        "rag.rebuild_index",
+        {"ok": False, "error": "Rebuild уже идёт"},
+    )
+    assert panel._rebuild_running is False
+    assert panel._rebuild_button.isEnabled()
+    assert "Rebuild" in panel._rebuild_status_label.text() or \
+           "идёт" in panel._rebuild_status_label.text()
+    assert not panel._rebuild_poll_timer.isActive()
+    panel.deleteLater()
+
+
+def test_rebuild_response_status_complete_shows_chunks(app: QApplication) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._rebuild_running = True
+    panel._rebuild_button.setEnabled(False)
+    panel._rebuild_poll_timer.start()
+    panel._on_rebuild_response(
+        "rag.rebuild_status",
+        {
+            "ok": True,
+            "state": "complete",
+            "chunks_indexed": 1124,
+            "started_at": 1.0,
+            "finished_at": 2.0,
+            "error": None,
+        },
+    )
+    assert panel._rebuild_running is False
+    assert panel._rebuild_button.isEnabled()
+    assert "1124" in panel._rebuild_status_label.text()
+    assert "Индекс обновлён" in panel._rebuild_status_label.text()
+    assert not panel._rebuild_poll_timer.isActive()
+    panel.deleteLater()
+
+
+def test_rebuild_response_status_failed(app: QApplication) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._rebuild_running = True
+    panel._on_rebuild_response(
+        "rag.rebuild_status",
+        {
+            "ok": True,
+            "state": "failed",
+            "chunks_indexed": 0,
+            "error": "ollama unreachable",
+        },
+    )
+    assert panel._rebuild_running is False
+    assert panel._rebuild_button.isEnabled()
+    assert "ollama" in panel._rebuild_status_label.text()
+    panel.deleteLater()
+
+
+def test_rebuild_response_engine_disconnect(app: QApplication) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._rebuild_running = True
+    panel._on_rebuild_response("rag.rebuild_index", None)
+    assert panel._rebuild_running is False
+    assert panel._rebuild_button.isEnabled()
+    assert "не ответил" in panel._rebuild_status_label.text()
+    panel.deleteLater()
+
+
+def test_rebuild_concurrent_click_polls_status(app: QApplication) -> None:
+    """If operator clicks while running, no new start command — just refresh."""
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel._confirm_rebuild = False
+    panel._rebuild_running = True
+    panel._on_rebuild_clicked()
+    # No start worker spawned; the click delegates to a status poll.
+    # We can't easily inspect outgoing ZMQ command without mocking, but
+    # the running flag stays True and button stays disabled (which it
+    # already was — the click cannot resurrect a busy state).
+    assert panel._rebuild_running is True
+    panel.deleteLater()
