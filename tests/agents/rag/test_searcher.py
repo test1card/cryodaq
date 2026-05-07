@@ -15,7 +15,7 @@ import hashlib
 
 
 class _MockEmbeddings:
-    """Deterministic 384-dim mock — uses md5, not Python's `hash()`.
+    """Deterministic 1024-dim mock — uses md5, not Python's `hash()`.
 
     PYTHONHASHSEED randomizes Python's built-in `hash()` across
     processes, which would let a broken `source_kind_filter`
@@ -26,7 +26,7 @@ class _MockEmbeddings:
     async def embed(self, text: str) -> list[float]:
         digest = hashlib.md5(text[:32].encode("utf-8")).digest()
         seed = digest[0] / 255.0
-        return [seed] * 384
+        return [seed] * 1024
 
 
 class _ScriptedMockEmbeddings:
@@ -50,8 +50,8 @@ class _ScriptedMockEmbeddings:
 
     async def embed(self, text: str) -> list[float]:
         if self._rare_marker in text:
-            return [1.0] * 384  # rare operator_log row — far from query
-        return [0.0] * 384      # query and experiment_metadata — collapsed
+            return [1.0] * 1024  # rare operator_log row — far from query
+        return [0.0] * 1024      # query and experiment_metadata — collapsed
 
 
 def _seed(tmp_path: Path) -> None:
@@ -180,8 +180,8 @@ async def test_searcher_source_kind_filter_finds_rare_kind_among_many(tmp_path):
     searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings)
 
     # Baseline: experiment_metadata rows share the query's vector
-    # (collapsed at [0.0]*384) while the operator_log row sits at
-    # [1.0]*384 — so an unfiltered top_k=3 must contain ONLY
+    # (collapsed at [0.0]*1024) while the operator_log row sits at
+    # [1.0]*1024 — so an unfiltered top_k=3 must contain ONLY
     # experiment_metadata rows. If a broken implementation applied
     # `source_kind_filter` after `.limit(top_k)` it would also receive
     # only experiment_metadata rows here and the filtered search below
