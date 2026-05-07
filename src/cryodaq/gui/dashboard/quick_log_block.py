@@ -67,7 +67,8 @@ class QuickLogBlock(QWidget):
             "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c "
             "\u0437\u0430\u043c\u0435\u0442\u043a\u0443\u2026"
         )  # Добавить заметку…
-        self._input.setFixedHeight(24)
+        # v0.55.2 ds-004: 24px = SPACE_5 — keep height on the scale.
+        self._input.setFixedHeight(theme.SPACE_5)
         self._input.returnPressed.connect(self._on_submit)
         self._input.setStyleSheet(
             f"#quickLogInput {{ "
@@ -75,7 +76,7 @@ class QuickLogBlock(QWidget):
             f"color: {theme.FOREGROUND}; "
             f"border: 1px solid {theme.BORDER}; "
             f"border-radius: {theme.RADIUS_SM}px; "
-            f"padding: 2px 8px; "
+            f"padding: {theme.SPACE_1 // 2}px {theme.SPACE_2}px; "
             f"font-family: '{theme.FONT_BODY}'; "
             f"font-size: {theme.FONT_SIZE_SM}px; "
             f"}}"
@@ -84,7 +85,8 @@ class QuickLogBlock(QWidget):
 
         self._send_btn = QPushButton("\u21b5")  # ↵
         self._send_btn.setObjectName("quickLogSendBtn")
-        self._send_btn.setFixedSize(24, 24)
+        # v0.55.2 ds-005: square at 24px = SPACE_5; matches the input height.
+        self._send_btn.setFixedSize(theme.SPACE_5, theme.SPACE_5)
         self._send_btn.clicked.connect(self._on_submit)
         self._send_btn.setStyleSheet(
             f"#quickLogSendBtn {{ "
