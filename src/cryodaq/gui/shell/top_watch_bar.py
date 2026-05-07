@@ -412,10 +412,16 @@ class TopWatchBar(QWidget):
         value = reading.value
 
         if ch.startswith("\u0422") and reading.unit == "K":
-            self._channel_last_seen[ch] = (time.monotonic(), reading.status)
+            # v0.55.4 A5 fix: get_all_visible() returns short IDs like
+            # "\u04221"; the driver emits readings as "\u04221 <display suffix>".
+            # _refresh_channels looks up the short id, so stamp under
+            # the short id only \u2014 otherwise the seeded "\u04221" entry goes
+            # stale after _STALE_TIMEOUT_S and the counter freezes at
+            # "0/16 \u043d\u043e\u0440\u043c\u0430".
+            short_id = ch.split(" ", 1)[0]
+            self._channel_last_seen[short_id] = (time.monotonic(), reading.status)
             # T-min / T-max locked to positionally fixed reference channels.
             if isinstance(value, (int, float)) and not math.isnan(value):
-                short_id = ch.split(" ")[0]
                 if short_id in (T_MIN_CHANNEL, T_MAX_CHANNEL):
                     ts = reading.timestamp.timestamp()
                     self._latest_ref_temps[short_id] = (ts, float(value))

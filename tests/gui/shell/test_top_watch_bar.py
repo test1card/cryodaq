@@ -29,21 +29,60 @@ def test_top_watch_bar_constructs() -> None:
 def test_seed_visible_channels_marks_them_ok() -> None:
     """v0.55.2 A5: seed _channel_last_seen so the counter doesn't show
     "0/N норма • N ожидают" while waiting for the first ZMQ reading.
+    Real ChannelManager returns short IDs ("Т1") — the fake mirrors
+    that contract.
     """
     _app()
 
     class _FakeChannelMgr:
         def get_all_visible(self) -> list[str]:
-            return ["Т1 Криостат вер", "Т2 Радиатор", "Pressure"]
+            return ["Т1", "Т2", "Pressure"]
 
     bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
     bar._fast_timer.stop()
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
-    # Two Т-channels seeded, the non-Т one ignored.
-    assert "Т1 Криостат вер" in bar._channel_last_seen
-    assert "Т2 Радиатор" in bar._channel_last_seen
+    # Two Т-channels seeded under their short IDs, the non-Т one ignored.
+    assert "Т1" in bar._channel_last_seen
+    assert "Т2" in bar._channel_last_seen
     assert "Pressure" not in bar._channel_last_seen
+
+
+def test_on_reading_stores_under_short_id() -> None:
+    """v0.55.4 A5 fix: drivers emit readings as "Т1 <display suffix>",
+    but ChannelManager.get_all_visible() returns short IDs ("Т1"). The
+    counter loop reads the short id, so on_reading must stamp under
+    the short id — otherwise the seeded "Т1" entry goes stale and the
+    counter freezes at "0/N норма".
+    """
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    _app()
+
+    class _FakeChannelMgr:
+        def get_all_visible(self) -> list[str]:
+            return ["Т1"]
+
+    bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+
+    reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218_1",
+        channel="Т1 Криостат верх",  # full name as the driver emits
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+    bar.on_reading(reading)
+
+    # Stored under the short id, NOT the full name.
+    assert "Т1" in bar._channel_last_seen
+    assert "Т1 Криостат верх" not in bar._channel_last_seen
 
 
 def test_experiment_click_emits_signal() -> None:
