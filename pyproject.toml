@@ -48,6 +48,11 @@ dependencies = [
     "pillow>=10.0,<12",
     # F32: RAG indexer vector store
     "lancedb>=0.6.0,<1",
+    # F-KnowledgeBaseExpansion (v0.55.7.1): equipment manual PDF
+    # ingestion. Pure-Python text extraction; encrypted / corrupt PDFs
+    # are skipped with a warning so a single bad manual cannot kill
+    # the bootstrap batch.
+    "pypdf>=4.0,<6",
 ]
 
 [project.optional-dependencies]

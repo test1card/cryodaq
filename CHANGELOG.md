@@ -109,6 +109,39 @@ ZMQ subprocess threading) unchanged — separate from audit scope.
   via `asyncio.to_thread` so the scheduler tick never blocks. The
   driver logs first-cycle latency on receipt at INFO so empirical cycle
   rate surfaces in smoke logs without extra instrumentation.
+- **F-KnowledgeBaseExpansion (v0.55.7.1)** — operational knowledge
+  base ready for fresh-deploy demo. New corpus root
+  `data/knowledge/{equipment_manuals,procedures,reference}` tracks
+  per-machine PDFs and Markdown procedures inside the repo (carved
+  out of the global `data/` ignore so a clone gets the same RAG
+  ingest the lab machine sees). Three new loaders extend the F32
+  Stage 1 indexer through optional `build_index` kwargs: `pdf_dir`
+  (pypdf, page-aware chunks с `page_number` / `document_name`
+  metadata; encrypted / corrupt PDFs skip с warning),
+  `procedures_dir` (markdown с H1 → title, subdir → category,
+  README.md skipped), `reference_root` (operator_manual, README,
+  README.en, CHANGELOG; latter section-aware per version).
+  Engine startup fires `_bootstrap_rag_index_if_empty` as a
+  fire-and-forget asyncio task so a fresh checkout populates the
+  index без manual CLI; ready signal не блокируется.
+  Operator-driven rebuild surfaces через new ZMQ commands
+  `rag.rebuild_index` / `rag.rebuild_status` and «Обновить индекс»
+  button в KnowledgeBasePanel toolbar (single-instance enforced;
+  status-poll @1 Hz; engine error surfaces verbatim). Pretty
+  source labels («Etalon MultiLine — стр. 5», «Процедура:
+  Аварийное отключение», «CHANGELOG v0.55.7») унифицированы через
+  `prettify_source_label` для GUI snippet card и
+  `FORMAT_KNOWLEDGE_QUERY_USER` prompt. New
+  `scripts/download_manuals.sh` best-effort downloader для public
+  manual URLs; equipment_manuals/ ships с four PDFs (Etalon
+  MultiLine v2.2, LakeShore 218S, Keithley 2600B Reference,
+  Thyracont VSP63D — total ~1100 pages). Three seed procedures
+  (`cooldown_protocol.md`, `emergency_shutdown.md`,
+  `troubleshooting/gpib_disconnect.md`). Default embedding-model
+  fallback в engine RAG init flipped `multilingual-e5-small` →
+  `qwen3-embedding:0.6b` aligning с v0.55.7.0.1 modernization
+  (1024-dim, /api/embed). Persistence-first invariant intact —
+  все loaders read-only.
 - **F32 Stage 1 RAG indexer** — standalone semantic search foundation
   over the experiment archive (metadata + F31 vault notes + operator
   log entries). New module `cryodaq.agents.rag` with `document_loader`

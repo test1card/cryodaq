@@ -16,13 +16,20 @@ from cryodaq.agents.rag.document_loader import (
     DocumentChunk,
     load_experiment_metadata,
     load_operator_log_entries,
+    load_procedure_documents,
+    load_reference_documents,
     load_vault_notes,
 )
+from cryodaq.agents.rag.loaders.pdf_loader import load_pdf_documents
 
 logger = logging.getLogger(__name__)
 
 
-_EMBEDDING_DIM = 384  # multilingual-e5-small dimension
+# May 2026: switched to qwen3-embedding:0.6b — top of MTEB multilingual
+# leaderboard (June 2025 score 70.58), 100+ languages, 32k context, official
+# Ollama library entry. Previous: multilingual-e5-small (384d) — qllama/jeffh
+# uploads incompatible with Ollama 0.23+ runtime (subprocess EOF crash).
+_EMBEDDING_DIM = 1024
 
 
 class _EmbeddingsLike(Protocol):
@@ -119,6 +126,9 @@ async def build_index(
     embedding_dim: int = _EMBEDDING_DIM,
     table_name: str = "cryodaq_corpus",
     progress_cb: Callable[[int, int], Any] | None = None,
+    pdf_dir: Path | None = None,
+    procedures_dir: Path | None = None,
+    reference_root: Path | None = None,
 ) -> dict:
     """Build (or rebuild) the RAG index. Returns a stats dict.
 
@@ -129,6 +139,24 @@ async def build_index(
     walks and LanceDB writes are offloaded via :func:`asyncio.to_thread`
     so the engine event loop does not stall while ``RAGIndexSink`` runs
     a finalize-time rebuild on a corpus of any size.
+
+    v0.55.7.1 (F-KnowledgeBaseExpansion) — three new optional sources:
+
+    pdf_dir
+        Knowledge corpus folder с equipment manual PDFs (e.g.
+        ``data/knowledge/equipment_manuals``). Page-aware chunks via
+        :func:`cryodaq.agents.rag.loaders.pdf_loader.load_pdf_documents`.
+    procedures_dir
+        Markdown procedures folder (e.g. ``data/knowledge/procedures``).
+        H1 → title; subdir → category.
+    reference_root
+        Repo root для project reference docs (operator_manual, README,
+        CHANGELOG). CHANGELOG is section-aware per version.
+
+    All three are optional; existing callers (CLI, RAGIndexSink before
+    v0.55.7.1) keep working without modification. Like the legacy
+    loaders, the new loaders run inside :func:`asyncio.to_thread` so
+    they do not stall the engine loop.
     """
     chunks: list[DocumentChunk] = []
     chunks.extend(
@@ -139,6 +167,16 @@ async def build_index(
     if sqlite_path is not None:
         chunks.extend(
             await asyncio.to_thread(load_operator_log_entries, sqlite_path)
+        )
+    if pdf_dir is not None:
+        chunks.extend(await asyncio.to_thread(load_pdf_documents, pdf_dir))
+    if procedures_dir is not None:
+        chunks.extend(
+            await asyncio.to_thread(load_procedure_documents, procedures_dir)
+        )
+    if reference_root is not None:
+        chunks.extend(
+            await asyncio.to_thread(load_reference_documents, reference_root)
         )
 
     logger.info("RAG: %d chunks loaded", len(chunks))

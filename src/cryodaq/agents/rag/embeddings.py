@@ -20,7 +20,7 @@ class EmbeddingsClient:
         self,
         *,
         base_url: str = "http://localhost:11434",
-        model: str = "multilingual-e5-small",
+        model: str = "qwen3-embedding:0.6b",
         timeout_s: float = 30.0,
     ) -> None:
         self._model = model

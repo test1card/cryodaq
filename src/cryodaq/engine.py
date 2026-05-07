@@ -709,6 +709,225 @@ async def _handle_multiline_burst_command(
     return {"ok": False, "error": f"unknown burst action: {action}"}
 
 
+# v0.55.7.1 — rag.rebuild_index command state machine. Single-instance:
+# concurrent rebuild is rejected с a Russian error string. State is
+# module-level rather than per-engine because the rebuild is also
+# operator-facing (GUI poll), and idle/running/complete/failed maps
+# directly к the panel's status label states. The accompanying task
+# ref is also held here; engine startup constructs both fresh.
+_rag_rebuild_state: dict[str, Any] = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "chunks_indexed": 0,
+    "error": None,
+}
+_rag_rebuild_task: asyncio.Task[None] | None = None
+
+
+def _rag_rebuild_status_snapshot() -> dict[str, Any]:
+    """Return a JSON-serialisable copy of the rebuild state."""
+    return {
+        "ok": True,
+        "state": _rag_rebuild_state["state"],
+        "started_at": _rag_rebuild_state["started_at"],
+        "finished_at": _rag_rebuild_state["finished_at"],
+        "chunks_indexed": _rag_rebuild_state["chunks_indexed"],
+        "error": _rag_rebuild_state["error"],
+    }
+
+
+async def _run_rag_rebuild(
+    *,
+    db_path: Path,
+    embeddings_client: Any,
+    knowledge_dir: Path,
+    experiments_dir: Path,
+    sqlite_path: Path | None,
+    repo_root: Path,
+) -> None:
+    """Body of the manual rebuild task.
+
+    Updates ``_rag_rebuild_state`` in-place across the lifecycle so
+    poll responses always reflect the latest state. Failures populate
+    ``error`` field rather than re-raising; the engine task wrapper
+    discards the task ref после completion.
+    """
+    try:
+        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
+
+        stats = await build_index(
+            experiments_dir=experiments_dir,
+            vault_dir=None,
+            sqlite_path=sqlite_path,
+            db_path=db_path,
+            embeddings_client=embeddings_client,
+            pdf_dir=knowledge_dir / "equipment_manuals",
+            procedures_dir=knowledge_dir / "procedures",
+            reference_root=repo_root,
+        )
+        _rag_rebuild_state.update(
+            {
+                "state": "complete",
+                "finished_at": time.time(),
+                "chunks_indexed": int(stats.get("indexed", 0)),
+                "error": None,
+            }
+        )
+        logger.info(
+            "RAG manual rebuild complete: %d chunks indexed в %s",
+            stats.get("indexed", 0),
+            db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _rag_rebuild_state.update(
+            {
+                "state": "failed",
+                "finished_at": time.time(),
+                "error": str(exc),
+            }
+        )
+        logger.error("RAG manual rebuild failed: %s", exc, exc_info=True)
+
+
+async def _handle_rag_rebuild_command(
+    action: str,
+    cmd: dict[str, Any],
+    *,
+    db_path: Path | None,
+    embeddings_client: Any | None,
+    knowledge_dir: Path | None,
+    experiments_dir: Path | None,
+    sqlite_path: Path | None,
+    repo_root: Path | None,
+) -> dict[str, Any]:
+    """Dispatch ``rag.rebuild_index`` / ``rag.rebuild_status`` GUI commands.
+
+    Module-level helper (mirrors ``_handle_assistant_query_command``)
+    so the closure inside ``_handle_gui_command`` is a one-line delegate
+    and tests can exercise the dispatch path without spinning up an
+    engine. Concurrent rebuilds rejected — operator must wait for the
+    current run to finish before re-clicking the GUI button.
+    """
+    global _rag_rebuild_task
+
+    if action == "rag.rebuild_status":
+        return _rag_rebuild_status_snapshot()
+
+    if action != "rag.rebuild_index":
+        return {"ok": False, "error": f"unknown rebuild action: {action}"}
+
+    if _rag_rebuild_state["state"] == "running":
+        return {
+            "ok": False,
+            "error": "Rebuild уже идёт — дождитесь завершения.",
+        }
+    if (
+        embeddings_client is None
+        or db_path is None
+        or knowledge_dir is None
+        or experiments_dir is None
+        or repo_root is None
+    ):
+        return {
+            "ok": False,
+            "error": "RAG не сконфигурирован (config/rag.yaml отсутствует?).",
+        }
+
+    # Reset state — operator-clicked start always wins over a stale
+    # complete/failed status from a previous run.
+    _rag_rebuild_state.update(
+        {
+            "state": "running",
+            "started_at": time.time(),
+            "finished_at": None,
+            "chunks_indexed": 0,
+            "error": None,
+        }
+    )
+    _rag_rebuild_task = asyncio.create_task(
+        _run_rag_rebuild(
+            db_path=db_path,
+            embeddings_client=embeddings_client,
+            knowledge_dir=knowledge_dir,
+            experiments_dir=experiments_dir,
+            sqlite_path=sqlite_path,
+            repo_root=repo_root,
+        ),
+        name="rag_manual_rebuild",
+    )
+    return {
+        "ok": True,
+        "state": "running",
+        "started_at": _rag_rebuild_state["started_at"],
+    }
+
+
+async def _bootstrap_rag_index_if_empty(
+    *,
+    db_path: Path,
+    embeddings_client: Any,
+    knowledge_dir: Path,
+    experiments_dir: Path,
+    sqlite_path: Path | None,
+    repo_root: Path,
+) -> None:
+    """Build the RAG index из bundled corpus if it's empty.
+
+    F-KnowledgeBaseExpansion (v0.55.7.1): operator demos на свежем
+    клон должны видеть базу знаний без manual ``cryodaq-rag-index``
+    step. The engine fires this as ``asyncio.create_task`` — the
+    bootstrap progresses в фоне; engine ``ready`` signal is NOT
+    awaited on it. Failures are logged but never propagated; operator
+    briefly sees empty KnowledgeBasePanel, then it populates без
+    restart once embeddings finish.
+
+    Idempotent: probes the index с a 1-result search; non-empty
+    response → skip. Pre-existing tables therefore safe to leave
+    alone (e.g. RAGIndexSink built one earlier in this engine's
+    lifetime, or a manual ``cryodaq-rag-index`` run).
+    """
+    try:
+        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
+
+        searcher = RagSearcher(
+            db_path=db_path, embeddings_client=embeddings_client
+        )
+        sample = await searcher.search("test", top_k=1)
+        if sample:
+            logger.info(
+                "RAG index already populated (%d sample), skipping bootstrap",
+                len(sample),
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        # Probe failure is expected on the very first run (table missing).
+        # Log at INFO — that path IS the bootstrap's reason for existing.
+        logger.info("RAG index probe failed, proceeding with bootstrap: %s", exc)
+
+    logger.info("RAG bootstrap starting from bundled sources в %s", knowledge_dir)
+    try:
+        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
+
+        stats = await build_index(
+            experiments_dir=experiments_dir,
+            vault_dir=None,  # vault не bundled
+            sqlite_path=sqlite_path,
+            db_path=db_path,
+            embeddings_client=embeddings_client,
+            pdf_dir=knowledge_dir / "equipment_manuals",
+            procedures_dir=knowledge_dir / "procedures",
+            reference_root=repo_root,
+        )
+        logger.info(
+            "RAG bootstrap complete: %d chunks indexed в %s",
+            stats.get("indexed", 0),
+            db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
+
+
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -2607,6 +2826,21 @@ async def _run_engine(*, mock: bool = False) -> None:
                         prev.cancel()
                     _multiline_burst_auto_stop_tasks[target_name] = _t
                 return response
+            if action in ("rag.rebuild_index", "rag.rebuild_status"):
+                # v0.55.7.1 PHASE 8 — operator-driven «Обновить индекс»
+                # in KnowledgeBasePanel. Single-instance enforced inside
+                # the helper; concurrent click rejected. State machine
+                # exposed via rag.rebuild_status poll.
+                return await _handle_rag_rebuild_command(
+                    action,
+                    cmd,
+                    db_path=_rag_rebuild_db_path,
+                    embeddings_client=_rag_rebuild_embeddings,
+                    knowledge_dir=_rag_rebuild_knowledge_dir,
+                    experiments_dir=_DATA_DIR / "experiments",
+                    sqlite_path=None,
+                    repo_root=_PROJECT_ROOT,
+                )
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -2793,6 +3027,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     #     the AssistantQueryAgent KNOWLEDGE_QUERY adapter can wrap the same
     #     RagSearcher instance the GUI knowledge-base overlay already uses).
     _rag_searcher: Any = None
+    # v0.55.7.1: handles for the rebuild dispatch helper. Populated
+    # below when the searcher block successfully resolves config.
+    _rag_rebuild_db_path: Path | None = None
+    _rag_rebuild_embeddings: Any | None = None
+    _rag_rebuild_knowledge_dir: Path | None = None
     try:
         from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
         from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
@@ -2818,29 +3057,55 @@ async def _run_engine(*, mock: bool = False) -> None:
             _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()
             _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
             _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
-            _rag_emb_model = str(_rag_cfg.get("embedding_model", "multilingual-e5-small"))
-            if _rag_db_path.exists():
-                _rag_emb = EmbeddingsClient(
-                    base_url=_rag_emb_url,
-                    model=_rag_emb_model,
-                )
-                _rag_searcher = RagSearcher(
+            # v0.55.7.1: default fallback aligned с modernized stack —
+            # qwen3-embedding:0.6b (1024d). Older v0.55.7 default
+            # multilingual-e5-small (384d) deprecated due к Ollama
+            # 0.23+ runtime incompatibility for community uploads.
+            _rag_emb_model = str(_rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
+            _rag_knowledge_dir = Path(
+                str(_rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
+            ).expanduser()
+            # v0.55.7.1: create searcher unconditionally — LanceDB
+            # connects lazily on the first .search() call, so an
+            # absent db_path is fine. Bootstrap (below) will populate
+            # the index from the bundled corpus в фоне; the searcher
+            # itself returns [] from search() until the table exists.
+            _rag_db_path.mkdir(parents=True, exist_ok=True)
+            _rag_emb = EmbeddingsClient(
+                base_url=_rag_emb_url,
+                model=_rag_emb_model,
+            )
+            _rag_searcher = RagSearcher(
+                db_path=_rag_db_path,
+                embeddings_client=_rag_emb,
+                table_name=_rag_table,
+            )
+            # Hand off resolved paths к the rebuild dispatch helper.
+            _rag_rebuild_db_path = _rag_db_path
+            _rag_rebuild_embeddings = _rag_emb
+            _rag_rebuild_knowledge_dir = _rag_knowledge_dir
+            logger.info(
+                "RAG searcher: инициализирован (config=%s, db=%s, table=%s, knowledge=%s)",
+                _rag_cfg_source,
+                _rag_db_path,
+                _rag_table,
+                _rag_knowledge_dir,
+            )
+            # v0.55.7.1 PHASE 6: fire-and-forget bootstrap. Engine
+            # ready signal does NOT await this; the operator may
+            # briefly see empty KnowledgeBasePanel during first boot
+            # of a fresh deploy, then it populates без restart.
+            asyncio.create_task(
+                _bootstrap_rag_index_if_empty(
                     db_path=_rag_db_path,
                     embeddings_client=_rag_emb,
-                    table_name=_rag_table,
-                )
-                logger.info(
-                    "RAG searcher: инициализирован (config=%s, db=%s, table=%s)",
-                    _rag_cfg_source,
-                    _rag_db_path,
-                    _rag_table,
-                )
-            else:
-                logger.info(
-                    "RAG searcher: config=%s найден, но index path %s не существует — RAG отключён",
-                    _rag_cfg_source,
-                    _rag_db_path,
-                )
+                    knowledge_dir=_rag_knowledge_dir,
+                    experiments_dir=_DATA_DIR / "experiments",
+                    sqlite_path=None,
+                    repo_root=_PROJECT_ROOT,
+                ),
+                name="rag_bootstrap",
+            )
         else:
             logger.info(
                 "RAG searcher: ни rag.local.yaml/rag.yaml/rag.yaml.example "

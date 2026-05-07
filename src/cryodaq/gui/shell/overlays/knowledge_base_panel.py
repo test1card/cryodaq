@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -56,6 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.agents.rag.source_labels import prettify_source_label
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
 from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -144,13 +146,16 @@ class _SnippetCard(QFrame):
         layout.setSpacing(theme.SPACE_2)
 
         kind = str(result.get("source_kind", "?"))
-        source_id = str(result.get("source_id", "?"))
         score = result.get("score", 0.0)
         try:
             score_str = f" · score {float(score):.3f}"
         except (TypeError, ValueError):
             score_str = ""
-        header = QLabel(f"<b>{kind}</b> · {source_id}{score_str}")
+        # v0.55.7.1 PHASE 9 — prettify_source_label produces the
+        # operator-facing citation. Falls back gracefully when
+        # source_kind is unknown to the helper.
+        pretty = prettify_source_label(kind, result.get("metadata") or {})
+        header = QLabel(f"<b>{pretty}</b>{score_str}")
         header.setTextFormat(Qt.TextFormat.RichText)
         header.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
         layout.addWidget(header)
@@ -249,14 +254,58 @@ class KnowledgeBasePanel(QWidget):
         self._connected = False
         self._categories = categories if categories is not None else _load_categories(config_path)
         self._workers: list[ZmqCommandWorker] = []
+        # v0.55.7.1 PHASE 8 — manual rebuild bookkeeping. Workers retained
+        # so QThread GC doesn't race the reply; status poll timer ticks
+        # every 1 s while a rebuild is running.
+        self._rebuild_workers: list[ZmqCommandWorker] = []
+        self._rebuild_running: bool = False
+        self._rebuild_poll_timer = QTimer(self)
+        self._rebuild_poll_timer.setInterval(1000)
+        self._rebuild_poll_timer.timeout.connect(self._poll_rebuild_status)
+        # Confirm dialogs are skipped в test mode (driven by `_confirm_rebuild`).
+        self._confirm_rebuild: bool = True
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # --- Top toolbar: rebuild button + status label ---
+        toolbar = QFrame()
+        toolbar.setObjectName("KnowledgeBaseToolbar")
+        toolbar.setStyleSheet(
+            f"#KnowledgeBaseToolbar {{ background: {theme.SURFACE_PANEL}; "
+            f"border-bottom: 1px solid {theme.BORDER_SUBTLE}; "
+            f"padding: {theme.SPACE_2}px {theme.SPACE_3}px; }}"
+        )
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(theme.SPACE_2, 0, theme.SPACE_2, 0)
+        toolbar_layout.setSpacing(theme.SPACE_3)
+        title = QLabel("База знаний CryoDAQ")
+        title_font = title.font()
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setStyleSheet(f"color: {theme.FOREGROUND};")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addStretch(1)
+        self._rebuild_status_label = QLabel("Готов")
+        self._rebuild_status_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; "
+            f"font-family: '{theme.FONT_MONO}'; "
+            f"font-feature-settings: 'tnum';"
+        )
+        toolbar_layout.addWidget(self._rebuild_status_label)
+        self._rebuild_button = QPushButton("Обновить индекс")
+        self._rebuild_button.setToolTip(
+            "Перестроить индекс базы знаний после нового PDF / процедуры. "
+            "Может занять несколько минут."
+        )
+        self._rebuild_button.clicked.connect(self._on_rebuild_clicked)
+        toolbar_layout.addWidget(self._rebuild_button)
+        root.addWidget(toolbar)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter)
+        root.addWidget(splitter, stretch=1)
 
         # --- LEFT: categories list ---
         self._list = QListWidget()
@@ -383,3 +432,92 @@ class KnowledgeBasePanel(QWidget):
 
         worker.finished.connect(_on_finished)
         worker.start()
+
+    # ------------------------------------------------------------------
+    # v0.55.7.1 PHASE 8 — manual rebuild dispatch
+    # ------------------------------------------------------------------
+
+    def _on_rebuild_clicked(self) -> None:
+        """Confirm + dispatch rag.rebuild_index, switch к polling status."""
+        if self._rebuild_running:
+            # Operator clicked while engine still working — surface
+            # current status instead of attempting concurrent start.
+            self._poll_rebuild_status()
+            return
+        if self._confirm_rebuild:
+            res = QMessageBox.question(
+                self,
+                "Перестроить индекс знаний?",
+                "Перестроить индекс? Может занять несколько минут на больших PDF.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if res != QMessageBox.StandardButton.Yes:
+                return
+        self._send_rebuild_command("rag.rebuild_index")
+
+    def _send_rebuild_command(self, action: str) -> None:
+        worker = ZmqCommandWorker({"cmd": action}, parent=self)
+        worker.finished.connect(
+            lambda result, c=action: self._on_rebuild_response(c, result)
+        )
+        self._rebuild_workers.append(worker)
+        worker.start()
+
+    def _on_rebuild_response(self, action: str, result: dict | None) -> None:
+        # Drop finished workers so the list does not grow unbounded.
+        self._rebuild_workers = [
+            w for w in self._rebuild_workers if w.isRunning()
+        ]
+        if not isinstance(result, dict):
+            self._rebuild_running = False
+            self._rebuild_button.setEnabled(True)
+            self._rebuild_status_label.setText("Engine не ответил")
+            self._rebuild_poll_timer.stop()
+            return
+        if not result.get("ok"):
+            self._rebuild_running = False
+            self._rebuild_button.setEnabled(True)
+            self._rebuild_status_label.setText(str(result.get("error", "ошибка"))[:80])
+            self._rebuild_poll_timer.stop()
+            return
+        if action == "rag.rebuild_index":
+            self._rebuild_running = True
+            self._rebuild_button.setEnabled(False)
+            self._rebuild_status_label.setText("Индексация…")
+            if not self._rebuild_poll_timer.isActive():
+                self._rebuild_poll_timer.start()
+            return
+        if action == "rag.rebuild_status":
+            state = str(result.get("state", "idle"))
+            chunks = int(result.get("chunks_indexed", 0) or 0)
+            err = result.get("error")
+            if state == "running":
+                self._rebuild_running = True
+                self._rebuild_button.setEnabled(False)
+                self._rebuild_status_label.setText("Индексация…")
+            elif state == "complete":
+                self._rebuild_running = False
+                self._rebuild_button.setEnabled(True)
+                self._rebuild_poll_timer.stop()
+                self._rebuild_status_label.setText(
+                    f"Индекс обновлён: {chunks} chunks"
+                )
+            elif state == "failed":
+                self._rebuild_running = False
+                self._rebuild_button.setEnabled(True)
+                self._rebuild_poll_timer.stop()
+                self._rebuild_status_label.setText(
+                    (str(err) if err else "Сборка не удалась")[:80]
+                )
+            else:  # idle и unknown
+                self._rebuild_running = False
+                self._rebuild_button.setEnabled(True)
+                self._rebuild_poll_timer.stop()
+                self._rebuild_status_label.setText("Готов")
+
+    def _poll_rebuild_status(self) -> None:
+        if not self._rebuild_running:
+            self._rebuild_poll_timer.stop()
+            return
+        self._send_rebuild_command("rag.rebuild_status")

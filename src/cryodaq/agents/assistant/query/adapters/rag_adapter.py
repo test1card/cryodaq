@@ -116,6 +116,10 @@ class RAGAdapter:
                     source_kind=r.source_kind,
                     snippet=_truncate_snippet(r.text),
                     distance=float(r.score),
+                    # v0.55.7.1: forward chunk metadata so the format
+                    # prompt can render pretty source labels (page,
+                    # title, version etc.) instead of opaque source_id.
+                    metadata=dict(r.metadata) if r.metadata else {},
                 )
             )
 

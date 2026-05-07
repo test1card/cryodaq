@@ -1,10 +1,27 @@
 # F32 — RAG indexer configuration. Copy to rag.local.yaml and customize.
+#
+# May 2026: default embedding model switched к qwen3-embedding:0.6b
+# — top of MTEB multilingual leaderboard, 100+ languages including Russian,
+# 32k context window, 1024-dim output, official Ollama library entry.
+# Previous default (multilingual-e5-small / 384d) deprecated due
+# к runtime incompatibility с Ollama 0.23+ for community uploads.
 rag:
   ollama_base_url: "http://localhost:11434"
-  embedding_model: "multilingual-e5-small"
-  embedding_dim: 384
+  embedding_model: "qwen3-embedding:0.6b"
+  embedding_dim: 1024
   db_path: "data/rag_index"
   vault_dir: "~/CryoDAQ-Vault/experiments"
+
+  # F-KnowledgeBaseExpansion (v0.55.7.1): operator-facing corpus root.
+  # CLI + engine bootstrap append three sub-corpora from this folder:
+  #   ${knowledge_dir}/equipment_manuals/  → PDF (page-aware chunks)
+  #   ${knowledge_dir}/procedures/         → Markdown procedures
+  #                                          (subdir → category;
+  #                                          README.md skipped)
+  #   project-root reference docs           → operator_manual,
+  #                                          README, CHANGELOG (latter
+  #                                          section-aware per version)
+  knowledge_dir: "data/knowledge"
 
   # Chunking
   chunk_max_chars: 1000

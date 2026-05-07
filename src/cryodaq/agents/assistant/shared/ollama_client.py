@@ -13,7 +13,11 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 _GENERATE_PATH = "/api/generate"
-_EMBEDDINGS_PATH = "/api/embeddings"
+# May 2026: switched к new Ollama API. /api/embeddings (legacy) still
+# accepts requests but causes subprocess EOF crashes для some newer
+# models. /api/embed introduced in Ollama 0.1.36 (2024) is the modern
+# endpoint, accepts batched input, returns embeddings as nested list.
+_EMBEDDINGS_PATH = "/api/embed"
 
 
 class OllamaUnavailableError(Exception):
@@ -153,17 +157,20 @@ class OllamaClient:
         self,
         text: str,
         *,
-        model: str = "multilingual-e5-small",
+        model: str = "qwen3-embedding:0.6b",
     ) -> list[float]:
-        """Call Ollama /api/embeddings and return the raw vector.
+        """Call Ollama /api/embed and return the raw vector.
 
-        F32: distinct from generate() — uses /api/embeddings, returns the
-        raw vector. Embedding model defaults to multilingual-e5-small
-        (architect's stack) but is overridable per call. Embedding model
-        is *not* the same as the generation model; pass it per-call.
+        F32: distinct from generate() — uses /api/embed (modern endpoint),
+        returns the raw vector. Embedding model defaults to
+        qwen3-embedding:0.6b (May 2026 default, top of MTEB multilingual
+        leaderboard) but is overridable per call. Embedding model is *not*
+        the same as the generation model; pass it per-call.
         """
         url = f"{self._base_url}{_EMBEDDINGS_PATH}"
-        payload = {"model": model, "prompt": text}
+        # New /api/embed expects "input" (str or list[str]); returns
+        # "embeddings": [[float,...]] (always batched, even for one input).
+        payload = {"model": model, "input": text}
         session = await self._get_session()
         try:
             async with asyncio.timeout(self._timeout_s):
@@ -184,4 +191,9 @@ class OllamaClient:
                 raise OllamaModelMissingError(model)
             raise OllamaUnavailableError(f"Ollama embed error: {err}")
 
+        # New API: data["embeddings"] is list[list[float]] (batched response)
+        embeddings = data.get("embeddings", [])
+        if embeddings:
+            return list(embeddings[0])
+        # Fallback к legacy single-vector format в case of mixed responses
         return list(data.get("embedding", []))

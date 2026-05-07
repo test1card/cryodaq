@@ -38,6 +38,7 @@ from cryodaq.agents.assistant.query.ru_labels import (
     ru_bool,
 )
 from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory
+from cryodaq.agents.rag.source_labels import prettify_source_label
 
 if TYPE_CHECKING:
     from cryodaq.agents.assistant.live.agent import AssistantConfig
@@ -667,9 +668,19 @@ class AssistantQueryAgent:
         else:
             lines: list[str] = []
             for idx, hit in enumerate(hits, start=1):
-                kind_label = self._kind_label(hit.source_kind)
+                # v0.55.7.1 PHASE 9: prefer the prettified citation
+                # label («Etalon MultiLine — стр. 5», «Процедура: …»)
+                # so the LLM cites the document operator can recognise
+                # rather than a chunk-id path. Fall back to source_id
+                # when prettifier is non-specific (would just echo the
+                # kind string).
+                pretty = prettify_source_label(
+                    hit.source_kind, getattr(hit, "metadata", None) or {}
+                )
+                if pretty == hit.source_kind:
+                    pretty = f"{self._kind_label(hit.source_kind)} — {hit.source}"
                 lines.append(
-                    f"[Источник {idx}] {kind_label} — {hit.source} "
+                    f"[Источник {idx}] {pretty} "
                     f"(score={hit.distance:.2f})\n  «{hit.snippet}»"
                 )
             hits_text = "\n".join(lines)

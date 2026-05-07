@@ -61,10 +61,11 @@ class RagSearcher:
         table = self._db.open_table(self._table_name)
         query_vec = await self._embeddings.embed(query)
 
-        # H9: guard query embedding dim. Indexer (cycle 2) has warn+zero-vec
-        # fallback for dim mismatch; searcher passed mismatched vectors to
-        # LanceDB and crashed with schema error. Mirror indexer's pattern.
-        expected_dim = 384  # multilingual-e5-small canonical dim
+        # H9: guard query embedding dim. Indexer has warn+zero-vec
+        # fallback for dim mismatch; searcher mirrors that pattern.
+        # May 2026: switched to qwen3-embedding:0.6b (1024-dim) from
+        # multilingual-e5-small (384-dim).
+        expected_dim = 1024  # qwen3-embedding:0.6b canonical dim
         if len(query_vec) != expected_dim:
             logger.warning(
                 "RAG search: query embedding dim %d != expected %d; "
