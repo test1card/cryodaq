@@ -50,7 +50,7 @@ class RagSearcher:
         top_k: int = 5,
         source_kind_filter: list[str] | None = None,
     ) -> list[SearchResult]:
-        if self._table_name not in self._db.list_tables():
+        if self._table_name not in self._db.list_tables().tables:
             logger.warning(
                 "RAG table '%s' not found in %s",
                 self._table_name,

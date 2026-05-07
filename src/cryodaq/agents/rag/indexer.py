@@ -100,7 +100,7 @@ async def build_index(
     ]
     schema = _make_schema(embedding_dim)
 
-    if table_name in db.list_tables():
+    if table_name in db.list_tables().tables:
         db.drop_table(table_name)
     table = db.create_table(table_name, data=rows, schema=schema)
 
