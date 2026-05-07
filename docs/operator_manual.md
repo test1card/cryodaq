@@ -573,4 +573,91 @@ restart engine. Алиасы для T1-T10/T13-T24 **давать вредно**
   данных до сходимости, порог `percent_settled ≥ 30 %`). Для валидации полноценного прогноза
   охлаждения используйте replay mode (v0.53.0+), который воспроизводит реальные траектории.
 
+## Etalon MultiLine: continuous mode и burst capture
+
+С v0.55.11 драйвер `etalon_multiline` поддерживает два режима работы.
+
+### Когда какой режим
+
+- **`averaged` (по умолчанию)** — request / response: на каждый scheduler
+  tick драйвер отправляет `latestlengthvalid` и парсит один cycle. Подходит
+  для обычного STE-цикла, где interferometric drift важна на масштабе
+  минут / часов и достаточно 1 reading per scheduler poll. Не требует
+  предварительной настройки в `MultiLine.exe`.
+- **`continuous`** — после connect драйвер шлёт `startmeasnogui` и держит
+  background listener: сервер сам пушит `channeldata_` cycle после каждого
+  measurement (cycle rate определяется FPGA + analysis step и empirically
+  ~1–10 Гц). Драйвер decimates до `target_rate_hz` (по умолчанию 1.0)
+  перед публикацией Reading в ZMQ — operator видит ту же 1 Hz скорость
+  что и в averaged, но при этом доступен **burst capture**: моментальная
+  запись raw cycles на максимальной hardware cadence в Parquet blob.
+
+### Pre-conditions для continuous mode
+
+В `MultiLine.exe`:
+1. Каналы выбраны и сгруппированы (`isgrouped=1`).
+2. Окно измерения закрыто (driver не открывает GUI на сервере).
+3. Setup сохранён в software (lasers ready / aligned).
+
+Если pre-conditions не выполнены, сервер отклонит `startmeasnogui` либо
+не пришлёт ни одного cycle. Driver логирует empirical first-cycle latency
+на INFO (`MultiLine 'Multiline_1' first cycle received after %.2fs`) —
+если в логах нет этой строки в течение ~10 секунд после connect, проверьте
+software setup на сервере.
+
+### Как переключить
+
+Режим переключается через `config/instruments.yaml` (или
+`instruments.local.yaml` для деплой-специфичного override):
+
+```yaml
+- type: etalon_multiline
+  name: "MultiLine_1"
+  host: "192.168.1.50"
+  port: 2001
+  channels: [1, 2, 3, 4]
+  mode: continuous           # вместо averaged
+  target_rate_hz: 1.0        # 0.01 .. 10 (1.0 default)
+```
+
+Изменение требует **рестарта engine** — runtime hot-reload не поддерживается.
+
+### Workflow: burst capture
+
+В overlay «MultiLine» снизу под env строкой добавлена строка
+«Захват вибрации»:
+- spinbox: длительность (1..600 с, по умолчанию 10),
+- кнопка «Записать» (превращается в «Остановить» во время записи),
+- mono статус справа.
+
+При клике «Записать»:
+1. Engine вызывает `driver.burst_start(experiment_id=<active>)`.
+2. Listener продолжает receive cycles в обычном темпе, но теперь
+   КАЖДЫЙ cycle ALSO добавляется в burst buffer (decimation для emit
+   в ZMQ остаётся, full cadence только в blob).
+3. По истечении duration или ручной нажатии «Остановить», engine
+   вызывает `driver.burst_stop()` — flush buffer в Parquet.
+4. Путь к файлу появляется в статусе:
+   - Если active experiment: `data/experiments/<id>/multiline_burst_<utc_iso>.parquet`.
+   - Без эксперимента: `data/multiline_bursts/<utc_iso>.parquet`.
+
+Parquet схема включает все 17 полей `channeldata` per row (length,
+env T/P/RH, intensity bounds, все 10 error flags). Этого достаточно
+для post-hoc PSD/Allan deviation анализа в Jupyter.
+
+Если burst capture запрошен в `mode: averaged`, engine отвечает
+ошибкой «Burst capture requires continuous mode» — статус строка
+отображает её дословно.
+
+### Гарантии persistence
+
+- Decimated Reading из continuous mode проходит **тот же**
+  `Scheduler.write_immediate → SQLiteWriter → DataBroker` путь что и
+  averaged — SQLite write завершается **до** broker publish, никаких
+  изменений в persistence-first инвариант не вносится.
+- Burst Parquet — отдельный артефакт, пишется через `asyncio.to_thread`
+  чтобы не блокировать scheduler tick. Если operator закроет engine
+  во время активного burst, buffer **не** persist'ится — explicit
+  `burst_stop` is the only save path.
+
 Документ описывает текущее реализованное состояние и не обещает будущие функции.

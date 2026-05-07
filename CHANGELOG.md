@@ -13,6 +13,29 @@
 
 ### Added
 
+- **F-MultiLineContinuous (v0.55.11)** — driver continuous mode for the
+  Etalon MultiLine, replacing per-poll `latestlengthvalid` request /
+  response with `startmeasnogui` server push. New optional config keys
+  on the `etalon_multiline` instrument entry: `mode: averaged|continuous`
+  (default `averaged` — backward compatible) and `target_rate_hz`
+  (default `1.0`; sets the decimation rate for `Reading` emission so a
+  fast cycle stream does not flood the ZMQ channel). Per-channel env
+  (T/P/RH) arrives bundled inside `channeldata_` cycles in continuous
+  mode — no separate `environmentdata` polling. New burst-capture
+  mechanism for actuator workflows: ZMQ commands
+  `multiline.burst_start` / `burst_stop` / `burst_status` and a GUI
+  «Захват вибрации» row in the MultiLine overlay (1..600 s spinbox,
+  start / stop button, mono status with elapsed + cycle count or saved
+  path). Burst raw cycles persist as Parquet (full 17-field channeldata
+  schema — length, env, intensity bounds, all 10 error flags) at
+  `data/experiments/<id>/multiline_burst_<utc_iso>.parquet` when an
+  experiment is active or `data/multiline_bursts/` otherwise.
+  Persistence-first invariant intact — decimated cycles flow through
+  the standard `Scheduler.write_immediate → SQLiteWriter → DataBroker`
+  path; the burst Parquet blob is a separate auxiliary artifact written
+  via `asyncio.to_thread` so the scheduler tick never blocks. The
+  driver logs first-cycle latency on receipt at INFO so empirical cycle
+  rate surfaces in smoke logs without extra instrumentation.
 - **F32 Stage 1 RAG indexer** — standalone semantic search foundation
   over the experiment archive (metadata + F31 vault notes + operator
   log entries). New module `cryodaq.agents.rag` with `document_loader`
