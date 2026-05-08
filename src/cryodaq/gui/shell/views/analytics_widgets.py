@@ -644,39 +644,27 @@ class VacuumPredictionWidget(QWidget):
 class CooldownPredictionWidget(QWidget):
     """Linear-Y prediction widget wrapped for cooldown forecast.
 
-    F-MockPredictor (v0.54.0): feed cold-stage (Т12) temperature
-    readings into a SteadyStatePredictor and render a horizontal
-    asymptote line + ±sigma band + "Стационарное состояние ≈ X K"
-    badge in place of the empty placeholder. Mirrors the pattern in
-    :class:`RThermalLiveWidget` / :class:`VacuumPredictionWidget`.
-
-    v0.56.1 (REG-2 dual-channel asymptote): the widget now also tracks
-    Т11 (1st-stage GM cooler) in parallel — a second
-    :class:`SteadyStatePredictor` plus its own asymptote line, ±sigma
-    band, and steady badge. The same widget therefore serves both the
-    `cooldown` phase (where the focus is the cold trajectory toward
-    base T) and the `measurement` phase (where the operator wants to
-    confirm both stages have reached their stable asymptotes). Т12
-    remains the data line plotted by `_inner.set_history()`; Т11 is
-    surfaced through the asymptote overlays alone (operator already
-    sees the live values on the temperature panel).
+    F-MockPredictor: when CooldownDetector backend is IDLE (Mac mock on
+    already-cooled data), feed cold-stage temperature readings into a
+    SteadyStatePredictor and render a horizontal asymptote line + ±sigma
+    band + "Стационарное состояние ≈ X K" badge in place of the empty
+    placeholder. Mirrors the pattern in :class:`RThermalLiveWidget` and
+    :class:`VacuumPredictionWidget`: the widget owns its own raw buffer
+    + setter, since CooldownData.actual_trajectory is intentionally empty
+    in the production adapter (a snapshot of CooldownService output).
     """
 
     # Predictor convergence threshold: show overlay when ≥30% settled
     # (matches RThermalLiveWidget).
     _SETTLE_THRESHOLD: float = 30.0
-    # Internal predictor keys — channel-id-agnostic; only the widget
-    # feeds them. Cold = Т12 stage-2 cooler, warm = Т11 stage-1 cooler.
-    _PRED_COLD = "cold_stage"
-    _PRED_WARM = "warm_stage"
+    # Internal predictor key — channel-id-agnostic, only the widget feeds it.
+    _PRED_CHANNEL = "cold_stage"
     # Cap raw-buffer size (mirrors VacuumPredictionWidget._MAX_RAW_PTS).
     _MAX_RAW_PTS: int = 5000
-    # Canonical landmark short-ids from config/physical_alarms.yaml.
-    # MainWindowV2 dispatches readings whose short-id matches one of
-    # these to the corresponding setter; configuration-decoupling is
-    # left to a future spec per architect.
+    # Canonical cold-stage landmark id from config/physical_alarms.yaml.
+    # MainWindowV2 routes only readings whose channel resolves to this id;
+    # configuration-decoupling is left to a future spec per architect.
     _COLD_LANDMARK: str = "Т12"
-    _WARM_LANDMARK: str = "Т11"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -745,61 +733,13 @@ class CooldownPredictionWidget(QWidget):
         _vb.addItem(self._steady_badge, ignoreBounds=True)
         _vb.sigRangeChanged.connect(self._reposition_overlays)
 
-        # v0.56.1 (REG-2 dual-channel asymptote): second asymptote
-        # band + line + badge for Т11 (warm/1st-stage cooler). Visual
-        # tokens use STATUS_WARNING so Т11 is distinguishable from
-        # Т12's STATUS_INFO without relying on the legend alone. Both
-        # are clipped behind the live data line so they never obscure
-        # actual measurements.
-        warm_band_color = QColor(theme.STATUS_WARNING)
-        warm_band_color.setAlpha(64)
-        self._asym_band_t11 = pg.LinearRegionItem(
-            values=[0.0, 0.0],
-            orientation="horizontal",
-            brush=pg.mkBrush(warm_band_color),
-            movable=False,
-        )
-        self._asym_band_t11.setVisible(False)
-        self._inner._plot.addItem(self._asym_band_t11)
-
-        self._asym_line_t11 = pg.InfiniteLine(
-            angle=0,
-            pen=pg.mkPen(
-                color=QColor(theme.STATUS_WARNING),
-                width=theme.PLOT_LINE_WIDTH,
-                style=Qt.DashLine,
-            ),
-            label="Т11∞",
-            labelOpts={"color": theme.STATUS_WARNING, "position": 0.95},
-        )
-        self._asym_line_t11.setVisible(False)
-        self._inner._plot.addItem(self._asym_line_t11)
-
-        self._steady_badge_t11 = pg.TextItem(
-            "",
-            anchor=(0.5, 0.5),
-            color=QColor(theme.STATUS_WARNING),
-        )
-        self._steady_badge_t11.setFont(_badge_font)
-        self._steady_badge_t11.setVisible(False)
-        _vb.addItem(self._steady_badge_t11, ignoreBounds=True)
-
         # F-MockPredictor: SteadyStatePredictor (params verbatim from RThermalLiveWidget).
         self._ss_predictor = SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
         self._last_ts_seen: float = 0.0
-        # v0.56.1: parallel Т11 predictor.
-        self._ss_predictor_t11 = SteadyStatePredictor(
-            window_s=600.0, update_interval_s=30.0
-        )
-        self._last_ts_seen_t11: float = 0.0
         # Raw cold-stage readings — fed by set_cold_temperature_reading()
         # because CooldownData.actual_trajectory is empty in production
         # (intentional contract — see _cooldown_reading_to_data adapter).
         self._raw_cold_buffer: list[tuple[float, float]] = []
-        # v0.56.1: warm-stage buffer (fed by set_warm_temperature_reading;
-        # not pushed to the inner plot to keep the data trace single-line —
-        # operator sees Т11 live values on the temperature panel).
-        self._raw_warm_buffer: list[tuple[float, float]] = []
 
         self._reposition_overlays()
         self._placeholder.setVisible(True)
@@ -820,33 +760,10 @@ class CooldownPredictionWidget(QWidget):
         if len(self._raw_cold_buffer) > self._MAX_RAW_PTS:
             del self._raw_cold_buffer[: len(self._raw_cold_buffer) - self._MAX_RAW_PTS]
         if ts > self._last_ts_seen:
-            self._ss_predictor.add_point(self._PRED_COLD, ts, val)
+            self._ss_predictor.add_point(self._PRED_CHANNEL, ts, val)
             self._last_ts_seen = ts
         self._ss_predictor.update(time.time())
         self._inner.set_history(list(self._raw_cold_buffer))
-
-    def set_warm_temperature_reading(self, reading) -> None:
-        """Receive one warm-stage temperature reading (Т11, 1st-stage cooler).
-
-        v0.56.1 dual-channel extension: mirrors
-        :meth:`set_cold_temperature_reading` in shape but feeds the
-        parallel Т11 predictor only. The warm-stage buffer is NOT
-        pushed to the inner plot (the data line stays single-channel
-        for chart legibility); the asymptote line + ±sigma band are
-        rendered on the same plot whenever the Т11 predictor reports a
-        valid settled fit.
-        """
-        if reading is None:
-            return
-        ts = reading.timestamp.timestamp()
-        val = float(reading.value)
-        self._raw_warm_buffer.append((ts, val))
-        if len(self._raw_warm_buffer) > self._MAX_RAW_PTS:
-            del self._raw_warm_buffer[: len(self._raw_warm_buffer) - self._MAX_RAW_PTS]
-        if ts > self._last_ts_seen_t11:
-            self._ss_predictor_t11.add_point(self._PRED_WARM, ts, val)
-            self._last_ts_seen_t11 = ts
-        self._ss_predictor_t11.update(time.time())
 
     def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
@@ -854,79 +771,16 @@ class CooldownPredictionWidget(QWidget):
         cx = (xr[0] + xr[1]) / 2
         cy = (yr[0] + yr[1]) / 2
         self._placeholder.setPos(cx, cy)
-        # Stagger the Т12 / Т11 badges vertically so they do not stack.
-        # The y-offsets are fractions of the visible y-range so the
-        # split scales with autoRange.
-        y_span = yr[1] - yr[0]
-        offset = 0.06 * y_span if y_span > 0 else 0.0
-        self._steady_badge.setPos(cx, cy + offset)
-        self._steady_badge_t11.setPos(cx, cy - offset)
-
-    def _apply_channel_overlays(
-        self,
-        predictor: SteadyStatePredictor,
-        key: str,
-        label: str,
-        asym_line,
-        asym_band,
-        steady_badge,
-    ) -> bool:
-        """Evaluate a single channel predictor and toggle its overlays.
-
-        Returns True if the channel rendered any overlay (settled
-        asymptote, quasi-steady badge, etc); False if all overlays
-        were hidden because the predictor is not yet settled.
-        """
-        pred = predictor.get_prediction(key)
-        if pred is not None and pred.valid and getattr(pred, "is_quasi_steady", False):
-            # v0.55.3 — quasi-steady regime. Curve fit was bypassed
-            # because the system is sitting near steady; report mean ±
-            # stddev plus the slow drift rate.
-            asym_line.setVisible(False)
-            asym_band.setVisible(False)
-            steady_badge.setPlainText(
-                f"Стационар {label}: T = {pred.t_current:.2f} ± "
-                f"{pred.stddev_k:.2f} K, дрейф "
-                f"{pred.drift_rate_k_per_h:+.2f} К/ч"
-            )
-            steady_badge.setVisible(True)
-            return True
-        if (
-            pred is not None
-            and pred.valid
-            and pred.percent_settled >= self._SETTLE_THRESHOLD
-        ):
-            t_inf = pred.t_predicted
-            sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
-            asym_line.setPos(t_inf)
-            asym_band.setRegion([t_inf - sigma, t_inf + sigma])
-            asym_line.setVisible(True)
-            asym_band.setVisible(True)
-            steady_badge.setPlainText(
-                f"Стационарное состояние {label} ≈ {t_inf:.2f} K"
-            )
-            steady_badge.setVisible(True)
-            return True
-        asym_line.setVisible(False)
-        asym_band.setVisible(False)
-        steady_badge.setVisible(False)
-        return False
-
-    def _hide_all_overlays(self) -> None:
-        """Hide both Т12 and Т11 asymptote overlays."""
-        self._asym_line.setVisible(False)
-        self._asym_band.setVisible(False)
-        self._steady_badge.setVisible(False)
-        self._asym_line_t11.setVisible(False)
-        self._asym_band_t11.setVisible(False)
-        self._steady_badge_t11.setVisible(False)
+        self._steady_badge.setPos(cx, cy)
 
     def set_cooldown_data(self, data) -> None:
         if data is None:
             # Clear any stale forecast curves left from a prior active push
             # (mirrors VacuumPredictionWidget._on_trend_result no-data path).
             self._inner.set_prediction([], [], [], ci_level_pct=67.0)
-            self._hide_all_overlays()
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
             self._placeholder.setVisible(True)
             return
         # CooldownData from analytics_view has predicted_trajectory and
@@ -944,10 +798,9 @@ class CooldownPredictionWidget(QWidget):
                 upper,
                 ci_level_pct=67.0,
             )
-            # Active CooldownService trajectory is the focus; hide
-            # asymptote overlays для both channels so they do not
-            # compete с the forecast curve visually.
-            self._hide_all_overlays()
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
             self._placeholder.setVisible(False)
             return
 
@@ -955,30 +808,41 @@ class CooldownPredictionWidget(QWidget):
         # asymptote / placeholder doesn't sit on top of stale data.
         self._inner.set_prediction([], [], [], ci_level_pct=67.0)
 
-        # v0.56.1 (REG-2): evaluate Т12 + Т11 predictors INDEPENDENTLY.
-        # Settle threshold per-channel — Т11 typically settles before
-        # Т12 because it is a warmer stage. Show placeholder только если
-        # NEITHER channel has anything to render.
-        rendered_cold = self._apply_channel_overlays(
-            self._ss_predictor,
-            self._PRED_COLD,
-            self._COLD_LANDMARK,
-            self._asym_line,
-            self._asym_band,
-            self._steady_badge,
-        )
-        rendered_warm = self._apply_channel_overlays(
-            self._ss_predictor_t11,
-            self._PRED_WARM,
-            self._WARM_LANDMARK,
-            self._asym_line_t11,
-            self._asym_band_t11,
-            self._steady_badge_t11,
-        )
-        if rendered_cold or rendered_warm:
+        # Then check for steady-state asymptote.
+        pred = self._ss_predictor.get_prediction(self._PRED_CHANNEL)
+        if pred is not None and pred.valid and getattr(pred, "is_quasi_steady", False):
+            # v0.55.3 — quasi-steady regime. Curve fit was bypassed because
+            # the system is sitting near steady; report mean ± stddev plus
+            # the slow drift rate. No asymptote line / band: t_current is
+            # the readout, not an extrapolated asymptote.
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setPlainText(
+                f"Стационар: T = {pred.t_current:.2f} ± {pred.stddev_k:.2f} K, "
+                f"дрейф {pred.drift_rate_k_per_h:+.2f} К/ч"
+            )
+            self._steady_badge.setVisible(True)
+            self._placeholder.setVisible(False)
+            self._reposition_overlays()
+        elif (
+            pred is not None
+            and pred.valid
+            and pred.percent_settled >= self._SETTLE_THRESHOLD
+        ):
+            t_inf = pred.t_predicted
+            sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
+            self._asym_line.setPos(t_inf)
+            self._asym_band.setRegion([t_inf - sigma, t_inf + sigma])
+            self._asym_line.setVisible(True)
+            self._asym_band.setVisible(True)
+            self._steady_badge.setPlainText(f"Стационарное состояние ≈ {t_inf:.2f} K")
+            self._steady_badge.setVisible(True)
             self._placeholder.setVisible(False)
             self._reposition_overlays()
         else:
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
             self._placeholder.setVisible(True)
 
 

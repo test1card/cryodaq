@@ -71,16 +71,15 @@ def test_cooldown_layout_main_is_cooldown_prediction(app):
     assert analytics_widgets.id_of(slots["main"]) == "cooldown_prediction"
 
 
-def test_measurement_layout_main_is_cooldown_prediction(app):
+def test_measurement_layout_main_is_temperature_steady_state(app):
     view = AnalyticsView()
     view.set_phase("measurement")
     slots = view.active_widgets()
-    # v0.56.1 (REG-2): unified across cooldown + measurement phases.
-    # CooldownPredictionWidget extended for dual-channel asymptote
-    # (Т11 + Т12 simultaneously). R_thermal demoted to top_right
-    # (still useful для thermal-link diagnostics), temperature_overview
-    # occupies bottom_right.
-    assert analytics_widgets.id_of(slots["main"]) == "cooldown_prediction"
+    # v0.55.6.1: temperature_steady_state replaces r_thermal_live as the
+    # measurement-phase headline (architect 2026-05-07: «в фазе измерения
+    # до сих пор R, а не прогноз по температуре»). R_thermal demoted to
+    # top_right, temperature_overview occupies bottom_right.
+    assert analytics_widgets.id_of(slots["main"]) == "temperature_steady_state"
     assert analytics_widgets.id_of(slots["top_right"]) == "r_thermal_live"
     assert analytics_widgets.id_of(slots["bottom_right"]) == "temperature_overview"
 
@@ -180,11 +179,8 @@ def test_set_cooldown_forwards_to_cooldown_prediction_widget(app):
     main = view.active_widgets()["main"]
     inner = getattr(main, "_inner", None)
     assert inner is not None
-    # v0.56.1: CooldownPredictionWidget contract — set_cooldown_data
-    # routes predicted_trajectory + ci_trajectory к the inner
-    # PredictionWidget (set_prediction). actual_trajectory is empty by
-    # contract; live history flows via set_cold_temperature_reading.
-    xs, _ = inner._central_curve.getData()
+    # History populated.
+    xs, _ = inner._history_curve.getData()
     assert len(xs) == 2
 
 
@@ -197,8 +193,8 @@ def test_set_r_thermal_forwards_to_live_widget(app):
         last_updated_ts=1000.0,
     )
     view.set_r_thermal(data)
-    # v0.55.6.1 / v0.56.1 — r_thermal_live moved from main to top_right
-    # when the cooldown_prediction widget took the headline slot.
+    # v0.55.6.1 — r_thermal_live moved from main to top_right when
+    # temperature_steady_state took the headline slot.
     r_thermal = view.active_widgets()["top_right"]
     assert "2.345" in r_thermal._value_label.text()
 
@@ -296,9 +292,5 @@ def test_phase_swap_replays_cached_cooldown(app):
     view.set_cooldown(data)
     view.set_phase("cooldown")  # mounts CooldownPredictionWidget
     main = view.active_widgets()["main"]
-    # v0.56.1: cached CooldownData replays via set_cooldown_data which
-    # routes predicted_trajectory к the inner PredictionWidget's
-    # _central_curve (set_prediction). actual_trajectory не plotted —
-    # live history flows separately через set_cold_temperature_reading.
-    xs, _ = main._inner._central_curve.getData()
+    xs, _ = main._inner._history_curve.getData()
     assert len(xs) == 2

@@ -118,6 +118,11 @@ class TempPlotWidget(QWidget):
         # auto-rescale to mK / µK when the value range crosses decades.
         left_axis.enableAutoSIPrefix(False)
         left_axis.setWidth(theme.PLOT_AXIS_WIDTH_PX)
+        # 2026-05-08: hysteresis-based Y autoRange to suppress per-sample
+        # micro-jitter on Mac mock + general live-data UX. enable=0.95
+        # means pyqtgraph rescales только when data leave the central
+        # 95% band — stable view, no flicker on each refresh tick.
+        pi.enableAutoRange(axis="y", enable=0.95)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.getAxis("bottom").setStyle(showValues=False)

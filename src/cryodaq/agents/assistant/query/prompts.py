@@ -3,6 +3,14 @@
 All operator-facing output is Russian per project standard.
 System prompts use {brand_name} interpolation per brand-abstraction §1.3.
 
+Revision: 2026-05-08 v3 — FORMAT_KNOWLEDGE_QUERY_USER fix per architect 
+post-v0.55.7.1 KB expansion: prompt told Гемма to label sources as 
+«vault / архив / журнал» but corpus now has 8 source kinds (equipment_manual,
+procedure, operator_manual, readme, readme_en, changelog, vault_note,
+experiment_metadata, operator_log). Гемма e2b слепо follow'ил template и 
+все labels рендерил как «vault». Fix: instruct Гемма use pretty labels 
+verbatim from hits_text без переформирования.
+
 Revision: 2026-05-01 v2 (Track E russification + Track F anti-pattern guard)
 """
 
@@ -24,7 +32,7 @@ INTENT_CLASSIFIER_SYSTEM = """\
   "target_channels": ["список каналов из запроса, или null"],
   "time_window_minutes": <int или null>,
   "quantity": "<краткое описание что спрашивают; для archive_detail — experiment_id если назван>",
-  "target_source_kind": "<для knowledge_query: experiment_metadata | vault_note | operator_log | null>"
+  "target_source_kind": "<для knowledge_query: equipment_manual | procedure | operator_manual | readme | changelog | vault_note | experiment_metadata | operator_log | null>"
 }
 
 Правила классификации:
@@ -47,23 +55,36 @@ INTENT_CLASSIFIER_SYSTEM = """\
   (если назван experiment_id — клади его в "quantity")
 - "сколько раз сработал overheat", "статистика тревог за период",
   "история тревог", "были ли алармы вчера/за неделю" → alarm_history
-- knowledge_query — семантический поиск по проиндексированной документации
-  (vault notes, метаданные архивных экспериментов, журнал оператора).
-  Это вопросы «как делать X», «что такое Y», «процедура Z», «расскажи о…»
-  про лабораторные практики, процедуры, термины, исторические наблюдения.
+- knowledge_query — семантический поиск по проиндексированной документации:
+  - equipment_manual — руководства приборов (LakeShore, Keithley, Thyracont,
+    MultiLine), 4 PDF манула, страницы.
+  - procedure — операторские процедуры (cooldown_protocol, emergency_shutdown,
+    troubleshooting/*.md).
+  - operator_manual — operator_manual.md проекта CryoDAQ.
+  - readme / readme_en — README.md / README.en.md.
+  - changelog — CHANGELOG.md (per-version sections).
+  - vault_note — Obsidian vault notes.
+  - experiment_metadata — метаданные архивных экспериментов.
+  - operator_log — журнал оператора.
+  Это вопросы «как делать X», «что такое Y», «процедура Z», «команда такая-то»,
+  «расскажи о…» про лабораторные практики, процедуры, термины, приборы.
   Примеры:
     «как делать калибровку датчика?» → knowledge_query
-    «что такое детектор Т7?» → knowledge_query
-    «процедура аварийного отключения» → knowledge_query
+    «какая команда у lakeshore 218?» → knowledge_query (target_source_kind: equipment_manual)
+    «процедура аварийного отключения» → knowledge_query (target_source_kind: procedure)
     «какие у нас были проблемы с GPIB?» → knowledge_query
     «расскажи про насос форвакуума» → knowledge_query
     «инструкция по установке образца» → knowledge_query
-  Извлечение target_source_kind (только канонические значения корпуса):
-    «процедура» / «инструкция» / «как делать» — обычно vault_note,
-      иногда null если непонятно.
-    «vault» / «заметки» / «notes» → vault_note
-    «эксперимент <X>» / «прошлый» / «архив» → experiment_metadata
-    «журнал» / «лог оператора» / «record» → operator_log
+  Извлечение target_source_kind:
+    «команда» / «прибор» / «manual» / «руководство» / упомянуто имя прибора
+      (LakeShore, Keithley, Thyracont, MultiLine) → equipment_manual.
+    «процедура» / «инструкция оператора» / «как делать» / «troubleshooting»
+      / «protocol» → procedure.
+    «как пользоваться CryoDAQ» / «operator manual» → operator_manual.
+    «vault» / «заметки» / «notes» → vault_note.
+    «эксперимент <X>» / «прошлый» / «архив» → experiment_metadata.
+    «журнал» / «лог оператора» / «record» → operator_log.
+    «changelog» / «история версий» → changelog.
     Если не можешь точно определить — клади null. НЕ комбинируй
     значения через запятую и НЕ возвращай список — только одно
     каноническое значение или null.
@@ -267,16 +288,34 @@ FORMAT_KNOWLEDGE_QUERY_USER = """\
 Сформулируй ответ оператору на русском языке.
 
 ПРАВИЛА:
-- Используй ТОЛЬКО информацию из извлечений выше. НЕ ДОДУМЫВАЙ факты,
-  которых там нет.
-- Цитируй источники в формате [Источник N], где N — номер фрагмента.
-- В конце ответа добавь блок «Источники:» — список источников с указанием
-  типа (vault / архив / журнал) и краткого имени файла.
+- Используй ТОЛЬКО конкретную информацию из извлечений выше. НЕ ДОДУМЫВАЙ
+  факты, которых там нет.
+- Извлекай конкретику: команды (например `KRDG?`, `*IDN?`), числа, формулы,
+  модели приборов, шаги процедуры. НЕ ограничивайся фразой «есть руководство
+  пользователя» — если в фрагменте есть команда или ответ — приведи его.
+- Цитируй источники в формате [Источник N], где N — номер фрагмента
+  (по порядку появления выше).
+- В конце ответа добавь блок «Источники:» — список **уникальных** источников
+  (не дублируй один и тот же источник несколько раз). Используй название
+  источника **дословно** как оно дано в фрагменте (например
+  «lakeshore 218s manual — стр. 83», «Процедура: Аварийное отключение»,
+  «CHANGELOG v0.55.7»). НЕ добавляй слова «vault», «архив», «журнал» —
+  название уже содержит всю нужную информацию.
 - Длина ответа: 2-5 предложений + блок источников.
 
 Если извлечения не отвечают на вопрос или их нет — скажи прямо
 «в проиндексированной документации не нашлось релевантной информации»
 и предложи переформулировать запрос. Не выдумывай ответ.
+
+Пример хорошего ответа на «какая команда запросить температуру в Lakeshore 218?»:
+
+«Для запроса температуры в кельвинах используется команда `KRDG?` —
+запрашивает все 8 каналов сразу [Источник 1]. Для одного канала —
+`KRDG? <N>`, где N от 1 до 8 [Источник 2].
+
+Источники:
+- lakeshore 218s manual — стр. 83
+- lakeshore 218s manual — стр. 84»
 """
 
 FORMAT_ALARM_HISTORY_USER = """\

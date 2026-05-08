@@ -26,15 +26,12 @@ phases:
     bottom_right: r_thermal_placeholder
 
   measurement:
-    # v0.56.1 (REG-2): unified с cooldown phase — same widget across
-    # both phases. CooldownPredictionWidget extended to dual-channel
-    # asymptote (Т11 + Т12 simultaneously). The chart shows where
-    # both stages are heading; quasi-steady / settled-asymptote
-    # rendering is per-channel так one stage может settle before the
-    # other без blanking the row. R_thermal demoted to top_right
-    # (still useful для thermal-link diagnostics), Keithley still
-    # confined к its own tab per v0.55.2.
-    main: cooldown_prediction
+    # v0.55.6.1: temperature steady-state asymptote is the headline
+    # widget per architect 2026-05-07 («в фазе измерения до сих пор R,
+    # а не прогноз по температуре (пусть и асимптотический)»).
+    # R_thermal demoted to top_right (still useful for thermal-link
+    # diagnostics), Keithley still confined to its own tab per v0.55.2.
+    main: temperature_steady_state
     top_right: r_thermal_live
     bottom_right: temperature_overview
 

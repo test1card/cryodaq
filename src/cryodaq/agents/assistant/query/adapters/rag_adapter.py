@@ -8,8 +8,8 @@ QueryAgent-friendly interface that:
 - Filters out hits whose LanceDB ``_distance`` exceeds a configured cutoff so
   the format LLM does not have to reason about irrelevant matches. Distance is
   used (not similarity) because the underlying searcher exposes only LanceDB's
-  raw distance — lower is closer; for normalised multilingual-e5-small
-  embeddings a distance ≳1.5 typically means an unrelated chunk.
+  raw distance — lower is closer; for qwen3-embedding (1024-dim, May 2026)
+  a distance ≳1.6 typically means an unrelated chunk.
 - Never raises; missing searcher / index / embedding errors all collapse to
   ``None`` so the format prompt can frame "no relevant information" politely.
 
@@ -34,11 +34,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Distance cutoff calibrated for ``multilingual-e5-small`` (384-dim, normalised).
-# LanceDB defaults to L2 distance; with unit-norm vectors L2² ≈ 2 - 2·cos(θ),
-# so a cutoff of ~1.5 keeps roughly cosθ > 0.25 — empirically the boundary
-# between "topical" and "noise" for the small CryoDAQ corpus.
-_DEFAULT_MAX_DISTANCE = 1.5
+# Distance cutoff calibrated for qwen3-embedding:0.6b (1024-dim, May 2026).
+# Slightly more permissive than the legacy e5-small cutoff (1.5) because
+# qwen3's cross-language semantic match — RU query → EN PDF chunk — sits
+# in the 1.0-1.6 range where e5-small was already past its practical
+# cutoff. Empirical: queries like «команда lakeshore температура» hit
+# the right page at distance 1.2-1.4 against an English manual.
+_DEFAULT_MAX_DISTANCE = 1.6
 
 
 def _truncate_snippet(text: str, *, max_chars: int = 280) -> str:
@@ -62,9 +64,15 @@ class RAGAdapter:
         self,
         searcher: RagSearcher | None,
         *,
-        default_top_k: int = 5,
+        default_top_k: int = 8,
         max_distance: float = _DEFAULT_MAX_DISTANCE,
     ) -> None:
+        # v0.56.x: default_top_k bumped 5 → 8. With 4 PDF manuals + 3
+        # procedures + reference docs the corpus is large enough that
+        # the operator's question often shares semantic neighbourhood
+        # с 6-7 chunks, not 5. Bump gives Гемма more material к
+        # extract specifics from, without overloading the format
+        # prompt budget.
         self._searcher = searcher
         self._default_top_k = default_top_k
         self._max_distance = max_distance

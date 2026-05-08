@@ -80,14 +80,10 @@ def test_full_lifecycle_phase_widgets(app):
     """Cycling through all experiment phases must place the expected main widget."""
     view = AnalyticsView()
 
-    # v0.56.1 (REG-2): measurement.main is cooldown_prediction (was
-    # r_thermal_live in v0.54.0 / temperature_steady_state in v0.55.6.1).
-    # The cooldown_prediction widget now serves both cooldown +
-    # measurement phases с dual-channel asymptote (Т11 + Т12).
     expected = {
         "preparation": "temperature_overview",
         "cooldown": "cooldown_prediction",
-        "measurement": "cooldown_prediction",
+        "measurement": "r_thermal_live",
         "disassembly": "experiment_summary",
     }
     for phase, expected_main_id in expected.items():
@@ -100,23 +96,14 @@ def test_full_lifecycle_phase_widgets(app):
 
 
 def test_phase_sequence_does_not_carry_over_stale_widgets(app):
-    """Going cooldown → preparation → cooldown must discard and recreate
-    the cooldown widget (it should be a different instance the second
-    time around).
-
-    v0.56.1 (REG-2): the measurement phase now shares the
-    cooldown_prediction widget с the cooldown phase, so swapping
-    cooldown ↔ measurement intentionally reuses the same instance
-    (continuity of dual-channel asymptote state). To exercise the
-    discard/recreate path we instead detour through `preparation`,
-    which uses a different widget id (`temperature_overview`).
-    """
+    """Going cooldown → measurement → cooldown must not reuse the old
+    cooldown widget (it should have been discarded and recreated)."""
     view = AnalyticsView()
 
     view.set_phase("cooldown")
     widget_first = view.active_widgets().get("main")
 
-    view.set_phase("preparation")
+    view.set_phase("measurement")
     view.set_phase("cooldown")
     widget_second = view.active_widgets().get("main")
 
