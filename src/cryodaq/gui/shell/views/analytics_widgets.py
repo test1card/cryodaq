@@ -294,7 +294,11 @@ class TemperatureOverviewWidget(QWidget):
         pi.setXRange(now - window.seconds, now, padding=0)
         # Y must autoscale to data; X-pinning alone leaves Y at pyqtgraph
         # default ~[0,1], hiding 77-300K curves while legend still renders.
-        pi.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        # 2026-05-08 (v0.56.2): hysteresis-based Y autoRange to suppress
+        # per-sample micro-jitter — enable=0.95 means pyqtgraph rescales only
+        # when data leaves the central 95% band (was True = full reset every
+        # refresh tick → visible Y axis jitter on every new sample).
+        pi.enableAutoRange(axis=pg.ViewBox.YAxis, enable=0.95)
         self._maybe_refetch_history(window)
 
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
@@ -1694,6 +1698,10 @@ class TemperatureSteadyStateWidget(QWidget):
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "T", units="K", color=theme.PLOT_LABEL_COLOR)
+        # 2026-05-08 (v0.56.2): hysteresis-based Y autoRange — same as
+        # TemperatureOverviewWidget, prevents per-sample jitter when
+        # SteadyStatePredictor adds new readings each tick.
+        pi.enableAutoRange(axis="y", enable=0.95)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
 

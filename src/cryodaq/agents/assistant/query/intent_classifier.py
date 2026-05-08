@@ -35,23 +35,39 @@ def _build_landmark_hint(channel_manager: ChannelManager) -> str:
     even when an experiment-level channels.yaml entry happens to drift
     onto a similar phrasing. Returns an empty string when no landmarks
     are installed (backward-compat fallback).
+
+    2026-05-08: stronger formatting — landmark block приоритетнее EVERYTHING
+    else в prompt (поднят к топу system_prompt в ``classify``), aliases
+    listed exhaustively per channel так что Gemma e2b может pattern-match
+    каждую фразу к channel_id.
     """
     landmarks = channel_manager.get_landmarks()
     if not landmarks:
         return ""
-    lines: list[str] = ["КАНАЛЫ-LANDMARKS (фиксированы физически, не меняются):"]
+    lines: list[str] = [
+        "═══ ВАЖНЕЙШЕЕ ПРАВИЛО — LANDMARK КАНАЛЫ ═══",
+        "Эти каналы физически закреплены и НИКОГДА не меняются:",
+        "",
+    ]
     for ch_id in sorted(landmarks):
         entry = landmarks[ch_id]
         aliases = list(entry.get("aliases", []))
         physical = entry.get("physical", "")
-        headline = aliases[0] if aliases else physical or ch_id
-        if physical:
-            lines.append(f"  {ch_id} — {headline} ({physical})")
-        else:
-            lines.append(f"  {ch_id} — {headline}")
-        rest = aliases[1:] if aliases else []
-        if rest:
-            lines.append("    также может называться: " + ", ".join(rest))
+        lines.append(f"▶ {ch_id} ({physical})")
+        if aliases:
+            lines.append(f"  Любая из этих фраз → target_channels=[\"{ch_id}\"]:")
+            for alias in aliases:
+                lines.append(f"    • «{alias}»")
+        lines.append("")
+    lines.append(
+        "Если запрос содержит ЛЮБУЮ из перечисленных фраз выше — "
+        "ОБЯЗАТЕЛЬНО положи соответствующий channel_id в target_channels."
+    )
+    lines.append(
+        "Категория для таких запросов = current_value (если спрашивают "
+        "значение/температуру/сейчас)."
+    )
+    lines.append("═" * 50)
     return "\n".join(lines)
 
 
@@ -112,10 +128,23 @@ _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 # dict shapes, or arbitrary strings) collapses to ``None`` so the
 # RAGAdapter searches across the whole corpus rather than passing a
 # malformed ``WHERE`` clause to LanceDB.
+#
+# 2026-05-08: expanded к full 8-kind set после v0.55.7.1 KB expansion.
+# Pre-fix old set was {experiment_metadata, vault_note, operator_log}
+# — оператор спрашивает «процедура захолаживания» → classifier хочет
+# filter `procedure` → rejected → no filter → noisy retrieval с
+# experiment metadata вместо procedure markdown.
 _VALID_SOURCE_KINDS = frozenset({
     "experiment_metadata",
     "vault_note",
     "operator_log",
+    # v0.55.7.1 KB expansion (knowledge corpus):
+    "equipment_manual",
+    "procedure",
+    "operator_manual",
+    "readme",
+    "readme_en",
+    "changelog",
 })
 
 
@@ -228,10 +257,18 @@ class IntentClassifier:
         self._channel_manager = channel_manager  # stored by reference, never cached
 
     async def classify(self, query: str) -> QueryIntent:
-        """Classify query text into a QueryIntent. Never raises."""
+        """Classify query text into a QueryIntent. Never raises.
+
+        2026-05-08: landmark hint moved к ТОЧНО ВЕРХ system prompt
+        (BEFORE INTENT_CLASSIFIER_SYSTEM) — gemma4:e2b слабая модель и
+        position bias significant: landmark instructions в конце были
+        ignored, в начале — followed.
+        """
         try:
             channel_hint = _build_channel_hint(self._channel_manager)
-            system_prompt = INTENT_CLASSIFIER_SYSTEM + channel_hint
+            # Landmark hint goes FIRST — gemma4:e2b position-biased,
+            # critical instructions must lead.
+            system_prompt = channel_hint + "\n\n" + INTENT_CLASSIFIER_SYSTEM
             user_prompt = INTENT_CLASSIFIER_USER.format(query=query)
             result = await self._ollama.generate(
                 user_prompt,

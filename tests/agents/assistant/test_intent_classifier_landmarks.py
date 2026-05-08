@@ -68,13 +68,16 @@ def test_landmark_hint_empty_when_no_landmarks() -> None:
 def test_landmark_hint_lists_aliases_under_each_channel() -> None:
     mgr = _make_manager(landmarks=_T11_LANDMARKS)
     hint = _build_landmark_hint(mgr)
-    # First-alias headline plus parenthetical physical description
-    assert "Т11 — азотная плита (1-я ступень GM-cooler, ~40K при работе)" in hint
-    # Remaining aliases joined as a "также может называться:" tail
+    # 2026-05-08 (v0.56.2): aligned with landmark v3 prompt reformat —
+    # headlines are now "▶ {ch_id} ({physical})" with aliases listed as
+    # bullet points underneath ("    • «alias»"). Substring matches on
+    # alias text still hold against the bullet-formatted lines.
+    assert "▶ Т11 (1-я ступень GM-cooler, ~40K при работе)" in hint
+    # Aliases rendered as bullet rows
     assert "плита" in hint
     assert "первая ступень" in hint
     # Т12 path
-    assert "Т12 — вторая ступень" in hint
+    assert "▶ Т12 (2-я ступень GM-cooler, ~2.9K при работе)" in hint
     assert "холодная точка" in hint
 
 
@@ -99,10 +102,12 @@ def test_build_channel_hint_emits_landmarks_and_experiment_separately() -> None:
         landmarks=_T11_LANDMARKS,
     )
     hint = _build_channel_hint(mgr)
-    assert "КАНАЛЫ-LANDMARKS" in hint
+    # 2026-05-08 (v0.56.2): v3 prompt header renamed
+    # "КАНАЛЫ-LANDMARKS:" → "═══ ВАЖНЕЙШЕЕ ПРАВИЛО — LANDMARK КАНАЛЫ ═══"
+    assert "LANDMARK КАНАЛЫ" in hint
     assert "КАНАЛЫ ТЕКУЩЕГО ЭКСПЕРИМЕНТА" in hint
     # Landmark section comes before experiment section.
-    assert hint.index("КАНАЛЫ-LANDMARKS") < hint.index("КАНАЛЫ ТЕКУЩЕГО ЭКСПЕРИМЕНТА")
+    assert hint.index("LANDMARK КАНАЛЫ") < hint.index("КАНАЛЫ ТЕКУЩЕГО ЭКСПЕРИМЕНТА")
     # Experiment channel data still rendered.
     assert 'Т1 → "Криостат верх"' in hint
     # Landmark aliases present.
