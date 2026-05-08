@@ -80,10 +80,14 @@ def test_full_lifecycle_phase_widgets(app):
     """Cycling through all experiment phases must place the expected main widget."""
     view = AnalyticsView()
 
+    # v0.56.1 (REG-2): measurement.main is cooldown_prediction (was
+    # r_thermal_live in v0.54.0 / temperature_steady_state in v0.55.6.1).
+    # The cooldown_prediction widget now serves both cooldown +
+    # measurement phases с dual-channel asymptote (Т11 + Т12).
     expected = {
         "preparation": "temperature_overview",
         "cooldown": "cooldown_prediction",
-        "measurement": "r_thermal_live",
+        "measurement": "cooldown_prediction",
         "disassembly": "experiment_summary",
     }
     for phase, expected_main_id in expected.items():

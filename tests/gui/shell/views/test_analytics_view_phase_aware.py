@@ -180,8 +180,11 @@ def test_set_cooldown_forwards_to_cooldown_prediction_widget(app):
     main = view.active_widgets()["main"]
     inner = getattr(main, "_inner", None)
     assert inner is not None
-    # History populated.
-    xs, _ = inner._history_curve.getData()
+    # v0.56.1: CooldownPredictionWidget contract — set_cooldown_data
+    # routes predicted_trajectory + ci_trajectory к the inner
+    # PredictionWidget (set_prediction). actual_trajectory is empty by
+    # contract; live history flows via set_cold_temperature_reading.
+    xs, _ = inner._central_curve.getData()
     assert len(xs) == 2
 
 
@@ -293,5 +296,9 @@ def test_phase_swap_replays_cached_cooldown(app):
     view.set_cooldown(data)
     view.set_phase("cooldown")  # mounts CooldownPredictionWidget
     main = view.active_widgets()["main"]
-    xs, _ = main._inner._history_curve.getData()
+    # v0.56.1: cached CooldownData replays via set_cooldown_data which
+    # routes predicted_trajectory к the inner PredictionWidget's
+    # _central_curve (set_prediction). actual_trajectory не plotted —
+    # live history flows separately через set_cold_temperature_reading.
+    xs, _ = main._inner._central_curve.getData()
     assert len(xs) == 2
