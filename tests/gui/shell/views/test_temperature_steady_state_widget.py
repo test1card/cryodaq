@@ -171,12 +171,18 @@ def test_hero_readout_shows_last_value_when_not_settled(app: QApplication) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_analytics_layout_measurement_phase_uses_temperature_steady_state() -> None:
+def test_analytics_layout_measurement_phase_uses_cooldown_prediction() -> None:
+    """v0.56.1 (REG-2): measurement phase shares cooldown_prediction
+    widget с the cooldown phase (dual-channel asymptote). The
+    temperature_steady_state widget is no longer wired into the layout
+    YAML — the dual-channel asymptote behavior moved to
+    CooldownPredictionWidget so the same chart serves both phases.
+    R_thermal stays demoted to top_right (still useful для
+    thermal-link diagnostics)."""
     cfg_path = (
         Path(__file__).resolve().parents[4] / "config" / "analytics_layout.yaml"
     )
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     measurement = raw["phases"]["measurement"]
-    assert measurement["main"] == "temperature_steady_state"
-    # R_thermal demoted but still surfaced in the same phase.
+    assert measurement["main"] == "cooldown_prediction"
     assert measurement["top_right"] == "r_thermal_live"

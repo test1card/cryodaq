@@ -96,14 +96,23 @@ def test_full_lifecycle_phase_widgets(app):
 
 
 def test_phase_sequence_does_not_carry_over_stale_widgets(app):
-    """Going cooldown → measurement → cooldown must not reuse the old
-    cooldown widget (it should have been discarded and recreated)."""
+    """Going cooldown → preparation → cooldown must discard and recreate
+    the cooldown widget (it should be a different instance the second
+    time around).
+
+    v0.56.1 (REG-2): the measurement phase now shares the
+    cooldown_prediction widget с the cooldown phase, so swapping
+    cooldown ↔ measurement intentionally reuses the same instance
+    (continuity of dual-channel asymptote state). To exercise the
+    discard/recreate path we instead detour through `preparation`,
+    which uses a different widget id (`temperature_overview`).
+    """
     view = AnalyticsView()
 
     view.set_phase("cooldown")
     widget_first = view.active_widgets().get("main")
 
-    view.set_phase("measurement")
+    view.set_phase("preparation")
     view.set_phase("cooldown")
     widget_second = view.active_widgets().get("main")
 
