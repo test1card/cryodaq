@@ -63,6 +63,12 @@ class TempPlotWidget(QWidget):
         # mirror refreshed from the broadcast.
         self._current_window = get_time_window_controller().get_window()
         self._is_log_y = False
+        # 2026-05-08 (v0.56.3 amend): widget-side Y-range cache for the
+        # deadband helper — see _update_y_range_with_deadband for why we
+        # do not trust pyqtgraph's getViewBox().viewRange() readings.
+        self._y_cache_lo: float | None = None
+        self._y_cache_hi: float | None = None
+        self._y_last_set_ts: float = 0.0
         self._build_ui()
         self._rebuild_curves()
         self._channel_mgr.on_change(self._on_channels_changed)
@@ -192,26 +198,64 @@ class TempPlotWidget(QWidget):
         self._update_y_range_with_deadband(in_window_y)
 
     def _update_y_range_with_deadband(self, in_window_y: list[float]) -> None:
-        """Resize Y range only if new data drifts outside ±10% of current span.
+        """Cache-driven deadband: rate-limit to ≥2 s between Y resizes,
+        widen Y only when new bounds escape ±max(15%, 0.5 K) of the
+        widget-cached last-set range.
 
-        pyqtgraph rescales on every setData call by default — that is
-        what produces the per-sample jitter the operator sees. Tracking
-        a deadband here keeps the visible band stable while the data
-        wanders, and only redraws when the actual envelope changes.
+        Two prior fixes failed to stop the jitter operator-side:
+        - v0.56.2 used pyqtgraph ``enableAutoRange(axis="y", enable=0.95)``,
+          which is a percentile selector that re-runs on every ``setData``.
+        - v0.56.3 disabled native autoRange and read the current Y range
+          via ``getViewBox().viewRange()[1]`` to gate the deadband.
+
+        The v0.56.3 fix likely fired spuriously because pyqtgraph can
+        report stale or default ``viewRange`` mid-update (especially
+        right after ``setAxisItems`` / ``setData`` re-computes
+        ``childrenBoundingRect``), so the comparison kept saying "drift
+        too big, resize" even when no real envelope change had occurred.
+
+        This version owns Y range state widget-side: cache the range
+        we last asked pyqtgraph for, gate every future setYRange against
+        that cache (never against pyqtgraph's reported view), and rate
+        limit so even pathological signals can resize Y at most once
+        per 2 seconds.
         """
+        import time as _time
+
         if not in_window_y or self._is_log_y:
             return
-        new_lo = min(in_window_y)
-        new_hi = max(in_window_y)
-        span = max(new_hi - new_lo, 1.0)
-        new_lo -= span * 0.05
-        new_hi += span * 0.05
+        new_lo_raw = min(in_window_y)
+        new_hi_raw = max(in_window_y)
+        span = max(new_hi_raw - new_lo_raw, 1.0)
+        new_lo = new_lo_raw - span * 0.05
+        new_hi = new_hi_raw + span * 0.05
         pi = self._plot.getPlotItem()
-        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
-        cur_span = max(cur_hi - cur_lo, 1.0)
-        threshold = cur_span * 0.10
-        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+
+        # First call — seed the cache without rate-limit / threshold gate.
+        if self._y_cache_lo is None or self._y_cache_hi is None:
             pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = _time.monotonic()
+            return
+
+        # Rate limit — at most one Y resize per 2 wall-clock seconds.
+        now_mono = _time.monotonic()
+        if now_mono - self._y_last_set_ts < 2.0:
+            return
+
+        # Threshold floor 0.5 K so sensor noise (~0.01-0.1 K) is absorbed
+        # even when the visible span is small (steady-state at 4 K).
+        cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
+        threshold = max(cached_span * 0.15, 0.5)
+        if (
+            abs(new_lo - self._y_cache_lo) > threshold
+            or abs(new_hi - self._y_cache_hi) > threshold
+        ):
+            pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = now_mono
 
     # ------------------------------------------------------------------
     # Time picker

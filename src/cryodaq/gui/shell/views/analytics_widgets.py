@@ -219,6 +219,12 @@ class TemperatureOverviewWidget(QWidget):
         self._history_worker = None
         self._last_history_fetch_ts: float = 0.0
         self._window_selector = TimeWindowSelector()
+        # 2026-05-08 (v0.56.3 amend): widget-side Y-range cache. See
+        # _update_y_range_with_deadband for why pyqtgraph's reported
+        # viewRange is not trustworthy as the deadband reference.
+        self._y_cache_lo: float | None = None
+        self._y_cache_hi: float | None = None
+        self._y_last_set_ts: float = 0.0
         self._build_ui()
         self._window_selector.window_changed.connect(self._apply_window)
         self._fetch_history()
@@ -241,6 +247,12 @@ class TemperatureOverviewWidget(QWidget):
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "Температура", units="K", color=theme.PLOT_LABEL_COLOR)
         pi.getAxis("left").enableAutoSIPrefix(False)
+        # 2026-05-08 (v0.56.3 amend): disable Y autoRange at construction
+        # time, NOT only at first _apply_window — the v0.56.3 ordering
+        # left a window where pyqtgraph could re-arm autoRange before
+        # _apply_window ran. _update_y_range_with_deadband owns Y end
+        # to end via a widget-side cache.
+        pi.disableAutoRange(axis="y")
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.addLegend(offset=(10, 10))
@@ -301,16 +313,20 @@ class TemperatureOverviewWidget(QWidget):
         self._maybe_refetch_history(window)
 
     def _update_y_range_with_deadband(self, x_lo: float, x_hi: float) -> None:
-        """Resize Y range only if in-window data drifts outside ±10% of
-        current span.
+        """Cache-driven Y deadband — see TempPlotWidget for the rationale.
 
-        Walks ``self._series`` once and rebuilds [min, max] over points
-        whose timestamp lies within the visible X window, then compares
-        against ``getViewBox().viewRange()`` and applies ``setYRange``
-        only when the envelope has actually moved. Keeps the live plot
-        from rescaling on every refresh tick.
+        v0.56.3 used ``getViewBox().viewRange()`` as the deadband
+        reference, but pyqtgraph can return stale or default values
+        right after ``setData`` / ``setAxisItems`` recompute
+        ``childrenBoundingRect``, so the comparison kept firing on
+        every tick. This version caches the last range we asked
+        pyqtgraph to apply and gates future setYRange calls against
+        that cache, never against pyqtgraph's reported view. Combined
+        with a 2 s rate limit and a 0.5 K threshold floor, the Y axis
+        becomes visually stable under live mock + replay 60×/600×.
         """
         import math
+        import time as _time
 
         in_window: list[float] = []
         for series in self._series.values():
@@ -319,17 +335,36 @@ class TemperatureOverviewWidget(QWidget):
                     in_window.append(y)
         if not in_window:
             return
-        new_lo = min(in_window)
-        new_hi = max(in_window)
-        span = max(new_hi - new_lo, 1.0)
-        new_lo -= span * 0.05
-        new_hi += span * 0.05
+        new_lo_raw = min(in_window)
+        new_hi_raw = max(in_window)
+        span = max(new_hi_raw - new_lo_raw, 1.0)
+        new_lo = new_lo_raw - span * 0.05
+        new_hi = new_hi_raw + span * 0.05
         pi = self._plot.getPlotItem()
-        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
-        cur_span = max(cur_hi - cur_lo, 1.0)
-        threshold = cur_span * 0.10
-        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+
+        # First call — seed the cache without rate-limit / threshold gate.
+        if self._y_cache_lo is None or self._y_cache_hi is None:
             pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = _time.monotonic()
+            return
+
+        # Rate limit — ≤1 Y resize per 2 wall-clock seconds.
+        now_mono = _time.monotonic()
+        if now_mono - self._y_last_set_ts < 2.0:
+            return
+
+        cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
+        threshold = max(cached_span * 0.15, 0.5)
+        if (
+            abs(new_lo - self._y_cache_lo) > threshold
+            or abs(new_hi - self._y_cache_hi) > threshold
+        ):
+            pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = now_mono
 
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
         import math
@@ -693,8 +728,14 @@ class CooldownPredictionWidget(QWidget):
     _SETTLE_THRESHOLD: float = 30.0
     # Internal predictor key — channel-id-agnostic, only the widget feeds it.
     _PRED_CHANNEL = "cold_stage"
-    # Cap raw-buffer size (mirrors VacuumPredictionWidget._MAX_RAW_PTS).
-    _MAX_RAW_PTS: int = 5000
+    # 2026-05-08 (v0.56.3 amend): bump 5000 → 50000. At replay 600× the
+    # raw_cold_buffer fills 5000 within ~3.7 s wall-clock and trim-from-
+    # left visibly erases the LEFT side of the prediction history plot
+    # in 2-3 step jumps (operator complaint). 50 000 covers ≈14 h live
+    # at 1 Hz or the demo MTO 18.85 h replay (≈6700 samples per channel)
+    # with margin. VacuumPredictionWidget left at 5000 — its replay
+    # cadence has not surfaced the same UX issue.
+    _MAX_RAW_PTS: int = 50000
     # Canonical cold-stage landmark id from config/physical_alarms.yaml.
     # MainWindowV2 routes only readings whose channel resolves to this id;
     # configuration-decoupling is left to a future spec per architect.
@@ -792,7 +833,13 @@ class CooldownPredictionWidget(QWidget):
         val = float(reading.value)
         self._raw_cold_buffer.append((ts, val))
         if len(self._raw_cold_buffer) > self._MAX_RAW_PTS:
-            del self._raw_cold_buffer[: len(self._raw_cold_buffer) - self._MAX_RAW_PTS]
+            # 2026-05-08 (v0.56.3 amend): decimate stride-2 instead of
+            # truncate-from-left. The first sample is preserved so
+            # _apply_x_range's `self._history[0][0]` X-anchor stays
+            # stable, eliminating the visible left-edge jump that
+            # appeared each time the cap was hit. Trades time
+            # resolution for retention.
+            self._raw_cold_buffer = self._raw_cold_buffer[:1] + self._raw_cold_buffer[1::2]
         if ts > self._last_ts_seen:
             self._ss_predictor.add_point(self._PRED_CHANNEL, ts, val)
             self._last_ts_seen = ts
@@ -1687,7 +1734,12 @@ class TemperatureSteadyStateWidget(QWidget):
         ("Т12", "T12", "Т12"),
         ("Т11", "T11", "Т11"),
     )
-    _MAX_RAW_PTS: int = 5000
+    # 2026-05-08 (v0.56.3 amend): bump 5000 → 50000. At replay 600× the
+    # raw_buffer fills 5000 within ~3.7 s wall-clock and trim-from-left
+    # erases the visible left edge of the plot in 2-3 step jumps. 50 000
+    # covers 14 h live (1 Hz) or ≈1.4 h replay-time at 600× — plenty for
+    # the demo MTO 18.85 h replay (≈6700 samples per channel).
+    _MAX_RAW_PTS: int = 50000
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1699,6 +1751,11 @@ class TemperatureSteadyStateWidget(QWidget):
             key: [] for _, key, _ in self._LANDMARKS
         }
         self._last_ts: dict[str, float] = {key: 0.0 for _, key, _ in self._LANDMARKS}
+        # 2026-05-08 (v0.56.3 amend): widget-side Y-range cache for the
+        # cache-driven deadband helper.
+        self._y_cache_lo: float | None = None
+        self._y_cache_hi: float | None = None
+        self._y_last_set_ts: float = 0.0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1802,7 +1859,13 @@ class TemperatureSteadyStateWidget(QWidget):
             buf = self._buffers[key]
             buf.append((ts, value))
             if len(buf) > self._MAX_RAW_PTS:
-                del buf[: len(buf) - self._MAX_RAW_PTS]
+                # 2026-05-08 (v0.56.3 amend): decimate stride-2 instead of
+                # truncate-from-left. Truncation made the plot's left edge
+                # jump forward visibly each time the cap was hit; stride-2
+                # downsamples the older history while keeping the first
+                # sample so the X-range anchor (set by _apply_x_range) is
+                # preserved. Trades time resolution for retention.
+                buf[:] = buf[:1] + buf[1::2]
             if ts > self._last_ts[key]:
                 self._predictors[key].add_point(key, ts, value)
                 self._last_ts[key] = ts
@@ -1855,11 +1918,13 @@ class TemperatureSteadyStateWidget(QWidget):
         self._update_y_range_with_deadband()
 
     def _update_y_range_with_deadband(self) -> None:
-        """Resize Y range only when buffered samples + visible asymptotes
-        drift outside ±10% of current span. Keeps the asymptote band
-        legible without chasing every new SteadyStatePredictor sample.
+        """Cache-driven Y deadband — same approach as TempPlotWidget /
+        TemperatureOverviewWidget. Includes visible asymptote line
+        positions in the envelope so the predicted-T marker stays in
+        view as it converges.
         """
         import math
+        import time as _time
 
         in_window: list[float] = []
         for buf in self._buffers.values():
@@ -1871,17 +1936,34 @@ class TemperatureSteadyStateWidget(QWidget):
                 in_window.append(float(asym.value()))
         if not in_window:
             return
-        new_lo = min(in_window)
-        new_hi = max(in_window)
-        span = max(new_hi - new_lo, 1.0)
-        new_lo -= span * 0.05
-        new_hi += span * 0.05
+        new_lo_raw = min(in_window)
+        new_hi_raw = max(in_window)
+        span = max(new_hi_raw - new_lo_raw, 1.0)
+        new_lo = new_lo_raw - span * 0.05
+        new_hi = new_hi_raw + span * 0.05
         pi = self._plot.getPlotItem()
-        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
-        cur_span = max(cur_hi - cur_lo, 1.0)
-        threshold = cur_span * 0.10
-        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+
+        if self._y_cache_lo is None or self._y_cache_hi is None:
             pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = _time.monotonic()
+            return
+
+        now_mono = _time.monotonic()
+        if now_mono - self._y_last_set_ts < 2.0:
+            return
+
+        cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
+        threshold = max(cached_span * 0.15, 0.5)
+        if (
+            abs(new_lo - self._y_cache_lo) > threshold
+            or abs(new_hi - self._y_cache_hi) > threshold
+        ):
+            pi.setYRange(new_lo, new_hi, padding=0)
+            self._y_cache_lo = new_lo
+            self._y_cache_hi = new_hi
+            self._y_last_set_ts = now_mono
 
 
 # ---------------------------------------------------------------------------

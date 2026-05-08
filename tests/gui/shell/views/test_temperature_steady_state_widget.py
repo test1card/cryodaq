@@ -125,14 +125,31 @@ def test_invalid_value_skipped(app: QApplication) -> None:
     w.deleteLater()
 
 
-def test_buffer_truncates_at_max_pts(app: QApplication) -> None:
+def test_buffer_decimates_on_overflow(app: QApplication, monkeypatch) -> None:
+    """v0.56.3: when the raw buffer exceeds ``_MAX_RAW_PTS``, the widget
+    decimates stride-2 instead of truncating from the left so the
+    plot's left edge stays anchored. The contract pins three
+    invariants:
+
+    - the buffer never grows past ``_MAX_RAW_PTS`` (memory bounded),
+    - the first sample is preserved (X-range anchor stable for
+      ``_apply_x_range``),
+    - the most recent sample is preserved (live data visible).
+
+    The class-level cap is 50 000 in production (covers ~14 h live
+    + replay-time at 600×). The test patches it down to a small value
+    so the assertion runs in milliseconds rather than minutes — the
+    decimation logic is independent of the actual cap.
+    """
+    monkeypatch.setattr(TemperatureSteadyStateWidget, "_MAX_RAW_PTS", 100)
     w = TemperatureSteadyStateWidget()
     cap = TemperatureSteadyStateWidget._MAX_RAW_PTS
     for i in range(cap + 50):
         w.set_temperature_readings({"Т12": _reading("Т12", 4.0, ts=float(i))})
-    assert len(w._buffers["T12"]) == cap
-    # The last reading must be the most recent one.
-    assert w._buffers["T12"][-1][0] == float(cap + 50 - 1)
+    buf = w._buffers["T12"]
+    assert len(buf) <= cap, "raw buffer must stay bounded by _MAX_RAW_PTS"
+    assert buf[0][0] == 0.0, "first sample must survive decimation (X anchor)"
+    assert buf[-1][0] == float(cap + 50 - 1), "most recent sample must survive"
     w.deleteLater()
 
 

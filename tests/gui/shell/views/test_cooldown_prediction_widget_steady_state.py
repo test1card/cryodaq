@@ -171,7 +171,19 @@ def test_cold_reading_none_is_noop(app) -> None:
 
 
 # 5. Buffer cap
-def test_cold_reading_buffer_caps_at_max_raw_pts(app) -> None:
+def test_cold_reading_buffer_decimates_on_overflow(app, monkeypatch) -> None:
+    """v0.56.3: raw cold buffer decimates stride-2 on overflow (not
+    truncate-from-left) so the prediction history plot's left edge
+    stays anchored. Contract:
+
+    - buffer length stays ≤ ``_MAX_RAW_PTS`` (bounded memory),
+    - first sample preserved (X-anchor for ``_apply_x_range``),
+    - most recent sample preserved (live cooldown trace).
+
+    Production cap is 50 000; tests patch it down so the assertion
+    runs in ms — decimation logic is cap-independent.
+    """
+    monkeypatch.setattr(CooldownPredictionWidget, "_MAX_RAW_PTS", 100)
     w = CooldownPredictionWidget()
     cap = w._MAX_RAW_PTS
     now = time.time()
@@ -181,9 +193,11 @@ def test_cold_reading_buffer_caps_at_max_raw_pts(app) -> None:
             for i in range(cap + 50):
                 w.set_cold_temperature_reading(_reading(now + i, 4.5))
 
-    assert len(w._raw_cold_buffer) == cap
-    # Trimming drops the oldest 50 — first remaining ts should be now+50.
-    assert w._raw_cold_buffer[0][0] == pytest.approx(now + 50)
+    buf = w._raw_cold_buffer
+    assert len(buf) <= cap
+    assert buf[0][0] == pytest.approx(now), "first sample must survive decimation"
+    assert buf[-1][0] == pytest.approx(now + (cap + 50) - 1), \
+        "most recent sample must survive"
 
 
 # 6. Settled predictor
