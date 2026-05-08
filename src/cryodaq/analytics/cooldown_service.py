@@ -224,6 +224,11 @@ class CooldownService:
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
 
+        # F-ReplayPredictor (v0.56.3): track latest reading timestamp from
+        # the data stream so predict() works correctly with accelerated
+        # replay (where wall-clock time and reading timestamps decouple).
+        self._last_reading_ts: float | None = None
+
         # Cached prediction for query agent (F30)
         self._last_prediction: dict[str, Any] | None = None
         # v0.55.3 — raw PredictionResult kept alongside the dict summary
@@ -297,6 +302,12 @@ class CooldownService:
         if mean_arr is None or upper_arr is None or lower_arr is None:
             return None
 
+        # TODO (v0.56.3 follow-up): same wall-vs-reading clock pattern as
+        # _do_predict — if the caller (PhysicsAlarmDetector) passes
+        # time.time() while _cooldown_wall_start was seeded from
+        # reading.timestamp, ``target_h`` will undercount under
+        # accelerated replay. Verify caller before swapping ts_monotonic
+        # for self._last_reading_ts; demo blocker is _do_predict only.
         target_h = (ts_monotonic - self._cooldown_wall_start) / 3600.0
         future_t = pred.future_t
         if target_h < float(future_t[0]) or target_h > float(future_t[-1]):
@@ -384,6 +395,7 @@ class CooldownService:
                     continue
 
                 reading_ts = reading.timestamp.timestamp()
+                self._last_reading_ts = reading_ts
 
                 if reading.channel == self._channel_cold:
                     self._last_T_cold = reading.value
@@ -438,8 +450,20 @@ class CooldownService:
             return
 
         # Compute elapsed time
-        if self._cooldown_wall_start is not None and cooldown_active:
-            t_elapsed = (time.time() - self._cooldown_wall_start) / 3600.0
+        # F-ReplayPredictor (v0.56.3): use the most recent reading timestamp
+        # instead of time.time() so the predictor works under accelerated
+        # replay (where readings stream faster than wall clock) AND under
+        # live data (where reading_ts ≈ wall clock anyway). Mixing the two
+        # clocks collapses the Gaussian weighting on t_at_p vs t_elapsed
+        # at high replay speeds → predictor falls back to uniform weights
+        # and emits trajectories anchored at "now" instead of the
+        # accelerated timeline.
+        if (
+            self._cooldown_wall_start is not None
+            and cooldown_active
+            and self._last_reading_ts is not None
+        ):
+            t_elapsed = (self._last_reading_ts - self._cooldown_wall_start) / 3600.0
         else:
             t_elapsed = 0.0
 
