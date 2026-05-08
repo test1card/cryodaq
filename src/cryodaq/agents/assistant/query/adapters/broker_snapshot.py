@@ -69,8 +69,33 @@ class BrokerSnapshot:
                 logger.error("BrokerSnapshot consume error: %s", exc)
 
     async def latest(self, channel: str) -> Reading | None:
+        """Return latest reading, accepting canonical id OR display name.
+
+        2026-05-08 (v0.56.3): drivers store ``Reading.channel`` as the
+        full label from ``instruments.yaml`` (e.g. ``"Т1 Криостат верх"``),
+        while ``QueryRouter._resolve_target_channels`` returns canonical
+        short ids (``"Т1"``). Without this multi-tier lookup the snapshot
+        hit-rate from the assistant pipeline is zero — every
+        ``current_value`` query falls through to «нет данных».
+        """
         async with self._lock:
-            return self._latest.get(channel)
+            # Tier 1 — direct hit (display-name path).
+            if channel in self._latest:
+                return self._latest[channel]
+            # Tier 2 — canonical id → display name via ChannelManager.
+            if self._channel_manager is not None:
+                try:
+                    display = self._channel_manager.get_display_name(channel)
+                except Exception:
+                    display = None
+                if display and display in self._latest:
+                    return self._latest[display]
+            # Tier 3 — prefix-match for "<canonical> <suffix>" labels
+            # so the lookup also works without a ChannelManager bound.
+            for key, reading in self._latest.items():
+                if key == channel or key.startswith(channel + " "):
+                    return reading
+            return None
 
     async def latest_all(self) -> dict[str, Reading]:
         async with self._lock:

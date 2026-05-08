@@ -118,11 +118,12 @@ class TempPlotWidget(QWidget):
         # auto-rescale to mK / µK when the value range crosses decades.
         left_axis.enableAutoSIPrefix(False)
         left_axis.setWidth(theme.PLOT_AXIS_WIDTH_PX)
-        # 2026-05-08: hysteresis-based Y autoRange to suppress per-sample
-        # micro-jitter on Mac mock + general live-data UX. enable=0.95
-        # means pyqtgraph rescales только when data leave the central
-        # 95% band — stable view, no flicker on each refresh tick.
-        pi.enableAutoRange(axis="y", enable=0.95)
+        # 2026-05-08 (v0.56.3): manual Y deadband applied in refresh().
+        # pyqtgraph's enableAutoRange(enable=<float>) is a percentile of
+        # data range, NOT hysteresis — it still recomputes on every
+        # setData → visible jitter. Disable native autoRange on Y so
+        # _update_y_range_with_deadband owns the axis end-to-end.
+        pi.disableAutoRange(axis="y")
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.getAxis("bottom").setStyle(showValues=False)
@@ -157,9 +158,13 @@ class TempPlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
+        import math
+
         now = time.time()
         window = self._current_window
+        x_min = now - window.seconds if window != TimeWindow.ALL else None
 
+        in_window_y: list[float] = []
         for ch_id, item in self._plot_items.items():
             pts = self._buffer.get_history(ch_id)
             if not pts:
@@ -170,13 +175,43 @@ class TempPlotWidget(QWidget):
             xs = [t for t, _ in pts]
             ys = [v for _, v in pts]
             item.setData(x=xs, y=ys)
+            for t, v in pts:
+                if not math.isfinite(v):
+                    continue
+                if x_min is None or t >= x_min:
+                    in_window_y.append(v)
 
         if window == TimeWindow.ALL:
             self._plot.enableAutoRange(axis="x")
         else:
             x_max = now
-            x_min = now - window.seconds
             self._plot.setXRange(x_min, x_max, padding=0)
+
+        # 2026-05-08 (v0.56.3): manual Y deadband — see _init_plot for why
+        # pyqtgraph's float enable= autoRange is not enough.
+        self._update_y_range_with_deadband(in_window_y)
+
+    def _update_y_range_with_deadband(self, in_window_y: list[float]) -> None:
+        """Resize Y range only if new data drifts outside ±10% of current span.
+
+        pyqtgraph rescales on every setData call by default — that is
+        what produces the per-sample jitter the operator sees. Tracking
+        a deadband here keeps the visible band stable while the data
+        wanders, and only redraws when the actual envelope changes.
+        """
+        if not in_window_y or self._is_log_y:
+            return
+        new_lo = min(in_window_y)
+        new_hi = max(in_window_y)
+        span = max(new_hi - new_lo, 1.0)
+        new_lo -= span * 0.05
+        new_hi += span * 0.05
+        pi = self._plot.getPlotItem()
+        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
+        cur_span = max(cur_hi - cur_lo, 1.0)
+        threshold = cur_span * 0.10
+        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+            pi.setYRange(new_lo, new_hi, padding=0)
 
     # ------------------------------------------------------------------
     # Time picker

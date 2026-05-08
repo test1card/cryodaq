@@ -292,14 +292,44 @@ class TemperatureOverviewWidget(QWidget):
             return
         now = time.time()
         pi.setXRange(now - window.seconds, now, padding=0)
-        # Y must autoscale to data; X-pinning alone leaves Y at pyqtgraph
-        # default ~[0,1], hiding 77-300K curves while legend still renders.
-        # 2026-05-08 (v0.56.2): hysteresis-based Y autoRange to suppress
-        # per-sample micro-jitter — enable=0.95 means pyqtgraph rescales only
-        # when data leaves the central 95% band (was True = full reset every
-        # refresh tick → visible Y axis jitter on every new sample).
-        pi.enableAutoRange(axis=pg.ViewBox.YAxis, enable=0.95)
+        # 2026-05-08 (v0.56.3): manual Y deadband. pyqtgraph's
+        # enableAutoRange(enable=<float>) is a percentile selector that
+        # still recomputes the range on every setData → visible
+        # per-sample jitter. _update_y_range_with_deadband owns Y.
+        pi.disableAutoRange(axis=pg.ViewBox.YAxis)
+        self._update_y_range_with_deadband(now - window.seconds, now)
         self._maybe_refetch_history(window)
+
+    def _update_y_range_with_deadband(self, x_lo: float, x_hi: float) -> None:
+        """Resize Y range only if in-window data drifts outside ±10% of
+        current span.
+
+        Walks ``self._series`` once and rebuilds [min, max] over points
+        whose timestamp lies within the visible X window, then compares
+        against ``getViewBox().viewRange()`` and applies ``setYRange``
+        only when the envelope has actually moved. Keeps the live plot
+        from rescaling on every refresh tick.
+        """
+        import math
+
+        in_window: list[float] = []
+        for series in self._series.values():
+            for x, y in zip(series.xs, series.ys):
+                if x_lo <= x <= x_hi and math.isfinite(y):
+                    in_window.append(y)
+        if not in_window:
+            return
+        new_lo = min(in_window)
+        new_hi = max(in_window)
+        span = max(new_hi - new_lo, 1.0)
+        new_lo -= span * 0.05
+        new_hi += span * 0.05
+        pi = self._plot.getPlotItem()
+        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
+        cur_span = max(cur_hi - cur_lo, 1.0)
+        threshold = cur_span * 0.10
+        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+            pi.setYRange(new_lo, new_hi, padding=0)
 
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
         import math
@@ -1698,10 +1728,11 @@ class TemperatureSteadyStateWidget(QWidget):
         apply_plot_style(self._plot)
         pi = self._plot.getPlotItem()
         pi.setLabel("left", "T", units="K", color=theme.PLOT_LABEL_COLOR)
-        # 2026-05-08 (v0.56.2): hysteresis-based Y autoRange — same as
-        # TemperatureOverviewWidget, prevents per-sample jitter when
-        # SteadyStatePredictor adds new readings each tick.
-        pi.enableAutoRange(axis="y", enable=0.95)
+        # 2026-05-08 (v0.56.3): manual Y deadband applied in _refresh().
+        # pyqtgraph's float enable= autoRange still rescales every
+        # setData — disable native autoRange so the deadband helper
+        # owns Y end-to-end (mirror of TemperatureOverviewWidget).
+        pi.disableAutoRange(axis="y")
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
 
@@ -1818,6 +1849,39 @@ class TemperatureSteadyStateWidget(QWidget):
                     hero.setText(f"{label}: {last_val:.2f} K — стабилизация…")
                 else:
                     hero.setText(f"{label}: стабилизация…")
+        # 2026-05-08 (v0.56.3): manual Y deadband (same rationale as
+        # TemperatureOverviewWidget — pyqtgraph float autoRange is a
+        # percentile not hysteresis).
+        self._update_y_range_with_deadband()
+
+    def _update_y_range_with_deadband(self) -> None:
+        """Resize Y range only when buffered samples + visible asymptotes
+        drift outside ±10% of current span. Keeps the asymptote band
+        legible without chasing every new SteadyStatePredictor sample.
+        """
+        import math
+
+        in_window: list[float] = []
+        for buf in self._buffers.values():
+            for _t, v in buf:
+                if math.isfinite(v):
+                    in_window.append(v)
+        for key, asym in self._asym_lines.items():
+            if asym.isVisible():
+                in_window.append(float(asym.value()))
+        if not in_window:
+            return
+        new_lo = min(in_window)
+        new_hi = max(in_window)
+        span = max(new_hi - new_lo, 1.0)
+        new_lo -= span * 0.05
+        new_hi += span * 0.05
+        pi = self._plot.getPlotItem()
+        cur_lo, cur_hi = pi.getViewBox().viewRange()[1]
+        cur_span = max(cur_hi - cur_lo, 1.0)
+        threshold = cur_span * 0.10
+        if abs(new_lo - cur_lo) > threshold or abs(new_hi - cur_hi) > threshold:
+            pi.setYRange(new_lo, new_hi, padding=0)
 
 
 # ---------------------------------------------------------------------------
