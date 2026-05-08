@@ -16,17 +16,17 @@
 categories:
   - id: safety
     label: "📚 Безопасность"
-    query: "безопасность аварийное вакуум криогенный"
+    query: "безопасность аварийное вакуум криогенный safety regulations cryogenic"
     limit: 10
   - id: cryostat
     label: "❄️ Криостат"
-    query: "криостат температура захолаживание"
+    query: "криостат температура захолаживание cryostat operation cooldown"
     limit: 10
   - id: procedures
     label: "📋 Процедуры"
-    query: "процедура захолаживание калибровка эксперимент"
+    query: "процедура захолаживание калибровка эксперимент procedure calibration experiment"
     limit: 10
   - id: manuals
     label: "📖 Документация"
-    query: "manual руководство instrument прибор сенсор"
+    query: "manual руководство instrument прибор сенсор operator instruction"
     limit: 10
