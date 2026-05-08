@@ -11,6 +11,30 @@
 
 (autonomous run 2026-05-07 work — pending v0.55.0 tag)
 
+### v0.56.1 — feature surface audit + REG-2 dual-channel asymptote
+
+Post-merge sweep audit (62 features verified row-by-row) caught one
+true regression. The architect-flagged REG-1 (chat duplication ToolRail
++ KB) was already in the desired single-surface state from v0.55.6.1
+(no action). REG-2 fixed:
+
+- **REG-2 — dual-channel asymptote on cooldown + measurement**.
+  `CooldownPredictionWidget` extended c parallel Т11 (warm-stage,
+  1st GM cooler) `SteadyStatePredictor` alongside the existing Т12
+  (cold-stage) predictor. Each channel renders its own asymptote
+  dashed line, ±sigma band, and steady badge; settle threshold is
+  per-channel so Т11 may settle before Т12 без blanking the row.
+  Visual tokens: STATUS_INFO для Т12 (existing), STATUS_WARNING для
+  Т11 (new) so two channels are distinguishable beyond the legend.
+  `set_warm_temperature_reading(reading)` is the new entry point
+  mirroring `set_cold_temperature_reading`. `analytics_layout.yaml`
+  flips `measurement.main` from `temperature_steady_state` к
+  `cooldown_prediction`, unifying the prediction widget across
+  cooldown + measurement phases. `main_window_v2._dispatch_reading`
+  routes Т11 readings к the new setter alongside the existing Т12
+  path; both go through the canonical `physical_alarms.yaml`
+  `landmarks:` short-ids.
+
 ### Audit batch v0.55.12 — v0.55.16
 
 Codex audit on shipped tags v0.54.0 / v0.55.4 / v0.55.6 / v0.55.7
