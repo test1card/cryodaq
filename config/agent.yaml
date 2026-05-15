@@ -5,12 +5,16 @@ agent:
 
   ollama:
     base_url: http://localhost:11434
-    default_model: gemma4:e2b
-    timeout_s: 60  # gemma4:e2b runs comfortably on M5 24GB; thinking-first still applies
+    default_model: gemma4:e4b
+    timeout_s: 120  # gemma4:e4b thinking-first; cold-load ~40s, warm ~10s on RTX 5070 Ti 16GB
     temperature: 0.3
-    # num_ctx: 4096  # Uncomment to reduce context window for faster inference
-    # Note: gemma4:e4b also pulled (~14GB) but doesn't fit on M5 alongside engine + GUI.
-    # Switch to e4b only on dedicated GPU box (e.g. RTX with ≥16GB VRAM).
+    num_ctx: 32768  # 32K context; fits 100% on GPU with ~2 GB vRAM headroom on RTX 5070 Ti 16GB
+    # Deployment notes (verified 2026-05-15 on RTX 5070 Ti 16GB lab PC):
+    #   e4b @ num_ctx=32768: 100% GPU, ~11 GB used, ~2 GB headroom, ~39 tok/s.
+    #   26b @ num_ctx=16384: 41% CPU / 59% GPU split (model 17 GB > vRAM budget),
+    #     only ~680 MiB headroom, degraded throughput. Not viable on 16 GB.
+    #   M5 24GB (Mac dev): downgrade default_model к gemma4:e2b — e4b не fits
+    #     alongside engine + GUI on Apple Silicon shared memory.
 
   triggers:
     alarm_fired:
@@ -41,12 +45,12 @@ agent:
 
   query:
     enabled: true
-    intent_model: gemma4:e2b
-    format_model: gemma4:e2b
+    intent_model: gemma4:e4b
+    format_model: gemma4:e4b
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 20.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
-    format_timeout_s: 40.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
+    intent_timeout_s: 60.0  # 3× e2b default — absorbs e4b cold-load (~40s) + intent generation
+    format_timeout_s: 90.0  # 2.25× e2b default — absorbs e4b cold-load + Russian format generation
     rate_limit:
       max_queries_per_chat_per_hour: 60
 
@@ -61,11 +65,11 @@ agent:
 
   query:
     enabled: true
-    intent_model: gemma4:e2b
-    format_model: gemma4:e2b
+    intent_model: gemma4:e4b
+    format_model: gemma4:e4b
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 20.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
-    format_timeout_s: 40.0  # F-TimeoutRelax: 2× old default for cold-start Ollama
+    intent_timeout_s: 60.0  # 3× e2b default — absorbs e4b cold-load (~40s) + intent generation
+    format_timeout_s: 90.0  # 2.25× e2b default — absorbs e4b cold-load + Russian format generation
     rate_limit:
       max_queries_per_chat_per_hour: 60
