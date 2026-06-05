@@ -7,9 +7,56 @@
 
 ---
 
-## [Unreleased]
+## [0.56.4] — 2026-05-08 — демо-хотфикс: Y-axis jitter + переполнение буфера предиктора
 
-(autonomous run 2026-05-07 work — pending v0.55.0 tag)
+### Исправлено
+
+- Дрожание оси Y на температурных графиках устранено через cache-driven
+  deadband — виджет-сайд кэш диапазона заменяет нестабильный `pyqtgraph`
+  `viewRange` (690e4ff).
+- Переполнение буфера истории предиктора устранено через stride-2
+  decimation вместо truncate-from-left (690e4ff).
+
+## [0.56.3] — 2026-05-08 — Y-axis deadband + BrokerSnapshot canonical-id + predictor clock
+
+### Исправлено
+
+- Реальный Y-axis deadband + `BrokerSnapshot` lookup по каноническим
+  id каналов вместо display-имён (`Т1 Криостат верх` и т.п.) (ab0c64f).
+- `predictor.t_elapsed` считается от `reading_ts`, а не от wall clock —
+  корректный ETA при ускоренном replay (841b067).
+
+## [0.56.2] — 2026-05-08 — пост-0.56.1 хотфиксы (jitter + KB prompt + RAG)
+
+### Исправлено
+
+- GUI analytics jitter + landmark prompt v3 + version bump (c19663d).
+- Post-v0.56.1 хотфиксы: jitter, prompt базы знаний, RAG tuning (6aff581).
+
+## [0.56.1] — 2026-05-08 — аудит feature surface + REG-2
+
+### Исправлено
+
+- REG-2 — dual-channel asymptote на фазах cooldown и measurement (aa7d832).
+
+### Изменено
+
+- Предсказание `cooldown_prediction` унифицировано; phase-aware тесты
+  выровнены под новый контракт (625621e, 4dbde78).
+- CHANGELOG: аудит feature surface v0.56.1 + запись REG-2 (e06446c).
+
+## [0.56.0] — 2026-05-08 — version bump
+
+### Изменено
+
+- Версия проекта поднята до 0.56.0 (version-bump commit `2d2ef32`;
+  тег `v0.56.0` указывает на `d7b1df9`, `v0.56.1` — на `4dbde78`).
+
+> Примечание: ниже в записях указаны content-коммиты (subject + diff),
+> а не SHA, на которые указывают теги — теги ставились после
+> housekeeping-/test-amend коммитов того же релиза.
+
+## [0.55.5 — 0.55.16] — 2026-05-07/08 — autonomous run + Codex audit batch (теги `archive/v0.55.*`)
 
 ### Audit batch v0.55.12 — v0.55.16
 

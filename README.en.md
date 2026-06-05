@@ -7,16 +7,16 @@ multi-format export, DOCX report auto-generation, role-based Telegram
 alerts, sensor anomaly detection with alarm pipeline, plugin analytics,
 local AI assistant (Гемма / Gemma), predictor-based physical alarms,
 historical data replay, Etalon MultiLine interferometer integration,
-regression test suite (~2,450+ tests).
+regression test suite (3158 test functions across 296 files).
 
 Developed for ASC FIAN (Lebedev Physical Institute Astro Space Center,
 Millimetron project).
 
 ## Status
 
-- **Latest release:** v0.55.4 (2026-05-07, local tag)
-- **In progress:** v0.55.5 (Telegram one-shot policy + Гемма quality)
-- **Tests:** ~2,450+ passing
+- **Latest release:** v0.56.4 (2026-05-08, local tag)
+- **Master:** `690e4ff`
+- **Tests:** 3158 test functions across 296 files
 - **Production status:** stable; LabVIEW VI fully replaced
 - **Languages:** GUI and logs in Russian; code, commit messages —
   English
@@ -60,9 +60,8 @@ commands).
   emergency_off latched
 - Thyracont VSP63D (RS-232) — 1 pressure channel; V1 protocol,
   formula validation
-- Etalon MultiLine (TCP/IP) — interferometric length measurement
-  system (Stage 1 driver shipped in v0.54.0; GUI overlay in flight
-  for v0.55.6)
+- Etalon MultiLine (TCP/IP) — interferometric length metrology;
+  averaged and continuous modes, vibration burst capture to Parquet
 
 The channel model is built around hardware-fixed landmarks:
 **Т11** = 1st-stage GM-cooler (~40 K floor), **Т12** = 2nd stage
@@ -135,11 +134,14 @@ experiments.
   Markdown + frontmatter note to a filesystem vault, `WebhookSink`
   POSTs JSON to a configured URL. Fire-and-forget, failures captured
   via the `sinks_status` ZMQ command.
-- **RAG indexer (F32 Stage 1):** standalone semantic search over the
-  experiment archive, vault notes, operator log. LanceDB persistence,
-  multilingual-e5-small embeddings via Ollama. CLI:
-  `cryodaq-rag-index`, `cryodaq-rag-search`. Stage 2 (integration into
-  QueryAgent) lands in v0.55.6.
+- **RAG knowledge base (F32):** semantic search over the experiment
+  archive, vault notes, operator log, and the `data/knowledge/`
+  corpus (`equipment_manuals` PDFs, `procedures`, `reference`).
+  LanceDB persistence, `qwen3-embedding:0.6b` (1024-dim) embeddings
+  via Ollama. CLI `cryodaq-rag-index` / `cryodaq-rag-search`, ZMQ
+  `rag.rebuild_index`, «Обновить индекс» button. The AI assistant
+  answers operator queries through it: IntentClassifier → QueryRouter
+  → BrokerSnapshot (live) and KNOWLEDGE_QUERY (RAG).
 
 ## GUI
 
@@ -174,8 +176,12 @@ Overlay panels:
   (v1 threshold + v2 YAML-driven), SeverityChip with status tokens
   (КРИТ/ПРЕД/ИНФО), acknowledge button, "Контроль захолаживания"
   footer for CooldownAlarm.
-- **Помощник Гемма** (Гемма Assistant, F34, v0.54.0) — chat overlay
-  for free-form queries to the QueryAgent.
+- **База знаний** (Knowledge base) — RAG search plus the embedded
+  Гемма chat in `KnowledgeBasePanel` for free-form queries to the
+  QueryAgent (the standalone F34 chat overlay was removed; this is the
+  single chat surface).
+- **MultiLine** — interferometric metrology overlay + vibration burst
+  capture.
 - **Оператор-лог** (Operator log), **Приборы** (Instruments — cards +
   sensor diagnostics), **Источник мощности** (Power source —
   Keithley smua/smub), **Теплопроводность** (Thermal conductivity —
@@ -217,7 +223,7 @@ cryodaq                    # Launcher: engine + GUI + tray, auto-restart
 cryodaq-engine             # Headless engine (real instruments)
 cryodaq-engine --mock      # Mock mode (simulated instruments)
 cryodaq-engine --force     # Kill old engine + start (lock override)
-cryodaq-engine --replay <path>     # Replay mode
+cryodaq --replay <path>    # Replay mode (launcher; or python -m cryodaq.replay_engine --source <path>)
 cryodaq-gui                # GUI only (connects to a running engine)
 cryodaq-cooldown build|predict|validate|demo|update    # Predictor CLI
 cryodaq-rag-index | cryodaq-rag-search                 # RAG CLI
@@ -247,8 +253,10 @@ Active configuration files:
 - `config/agent.yaml` — Гемма (AssistantLiveAgent +
   AssistantQueryAgent): triggers, brand, Ollama model, rate limit,
   query enabled
-- `config/sinks.yaml` — F31 vault writer + webhook
-- `config/rag.yaml` — F32 RAG indexer
+- `config/sinks.yaml.example` — F31 vault writer + webhook (copy to
+  `sinks.yaml` / `sinks.local.yaml` to activate)
+- `config/rag.yaml.example` — F32 RAG indexer (copy to `rag.yaml` to
+  activate; `rag_categories.yaml` ships active)
 - `config/themes/<name>.yaml` — bundled theme packs
 - `config/experiment_templates/*.yaml` — experiment-type templates
 - `config/housekeeping.yaml` — throttle, retention, compression,
@@ -281,8 +289,9 @@ data/agents/assistant/audit/       # LLM call audit log per day
 
 ## Local AI assistant
 
-CryoDAQ ships a local AI agent (brand: **Гемма** / Gemma, model
-`gemma4:e2b` via Ollama). No external APIs.
+CryoDAQ ships a local AI agent (brand: **Гемма** / Gemma, default
+model `gemma4:e4b` via Ollama; low-VRAM dev machines downgrade to
+`gemma4:e2b`). No external APIs.
 
 ### What it does
 
@@ -347,7 +356,7 @@ src/cryodaq/
   web/           # FastAPI monitoring
   tools/         # CLI: cooldown, replay alarm history
 tsp/             # Keithley TSP scripts (draft)
-tests/           # ~2,450+ tests
+tests/           # 3158 test functions across 296 files
 config/          # YAML configurations
 docs/            # design system, decisions, operator manual
 ```
@@ -373,14 +382,12 @@ GUI tests require `PySide6` + `pyqtgraph`. Some storage tests require
 - **SQLite WAL gate (F25):** the engine refuses to start on SQLite
   versions in `[3.7.0, 3.51.3)`. Backport-safe: 3.44.6, 3.50.7.
   Workaround: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (logs a warning).
-- **Push gate:** ~25 local tags v0.51.0..v0.55.4 are not pushed to
-  origin/master (master lags behind). Resolution requires architecture
-  review; work continues on feature branches.
 - **PDF reports:** best-effort via `soffice`/LibreOffice. The
   guaranteed artifact is DOCX.
-- **MultiLine GUI:** Stage 1 driver shipped in v0.54.0, the GUI
-  overlay is in flight for v0.55.6. Channel data is already published
-  to the broker.
+- **MultiLine Stage 2:** deformation analysis, channel alignment,
+  MLAC/AC operations and frontend splitter/shutter control are out of
+  scope of Stage 1 and live in a separate spec. The Stage 1 driver,
+  GUI overlay and vibration burst capture are shipped.
 - **Lab Ubuntu PC:** last physical smoke 2026-04-20. Next planned for
   the 2026-05-14 contest release verification.
 - **Deprecation warnings:** `asyncio.WindowsSelectorEventLoopPolicy`
