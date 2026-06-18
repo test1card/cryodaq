@@ -347,7 +347,7 @@ async def test_watchdog_sustained_over_threshold_fires():
     # T_cold = 7.0 K > 6.0 K threshold
     tracker.get.side_effect = lambda ch: _make_ch(ch, 7.0)
 
-    with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock) as mock_pub:
+    with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):
         for _ in range(3):
             await alarm.tick()
 

@@ -227,7 +227,7 @@ def replay(
     timeline = _load_phase_timelines(data_dir)
 
     # Per-cooldown-cycle tracking
-    cycle_starts: dict[str, float] = {}  # experiment_id → start_ts
+    cycle_starts: dict[str, float] = {}  # noqa: F841 — TODO(architect): per-cooldown-cycle tracking declared but never wired; decide wire-up vs removal  # experiment_id → start_ts
 
     suppressed: list[dict] = []
     newly_fired: list[dict] = []

@@ -18,7 +18,7 @@ import pytest
 async def _drain_dispatch_tasks(
     tasks: set[asyncio.Task],
     logger: logging.Logger,
-    timeout: float = 10.0,
+    timeout: float = 10.0,  # noqa: ASYNC109 — mirrors engine.py drain signature, not a public coroutine API
 ) -> None:
     """Mirror of engine.py shutdown drain block (H3)."""
     if tasks:

@@ -3,12 +3,12 @@
 All operator-facing output is Russian per project standard.
 System prompts use {brand_name} interpolation per brand-abstraction §1.3.
 
-Revision: 2026-05-08 v3 — FORMAT_KNOWLEDGE_QUERY_USER fix per architect 
-post-v0.55.7.1 KB expansion: prompt told Гемма to label sources as 
+Revision: 2026-05-08 v3 — FORMAT_KNOWLEDGE_QUERY_USER fix per architect
+post-v0.55.7.1 KB expansion: prompt told Гемма to label sources as
 «vault / архив / журнал» but corpus now has 8 source kinds (equipment_manual,
 procedure, operator_manual, readme, readme_en, changelog, vault_note,
-experiment_metadata, operator_log). Гемма e2b слепо follow'ил template и 
-все labels рендерил как «vault». Fix: instruct Гемма use pretty labels 
+experiment_metadata, operator_log). Гемма e2b слепо follow'ил template и
+все labels рендерил как «vault». Fix: instruct Гемма use pretty labels
 verbatim from hits_text без переформирования.
 
 Revision: 2026-05-01 v2 (Track E russification + Track F anti-pattern guard)

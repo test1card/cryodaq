@@ -149,7 +149,7 @@ def test_tool_rail_icon_color_follows_theme_foreground() -> None:
     original = tr_mod.qta.icon
     tr_mod.qta.icon = fake_icon
     try:
-        rail = ToolRail()
+        ToolRail()  # construction triggers icon creation; assertion is on `captured`
         # Idle state uses TEXT_MUTED.
         assert theme.TEXT_MUTED in captured
     finally:

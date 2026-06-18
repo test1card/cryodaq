@@ -106,8 +106,8 @@ def test_set_pressure_reading_updates_inner_history(app) -> None:
 def test_no_data_status_clears_prediction(app) -> None:
     w = VacuumPredictionWidget()
     pred_calls: list = []
-    w._inner.set_prediction = lambda c, l, u, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
-        {"central": c, "lower": l, "upper": u}
+    w._inner.set_prediction = lambda central, lower, upper, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
+        {"central": central, "lower": lower, "upper": upper}
     )
     w._on_trend_result({"ok": True, "status": "no_data"})
     # Fix: clears any previously-rendered forecast with empty lists
@@ -123,8 +123,8 @@ def test_no_data_status_clears_prediction(app) -> None:
 def test_ok_false_clears_prediction(app) -> None:
     w = VacuumPredictionWidget()
     pred_calls: list = []
-    w._inner.set_prediction = lambda c, l, u, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
-        {"central": c}
+    w._inner.set_prediction = lambda central, lower, upper, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
+        {"central": central}
     )
     w._on_trend_result({"ok": False})
     # Fix: clears any previously-rendered forecast with empty lists
@@ -253,8 +253,8 @@ def test_stale_forecast_cleared_on_no_data(app) -> None:
 def test_stale_forecast_cleared_on_ok_false(app) -> None:
     w = VacuumPredictionWidget()
     pred_calls: list = []
-    w._inner.set_prediction = lambda c, l, u, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
-        {"central": c}
+    w._inner.set_prediction = lambda central, lower, upper, ci_level_pct=68.0: pred_calls.append(  # type: ignore[method-assign]
+        {"central": central}
     )
     # First: valid
     with patch("time.time", return_value=2_000_000.0):

@@ -111,7 +111,7 @@ def test_reconfigure_continuous_restarts_listener_when_connected() -> None:
 
     cancelled = {"called": False}
 
-    async def fake_wait_for(awaitable, timeout):
+    async def fake_wait_for(awaitable, timeout):  # noqa: ASYNC109 — mock of asyncio.wait_for; signature must match the patched callable
         cancelled["called"] = True
 
     driver._listener_task = fake_task
@@ -485,7 +485,7 @@ def test_reconfigure_continuous_refuses_spawn_on_listener_cancel_timeout() -> No
     fake_task.done.return_value = False
     fake_task.cancel = MagicMock()
 
-    async def fake_wait_for(awaitable, timeout):
+    async def fake_wait_for(awaitable, timeout):  # noqa: ASYNC109 — mock of asyncio.wait_for; signature must match the patched callable
         raise TimeoutError()
 
     driver._listener_task = fake_task

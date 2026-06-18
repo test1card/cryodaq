@@ -3054,7 +3054,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
             _rag_raw = _yaml.safe_load(_rag_cfg_path.read_text(encoding="utf-8")) or {}
             _rag_cfg = _rag_raw.get("rag", {})
-            _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()
+            _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
             _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
             _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
             # v0.55.7.1: default fallback aligned с modernized stack —
@@ -3062,7 +3062,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             # multilingual-e5-small (384d) deprecated due к Ollama
             # 0.23+ runtime incompatibility for community uploads.
             _rag_emb_model = str(_rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            _rag_knowledge_dir = Path(
+            _rag_knowledge_dir = Path(  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
                 str(_rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
             ).expanduser()
             # v0.55.7.1: create searcher unconditionally — LanceDB

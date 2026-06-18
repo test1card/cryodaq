@@ -43,7 +43,7 @@ async def test_dispatch_retains_task_strong_ref() -> None:
     assert len(dispatcher._tasks) == 1
 
     release.set()
-    while dispatcher._tasks:
+    while dispatcher._tasks:  # noqa: ASYNC110 — test poll: yield until the strong-ref task set drains
         await asyncio.sleep(0)
 
     assert len(dispatcher._tasks) == 0
