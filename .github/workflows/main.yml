@@ -30,4 +30,7 @@ jobs:
       - name: Run tests
         # -v so a hard crash (Qt/PySide segfault on Windows prints no traceback)
         # is preceded by the crashing test's nodeid as the last log line.
-        run: pytest tests/ -x --tb=short -v
+        # --timeout bounds hangs: a Windows test stuck forever (no traceback,
+        # no crash) is turned into a readable failure with a faulthandler stack
+        # dump naming the hung test. thread method works on Windows.
+        run: pytest tests/ -x --tb=short -v --timeout=120 --timeout-method=thread
