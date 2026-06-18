@@ -28,4 +28,6 @@ jobs:
         run: ruff check src/ tests/
 
       - name: Run tests
-        run: pytest tests/ -x --tb=short -q
+        # -v so a hard crash (Qt/PySide segfault on Windows prints no traceback)
+        # is preceded by the crashing test's nodeid as the last log line.
+        run: pytest tests/ -x --tb=short -v
