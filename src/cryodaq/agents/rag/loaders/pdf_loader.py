@@ -65,7 +65,9 @@ def load_pdf_documents(
             continue
 
         document_name = pdf_path.stem.replace("_", " ").replace("-", " ")
-        relative_path = pdf_path.relative_to(pdf_dir)
+        # as_posix() so source ids use forward slashes on every OS — keeps the
+        # RAG corpus portable between Mac dev and Windows operator PCs.
+        relative_path = pdf_path.relative_to(pdf_dir).as_posix()
         try:
             total_pages = len(reader.pages)
         except Exception as exc:  # noqa: BLE001
@@ -99,14 +101,14 @@ def load_pdf_documents(
                     DocumentChunk(
                         chunk_id=chunk_id,
                         source_kind=source_kind,
-                        source_id=str(relative_path),
+                        source_id=relative_path,
                         text=chunk_text,
                         metadata={
                             "document_name": document_name,
                             "page_number": page_idx,
                             "total_pages": total_pages,
                             "chunk_index": chunk_idx,
-                            "source_path": str(relative_path),
+                            "source_path": relative_path,
                         },
                     )
                 )

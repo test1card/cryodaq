@@ -296,21 +296,24 @@ def load_procedure_documents(
 
         relative = md_path.relative_to(procedures_dir)
         category = relative.parts[0] if len(relative.parts) > 1 else "general"
+        # as_posix() so source ids use forward slashes on every OS — keeps the
+        # RAG corpus portable between Mac dev and Windows operator PCs.
+        relative_posix = relative.as_posix()
 
         text_chunks = _chunk_text(text, max_chars=max_chars, overlap=overlap)
         for idx, chunk_text in enumerate(text_chunks):
-            chunk_id = f"procedure:{relative}:c{idx}"
+            chunk_id = f"procedure:{relative_posix}:c{idx}"
             chunks.append(
                 DocumentChunk(
                     chunk_id=chunk_id,
                     source_kind="procedure",
-                    source_id=str(relative),
+                    source_id=relative_posix,
                     text=chunk_text,
                     metadata={
                         "title": title,
                         "category": category,
                         "chunk_index": idx,
-                        "source_path": str(relative),
+                        "source_path": relative_posix,
                     },
                 )
             )
