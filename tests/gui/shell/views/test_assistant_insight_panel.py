@@ -137,7 +137,8 @@ def test_panel_layout_count_matches_entries() -> None:
 def test_trigger_chip_alarm_label() -> None:
     _app()
     chip = _TriggerChip("alarm_fired")
-    assert chip.text() == "АЛАРМ"
+    # v0.55.4 renamed operator-facing «Алармы» → «Тревоги» (commit e642ba9).
+    assert chip.text() == "ТРЕВОГА"
     chip.deleteLater()
 
 

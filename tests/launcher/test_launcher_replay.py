@@ -116,6 +116,7 @@ def _make_fake_self(src: Path, *, loop: bool = False) -> object:
         _replay_phase="cooldown",
         _replay_loop=loop,
         _force_replay=False,
+        _legacy_channel_era=None,
         _engine_proc=None,
         _engine_external=False,
         _engine_stderr_handler=None,

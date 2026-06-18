@@ -83,7 +83,10 @@ def test_full_lifecycle_phase_widgets(app):
     expected = {
         "preparation": "temperature_overview",
         "cooldown": "cooldown_prediction",
-        "measurement": "r_thermal_live",
+        # v0.55.6.1 (architect 2026-05-07): temperature_steady_state replaced
+        # r_thermal_live as the measurement-phase headline; r_thermal demoted
+        # to top_right.
+        "measurement": "temperature_steady_state",
         "disassembly": "experiment_summary",
     }
     for phase, expected_main_id in expected.items():
