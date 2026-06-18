@@ -104,7 +104,17 @@ markers = [
 
 [tool.ruff]
 target-version = "py312"
-line-length = 100
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# E501: LLM prompt-template strings — the long schema/enum lines are part of the
+# prompt text sent to the model and must not be wrapped or reflowed.
+"src/cryodaq/agents/assistant/query/prompts.py" = ["E501"]
+# E501: single escaped-Cyrillic literal per file (\uXXXX form inflates the source
+# line past 120). De-escaping to literal Cyrillic would also resolve it; left as a
+# scoped ignore for now to avoid touching the literal.
+"src/cryodaq/gui/shell/experiment_overlay.py" = ["E501"]
+"tests/core/test_sensor_diagnostics.py" = ["E501"]

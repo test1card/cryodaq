@@ -117,7 +117,7 @@ def _load_categories(config_path: Path | None = None) -> list[dict[str, Any]]:
 
 def _builtin_categories() -> list[dict[str, Any]]:
     return [
-        {"id": "safety", "label": "📚 Безопасность", "query": "safety regulations cryogenic", "limit": 10},
+        {"id": "safety", "label": "📚 Безопасность", "query": "safety regulations cryogenic", "limit": 10},  # noqa: E501 — single-line category record kept aligned with siblings
         {"id": "cryostat", "label": "❄️ Криостат", "query": "cryostat operation manual", "limit": 10},
         {"id": "procedures", "label": "📋 Procedures", "query": "experimental procedure CryoDAQ", "limit": 10},
         {"id": "manuals", "label": "📖 Manuals", "query": "operator manual instruction", "limit": 10},

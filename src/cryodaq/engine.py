@@ -3019,7 +3019,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     _gemma_config.default_model,
                 )
         except Exception as _gemma_exc:
-            logger.warning("AssistantLiveAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)
+            logger.warning("AssistantLiveAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)  # noqa: E501 — single RU log call, splitting hurts grep-ability
     else:
         logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
 
@@ -3229,7 +3229,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             await gemma_agent.start()
         except Exception as _gemma_start_exc:
-            logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)
+            logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)  # noqa: E501 — single RU log call, splitting hurts grep-ability
             gemma_agent = None
     periodic_report_tick_task: asyncio.Task | None = None
     if _gemma_config is not None and _gemma_config.periodic_report_enabled:
