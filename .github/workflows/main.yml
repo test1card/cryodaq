@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    env:
+      # Force CPython UTF-8 Mode so file I/O defaults to UTF-8 on Windows
+      # (default is cp1252, which raises UnicodeError on the project's
+      # Cyrillic fixtures/content). Matches the repo's UTF-8 canon.
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
