@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,9 +10,6 @@ import pytest
 
 from cryodaq.agents.rag.indexer import build_index
 from cryodaq.agents.rag.searcher import RagSearcher
-
-
-import hashlib
 
 
 class _MockEmbeddings:

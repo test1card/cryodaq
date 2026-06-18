@@ -8,7 +8,6 @@ from pathlib import Path
 
 import yaml
 
-
 ALARMS_V3 = Path("config/alarms_v3.yaml")
 
 

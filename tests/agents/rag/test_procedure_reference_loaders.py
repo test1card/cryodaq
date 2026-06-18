@@ -16,7 +16,6 @@ from cryodaq.agents.rag.document_loader import (
     load_reference_documents,
 )
 
-
 # ---------------------------------------------------------------------------
 # Procedure loader
 # ---------------------------------------------------------------------------

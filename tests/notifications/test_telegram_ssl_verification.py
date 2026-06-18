@@ -15,7 +15,6 @@ import yaml
 from cryodaq.notifications.telegram import TelegramNotifier
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
-
 # ---------------------------------------------------------------------------
 # TelegramNotifier
 # ---------------------------------------------------------------------------

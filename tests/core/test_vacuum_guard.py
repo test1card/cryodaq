@@ -1,15 +1,13 @@
 """Tests for VacuumGuard state machine — Phase C of F-X v3."""
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from cryodaq.core.channel_state import ChannelState
 from cryodaq.core.vacuum_guard import VacuumGuard, VacuumState
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

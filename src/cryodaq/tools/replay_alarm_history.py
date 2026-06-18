@@ -20,7 +20,7 @@ import bisect
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ import yaml
 from cryodaq.core.physical_alarms_config import load_physical_alarms_config
 
 logger = logging.getLogger(__name__)
-UTC = timezone.utc
+UTC = UTC
 
 
 # ---------------------------------------------------------------------------

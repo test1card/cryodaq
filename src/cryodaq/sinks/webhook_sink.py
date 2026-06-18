@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import asdict
 from datetime import datetime
@@ -71,7 +70,7 @@ class WebhookSink(Sink):
                         success=True,
                         target=self._url,
                     )
-        except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, TimeoutError) as exc:
             logger.warning("WebhookSink %s failed: %s", self._url, exc)
             return SinkResult(
                 sink_name=sink_name,

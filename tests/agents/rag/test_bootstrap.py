@@ -9,7 +9,6 @@ PHASE 6: ``_bootstrap_rag_index_if_empty`` is fire-and-forget.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 

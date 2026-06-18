@@ -12,11 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import numpy as np
-
 from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
-
 
 # ---------------------------------------------------------------------------
 # Helpers

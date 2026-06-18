@@ -24,7 +24,6 @@ from cryodaq.agents.rag.document_loader import (
 )
 from cryodaq.agents.rag.indexer import _swap_table_atomically, build_index
 
-
 # ---------------------------------------------------------------------------
 # 2.3 — crash-safe rebuild
 # ---------------------------------------------------------------------------

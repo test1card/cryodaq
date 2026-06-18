@@ -11,7 +11,6 @@ import pytest
 from cryodaq.core.channel_state import ChannelState
 from cryodaq.core.cooldown_alarm import CooldownAlarm, CooldownState
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

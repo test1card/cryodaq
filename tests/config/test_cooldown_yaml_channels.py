@@ -1,6 +1,7 @@
 """F-ConfigChannelDrift: ensure cooldown.yaml uses canonical Т11/Т12."""
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 def test_cooldown_yaml_uses_canonical_channels():

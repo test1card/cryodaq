@@ -19,8 +19,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine, _health_to_status
-
+from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 
 # ---------------------------------------------------------------------------
 # Stub publisher

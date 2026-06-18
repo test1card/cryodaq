@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -119,7 +119,6 @@ def test_reconfigure_continuous_restarts_listener_when_connected() -> None:
     driver._transport = MagicMock()
 
     # Patch asyncio.wait_for so we don't actually wait on the MagicMock.
-    import cryodaq.drivers.instruments.etalon_multiline as mod
 
     original_wait_for = asyncio.wait_for
     asyncio.wait_for = fake_wait_for  # type: ignore[assignment]
@@ -487,7 +486,7 @@ def test_reconfigure_continuous_refuses_spawn_on_listener_cancel_timeout() -> No
     fake_task.cancel = MagicMock()
 
     async def fake_wait_for(awaitable, timeout):
-        raise asyncio.TimeoutError()
+        raise TimeoutError()
 
     driver._listener_task = fake_task
     driver._connected = True

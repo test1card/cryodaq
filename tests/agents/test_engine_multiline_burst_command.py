@@ -11,8 +11,6 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from cryodaq.engine import _handle_multiline_burst_command
 
 

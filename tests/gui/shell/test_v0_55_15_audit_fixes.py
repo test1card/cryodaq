@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 
 import pytest
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QLabel
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.overlay_container import OverlayContainer

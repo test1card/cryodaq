@@ -12,7 +12,6 @@ import numpy as np
 from cryodaq.analytics.cooldown_predictor import (
     T_PHASE_BOUNDARY,
     ReferenceCurve,
-    build_ensemble,
     build_model_from_curves,
     format_prediction,
     ingest_curve,
@@ -153,7 +152,7 @@ def cmd_validate(args):
     curves = load_curves(Path(args.data))
     if len(curves) < 3:
         sys.exit(f"Need >=3 curves, got {len(curves)}")
-    from cryodaq.analytics.cooldown_predictor import _derive_floors, prepare_all
+    from cryodaq.analytics.cooldown_predictor import _derive_floors
     T_cold_end, T_warm_end = _derive_floors(curves)
     curves = prepare_all(curves, T_cold_end=T_cold_end, T_warm_end=T_warm_end)
     out = Path(args.output)

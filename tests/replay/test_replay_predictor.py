@@ -3,15 +3,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from cryodaq.tools.replay_alarm_history import replay
 
-UTC = timezone.utc
+UTC = UTC
 _BASE_TS = datetime(2026, 4, 1, 10, 0, 0, tzinfo=UTC).timestamp()
 _COOLDOWN_START = _BASE_TS
 _MEASUREMENT_START = _BASE_TS + 40 * 3600  # 40h in

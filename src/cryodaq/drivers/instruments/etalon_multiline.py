@@ -16,7 +16,7 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -289,7 +289,7 @@ class MultiLineDriver(InstrumentDriver):
                 cancel_clean = True
             except asyncio.CancelledError:
                 cancel_clean = True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     "MultiLine '%s' reconfigure: listener did not cancel "
                     "within 2s — refusing to spawn replacement to avoid a "
@@ -398,7 +398,7 @@ class MultiLineDriver(InstrumentDriver):
             self._listener_task.cancel()
             try:
                 await asyncio.wait_for(self._listener_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -550,7 +550,7 @@ class MultiLineDriver(InstrumentDriver):
                         self._transport.write_command("stopmeasnogui"),
                         timeout=2.0,
                     )
-            except (TCPTransportError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, TCPTransportError, OSError) as exc:
                 logger.warning(
                     "MultiLine '%s' stopmeasnogui on cancel failed: %s",
                     self.name, exc,

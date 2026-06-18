@@ -39,10 +39,10 @@ from cryodaq.gui.shell.overlays.alarm_panel import AlarmPanel
 from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
-from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
-from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
+from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
+from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar

@@ -119,7 +119,7 @@ class TCPTransport:
                     reader.readline(),
                     timeout=self._read_timeout_s,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Idle period — give caller a chance to cancel the task
                 # by yielding control, then keep listening.
                 await asyncio.sleep(0)

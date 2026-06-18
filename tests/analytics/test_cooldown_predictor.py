@@ -67,7 +67,11 @@ async def test_compute_progress_base_temperature():
 
 async def test_compute_progress_quasi_stationary_not_saturated():
     """With data-driven floors (2.5K), progress at 4K should be <1.0 (not saturated)."""
-    from cryodaq.analytics.cooldown_predictor import T_COLD_END_FALLBACK, T_WARM_END_FALLBACK, compute_progress
+    from cryodaq.analytics.cooldown_predictor import (
+        T_COLD_END_FALLBACK,
+        T_WARM_END_FALLBACK,
+        compute_progress,
+    )
 
     p = compute_progress(np.array([4.0]), np.array([80.0]),
                          T_cold_end=T_COLD_END_FALLBACK, T_warm_end=T_WARM_END_FALLBACK)
@@ -454,7 +458,6 @@ async def test_build_model_from_curves_sets_floors(synthetic_curves):
     """build_model_from_curves() sets T_cold_end from data, not from fallback."""
     from cryodaq.analytics.cooldown_predictor import (
         ReferenceCurve,
-        T_COLD_END_FALLBACK,
         build_model_from_curves,
     )
 
@@ -535,7 +538,6 @@ async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path
 
     from cryodaq.analytics.cooldown_predictor import (
         ReferenceCurve,
-        T_COLD_END_FALLBACK,
         build_model_from_curves,
         load_model,
         save_model,

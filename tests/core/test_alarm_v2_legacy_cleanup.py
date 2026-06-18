@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 _RETAINED_ALARM_IDS = {
     # calibrated_sensor_fault: sensor hardware failure detection (< 1K or > 350K).
     # NOT replaced by F-X v3 — CooldownAlarm/VacuumGuard evaluate physical state,

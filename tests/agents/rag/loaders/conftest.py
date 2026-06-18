@@ -9,8 +9,8 @@ in a heavier rendering dependency.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 
 def _build_minimal_pdf(page_texts: Sequence[str]) -> bytes:

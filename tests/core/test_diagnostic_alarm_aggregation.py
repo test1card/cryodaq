@@ -8,14 +8,10 @@ Covers:
 """
 from __future__ import annotations
 
-import time
 from unittest.mock import patch
-
-import numpy as np
 
 from cryodaq.core.alarm_v2 import AlarmEvent, AlarmStateManager
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
-
 
 # ---------------------------------------------------------------------------
 # Publisher stub that returns real AlarmEvent objects (needed to populate new_events)

@@ -44,7 +44,6 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
-    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -60,8 +59,8 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
-from cryodaq.gui.zmq_client import ZmqCommandWorker
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
+from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 

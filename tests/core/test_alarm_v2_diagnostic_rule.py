@@ -12,8 +12,6 @@ which is the class that owns active alarm state and history.
 """
 from __future__ import annotations
 
-import time
-
 from cryodaq.core.alarm_v2 import AlarmStateManager
 
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from cryodaq.agents.rag.source_labels import prettify_source_label
 
 
