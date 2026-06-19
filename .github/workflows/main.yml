@@ -8,11 +8,20 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    # windows-latest is the deployment target and the required check. Linux is a
+    # fast-feedback leg being stabilised — don't let it fail the whole run yet.
+    # Remove this once the Linux leg is consistently green.
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
     env:
       # Force CPython UTF-8 Mode so file I/O defaults to UTF-8 on Windows
-      # (default is cp1252, which raises UnicodeError on the project's
-      # Cyrillic fixtures/content). Matches the repo's UTF-8 canon.
+      # (default is cp1252, which raises UnicodeError on the project's Cyrillic
+      # fixtures/content). No-op on Linux/macOS. Matches the repo's UTF-8 canon.
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +29,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      - name: Install Qt offscreen system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
       - name: Install dependencies
         run: pip install -e ".[dev,web]"
@@ -32,7 +47,7 @@ jobs:
         # its own process so there are no leaked widgets from earlier tests to
         # re-polish — re-polishing a large accumulated widget tree under the
         # Windows offscreen platform deterministically access-violates in
-        # teardown. In isolation these tests pass cleanly.
+        # teardown. In isolation these tests pass cleanly. Harmless on Linux.
         run: pytest tests/gui/test_app_palette.py --tb=short -v --timeout=120 --timeout-method=thread
 
       - name: Run tests
