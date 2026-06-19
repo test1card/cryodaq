@@ -24,6 +24,8 @@ def _isolate_shell_test(monkeypatch):
 
     monkeypatch.setattr(zc, "send_command", lambda _cmd: {"ok": False, "stub": True})
     yield
+    import time
+
     from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
 
@@ -31,54 +33,52 @@ def _isolate_shell_test(monkeypatch):
     if app is None:
         return
 
-    import time
+    top_level = list(QApplication.topLevelWidgets())
 
-    # Stop timers first so nothing new gets scheduled while teardown is
-    # draining the event queue.
-    for timer in app.findChildren(QTimer):
+    # Collect timers AND threads from the app object *and* every widget tree.
+    # app.findChildren() only finds objects parented to the QApplication —
+    # widget-owned ones (QTimer(self) on an overlay, ZmqCommandWorker(parent=
+    # widget) QThreads) parent to the widget, not the app, so they were missed.
+    # A missed timer fires its slot on a mid-deletion widget, and a missed
+    # running thread gets destroyed with its parent widget — both segfault on
+    # Windows.
+    timers = list(app.findChildren(QTimer))
+    threads = list(app.findChildren(QThread))
+    for widget in top_level:
+        try:
+            timers.extend(widget.findChildren(QTimer))
+            threads.extend(widget.findChildren(QThread))
+        except RuntimeError:
+            pass
+
+    # Stop timers so nothing reschedules during teardown.
+    for timer in timers:
         try:
             timer.stop()
         except RuntimeError:
             pass
 
-    # Close and delete any top-level widgets created by the test. Their
-    # child widgets/timers will be cleaned up with them.
-    for widget in QApplication.topLevelWidgets():
+    # Drain worker threads BEFORE deleting their parent widgets, else Qt
+    # destroys a running QThread with its parent and aborts ("QThread:
+    # Destroyed while thread is still running").
+    deadline = time.monotonic() + 2.0
+    for thread in threads:
+        try:
+            while thread.isRunning() and time.monotonic() < deadline:
+                thread.wait(50)
+                app.processEvents()
+        except RuntimeError:
+            pass
+
+    # Now close + delete top-level widgets; children, timers, and the
+    # (finished) threads are cleaned up with them.
+    for widget in top_level:
         try:
             widget.close()
             widget.deleteLater()
         except RuntimeError:
             pass
 
-    # Process pending deleteLater calls and any immediate finished
-    # signals from no-op worker stubs.
-    for _ in range(5):
-        app.processEvents()
-
-    # Wait briefly for any already-running QThread to finish. Keep the
-    # wait bounded so teardown cost scales with actual work, not with a
-    # fixed sleep per test.
-    deadline = time.monotonic() + 0.5
-    idle_rounds = 0
-    while time.monotonic() < deadline:
-        app.processEvents()
-        running = False
-        for obj in app.findChildren(QThread):
-            try:
-                if obj.isRunning():
-                    running = True
-                    obj.wait(25)
-            except RuntimeError:
-                # C++ object already deleted
-                pass
-        if not running:
-            idle_rounds += 1
-            if idle_rounds >= 3:
-                break
-        else:
-            idle_rounds = 0
-        time.sleep(0.01)
-
-    # Final flush so finished signals are processed.
+    # Final flush so deleteLater and finished signals are processed.
     for _ in range(10):
         app.processEvents()
