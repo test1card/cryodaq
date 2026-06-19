@@ -102,7 +102,12 @@ def test_shift_start_dialog_accepts_with_operator() -> None:
     received = []
     dialog.shift_started.connect(lambda op, sid: received.append((op, sid)))
 
-    with patch("cryodaq.gui.zmq_client.send_command", return_value={"ok": True}):
+    # Patch the worker so _on_accept does not spawn a real ZmqCommandWorker
+    # QThread (parented to the dialog). Left unpatched, the running thread
+    # outlives the test and Qt destroys it with its parent dialog →
+    # "QThread: Destroyed while thread is still running" → segfault on Windows.
+    patcher, _ = _patch_worker_capture()
+    with patcher, patch("cryodaq.gui.zmq_client.send_command", return_value={"ok": True}):
         dialog._operator_combo.setCurrentText("Фоменко В.Н.")
         dialog._on_accept()
 

@@ -20,7 +20,9 @@ import pytest
 @pytest.fixture(autouse=True)
 def _cleanup_top_level_widgets():
     yield
-    from PySide6.QtCore import QTimer
+    import time
+
+    from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
@@ -29,27 +31,42 @@ def _cleanup_top_level_widgets():
 
     top_level = list(QApplication.topLevelWidgets())
 
-    # Stop EVERY timer first. app.findChildren(QTimer) only catches timers
-    # parented to the QApplication — widget-owned timers (e.g.
-    # ConductivityPanel._auto_timer, a QTimer(self)) are descendants of the
-    # widget, not the app, so they are missed. A leaked widget whose timer is
-    # still running will fire its timeout slot during the processEvents() below,
-    # touching child widgets that are mid-deletion → segfault. Walk the widget
-    # trees too so nothing is left ticking.
+    # Collect timers AND threads from the app object *and* every widget tree.
+    # app.findChildren() only catches objects parented to the QApplication —
+    # widget-owned ones (e.g. ConductivityPanel._auto_timer = QTimer(self), or
+    # ZmqCommandWorker = QThread(parent=dialog)) are descendants of the widget,
+    # not the app, so they are missed.
     timers = list(app.findChildren(QTimer))
+    threads = list(app.findChildren(QThread))
     for widget in top_level:
         try:
             timers.extend(widget.findChildren(QTimer))
+            threads.extend(widget.findChildren(QThread))
         except RuntimeError:
             pass
+
+    # Stop timers so a leaked widget can't fire a timeout slot during the
+    # processEvents() below, touching child widgets that are mid-deletion.
     for timer in timers:
         try:
             timer.stop()
         except RuntimeError:
             pass
 
-    # Close + delete every top-level widget the test created; child widgets
-    # and their timers are cleaned up with their parents.
+    # Wait for worker threads to finish BEFORE deleting their parent widgets —
+    # otherwise Qt destroys a running QThread with its parent and aborts with
+    # "QThread: Destroyed while thread is still running" (segfault on Windows).
+    deadline = time.monotonic() + 2.0
+    for thread in threads:
+        try:
+            while thread.isRunning() and time.monotonic() < deadline:
+                thread.wait(50)
+                app.processEvents()
+        except RuntimeError:
+            pass
+
+    # Close + delete every top-level widget the test created; child widgets,
+    # timers, and (now-finished) threads are cleaned up with their parents.
     for widget in top_level:
         try:
             widget.close()
