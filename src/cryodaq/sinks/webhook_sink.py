@@ -72,9 +72,12 @@ class WebhookSink(Sink):
                     )
         except (aiohttp.ClientError, TimeoutError) as exc:
             logger.warning("WebhookSink %s failed: %s", self._url, exc)
+            # Fall back to the exception type name: a bare TimeoutError (raised
+            # for an unreachable host on Windows) stringifies to "", which would
+            # leave SinkResult.error empty and unhelpful for diagnostics.
             return SinkResult(
                 sink_name=sink_name,
                 success=False,
                 target=self._url,
-                error=str(exc),
+                error=str(exc) or type(exc).__name__,
             )
