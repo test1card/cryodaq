@@ -1453,6 +1453,13 @@ class ConductivityPanel(QWidget):
         self._flight_log.flush()
 
     def closeEvent(self, event) -> None:
+        # Stop owned timers so a closed/destroyed panel does not keep ticking
+        # (_auto_tick / banner refresh firing on a deleted widget segfaults).
+        for timer in (self._timer, self._auto_timer, self._banner_timer):
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
         if self._flight_log:
             self._flight_log.close()
             self._flight_log = None
