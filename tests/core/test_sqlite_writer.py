@@ -7,6 +7,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -411,18 +413,36 @@ async def test_underrange_negative_inf_persists(tmp_path: Path) -> None:
     assert rows[0][1] == "underrange"
 
 
-def test_sqlite_writer_wal_mode_verified(tmp_path: Path) -> None:
-    """B-1.3: SQLiteWriter must verify WAL mode is active on new DB."""
-    source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")
-    assert "actual_mode" in source and '"wal"' in source, (
-        "sqlite_writer.py does not verify WAL mode"
-    )
+def test_sqlite_writer_raises_when_wal_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """B-1.3 (runtime): if PRAGMA journal_mode does not return 'wal' (e.g. a
+    network share or read-only mount that silently refuses WAL), _ensure_connection
+    must raise RuntimeError rather than run without cross-process read concurrency.
 
+    Fault-injected by faking the connection so journal_mode reports 'delete'.
+    Replaces two tests that only grepped the source for the right strings — those
+    pass even if the check is commented out or never executed."""
+    import sqlite3
+    from datetime import date
 
-def test_sqlite_writer_wal_verification_in_source() -> None:
-    """B-1.3: sqlite_writer must raise RuntimeError if WAL mode fails."""
-    source = Path("src/cryodaq/storage/sqlite_writer.py").read_text(encoding="utf-8")
-    assert 'actual_mode != "wal"' in source or "actual_mode != 'wal'" in source, (
-        "sqlite_writer.py does not verify WAL mode result"
-    )
-    assert "RuntimeError" in source
+    writer = SQLiteWriter(data_dir=tmp_path)
+
+    class _FakeConn:
+        def execute(self, sql, *args):
+            mode = "delete" if "journal_mode" in sql.lower() else None
+
+            class _Cur:
+                def fetchone(self):
+                    return (mode,) if mode is not None else None
+
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: _FakeConn())
+
+    with pytest.raises(RuntimeError, match="WAL"):
+        writer._ensure_connection(date.today())

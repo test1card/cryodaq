@@ -4,11 +4,39 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from cryodaq.drivers.instruments.keithley_2604b import (
     _COMPLIANCE_NOTIFY_THRESHOLD,
     MAX_DELTA_V_PER_STEP,
     Keithley2604B,
 )
+
+
+class _FakeKeithleyTransport:
+    """Minimal fake TSP transport exercising the non-mock regulation path.
+
+    measure.iv() returns "current\\tvoltage" (the format _parse_iv_response
+    expects); compliance is false; levelv writes are recorded so the test can
+    inspect what the driver actually commanded.
+    """
+
+    def __init__(self, *, current: float, voltage: float) -> None:
+        self._iv = f"{current}\t{voltage}"
+        self.writes: list[str] = []
+
+    async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
+        c = cmd.lower()
+        if "source.output" in c:
+            return "0"  # inactive channels report OFF
+        if "measure.iv()" in c:
+            return self._iv
+        if "source.compliance" in c:
+            return "false"
+        return "0"
+
+    async def write(self, cmd: str) -> None:
+        self.writes.append(cmd)
 
 # ---------------------------------------------------------------------------
 # Slew rate limiting
@@ -33,30 +61,32 @@ async def test_slew_rate_normal_regulation() -> None:
     await driver.disconnect()
 
 
-async def test_slew_rate_limits_large_r_change() -> None:
-    """When R drops dramatically, voltage step is clamped to MAX_DELTA_V_PER_STEP.
+async def test_slew_rate_limits_large_v_step() -> None:
+    """Exercise the REAL non-mock regulation path (the mock path bypasses the
+    slew limiter). A 10 kΩ measured resistance at P=0.5 W wants ~40 V, but from
+    _last_v=0 the commanded step must be clamped to MAX_DELTA_V_PER_STEP, so the
+    driver writes levelv = 0.5, not the full target."""
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    # current=1 mA, voltage=10 V → R=10 kΩ → target ~sqrt(0.5*10000)=70.7 V,
+    # clamped to v_comp(40), then slew-clamped to 0.5 V from _last_v=0.
+    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
+    driver._transport = fake
+    driver._connected = True
+    driver._channels["smua"].active = True
+    driver._channels["smua"].p_target = 0.5
+    driver._channels["smua"].v_comp = 40.0
+    driver._last_v["smua"] = 0.0
 
-    In mock mode we can't simulate R changes directly, but we can verify
-    that _last_v tracks and the limit constant is correct.
-    """
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
-    await driver.start_source("smua", p_target=0.5, v_compliance=40.0, i_compliance=1.0)
-
-    # After start, _last_v is 0
-    assert driver._last_v["smua"] == 0.0
-
-    # First read: voltage jumps from 0 to sqrt(P*R) but is limited
     await driver.read_channels()
 
-    # In mock: R ≈ 100 Ω, P=0.5W → V ≈ sqrt(50) ≈ 7.07V
-    # But _last_v was 0, so step is limited to MAX_DELTA_V_PER_STEP = 0.5V
-    # Mock path doesn't go through the slew limiter (it computes directly),
-    # but the constant must exist and be sensible.
-    assert MAX_DELTA_V_PER_STEP == 0.5
-    assert MAX_DELTA_V_PER_STEP > 0
-
-    await driver.disconnect()
+    levelv_writes = [w for w in fake.writes if "smua.source.levelv" in w]
+    assert levelv_writes, "active channel must command a source.levelv write"
+    commanded = float(levelv_writes[-1].split("=")[1])
+    assert commanded == pytest.approx(MAX_DELTA_V_PER_STEP), (
+        f"slew limiter must clamp the step to {MAX_DELTA_V_PER_STEP} V, "
+        f"but commanded {commanded} V"
+    )
+    assert driver._last_v["smua"] == pytest.approx(MAX_DELTA_V_PER_STEP)
 
 
 async def test_slew_rate_constant_is_safe() -> None:

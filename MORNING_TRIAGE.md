@@ -52,7 +52,48 @@ product bugs.
   into real payload capture via `_patch_worker_capture` (test_shift_handover,
   test_periodic_prompt). Not false confidence.
 
-## Net result
+## Cycle 1 net result
 12/12 Codex findings addressed (11 strengthened, 1 reasoned-reject). All green;
-no real product bugs surfaced — the safety/alarm/cooldown/persistence behaviors
-the weak tests named do actually work.
+no real product bugs surfaced.
+
+## Cycle 2 (Codex re-review): 9/11 GENUINE, 2 still-weak, +6 new
+Codex verified the cycle-1 fixes: 9 GENUINE; 2 still-weak (#2 alarm suppression
+still routes through a test-helper copy of the prod loop; #10 sentinel tests a
+copied drain, not the real conftest). Found 6 new (2 HIGH).
+
+## Cycle 3 — strengthened & green (the HIGH new findings + a quick MED)
+- **B1 (HIGH, safety)** `test_keithley_safety::test_slew_rate_limits_large_v_step`
+  — was a tautology (mock path bypasses the limiter; asserted only the constant).
+  Now drives the REAL non-mock regulation path via a fake TSP transport: a 10 kΩ
+  measured R wants ~40 V, must clamp to 0.5 V/step. **Confirms the slew limiter works.**
+- **B3 (HIGH, data-integrity)** `test_sqlite_writer::test_sqlite_writer_raises_when_wal_unavailable`
+  — was source-string grep. Now fault-injects a fake connection whose
+  PRAGMA journal_mode returns 'delete' and asserts _ensure_connection raises
+  RuntimeError. **Confirms WAL-refusal is actually rejected.**
+- **B2 (MED)** `test_keithley_2604b::test_inactive_channel_output_state_parsed_as_float`
+  — was `assert float("1.000000e+00") > 0.5` (tests Python, not the driver). Now
+  drives the driver's output-state branch via fake transport (ON form → reads iv;
+  OFF → zeros).
+
+## DEFERRED to a focused session (documented, not rushed)
+These are real but need a refactor/harness best done with you in the loop —
+rushing them risks wrong tests, which defeats the purpose:
+- **#2 alarm production-level suppression** — to test the *production* phase filter
+  (engine.py:2064) rather than the `_simulate_tick` helper copy, extract the
+  per-alarm tick (filter→evaluate→process) from the engine's inline loop into a
+  callable production function, then test that. Touches engine.py.
+- **#10 sentinel vs real conftest** — to test the actual fixture (not a copied
+  drain), unify gui + shell conftest cleanup into one importable helper and have
+  the sentinel import it. Deferred to avoid re-touching the hard-won-green conftests.
+- **B4 (MED)** gpib bus-lock RM sharing — over-mocked (mock=True returns before
+  `_get_rm`); needs a non-mock pyvisa.ResourceManager monkeypatch + 2 transports.
+- **B5 (MED)** thyracont fallback baud — only asserts mock connect; needs a fake
+  serial transport that fails primary baud then succeeds fallback.
+- **B6 (LOW-MED)** web dashboard `--host` — checks help/doc text, not runtime bind
+  default; needs a CLI/config-level assertion.
+
+## Bottom line
+All Critical + HIGH false-confidence tests across cycles 1-3 are fixed and green
+(safety overflow, rate limit, Keithley slew, WAL, cooldown arm, alarm suppression
+positive-control, executor routing). No product bugs surfaced — the behaviors the
+weak tests named all work. Remaining is a documented MED/LOW tail + 2 refactors.

@@ -121,15 +121,45 @@ async def test_keithley_read_source_off() -> None:
     await driver.disconnect()
 
 
-async def test_keithley_output_state_float_string() -> None:
-    """Keithley print(smua.source.output) returns '1.000000e+00', not '1'.
+class _FakeOutputStateTransport:
+    """Fake TSP transport for the unmanaged-channel output-state branch."""
 
-    The driver must parse this as float and compare > 0.5 to detect ON state.
-    Regression test for the real-instrument float-format response.
-    """
-    # Verify the parsing logic: float("1.000000e+00") > 0.5 == True
-    assert float("1.000000e+00") > 0.5
-    assert float("0.000000e+00") <= 0.5
-    # Edge cases the old string comparison would have handled
-    assert float("1") > 0.5
-    assert float("0") <= 0.5
+    def __init__(self, output: str) -> None:
+        self._output = output
+
+    async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
+        c = cmd.lower()
+        if "source.output" in c:
+            return self._output
+        if "measure.iv()" in c:
+            return "1e-3\t10.0"  # current\tvoltage
+        if "source.compliance" in c:
+            return "false"
+        return "0"
+
+    async def write(self, cmd: str) -> None:
+        pass
+
+
+async def test_inactive_channel_output_state_parsed_as_float() -> None:
+    """Real-instrument print(smu.source.output) returns '1.000000e+00', not '1'.
+    The driver must parse it as a float (> 0.5 == ON) and, for an unmanaged-but-ON
+    channel, read measure.iv(); for an OFF channel it must emit zeros. Exercises
+    the DRIVER branch (keithley_2604b.py:139-158), not Python's float()."""
+
+    async def voltages_for(output_state: str) -> list[float]:
+        driver = Keithley2604B("k", "USB0::FAKE", mock=False)
+        driver._transport = _FakeOutputStateTransport(output_state)
+        driver._connected = True  # both channels inactive → driver checks source.output
+        readings = await driver.read_channels()
+        return [r.value for r in readings if r.channel.endswith("/voltage")]
+
+    on_v = await voltages_for("1.000000e+00")
+    assert on_v and any(v == 10.0 for v in on_v), (
+        "float-exponent ON state must be parsed as ON and the channel read (V=10)"
+    )
+
+    off_v = await voltages_for("0.000000e+00")
+    assert off_v and all(v == 0.0 for v in off_v), (
+        "OFF state must emit zero voltage, not the measured value"
+    )
