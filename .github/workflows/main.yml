@@ -14,10 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    # windows-latest is the deployment target and the required check. Linux is a
-    # fast-feedback leg being stabilised — don't let it fail the whole run yet.
-    # Remove this once the Linux leg is consistently green.
-    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
     env:
       # Force CPython UTF-8 Mode so file I/O defaults to UTF-8 on Windows
       # (default is cp1252, which raises UnicodeError on the project's Cyrillic
