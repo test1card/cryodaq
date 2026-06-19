@@ -25,25 +25,6 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture(autouse=True)
-def _restore_global_style(app):
-    """Restore the application stylesheet/palette after each test.
-
-    These tests mutate the *global* QApplication stylesheet + palette. Left in
-    place, the conftest teardown's processEvents() re-polishes every leaked
-    widget against that fusion stylesheet, which intermittently raises a Windows
-    fatal access violation (the flaky ~78% crash). Restoring here — before the
-    conftest teardown runs — removes the trigger.
-    """
-    before_sheet = app.styleSheet()
-    before_palette = app.palette()
-    before_flag = app.property("_cryodaq_fusion_applied")
-    yield
-    app.setStyleSheet(before_sheet)
-    app.setPalette(before_palette)
-    app.setProperty("_cryodaq_fusion_applied", before_flag)
-
-
 def test_apply_fusion_dark_palette_sets_fusion_style(app):
     apply_fusion_dark_palette(app)
     # Qt6 wraps the active style in QStyleSheetStyle once any

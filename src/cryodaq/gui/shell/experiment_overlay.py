@@ -974,6 +974,17 @@ class ExperimentOverlay(QWidget):
                 return False
         return super().eventFilter(obj, event)
 
+    def closeEvent(self, event):  # noqa: ANN001
+        # Drop the event filter so a closed (or leaked) overlay does not have
+        # its eventFilter invoked during a later application-global
+        # setStyleSheet repaint — that fires against a half-torn-down widget and
+        # access-violates on Windows.
+        try:
+            self._name_edit.removeEventFilter(self)
+        except RuntimeError:
+            pass
+        super().closeEvent(event)
+
     # ------------------------------------------------------------------
     # ESC close
     # ------------------------------------------------------------------
