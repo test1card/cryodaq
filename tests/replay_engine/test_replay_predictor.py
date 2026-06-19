@@ -69,7 +69,11 @@ def _write_cooldown_yaml(
     replay-mode override path is exercised by every test that uses this helper.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
-    md = str(model_dir) if model_dir is not None else "data/cooldown_model"
+    # as_posix() so the path uses forward slashes: a Windows path like
+    # D:\a\... inside a double-quoted YAML scalar has invalid escapes (\a, \c)
+    # and fails to parse ("while scanning a double-quoted scalar"). Path()
+    # accepts forward slashes on every OS.
+    md = model_dir.as_posix() if model_dir is not None else "data/cooldown_model"
     (config_dir / "cooldown.yaml").write_text(
         "cooldown:\n"
         f"  enabled: {'true' if enabled else 'false'}\n"
