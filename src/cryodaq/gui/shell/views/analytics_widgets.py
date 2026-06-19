@@ -167,6 +167,37 @@ def _mono_value_label(text: str) -> QLabel:
 
 
 # ---------------------------------------------------------------------------
+# Worker-cleanup mixin
+# ---------------------------------------------------------------------------
+
+
+class _WorkerCleanupMixin:
+    """Wait for any ZmqCommandWorker QThreads this widget owns before it is
+    destroyed.
+
+    These widgets create ``ZmqCommandWorker(parent=self)`` QThreads to fetch
+    data. If the widget is destroyed while a worker is still running, Qt aborts
+    with "QThread: Destroyed while thread is still running" — a flaky segfault on
+    Windows CI when a test (or teardown) deletes the widget mid-fetch. Joining
+    the workers in closeEvent makes destruction safe.
+    """
+
+    _WORKER_ATTRS = ("_history_worker", "_alarm_worker", "_stats_worker")
+
+    def closeEvent(self, event):  # noqa: ANN001
+        for name in self._WORKER_ATTRS:
+            worker = getattr(self, name, None)
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    worker.wait(2000)
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Placeholder widget — «данные появятся при переходе фазы»
 # ---------------------------------------------------------------------------
 
@@ -208,7 +239,7 @@ class _ChannelSeries:
     ys: list[float] = field(default_factory=list)
 
 
-class TemperatureOverviewWidget(QWidget):
+class TemperatureOverviewWidget(_WorkerCleanupMixin, QWidget):
     """Compact multi-channel temperature plot following the global
     time window. Subscribes to ``GlobalTimeWindowController``."""
 
@@ -457,7 +488,7 @@ class TemperatureOverviewWidget(QWidget):
         CooldownPredictionWidget — no-op here."""
 
 
-class TemperatureTrajectoryWidget(QWidget):
+class TemperatureTrajectoryWidget(_WorkerCleanupMixin, QWidget):
     """Full-experiment temperature history — per-group Y-axis scaling (W1, warmup/main, F3-Cycle2).
 
     Initial data: ``readings_history`` ZMQ fetch (7-day window, cold channels) on construction.
@@ -1266,7 +1297,7 @@ class KeithleyPowerWidget(QWidget):
             label.setText(f"{float(reading.value):.3g} {unit}")
 
 
-class CooldownHistoryWidget(QWidget):
+class CooldownHistoryWidget(_WorkerCleanupMixin, QWidget):
     """Past cooldown durations for comparison (W2, warmup/bottom_right, F3-Cycle3).
 
     One-shot ``cooldown_history_get`` ZMQ fetch on construction.
@@ -1380,7 +1411,7 @@ class _ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-class ExperimentSummaryWidget(QWidget):
+class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
     """Post-experiment summary card (W3, disassembly/main, F3-Cycle4).
 
     Receives experiment status via set_experiment_status().
