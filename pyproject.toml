@@ -53,6 +53,10 @@ dependencies = [
     # are skipped with a warning so a single bad manual cannot kill
     # the bootstrap batch.
     "pypdf>=4.0,<6",
+    # IANA time-zone database. Windows ships no system tz database, so resolving
+    # tz="UTC" timestamps (parquet archive via pyarrow) raises
+    # ZoneInfoNotFoundError without this. No-op where the OS provides tzdata.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
