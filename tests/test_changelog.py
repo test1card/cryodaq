@@ -22,12 +22,18 @@ def test_changelog_versions_in_descending_order():
     )
 
 
-def test_changelog_recent_versions_present():
-    """v0.51.0 → v0.53.2 all present in CHANGELOG.md."""
-    text = (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
-    expected = [
-        "0.51.0", "0.52.0", "0.52.1", "0.52.2",
-        "0.52.10", "0.52.11", "0.53.0", "0.53.1", "0.53.2",
-    ]
-    for v in expected:
-        assert f"[{v}]" in text, f"Missing version {v} in CHANGELOG.md"
+def test_changelog_documents_current_version():
+    """The current project version (pyproject) must have a CHANGELOG entry.
+
+    Derived from pyproject so it can't go stale: a release that bumps the version
+    without a changelog entry fails here (the old fixed 0.51–0.53.2 list silently
+    stayed green long after the project reached 0.56.x)."""
+    import tomllib
+
+    root = Path(__file__).parents[1]
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    with (root / "pyproject.toml").open("rb") as fh:
+        version = tomllib.load(fh)["project"]["version"]
+    assert f"[{version}]" in text, (
+        f"CHANGELOG.md has no entry for the current version [{version}]"
+    )

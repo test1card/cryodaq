@@ -253,17 +253,28 @@ async def test_broker_overflow_triggers_fault():
     await mgr.start()
 
     try:
-        # Fill the queue (queue was created with maxsize=2 in start)
-        # Overflow callback should trigger fault
-        for i in range(5):
-            r = Reading.now(channel=f"CH{i}", value=float(i), unit="K", instrument_id="test")
-            await broker.publish(r)
-            await asyncio.sleep(0.01)
+        q = mgr._queue
+        assert q is not None and q.maxsize > 0, "safety subscriber queue must be bounded"
 
-        # Check that overflow was detected
-        # The fault may or may not have triggered depending on timing,
-        # but the overflow callback is set up correctly
-        assert broker._overflow_callback is not None
+        # Fill the safety subscriber queue to capacity *synchronously* — with no
+        # await between puts, the manager's consumer task cannot drain it. Then
+        # one publish: broker.publish() checks queue.full() before any await and
+        # invokes the overflow callback -> SafetyManager._fault(). This makes the
+        # overflow deterministic instead of timing-dependent.
+        for _ in range(q.maxsize):
+            q.put_nowait(
+                Reading.now(channel="CHfill", value=0.0, unit="K", instrument_id="test")
+            )
+        await broker.publish(
+            Reading.now(channel="CHoverflow", value=1.0, unit="K", instrument_id="test")
+        )
+
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"SafetyBroker overflow must latch FAULT_LATCHED, got {mgr.state}"
+        )
+        assert "overflow" in mgr.fault_reason.lower(), (
+            f"fault_reason must name the overflow cause, got {mgr.fault_reason!r}"
+        )
     finally:
         await mgr.stop()
 

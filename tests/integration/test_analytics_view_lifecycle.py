@@ -151,6 +151,10 @@ def test_pressure_forwarded_in_preparation_top_right(app):
     view.set_pressure_reading(reading)
     widget = view.active_widgets().get("top_right")
     assert isinstance(widget, aw.PressureCurrentWidget)
+    # The reading must actually reach the widget's series — isinstance alone was
+    # already true before the setter, so it proved nothing about forwarding.
+    assert len(widget._series) == 1
+    assert widget._series[-1][1] == 5e-6
 
 
 # ─── set_experiment_status ─────────────────────────────────────────────────────

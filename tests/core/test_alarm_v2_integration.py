@@ -61,8 +61,12 @@ def _make_stack(
 
 
 def test_phase_alarm_suppressed_outside_phase() -> None:
-    state, rate, ev, sm = _make_stack(phase="vacuum")
-    state.update(_reading("T12", 5.5))
+    # Phase = vacuum, but this alarm only applies in measurement. A reading that
+    # WOULD breach the threshold must be suppressed by the phase filter. Prove it
+    # by running the real evaluator + state-manager tick (mirrors the production
+    # loop at engine.py:2064), not by re-deriving the filter boolean in the test.
+    state, rate, ev, sm = _make_stack(phase="vacuum", setpoints={"T12_setpoint": 4.2})
+    state.update(_reading("T12", 5.5))  # deviation 1.3 K > threshold 0.5 → would fire
 
     alarm_cfg = AlarmConfig(
         alarm_id="detector_drift",
@@ -77,10 +81,19 @@ def test_phase_alarm_suppressed_outside_phase() -> None:
         phase_filter=["measurement"],
     )
 
-    # Current phase = "vacuum", filter = ["measurement"] → should not evaluate
-    current_phase = ev._phase.get_current_phase()
-    should_skip = alarm_cfg.phase_filter is not None and current_phase not in alarm_cfg.phase_filter
-    assert should_skip  # logic: suppressed
+    transitions = _simulate_tick(ev, sm, [alarm_cfg], current_phase="vacuum")
+    assert "detector_drift" not in transitions, (
+        f"alarm must be suppressed outside its phase filter, got transition {transitions}"
+    )
+
+    # Positive control: the SAME reading DOES fire once the phase matches — guards
+    # against a false pass where the threshold simply never breaches.
+    state2, rate2, ev2, sm2 = _make_stack(phase="measurement", setpoints={"T12_setpoint": 4.2})
+    state2.update(_reading("T12", 5.5))
+    fired = _simulate_tick(ev2, sm2, [alarm_cfg], current_phase="measurement")
+    assert fired.get("detector_drift") == "TRIGGERED", (
+        f"alarm must fire inside its phase filter, got {fired}"
+    )
 
 
 def test_phase_alarm_fires_in_correct_phase() -> None:

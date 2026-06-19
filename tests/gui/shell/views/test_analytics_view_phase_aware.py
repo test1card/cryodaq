@@ -179,11 +179,18 @@ def test_set_cooldown_forwards_to_cooldown_prediction_widget(app):
     main = view.active_widgets()["main"]
     inner = getattr(main, "_inner", None)
     assert inner is not None
-    # v0.55+ contract: CooldownData.actual_trajectory is empty by design (obs:
-    # cold-stage readings flow via set_cold_temperature_reading). set_cooldown
-    # forwards predicted_trajectory → set_prediction → _central_curve.
-    xs, _ = inner._central_curve.getData()
-    assert len(xs) == 2
+    # v0.55+ contract: CooldownData.actual_trajectory is empty by design (cold-
+    # stage readings flow via set_cold_temperature_reading). set_cooldown forwards
+    # predicted_trajectory → set_prediction → central curve, and ci_trajectory →
+    # lower/upper bands. Assert the actual values, not just point count, so a
+    # wrong/swapped trajectory or dropped CI band would be caught.
+    cx, cy = inner._central_curve.getData()
+    assert list(cx) == [3600.0, 14400.0]
+    assert list(cy) == [150.0, 50.0]
+    _, ly = inner._lower_curve.getData()
+    assert list(ly) == [148.0, 45.0]
+    _, uy = inner._upper_curve.getData()
+    assert list(uy) == [152.0, 55.0]
 
 
 def test_set_r_thermal_forwards_to_live_widget(app):
@@ -294,7 +301,13 @@ def test_phase_swap_replays_cached_cooldown(app):
     view.set_cooldown(data)
     view.set_phase("cooldown")  # mounts CooldownPredictionWidget
     main = view.active_widgets()["main"]
-    # Cached cooldown replays on mount → set_prediction populates _central_curve
-    # (actual_trajectory empty by contract).
-    xs, _ = main._inner._central_curve.getData()
-    assert len(xs) == 2
+    # Cached cooldown must replay on mount with the SAME values that were pushed
+    # pre-mount — assert the actual replayed trajectory + CI band, not just count,
+    # so a replay that drops/garbles the cached data would be caught.
+    cx, cy = main._inner._central_curve.getData()
+    assert list(cx) == [600.0, 3600.0]
+    assert list(cy) == [200.0, 100.0]
+    _, ly = main._inner._lower_curve.getData()
+    assert list(ly) == [198.0, 95.0]
+    _, uy = main._inner._upper_curve.getData()
+    assert list(uy) == [202.0, 105.0]

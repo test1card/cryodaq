@@ -78,15 +78,25 @@ def test_arm_with_missing_model_returns_false(tmp_path):
 
 
 def test_arm_with_model_returns_true(tmp_path):
-    """Model present → arm() returns True, state ARMED."""
-    alarm, *_ = _make_alarm(model_dir=tmp_path)
-    with patch("cryodaq.core.cooldown_alarm.CooldownAlarm.arm") as mock_arm:
-        mock_arm.return_value = True
-        # Directly set state to test the contract
-        alarm._model = _fake_model()
-        alarm._t_armed = time.monotonic()
-        alarm._state = CooldownState.ARMED
+    """Model present + not cold-start → the REAL arm() returns True, state ARMED,
+    and the loaded model is stored. Only the file load is mocked, so arm()'s own
+    logic (cold-start gate, state transition, model assignment) is exercised."""
+    alarm, tracker, *_ = _make_alarm(model_dir=tmp_path)
+    # 200 K is far above base (5 K), so the cold-start gate does not skip arming.
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 200.0)
+    # arm() existence-checks the model file before loading it; create it so the
+    # gate passes, then mock the parse so we don't need a real EnsembleModel.
+    (tmp_path / "predictor_model.json").write_text("{}", encoding="utf-8")
+    fake = _fake_model()
+    with patch(
+        "cryodaq.analytics.cooldown_predictor.load_model", return_value=fake
+    ) as load_model_mock:
+        result = alarm.arm()
+
+    assert result is True
     assert alarm.state == CooldownState.ARMED
+    assert alarm._model is fake, "arm() must store the loaded model"
+    load_model_mock.assert_called_once()
 
 
 @pytest.mark.asyncio

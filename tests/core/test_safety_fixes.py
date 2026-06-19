@@ -371,15 +371,43 @@ async def test_fault_event_has_channel_and_value():
 # ---------------------------------------------------------------------------
 
 
-async def test_rate_limit_uses_rate_estimator():
-    """SafetyManager uses RateEstimator instead of raw _rate_buffers."""
+async def test_rate_limit_faults_on_critical_channel():
+    """Black-box rate-limit invariant: a steep dT/dt on a CRITICAL channel while
+    RUNNING latches FAULT_LATCHED. (The sibling test above already proves a steep
+    rate on a NON-critical channel does NOT fault.) Replaces a prior test that
+    only asserted private attributes (_rate_estimator present, _rate_buffers
+    absent) and so could not catch a rate limiter that silently stopped working.
+    """
     mgr, broker = await _make_manager(stale=30.0)
     try:
-        assert not hasattr(mgr, "_rate_buffers"), (
-            "SafetyManager should use RateEstimator, not raw _rate_buffers"
+        crit = "Т1 Криостат верх"
+        # critical_channels holds compiled regex patterns, not raw strings.
+        mgr._config.critical_channels = [re.compile(re.escape(crit))]
+        # Reach RUNNING with the critical channel fresh and in-range.
+        await _feed(broker, channel=crit, value=4.5, unit="K")
+        await asyncio.sleep(1.5)
+        assert mgr.state == SafetyState.READY
+        assert (await mgr.request_run(0.5, 40.0, 1.0))["ok"] is True
+        assert mgr.state == SafetyState.RUNNING
+
+        # Drive a steep dT/dt on the critical channel. The RateEstimator needs
+        # >= min_points (60) samples in-window before it reports a rate, so feed
+        # 65 rising samples (+0.5 K each, kept < 40 K). dT/dt is then far above
+        # the 5 K/min limit.
+        for i in range(65):
+            r = Reading.now(
+                channel=crit, value=4.5 + i * 0.5, unit="K", instrument_id="test"
+            )
+            await broker.publish(r)
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(1.5)
+
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"steep dT/dt on a critical channel must latch FAULT, got {mgr.state}"
         )
-        assert hasattr(mgr, "_rate_estimator"), (
-            "SafetyManager should have _rate_estimator attribute"
+        reason = mgr.fault_reason.lower()
+        assert "rate" in reason or "dt" in reason or "k/min" in reason, (
+            f"fault_reason should name the rate-limit cause, got {mgr.fault_reason!r}"
         )
     finally:
         await mgr.stop()
