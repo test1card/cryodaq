@@ -12,50 +12,53 @@ during a scheduler flush.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from pathlib import Path
 
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
-def test_get_operator_log_uses_read_executor():
-    """Source of get_operator_log must route to self._read_executor."""
-    source = inspect.getsource(SQLiteWriter.get_operator_log)
-    assert "_read_executor" in source, (
-        "get_operator_log must use _read_executor (separated from "
-        "persistence writes on _executor)."
-    )
-    # Make sure we didn't accidentally leave a run_in_executor(self._executor, ...)
-    # call in the method. The test must fail loudly if a future edit reverts it.
-    stripped = source.replace("_read_executor", "")
-    assert "run_in_executor(self._executor" not in stripped, (
-        "get_operator_log must NOT schedule the read on self._executor."
-    )
+def test_reads_and_writes_use_separate_executors(tmp_path: Path):
+    """Runtime routing check (not source inspection): a read actually runs on
+    _read_executor and a write actually runs on _executor. Source-string
+    inspection could pass on a comment or a wrapper while the real call misroutes;
+    spying run_in_executor records the executor object that is genuinely used."""
+    from cryodaq.drivers.base import Reading
 
+    writer = SQLiteWriter(data_dir=tmp_path)
 
-def test_read_readings_history_uses_read_executor():
-    """read_readings_history has been on _read_executor for a while;
-    keep it pinned to prevent accidental regression."""
-    source = inspect.getsource(SQLiteWriter.read_readings_history)
-    assert "_read_executor" in source
+    async def run():
+        await writer.start_immediate()
+        try:
+            loop = asyncio.get_running_loop()
+            seen: list = []
+            orig = loop.run_in_executor
 
+            def spy(executor, func, *args):
+                seen.append(executor)
+                return orig(executor, func, *args)
 
-def test_write_immediate_still_uses_write_executor():
-    """Persistence-first writes MUST stay on _executor to preserve
-    ordering with the scheduler batch flush."""
-    source = inspect.getsource(SQLiteWriter.write_immediate)
-    assert "run_in_executor(self._executor" in source, (
-        "write_immediate must stay on _executor (write pool)."
-    )
-    assert "_read_executor" not in source
+            loop.run_in_executor = spy  # type: ignore[method-assign]
+            try:
+                seen.clear()
+                await writer.get_operator_log(limit=10)
+                read_execs = list(seen)
 
+                seen.clear()
+                await writer.write_immediate(
+                    [Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test")]
+                )
+                write_execs = list(seen)
+            finally:
+                loop.run_in_executor = orig
+            return read_execs, write_execs, writer._read_executor, writer._executor
+        finally:
+            await writer.stop()
 
-def test_append_operator_log_still_uses_write_executor():
-    """append_operator_log is a WRITE (INSERT INTO operator_log);
-    it must stay on the write executor to serialise with other writes."""
-    source = inspect.getsource(SQLiteWriter.append_operator_log)
-    assert "run_in_executor(self._executor" in source
-    assert "_read_executor" not in source
+    read_execs, write_execs, read_pool, write_pool = asyncio.run(run())
+    assert read_pool in read_execs, "get_operator_log must run on _read_executor"
+    assert write_pool not in read_execs, "get_operator_log must NOT use the write executor"
+    assert write_pool in write_execs, "write_immediate must run on the write _executor"
+    assert read_pool not in write_execs, "write_immediate must NOT use _read_executor"
 
 
 def test_get_operator_log_not_blocked_by_slow_write(tmp_path: Path):

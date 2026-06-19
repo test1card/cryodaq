@@ -30,8 +30,29 @@ product bugs.
 - **A12 (Low)** `test_changelog` — stale fixed version range → asserts the current
   pyproject version is documented.
 
-## Still open (next pass / Codex cycle 2)
-- A9 executor source-string tests → runtime executor assertions.
-- A10 replay_predictor fixed ZMQ ports/sleep → dynamic ports.
-- A11 app_palette isolation → add a GUI leak-sentinel test.
-- A7 shell conftest global `send_command` stub → see note (likely justified default).
+## Batch 2 — strengthened & green
+- **A9 (Med)** `test_sqlite_writer_executor_separation` — replaced 4 brittle
+  `inspect.getsource("_read_executor" in source)` tests with one runtime test that
+  spies `run_in_executor` and asserts reads route to `_read_executor`, writes to
+  `_executor` (kept the real slow-write-doesn't-block-read integration test).
+- **A10 (Med)** `test_replay_predictor` — fixed ZMQ ports 15555/15556 → OS-assigned
+  free ports (`_free_tcp_addr`), so a stale process / parallel run can't collide.
+- **A11 (Med)** new `tests/gui/test_widget_cleanup_sentinel.py` — guards the real
+  protective invariant: teardown stops leaked widget timers (a running timer during
+  app_palette's global setStyleSheet re-polish is the crash). Note: discovered that
+  `deleteLater()+processEvents()` does NOT reliably *delete* widgets (Qt
+  DeferredDelete semantics) — the conftest protects via timer-stop + closeEvent,
+  not widget deletion. Sentinel asserts the timer-stop invariant accordingly.
+
+## Rejected (with reason)
+- **A7** shell conftest global `send_command` stub — kept. It's a deliberate
+  test-isolation default (no real ZMQ sockets in unit tests). Scoping it per-test
+  would mean auditing hundreds of shell tests and risk re-introducing real-ZMQ
+  flakiness, and it hides nothing: command/wiring tests that matter already opt
+  into real payload capture via `_patch_worker_capture` (test_shift_handover,
+  test_periodic_prompt). Not false confidence.
+
+## Net result
+12/12 Codex findings addressed (11 strengthened, 1 reasoned-reject). All green;
+no real product bugs surfaced — the safety/alarm/cooldown/persistence behaviors
+the weak tests named do actually work.

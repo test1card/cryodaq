@@ -9,13 +9,15 @@ Covers:
    reaches a ZMQ SUB subscriber, proving the source → broker → CooldownService
    → broker → ZMQPublisher fan-out is intact.
 
-Tests use isolated test ports (15555/15556) consistent with test_replay_engine.py.
+Tests bind to OS-assigned free ports (not fixed ones) so a stale process or a
+parallel run cannot collide and flake the suite.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +25,19 @@ import pytest
 import zmq
 import zmq.asyncio
 
-_TEST_PUB = "tcp://127.0.0.1:15555"
-_TEST_CMD = "tcp://127.0.0.1:15556"
+
+def _free_tcp_addr() -> str:
+    """Return a tcp://127.0.0.1:<port> on an OS-assigned free port."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{s.getsockname()[1]}"
+    finally:
+        s.close()
+
+
+_TEST_PUB = _free_tcp_addr()
+_TEST_CMD = _free_tcp_addr()
 
 
 # ---------------------------------------------------------------------------
