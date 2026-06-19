@@ -24,13 +24,62 @@ def _isolate_shell_test(monkeypatch):
 
     monkeypatch.setattr(zc, "send_command", lambda _cmd: {"ok": False, "stub": True})
     yield
+    from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
 
-    # Windows-safe teardown: stop timers, join worker threads, delete widgets,
-    # flush only DeferredDelete events (no processEvents — that fires leaked
-    # timer/paint events on mid-deletion widgets → access violation on Windows).
-    from tests._qt_cleanup import drain_gui
-
     app = QApplication.instance()
-    if app is not None:
-        drain_gui(app)
+    if app is None:
+        return
+
+    import time
+
+    # Stop timers first so nothing new gets scheduled while teardown is
+    # draining the event queue.
+    for timer in app.findChildren(QTimer):
+        try:
+            timer.stop()
+        except RuntimeError:
+            pass
+
+    # Close and delete any top-level widgets created by the test. Their
+    # child widgets/timers will be cleaned up with them. Closing also fires
+    # closeEvent, where overlays stop their own owned timers/workers.
+    for widget in QApplication.topLevelWidgets():
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            pass
+
+    # Process pending deleteLater calls and any immediate finished
+    # signals from no-op worker stubs.
+    for _ in range(5):
+        app.processEvents()
+
+    # Wait briefly for any already-running QThread to finish. Keep the
+    # wait bounded so teardown cost scales with actual work, not with a
+    # fixed sleep per test.
+    deadline = time.monotonic() + 0.5
+    idle_rounds = 0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        running = False
+        for obj in app.findChildren(QThread):
+            try:
+                if obj.isRunning():
+                    running = True
+                    obj.wait(25)
+            except RuntimeError:
+                # C++ object already deleted
+                pass
+        if not running:
+            idle_rounds += 1
+            if idle_rounds >= 3:
+                break
+        else:
+            idle_rounds = 0
+        time.sleep(0.01)
+
+    # Final flush so finished signals are processed.
+    for _ in range(10):
+        app.processEvents()
