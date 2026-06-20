@@ -41,7 +41,7 @@ from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager, tick_alarm
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
@@ -2060,27 +2060,13 @@ async def _run_engine(*, mock: bool = False) -> None:
                 continue
             current_phase = _alarm_v2_phase.get_current_phase()
             for alarm_cfg in _alarm_v2_configs:
-                # Проверка фазового фильтра
-                if alarm_cfg.phase_filter is not None:
-                    if current_phase not in alarm_cfg.phase_filter:
-                        # Вне фазы — явно очистить если был активен
-                        alarm_v2_state_mgr.process(alarm_cfg.alarm_id, None, alarm_cfg.config)
-                        continue
                 try:
-                    _active_alarms = alarm_v2_state_mgr.get_active()
-                    _active_event = _active_alarms.get(alarm_cfg.alarm_id)
-                    event = alarm_v2_evaluator.evaluate(
-                        alarm_cfg.alarm_id,
-                        alarm_cfg.config,
-                        is_active=_active_event is not None,
-                        active_channels=(
-                            frozenset(_active_event.channels)
-                            if _active_event is not None
-                            else None
-                        ),
-                    )
-                    transition = alarm_v2_state_mgr.process(
-                        alarm_cfg.alarm_id, event, alarm_cfg.config
+                    # Phase-filter -> evaluate -> process. Shared with tests via
+                    # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
+                    # by the real production logic. Out-of-phase returns
+                    # (None, None) after clearing, so nothing dispatches below.
+                    event, transition = tick_alarm(
+                        alarm_cfg, current_phase, alarm_v2_evaluator, alarm_v2_state_mgr
                     )
                     if transition == "TRIGGERED" and event is not None:
                         # GUI polls via alarm_v2_status command; optionally notify via Telegram

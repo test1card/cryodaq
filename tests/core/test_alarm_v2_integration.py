@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from cryodaq.core.alarm_config import AlarmConfig, SetpointDef
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager, tick_alarm
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.drivers.base import Reading
@@ -126,15 +126,13 @@ def _simulate_tick(
     alarm_cfgs: list[AlarmConfig],
     current_phase: str | None,
 ) -> dict[str, str]:
-    """Simulate one alarm tick, return alarm_id → transition for those that changed."""
+    """Simulate one alarm tick via the PRODUCTION tick_alarm (the same function
+    the engine's alarm loop runs), returning alarm_id → transition for those that
+    changed. Using the production helper means phase-filter suppression is tested
+    against real code, not a reimplementation."""
     transitions: dict[str, str] = {}
     for alarm_cfg in alarm_cfgs:
-        if alarm_cfg.phase_filter is not None:
-            if current_phase not in alarm_cfg.phase_filter:
-                state_mgr.process(alarm_cfg.alarm_id, None, alarm_cfg.config)
-                continue
-        event = evaluator.evaluate(alarm_cfg.alarm_id, alarm_cfg.config)
-        t = state_mgr.process(alarm_cfg.alarm_id, event, alarm_cfg.config)
+        _event, t = tick_alarm(alarm_cfg, current_phase, evaluator, state_mgr)
         if t is not None:
             transitions[alarm_cfg.alarm_id] = t
     return transitions

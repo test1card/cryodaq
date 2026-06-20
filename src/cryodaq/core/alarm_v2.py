@@ -704,3 +704,37 @@ class AlarmStateManager:
             "operator": operator,
             "reason": reason,
         }
+
+
+def tick_alarm(
+    alarm_cfg: Any,
+    current_phase: str | None,
+    evaluator: AlarmEvaluator,
+    state_mgr: AlarmStateManager,
+) -> tuple[AlarmEvent | None, str | None]:
+    """Run one alarm through the phase-filter → evaluate → process pipeline.
+
+    This is the per-alarm core of the engine's alarm-v2 tick loop, extracted so
+    both the engine and tests exercise the *same* production logic (phase-filter
+    suppression in particular). Returns ``(event, transition)``.
+
+    When ``alarm_cfg.phase_filter`` excludes ``current_phase`` the alarm is
+    cleared in the state manager and ``(None, None)`` is returned, signalling the
+    caller to dispatch nothing — matching the engine's "out of phase → clear and
+    skip" behaviour.
+    """
+    if alarm_cfg.phase_filter is not None and current_phase not in alarm_cfg.phase_filter:
+        state_mgr.process(alarm_cfg.alarm_id, None, alarm_cfg.config)
+        return None, None
+
+    active_event = state_mgr.get_active().get(alarm_cfg.alarm_id)
+    event = evaluator.evaluate(
+        alarm_cfg.alarm_id,
+        alarm_cfg.config,
+        is_active=active_event is not None,
+        active_channels=(
+            frozenset(active_event.channels) if active_event is not None else None
+        ),
+    )
+    transition = state_mgr.process(alarm_cfg.alarm_id, event, alarm_cfg.config)
+    return event, transition

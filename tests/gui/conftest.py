@@ -19,40 +19,14 @@ from __future__ import annotations
 
 import pytest
 
+from tests._widget_cleanup import drain_gui_widgets
+
 
 @pytest.fixture(autouse=True)
 def _cleanup_top_level_widgets():
     yield
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
-    if app is None:
-        return
-
-    top_level = list(QApplication.topLevelWidgets())
-
-    timers = list(app.findChildren(QTimer))
-    for widget in top_level:
-        try:
-            timers.extend(widget.findChildren(QTimer))
-        except RuntimeError:
-            pass
-    for timer in timers:
-        try:
-            timer.stop()
-        except RuntimeError:
-            pass
-
-    for widget in top_level:
-        try:
-            widget.close()
-            widget.deleteLater()
-        except RuntimeError:
-            pass
-
-    for _ in range(5):
-        try:
-            app.processEvents()
-        except RuntimeError:
-            break
+    if app is not None:
+        drain_gui_widgets(app)

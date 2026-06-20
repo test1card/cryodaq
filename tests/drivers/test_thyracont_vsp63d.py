@@ -287,12 +287,44 @@ def test_fallback_baudrates_mapping() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_connect_fallback_baudrate() -> None:
-    """When primary baudrate is 9600 in mock mode, connection still succeeds."""
-    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=9600, mock=True)
+class _FakeSerial:
+    """Fake serial transport recording the baudrates connect() opens at."""
+
+    def __init__(self) -> None:
+        self.opened_bauds: list[int] = []
+
+    async def open(self, resource: str, baudrate: int = 9600) -> None:
+        self.opened_bauds.append(baudrate)
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_connect_falls_back_to_secondary_baudrate(monkeypatch) -> None:
+    """Real fallback logic (not mock): when the probe fails at the primary baud,
+    connect() must reopen at the fallback baud and succeed there. Asserts the
+    actual try-order, not just 'connected' in mock mode."""
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=9600, mock=False)
+    fake = _FakeSerial()
+    driver._transport = fake
+
+    # Protocol-V1 probe succeeds only once we're at the fallback baud (115200).
+    async def _v1_probe():
+        return fake.opened_bauds[-1] == 115200
+
+    async def _mv00_probe():
+        return False
+
+    monkeypatch.setattr(driver, "_try_v1_probe", _v1_probe)
+    monkeypatch.setattr(driver, "_try_mv00_probe", _mv00_probe)
+
     await driver.connect()
+
     assert driver.connected
-    await driver.disconnect()
+    assert driver._protocol_v1 is True
+    assert fake.opened_bauds == [9600, 115200], (
+        f"must try primary then fall back, got {fake.opened_bauds}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -300,10 +332,25 @@ async def test_connect_fallback_baudrate() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_connect_preserves_original_baudrate_on_success() -> None:
-    """When primary baudrate probe succeeds, no fallback is attempted."""
-    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=115200, mock=True, validate_checksum=False)
+async def test_connect_no_fallback_when_primary_succeeds(monkeypatch) -> None:
+    """When the primary baud probe succeeds, connect() must NOT open the fallback
+    baud at all — asserts exactly one open at the configured baud."""
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=115200, mock=False)
+    fake = _FakeSerial()
+    driver._transport = fake
+
+    async def _v1_probe():
+        return True  # succeeds immediately at the primary baud
+
+    async def _mv00_probe():
+        return False
+
+    monkeypatch.setattr(driver, "_try_v1_probe", _v1_probe)
+    monkeypatch.setattr(driver, "_try_mv00_probe", _mv00_probe)
+
     await driver.connect()
+
     assert driver.connected
-    assert driver._protocol_v1 is True
-    await driver.disconnect()
+    assert fake.opened_bauds == [115200], (
+        f"primary success must not trigger a fallback open, got {fake.opened_bauds}"
+    )

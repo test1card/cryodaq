@@ -75,25 +75,39 @@ copied drain, not the real conftest). Found 6 new (2 HIGH).
   drives the driver's output-state branch via fake transport (ON form → reads iv;
   OFF → zeros).
 
-## DEFERRED to a focused session (documented, not rushed)
-These are real but need a refactor/harness best done with you in the loop —
-rushing them risks wrong tests, which defeats the purpose:
-- **#2 alarm production-level suppression** — to test the *production* phase filter
-  (engine.py:2064) rather than the `_simulate_tick` helper copy, extract the
-  per-alarm tick (filter→evaluate→process) from the engine's inline loop into a
-  callable production function, then test that. Touches engine.py.
-- **#10 sentinel vs real conftest** — to test the actual fixture (not a copied
-  drain), unify gui + shell conftest cleanup into one importable helper and have
-  the sentinel import it. Deferred to avoid re-touching the hard-won-green conftests.
-- **B4 (MED)** gpib bus-lock RM sharing — over-mocked (mock=True returns before
-  `_get_rm`); needs a non-mock pyvisa.ResourceManager monkeypatch + 2 transports.
-- **B5 (MED)** thyracont fallback baud — only asserts mock connect; needs a fake
-  serial transport that fails primary baud then succeeds fallback.
-- **B6 (LOW-MED)** web dashboard `--host` — checks help/doc text, not runtime bind
-  default; needs a CLI/config-level assertion.
+## Cycle 4 — ALL remaining items finished
+- **#2 alarm production-level suppression** — DONE. Extracted the per-alarm tick
+  (phase-filter→evaluate→process) into `cryodaq.core.alarm_v2.tick_alarm`; the
+  engine loop now calls it (behavior-preserving), and the test helper
+  `_simulate_tick` routes through it — so phase-filter suppression is now tested
+  against PRODUCTION code, not a reimplementation.
+- **#10 sentinel vs real conftest** — DONE. Extracted the gui teardown into
+  `tests/_widget_cleanup.drain_gui_widgets`; `tests/gui/conftest.py` (autouse,
+  also covers shell tests as the parent conftest) and the leak sentinel both use
+  it, so the sentinel exercises the real cleanup. Full tests/gui/ green (1137).
+- **B4 (MED)** gpib RM sharing — DONE. Tests the real `_get_rm` caching with a fake
+  pyvisa: same bus reuses one ResourceManager, different bus gets its own.
+- **B5 (MED)** thyracont fallback baud — DONE. Fake serial transport: probe fails
+  at primary baud, succeeds at fallback; asserts the open-baud order [9600,115200]
+  and that a primary success opens only once.
+- **B6 (LOW-MED)** web `--host` — KEPT (reasoned). The web server is launched by
+  external uvicorn (`server:app`); there is no in-code host default to assert at
+  runtime, so the docstring guard (bind must be 127.0.0.1, never 0.0.0.0) is the
+  right check for this architecture. (Side note: the deploy example in CLAUDE.md
+  shows `--host 0.0.0.0` — a docs inconsistency worth a separate look, not a test.)
 
 ## Bottom line
-All Critical + HIGH false-confidence tests across cycles 1-3 are fixed and green
-(safety overflow, rate limit, Keithley slew, WAL, cooldown arm, alarm suppression
-positive-control, executor routing). No product bugs surfaced — the behaviors the
-weak tests named all work. Remaining is a documented MED/LOW tail + 2 refactors.
+ALL Codex findings across 4 cycles are now addressed — every false-confidence
+test (Critical → LOW) is either strengthened to exercise real behavior or kept
+with a documented reason (A7 shell stub, B6 web bind). The two architectural
+refactors (#2 engine alarm-tick extraction, #10 shared GUI cleanup helper) are
+done. **No product bug surfaced in any cycle** — the safety/data-integrity
+behaviors the weak tests named (overflow→FAULT, rate-limit→FAULT, Keithley slew
+clamp, WAL-refusal→raise, cooldown arm, alarm phase-suppression, executor routing,
+gpib RM caching, thyracont fallback) all genuinely work; the weak tests just
+weren't proving it.
+
+This MORNING_TRIAGE.md is a transient worklist — safe to delete now that it's
+done, or keep as a record. The one real follow-up that is NOT a test issue: the
+CLAUDE.md deploy example uses `uvicorn ... --host 0.0.0.0`, which contradicts the
+127.0.0.1 guard — worth reconciling.

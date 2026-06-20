@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 
@@ -30,13 +33,28 @@ async def test_gpib_close_releases_resource():
     assert t._resource is None
 
 
-async def test_gpib_shared_resource_manager():
-    """Two transports on the same bus share one ResourceManager."""
-    t1 = GPIBTransport(mock=True)
-    t2 = GPIBTransport(mock=True)
-    await t1.open("GPIB0::12::INSTR")
-    await t2.open("GPIB0::11::INSTR")
-    assert t1._bus_prefix == t2._bus_prefix == "GPIB0"
+def test_gpib_resource_manager_shared_per_bus(monkeypatch):
+    """_get_rm caches one pyvisa.ResourceManager per bus prefix and reuses it.
+
+    Tests the real caching logic (the previous test ran in mock mode, which
+    returns before _get_rm, and only compared _bus_prefix strings). A fake pyvisa
+    counts how many ResourceManagers are actually constructed."""
+    created: list = []
+
+    class _FakeRM:
+        def __init__(self):
+            created.append(self)
+
+    monkeypatch.setitem(sys.modules, "pyvisa", types.SimpleNamespace(ResourceManager=_FakeRM))
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+
+    rm_a1 = GPIBTransport._get_rm("GPIB0")
+    rm_a2 = GPIBTransport._get_rm("GPIB0")
+    rm_b = GPIBTransport._get_rm("GPIB1")
+
+    assert rm_a1 is rm_a2, "same bus must reuse the cached ResourceManager"
+    assert rm_b is not rm_a1, "different bus must get its own ResourceManager"
+    assert len(created) == 2, f"expected exactly 2 RMs (one per bus), got {len(created)}"
 
 
 async def test_gpib_different_buses_independent():
