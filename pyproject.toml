@@ -103,6 +103,11 @@ packages = ["src/cryodaq"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so `tests` is importable (e.g. the shared
+# tests/_widget_cleanup helper) regardless of how pytest is invoked — the
+# `pytest` console script (used by CI) does not add CWD the way `python -m
+# pytest` does, and tests/gui has no __init__.py.
+pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-m 'not ollama'"
 markers = [
