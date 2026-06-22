@@ -102,15 +102,67 @@ leak_rate action, so the closure falls through to other actions); closure block
 becomes a call + early-return-if-not-None. Test rewritten to import & call the
 real handler. Behavior-preserving (same returns, same validation, same event log).
 
+### D10 — Items 5-8 extraction plans (all behaviour-preserving)
+- **5 (shutdown-drain):** extracted the inline drain block (engine.py shutdown)
+  to module-level `async _drain_dispatch_tasks(tasks, logger_, timeout=10.0)`;
+  test imports it instead of mirroring. Timeout surfaced as a param (warning now
+  reports the actual cap, previously hardcoded "10s"). Same gather/wait_for/cancel.
+- **6 (summary-metadata):** extracted the `ExperimentExport(...)` construction
+  (incl. started/ended/duration derivation) to `_build_experiment_export(exp_info,
+  metadata)`; metadata-load stays in the closure (needs `to_thread`). Test now
+  calls the real builder; added a stronger assertion that the bare `summary` key
+  is ignored (only `summary_metadata` is read).
+- **7 (diag→telegram):** extracted the `_sensor_diag_tick` Telegram formatting
+  (incl. F20 aggregation) to pure `_format_diag_telegram_messages(new_events,
+  threshold) -> list[(task_name, message)]`. Returns (name, msg) pairs to preserve
+  exact asyncio task names. Test uses the real formatter + 3 new unit tests cover
+  the aggregation/per-event/empty paths the copy never exercised.
+- **8 (ReplayEngine PUB readiness):** RISKIEST. `ZMQPublisher` is plain `zmq.PUB`
+  shared with the live engine; XPUB would change production semantics → rejected.
+  Consulted Codex (gpt-5.5/high): a `pub_ready` event only signals "PUB bound"
+  (useless for slow-joiner); socket-monitor EVENT_ACCEPTED is tighter-than-sleep
+  but NOT deterministic. Codex-endorsed deterministic pattern = prove subscriber
+  readiness by RECEIVING from the real PUB stream. Implemented test-only
+  `ReplayEngine.publish_readiness_probe()` (+ `READINESS_PROBE_CHANNEL` sentinel)
+  that publishes one sentinel Reading through the normal broker→PUB path;
+  production never calls it → live stream byte-for-byte unchanged. Test loops
+  probe→recv until it sees the sentinel, replacing the fixed `sleep(0.1)`.
+
+### D11 — Batch 2 commit grouping (deviation from one-commit-per-item, justified)
+Items 4-7 are four independent, non-overlapping extractions that all live in
+`src/cryodaq/engine.py`. Splitting one file across four commits requires
+interactive hunk staging (`git add -p`), which this environment blocks. User
+authorized batching ("fix all prod in batches, choose batch size yourself"), so
+I group the four engine.py extractions into ONE commit whose message enumerates
+each item + its test file (each item also has its own separate test file, so
+per-item traceability is preserved at the test level). Item 8 (separate file,
+`replay_engine/server.py`) gets its own commit. Batch 2 = 2 commits.
+
 ## Item log
 
 | # | Item | Test (red→green) | Full-suite | Commit |
 |--:|------|------------------|-----------|--------|
-| 1 | ZMQ timeout inversion | pending | — | — |
-| 2 | query format-timeout | pending | — | — |
-| 3 | periodic-report label | pending | — | — |
-| 4 | leak-rate dispatch extract | pending | — | — |
-| 5 | engine shutdown-drain extract | pending | — | — |
-| 6 | summary-metadata export | pending | — | — |
-| 7 | diagnostic→alarm→telegram | pending | — | — |
-| 8 | ReplayEngine PUB readiness | pending | — | — |
+| 1 | ZMQ timeout inversion | red→green (41) | batch1 green (3249 passed) | 337e2a8 |
+| 2 | query format-timeout | red→green | batch1 green (3249 passed) | d77c1b3 |
+| 3 | periodic-report label | red→green | batch1 green (3249 passed) | 2f1f58a |
+| 4 | leak-rate dispatch extract | red→green (9) | batch2 green (3255 passed) | f271fcd |
+| 5 | engine shutdown-drain extract | red→green (2) | batch2 green (3255 passed) | f271fcd |
+| 6 | summary-metadata export | red→green (2) | batch2 green (3255 passed) | f271fcd |
+| 7 | diagnostic→alarm→telegram | red→green (5) | batch2 green (3255 passed) | f271fcd |
+| 8 | ReplayEngine PUB readiness | red→green (3) | batch2 green (3255 passed) | 061063e |
+
+---
+
+## Final status — ALL 8 ITEMS COMPLETE (2026-06-23)
+
+5 commits on `prod-fixes` (not pushed; human merges):
+- `337e2a8` item 1 — ZMQ REQ timeout inversion (+2 collateral threading-test deadlines)
+- `d77c1b3` item 2 — query format-timeout bound
+- `2f1f58a` item 3 — periodic-report label
+- `f271fcd` items 4-7 — engine.py testability extractions
+- `061063e` item 8 — ReplayEngine deterministic PUB-readiness probe
+
+Final validation = batch-2 gate = exact CI mirror (ruff src/ tests/ → palette
+isolated → full suite --timeout=120, no global env per D3-FIX). Result on the
+current HEAD tree: **ruff clean · palette 7 passed · suite 3255 passed, 8
+skipped, 0 failed**. CI-green goal met locally. `.gate/` is scratch (uncommitted).
