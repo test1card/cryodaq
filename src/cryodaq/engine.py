@@ -344,6 +344,171 @@ async def _handle_assistant_query_command(
         return {"ok": False, "error": str(exc)}
 
 
+async def _handle_leak_rate_command(
+    action: str,
+    cmd: dict[str, Any],
+    leak_rate_estimator: LeakRateEstimator,
+    leak_cfg: dict[str, Any],
+    event_logger: Any,
+) -> dict[str, Any] | None:
+    """Dispatch ``leak_rate_start`` / ``leak_rate_stop`` GUI commands.
+
+    F13: extracted as a module-level helper (mirrors
+    ``_handle_assistant_query_command``) so the leak-rate command path is
+    unit-testable without spinning up the full engine. Returns ``None`` when
+    *action* is not a leak-rate command, so the caller falls through to the
+    remaining handlers; otherwise returns the response dict. Behaviour is
+    identical to the inline dispatch it replaces.
+    """
+    if action == "leak_rate_start":
+        if not leak_cfg.get("enabled", True):
+            return {"ok": False, "error": "leak rate measurement disabled in config"}
+        _raw_dur = cmd.get("duration_s")
+        window_s: float | None = None
+        if _raw_dur is not None:
+            try:
+                window_s = float(_raw_dur)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"duration_s not numeric: {_raw_dur!r}"}
+            if not (0 < window_s < float("inf")):
+                return {
+                    "ok": False,
+                    "error": f"duration_s must be positive and finite, got {window_s}",
+                }
+        try:
+            leak_rate_estimator.start_measurement(window_s=window_s)
+            return {"ok": True, "action": "leak_rate_start"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+    if action == "leak_rate_stop":
+        try:
+            from dataclasses import asdict as _asdict  # noqa: PLC0415
+            result = leak_rate_estimator.finalize()
+            await event_logger.log_event(
+                "leak_rate",
+                f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
+            )
+            return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+    return None
+
+
+async def _drain_dispatch_tasks(
+    tasks: set[asyncio.Task[Any]],
+    logger_: logging.Logger,
+    timeout: float = 10.0,  # noqa: ASYNC109 — internal drain helper, not a public coroutine API
+) -> None:
+    """Await in-flight fire-and-forget sink dispatch tasks before teardown.
+
+    F31 H3: extracted as an importable module-level helper so the drain
+    semantics — await to completion, cap at *timeout*, cancel any stragglers —
+    are unit-testable without bringing up the full engine. This is now the
+    single source of the shutdown drain logic. Behaviour-preserving: same
+    gather/wait_for/cancel sequence the inline shutdown block ran, with the
+    timeout (previously the hardcoded 10 s) surfaced as a parameter so the
+    warning text reports the actual cap.
+    """
+    if tasks:
+        logger_.info(
+            "Draining %d in-flight dispatch task(s) before shutdown",
+            len(tasks),
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger_.warning(
+                "Sink drain timed out (%ss); cancelling %d remaining",
+                timeout,
+                len(tasks),
+            )
+            for t in tasks:
+                t.cancel()
+
+
+def _build_experiment_export(
+    exp_info: dict[str, Any],
+    metadata: dict[str, Any],
+) -> Any:
+    """Construct the F31 sink ``ExperimentExport`` from experiment info plus
+    the loaded ``metadata.json`` dict.
+
+    F31 H1: extracted so the export construction is unit-testable without
+    finalizing a real experiment — in particular that ``summary`` is read from
+    the canonical ``summary_metadata`` metadata key (the bare ``summary`` key
+    is empty and would yield vault notes with empty ## Summary sections). This
+    is now the single source of the dispatch-export shape; behaviour-preserving.
+    """
+    from cryodaq.sinks import ExperimentExport
+
+    exp_id = exp_info.get("experiment_id") or ""
+    started = _parse_experiment_time(exp_info.get("start_time"))
+    ended = _parse_experiment_time(exp_info.get("end_time"))
+    duration_h: float | None = None
+    if started is not None and ended is not None:
+        duration_h = (ended - started).total_seconds() / 3600.0
+    return ExperimentExport(
+        experiment_id=exp_id,
+        title=str(exp_info.get("title") or ""),
+        sample=str(exp_info.get("sample") or ""),
+        operator=str(exp_info.get("operator") or ""),
+        status=str(exp_info.get("status") or ""),
+        started_at=started or datetime.now(UTC),
+        ended_at=ended,
+        duration_h=duration_h,
+        template_id=str(exp_info.get("template_id") or "custom"),
+        phases=list(metadata.get("phases", []) or []),
+        artifact_index=list(metadata.get("artifact_index", []) or []),
+        summary=dict(metadata.get("summary_metadata", {}) or {}),
+        notes=str(exp_info.get("notes") or ""),
+        description=str(exp_info.get("description") or ""),
+        custom_fields=dict(exp_info.get("custom_fields") or {}),
+    )
+
+
+def _format_diag_telegram_messages(
+    new_events: list[Any],
+    aggregation_threshold: int = 3,
+) -> list[tuple[str, str]]:
+    """Build the Telegram dispatch ``(task_name, message)`` pairs for a batch
+    of sensor-diagnostic events.
+
+    F10/F20: extracted from the ``_sensor_diag_tick`` closure so the message
+    formatting — including the F20 aggregation rule (more than
+    *aggregation_threshold* simultaneous events collapse into one batch
+    summary; otherwise one message per event) — is unit-testable without the
+    engine loop. Returns pairs in dispatch order (empty when nothing to send).
+    Behaviour-preserving, including the asyncio task names.
+    """
+    if not new_events:
+        return []
+    if len(new_events) > aggregation_threshold:
+        criticals = [e for e in new_events if e.level == "CRITICAL"]
+        warnings = [e for e in new_events if e.level == "WARNING"]
+        parts: list[str] = []
+        if criticals:
+            names = ", ".join(
+                e.channels[0] if e.channels else e.alarm_id for e in criticals
+            )
+            parts.append(f"{len(criticals)} channels critical: {names}")
+        if warnings:
+            names = ", ".join(
+                e.channels[0] if e.channels else e.alarm_id for e in warnings
+            )
+            parts.append(f"{len(warnings)} channels warning: {names}")
+        return [("diag_tg_batch", "⚠ Diagnostic alarm batch:\n" + "\n".join(parts))]
+    return [
+        (
+            f"diag_tg_{event.alarm_id}",
+            f"⚠ [{event.level}] {event.alarm_id}\n{event.message}",
+        )
+        for event in new_events
+    ]
+
+
 async def _handle_rag_search_command(
     rag_searcher: Any,
     cmd: dict[str, Any],
@@ -2137,39 +2302,16 @@ async def _run_engine(*, mock: bool = False) -> None:
                 new_events = sensor_diag.update()
                 if _notify_telegram and telegram_bot is not None and new_events:
                     aggregation_threshold = _sd_cfg.get("aggregation_threshold", 3)
-                    # F20 aggregation: batch > N simultaneous events into one message
-                    if len(new_events) > aggregation_threshold:
-                        criticals = [e for e in new_events if e.level == "CRITICAL"]
-                        warnings = [e for e in new_events if e.level == "WARNING"]
-                        parts: list[str] = []
-                        if criticals:
-                            names = ", ".join(
-                                e.channels[0] if e.channels else e.alarm_id
-                                for e in criticals
-                            )
-                            parts.append(f"{len(criticals)} channels critical: {names}")
-                        if warnings:
-                            names = ", ".join(
-                                e.channels[0] if e.channels else e.alarm_id
-                                for e in warnings
-                            )
-                            parts.append(f"{len(warnings)} channels warning: {names}")
-                        msg = "⚠ Diagnostic alarm batch:\n" + "\n".join(parts)
+                    # F20 aggregation handled by _format_diag_telegram_messages.
+                    for _tg_name, _tg_msg in _format_diag_telegram_messages(
+                        new_events, aggregation_threshold
+                    ):
                         t = asyncio.create_task(
-                            telegram_bot._send_to_all(msg),
-                            name="diag_tg_batch",
+                            telegram_bot._send_to_all(_tg_msg),
+                            name=_tg_name,
                         )
                         _alarm_dispatch_tasks.add(t)
                         t.add_done_callback(_alarm_dispatch_tasks.discard)
-                    else:
-                        for event in new_events:
-                            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
-                            t = asyncio.create_task(
-                                telegram_bot._send_to_all(msg),
-                                name=f"diag_tg_{event.alarm_id}",
-                            )
-                            _alarm_dispatch_tasks.add(t)
-                            t.add_done_callback(_alarm_dispatch_tasks.discard)
                 for _sd_ev in new_events:
                     if _sd_ev.level.upper() == "CRITICAL":
                         await event_bus.publish(
@@ -2315,37 +2457,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                     return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
                 except KeyError as exc:
                     return {"ok": False, "error": str(exc)}
-            if action == "leak_rate_start":
-                if not _leak_cfg.get("enabled", True):
-                    return {"ok": False, "error": "leak rate measurement disabled in config"}
-                _raw_dur = cmd.get("duration_s")
-                window_s: float | None = None
-                if _raw_dur is not None:
-                    try:
-                        window_s = float(_raw_dur)
-                    except (TypeError, ValueError):
-                        return {"ok": False, "error": f"duration_s not numeric: {_raw_dur!r}"}
-                    if not (0 < window_s < float("inf")):
-                        return {
-                            "ok": False,
-                            "error": f"duration_s must be positive and finite, got {window_s}",
-                        }
-                try:
-                    leak_rate_estimator.start_measurement(window_s=window_s)
-                    return {"ok": True, "action": "leak_rate_start"}
-                except Exception as exc:  # noqa: BLE001
-                    return {"ok": False, "error": str(exc)}
-            if action == "leak_rate_stop":
-                try:
-                    from dataclasses import asdict as _asdict  # noqa: PLC0415
-                    result = leak_rate_estimator.finalize()
-                    await event_logger.log_event(
-                        "leak_rate",
-                        f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
-                    )
-                    return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
-                except ValueError as exc:
-                    return {"ok": False, "error": str(exc)}
+            _leak_resp = await _handle_leak_rate_command(
+                action, cmd, leak_rate_estimator, _leak_cfg, event_logger
+            )
+            if _leak_resp is not None:
+                return _leak_resp
             if action == "alarm_v2_status":
                 active = alarm_v2_state_mgr.get_active()
                 return {
@@ -2507,14 +2623,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     # strong-ref against GC via _alarm_dispatch_tasks).
                     if sink_registry.sinks:
                         try:
-                            from cryodaq.sinks import ExperimentExport
-
                             _exp_id = _exp_info.get("experiment_id") or ""
-                            _started = _parse_experiment_time(_exp_info.get("start_time"))
-                            _ended = _parse_experiment_time(_exp_info.get("end_time"))
-                            _duration_h: float | None = None
-                            if _started is not None and _ended is not None:
-                                _duration_h = (_ended - _started).total_seconds() / 3600.0
                             _metadata: dict = {}
                             if _exp_id:
                                 _meta_path = (
@@ -2527,28 +2636,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                                 _metadata = await asyncio.to_thread(
                                     _load_experiment_metadata_sync, _meta_path
                                 )
-                            _export = ExperimentExport(
-                                experiment_id=_exp_id,
-                                title=str(_exp_info.get("title") or ""),
-                                sample=str(_exp_info.get("sample") or ""),
-                                operator=str(_exp_info.get("operator") or ""),
-                                status=str(_exp_info.get("status") or ""),
-                                started_at=_started or datetime.now(UTC),
-                                ended_at=_ended,
-                                duration_h=_duration_h,
-                                template_id=str(_exp_info.get("template_id") or "custom"),
-                                phases=list(_metadata.get("phases", []) or []),
-                                artifact_index=list(_metadata.get("artifact_index", []) or []),
-                                # F31 H1: metadata.json stores summary under
-                                # "summary_metadata" key (verified against
-                                # ExperimentManager metadata builder). The bare
-                                # "summary" key is empty, producing vault notes
-                                # with empty ## Summary sections.
-                                summary=dict(_metadata.get("summary_metadata", {}) or {}),
-                                notes=str(_exp_info.get("notes") or ""),
-                                description=str(_exp_info.get("description") or ""),
-                                custom_fields=dict(_exp_info.get("custom_fields") or {}),
-                            )
+                            # F31 H1: build the sink export via the extracted
+                            # helper — summary comes from the canonical
+                            # "summary_metadata" metadata key, not the empty
+                            # bare "summary" key.
+                            _export = _build_experiment_export(_exp_info, _metadata)
                             _t = asyncio.create_task(
                                 sink_registry.dispatch(_export),
                                 name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
@@ -3402,25 +3494,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
     # that are mid-flight at SIGTERM time; cancelling them mid-flight
     # corrupts vault notes and aborts webhook POSTs. Cap at 10s.
-    if _alarm_dispatch_tasks:
-        logger.info(
-            "Draining %d in-flight dispatch task(s) before shutdown",
-            len(_alarm_dispatch_tasks),
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    *_alarm_dispatch_tasks, return_exceptions=True
-                ),
-                timeout=10.0,
-            )
-        except TimeoutError:
-            logger.warning(
-                "Sink drain timed out (10s); cancelling %d remaining",
-                len(_alarm_dispatch_tasks),
-            )
-            for t in _alarm_dispatch_tasks:
-                t.cancel()
+    await _drain_dispatch_tasks(_alarm_dispatch_tasks, logger)
 
     watchdog_task.cancel()
     try:

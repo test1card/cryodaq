@@ -1,10 +1,11 @@
 """F31 H3 — engine shutdown drains in-flight sink dispatch tasks.
 
 The engine teardown sequence (engine.py around the "Завершение" log)
-must await pending sink dispatches before cancelling other tasks.
-This regression test recreates the drain block as a standalone
-function and verifies it (a) awaits to completion and (b) caps at
-10s with cancellation.
+must await pending sink dispatches before cancelling other tasks. The
+drain block was extracted into the importable ``_drain_dispatch_tasks``
+helper, so these tests exercise the PRODUCTION drain logic directly —
+verifying it (a) awaits to completion and (b) caps at the timeout with
+cancellation — instead of a mirror that could drift.
 """
 
 from __future__ import annotations
@@ -14,31 +15,7 @@ import logging
 
 import pytest
 
-
-async def _drain_dispatch_tasks(
-    tasks: set[asyncio.Task],
-    logger: logging.Logger,
-    timeout: float = 10.0,  # noqa: ASYNC109 — mirrors engine.py drain signature, not a public coroutine API
-) -> None:
-    """Mirror of engine.py shutdown drain block (H3)."""
-    if tasks:
-        logger.info(
-            "Draining %d in-flight dispatch task(s) before shutdown",
-            len(tasks),
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-        except TimeoutError:
-            logger.warning(
-                "Sink drain timed out (%s s); cancelling %d remaining",
-                timeout,
-                len(tasks),
-            )
-            for t in tasks:
-                t.cancel()
+from cryodaq.engine import _drain_dispatch_tasks
 
 
 @pytest.mark.asyncio

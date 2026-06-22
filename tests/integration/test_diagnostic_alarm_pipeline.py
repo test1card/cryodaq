@@ -10,10 +10,12 @@ Covers spec §5.3:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.engine import _format_diag_telegram_messages
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,6 +44,40 @@ def _push_disconnected(eng: SensorDiagnosticsEngine, ch: str, n: int = 200) -> N
 # ---------------------------------------------------------------------------
 
 
+def _diag_event(level: str, alarm_id: str, channels: list[str], message: str = "msg"):
+    return SimpleNamespace(
+        level=level, alarm_id=alarm_id, channels=channels, message=message
+    )
+
+
+def test_diag_telegram_per_event_format_below_threshold() -> None:
+    """At or below the aggregation threshold: one (task_name, message) pair per
+    event, in the exact production format."""
+    events = [_diag_event("CRITICAL", "diag:T1", ["T1"], "T1 disconnected")]
+
+    pairs = _format_diag_telegram_messages(events, aggregation_threshold=3)
+
+    assert pairs == [("diag_tg_diag:T1", "⚠ [CRITICAL] diag:T1\nT1 disconnected")]
+
+
+def test_diag_telegram_aggregates_above_threshold() -> None:
+    """More than `aggregation_threshold` simultaneous events collapse into a
+    single batch summary message named ``diag_tg_batch`` (F20)."""
+    events = [_diag_event("WARNING", f"diag:T{i}", [f"T{i}"]) for i in range(5)]
+
+    pairs = _format_diag_telegram_messages(events, aggregation_threshold=3)
+
+    assert len(pairs) == 1
+    name, msg = pairs[0]
+    assert name == "diag_tg_batch"
+    assert msg.startswith("⚠ Diagnostic alarm batch:")
+    assert "5 channels warning" in msg
+
+
+def test_diag_telegram_empty_events_returns_empty() -> None:
+    assert _format_diag_telegram_messages([]) == []
+
+
 def test_diagnostic_anomaly_to_alarm_to_telegram_pipeline() -> None:
     """Sustained anomaly flows through the full pipeline: diagnostics → alarm →
     new event returned → Telegram-like notifier would fire.
@@ -56,11 +92,8 @@ def test_diagnostic_anomaly_to_alarm_to_telegram_pipeline() -> None:
     telegram_mock = MagicMock()
 
     def _simulate_tick(eng: SensorDiagnosticsEngine) -> None:
-        """Mirrors engine.py _sensor_diag_tick Telegram dispatch exactly."""
-        new_events = eng.update()
-        for event in new_events:
-            # Exact format from engine.py _sensor_diag_tick (Codex MEDIUM fix)
-            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+        """Dispatch via the PRODUCTION formatter (engine._format_diag_telegram_messages)."""
+        for _name, msg in _format_diag_telegram_messages(eng.update()):
             telegram_mock.send(msg)
 
     # First tick: sets first_anomaly_ts = 0.0

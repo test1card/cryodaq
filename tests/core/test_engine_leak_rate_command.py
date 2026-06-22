@@ -23,30 +23,20 @@ def _make_estimator(volume: float = 50.0) -> LeakRateEstimator:
 async def _dispatch(
     action: str, cmd: dict, estimator: LeakRateEstimator, leak_cfg: dict, event_logger
 ) -> dict:
-    """Minimal reproduction of the engine leak_rate command handlers."""
-    if action == "leak_rate_start":
-        if not leak_cfg.get("enabled", True):
-            return {"ok": False, "error": "leak rate measurement disabled in config"}
-        window_s = cmd.get("duration_s")
-        try:
-            estimator.start_measurement(window_s=window_s)
-            return {"ok": True, "action": "leak_rate_start"}
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
+    """Call the REAL engine leak_rate handler (no test-side reproduction).
 
-    if action == "leak_rate_stop":
-        try:
-            from dataclasses import asdict as _asdict
-            result = estimator.finalize()
-            await event_logger.log_event(
-                "leak_rate",
-                f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
-            )
-            return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+    The extraction (F13) made ``_handle_leak_rate_command`` an importable
+    module-level helper, so these tests now exercise the production dispatch
+    — including its duration_s validation — instead of a copy that could
+    silently drift from it. ``None`` (action not a leak-rate command) maps to
+    the same unknown-action error the engine closure would surface.
+    """
+    from cryodaq.engine import _handle_leak_rate_command
 
-    return {"ok": False, "error": f"unknown action: {action}"}
+    resp = await _handle_leak_rate_command(action, cmd, estimator, leak_cfg, event_logger)
+    if resp is None:
+        return {"ok": False, "error": f"unknown action: {action}"}
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +108,44 @@ async def test_leak_rate_disabled_config_returns_error() -> None:
     )
     assert response["ok"] is False
     assert "disabled" in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_leak_rate_start_non_numeric_duration_returns_error() -> None:
+    """duration_s that is not numeric is rejected before arming the estimator.
+
+    This branch only exists in the production handler; the previous test-side
+    copy silently forwarded the bad value. Now reachable via the real handler.
+    """
+    est = _make_estimator()
+    response = await _dispatch(
+        "leak_rate_start", {"duration_s": "soon"}, est, {}, AsyncMock()
+    )
+    assert response["ok"] is False
+    assert "not numeric" in response["error"]
+    assert not est.is_active
+
+
+@pytest.mark.asyncio
+async def test_leak_rate_start_negative_duration_returns_error() -> None:
+    """duration_s must be positive and finite — negative is rejected."""
+    est = _make_estimator()
+    response = await _dispatch(
+        "leak_rate_start", {"duration_s": -5.0}, est, {}, AsyncMock()
+    )
+    assert response["ok"] is False
+    assert "positive and finite" in response["error"]
+    assert not est.is_active
+
+
+@pytest.mark.asyncio
+async def test_leak_rate_unknown_action_falls_through() -> None:
+    """A non-leak-rate action returns None from the handler (fall-through)."""
+    from cryodaq.engine import _handle_leak_rate_command
+
+    est = _make_estimator()
+    resp = await _handle_leak_rate_command("safety_status", {}, est, {}, AsyncMock())
+    assert resp is None
 
 
 @pytest.mark.asyncio
