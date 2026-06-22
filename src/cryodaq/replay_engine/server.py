@@ -27,6 +27,11 @@ from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_config_dir, get_project_root
 from cryodaq.replay_engine.sources import resolve_source
 
+#: Sentinel channel for the test-only PUB-readiness probe
+#: (:meth:`ReplayEngine.publish_readiness_probe`). Deliberately un-instrument-like
+#: so it never collides with a real channel and is trivially filtered by SUBs.
+READINESS_PROBE_CHANNEL = "__replay_pub_probe__"
+
 logger = logging.getLogger("cryodaq.replay_engine")
 
 _WATCHDOG_INTERVAL_S = 30.0
@@ -209,6 +214,23 @@ class ReplayEngine:
             "Replay source finished: %d readings published",
             self._readings_published,
         )
+
+    async def publish_readiness_probe(self) -> None:
+        """TEST-ONLY: publish one sentinel reading through the normal
+        source → broker → PUB path.
+
+        Lets a subscriber prove its subscription is live before
+        :meth:`run_source` begins, replacing the non-deterministic fixed-sleep
+        slow-joiner mitigation: a test calls this in a loop until its SUB
+        actually receives a ``readings``-topic message whose channel is
+        :data:`READINESS_PROBE_CHANNEL`. Production never calls this, so the
+        live publish stream is byte-for-byte unchanged. Requires
+        :meth:`start` to have run.
+        """
+        if self._broker is None:
+            raise RuntimeError("start() must be called before publish_readiness_probe()")
+        await self._broker.publish(Reading.now(READINESS_PROBE_CHANNEL, 0.0, ""))
+        await asyncio.sleep(0)
 
     async def stop(self) -> None:
         if self._watchdog_task is not None:
