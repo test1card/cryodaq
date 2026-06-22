@@ -304,11 +304,13 @@ async def _handle_assistant_query_command(
     20–40 s, and the previous 25 s ceiling fired before the model had
     finished loading, surfacing a Russian "Запрос обрабатывался слишком
     долго" error on the operator's first GUI query. The surrounding
-    transport budget is bumped in lockstep: ZMQ slow envelope
-    ``HANDLER_TIMEOUT_SLOW_S`` is 55 s (``core/zmq_bridge.py``); GUI
-    client reply timeout is 60 s; Telegram path stays at 60 s via
-    ``telegram_commands.py`` (it does not flow through the ZMQ REP
-    server). Subsequent warm-cache queries land well under 5 s.
+    transport budget is bumped in lockstep and nests strictly: ZMQ slow
+    envelope ``HANDLER_TIMEOUT_SLOW_S`` is 55 s (``core/zmq_bridge.py``)
+    < subprocess REQ socket ``SUBPROCESS_REQ_TIMEOUT_S`` 60 s
+    (``core/zmq_subprocess.py``) < GUI client reply timeout
+    ``_CMD_REPLY_TIMEOUT_S`` 65 s (``gui/zmq_client.py``); Telegram path
+    stays at 60 s via ``telegram_commands.py`` (it does not flow through
+    the ZMQ REP server). Subsequent warm-cache queries land well under 5 s.
     """
     query = str(cmd.get("query", "")).strip()
     chat_id = cmd.get("chat_id", "gui")

@@ -35,6 +35,18 @@ DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
 DEFAULT_TOPIC = b"readings"
 
+# IV.3 Finding 7 / H7: subprocess REQ-socket RCVTIMEO/SNDTIMEO. This MUST sit
+# strictly above the server slow handler cap (HANDLER_TIMEOUT_SLOW_S = 55 s in
+# core/zmq_bridge.py) and strictly below the GUI client future
+# (_CMD_REPLY_TIMEOUT_S = 65 s in gui/zmq_client.py), so command-path timeouts
+# nest predictably: server (55) < subprocess REQ (60) < GUI (65). The previous
+# 35 s value sat *below* the 55 s server cap (the cap was bumped 30→55 for
+# Ollama cold-start without raising this), so a 35–55 s command tripped the
+# REQ timeout first and surfaced a false ``cmd_timeout`` while the engine was
+# still working. Named (not an inline literal) so tests assert the ordering on
+# the live constant rather than grepping source text.
+SUBPROCESS_REQ_TIMEOUT_S = 60.0
+
 
 def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
     """Unpack msgpack Reading into a plain dict (picklable for mp.Queue)."""
@@ -185,15 +197,17 @@ def zmq_bridge_main(
             """
             req = ctx.socket(zmq.REQ)
             req.setsockopt(zmq.LINGER, 0)
-            # IV.3 Finding 7: REQ timeout stays at 35 s so a slow
-            # server-side handler (experiment_finalize / report
-            # generation, tiered at 30 s) has room to reply before
-            # the REQ side gives up. Server's 30 s ceiling + 5 s slack
-            # stays inside the client's 35 s future wait
-            # (_CMD_REPLY_TIMEOUT_S), so timeouts at each layer fire
-            # in predictable order: server → subprocess → GUI future.
-            req.setsockopt(zmq.RCVTIMEO, 35000)
-            req.setsockopt(zmq.SNDTIMEO, 35000)
+            # IV.3 Finding 7 / H7: REQ timeout = SUBPROCESS_REQ_TIMEOUT_S
+            # (60 s) — strictly above the server slow handler cap (55 s,
+            # HANDLER_TIMEOUT_SLOW_S) and strictly below the GUI client
+            # future (65 s, _CMD_REPLY_TIMEOUT_S). A slow server-side
+            # handler (experiment_finalize / report generation / Ollama
+            # cold-start, capped at 55 s) has room to reply before the REQ
+            # side gives up, so timeouts at each layer fire in predictable
+            # order: server → subprocess REQ → GUI future.
+            _req_timeout_ms = int(SUBPROCESS_REQ_TIMEOUT_S * 1000)
+            req.setsockopt(zmq.RCVTIMEO, _req_timeout_ms)
+            req.setsockopt(zmq.SNDTIMEO, _req_timeout_ms)
             req.connect(cmd_addr)
             return req
 

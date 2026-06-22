@@ -318,15 +318,31 @@ def test_gui_client_cmd_reply_timeout_exceeds_server_slow_ceiling() -> None:
 
 
 def test_subprocess_req_timeout_exceeds_server_slow_ceiling() -> None:
-    """Subprocess REQ RCVTIMEO/SNDTIMEO must outlast the server's cap."""
-    from pathlib import Path
+    """Command-path timeouts must nest strictly so each outer layer waits
+    long enough to receive the inner layer's reply instead of giving up
+    first. Required ordering:
 
-    src = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "core" / "zmq_subprocess.py"
-    text = src.read_text(encoding="utf-8")
-    # Raised from 3 s → 35 s as part of IV.3 Finding 7. Hex grep is
-    # enough: finding either the old 3000 literal would mean an
-    # incomplete fix.
-    assert "RCVTIMEO, 35000" in text
-    assert "SNDTIMEO, 35000" in text
-    assert "RCVTIMEO, 3000)" not in text
-    assert "SNDTIMEO, 3000)" not in text
+        server handler slow-cap  <  subprocess REQ socket  <  GUI client future
+
+    A REQ socket below the server cap is the H7 regression this guards:
+    the server slow-cap was bumped 30→55 s (Ollama cold-start) while the
+    subprocess REQ socket stayed at 35 s, so a 35–55 s command
+    (finalize / report / cold model load) tripped the REQ timeout first
+    and the operator saw a false ``cmd_timeout`` while the engine was
+    still working. Asserted on the live imported constants (behavioural),
+    not a source grep of the literal — a grep cannot catch a re-inversion
+    that keeps the same literal text elsewhere.
+    """
+    from cryodaq.core.zmq_subprocess import SUBPROCESS_REQ_TIMEOUT_S
+    from cryodaq.gui.zmq_client import _CMD_REPLY_TIMEOUT_S
+
+    assert HANDLER_TIMEOUT_SLOW_S < SUBPROCESS_REQ_TIMEOUT_S, (
+        f"subprocess REQ socket ({SUBPROCESS_REQ_TIMEOUT_S}s) must outlast "
+        f"the server slow-cap ({HANDLER_TIMEOUT_SLOW_S}s) or slow commands "
+        f"report a false cmd_timeout while the engine is still working"
+    )
+    assert SUBPROCESS_REQ_TIMEOUT_S < _CMD_REPLY_TIMEOUT_S, (
+        f"GUI client future ({_CMD_REPLY_TIMEOUT_S}s) must outlast the "
+        f"subprocess REQ socket ({SUBPROCESS_REQ_TIMEOUT_S}s) so the GUI "
+        f"never abandons a reply the subprocess would still deliver"
+    )

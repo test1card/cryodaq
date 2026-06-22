@@ -16,7 +16,11 @@ import time
 
 import pytest
 
-from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, zmq_bridge_main
+from cryodaq.core.zmq_subprocess import (
+    DEFAULT_TOPIC,
+    SUBPROCESS_REQ_TIMEOUT_S,
+    zmq_bridge_main,
+)
 
 
 def _find_free_port() -> int:
@@ -173,12 +177,13 @@ def test_cmd_timeout_emits_warning(_bridge_fixture):
 
     cmd_q.put({"cmd": "safety_status", "_rid": "r1"})
 
-    # IV.3 F7 raised REQ RCVTIMEO from 3 s to 35 s so slow server-side
-    # handlers (experiment_finalize / report generation) have room to
-    # reply. cmd_timeout envelope still appears — just after the full
-    # envelope elapses. Deadline extended with 5 s slack so intermittent
-    # jitter doesn't flake this.
-    deadline = time.monotonic() + 40.0
+    # IV.3 F7 / H7 raised REQ RCVTIMEO to SUBPROCESS_REQ_TIMEOUT_S so slow
+    # server-side handlers (experiment_finalize / report generation /
+    # Ollama cold-start, capped at HANDLER_TIMEOUT_SLOW_S = 55 s) have room
+    # to reply. cmd_timeout envelope still appears — just after the full
+    # REQ timeout elapses. Deadline tracks the live constant (+8 s slack)
+    # so it self-adjusts if the timeout is retuned and jitter doesn't flake.
+    deadline = time.monotonic() + SUBPROCESS_REQ_TIMEOUT_S + 8.0
     got_cmd_timeout = False
     while time.monotonic() < deadline and not got_cmd_timeout:
         try:
@@ -208,13 +213,15 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
 
     # First command times out because no REP is bound yet.
     cmd_q.put({"cmd": "safety_status", "_rid": "t1"})
-    # IV.3 F7: subprocess REQ RCVTIMEO is 35 s; deadline bumped so
-    # the initial timeout reply arrives before the assertion fails.
+    # IV.3 F7 / H7: subprocess REQ RCVTIMEO is SUBPROCESS_REQ_TIMEOUT_S;
+    # deadline tracks the live constant (+8 s slack) so the initial timeout
+    # reply arrives before the assertion fails and the test self-adjusts if
+    # the timeout is retuned.
     # IV.6 B1 fix: timeout error now reads "Engine не отвечает (<exc>)"
     # — the <exc> part comes straight from pyzmq (e.g. "Resource
     # temporarily unavailable"), so assert on the stable Russian prefix
     # rather than the OS-specific tail.
-    deadline = time.monotonic() + 40.0
+    deadline = time.monotonic() + SUBPROCESS_REQ_TIMEOUT_S + 8.0
     saw_timeout_reply = False
     while time.monotonic() < deadline and not saw_timeout_reply:
         try:
