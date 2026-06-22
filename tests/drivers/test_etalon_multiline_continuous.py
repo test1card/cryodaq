@@ -108,16 +108,27 @@ def test_read_channels_continuous_emits_first_cycle() -> None:
     driver = MultiLineDriver(
         "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
     )
-    cycle = CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1), _channel_data(2)))
+    ts = time.time()
+    cycle = CycleSnapshot(timestamp=ts, channels=(_channel_data(1), _channel_data(2)))
     driver._last_cycle = cycle
     out = driver._read_channels_continuous()
     # 2 channels × length + env triplet (T/P/RH) from first channel.
     assert len(out) == 5
     length_channels = [r for r in out if "/length_ch" in r.channel]
     assert len(length_channels) == 2
+    # Assert actual length values match what was seeded (1234.5678 mm).
+    for r in length_channels:
+        assert r.value == pytest.approx(1234.5678), (
+            f"{r.channel}: expected 1234.5678, got {r.value}"
+        )
     assert any(r.channel == "ML1/env_temperature" for r in out)
     assert any(r.channel == "ML1/env_pressure" for r in out)
     assert any(r.channel == "ML1/env_humidity" for r in out)
+    # Assert actual env values match _channel_data defaults.
+    env_by_channel = {r.channel: r.value for r in out}
+    assert env_by_channel["ML1/env_temperature"] == pytest.approx(22.5)
+    assert env_by_channel["ML1/env_pressure"] == pytest.approx(1013.25)
+    assert env_by_channel["ML1/env_humidity"] == pytest.approx(45.0)
 
 
 def test_decimation_drops_cycles_inside_target_interval() -> None:
@@ -281,6 +292,13 @@ async def test_listener_appends_to_burst_buffer_when_active() -> None:
     await driver.burst_start()
     await driver._continuous_listener()
     assert len(driver._burst_buffer) == 2
+    # Assert both cycles were actually parsed with distinct values — a count-only
+    # check would pass even if the same cycle were appended twice or the
+    # buffer were pre-populated.
+    lengths = [snap.channels[0].length_mm for snap in driver._burst_buffer]
+    assert lengths[0] == pytest.approx(1.0), f"first cycle length_mm wrong: {lengths[0]}"
+    assert lengths[1] == pytest.approx(1.1), f"second cycle length_mm wrong: {lengths[1]}"
+    assert lengths[0] != lengths[1], "distinct input lines must produce distinct cycle snapshots"
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +384,24 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
     assert set(table.column_names) == expected_cols
     # 3 cycles × 2 channels = 6 rows.
     assert table.num_rows == 6
+    # Assert actual cell values match what was seeded — schema/count alone would
+    # pass even if all cells were NULL or the wrong dtype.
+    length_vals = table.column("length_mm").to_pylist()
+    assert all(v == pytest.approx(1234.5678) for v in length_vals), (
+        f"length_mm cells wrong: {length_vals}"
+    )
+    temp_vals = table.column("temperature_c").to_pylist()
+    assert all(v == pytest.approx(22.5) for v in temp_vals), (
+        f"temperature_c cells wrong: {temp_vals}"
+    )
+    pressure_vals = table.column("pressure_hpa").to_pylist()
+    assert all(v == pytest.approx(1013.25) for v in pressure_vals), (
+        f"pressure_hpa cells wrong: {pressure_vals}"
+    )
+    channel_idx_vals = set(table.column("channel_index").to_pylist())
+    assert channel_idx_vals == {1, 2}, (
+        f"channel_index must contain both channels 1 and 2, got {channel_idx_vals}"
+    )
 
 
 @pytest.mark.asyncio
@@ -429,14 +465,18 @@ async def test_disconnect_cancels_listener_and_clears_burst() -> None:
         def __init__(self) -> None:
             self.commands: list[str] = []
             self.closed = False
+            # Signals that read_lines_async has started — replaces the
+            # fixed sleep(0.05) which is flaky on loaded CI boxes.
+            self.listening = asyncio.Event()
 
         async def write_command(self, cmd: str) -> None:
             self.commands.append(cmd)
 
         async def read_lines_async(self):
-            # Hang forever until cancelled — let CancelledError propagate
-            # so the listener's `except asyncio.CancelledError` handler
-            # runs and issues the stopmeasnogui handshake.
+            # Signal that we are now inside the read loop, then hang
+            # until cancelled — lets CancelledError propagate so the
+            # listener's except handler issues the stopmeasnogui handshake.
+            self.listening.set()
             while True:
                 await asyncio.sleep(10)
                 yield ""  # pragma: no cover
@@ -452,8 +492,9 @@ async def test_disconnect_cancels_listener_and_clears_burst() -> None:
     driver._connected = True
     driver._listener_started_mono = time.monotonic()
     driver._listener_task = asyncio.create_task(driver._continuous_listener())
-    # Let listener get into its read loop.
-    await asyncio.sleep(0.05)
+    # Wait until listener is actually blocked in read_lines_async — Event-based,
+    # no arbitrary sleep that can fail on slow CI.
+    await asyncio.wait_for(transport.listening.wait(), timeout=5.0)
     # Pretend a burst was in flight — disconnect must drop it cleanly.
     await driver.burst_start()
     await driver.disconnect()

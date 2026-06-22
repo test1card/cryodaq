@@ -145,12 +145,52 @@ async def test_gpib_ifc_recovery_invokes_send_ifc():
     assert transport.clear_calls >= 1, "Level-1 clear_bus must run before IFC escalation"
 
 
-async def test_gpib_connect_does_not_send_idn():
-    """open() does not send *IDN? — just opens resource + clear."""
-    t = GPIBTransport(mock=True)
+async def test_gpib_connect_does_not_send_idn(monkeypatch):
+    """open() must NOT send *IDN? — only opens resource + VISA Clear.
+
+    Driven through the non-mock path (mock=True returns before _blocking_connect,
+    so the assertion was vacuously true). A fake resource records every write/query
+    call; the test asserts none contain '*IDN?'."""
+
+    class _FakeResource:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.queries: list[str] = []
+            self.write_termination = ""
+            self.read_termination = ""
+            self.timeout = 3000
+
+        def clear(self) -> None:
+            pass
+
+        def set_visa_attribute(self, attr: int, value: object) -> None:
+            pass
+
+        def write(self, cmd: str) -> None:
+            self.writes.append(cmd)
+
+        def read(self) -> str:
+            return ""
+
+        def query(self, cmd: str) -> str:
+            self.queries.append(cmd)
+            return ""
+
+    fake_resource = _FakeResource()
+
+    def _fake_blocking_connect(self) -> None:
+        # Simulate what _blocking_connect does: sets _resource, no *IDN?.
+        self._resource = fake_resource
+
+    monkeypatch.setattr(GPIBTransport, "_blocking_connect", _fake_blocking_connect)
+
+    t = GPIBTransport(mock=False)
     await t.open("GPIB0::12::INSTR")
-    # In mock mode, no queries are sent during open
-    # The key test: open() succeeds without any query
+
+    idn_writes = [w for w in fake_resource.writes if "*IDN?" in w.upper()]
+    idn_queries = [q for q in fake_resource.queries if "*IDN?" in q.upper()]
+    assert not idn_writes, f"open() must not write *IDN?, but saw: {idn_writes}"
+    assert not idn_queries, f"open() must not query *IDN?, but saw: {idn_queries}"
 
 
 async def test_gpib_krdg_no_argument():

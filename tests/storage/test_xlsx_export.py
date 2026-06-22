@@ -176,9 +176,42 @@ async def test_xlsx_channel_filter(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_xlsx_max_rows_constant() -> None:
-    from cryodaq.storage.xlsx_export import _XLSX_MAX_ROWS
+async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
+    """_XLSX_MAX_ROWS is the Excel hard limit; monkeypatch a small cap and
+    confirm the exporter actually truncates output rather than writing past it.
+    """
+    import unittest.mock as _mock
 
-    assert _XLSX_MAX_ROWS == 1_048_576, (
-        f"Expected _XLSX_MAX_ROWS == 1_048_576, got {_XLSX_MAX_ROWS}"
+    import cryodaq.storage.xlsx_export as xlsx_mod
+
+    # Canonical value correct
+    assert xlsx_mod._XLSX_MAX_ROWS == 1_048_576, (
+        f"Expected _XLSX_MAX_ROWS == 1_048_576, got {xlsx_mod._XLSX_MAX_ROWS}"
+    )
+
+    # Runtime truncation: write 10 readings at distinct timestamps (10 data rows)
+    data_dir = tmp_path / "data"
+    ts_base = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    readings = [
+        _reading("CH1", float(i), ts=ts_base.replace(second=i)) for i in range(10)
+    ]
+    _populate_db(data_dir, readings)
+
+    output_path = tmp_path / "out_capped.xlsx"
+    # cap=5: row_num starts at 2 (header row=1); loop breaks when row_num >= 5,
+    # so at most 3 data rows (row_num 2, 3, 4) are written before truncation.
+    cap = 5
+    with _mock.patch.object(xlsx_mod, "_XLSX_MAX_ROWS", cap):
+        exporter = XLSXExporter(data_dir)
+        count = exporter.export(output_path)
+
+    assert output_path.exists(), "XLSX not created under small cap"
+    wb = openpyxl.load_workbook(output_path)
+    ws = wb["Данные"]
+    data_rows = ws.max_row - 1  # subtract header row
+    assert data_rows < 10, (
+        f"Exporter wrote {data_rows} data rows despite cap={cap}; truncation broken"
+    )
+    assert count == data_rows, (
+        f"Return value {count} must equal actual data rows written {data_rows}"
     )

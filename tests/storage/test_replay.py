@@ -162,15 +162,23 @@ async def test_replay_stop(tmp_path: Path) -> None:
     db_path = _make_db(tmp_path, readings)
 
     broker = DataBroker()
-    await broker.subscribe("test_sub", maxsize=n + 10)
+    queue = await broker.subscribe("test_sub", maxsize=n + 10)
 
     replay = ReplaySource(broker, speed=100.0)  # 1 s apart → 10 ms sleep each
 
     # Launch play() as a background task
     play_task = asyncio.create_task(replay.play(db_path))
 
-    # Wait long enough for at least one row to be published, then stop
-    await asyncio.sleep(0.05)  # 50 ms — enough for a few 10 ms sleeps
+    # Wait deterministically for the first reading to land in the queue.
+    # Each inter-row sleep is 10 ms (speed=100, 1 s gap); polling at 5 ms
+    # intervals catches the first publish well before the second sleep begins,
+    # ensuring stop() fires while replay is blocked in asyncio.sleep().
+    for _ in range(400):  # up to 2 s total
+        await asyncio.sleep(0.005)
+        if not queue.empty():
+            break
+
+    assert not queue.empty(), "Replay did not publish even one reading within 2 s"
     replay.stop()
 
     count = await play_task

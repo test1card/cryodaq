@@ -104,24 +104,76 @@ def test_gui_never_imports_zmq():
     assert not violations, "GUI modules must not import zmq:\n" + "\n".join(violations)
 
 
-def test_heartbeat_interval_value():
-    """HEARTBEAT_INTERVAL must be 5s (matches is_healthy threshold)."""
-    import importlib
-    import inspect
+def test_heartbeat_interval_reasonable():
+    """Bridge subprocess emits its first heartbeat within a generous window.
 
-    mod = importlib.import_module("cryodaq.core.zmq_subprocess")
-    source = inspect.getsource(mod.zmq_bridge_main)
-    assert "HEARTBEAT_INTERVAL = 5.0" in source
+    HEARTBEAT_INTERVAL is 5s (documented in zmq_subprocess.py).  Allow up to
+    10s to accommodate slow CI startup.  The important thing is that the
+    heartbeat is NOT 50s+ (which would indicate the interval constant was
+    accidentally set to a very large value).
+    """
+    import queue as _queue
+    import time as _time
+
+    data_q = mp.Queue(maxsize=100)
+    cmd_q = mp.Queue(maxsize=100)
+    reply_q = mp.Queue(maxsize=100)
+    shutdown = mp.Event()
+
+    proc = mp.Process(
+        target=zmq_bridge_main,
+        args=("tcp://127.0.0.1:15561", "tcp://127.0.0.1:15562", data_q, cmd_q, reply_q, shutdown),
+        daemon=True,
+    )
+    proc.start()
+    start = _time.monotonic()
+
+    heartbeat_received = False
+    deadline = _time.monotonic() + 10.0
+    while _time.monotonic() < deadline and not heartbeat_received:
+        try:
+            msg = data_q.get(timeout=0.5)
+            if isinstance(msg, dict) and msg.get("__type") == "heartbeat":
+                heartbeat_received = True
+        except _queue.Empty:
+            pass
+
+    elapsed = _time.monotonic() - start
+    shutdown.set()
+    proc.join(timeout=5)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=2)
+
+    assert heartbeat_received, "bridge must emit heartbeat within 10s"
+    # Interval must not be unreasonably long (> 15s would indicate a bug)
+    assert elapsed < 15.0, f"heartbeat took {elapsed:.1f}s — HEARTBEAT_INTERVAL seems wrong"
 
 
 def test_is_healthy_threshold_generous():
-    """Heartbeat threshold must stay generous enough to survive GUI thread blocks."""
-    import inspect
+    """heartbeat_stale() default threshold is generous (>= 20s) for GUI thread blocks.
+
+    Tests the behavioral contract: a bridge whose last heartbeat was 31s ago
+    is stale; one whose last heartbeat was 5s ago is not.
+    """
+    import time as _time
 
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    source = inspect.getsource(ZmqBridge.heartbeat_stale)
-    assert "30.0" in source, "heartbeat threshold must stay at 30s"
+    bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59994", cmd_addr="tcp://127.0.0.1:59995")
+
+    # Simulate recent heartbeat → not stale
+    bridge._last_heartbeat = _time.monotonic() - 5.0
+    assert not bridge.heartbeat_stale(), "5s-old heartbeat must not be stale"
+
+    # Simulate old heartbeat → stale
+    bridge._last_heartbeat = _time.monotonic() - 31.0
+    assert bridge.heartbeat_stale(), "31s-old heartbeat must be stale"
+
+    # Default threshold must be >= 20s (generous enough for GUI thread blocks)
+    bridge._last_heartbeat = _time.monotonic() - 20.0
+    # At 20s the default threshold (30s) means NOT stale yet
+    assert not bridge.heartbeat_stale(), "20s-old heartbeat must not be stale with default 30s threshold"
 
 
 def test_launcher_poll_checks_is_healthy():

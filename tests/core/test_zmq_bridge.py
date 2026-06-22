@@ -153,7 +153,7 @@ async def test_publisher_subscriber_integration() -> None:
 
 
 def test_slow_commands_set_covers_experiment_lifecycle() -> None:
-    """Every known-slow command uses the 30 s envelope."""
+    """Every known-slow command routes to HANDLER_TIMEOUT_SLOW_S, not the fast tier."""
     for cmd in (
         "experiment_finalize",
         "experiment_stop",
@@ -168,6 +168,7 @@ def test_slow_commands_set_covers_experiment_lifecycle() -> None:
         "calibration_v2_extract",
     ):
         assert cmd in _SLOW_COMMANDS
+        assert _timeout_for({"cmd": cmd}) == HANDLER_TIMEOUT_SLOW_S
 
 
 def test_slow_commands_covers_safety_critical_hardware_ops() -> None:

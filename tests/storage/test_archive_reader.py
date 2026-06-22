@@ -137,6 +137,11 @@ def test_query_archived_uses_parquet(tmp_path: Path) -> None:
     # Verify sorted by time
     ts_list = [t for t, _ in result["Т1"]]
     assert ts_list == sorted(ts_list)
+    # Verify exact (timestamp, value) pairs — not just count/order.
+    expected = [(base_ts + i, 77.0 + i * 0.1) for i in range(10)]
+    for i, (ts, val) in enumerate(result["Т1"]):
+        assert ts == pytest.approx(expected[i][0], abs=1e-3), f"point {i}: ts mismatch"
+        assert val == pytest.approx(expected[i][1], abs=1e-6), f"point {i}: value mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +177,11 @@ def test_query_recent_uses_sqlite(tmp_path: Path) -> None:
 
     assert "Т2" in result
     assert len(result["Т2"]) == 15
+    # Verify exact (timestamp, value) pairs — not just count.
+    expected = [(base_ts + i, 80.0 + i * 0.05) for i in range(15)]
+    for i, (ts, val) in enumerate(result["Т2"]):
+        assert ts == pytest.approx(expected[i][0], abs=1e-3), f"point {i}: ts mismatch"
+        assert val == pytest.approx(expected[i][1], abs=1e-6), f"point {i}: value mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +243,14 @@ def test_missing_archive_file_returns_partial(tmp_path: Path) -> None:
     # day2 data present; day1 gracefully skipped (no exception)
     assert "Т3" in result
     assert len(result["Т3"]) == 5
+    # Verify exact day2 values — no day1 timestamps leaked in.
+    day2_ts = day2.timestamp()
+    expected_day2 = [(day2_ts + i, 90.0 + i) for i in range(5)]
+    for i, (ts, val) in enumerate(result["Т3"]):
+        assert ts >= day2_ts, f"point {i}: day1 timestamp leaked (ts={ts} < day2_ts={day2_ts})"
+        assert ts < day2_ts + 86400, f"point {i}: timestamp out of expected range"
+        assert ts == pytest.approx(expected_day2[i][0], abs=1e-3), f"point {i}: ts mismatch"
+        assert val == pytest.approx(expected_day2[i][1], abs=1e-6), f"point {i}: value mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +310,18 @@ def test_query_merges_sqlite_and_parquet(tmp_path: Path) -> None:
     # Verify time-sorted
     ts_list = [t for t, _ in all_points]
     assert ts_list == sorted(ts_list)
+    # Verify exact (timestamp, value) for parquet portion (first 5 points).
+    old_base = old_day.timestamp()
+    for i in range(5):
+        ts, val = all_points[i]
+        assert ts == pytest.approx(old_base + i, abs=1e-3), f"old[{i}] ts mismatch"
+        assert val == pytest.approx(70.0 + i, abs=1e-6), f"old[{i}] value mismatch"
+    # Verify exact (timestamp, value) for sqlite portion (last 3 points).
+    recent_base = recent_day.timestamp()
+    for i in range(3):
+        ts, val = all_points[5 + i]
+        assert ts == pytest.approx(recent_base + i, abs=1e-3), f"recent[{i}] ts mismatch"
+        assert val == pytest.approx(85.0 + i, abs=1e-6), f"recent[{i}] value mismatch"
 
 
 # ---------------------------------------------------------------------------

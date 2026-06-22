@@ -197,4 +197,5 @@ def test_export_experiment_id_column(tmp_path: Path) -> None:
 
     table = pq.read_table(str(output))
     exp_ids = table.column("experiment_id").to_pylist()
-    assert all(eid == "my-exp-42" for eid in exp_ids)
+    assert len(exp_ids) == 5, f"Expected 5 rows, got {len(exp_ids)}"
+    assert exp_ids == ["my-exp-42"] * 5, f"experiment_id column mismatch: {exp_ids}"

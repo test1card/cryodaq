@@ -162,3 +162,146 @@ def test_multiline_cold_rotation_is_channel_agnostic() -> None:
     )
     for f in forbidden:
         assert f not in src, f"cold_rotation contains channel filter '{f}'"
+
+
+def test_multiline_parquet_archive_runtime_channel_agnostic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Runtime proof for :func:`export_experiment_readings_to_parquet`.
+
+    Writes a mixed-channel batch (plain temperature + MultiLine channels)
+    into a daily SQLite file, runs the real Parquet export, then reads the
+    archive and asserts that every channel and its value appear in the output.
+    """
+    import pyarrow.parquet as pq
+
+    from cryodaq.storage.parquet_archive import export_experiment_readings_to_parquet
+
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+
+    day = datetime(2026, 3, 14, tzinfo=UTC)
+    db_path = tmp_path / f"data_{day.date().isoformat()}.db"
+
+    # Write mixed-channel readings directly via SQLiteWriter
+    writer = SQLiteWriter(tmp_path)
+    mixed = [
+        _ml_reading("T12 Теплообменник 2", 4.2, ts=day.replace(second=0)),
+        _ml_reading("MultiLine_1/length_ch1", 12.345, ts=day.replace(second=1)),
+        _ml_reading("MultiLine_1/env_humidity", 45.0, ts=day.replace(second=2)),
+    ]
+    writer._write_batch(mixed)
+    writer._conn = None  # release connection
+
+    assert db_path.exists(), "SQLiteWriter must create the daily DB file"
+
+    output = tmp_path / "archive.parquet"
+    result = export_experiment_readings_to_parquet(
+        experiment_id="ml-test-exp",
+        start_time=day,
+        end_time=day.replace(hour=23, minute=59, second=59),
+        sqlite_root=tmp_path,
+        output_path=output,
+    )
+
+    assert result.rows_written == len(mixed), (
+        f"Expected {len(mixed)} rows in Parquet, got {result.rows_written}"
+    )
+
+    table = pq.read_table(str(output))
+    archived_channels = set(table.column("channel").to_pylist())
+    for r in mixed:
+        assert r.channel in archived_channels, (
+            f"Channel '{r.channel}' missing from Parquet archive — "
+            "export_experiment_readings_to_parquet must not filter by channel name"
+        )
+
+    # Verify values survive the round-trip
+    ch_to_value = {
+        ch: val
+        for ch, val in zip(
+            table.column("channel").to_pylist(),
+            table.column("value").to_pylist(),
+        )
+    }
+    for r in mixed:
+        assert abs(ch_to_value[r.channel] - r.value) < 1e-9, (
+            f"Value for channel '{r.channel}' changed in Parquet archive: "
+            f"expected {r.value}, got {ch_to_value[r.channel]}"
+        )
+
+
+def test_multiline_cold_rotation_runtime_channel_agnostic(
+    tmp_path: Path,
+) -> None:
+    """Runtime proof for :class:`ColdRotationService`.
+
+    Writes a mixed-channel batch into an old-enough daily DB, runs cold
+    rotation, reads the resulting Parquet archive, and asserts every channel
+    and its value appear in the output.
+    """
+    import asyncio
+
+    import pyarrow.parquet as pq
+
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    # 40 days old — well past the 30-day rotation threshold
+    old_day = today.replace(day=today.day) - __import__("datetime").timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    db_path = data_dir / old_name
+
+    # Populate with mixed-channel data
+    mixed = [
+        _ml_reading("T12 Теплообменник 2", 4.2, ts=old_day.replace(second=0)),
+        _ml_reading("MultiLine_1/length_ch1", 12.345, ts=old_day.replace(second=1)),
+        _ml_reading("MultiLine_1/env_humidity", 45.0, ts=old_day.replace(second=2)),
+    ]
+    writer = SQLiteWriter(data_dir)
+    writer._write_batch(mixed)
+    writer._conn = None
+
+    # Rename to the correct old-day filename (SQLiteWriter uses today's date)
+    today_db = data_dir / f"data_{datetime.now(UTC).date().isoformat()}.db"
+    if today_db.exists() and today_db != db_path:
+        today_db.rename(db_path)
+
+    service = ColdRotationService(
+        data_dir=data_dir,
+        archive_dir=archive_dir,
+        age_days=30,
+        enabled=True,
+    )
+    results = asyncio.run(service.run_once(now=today))
+
+    assert len(results) == 1, f"Expected 1 rotation result, got {len(results)}"
+    result = results[0]
+
+    assert result.rows == len(mixed), (
+        f"Expected {len(mixed)} rows rotated, got {result.rows}"
+    )
+
+    table = pq.read_table(str(result.archive_path))
+    archived_channels = set(table.column("channel").to_pylist())
+    for r in mixed:
+        assert r.channel in archived_channels, (
+            f"Channel '{r.channel}' missing from cold-rotation Parquet — "
+            "ColdRotationService must not filter by channel name"
+        )
+
+    ch_to_value = {
+        ch: val
+        for ch, val in zip(
+            table.column("channel").to_pylist(),
+            table.column("value").to_pylist(),
+        )
+    }
+    for r in mixed:
+        assert abs(ch_to_value[r.channel] - r.value) < 1e-9, (
+            f"Value for channel '{r.channel}' changed in cold-rotation archive: "
+            f"expected {r.value}, got {ch_to_value[r.channel]}"
+        )

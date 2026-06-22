@@ -143,12 +143,16 @@ def test_alarm_clears_when_status_returns_to_ok() -> None:
         eng.update()  # warning published
 
     assert any(sev == "warning" for _, sev, _ in pub.published)
+    # No clear must have fired yet — alarm was published, recovery not yet seen.
+    assert pub.cleared == [], "clear fired before ok push — test would be vacuous"
 
     _push_clean(eng, "T1")  # health = 100 → ok in recent window
     with patch("time.monotonic", return_value=302.0):
         eng.update()
 
-    assert "T1" in pub.cleared
+    assert pub.cleared == ["T1"], (
+        f"Expected exactly one clear for T1 after ok push, got: {pub.cleared}"
+    )
 
 
 def test_no_alarm_when_publisher_is_none() -> None:

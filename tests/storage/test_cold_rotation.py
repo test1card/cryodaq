@@ -324,6 +324,7 @@ def test_index_updated_on_rotation(tmp_path: Path) -> None:
     results = asyncio.run(service.run_once(now=today))
 
     assert len(results) == 1
+    result = results[0]
 
     index_path = archive_dir / "index.json"
     assert index_path.exists(), "index.json must be created"
@@ -335,17 +336,44 @@ def test_index_updated_on_rotation(tmp_path: Path) -> None:
     entry = index["files"][0]
     assert entry["original_name"] == old_name
     assert entry["row_count"] == n_rows
-    assert entry["size_bytes_original"] > 0
-    assert entry["size_bytes_archive"] > 0
-    assert "checksum_md5" in entry
-    assert len(entry["checksum_md5"]) == 32  # hex MD5
-    assert "rotated_at" in entry
-    assert "archive_path" in entry
 
-    # Archive path follows year=/month= layout
+    # Sizes must match actual files on disk, not just be > 0.
+    assert entry["size_bytes_original"] == result.size_original, (
+        f"size_bytes_original {entry['size_bytes_original']} != "
+        f"RotationResult.size_original {result.size_original}"
+    )
+    assert entry["size_bytes_archive"] == result.size_archive, (
+        f"size_bytes_archive {entry['size_bytes_archive']} != "
+        f"RotationResult.size_archive {result.size_archive}"
+    )
+    assert result.size_original > 0
+    assert result.size_archive > 0
+
+    # Checksum must match actual MD5 of the produced archive file.
+    import hashlib as _hashlib
+
+    def _md5(path: Path) -> str:
+        h = _hashlib.md5()
+        with path.open("rb") as fh:
+            for block in iter(lambda: fh.read(65_536), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    expected_md5 = _md5(result.archive_path)
+    assert entry["checksum_md5"] == expected_md5, (
+        f"Index checksum {entry['checksum_md5']} != actual file MD5 {expected_md5}"
+    )
+    assert len(entry["checksum_md5"]) == 32  # hex MD5
+
+    assert "rotated_at" in entry
+
+    # Archive path in index resolves to the actual archive file.
     archive_rel = entry["archive_path"]
     assert "year=" in archive_rel
     assert "month=" in archive_rel
+    resolved = archive_dir / archive_rel
+    assert resolved.exists(), f"archive_path in index does not exist: {resolved}"
+    assert resolved == result.archive_path
 
 
 # ---------------------------------------------------------------------------

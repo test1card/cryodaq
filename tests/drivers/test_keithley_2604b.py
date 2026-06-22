@@ -92,18 +92,22 @@ async def test_start_same_channel_twice_is_rejected() -> None:
 
 
 async def test_keithley_read_source_off() -> None:
-    """When source output is OFF, read_channels returns zeros without error.
+    """When source output is OFF, read_channels returns finite zeros without error.
 
-    In mock mode the mock path returns computed values (not zero) — that's fine.
-    This test verifies that no reading has NaN value, which sqlite3 maps to
-    NULL and crashes on the NOT NULL constraint.
+    Driven through the non-mock path (mock=True takes a separate branch that
+    never exercises the OFF-readback logic, so a NaN regression in the real OFF
+    branch would pass undetected). Uses a fake transport that returns output=0
+    for both channels so the real OFF branch runs and emits zeros.
     """
     import math
 
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    # _FakeOutputStateTransport (defined below) returns "0" for source.output
+    # and real-ish values for measure.iv() — only the output==0 branch matters.
+    driver._transport = _FakeOutputStateTransport("0.000000e+00")
+    driver._connected = True
 
-    # Neither channel is active (source OFF)
+    # Neither channel is active (source OFF) — exercises the real OFF branch.
     readings = await driver.read_channels()
     assert len(readings) == 8  # 4 per channel × 2 channels
 
@@ -112,13 +116,15 @@ async def test_keithley_read_source_off() -> None:
         # NaN must never appear — sqlite3 maps NaN to NULL → IntegrityError
         assert reading.value is not None, f"{reading.channel} value is None"
         assert not math.isnan(reading.value), f"{reading.channel} value is NaN"
+        assert not math.isinf(reading.value), f"{reading.channel} value is Inf"
 
-    # V/I/P should be 0 when source is not active (mock returns 0 for inactive channels)
+    # V/I/P must be 0.0 when source output is OFF on the real path.
     for reading in readings:
         if reading.channel.endswith(("/voltage", "/current", "/power")):
-            assert reading.value == 0.0, f"{reading.channel} should be 0.0 when OFF"
-
-    await driver.disconnect()
+            assert reading.value == 0.0, (
+                f"{reading.channel} must be 0.0 when source.output=OFF, "
+                f"got {reading.value}"
+            )
 
 
 class _FakeOutputStateTransport:

@@ -470,6 +470,8 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
     assert readings[0].unit == "K"
     assert readings[0].raw == pytest.approx(82.98)
+    # Core behavioral assertion: value must equal store.evaluate output, not raw KRDG.
+    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
 
 
 async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(
@@ -519,6 +521,10 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     assert readings[0].metadata["reading_mode"] == "curve"
     assert readings[1].metadata["reading_mode"] == "krdg"
     assert readings[1].metadata["raw_source"] == "KRDG"
+    # CH1 — curve applied: value must equal store.evaluate output.
+    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
+    # CH2 — krdg passthrough: value must equal raw KRDG float (4.891 K from NORMAL_RESPONSE).
+    assert readings[1].value == pytest.approx(4.891)
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +544,11 @@ async def test_krdg_fallback_to_per_channel() -> None:
         "+003.876E+0",
         "+004.321E+0",
     ]
+    expected_values = [float(v) for v in all_values]
+    commands_sent: list[str] = []
 
     async def _query_handler(cmd, timeout_ms=None):
+        commands_sent.append(cmd)
         if cmd == "KRDG?":
             return "+004.235E+0"  # Only 1 value — triggers fallback
         if cmd.startswith("KRDG? "):
@@ -562,6 +571,17 @@ async def test_krdg_fallback_to_per_channel() -> None:
     for r in readings:
         assert r.unit == "K"
         assert r.status == ChannelStatus.OK
+
+    # Verify all 8 per-channel commands were sent (KRDG? 1 .. KRDG? 8).
+    per_ch_cmds = [c for c in commands_sent if c.startswith("KRDG? ") and c != "KRDG?"]
+    assert len(per_ch_cmds) == 8, f"Expected 8 per-channel KRDG? commands, got: {per_ch_cmds}"
+    assert sorted(per_ch_cmds) == [f"KRDG? {i}" for i in range(1, 9)]
+
+    # Verify exact mapped values — not just length/unit.
+    for i, r in enumerate(readings):
+        assert r.value == pytest.approx(expected_values[i]), (
+            f"CH{i+1}: expected {expected_values[i]}, got {r.value}"
+        )
 
 
 async def test_krdg_sticky_fallback() -> None:

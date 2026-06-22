@@ -262,11 +262,13 @@ async def test_write_command_sends_line_without_reading_response():
     response to each command.
     """
     received: list[str] = []
+    line_received = asyncio.Event()
 
     async def _capture(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             line = await reader.readline()
             received.append(line.decode("ascii").rstrip("\r\n"))
+            line_received.set()
         finally:
             writer.close()
             try:
@@ -284,11 +286,8 @@ async def test_write_command_sends_line_without_reading_response():
             await t.write_command("startmeasnogui")
         finally:
             await t.close()
-        # Wait for capture task to absorb the line before assert.
-        for _ in range(20):
-            if received:
-                break
-            await asyncio.sleep(0.05)
+        # Wait for capture handler to signal receipt — no fixed sleep.
+        await asyncio.wait_for(line_received.wait(), timeout=2.0)
         assert received == ["startmeasnogui"]
     finally:
         server.close()

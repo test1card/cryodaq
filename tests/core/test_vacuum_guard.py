@@ -227,19 +227,30 @@ async def test_reference_temp_channel_missing_stays_disarmed():
 
 @pytest.mark.asyncio
 async def test_alarm_message_contains_factual_data_only():
-    """Alarm message must contain channel IDs + values, no banned words."""
+    """Alarm message must contain channel IDs + values, no banned words.
+
+    The test drives guard into FIRED state (arm tick then fire tick with
+    sustained_s=0), so the alarm event is guaranteed non-None.  Assertions
+    are unconditional — a None event here means guard.tick() has a regression.
+    """
     guard, tracker, alarm_mgr, _ = _make_vg()
+    # Tick 1: arm (T=250K, good vacuum)
     tracker.get.side_effect = lambda ch: (
         _make_channel_state(250.0) if "Т12" in ch else _make_pressure_state(1e-5)
     )
     await guard.tick()
+    assert guard.state == VacuumState.ARMED, "pre-condition: guard must ARM before firing"
+
+    # Tick 2: fire (T=245K, bad vacuum; sustained_s=0 → instant)
     tracker.get.side_effect = lambda ch: (
         _make_channel_state(245.0) if "Т12" in ch else _make_pressure_state(5e-2)
     )
     await guard.tick()
+    assert guard.state == VacuumState.FIRED, "guard must reach FIRED state"
 
     event = alarm_mgr.process.call_args[0][1]
-    if event is not None:
-        msg = event.message.lower()
-        assert "детектор" not in msg
-        assert "VSP63D_1/pressure".lower() in event.message.lower() or "мбар" in event.message.lower()
+    assert event is not None, "alarm event must not be None when guard is FIRED"
+    msg = event.message.lower()
+    assert "детектор" not in msg
+    assert "VSP63D_1/pressure".lower() in event.message.lower() or "мбар" in event.message.lower()
+    assert event.level == "CRITICAL"

@@ -47,9 +47,13 @@ def test_history_max_limit(tmp_path: Path) -> None:
         prefs._add_to_history("operator_history", f"Operator-{i:02d}")
 
     history = prefs.get_history("operator")
-    assert len(history) <= 20
-    # Последние добавленные — первые в списке
+    # Exactly 20 entries kept (not fewer — tests that truncation happened).
+    assert len(history) == 20
+    # Most-recently-added is first; oldest surviving entry is Operator-05.
+    # Operator-00..04 were evicted by the 20-item cap.
     assert history[0] == "Operator-24"
+    assert history[-1] == "Operator-05"
+    assert history == [f"Operator-{i:02d}" for i in range(24, 4, -1)]
 
 
 def test_empty_value_ignored(tmp_path: Path) -> None:
@@ -77,8 +81,9 @@ def test_suggest_name_no_existing() -> None:
 
 
 def test_suggest_name_without_map() -> None:
+    # Without a map, template_id is title-cased ("My Template"); first slot → 001.
     name = suggest_experiment_name("my_template", [])
-    assert "001" in name
+    assert name == "My Template-001"
 
 
 def test_save_creates_parent_dirs(tmp_path: Path) -> None:

@@ -106,16 +106,27 @@ async def test_slew_rate_constant_is_safe() -> None:
 
 
 async def test_last_v_resets_on_stop() -> None:
-    """stop_source resets _last_v for that channel."""
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
-    await driver.start_source("smua", p_target=0.5, v_compliance=40.0, i_compliance=1.0)
-    await driver.read_channels()  # sets _last_v
+    """stop_source resets _last_v for that channel.
+
+    Driven through the non-mock path so that _last_v is seeded to a
+    nonzero value before the call — in mock mode _last_v never gets above
+    0.0 (mock read_channels doesn't update it), making 'resets to zero'
+    indistinguishable from 'was already zero'."""
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
+    driver._transport = fake
+    driver._connected = True
+    # Seed smua with a nonzero level so the reset is observable.
+    driver._channels["smua"].active = True
+    driver._channels["smua"].p_target = 0.5
+    driver._last_v["smua"] = 5.0
 
     await driver.stop_source("smua")
-    assert driver._last_v["smua"] == 0.0
 
-    await driver.disconnect()
+    assert driver._last_v["smua"] == 0.0, (
+        "stop_source must reset _last_v to 0.0 (was 5.0)"
+    )
+    assert driver._channels["smua"].active is False
 
 
 async def test_last_v_resets_on_emergency_off_single() -> None:
@@ -146,18 +157,26 @@ async def test_last_v_resets_on_emergency_off_single() -> None:
 
 
 async def test_last_v_resets_on_emergency_off_all() -> None:
-    """emergency_off(None) resets _last_v for ALL channels."""
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
-    await driver.start_source("smua", p_target=0.5, v_compliance=40.0, i_compliance=1.0)
-    await driver.start_source("smub", p_target=0.3, v_compliance=20.0, i_compliance=0.5)
-    await driver.read_channels()
+    """emergency_off(None) resets _last_v for ALL channels.
+
+    Driven through the non-mock path so both channels are seeded to
+    distinct nonzero levels — in mock mode _last_v stays 0.0 throughout,
+    making 'zeroed by emergency_off' indistinguishable from 'never set'."""
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
+    driver._transport = fake
+    driver._connected = True
+    # Seed both channels with distinct nonzero levels.
+    for ch, level in (("smua", 9.0), ("smub", 4.5)):
+        driver._channels[ch].active = True
+        driver._last_v[ch] = level
 
     await driver.emergency_off()  # all channels
-    assert driver._last_v["smua"] == 0.0
-    assert driver._last_v["smub"] == 0.0
 
-    await driver.disconnect()
+    assert driver._last_v["smua"] == 0.0, "emergency_off must zero smua _last_v (was 9.0)"
+    assert driver._last_v["smub"] == 0.0, "emergency_off must zero smub _last_v (was 4.5)"
+    assert driver._channels["smua"].active is False
+    assert driver._channels["smub"].active is False
 
 
 # ---------------------------------------------------------------------------

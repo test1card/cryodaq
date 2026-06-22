@@ -80,6 +80,9 @@ def test_reconfigure_refreshes_mock_nominals() -> None:
     assert 7 in driver._mock_nominal_lengths_mm
     assert 14 in driver._mock_nominal_lengths_mm
     assert 1 not in driver._mock_nominal_lengths_mm
+    # Verify exact formula values — not just key presence.
+    assert driver._mock_nominal_lengths_mm[7] == pytest.approx(1350.0)   # 1000 + 7*50
+    assert driver._mock_nominal_lengths_mm[14] == pytest.approx(1700.0)  # 1000 + 14*50
 
 
 def test_reconfigure_takes_effect_next_poll_in_averaged_mode() -> None:

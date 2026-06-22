@@ -13,3 +13,9 @@ only); the ZMQ timeout CRITICAL is held for architect.
 | 03 | 5 | 5 | 0 | 43 pass | experiment/photos; +bonus: fixed pre-existing isolation bug (test_finalize_builds_archive_snapshot only passed via env-var leakage → now sets CRYODAQ_ALLOW_BROKEN_SQLITE itself). Agent infra hit a transient 403 on 1st try; retry OK |
 | 04 | 10 | 10 | 0 | 54 pass | interlock/memory-leaks/p0-p1/persistence. ⭐ persistence_ordering rewritten to gate-the-write: now DETERMINISTIC (3/3 @0.12s, was the flaky 2.0s test that broke Windows CI) AND proves write-before-publish |
 | 05 | 17 | 17 | 0 | 77 pass | SAFETY-CRITICAL. rate-limiter now feeds >=60 samples (estimator actually computes); RUN_PERMITTED→FAULT_LATCHED; sequential-connect overlap counter. ZERO prod bugs — production confirmed correct |
+| -- | -- | -- | -- | -- | **COMMIT 64590b0: batches 0-5 (full suite 3244 pass), local, push held** |
+| 06 | 4 | 4 | 0 | 35 pass | sqlite/sensor-diag/user-prefs; WAL-crash-recovery now real subprocess+os._exit |
+| 07 | 19 | 10 | 2 | 58 pass | ZMQ; source-greps→behavioral, vacuum_guard unconditional, is_healthy stale fixed. DEFERRED: CRITICAL timeout-inversion (architect) + shutdown-during-timeout (needs src/ instrumentation). 4 NOT-A-BUG (slow but adequate-slack timeout tests) |
+| 08 | 9 | 9 | 0 | 59 pass | drivers keithley/gpib/etalon; _last_v stop/all siblings now non-mock seeded (match cycle-5 single); gpib RM-cache + no-IDN behavioral |
+| 09 | 13 | 13 | 0 | 69 pass | lakeshore/thyracont/visa/archive; visa usbtmc/close/rm-lock source-greps→behavioral spy (cycle-5 pattern); lakeshore curve values; archive exact (ts,val) sequences |
+| 10 | 9 | 9 | 0 | 59 pass | END tier-0. storage exports/replay + alarm-flow; multiline parquet/cold-rotation +runtime export tests; alarm-flow sleeps→deterministic. parquet exact rows |

@@ -58,11 +58,29 @@ async def test_connect_forces_output_off_non_mock():
 
 @pytest.mark.asyncio
 async def test_connect_skips_force_off_in_mock_mode():
-    """Mock mode skips the force-off path entirely (no real transport)."""
+    """Mock mode must skip the force-off path entirely.
+
+    The previous test only asserted _connected=True — mock transport writes
+    are silent no-ops, so the assertion was vacuously true even if the
+    force-off block ran. Fix: spy the transport's write method and assert
+    no OUTPUT_OFF or levelv=0 commands were issued."""
     k = _make_keithley(mock=True)
-    # The mock transport is the real USBTMCTransport(mock=True), which is fine.
+    written: list[str] = []
+
+    original_write = k._transport.write
+
+    async def _spy_write(cmd: str) -> None:
+        written.append(cmd)
+        return await original_write(cmd)
+
+    k._transport.write = _spy_write  # type: ignore[method-assign]
     await k.connect()
+
     assert k._connected is True
+    force_off_cmds = [w for w in written if "OUTPUT_OFF" in w or ("levelv" in w and "= 0" in w)]
+    assert not force_off_cmds, (
+        f"mock mode must NOT issue force-off writes, but saw: {force_off_cmds}"
+    )
 
 
 @pytest.mark.asyncio

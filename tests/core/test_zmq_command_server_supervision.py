@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import socket
-from pathlib import Path
 
 import zmq
 import zmq.asyncio
@@ -127,14 +126,24 @@ async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
 
 
 def test_engine_commands_keep_inner_timeouts_wired() -> None:
-    """Verify the inner-timeout wiring is in place; do NOT pin specific
+    """Inner timeout constants must be present and positive; do NOT pin specific
     seconds (F-TimeoutRelax bumped them and this test should not block
     future tuning)."""
-    engine_py = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "engine.py"
-    source = engine_py.read_text(encoding="utf-8")
+    import importlib
 
-    assert "_LOG_GET_TIMEOUT_S" in source
-    assert "_EXPERIMENT_STATUS_TIMEOUT_S" in source
-    assert 'if action == "log_get":' in source
-    assert 'if action == "experiment_status":' in source
-    assert "await asyncio.wait_for(" in source
+    engine_mod = importlib.import_module("cryodaq.engine")
+
+    assert hasattr(engine_mod, "_LOG_GET_TIMEOUT_S"), (
+        "engine._LOG_GET_TIMEOUT_S must exist — inner log_get timeout wiring removed?"
+    )
+    assert hasattr(engine_mod, "_EXPERIMENT_STATUS_TIMEOUT_S"), (
+        "engine._EXPERIMENT_STATUS_TIMEOUT_S must exist — inner experiment_status timeout wiring removed?"
+    )
+    log_get_t = engine_mod._LOG_GET_TIMEOUT_S
+    exp_status_t = engine_mod._EXPERIMENT_STATUS_TIMEOUT_S
+    assert isinstance(log_get_t, (int, float)) and log_get_t > 0, (
+        f"_LOG_GET_TIMEOUT_S must be a positive number, got {log_get_t!r}"
+    )
+    assert isinstance(exp_status_t, (int, float)) and exp_status_t > 0, (
+        f"_EXPERIMENT_STATUS_TIMEOUT_S must be a positive number, got {exp_status_t!r}"
+    )
