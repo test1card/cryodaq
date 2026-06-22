@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -100,6 +102,7 @@ def _make_agent(
     adapters: QueryAdapters | None = None,
     *,
     max_per_hour: int = 60,
+    format_timeout_s: float = 20.0,
 ) -> AssistantQueryAgent:
     return AssistantQueryAgent(
         ollama_client=ollama,
@@ -107,6 +110,7 @@ def _make_agent(
         config=_make_config(),
         adapters=adapters or _make_adapters(),
         max_queries_per_chat_per_hour=max_per_hour,
+        format_timeout_s=format_timeout_s,
     )
 
 
@@ -361,16 +365,7 @@ async def test_query_agent_rate_limit_separate_chats() -> None:
 
 
 async def test_query_agent_empty_format_response_returns_fallback() -> None:
-    """Format LLM returning whitespace-only text (not truncated) → _FALLBACK.
-
-    NOTE — DEFERRED-PRODUCTION-BUG (batch-13 HIGH):
-    _format_timeout_s is stored on the agent (agent.py:90) but
-    _handle_query_inner calls `await self._ollama.generate(...)` with NO
-    asyncio.wait_for wrapper (agent.py:142-148). The timeout is never
-    enforced at the await level.  This test covers the whitespace-fallback
-    path; actual timeout enforcement is a src/ gap that requires a separate
-    fix.
-    """
+    """Format LLM returning whitespace-only text (not truncated) → _FALLBACK."""
     ollama = MagicMock()
     ollama.generate = AsyncMock(side_effect=[
         _make_gen_result(_intent_json("alarm_status")),
@@ -381,6 +376,50 @@ async def test_query_agent_empty_format_response_returns_fallback() -> None:
     resp = await agent.handle_query("тревоги?")
 
     assert resp == _FALLBACK
+
+
+async def test_query_agent_format_timeout_returns_bounded_fallback() -> None:
+    """A hung format ``generate()`` must not hang the agent — the call is
+    bounded by ``_format_timeout_s`` and returns ``_FALLBACK`` promptly.
+
+    Regression guard (batch-13 HIGH production bug): ``_format_timeout_s``
+    was stored on the agent but ``_handle_query_inner`` awaited
+    ``self._ollama.generate(...)`` UNWRAPPED, so a stalled Ollama format
+    call (cold model load that never returns) hung the query agent
+    indefinitely. The fix wraps the format call in
+    ``asyncio.wait_for(..., _format_timeout_s)``; on timeout the bounded
+    fallback path runs. Asserted behaviourally: the first generate
+    (intent) returns fast, the second (format) blocks far longer than the
+    short timeout, and the whole call still completes well inside it.
+    """
+    format_timeout_s = 0.1
+    format_started = asyncio.Event()
+
+    async def side_effect(prompt, **kwargs):
+        # First call: intent classification — return immediately.
+        if not format_started.is_set():
+            format_started.set()
+            return _make_gen_result(_intent_json("alarm_status"))
+        # Second call: format — hang far longer than the timeout.
+        await asyncio.sleep(30.0)
+        return _make_gen_result("never reached")
+
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(side_effect=side_effect)
+
+    agent = _make_agent(ollama, _make_adapters(), format_timeout_s=format_timeout_s)
+
+    t0 = time.monotonic()
+    resp = await asyncio.wait_for(agent.handle_query("тревоги?"), timeout=5.0)
+    elapsed = time.monotonic() - t0
+
+    assert resp == _FALLBACK
+    # Bounded by _format_timeout_s, not the 30 s hang — generous ceiling
+    # for scheduler jitter but far below the hang duration.
+    assert elapsed < 2.0, (
+        f"format call was not bounded by _format_timeout_s "
+        f"({format_timeout_s}s); took {elapsed:.2f}s"
+    )
 
 
 async def test_query_agent_format_alarm_with_active_alarms() -> None:
