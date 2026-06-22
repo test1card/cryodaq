@@ -146,6 +146,42 @@ async def test_periodic_report_handler_dispatches_when_active(tmp_path: Path) ->
     await agent.stop()
 
 
+def test_report_window_label_matches_window_minutes() -> None:
+    """The dispatch label must reflect the requested window, not a hardcoded
+    "за час" — with correct Russian numeral agreement."""
+    from cryodaq.agents.assistant.live.agent import _report_window_label
+
+    assert _report_window_label(60) == "за час"
+    assert _report_window_label(30) == "за 30 минут"
+    assert _report_window_label(45) == "за 45 минут"
+    assert _report_window_label(90) == "за 90 минут"
+    assert _report_window_label(120) == "за 2 часа"
+    assert _report_window_label(180) == "за 3 часа"
+    assert _report_window_label(300) == "за 5 часов"
+    assert _report_window_label(1) == "за 1 минуту"
+    assert _report_window_label(2) == "за 2 минуты"
+
+
+async def test_periodic_report_handler_label_reflects_30min_window(tmp_path: Path) -> None:
+    """A 30-minute periodic report must be labelled "(отчёт за 30 минут)",
+    not the hardcoded "(отчёт за час)" the handler previously always emitted.
+    """
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock()
+    ctx = _make_mock_context(total_event_count=3)
+    agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_periodic_event(window_minutes=30))
+    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
+
+    telegram._send_to_all.assert_awaited_once()
+    sent = telegram._send_to_all.call_args[0][0]
+    assert "(отчёт за 30 минут)" in sent
+    assert "(отчёт за час)" not in sent
+    await agent.stop()
+
+
 async def test_periodic_report_handler_skips_when_idle(tmp_path: Path) -> None:
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
