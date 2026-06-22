@@ -10,14 +10,31 @@ executor agents strengthening the found weak tests). State lives in
 ## CURRENT STATE (at a glance)
 
 - **FIND pass:** batches 0–21 reviewed (22/35). **Paused at batch 22** — Codex hit its
-  usage limit (resets ~6:58 PM). 232 findings recorded (1 CRIT, 49 HIGH, 115 MED, 67 LOW).
-- **FIX pass:** **batches 0–5 fixed (6/22 findings-batches).** ~50 weak tests strengthened,
-  all verified green. In progress, **next = fix batch 6.**
-- **Committed:** cycle-5 hardening = `f1adc10` (green CI). Fix-pass batches 0–5 = UNCOMMITTED
-  working-tree edits until the next gate+commit (see below).
+  usage limit. 232 findings recorded (1 CRIT, 49 HIGH, 115 MED, 67 LOW).
+- **FIX pass:** ✅ **COMPLETE — batches 0–21 all fixed & verified green** (~290 weak tests
+  strengthened). Final clean CI-mirror gate (2026-06-23): **3248 pass / 0 fail / 3 skip**.
+- **VERIFY pass (mode now `fix-verify`):** Codex amend-cycle review of the strengthened files,
+  `verify_next_batch` 0→21. **This is the current activity.**
+- **Committed (local, push held):** batches 0-5 `64590b0`, 6-10 `c548d34`, 11-15 `c805dcf`,
+  16-20 `ee93591`, 21 + fix-pass-complete marker = latest commit.
 
 Authoritative machine state: `artifacts/test-sweep/progress.json`
-(`find_next_batch`, `fix_next_batch`, `fix_max_batch_with_findings: 21`).
+(`mode`, `verify_next_batch`, `fix_next_batch`, `find_next_batch`).
+
+### ⚠️ GATE ENV CAVEATS (this machine — learned 2026-06-23, avoid re-tripping)
+The CI-mirror full gate is `pytest tests/gui/test_app_palette.py` then
+`pytest tests/ --deselect tests/gui/test_app_palette.py --timeout=120 --timeout-method=thread`.
+Two LOCAL-ONLY hazards that produce false failures (CI is clean — fresh env, no ollama):
+1. **Do NOT export `CRYODAQ_ALLOW_BROKEN_SQLITE=1` for the whole-suite gate.** It bypasses the
+   broken-sqlite startup gate, so `tests/core/test_f23_f24_f25_misc.py`'s 5 gate-assertion
+   tests fail (they expect a raise). Tests that need the flag set it per-test via
+   `monkeypatch.setenv`. Run the full gate WITHOUT the global var.
+2. **`tests/reporting/test_report_generator.py` hangs when Ollama is running locally** +
+   local `agent.yaml` has `slices.c_campaign_report: true`. Its `generate()` tests reach the
+   real `_call_ollama_sync` (live `urllib.urlopen` → localhost:11434) and block until the
+   thread-timeout kills the session. Not ollama-marked, so `-m "not ollama"` won't skip it.
+   For a local gate, `--deselect tests/reporting/test_report_generator.py` (unrelated to the
+   sweep; CI passes it because ollama is down → ConnectionRefused → graceful None fallback).
 
 ---
 

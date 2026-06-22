@@ -55,12 +55,12 @@ def test_theme_selection_writes_before_restart() -> None:
     write_idx = src.index("write_theme_selection(theme_id)")
     restart_idx = src.index("self._restart_gui_with_theme_change()")
     assert write_idx < restart_idx, (
-        "write_theme_selection must run before restart to persist the new "
-        "selection for the re-exec'd process"
+        "write_theme_selection must run before restart to persist the new selection for the re-exec'd process"
     )
 
 
 def test_restart_uses_os_execv_only() -> None:
+    """AST-level check: no importlib.reload call exists in launcher source."""
     src = LAUNCHER.read_text(encoding="utf-8")
     # The spec forbids importlib.reload cascade — only os.execv.
     assert "os.execv(sys.executable" in src
@@ -73,6 +73,36 @@ def test_restart_uses_os_execv_only() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "reload":
             assert False, f"importlib.reload call found at line {node.lineno}"
+
+
+def test_restart_gui_calls_os_execv_with_correct_args() -> None:
+    """_restart_gui_with_theme_change must invoke os.execv(sys.executable, [...]) at runtime."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from cryodaq.launcher import LauncherWindow
+
+    w = MagicMock()
+    w._stop_engine = MagicMock()
+
+    captured: list = []
+
+    def _fake_execv(executable, args):
+        captured.append((executable, list(args)))
+        # Don't actually exec — just record the call.
+
+    with patch("cryodaq.launcher.os.execv", side_effect=_fake_execv):
+        with patch("cryodaq.launcher.sys.argv", ["/fake/launcher", "--mock"]):
+            LauncherWindow._restart_gui_with_theme_change(w)
+
+    assert len(captured) == 1, "os.execv must be called exactly once"
+    exe, args = captured[0]
+    assert exe == sys.executable
+    # Launcher re-exec form: [sys.executable, "-m", "cryodaq.launcher", *sys.argv[1:]]
+    assert "-m" in args
+    assert "cryodaq.launcher" in " ".join(args) or any("cryodaq" in a for a in args)
+    # CLI args must be preserved.
+    assert "--mock" in args
 
 
 def test_restart_preserves_cli_args() -> None:

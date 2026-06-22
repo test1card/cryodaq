@@ -27,32 +27,66 @@ def test_root_returns_html(client) -> None:
 
 
 def test_api_status_returns_json(client) -> None:
-    resp = client.get("/api/status")
+    """_async_engine_command is called for status sub-queries; response has expected shape."""
+
+    async def _fake(req: dict) -> dict:
+        cmd = req.get("cmd", "")
+        if cmd == "safety_status":
+            return {"ok": True, "state": "SAFE_OFF"}
+        if cmd == "alarm_v2_status":
+            return {"ok": True, "active": {}}
+        if cmd == "experiment_status":
+            return {"ok": True}
+        return {"ok": False}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = client.get("/api/status")
+
     assert resp.status_code == 200
     data = resp.json()
     assert "uptime" in data
+    assert isinstance(data["uptime"], str)  # formatted HH:MM:SS string
+    assert "uptime_s" in data
+    assert isinstance(data["uptime_s"], (int, float))
     assert "readings" in data
+    assert data.get("safety", {}).get("state") == "SAFE_OFF"
+    assert "active_alarms" in data
 
 
 def test_api_log_returns_entries(client) -> None:
-    with patch(
-        "cryodaq.gui.zmq_client.send_command",
-        return_value={
-            "ok": True,
-            "entries": [{"message": "test", "timestamp": "2026-03-17T10:00:00Z"}],
-        },
-    ):
+    """_async_engine_command receives correct payload and entries are forwarded."""
+    received: list[dict] = []
+    expected_entries = [{"message": "test", "timestamp": "2026-03-17T10:00:00Z"}]
+
+    async def _fake(req: dict) -> dict:
+        received.append(req)
+        return {"ok": True, "entries": expected_entries}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         resp = client.get("/api/log?limit=5")
+
     assert resp.status_code == 200
     data = resp.json()
-    assert "entries" in data
+    assert data == {"ok": True, "entries": expected_entries}
+    assert len(received) == 1
+    assert received[0] == {"cmd": "log_get", "limit": 5}
 
 
 def test_status_endpoint_returns_json(client) -> None:
-    resp = client.get("/status")
+    """/status is an alias for /api/status; verify uptime is a non-negative number."""
+
+    async def _fake(req: dict) -> dict:
+        return {"ok": False}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = client.get("/status")
+
     assert resp.status_code == 200
     data = resp.json()
     assert "uptime" in data
+    assert isinstance(data["uptime"], str)  # formatted HH:MM:SS string
+    assert "uptime_s" in data
+    assert data["uptime_s"] >= 0
 
 
 def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> None:

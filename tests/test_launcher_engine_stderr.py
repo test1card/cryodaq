@@ -54,10 +54,12 @@ def test_create_engine_stderr_logger_rotates_large_log(tmp_path, monkeypatch) ->
 
 
 def test_create_engine_stderr_logger_closes_prior_handlers(tmp_path, monkeypatch) -> None:
-    """Calling the helper twice must close the first handler, not leak it.
+    """Calling the helper twice must CLOSE the first handler, not merely remove it.
 
     Without the fix, .handlers = [] would leave the previous RotatingFileHandler
-    holding the file open — survivable on POSIX, broken on Windows.
+    holding the file open — survivable on POSIX, broken on Windows (file-lock).
+    We verify closure by checking that handler1.stream is None after the second call,
+    which is what BaseHandler.close() guarantees on a RotatingFileHandler.
     """
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
     from cryodaq import launcher, paths
@@ -66,12 +68,20 @@ def test_create_engine_stderr_logger_closes_prior_handlers(tmp_path, monkeypatch
     importlib.reload(launcher)
 
     stderr_logger1, handler1, _ = launcher._create_engine_stderr_logger()
-    stderr_logger2, handler2, _ = launcher._create_engine_stderr_logger()
 
-    assert stderr_logger1 is stderr_logger2
-    assert handler1 is not handler2
-    assert handler1 not in stderr_logger2.handlers
-    assert handler2 in stderr_logger2.handlers
+    # Open the stream by writing through the first handler.
+    stderr_logger1.error("first handler write")
+    handler1.flush()
+    assert handler1.stream is not None, "stream must be open after first write"
 
-    stderr_logger2.removeHandler(handler2)
+    _stderr_logger2, handler2, _ = launcher._create_engine_stderr_logger()
+
+    # handler1 must have been CLOSED (stream released), not just detached.
+    assert handler1.stream is None, (
+        "Prior handler stream must be None after close() — if still open, Windows cannot reopen/rotate the file"
+    )
+    assert handler1 not in _stderr_logger2.handlers
+    assert handler2 in _stderr_logger2.handlers
+
+    _stderr_logger2.removeHandler(handler2)
     handler2.close()

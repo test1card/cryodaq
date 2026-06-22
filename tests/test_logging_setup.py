@@ -42,9 +42,7 @@ def test_telegram_token_redacted_in_msg():
     logger.propagate = False
     logger.setLevel(logging.INFO)
 
-    logger.info(
-        "Posting to https://api.telegram.org/bot7701234567:AAEhBP0av8XyZabc-defGHIJ/sendMessage"
-    )
+    logger.info("Posting to https://api.telegram.org/bot7701234567:AAEhBP0av8XyZabc-defGHIJ/sendMessage")
     output = stream.getvalue()
     assert "AAEhBP0av8XyZabc-defGHIJ" not in output
     assert "bot***" in output
@@ -196,27 +194,25 @@ def test_resolve_log_level_unknown_env_var_falls_through(monkeypatch):
 
 
 def test_read_debug_mode_without_pyside_returns_false(monkeypatch):
-    """CLI-only engine invocation without PySide6 returns False cleanly."""
-    # Simulate PySide6 unavailability by making the import raise.
+    """CLI-only engine invocation without PySide6 returns False cleanly.
+
+    We block the real PySide6.QtCore import so that the try/except ImportError
+    branch inside read_debug_mode_from_qsettings() actually executes, rather
+    than just patching the function under test (which proved nothing).
+    """
+    import importlib
     import sys
 
-    from cryodaq import logging_setup
+    # Force reload of logging_setup with PySide6.QtCore blocked so that
+    # the ImportError branch inside read_debug_mode_from_qsettings is live.
+    monkeypatch.setitem(sys.modules, "PySide6.QtCore", None)  # None → ImportError on import
+    # Also block the parent so nested imports don't bypass it.
+    monkeypatch.setitem(sys.modules, "PySide6", None)
 
-    # Save current import to restore.
-    real_qtcore = sys.modules.get("PySide6.QtCore")
-    # Replace with a module-level import that raises ImportError on
-    # attribute access — simulating the "no PySide6" case as closely
-    # as we can within the test harness.
-    #
-    # Simpler: directly monkeypatch the helper. This proves the
-    # contract (returns False on ImportError) without the inner
-    # machinery.
-    monkeypatch.setattr(
-        logging_setup,
-        "read_debug_mode_from_qsettings",
-        lambda: False,
-    )
-    assert logging_setup.read_debug_mode_from_qsettings() is False
-    # Restore just in case something later relies on the module.
-    if real_qtcore is not None:
-        sys.modules["PySide6.QtCore"] = real_qtcore
+    # Reload logging_setup so it picks up the blocked module state.
+    import cryodaq.logging_setup as ls_module
+
+    importlib.reload(ls_module)
+
+    result = ls_module.read_debug_mode_from_qsettings()
+    assert result is False, "read_debug_mode_from_qsettings() must return False when PySide6 is not importable"
