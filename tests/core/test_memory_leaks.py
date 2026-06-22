@@ -79,27 +79,32 @@ def test_alarm_state_manager_history_is_deque() -> None:
 
 
 def test_rate_estimator_maxlen_computed_from_window() -> None:
-    """maxlen must be computed from window_s, not hardcoded 5000.
+    """Buffer cap must be derived from window_s, not hardcoded.
 
-    We test independent cases that cannot all be true under a single hardcoded value,
-    then prove the cap is behaviorally enforced by pushing more points than maxlen.
+    Two independent window cases — neither can hold under a single fixed cap.
+    We prove the cap behaviorally by pushing more samples than any reasonable
+    fixed maxlen and observing the retained buffer length stays bounded.
+    No private formula is re-derived; only the public buffer_size() is used.
     """
-    # Case 1: large window produces a larger (but still < 5000) maxlen
+    # Case 1: large window — push well above any fixed cap and assert retained size is finite
     est_large = RateEstimator(window_s=120.0)
-    assert est_large._maxlen == max(500, int(120.0 * 20) + 100)
-    assert est_large._maxlen < 5000
-
-    # Case 2: small window produces a smaller maxlen — could not both be true if hardcoded
-    est_small = RateEstimator(window_s=10.0)
-    assert est_small._maxlen == max(500, int(10.0 * 20) + 100)
-    assert est_small._maxlen < est_large._maxlen
-
-    # Behavioral cap: buffer must not grow beyond maxlen under overflow
-    maxlen = est_large._maxlen
-    for i in range(maxlen + 50):
+    n_large = 5000 + 200  # exceeds any sane fixed 5000 cap
+    for i in range(n_large):
         est_large.push("T1", float(i), float(i))
-    assert est_large.buffer_size("T1") <= maxlen, (
-        f"Buffer grew to {est_large.buffer_size('T1')}, expected ≤ {maxlen}"
+    size_large = est_large.buffer_size("T1")
+    assert size_large < n_large, (
+        f"Large-window buffer not capped: retained {size_large} of {n_large} pushed samples"
+    )
+
+    # Case 2: small window — its cap must be strictly smaller than the large-window cap
+    est_small = RateEstimator(window_s=10.0)
+    n_small = 5000 + 200
+    for i in range(n_small):
+        est_small.push("T1", float(i), float(i))
+    size_small = est_small.buffer_size("T1")
+    assert size_small < size_large, (
+        f"Small-window buffer ({size_small}) is not smaller than large-window buffer "
+        f"({size_large}) — cap appears to be independent of window_s"
     )
 
 
@@ -158,24 +163,28 @@ def test_channel_state_fault_history_bounded() -> None:
 
 
 def test_channel_state_fault_history_deque_has_maxlen_after_update() -> None:
-    """Deque is created with maxlen on first record_fault call.
+    """fault_history deque must be bounded from the first fault onward.
 
-    Also verifies the cap is behaviorally enforced: pushing far more than maxlen
-    faults must not grow the deque beyond its maxlen.
+    We verify behaviorally: after driving far more faults than any sane cap,
+    the retained count stays at or below the deque's own maxlen. No private
+    formula is re-derived — only the public record_fault() path and the
+    deque's own maxlen attribute are used.
     """
     tracker = ChannelStateTracker(fault_window_s=300.0)
     tracker.record_fault("T2", 1.0)
     hist = tracker._fault_history["T2"]
-    assert hist.maxlen is not None
-    # For 300s window: max(200, int(300*20)+100) = 6100
-    expected_maxlen = max(200, int(300.0 * 20) + 100)
-    assert hist.maxlen == expected_maxlen
+    assert hist.maxlen is not None, "fault_history deque must have a maxlen after first fault"
 
-    # Behavioral proof: push 2× maxlen faults — deque must stay bounded
-    for i in range(expected_maxlen * 2):
+    # Push far more faults than any reasonable cap — deque must stay bounded
+    n_push = 15_000  # well above max(200, int(300*20)+100) = 6100
+    for i in range(n_push):
         tracker.record_fault("T2", float(i) * 0.001)
-    assert len(hist) <= expected_maxlen, (
-        f"fault_history grew to {len(hist)}, expected ≤ {expected_maxlen}"
+    assert len(hist) <= hist.maxlen, (
+        f"fault_history grew to {len(hist)}, exceeds its own maxlen={hist.maxlen}"
+    )
+    assert hist.maxlen < n_push, (
+        f"maxlen={hist.maxlen} is not smaller than pushed count {n_push} — "
+        "cap may not be constraining growth"
     )
 
 
@@ -270,46 +279,39 @@ async def test_broadcast_queue_bounded() -> None:
 
 @pytest.mark.asyncio
 async def test_broadcast_pump_drains_queue() -> None:
-    """_broadcast_pump must consume items from the queue.
+    """The REAL _broadcast_pump must consume items from _state.broadcast_q.
 
-    We use a sentinel-event pattern instead of a fixed sleep:
-    - enqueue 10 real items plus one sentinel dict
-    - wrap _broadcast_pump to detect when the sentinel is dequeued and set an Event
-    - cancel the pump after the event fires (deterministic, no wall-clock sleep)
+    We wire the production pump directly — no local reimplementation.
+    With no clients, the pump discards each item immediately after dequeueing.
+    We poll until the queue is empty (deadline-based, no fixed sleep).
     """
-    from cryodaq.web.server import _state
-
-    _SENTINEL = object()
-    drained = asyncio.Event()
+    from cryodaq.web.server import _broadcast_pump, _state
 
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
     _state.broadcast_q = q
-    _state.clients.clear()  # no clients → pump discards data
+    _state.clients.clear()  # no clients → pump discards items
 
-    # Enqueue real items followed by a sentinel placeholder
+    # Enqueue 10 items before starting the pump
     for i in range(10):
         await q.put({"v": i})
-    await q.put(_SENTINEL)  # type: ignore[arg-type]
 
-    async def _pump_with_sentinel() -> None:
-        """Pump that sets `drained` when it consumes the sentinel."""
-        while True:
-            data = await q.get()
-            if data is _SENTINEL:
-                drained.set()
-                return
-            # discard (no clients)
-
-    pump_task = asyncio.create_task(_pump_with_sentinel())
-    await asyncio.wait_for(drained.wait(), timeout=2.0)
-    pump_task.cancel()
+    pump_task = asyncio.create_task(_broadcast_pump(), name="test_broadcast_pump")
     try:
-        await pump_task
-    except asyncio.CancelledError:
-        pass
+        # Deadline-poll: wait up to 2 s for the queue to drain
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while not q.empty():
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(0.01)
 
-    # All 10 real items + sentinel consumed → queue is empty
-    assert q.empty(), (
-        f"pump did not drain queue; {q.qsize()} items remain"
-    )
-    _state.broadcast_q = None
+        assert q.empty(), (
+            f"production _broadcast_pump did not drain queue; {q.qsize()} items remain"
+        )
+    finally:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except asyncio.CancelledError:
+            pass
+        _state.broadcast_q = None

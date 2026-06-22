@@ -357,8 +357,13 @@ async def test_event_history_bounded() -> None:
         _condition(threshold=50.0, comparison=">", hysteresis_k=0.0)
     )
     try:
-        for _ in range(600):
-            await broker.publish(Reading.now("sensor/temp", 60.0, "K", instrument_id="test"))
+        for i in range(600):
+            # Use a per-cycle activate value (60.00, 60.01, 60.02, …, 65.99).
+            # All values are > threshold 50.0 so the alarm activates every cycle.
+            # This encodes cycle identity into the AlarmEvent.value field so we
+            # can later prove that early cycles were evicted from the deque.
+            activate_value = 60.0 + i * 0.01
+            await broker.publish(Reading.now("sensor/temp", activate_value, "K", instrument_id="test"))
             await broker.publish(Reading.now("sensor/temp", 40.0, "K", instrument_id="test"))
 
         # Allow the check loop to drain the queue
@@ -376,6 +381,15 @@ async def test_event_history_bounded() -> None:
         cleared = sum(1 for e in events if e.event_type == "cleared")
         assert activated == 500, f"expected 500 activated events in retained window, got {activated}"
         assert cleared == 500, f"expected 500 cleared events in retained window, got {cleared}"
+        # Prove early cycles were evicted: the minimum activate value among retained
+        # "activated" events must correspond to a late cycle (cycle >= 100, value >= 61.0).
+        # Cycle 0 has value 60.00; if it were retained, the min would be ~60.00.
+        activated_values = [e.value for e in events if e.event_type == "activated"]
+        min_activated = min(activated_values)
+        assert min_activated >= 61.0, (
+            f"earliest retained activate value {min_activated:.2f} < 61.0 — "
+            "suggests cycle 0 was NOT evicted (deque cap not enforced)"
+        )
     finally:
         await engine.stop()
 

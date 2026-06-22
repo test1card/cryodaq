@@ -230,8 +230,12 @@ async def test_alarm_publishes_alarm_count_on_activate() -> None:
 async def test_alarm_publishes_alarm_count_on_clear() -> None:
     """AlarmEngine publishes analytics/alarm_count=0.0 as the LAST count after trigger→ack→clear.
 
-    start() emits an initial 0.0; we drain that first so subsequent assertions
-    only see counts produced by the trigger/clear sequence.
+    Sequence:
+    1. Drain the initial 0.0 published by start() — prevents contamination.
+    2. Publish a trigger reading; deadline-poll until count=1.0 is observed (proves activation).
+    3. Acknowledge + publish a clear reading; deadline-poll until the LAST count=0.0.
+    The assertion is on the FINAL count, not mere membership, so a spurious 0.0
+    from start() cannot satisfy it.
     """
     broker = DataBroker()
     count_q = await broker.subscribe(
@@ -240,42 +244,50 @@ async def test_alarm_publishes_alarm_count_on_clear() -> None:
         filter_fn=lambda r: r.channel == "analytics/alarm_count",
     )
     engine = AlarmEngine(broker=broker)
-    # hysteresis_k=10: clears when value < 90
+    # hysteresis_k=10: clears when value < threshold - hysteresis_k = 90
     engine.add_condition(
         _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
     )
     await engine.start()
     try:
-        # Drain the initial alarm_count=0.0 published by start() so it doesn't
-        # contaminate the post-clear assertion.
+        # 1. Drain the initial alarm_count=0.0 published by start()
         await _drain_queue(count_q, timeout=0.1)
 
-        # Activate: count → 1.0
+        # 2. Activate: count → 1.0
         await broker.publish(
             Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
         )
-        await asyncio.sleep(0.05)
+        # Deadline-poll until activation is observed (count=1.0 seen)
+        deadline = asyncio.get_event_loop().time() + 2.0
+        activation_seen = False
+        while asyncio.get_event_loop().time() < deadline:
+            readings = await _drain_queue(count_q, timeout=0.05)
+            if any(r.value == pytest.approx(1.0) for r in readings):
+                activation_seen = True
+                break
+        assert activation_seen, "Expected analytics/alarm_count=1.0 after trigger"
+        assert engine.get_active_alarms() != [], "Expected active alarm after trigger"
 
-        # Acknowledge
+        # 3. Acknowledge
         await engine.acknowledge("high_temp")
-        await asyncio.sleep(0.02)
 
-        # Clear: value=80 < threshold - hysteresis_k = 90 → count → 0.0
+        # 4. Clear: value=80 < 90 → count → 0.0
         await broker.publish(
             Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test")
         )
-        await asyncio.sleep(0.05)
+        # Deadline-poll until the LAST published count is 0.0
+        deadline = asyncio.get_event_loop().time() + 2.0
+        final_count: float | None = None
+        while asyncio.get_event_loop().time() < deadline:
+            readings = await _drain_queue(count_q, timeout=0.05)
+            if readings:
+                final_count = readings[-1].value
+            if final_count == pytest.approx(0.0):
+                break
 
-        readings = await _drain_queue(count_q, timeout=0.2)
-        count_values = [r.value for r in readings]
-        assert count_values, (
-            "Expected analytics/alarm_count readings after trigger→ack→clear sequence"
+        assert final_count == pytest.approx(0.0), (
+            f"Expected LAST analytics/alarm_count=0.0 after clear, got: {final_count}"
         )
-        # The LAST count must be 0.0 (alarm cleared) not merely present somewhere
-        assert count_values[-1] == pytest.approx(0.0), (
-            f"Expected LAST analytics/alarm_count=0.0 after clear, got history: {count_values}"
-        )
-        # Confirm the engine has no active alarms
         assert engine.get_active_alarms() == [], (
             f"Expected no active alarms after clear, got: {engine.get_active_alarms()}"
         )
@@ -442,10 +454,11 @@ async def test_safety_publishes_state_on_transition() -> None:
 async def test_safety_publish_failure_does_not_crash() -> None:
     """SafetyManager must not crash if data_broker.publish raises an exception.
 
-    The test verifies three things:
-    1. publish is actually called (not silently skipped) — await_count >= 1
-    2. The state machine still transitions correctly despite publish failures
-    3. No exception propagates out of start() or state transitions
+    Verifies three things:
+    1. publish is actually called BEYOND the start() baseline — the transition
+       triggers additional publish calls, not just the initial one.
+    2. The state machine transitions SAFE_OFF → READY despite publish failures.
+    3. No exception propagates out of start() or state transitions.
     """
     failing_broker = MagicMock()
     failing_broker.publish = AsyncMock(side_effect=RuntimeError("publish failed"))
@@ -455,20 +468,31 @@ async def test_safety_publish_failure_does_not_crash() -> None:
         # start() should not raise even with a failing broker
         assert mgr.state == SafetyState.SAFE_OFF
 
-        # Transitions should still work
-        await _feed_safety(sb)
-        await asyncio.sleep(1.2)
+        # Capture publish call count AFTER start() — any calls here are from the
+        # initial state publication, not from a transition yet.
+        baseline_count = failing_broker.publish.await_count
 
-        # The publish was attempted (SafetyManager does not silently skip it)
-        assert failing_broker.publish.await_count >= 1, (
-            f"Expected data_broker.publish to be awaited at least once, "
-            f"got await_count={failing_broker.publish.await_count}"
+        # Feed a healthy reading to trigger SAFE_OFF → READY transition
+        await _feed_safety(sb)
+
+        # Deadline-poll until the state machine reaches READY (up to 2 s)
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while mgr.state != SafetyState.READY:
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+
+        # State machine must reach READY despite failing broker
+        assert mgr.state == SafetyState.READY, (
+            f"Expected READY after healthy feed, got {mgr.state}"
         )
 
-        # State machine must still function despite broker publish failures:
-        # SAFE_OFF → READY is the expected path after a healthy reading
-        assert mgr.state in (SafetyState.SAFE_OFF, SafetyState.READY), (
-            f"Expected SAFE_OFF or READY after feed+sleep, got {mgr.state}"
+        # publish must have been called BEYOND the post-start baseline,
+        # proving the SAFE_OFF → READY transition triggered a publish attempt
+        # (which was swallowed, not crashed).
+        assert failing_broker.publish.await_count > baseline_count, (
+            f"Expected data_broker.publish to be called beyond baseline "
+            f"({baseline_count}), got await_count={failing_broker.publish.await_count}"
         )
     finally:
         await mgr.stop()

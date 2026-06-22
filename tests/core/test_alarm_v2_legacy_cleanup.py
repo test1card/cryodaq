@@ -47,24 +47,45 @@ def test_measurement_thresholds_removed_from_t11_t12():
 
         cfg = alarm.config
         check = cfg.get("check", "")
-        if check not in _ABSOLUTE_THRESHOLD_CHECKS:
-            continue
 
-        # Collect channels referenced by this alarm rule
-        channels: list[str] = []
-        if "channel" in cfg:
-            channels.append(cfg["channel"])
-        if "channels" in cfg:
-            channels.extend(cfg["channels"])
+        # --- top-level threshold check ---
+        if check in _ABSOLUTE_THRESHOLD_CHECKS:
+            # Collect channels referenced by this alarm rule
+            channels: list[str] = []
+            if "channel" in cfg:
+                channels.append(cfg["channel"])
+            if "channels" in cfg:
+                channels.extend(cfg["channels"])
 
-        # Flag if any calibrated channel (Т11/Т12) is targeted
-        offending = _CALIBRATED_CHANNELS.intersection(channels)
-        if offending:
-            violations.append(
-                f"alarm '{alarm.alarm_id}' (phase=measurement, check={check!r}) "
-                f"targets calibrated channels {sorted(offending)} — "
-                "should have been removed by F-X v3"
-            )
+            # Flag if any calibrated channel (Т11/Т12) is targeted
+            offending = _CALIBRATED_CHANNELS.intersection(channels)
+            if offending:
+                violations.append(
+                    f"alarm '{alarm.alarm_id}' (phase=measurement, check={check!r}) "
+                    f"targets calibrated channels {sorted(offending)} — "
+                    "should have been removed by F-X v3"
+                )
+
+        # --- nested composite conditions ---
+        # Composite alarms nest checks under cfg["conditions"]; each condition
+        # may use an absolute-threshold check (above, below, any_above, any_below,
+        # outside_range, deviation_from_setpoint) targeting Т11/Т12.
+        for cond in cfg.get("conditions", []):
+            cond_check = cond.get("check", "")
+            if cond_check not in _ABSOLUTE_THRESHOLD_CHECKS:
+                continue
+            cond_channels: list[str] = []
+            if "channel" in cond:
+                cond_channels.append(cond["channel"])
+            if "channels" in cond:
+                cond_channels.extend(cond["channels"])
+            offending_cond = _CALIBRATED_CHANNELS.intersection(cond_channels)
+            if offending_cond:
+                violations.append(
+                    f"alarm '{alarm.alarm_id}' (phase=measurement) nested condition "
+                    f"(check={cond_check!r}) targets calibrated channels "
+                    f"{sorted(offending_cond)} — should have been removed by F-X v3"
+                )
 
     assert not violations, (
         "alarms_v3.yaml contains absolute-threshold rules on Т11/Т12 "

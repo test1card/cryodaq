@@ -16,8 +16,11 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 from io import BytesIO
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
@@ -414,15 +417,24 @@ async def test_html_escape_in_caption_prevents_injection() -> None:
     assert captured_texts, "send_message_with_keyboard was never called"
     text = captured_texts[0]
 
-    # Raw HTML tags must not appear in the output (they must be escaped)
+    # Raw HTML tags must NOT appear in the output (they must be escaped)
     assert "<script>" not in text, f"Unescaped <script> in confirm text: {text!r}"
     assert "<evil>" not in text, f"Unescaped <evil> in confirm text: {text!r}"
-    # The malicious title tag must be escaped too
-    assert "<b>INJECT</b>" not in text or text.count("<b>") == 1, (
+    assert "<b>INJECT</b>" not in text, (
         f"Unescaped title injection in confirm text: {text!r}"
     )
-    # Escaped forms must be present
-    assert "&lt;script&gt;" in text or "script" not in text
+
+    # Exact escaped forms MUST be present
+    # caption: <script>alert('xss')</script>  →  &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;
+    assert "&lt;script&gt;" in text, f"Escaped <script> not found in confirm text: {text!r}"
+    assert "&#x27;xss&#x27;" in text, f"Escaped quotes not found in confirm text: {text!r}"
+    assert "&lt;/script&gt;" in text, f"Escaped </script> not found in confirm text: {text!r}"
+    # username: <evil>user</evil>  →  &lt;evil&gt;user&lt;/evil&gt;
+    assert "&lt;evil&gt;" in text, f"Escaped <evil> not found in confirm text: {text!r}"
+    # title: <b>INJECT</b>  →  &lt;b&gt;INJECT&lt;/b&gt;
+    assert "&lt;b&gt;INJECT&lt;/b&gt;" in text, (
+        f"Escaped title not found in confirm text: {text!r}"
+    )
 
 
 def test_widgets_set_photos_then_empty_then_photos_restores_max_height() -> None:

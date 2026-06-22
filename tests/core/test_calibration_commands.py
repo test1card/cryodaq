@@ -95,9 +95,17 @@ async def test_calibration_curve_export_import(
     )
     assert imported["curve"]["sensor_id"] == "sensor-002"
     assert imported["curve"]["curve_id"] == original_curve_id
-    # Verify the curve evaluates to a plausible temperature (not NaN/zero)
-    evaluated_t = imported_store.evaluate("sensor-002", 50.0)
-    assert evaluated_t > 0.0, f"Imported curve evaluates to non-positive T: {evaluated_t}"
+    # Verify round-trip fidelity: imported curve must agree with original at the same raw value.
+    import math
+    raw_probe = 50.0
+    original_t = store.evaluate("sensor-002", raw_probe)
+    imported_t = imported_store.evaluate("sensor-002", raw_probe)
+    assert math.isfinite(original_t), f"Original curve returned non-finite: {original_t}"
+    assert math.isfinite(imported_t), f"Imported curve returned non-finite: {imported_t}"
+    assert abs(imported_t - original_t) < 1e-9, (
+        f"Import/export round-trip mismatch at raw={raw_probe}: "
+        f"original={original_t}, imported={imported_t}"
+    )
 
 
 async def test_calibration_curve_list_and_lookup(
@@ -106,10 +114,20 @@ async def test_calibration_curve_list_and_lookup(
 ) -> None:
     store = CalibrationStore(tmp_path / "calibration")
     curve_id = _fit_and_save(store, "sensor-lookup")
+    # Second curve on a different sensor/channel — ensures lookup is not trivially correct
+    # by ignoring channel_key and returning the sole stored curve.
+    curve_id_2 = _fit_and_save(store, "sensor-lookup-2")
 
     assigned = _run_calibration_command(
         "calibration_curve_assign",
         {"sensor_id": "sensor-lookup", "curve_id": curve_id, "channel_key": "LS218:CH2"},
+        calibration_store=store,
+        experiment_manager=experiment_manager,
+        drivers_by_name={},
+    )
+    assigned_2 = _run_calibration_command(
+        "calibration_curve_assign",
+        {"sensor_id": "sensor-lookup-2", "curve_id": curve_id_2, "channel_key": "LS218:CH3"},
         calibration_store=store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
@@ -128,14 +146,27 @@ async def test_calibration_curve_list_and_lookup(
         experiment_manager=experiment_manager,
         drivers_by_name={},
     )
+    lookup_2 = _run_calibration_command(
+        "calibration_curve_lookup",
+        {"channel_key": "LS218:CH3"},
+        calibration_store=store,
+        experiment_manager=experiment_manager,
+        drivers_by_name={},
+    )
 
     assert assigned["assignment"]["channel_key"] == "LS218:CH2"
-    assert len(listed["curves"]) == 1
-    listed_curve = listed["curves"][0]
-    assert listed_curve["curve_id"] == curve_id
-    assert listed_curve["sensor_id"] == "sensor-lookup"
+    assert assigned_2["assignment"]["channel_key"] == "LS218:CH3"
+    assert len(listed["curves"]) == 2
+    listed_ids = {c["curve_id"] for c in listed["curves"]}
+    assert curve_id in listed_ids
+    assert curve_id_2 in listed_ids
+    # First channel lookup must return first curve, not second
     assert lookup["curve"]["curve_id"] == curve_id
     assert lookup["curve"]["sensor_id"] == "sensor-lookup"
+    # Second channel lookup must return second curve, proving channel_key is not ignored
+    assert lookup_2["curve"]["curve_id"] == curve_id_2
+    assert lookup_2["curve"]["sensor_id"] == "sensor-lookup-2"
+    assert lookup_2["assignment"]["channel_key"] == "LS218:CH3"
 
 
 async def test_calibration_runtime_set_global_and_channel_policy(

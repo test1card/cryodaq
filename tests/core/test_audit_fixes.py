@@ -285,6 +285,10 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
     assert len(rows) == 1, f"OVERRANGE +inf must be persisted, got rows={rows}"
     assert rows[0][0] == "T_OVR"
     assert rows[0][2] == ChannelStatus.OVERRANGE.value
+    import math
+    assert math.isinf(rows[0][1]) and rows[0][1] > 0, (
+        f"Persisted value must be +inf, got {rows[0][1]}"
+    )
 
 
 async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
@@ -318,6 +322,10 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
     assert len(rows) == 1, f"UNDERRANGE -inf must be persisted, got rows={rows}"
     assert rows[0][0] == "T_UNR"
     assert rows[0][2] == ChannelStatus.UNDERRANGE.value
+    import math
+    assert math.isinf(rows[0][1]) and rows[0][1] < 0, (
+        f"Persisted value must be -inf, got {rows[0][1]}"
+    )
 
 
 # ---------------------------------------------------------------------------

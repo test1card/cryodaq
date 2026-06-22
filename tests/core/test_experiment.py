@@ -582,27 +582,52 @@ def test_experiment_sidecars_use_atomic_write(
             operator_username="testuser",
         )
 
-    # At least one sidecar .json must have been written via atomic_write_text
-    sidecar_writes = [p for p in written_paths if p.suffix == ".json"]
-    assert sidecar_writes, (
-        f"No .json sidecar written via atomic_write_text; calls: {written_paths}"
+    # The photo sidecar under composition/ must have been written via atomic_write_text
+    composition_sidecar_writes = [
+        p for p in written_paths
+        if p.suffix == ".json" and "composition" in p.parts
+    ]
+    assert composition_sidecar_writes, (
+        f"No composition/ .json sidecar written via atomic_write_text; calls: {written_paths}"
+    )
+
+    # metadata.json (experiment-level) must also have been written via atomic_write_text
+    metadata_writes = [
+        p for p in written_paths
+        if p.name == "metadata.json"
+    ]
+    assert metadata_writes, (
+        f"No metadata.json written via atomic_write_text; calls: {written_paths}"
     )
 
 
 def test_experiment_wal_verification(
     tmp_path: Path, instruments_yaml: Path, templates_dir: Path
 ) -> None:
-    """B-1.3: _get_connection raises RuntimeError when PRAGMA journal_mode returns non-WAL."""
+    """B-1.3: start_experiment raises RuntimeError when PRAGMA journal_mode returns non-WAL.
+
+    The fake cursor's execute() inspects the SQL: only the WAL PRAGMA returns "delete";
+    any other SQL (e.g. CREATE TABLE) returns a neutral cursor so the fake can't pass
+    for the wrong reason.
+    """
     from unittest.mock import MagicMock, patch
 
-    fake_result = MagicMock()
-    fake_result.__getitem__ = lambda self, idx: "delete"  # PRAGMA returns "delete"
+    def _make_fake_conn() -> MagicMock:
+        def _execute(sql: str, *args: object) -> MagicMock:
+            cursor = MagicMock()
+            if "journal_mode" in sql.lower():
+                # Simulate WAL mode NOT enabled — PRAGMA returns "delete"
+                result = MagicMock()
+                result.__getitem__ = lambda self, idx: "delete"
+                cursor.fetchone.return_value = result
+            else:
+                cursor.fetchone.return_value = None
+            return cursor
 
-    fake_cursor = MagicMock()
-    fake_cursor.fetchone.return_value = fake_result
-
-    fake_conn = MagicMock()
-    fake_conn.execute.return_value = fake_cursor
+        fake_conn = MagicMock()
+        fake_conn.execute.side_effect = _execute
+        fake_conn.commit.return_value = None
+        return fake_conn
 
     em = ExperimentManager(
         data_dir=tmp_path,
@@ -610,6 +635,6 @@ def test_experiment_wal_verification(
         templates_dir=templates_dir,
     )
 
-    with patch("sqlite3.connect", return_value=fake_conn):
+    with patch("sqlite3.connect", side_effect=lambda *a, **kw: _make_fake_conn()):
         with pytest.raises(RuntimeError, match="WAL"):
-            em._get_connection()
+            em.start_experiment("WALTest", "Op", template_id="custom")

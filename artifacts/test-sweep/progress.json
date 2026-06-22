@@ -3,7 +3,7 @@
   "find_next_batch": 22,
   "fix_next_batch": 22,
   "fix_max_batch_with_findings": 21,
-  "verify_next_batch": 0,
+  "verify_next_batch": 5,
   "verify_max_batch": 21,
   "phase3_verify_planned": true,
   "total_batches": 35,

@@ -69,14 +69,31 @@ async def test_leak_rate_start_command_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_leak_rate_start_with_duration_override() -> None:
-    """duration_s parameter is forwarded to the estimator and stored as _window_override."""
+    """duration_s=120 is honoured: should_finalize() is False just before the boundary
+    and True just after, proving the override window was applied (not the default 60s)."""
     est = _make_estimator()
     response = await _dispatch(
         "leak_rate_start", {"duration_s": 120.0}, est, {}, AsyncMock()
     )
     assert response["ok"] is True
     assert est.is_active
-    assert est._window_override == 120.0
+
+    # _dispatch calls start_measurement(window_s=120) with t0=now(); reconstruct t0 from _t0.
+    t0 = datetime.fromtimestamp(est._t0, tz=UTC)
+
+    # Feed a sample at t_rel≈61s — past the default window (60s) but inside the override (120s).
+    # should_finalize() must be False here (override window not yet elapsed).
+    est.add_sample(t0 + timedelta(seconds=61.0), 1e-5)
+    assert not est.should_finalize(), (
+        "should_finalize() must be False at 61s when duration_s=120 was requested"
+    )
+
+    # Feed a sample at t_rel≈121s — past the override window boundary.
+    # should_finalize() must be True now.
+    est.add_sample(t0 + timedelta(seconds=121.0), 1e-5)
+    assert est.should_finalize(), (
+        "should_finalize() must be True at 121s when duration_s=120 was requested"
+    )
 
 
 @pytest.mark.asyncio

@@ -201,12 +201,15 @@ async def test_cooldown_alarm_critical_swallows_latch_fault_exception(tmp_path):
     safety_manager.latch_fault.assert_awaited_once()
     # Alarm must have transitioned to FIRED
     assert alarm.state == CooldownState.FIRED
-    # alarm_mgr.process must have been called with a non-None event (CRITICAL)
+    # alarm_mgr.process must have been called with a CRITICAL event carrying the expected alarm_id
     critical_calls = [
         c for c in alarm_mgr.process.call_args_list
         if len(c.args) >= 2 and c.args[1] is not None
     ]
     assert critical_calls, "alarm_mgr.process must be called with a non-None CRITICAL event"
+    event = critical_calls[-1].args[1]
+    assert event.level == "CRITICAL", f"expected CRITICAL, got {event.level!r}"
+    assert event.alarm_id == "cooldown_alarm", f"expected alarm_id='cooldown_alarm', got {event.alarm_id!r}"
 
 
 def test_cooldown_alarm_constructible_without_safety_manager():

@@ -100,6 +100,14 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
 6. **diagnostic-alarm pipeline test** (batch 18) — needs src/ to expose the
    `_sensor_diag_tick` closure to test the real diag→alarm→telegram path end-to-end.
 
+7. **alarm_v2 status/ack command-shape tests** (batch 00 VERIFY, F3/F4) — `test_alarm_v2_status_shape`
+   re-implements the engine's serialization dict inside the test and asserts on its own
+   reconstruction (tautology); `test_alarm_v2_ack` tests `AlarmStateManager.acknowledge()`
+   directly. Both miss the real command path `_handle_gui_command` `alarm_v2_status` /
+   `alarm_v2_ack` (engine.py:2347 / 2392) — a nested closure inside the engine bootstrap.
+   Testing the real path needs extracting the closure (prod change), same monolith pattern
+   as items 2 & 6. NOT auto-fixed in the verify pass.
+
 NOTE: secret-token leak guard (batch 18) — RESOLVED, not deferred: runtime __dict__
 inspection now confirms all 3 Telegram classes store tokens as SecretStr only (no leak).
 

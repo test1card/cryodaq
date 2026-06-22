@@ -15,10 +15,11 @@ def test_force_kill_removes_lock_when_pid_not_alive(tmp_path):
 
     with (
         patch("cryodaq.engine._LOCK_FILE", lock_file),
-        patch("cryodaq.engine._is_pid_alive", return_value=False),
+        patch("cryodaq.engine._is_pid_alive", return_value=False) as is_pid_alive,
     ):
         _force_kill_existing()
 
+    is_pid_alive.assert_called_once_with(12345)
     assert not lock_file.exists(), "lock file must be removed after force-kill of dead PID"
 
 
