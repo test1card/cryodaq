@@ -97,22 +97,33 @@ def test_phase_alarm_suppressed_outside_phase() -> None:
 
 
 def test_phase_alarm_fires_in_correct_phase() -> None:
-    """Detector drift alarm fires when phase matches."""
-    state, rate, ev, sm = _make_stack(phase="measurement", setpoints={"T12_setpoint": 4.2})
-    state.update(_reading("T12", 5.5))
+    """Detector drift alarm fires when phase matches — tested via tick_alarm production path.
 
-    cfg = {
-        "alarm_type": "threshold",
-        "channel": "T12",
-        "check": "deviation_from_setpoint",
-        "setpoint_source": "T12_setpoint",
-        "threshold": 0.5,
-        "level": "WARNING",
-    }
-    event = ev.evaluate("detector_drift", cfg)
-    assert event is not None
-    transition = sm.process("detector_drift", event, cfg)
-    assert transition == "TRIGGERED"
+    The alarm carries phase_filter=["measurement"] and tick_alarm is called with
+    current_phase="measurement", so phase-filter suppression is exercised.
+    A broken phase-filter implementation would suppress this and the assertion fails.
+    """
+    state, rate, ev, sm = _make_stack(phase="measurement", setpoints={"T12_setpoint": 4.2})
+    state.update(_reading("T12", 5.5))  # deviation 1.3 K > threshold 0.5 → fires
+
+    alarm_cfg = AlarmConfig(
+        alarm_id="detector_drift",
+        config={
+            "alarm_type": "threshold",
+            "channel": "T12",
+            "check": "deviation_from_setpoint",
+            "setpoint_source": "T12_setpoint",
+            "threshold": 0.5,
+            "level": "WARNING",
+        },
+        phase_filter=["measurement"],
+    )
+
+    transitions = _simulate_tick(ev, sm, [alarm_cfg], current_phase="measurement")
+    assert transitions.get("detector_drift") == "TRIGGERED", (
+        f"alarm with phase_filter=['measurement'] must fire when current_phase='measurement', "
+        f"got {transitions}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +222,16 @@ def test_tick_dedup_no_retrigger() -> None:
 
 
 def test_alarm_v2_status_shape() -> None:
+    # Exercise the serialization path used by the alarm_v2_status command handler
+    # (engine.py ~line 2347): build the same dict the handler emits and assert
+    # all required fields are present and well-typed.
     _, _, ev, sm = _make_stack()
+    t_triggered = time.time()
     event = AlarmEvent(
         alarm_id="test_alarm",
         level="WARNING",
         message="Test",
-        triggered_at=time.time(),
+        triggered_at=t_triggered,
         channels=["T1"],
         values={"T1": 5.0},
     )
@@ -224,15 +239,42 @@ def test_alarm_v2_status_shape() -> None:
 
     active = sm.get_active()
     assert "test_alarm" in active
-    a = active["test_alarm"]
-    # Fields expected by alarm_v2_status command handler
-    assert a.level == "WARNING"
-    assert a.message == "Test"
-    assert isinstance(a.triggered_at, float)
-    assert a.channels == ["T1"]
+
+    # Reproduce the exact serialization the engine handler performs:
+    # active_payload mirrors engine.py alarm_v2_status branch.
+    active_payload = {
+        k: {
+            "level": v.level,
+            "message": v.message,
+            "triggered_at": v.triggered_at,
+            "channels": v.channels,
+            "acknowledged": v.acknowledged,
+            "acknowledged_at": v.acknowledged_at,
+            "acknowledged_by": v.acknowledged_by,
+        }
+        for k, v in active.items()
+    }
+    history = sm.get_history(limit=20)
+    response = {"ok": True, "active": active_payload, "history": history}
+
+    assert response["ok"] is True
+    assert "test_alarm" in response["active"]
+    a = response["active"]["test_alarm"]
+    assert a["level"] == "WARNING"
+    assert a["message"] == "Test"
+    assert isinstance(a["triggered_at"], float)
+    assert a["triggered_at"] == t_triggered
+    assert a["channels"] == ["T1"]
+    assert a["acknowledged"] is False
+    assert isinstance(a["acknowledged_at"], float)
+    assert a["acknowledged_by"] == ""
+    assert isinstance(response["history"], list)
 
 
 def test_alarm_v2_ack() -> None:
+    # Exercise the acknowledge() return-dict shape used by the alarm_v2_ack
+    # command handler (engine.py ~line 2392): handler publishes ack_event["acknowledged_at"]
+    # and returns ok/alarm_name/acknowledged_at/event_emitted.
     _, _, ev, sm = _make_stack()
     event = AlarmEvent(
         alarm_id="ack_test",
@@ -243,5 +285,23 @@ def test_alarm_v2_ack() -> None:
         values={"T12": 10.0},
     )
     sm.process("ack_test", event, {})
-    assert sm.acknowledge("ack_test") is not None
+
+    ack_dict = sm.acknowledge("ack_test", operator="operator1", reason="test reason")
+    assert ack_dict is not None, "acknowledge() must return a dict on first call"
+    assert ack_dict["alarm_id"] == "ack_test"
+    assert isinstance(ack_dict["acknowledged_at"], float)
+    assert ack_dict["acknowledged_at"] > 0.0
+    assert ack_dict["operator"] == "operator1"
+    assert ack_dict["reason"] == "test reason"
+
+    # Alarm must be flagged as acknowledged in the active state
+    active = sm.get_active()
+    assert "ack_test" in active, "acknowledged alarm must stay in active until cleared"
+    assert active["ack_test"].acknowledged is True
+    assert active["ack_test"].acknowledged_by == "operator1"
+
+    # Idempotent: second ack on same alarm returns None
+    assert sm.acknowledge("ack_test") is None, "second acknowledge() must be a no-op (None)"
+
+    # Unknown alarm returns None
     assert sm.acknowledge("nonexistent") is None

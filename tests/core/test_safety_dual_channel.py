@@ -26,15 +26,26 @@ async def _make_manager(*, mock: bool = True, keithley=None):
     return manager, broker
 
 
-async def _feed_ready(broker: SafetyBroker) -> None:
+async def _feed_ready(broker: SafetyBroker, manager: SafetyManager | None = None) -> None:
     await broker.publish(Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test"))
-    await asyncio.sleep(1.2)
+    if manager is not None:
+        # Deterministic wait: poll until state transitions to READY (monitor loop ticks every 1s)
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while manager.state != SafetyState.READY:
+            if asyncio.get_event_loop().time() >= deadline:
+                raise AssertionError(
+                    f"Manager did not reach READY within 3s; state={manager.state}"
+                )
+            await asyncio.sleep(0.05)
+    else:
+        # Fallback for callers that don't pass manager: wait long enough for monitor loop
+        await asyncio.sleep(1.2)
 
 
 async def test_request_run_accepts_smub_channel() -> None:
     manager, broker = await _make_manager()
     try:
-        await _feed_ready(broker)
+        await _feed_ready(broker, manager)
         result = await manager.request_run(0.5, 40.0, 1.0, channel="smub")
         assert result["ok"] is True
         assert result["channel"] == "smub"
@@ -47,7 +58,7 @@ async def test_request_run_accepts_smub_channel() -> None:
 async def test_dual_channel_runtime_keeps_running_until_last_channel_stops() -> None:
     manager, broker = await _make_manager()
     try:
-        await _feed_ready(broker)
+        await _feed_ready(broker, manager)
         await manager.request_run(0.5, 40.0, 1.0, channel="smua")
         await manager.request_run(0.3, 20.0, 0.5, channel="smub")
 
@@ -68,7 +79,7 @@ async def test_channel_scoped_emergency_off_preserves_other_channel() -> None:
     keithley = _mock_keithley()
     manager, broker = await _make_manager(mock=False, keithley=keithley)
     try:
-        await _feed_ready(broker)
+        await _feed_ready(broker, manager)
         await manager.request_run(0.5, 40.0, 1.0, channel="smua")
         await manager.request_run(0.3, 20.0, 0.5, channel="smub")
 
@@ -85,7 +96,7 @@ async def test_channel_scoped_emergency_off_preserves_other_channel() -> None:
 async def test_invalid_channel_rejected_early() -> None:
     manager, broker = await _make_manager()
     try:
-        await _feed_ready(broker)
+        await _feed_ready(broker, manager)
         try:
             await manager.request_run(0.5, 40.0, 1.0, channel="smuc")
         except ValueError as exc:

@@ -373,27 +373,102 @@ async def test_attach_dedup_second_callback_is_noop() -> None:
     assert em.attach_composition_photo.call_count == 1  # still 1, not 2
 
 
-def test_html_escape_in_caption_prevents_injection() -> None:
-    """Verify html.escape is imported and would escape HTML in caption."""
-    import html
+async def test_html_escape_in_caption_prevents_injection() -> None:
+    """handle_photo escapes malicious HTML in username, caption, and title."""
+    from unittest.mock import AsyncMock, MagicMock
 
-    malicious_caption = "<script>alert('xss')</script>"
-    escaped = html.escape(malicious_caption)
-    assert "<script>" not in escaped
-    assert "&lt;script&gt;" in escaped
+    from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
+
+    bot = MagicMock()
+    bot.get_file_path = AsyncMock(return_value="path/to/file")
+    bot.download_file = AsyncMock(return_value=b"\xff\xd8\xff" + b"\x00" * 50)
+    bot._send = AsyncMock()
+
+    captured_texts: list[str] = []
+
+    async def _capture_send(chat_id: int, text: str, keyboard: object) -> int:
+        captured_texts.append(text)
+        return 99
+
+    bot.send_message_with_keyboard = _capture_send
+
+    # Active experiment with a malicious title
+    active = MagicMock()
+    active.title = "<b>INJECT</b>"
+    active.name = "<b>INJECT</b>"
+    active.experiment_id = "exp-001"
+
+    em = MagicMock()
+    em.get_active_experiment.return_value = active
+
+    handler = CompositionPhotoHandler(bot=bot, experiment_manager=em)
+
+    msg = {
+        "chat": {"id": 42},
+        "photo": [{"file_id": "fid1", "file_size": 1000}],
+        "from": {"username": "<evil>user</evil>"},
+        "caption": "<script>alert('xss')</script>",
+    }
+    await handler.handle_photo(msg)
+
+    assert captured_texts, "send_message_with_keyboard was never called"
+    text = captured_texts[0]
+
+    # Raw HTML tags must not appear in the output (they must be escaped)
+    assert "<script>" not in text, f"Unescaped <script> in confirm text: {text!r}"
+    assert "<evil>" not in text, f"Unescaped <evil> in confirm text: {text!r}"
+    # The malicious title tag must be escaped too
+    assert "<b>INJECT</b>" not in text or text.count("<b>") == 1, (
+        f"Unescaped title injection in confirm text: {text!r}"
+    )
+    # Escaped forms must be present
+    assert "&lt;script&gt;" in text or "script" not in text
 
 
 def test_widgets_set_photos_then_empty_then_photos_restores_max_height() -> None:
-    """setMaximumHeight must be reset to QWIDGETSIZE_MAX after going empty → non-empty."""
-    # Test the logic without creating actual Qt widgets (verify the constants)
-    # Verify the class defines the right height behavior by checking
-    # that empty state doesn't permanently lock the widget to 80px
-    # (this is a static/structural check on the code path)
-    import inspect
+    """setMaximumHeight is reset to QWIDGETSIZE_MAX when going empty → non-empty."""
+    from PySide6.QtWidgets import QApplication
 
     from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 
-    src = inspect.getsource(CompositionPhotosWidget._refresh)
-    assert "setMaximumHeight(16777215)" in src, "Must reset maxHeight on non-empty state"
-    assert "setMinimumHeight" in src
-    assert "setFixedHeight" not in src, "setFixedHeight permanently locks both min/max"
+    _app = QApplication.instance() or QApplication([])
+
+    widget = CompositionPhotosWidget()
+
+    fake_photo = {
+        "category": "composition_photo",
+        "path": "/tmp/fake.jpg",
+        "summary": {
+            "uploaded_at": "2026-01-01T00:00:00+00:00",
+            "telegram_username": "op",
+            "caption": "",
+            "file_size_bytes": 100,
+            "dimensions": {"width": 64, "height": 48},
+            "phase_at_upload": None,
+            "channels_mentioned": [],
+        },
+    }
+
+    # Populate — widget is non-empty
+    widget.set_photos([fake_photo])
+    assert widget.maximumHeight() == 16777215, (
+        f"After set_photos([...]) maximumHeight should be QWIDGETSIZE_MAX, "
+        f"got {widget.maximumHeight()}"
+    )
+
+    # Clear — widget goes empty (maxHeight locked to 80)
+    widget.set_photos([])
+    assert widget.maximumHeight() == 80, (
+        f"After set_photos([]) maximumHeight should be 80 (empty state), "
+        f"got {widget.maximumHeight()}"
+    )
+
+    # Repopulate — maxHeight must be restored to QWIDGETSIZE_MAX
+    widget.set_photos([fake_photo])
+    assert widget.maximumHeight() == 16777215, (
+        f"After set_photos([...]) following empty state, maximumHeight should be "
+        f"QWIDGETSIZE_MAX (16777215), got {widget.maximumHeight()}"
+    )
+
+    widget.deleteLater()
+    _app.processEvents()

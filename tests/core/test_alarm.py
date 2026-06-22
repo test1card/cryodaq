@@ -365,7 +365,17 @@ async def test_event_history_bounded() -> None:
         await asyncio.sleep(0.2)
 
         events = engine.get_events()
-        assert len(events) <= 1000
+        # Cap must be hit: 600 cycles × 2 events = 1200 > 1000, so exactly 1000 retained.
+        assert len(events) == 1000, f"expected 1000 retained events, got {len(events)}"
+        # Prove old events were evicted: the deque drops from the front, so the
+        # 1000 retained events come from the last 500 cycles only.
+        # Each cycle produces exactly one "activated" + one "cleared" event.
+        # If all 1000 are retained from the last 500 cycles, exactly 500 must be
+        # "activated" and 500 "cleared". Any other split means early events leaked in.
+        activated = sum(1 for e in events if e.event_type == "activated")
+        cleared = sum(1 for e in events if e.event_type == "cleared")
+        assert activated == 500, f"expected 500 activated events in retained window, got {activated}"
+        assert cleared == 500, f"expected 500 cleared events in retained window, got {cleared}"
     finally:
         await engine.stop()
 

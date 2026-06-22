@@ -61,7 +61,7 @@ async def test_calibration_curve_export_import(
     experiment_manager: ExperimentManager,
 ) -> None:
     store = CalibrationStore(tmp_path / "calibration")
-    _fit_and_save(store, "sensor-002")
+    original_curve_id = _fit_and_save(store, "sensor-002")
 
     exported = _run_calibration_command(
         "calibration_curve_export",
@@ -71,8 +71,19 @@ async def test_calibration_curve_export_import(
         drivers_by_name={},
     )
 
-    assert Path(exported["json_path"]).exists()  # noqa: ASYNC240
-    assert Path(exported["table_path"]).exists()  # noqa: ASYNC240
+    json_path = Path(exported["json_path"])
+    table_path = Path(exported["table_path"])
+    assert json_path.exists()  # noqa: ASYNC240
+    assert table_path.exists()  # noqa: ASYNC240
+    # Files must be non-empty
+    assert json_path.stat().st_size > 0, "JSON export is zero bytes"  # noqa: ASYNC240
+    assert table_path.stat().st_size > 0, "Table export is zero bytes"  # noqa: ASYNC240
+    # JSON must encode the correct sensor and curve identity
+    import json as _json
+
+    payload = _json.loads(json_path.read_text(encoding="utf-8"))  # noqa: ASYNC240
+    assert payload["sensor_id"] == "sensor-002"
+    assert payload["curve_id"] == original_curve_id
 
     imported_store = CalibrationStore(tmp_path / "imported")
     imported = _run_calibration_command(
@@ -83,6 +94,10 @@ async def test_calibration_curve_export_import(
         drivers_by_name={},
     )
     assert imported["curve"]["sensor_id"] == "sensor-002"
+    assert imported["curve"]["curve_id"] == original_curve_id
+    # Verify the curve evaluates to a plausible temperature (not NaN/zero)
+    evaluated_t = imported_store.evaluate("sensor-002", 50.0)
+    assert evaluated_t > 0.0, f"Imported curve evaluates to non-positive T: {evaluated_t}"
 
 
 async def test_calibration_curve_list_and_lookup(
@@ -116,7 +131,11 @@ async def test_calibration_curve_list_and_lookup(
 
     assert assigned["assignment"]["channel_key"] == "LS218:CH2"
     assert len(listed["curves"]) == 1
+    listed_curve = listed["curves"][0]
+    assert listed_curve["curve_id"] == curve_id
+    assert listed_curve["sensor_id"] == "sensor-lookup"
     assert lookup["curve"]["curve_id"] == curve_id
+    assert lookup["curve"]["sensor_id"] == "sensor-lookup"
 
 
 async def test_calibration_runtime_set_global_and_channel_policy(

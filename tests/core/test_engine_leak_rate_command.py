@@ -69,13 +69,14 @@ async def test_leak_rate_start_command_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_leak_rate_start_with_duration_override() -> None:
-    """duration_s parameter is forwarded to the estimator."""
+    """duration_s parameter is forwarded to the estimator and stored as _window_override."""
     est = _make_estimator()
     response = await _dispatch(
         "leak_rate_start", {"duration_s": 120.0}, est, {}, AsyncMock()
     )
     assert response["ok"] is True
     assert est.is_active
+    assert est._window_override == 120.0
 
 
 @pytest.mark.asyncio

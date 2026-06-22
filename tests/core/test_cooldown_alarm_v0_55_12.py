@@ -168,11 +168,15 @@ async def test_cooldown_alarm_critical_calls_latch_fault(tmp_path):
 
 @pytest.mark.asyncio
 async def test_cooldown_alarm_critical_swallows_latch_fault_exception(tmp_path):
-    """latch_fault failure must NOT propagate — alarm tick keeps running."""
+    """latch_fault failure must NOT propagate — alarm tick keeps running.
+
+    Strengthened: verifies latch_fault was actually awaited, alarm reached
+    FIRED state, and alarm_mgr.process received a non-None (CRITICAL) event.
+    """
     safety_manager = MagicMock()
     safety_manager.latch_fault = AsyncMock(side_effect=RuntimeError("safety down"))
 
-    alarm, tracker, _, _ = _make_alarm(
+    alarm, tracker, alarm_mgr, _ = _make_alarm(
         model_dir=tmp_path, safety_manager=safety_manager,
     )
     alarm._model = _fake_model()
@@ -185,9 +189,24 @@ async def test_cooldown_alarm_critical_swallows_latch_fault_exception(tmp_path):
     )
 
     import cryodaq.analytics.cooldown_predictor as cdp
+    original_predict = cdp.predict
     cdp.predict = MagicMock(return_value=MagicMock(progress=0.1, t_remaining_hours=10.0))
-    # Must not raise
-    await alarm.tick()
+    try:
+        # Must not raise even though latch_fault raises
+        await alarm.tick()
+    finally:
+        cdp.predict = original_predict
+
+    # latch_fault must have been called (not silently skipped)
+    safety_manager.latch_fault.assert_awaited_once()
+    # Alarm must have transitioned to FIRED
+    assert alarm.state == CooldownState.FIRED
+    # alarm_mgr.process must have been called with a non-None event (CRITICAL)
+    critical_calls = [
+        c for c in alarm_mgr.process.call_args_list
+        if len(c.args) >= 2 and c.args[1] is not None
+    ]
+    assert critical_calls, "alarm_mgr.process must be called with a non-None CRITICAL event"
 
 
 def test_cooldown_alarm_constructible_without_safety_manager():

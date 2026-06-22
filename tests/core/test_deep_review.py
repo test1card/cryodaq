@@ -30,8 +30,12 @@ def test_correlation_with_tiny_timestamp_offset() -> None:
         engine.push("T2", i * 0.5 + 1e-6, base + rng.normal(0, 0.001))  # 1µs offset
     engine.update()
     diag = engine.get_diagnostics()
-    # Should find correlation (not None) despite tiny timestamp differences
+    # Should find correlation (not None) despite tiny timestamp differences,
+    # and — since both channels share the same base signal — the computed value
+    # must be high, not just present. (A broken alignment that paired the wrong
+    # samples could return a low/non-None correlation and pass the old check.)
     assert diag["T1"].correlation is not None
+    assert diag["T1"].correlation > 0.99
 
 
 def test_correlation_with_identical_timestamps() -> None:

@@ -409,9 +409,13 @@ async def test_run_permitted_state_is_actively_monitored():
 
     await sm._run_checks()
 
-    assert sm._state != SafetyState.RUN_PERMITTED, (
-        "RUN_PERMITTED state did not react to stale critical channel — "
-        "F1 regression: monitoring disabled during source start"
+    assert sm._state == SafetyState.FAULT_LATCHED, (
+        f"Stale critical channel in RUN_PERMITTED must transition to FAULT_LATCHED, "
+        f"got {sm._state}. F1 regression: monitoring disabled during source start"
+    )
+    # fault_reason must contain evidence of the stale channel (not a generic message)
+    assert "Т1 Криостат верх" in sm._fault_reason or "Устаревшие" in sm._fault_reason, (
+        f"fault_reason must name the stale channel, got: {sm._fault_reason!r}"
     )
 
 
@@ -453,6 +457,17 @@ def test_load_config_succeeds_with_valid_config(tmp_path):
     sm = SafetyManager(SafetyBroker(), mock=True)
     sm.load_config(cfg)
     assert len(sm._config.critical_channels) == 2
+    # Verify actual pattern strings loaded correctly
+    pattern_strings = [p.pattern for p in sm._config.critical_channels]
+    assert "Т1 .*" in pattern_strings, f"Expected 'Т1 .*' in patterns, got {pattern_strings}"
+    assert "Т7 .*" in pattern_strings, f"Expected 'Т7 .*' in patterns, got {pattern_strings}"
+    # Verify numeric timeout values were parsed (not just defaulted)
+    assert sm._config.stale_timeout_s == 10.0, (
+        f"stale_timeout_s must be 10.0, got {sm._config.stale_timeout_s}"
+    )
+    assert sm._config.heartbeat_timeout_s == 15.0, (
+        f"heartbeat_timeout_s must be 15.0, got {sm._config.heartbeat_timeout_s}"
+    )
 
 
 def test_safety_config_error_is_runtime_error_subclass():
@@ -670,25 +685,45 @@ async def test_fault_log_callback_runs_even_if_publish_fails():
 
 
 async def test_fault_log_callback_runs_before_publish():
-    """Jules R2 Q1: callback must complete before publish starts.
-    If we cancel during publish, callback should have already fired."""
-    callback_invoked = asyncio.Event()
+    """Jules R2 Q1: fault_log_callback must complete before _publish_keithley_channel_states.
+
+    The production ordering in _fault() is:
+      1. _transition (synchronous — schedules _publish_state as a fire-and-forget task)
+      2. emergency_off
+      3. fault_log_callback  (shielded — MUST complete before next step)
+      4. _publish_keithley_channel_states  (best-effort broadcast, step 5 in code)
+
+    _publish_state from _transition fires as a separate fire-and-forget asyncio task,
+    so it races independently and is NOT between callback and channel-states publish.
+    This test verifies the shielded ordering: callback completes BEFORE
+    _publish_keithley_channel_states starts, which is the Jules R2 Q1 contract.
+
+    Uses an ordered event list to record the actual call sequence.
+    """
+    call_order: list[str] = []
+    callback_reached = asyncio.Event()
+    channel_states_started = asyncio.Event()
 
     async def log_callback(*, source, message, channel, value):
-        callback_invoked.set()
+        call_order.append("callback")
+        callback_reached.set()
 
-    async def slow_publish(*args, **kwargs):
+    async def slow_channel_states(reason: str, *, fault_channel=None):
+        call_order.append("channel_states_start")
+        channel_states_started.set()
         await asyncio.sleep(1.0)
 
     broker = SafetyBroker()
     sm = SafetyManager(broker, mock=True, fault_log_callback=log_callback)
-    sm._data_broker = MagicMock()
-    sm._data_broker.publish = AsyncMock(side_effect=slow_publish)
+    # Patch _publish_keithley_channel_states (step 5) to be slow — this is the
+    # call that must happen AFTER the callback, per the Jules R2 Q1 contract.
+    sm._publish_keithley_channel_states = slow_channel_states
 
     fault_task = asyncio.create_task(
         sm._fault("test cancel during publish", channel="smua", value=1.0)
     )
-    await asyncio.sleep(0.2)  # let it reach publish
+    # Wait until _publish_keithley_channel_states has actually started
+    await asyncio.wait_for(channel_states_started.wait(), timeout=2.0)
     fault_task.cancel()
 
     try:
@@ -696,7 +731,15 @@ async def test_fault_log_callback_runs_before_publish():
     except asyncio.CancelledError:
         pass
 
-    assert callback_invoked.is_set(), "Log callback not invoked before publish — ordering wrong"
+    assert callback_reached.is_set(), "Log callback not invoked before channel-states publish"
+    assert "callback" in call_order, f"callback never recorded in call_order: {call_order}"
+    assert "channel_states_start" in call_order, f"channel_states never started: {call_order}"
+    callback_idx = call_order.index("callback")
+    channel_states_idx = call_order.index("channel_states_start")
+    assert callback_idx < channel_states_idx, (
+        f"fault_log_callback must complete before _publish_keithley_channel_states; "
+        f"got order: {call_order}"
+    )
 
 
 @pytest.mark.asyncio

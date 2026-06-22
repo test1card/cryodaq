@@ -51,10 +51,10 @@ def test_get_thermal_zone_accepts_full_label(mgr: ChannelManager) -> None:
 
 def test_get_channels_in_zone_disconnected_reserve(mgr: ChannelManager) -> None:
     reserves = mgr.get_channels_in_zone("disconnected_reserve")
-    # 8 reserve+optics channels (Т17..Т24)
-    assert len(reserves) == 8
-    assert "Т17" in reserves
-    assert "Т24" in reserves
+    # 8 reserve+optics channels (Т17..Т24) — assert exact membership, not just endpoints
+    assert set(reserves) == {f"Т{i}" for i in range(17, 25)}, (
+        f"Expected Т17..Т24, got {sorted(reserves)}"
+    )
 
 
 def test_get_channels_in_zone_cold_4k(mgr: ChannelManager) -> None:

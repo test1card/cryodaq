@@ -88,9 +88,9 @@ def test_get_stale_channels_custom_timeout() -> None:
 def test_fault_recording_and_count() -> None:
     tracker = ChannelStateTracker(fault_window_s=300.0)
     now = time.time()
-    # Fault reading: value > 350
+    # Fault reading: value > 350 — exactly one update → exactly one fault recorded
     tracker.update(_reading("T3", 999.0, ts=now))
-    assert tracker.get_fault_count("T3") >= 1
+    assert tracker.get_fault_count("T3") == 1
 
 
 def test_normal_value_no_fault() -> None:
@@ -185,6 +185,6 @@ def test_resolve_fault_count() -> None:
             ts=now,
         )
     )
-    # Query by short ID
+    # Query by short ID \u2014 exactly one update \u2192 exactly one fault recorded
     count = tracker.get_fault_count("\u042212")
-    assert count >= 1
+    assert count == 1

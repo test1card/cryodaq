@@ -138,10 +138,19 @@ async def test_cooldown_prevents_retrip() -> None:
 
 
 async def test_action_called_async() -> None:
+    """Action must be fully AWAITED before the trip is considered complete.
+
+    We block the action on an asyncio.Event so the trip can only complete
+    after we release it. This proves the engine awaits the coroutine rather
+    than fire-and-forgetting it via create_task.
+    """
+    action_started = asyncio.Event()
+    action_gate = asyncio.Event()
     awaited: list[bool] = []
 
     async def async_action() -> None:
-        await asyncio.sleep(0)  # yields control — proves it is truly awaited
+        action_started.set()        # signal: coroutine body has been entered
+        await action_gate.wait()    # block until test releases the gate
         awaited.append(True)
 
     broker = DataBroker()
@@ -150,9 +159,22 @@ async def test_action_called_async() -> None:
     await engine.start()
 
     await broker.publish(Reading.now("T1", 999.0, "K", instrument_id="test"))
+
+    # Wait until the action coroutine has been entered (proves it was called)
+    await asyncio.wait_for(action_started.wait(), timeout=1.0)
+
+    # While the gate is still closed the action hasn't completed → awaited is empty
+    assert len(awaited) == 0, (
+        "Action completed before gate was opened — engine used create_task (fire-and-forget)"
+    )
+    # State is already TRIPPED (state change happens before action call in _trip)
+    assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
+
+    # Release the gate → action completes
+    action_gate.set()
     await asyncio.sleep(0.05)
 
-    assert len(awaited) == 1, "Async action was not awaited"
+    assert len(awaited) == 1, "Async action was not awaited to completion"
 
     await engine.stop()
 
@@ -308,6 +330,12 @@ async def test_event_history_bounded() -> None:
 
 
 async def test_load_config_yaml(tmp_path: Path) -> None:
+    """load_config must parse ALL fields from YAML, not just name/state.
+
+    We verify that threshold, comparison, channel_pattern, action, and
+    cooldown_s are actually loaded by driving a reading through the engine
+    and checking the loaded condition fields directly.
+    """
     config_data = {
         "interlocks": [
             {
@@ -324,13 +352,42 @@ async def test_load_config_yaml(tmp_path: Path) -> None:
     config_file = tmp_path / "interlocks.yaml"
     config_file.write_text(yaml.dump(config_data), encoding="utf-8")
 
+    action_called: list[bool] = []
+
+    async def _action() -> None:
+        action_called.append(True)
+
     broker = DataBroker()
-    engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None})
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": _action})
     engine.load_config(config_file)
 
+    # Verify state and all parsed fields
     states = engine.get_state()
     assert "overheat" in states
     assert states["overheat"] == InterlockState.ARMED
+
+    # Retrieve the loaded condition from the internal records to assert exact fields
+    record = engine._interlocks["overheat"]
+    cond = record.condition
+    assert cond.threshold == 400.0, f"threshold not loaded: {cond.threshold}"
+    assert cond.comparison == ">", f"comparison not loaded: {cond.comparison}"
+    assert cond.channel_pattern == r"T\d+", f"channel_pattern not loaded: {cond.channel_pattern}"
+    assert cond.action == "emergency_off", f"action not loaded: {cond.action}"
+    assert cond.cooldown_s == 5.0, f"cooldown_s not loaded: {cond.cooldown_s}"
+
+    # Behavioral proof: a reading matching the pattern+threshold MUST trip the interlock
+    await engine.start()
+    try:
+        await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
+        await asyncio.sleep(0.05)
+        assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
+            "Interlock loaded from YAML did not trip on a matching reading"
+        )
+        assert len(action_called) == 1, (
+            "YAML-loaded action was not called on trip"
+        )
+    finally:
+        await engine.stop()
 
 
 # ---------------------------------------------------------------------------

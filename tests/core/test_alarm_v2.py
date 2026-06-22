@@ -192,6 +192,8 @@ def test_threshold_missing_channel_no_fire() -> None:
 
 
 def test_threshold_sustained_fires_after_delay() -> None:
+    from unittest.mock import patch
+
     ev = _make_evaluator([_reading("T12", 5.5)], setpoints={"T12_setpoint": 4.2})
     cfg = {
         "alarm_type": "threshold",
@@ -204,13 +206,21 @@ def test_threshold_sustained_fires_after_delay() -> None:
     }
     state_mgr = AlarmStateManager()
 
-    # First evaluate — condition True, but sustained not yet
-    event = ev.evaluate("drift", cfg)
-    # Manually set sustained_since to 65 seconds ago
-    state_mgr._sustained_since["drift"] = time.time() - 65
+    t0 = 1_000_000.0  # arbitrary fixed epoch
 
-    result = state_mgr.process("drift", event, cfg)
-    assert result == "TRIGGERED"
+    # First process() call at t0: condition is true, sustained_since is recorded,
+    # but elapsed = 0 < 60 s → returns None (timer just started).
+    with patch("cryodaq.core.alarm_v2.time.time", return_value=t0):
+        event = ev.evaluate("drift", cfg)
+        result_first = state_mgr.process("drift", event, cfg)
+    assert result_first is None, "sustained not yet met — must return None on first call"
+    assert "drift" in state_mgr._sustained_since, "sustained_since must be recorded after first true"
+
+    # Second process() call at t0 + 65 s: elapsed 65 > 60 → "TRIGGERED".
+    with patch("cryodaq.core.alarm_v2.time.time", return_value=t0 + 65.0):
+        event2 = ev.evaluate("drift", cfg)
+        result_second = state_mgr.process("drift", event2, cfg)
+    assert result_second == "TRIGGERED"
 
 
 def test_threshold_sustained_resets_on_clear() -> None:

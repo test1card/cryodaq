@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 # ---------------------------------------------------------------------------
 # BUG-1: Safety state machine race — request_run rejected during _fault()
@@ -219,12 +219,12 @@ async def test_phase_detector_configure_resets_state() -> None:
 
 
 # ---------------------------------------------------------------------------
-# BUG-4: Inf values pass through SQLite writer
+# BUG-4: SQLite writer — non-finite value filtering vs. state-carrying persist
 # ---------------------------------------------------------------------------
 
 
-async def test_sqlite_filters_inf(tmp_path) -> None:
-    """float('inf') must be filtered out, not written to SQLite."""
+async def test_sqlite_ok_nonfinite_filtered(tmp_path) -> None:
+    """Non-finite values with status OK (default) are filtered; NaN always filtered."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -233,9 +233,9 @@ async def test_sqlite_filters_inf(tmp_path) -> None:
     now = datetime.now(UTC)
     readings = [
         Reading(timestamp=now, instrument_id="test", channel="T1", value=4.2, unit="K"),
+        # inf/nan with default status=OK → must be filtered
         Reading(timestamp=now, instrument_id="test", channel="T2", value=float("inf"), unit="K"),
-        Reading(timestamp=now, instrument_id="test", channel="T3", value=float("-inf"), unit="K"),
-        Reading(timestamp=now, instrument_id="test", channel="T4", value=float("nan"), unit="K"),
+        Reading(timestamp=now, instrument_id="test", channel="T3", value=float("nan"), unit="K"),
         Reading(timestamp=now, instrument_id="test", channel="T5", value=5.0, unit="K"),
     ]
     await writer.write_immediate(readings)
@@ -245,16 +245,79 @@ async def test_sqlite_filters_inf(tmp_path) -> None:
 
     db_files = glob.glob(str(tmp_path / "data_*.db"))
     conn = sqlite3.connect(db_files[0])
-    count = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
     channels = [r[0] for r in conn.execute("SELECT channel FROM readings").fetchall()]
     conn.close()
 
-    assert count == 2, f"Expected 2 rows (T1, T5), got {count}: {channels}"
     assert "T1" in channels
     assert "T5" in channels
-    assert "T2" not in channels  # inf filtered
-    assert "T3" not in channels  # -inf filtered
-    assert "T4" not in channels  # nan filtered
+    assert "T2" not in channels, "inf with status=OK must be filtered"
+    assert "T3" not in channels, "nan must always be filtered"
+
+
+async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
+    """OVERRANGE reading with value=+inf is intentionally persisted."""
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    now = datetime.now(UTC)
+    readings = [
+        Reading(
+            timestamp=now,
+            instrument_id="test",
+            channel="T_OVR",
+            value=float("inf"),
+            unit="K",
+            status=ChannelStatus.OVERRANGE,
+        ),
+    ]
+    await writer.write_immediate(readings)
+    await writer.stop()
+
+    import glob
+
+    db_files = glob.glob(str(tmp_path / "data_*.db"))
+    conn = sqlite3.connect(db_files[0])
+    rows = conn.execute("SELECT channel, value, status FROM readings").fetchall()
+    conn.close()
+
+    assert len(rows) == 1, f"OVERRANGE +inf must be persisted, got rows={rows}"
+    assert rows[0][0] == "T_OVR"
+    assert rows[0][2] == ChannelStatus.OVERRANGE.value
+
+
+async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
+    """UNDERRANGE reading with value=-inf is intentionally persisted."""
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    now = datetime.now(UTC)
+    readings = [
+        Reading(
+            timestamp=now,
+            instrument_id="test",
+            channel="T_UNR",
+            value=float("-inf"),
+            unit="K",
+            status=ChannelStatus.UNDERRANGE,
+        ),
+    ]
+    await writer.write_immediate(readings)
+    await writer.stop()
+
+    import glob
+
+    db_files = glob.glob(str(tmp_path / "data_*.db"))
+    conn = sqlite3.connect(db_files[0])
+    rows = conn.execute("SELECT channel, value, status FROM readings").fetchall()
+    conn.close()
+
+    assert len(rows) == 1, f"UNDERRANGE -inf must be persisted, got rows={rows}"
+    assert rows[0][0] == "T_UNR"
+    assert rows[0][2] == ChannelStatus.UNDERRANGE.value
 
 
 # ---------------------------------------------------------------------------

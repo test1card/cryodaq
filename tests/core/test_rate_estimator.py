@@ -108,26 +108,64 @@ def test_rate_noisy() -> None:
 
 
 def test_rate_custom_window_shorter() -> None:
-    """get_rate_custom_window с меньшим окном."""
-    est = RateEstimator(window_s=120.0, min_points=30)
+    """get_rate_custom_window с меньшим окном должен игнорировать старые точки.
+
+    Old points (t=0..119) have rate +10 K/min.
+    Recent points (t=420..479, within 60s window) have rate +2 K/min.
+    If get_rate_custom_window ignores the window_s argument and uses all data,
+    the measured slope would be dominated by the old high-rate points and
+    the assertion would fail.  This makes the window_s gate observable.
+    """
+    est = RateEstimator(window_s=600.0, min_points=30)
     t0 = 1_000_000.0
-    # Подаём 120 точек
+
+    # Old batch: +10 K/min slope (these will be outside the 60s window)
     for i in range(120):
-        est.push("T1", t0 + i, 4.2 + (2.0 / 60.0) * i)
+        est.push("T1", t0 + i, 4.2 + (10.0 / 60.0) * i)
+
+    # Gap: jump forward so old points are >60s back from the new batch
+    t1 = t0 + 420.0  # 420s later → old batch is 300–420s ago, outside 60s window
+
+    # Recent batch: +2 K/min slope, 60 points within the 60s window
+    recent_start_v = 100.0
+    for i in range(60):
+        est.push("T1", t1 + i, recent_start_v + (2.0 / 60.0) * i)
 
     rate_short = est.get_rate_custom_window("T1", window_s=60.0)
-    assert rate_short is not None
-    assert abs(rate_short - 2.0) < 0.2
+    assert rate_short is not None, "Expected a rate estimate from the recent 60s window"
+    assert abs(rate_short - 2.0) < 0.3, (
+        f"get_rate_custom_window must reflect recent 2 K/min slope, got {rate_short:.3f} K/min. "
+        f"A value near 10 K/min means the window_s argument was ignored."
+    )
 
 
 def test_rate_custom_window_insufficient() -> None:
-    """Недостаточно точек в кастомном окне → None."""
-    est = RateEstimator(window_s=120.0, min_points=60)
+    """Недостаточно точек в кастомном окне → None.
+
+    Total points >= min_points (60) so the global buffer is populated, but
+    only the RECENT 30 points fall within the custom 60s window. This
+    isolates the custom-window in-window filtering: get_rate_custom_window
+    must return None because the 60s window contains < min_points points,
+    not because the buffer as a whole is too small.
+    """
+    est = RateEstimator(window_s=600.0, min_points=60)
     t0 = 1_000_000.0
-    # Подаём только 40 точек
-    for i in range(40):
+
+    # Old batch: 60 points far outside the 60s custom window (200s ago)
+    for i in range(60):
         est.push("T1", t0 + i, 4.2 + i * 0.01)
-    assert est.get_rate_custom_window("T1", window_s=60.0) is None
+
+    # Recent batch: only 30 points within the 60s custom window
+    t1 = t0 + 200.0  # 200s gap → old batch is 200-260s ago, outside 60s window
+    for i in range(30):
+        est.push("T1", t1 + i, 100.0 + i * 0.01)
+
+    # Buffer has 90 total points (>= 60), but only 30 are in the 60s window
+    assert est.buffer_size("T1") >= 60, "Pre-condition: buffer must have >= 60 total points"
+    assert est.get_rate_custom_window("T1", window_s=60.0) is None, (
+        "get_rate_custom_window must return None when < min_points points are in the window, "
+        "even if the total buffer exceeds min_points"
+    )
 
 
 def test_multiple_channels_independent() -> None:

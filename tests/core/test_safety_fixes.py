@@ -116,11 +116,17 @@ async def test_fault_latched_not_cleared_by_emergency():
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"emergency_off must not clear FAULT_LATCHED, got {mgr.state}"
         )
-        # ok is debatable but the test spec requires ok=False here or
-        # at minimum confirms state stays FAULT_LATCHED; per spec: assert ok=False
-        # The current implementation returns ok=True + SAFE_OFF which is the bug;
-        # we assert the post-fix behaviour.
-        assert result["ok"] is False or mgr.state == SafetyState.FAULT_LATCHED
+        # Production contract: emergency_off() from FAULT_LATCHED returns ok=True
+        # but includes latched=True to signal the fault is still active.
+        # (Verified in safety_manager.py:410-418: the latched branch returns
+        # ok=True, latched=True, with warning="Outputs disabled but fault remains latched")
+        assert result["ok"] is True, (
+            f"emergency_off from FAULT_LATCHED should return ok=True (outputs disabled), "
+            f"got ok={result.get('ok')}"
+        )
+        assert result.get("latched") is True, (
+            f"emergency_off from FAULT_LATCHED must set latched=True, got {result}"
+        )
     finally:
         await mgr.stop()
 
@@ -248,9 +254,12 @@ async def test_rate_limit_ignores_non_temperature():
         await mgr.request_run(0.5, 40.0, 1.0)
         assert mgr.state == SafetyState.RUNNING
 
-        # Publish 20 voltage readings with a massive step change
-        for i in range(20):
-            v = 0.0 if i < 10 else 1000.0  # huge jump in Volts
+        # Publish >=60 voltage readings spanning a high dV/dt so the rate estimator
+        # CAN compute a rate (needs >= min_points=60).  Unit is "V" so the rate-check
+        # loop (which gates on unit=="K" via _collect_loop) must never see these
+        # readings in the estimator, and no fault must fire.
+        for i in range(65):
+            v = float(i) * 100.0  # +100 V per sample → enormous rate if it were K
             r = Reading.now(channel="Keithley/voltage", value=v, unit="V", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
@@ -258,6 +267,10 @@ async def test_rate_limit_ignores_non_temperature():
         # Allow monitor loop to run
         await asyncio.sleep(1.5)
 
+        # Confirm the estimator has NO entry for the voltage channel (unit-gated)
+        assert "Keithley/voltage" not in mgr._rate_estimator.channels(), (
+            "Voltage channel must not be pushed into the rate estimator (unit != 'K')"
+        )
         assert mgr.state == SafetyState.RUNNING, (
             f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
         )
@@ -323,17 +336,24 @@ async def test_rate_limit_ignores_non_critical_channel():
         assert result["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # Feed rapidly changing data on a NON-critical channel (T4 — disconnected sensor)
-        for i in range(20):
-            temp = 300.0 + i * 10.0  # +10 K per sample → huge rate
+        # Feed >=60 rapidly changing data on a NON-critical channel (T4 — disconnected sensor).
+        # 65 samples guarantees the rate estimator CAN compute a rate for this channel
+        # (needs >= min_points=60), so the test actually exercises the critical-channel
+        # gate rather than just relying on the estimator returning None.
+        for i in range(65):
+            temp = 4.0 + i * 10.0  # +10 K per sample → well above 5 K/min limit
             r = Reading.now(channel="Т4 Радиатор 2", value=temp, unit="K", instrument_id="test")
             await broker.publish(r)
             await asyncio.sleep(0.01)
 
-        # Keep critical channel fresh
+        # Keep critical channel fresh so stale-check doesn't fire
         await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
         await asyncio.sleep(1.5)
 
+        # Confirm the estimator DID record the non-critical channel (received enough samples)
+        assert mgr._rate_estimator.buffer_size("Т4 Радиатор 2") >= 60, (
+            "Expected >=60 samples in rate estimator for Т4 to prove the channel gate was tested"
+        )
         assert mgr.state == SafetyState.RUNNING, (
             f"Non-critical channel rate must not trigger FAULT_LATCHED, got {mgr.state}"
         )

@@ -360,20 +360,31 @@ async def test_switch_to_debug_with_active_experiment_is_rejected(
     assert "карточка эксперимента" in str(excinfo.value)
 
 
-def test_no_english_debug_switch_string_remains_in_src() -> None:
+def test_no_english_debug_switch_string_remains_in_src(
+    manager: ExperimentManager,
+) -> None:
     # Regression guard: the prior English phrasing leaked into a
-    # QMessageBox on macOS. Translate at source, not at the GUI.
-    import subprocess
-    from pathlib import Path
-
-    repo_src = Path(__file__).resolve().parents[2] / "src" / "cryodaq"
-    result = subprocess.run(
-        ["grep", "-rn", "Cannot switch to debug", str(repo_src)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.stdout == "", f"English debug-switch string still present:\n{result.stdout}"
+    # QMessageBox on macOS. The engine error must surface in Russian only.
+    # This test drives the real code path (not a source grep) so a rename
+    # of the English string doesn't silently keep the test green.
+    manager.start_experiment("First", "Operator", template_id="custom")
+    try:
+        manager.set_app_mode("debug")
+    except RuntimeError as exc:
+        msg = str(exc)
+        # Must contain no English debug-switch phrasing
+        assert "Cannot switch to debug" not in msg, (
+            f"English debug-switch string in error message: {msg!r}"
+        )
+        assert "debug mode" not in msg, (
+            f"English 'debug mode' string in error message: {msg!r}"
+        )
+        # Must be in Russian (the Russian guard word that was ratified)
+        assert "режим отладки" in msg or "карточка эксперимента" in msg, (
+            f"Expected Russian error message, got: {msg!r}"
+        )
+    else:
+        pytest.fail("Expected RuntimeError when switching to debug with active experiment")
 
 
 async def test_stop_without_active_raises(manager: ExperimentManager) -> None:
@@ -384,7 +395,13 @@ async def test_stop_without_active_raises(manager: ExperimentManager) -> None:
 async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifacts(
     manager: ExperimentManager,
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    # This test creates a real SQLiteWriter; on a host with a SQLite version in the
+    # known-broken WAL range it previously only passed by env-var leakage from another
+    # test (ordering-dependent). Set the bypass explicitly, matching the pattern in
+    # tests/storage/test_multiline_persistence.py.
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     writer = SQLiteWriter(tmp_path)
     exp_id = manager.start_experiment(
         name="Thermal archive",
@@ -521,22 +538,78 @@ async def test_no_phases_backward_compat(manager: ExperimentManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_experiment_sidecars_use_atomic_write():
-    """B-1.1: experiment.py JSON sidecar writes must use atomic_write_text."""
-    source = Path("src/cryodaq/core/experiment.py").read_text(encoding="utf-8")
-    import re as _re
+def test_experiment_sidecars_use_atomic_write(
+    tmp_path: Path, instruments_yaml: Path, templates_dir: Path
+) -> None:
+    """B-1.1: sidecar JSON writes route through atomic_write_text (runtime proof)."""
+    from unittest.mock import patch
 
-    raw_json_writes = _re.findall(r"\.write_text\(json\.dumps", source)
-    assert len(raw_json_writes) == 0, (
-        f"Found {len(raw_json_writes)} raw write_text(json.dumps...) — "
-        f"should all route through atomic_write_text"
+    from cryodaq.core.atomic_write import atomic_write_text as _real_awt
+
+    written_paths: list[Path] = []
+
+    def _capturing_awt(path: Path, text: str) -> None:
+        written_paths.append(Path(path))
+        _real_awt(path, text)
+
+    em = ExperimentManager(
+        data_dir=tmp_path,
+        instruments_config=instruments_yaml,
+        templates_dir=templates_dir,
     )
-    assert "atomic_write_text" in source
+    exp_id = em.start_experiment("AtomicTest", "Op", template_id="custom")
 
+    # Patch in the source module (lazy import inside function bodies)
+    with patch("cryodaq.core.atomic_write.atomic_write_text", side_effect=_capturing_awt):
+        from io import BytesIO
 
-def test_experiment_wal_verification():
-    """B-1.3: experiment.py metadata DB must verify WAL mode is active."""
-    source = Path("src/cryodaq/core/experiment.py").read_text(encoding="utf-8")
-    assert "actual_mode" in source and "wal" in source, (
-        "experiment.py metadata DB does not verify WAL mode"
+        try:
+            from PIL import Image
+            img = Image.new("RGB", (32, 32), color=(0, 128, 0))
+            buf = BytesIO()
+            img.save(buf, format="JPEG")
+            jpeg_bytes = buf.getvalue()
+        except ImportError:
+            pytest.skip("Pillow not installed")
+
+        artifact_dir = tmp_path / "experiments" / exp_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        em.attach_composition_photo(
+            experiment_id=exp_id,
+            photo_bytes=jpeg_bytes,
+            caption="test caption",
+            operator_username="testuser",
+        )
+
+    # At least one sidecar .json must have been written via atomic_write_text
+    sidecar_writes = [p for p in written_paths if p.suffix == ".json"]
+    assert sidecar_writes, (
+        f"No .json sidecar written via atomic_write_text; calls: {written_paths}"
     )
+
+
+def test_experiment_wal_verification(
+    tmp_path: Path, instruments_yaml: Path, templates_dir: Path
+) -> None:
+    """B-1.3: _get_connection raises RuntimeError when PRAGMA journal_mode returns non-WAL."""
+    from unittest.mock import MagicMock, patch
+
+    fake_result = MagicMock()
+    fake_result.__getitem__ = lambda self, idx: "delete"  # PRAGMA returns "delete"
+
+    fake_cursor = MagicMock()
+    fake_cursor.fetchone.return_value = fake_result
+
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value = fake_cursor
+
+    em = ExperimentManager(
+        data_dir=tmp_path,
+        instruments_config=instruments_yaml,
+        templates_dir=templates_dir,
+    )
+
+    with patch("sqlite3.connect", return_value=fake_conn):
+        with pytest.raises(RuntimeError, match="WAL"):
+            em._get_connection()

@@ -83,8 +83,9 @@ def _db_path_for_writer(writer: SQLiteWriter, ts: datetime) -> Path:
 # ---------------------------------------------------------------------------
 
 
-async def test_write_immediate_persists_before_return(tmp_path: Path) -> None:
+async def test_write_immediate_persists_before_return(tmp_path: Path, monkeypatch) -> None:
     """write_immediate() must not return until all rows are committed to disk."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -106,8 +107,9 @@ async def test_write_immediate_persists_before_return(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_write_immediate_failure_does_not_publish(tmp_path: Path) -> None:
+async def test_write_immediate_failure_does_not_publish(tmp_path: Path, monkeypatch) -> None:
     """If SQLite write raises, the reading must not reach any subscriber."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     broker = DataBroker()
     test_queue = await broker.subscribe("test_consumer", maxsize=100)
 
@@ -138,28 +140,75 @@ async def test_write_immediate_failure_does_not_publish(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_ordering_guarantee_write_before_zmq(tmp_path: Path) -> None:
-    """Any reading visible in the broker queue must already be committed to SQLite."""
+async def test_ordering_guarantee_write_before_zmq(tmp_path: Path, monkeypatch) -> None:
+    """Persistence-before-publish is deterministically verified.
+
+    Strategy:
+    1. Wrap write_immediate so it blocks on a gate Event before completing.
+    2. Start the scheduler and wait until _write_batch has been entered
+       (write is in progress but not yet committed).
+    3. Assert the subscriber queue is STILL EMPTY — no publish has happened yet.
+    4. Release the gate so the write completes.
+    5. Assert the exact reading now appears in the subscriber queue AND is on disk.
+
+    This proves the ordering guarantee: the scheduler does NOT publish until
+    write_immediate returns, regardless of timing.
+    Note: we cannot introduce a src/ change, so we wrap at the test level.
+    """
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     broker = DataBroker()
     test_queue = await broker.subscribe("test_consumer", maxsize=100)
 
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
+    # Gate that blocks write_immediate mid-flight
+    write_started = asyncio.Event()
+    write_gate = asyncio.Event()
+
+    original_write_immediate = writer.write_immediate
+
+    async def gated_write_immediate(batch: list) -> None:
+        write_started.set()           # signal: write has been entered
+        await write_gate.wait()       # block until test releases
+        await original_write_immediate(batch)
+
+    writer.write_immediate = gated_write_immediate  # type: ignore[method-assign]
+
     driver = MockDriver()
     sched = Scheduler(broker, sqlite_writer=writer)
     sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
 
     await sched.start()
-    # Wait until at least one reading appears in the subscriber queue.
     try:
+        # Wait until the first write_immediate has been entered
+        await asyncio.wait_for(write_started.wait(), timeout=2.0)
+
+        # Write is in progress but NOT yet committed → queue MUST be empty
+        assert test_queue.empty(), (
+            "Subscriber queue is non-empty while write_immediate is still blocked — "
+            "publish happened BEFORE persistence (ordering violated)"
+        )
+
+        # Release the gate → write completes → publish proceeds
+        write_gate.set()
+
+        # Now a reading must appear in the queue
         reading = await asyncio.wait_for(test_queue.get(), timeout=2.0)
     finally:
         await sched.stop()
 
-    # The reading is in the queue — it must already be on disk.
+    # Restore original to avoid interference with writer.stop()
+    writer.write_immediate = original_write_immediate  # type: ignore[method-assign]
+
+    # The reading is in the queue — it must already be on disk
     db_path = _db_path_for_writer(writer, reading.timestamp)
     assert db_path.exists(), "DB file must exist before reading reaches subscriber"
+
+    # Exact channel and value match (not just row count ≥ 1)
+    assert reading.channel == "CH1", f"Unexpected channel: {reading.channel}"
+    assert abs(reading.value - 4.2) < 1e-9, f"Unexpected value: {reading.value}"
+
     row_count = _count_rows(db_path)
     assert row_count >= 1, f"Expected at least 1 row in DB, found {row_count}"
 
@@ -171,8 +220,9 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_write_immediate_timeout_handling(tmp_path: Path) -> None:
+async def test_write_immediate_timeout_handling(tmp_path: Path, monkeypatch) -> None:
     """write_immediate() must wait for completion even when _write_batch is slow."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -204,8 +254,9 @@ async def test_write_immediate_timeout_handling(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_backward_compat_queue_mode(tmp_path: Path) -> None:
+async def test_backward_compat_queue_mode(tmp_path: Path, monkeypatch) -> None:
     """The queue-based start(queue) path must continue to work unchanged."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     writer = SQLiteWriter(tmp_path, flush_interval_s=0.1)
     queue: asyncio.Queue[Reading] = asyncio.Queue()
 
@@ -232,8 +283,9 @@ async def test_backward_compat_queue_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_start_immediate_creates_data_dir(tmp_path: Path) -> None:
+async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> None:
     """start_immediate() must create the data directory on demand."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     non_existent = tmp_path / "deep" / "nested" / "data"
     assert not non_existent.exists(), "Pre-condition: directory must not exist"
 
