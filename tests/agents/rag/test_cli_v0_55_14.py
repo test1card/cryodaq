@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -99,8 +101,9 @@ def test_load_rag_config_handles_missing_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2.2 — Ollama error surface (sanity check that the imports + exception
-# classes line up; the integration paths are tested at the higher level)
+# 2.2 — Ollama error surface: index_main and search_main must catch
+# OllamaModelMissingError (exit 3) and OllamaUnavailableError (exit 4)
+# and emit friendly stderr without a traceback.
 # ---------------------------------------------------------------------------
 
 
@@ -113,3 +116,94 @@ def test_ollama_error_classes_imported_at_module_load() -> None:
     assert OllamaUnavailableError in cli.__dict__.values() or hasattr(
         cli, "OllamaUnavailableError"
     )
+
+
+@pytest.mark.parametrize(
+    "error_cls,expected_exit",
+    [
+        (OllamaModelMissingError, 3),
+        (OllamaUnavailableError, 4),
+    ],
+)
+def test_index_main_ollama_errors_exit_with_friendly_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    error_cls: type,
+    expected_exit: int,
+) -> None:
+    """index_main must catch Ollama errors, print a friendly message to
+    stderr (no bare traceback), and exit with the documented code."""
+    # Provide a minimal config so CLI doesn't look up real paths.
+    cfg = tmp_path / "rag.yaml"
+    cfg.write_text("rag: {}", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["cryodaq-rag-index", "--config", str(cfg)])
+    monkeypatch.setattr(
+        cli,
+        "build_index",
+        AsyncMock(side_effect=error_cls("test error")),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.index_main()
+
+    assert exc_info.value.code == expected_exit, (
+        f"expected exit {expected_exit}, got {exc_info.value.code}"
+    )
+    captured = capsys.readouterr()
+    assert "error:" in captured.err, f"expected friendly error in stderr; got: {captured.err!r}"
+    assert "Traceback" not in captured.err, (
+        f"bare traceback must not appear in stderr; got: {captured.err!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "error_cls,expected_exit",
+    [
+        (OllamaModelMissingError, 3),
+        (OllamaUnavailableError, 4),
+    ],
+)
+def test_search_main_ollama_errors_exit_with_friendly_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    error_cls: type,
+    expected_exit: int,
+) -> None:
+    """search_main must catch Ollama errors, print a friendly message to
+    stderr (no bare traceback), and exit with the documented code."""
+    cfg = tmp_path / "rag.yaml"
+    cfg.write_text("rag: {}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys, "argv", ["cryodaq-rag-search", "--config", str(cfg), "test query"]
+    )
+    monkeypatch.setattr(
+        cli,
+        "RagSearcher",
+        lambda **_kwargs: _make_failing_searcher(error_cls),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.search_main()
+
+    assert exc_info.value.code == expected_exit, (
+        f"expected exit {expected_exit}, got {exc_info.value.code}"
+    )
+    captured = capsys.readouterr()
+    assert "error:" in captured.err, f"expected friendly error in stderr; got: {captured.err!r}"
+    assert "Traceback" not in captured.err, (
+        f"bare traceback must not appear in stderr; got: {captured.err!r}"
+    )
+
+
+def _make_failing_searcher(error_cls: type) -> object:
+    """Return a fake RagSearcher whose search() raises the given Ollama error."""
+
+    class _FailingSearcher:
+        async def search(self, *_args: object, **_kwargs: object) -> list:
+            raise error_cls("test error")
+
+    return _FailingSearcher()

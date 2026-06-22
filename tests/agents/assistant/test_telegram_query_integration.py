@@ -149,8 +149,8 @@ async def test_telegram_query_error_user_message() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_engine_constructs_query_agent_when_enabled() -> None:
-    """AssistantConfig correctly parses query.enabled=true."""
+def test_config_parses_query_agent_params_when_enabled() -> None:
+    """AssistantConfig correctly parses all query params from a dict (no engine construction)."""
     cfg = AssistantConfig.from_dict({
         "query": {
             "enabled": True,

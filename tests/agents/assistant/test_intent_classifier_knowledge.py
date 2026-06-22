@@ -157,20 +157,39 @@ def _make_ollama(text: str) -> MagicMock:
     return client
 
 
-async def test_classifier_emits_knowledge_query_with_vault_note_kind() -> None:
+async def test_classifier_parses_mocked_knowledge_query_with_vault_note_kind() -> None:
+    """Parser extracts knowledge_query + vault_note from a mocked generate() response.
+
+    Ollama is unconditionally mocked — LLM semantics are not tested here.
+    What IS tested: the query text reaches generate() (catches broken
+    prompt-construction paths), and vault_note is correctly parsed from
+    the mocked JSON response.
+    """
+    query = "как делать калибровку датчика?"
     ollama = _make_ollama(_knowledge_json(source_kind="vault_note", quantity="процедура"))
     clf = IntentClassifier(ollama)
-    intent = await clf.classify("как делать калибровку датчика?")
+    intent = await clf.classify(query)
     assert intent.category == QueryCategory.KNOWLEDGE_QUERY
     assert intent.target_source_kind == "vault_note"
+    call_kwargs = ollama.generate.call_args
+    assert query in str(call_kwargs)
 
 
-async def test_classifier_emits_knowledge_query_with_experiment_metadata_kind() -> None:
+async def test_classifier_parses_mocked_knowledge_query_with_experiment_metadata_kind() -> None:
+    """Parser extracts knowledge_query + experiment_metadata from a mocked generate() response.
+
+    Ollama is unconditionally mocked — LLM semantics are not tested here.
+    What IS tested: the query text reaches generate() (catches broken
+    prompt-construction paths), and experiment_metadata is correctly parsed.
+    """
+    query = "какие у нас были проблемы в архивных экспериментах?"
     ollama = _make_ollama(_knowledge_json(source_kind="experiment_metadata"))
     clf = IntentClassifier(ollama)
-    intent = await clf.classify("какие у нас были проблемы в архивных экспериментах?")
+    intent = await clf.classify(query)
     assert intent.category == QueryCategory.KNOWLEDGE_QUERY
     assert intent.target_source_kind == "experiment_metadata"
+    call_kwargs = ollama.generate.call_args
+    assert query in str(call_kwargs)
 
 
 async def test_classifier_handles_knowledge_query_without_source_kind_field() -> None:

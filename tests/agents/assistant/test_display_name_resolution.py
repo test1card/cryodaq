@@ -217,8 +217,8 @@ async def test_classifier_picks_up_rename_without_restart() -> None:
     assert "Теплообменник 2" not in second_system
 
 
-async def test_classifier_concurrent_calls_each_get_consistent_snapshot() -> None:
-    """Two concurrent classify() calls each see a consistent ChannelManager snapshot."""
+async def test_classifier_concurrent_calls_include_channel_hints() -> None:
+    """Two concurrent classify() calls each receive the full channel hint in their system prompt."""
     import asyncio
 
     mgr = _make_manager(**{

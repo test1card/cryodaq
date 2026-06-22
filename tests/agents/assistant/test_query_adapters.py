@@ -54,13 +54,28 @@ def _make_broker(readings: list | None = None) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+async def _poll_until(cond_fn, *, deadline_s: float = 1.0) -> None:
+    """Deterministic wait: poll async cond_fn() until True within deadline_s seconds."""
+    await asyncio.wait_for(_poll_loop(cond_fn), timeout=deadline_s)
+
+
+async def _poll_loop(cond_fn) -> None:
+    while not await cond_fn():  # noqa: ASYNC110
+        await asyncio.sleep(0.005)
+
+
 async def test_broker_snapshot_latest_per_channel() -> None:
     """After consuming a reading, latest() returns the value."""
     r = _make_reading("T_cold", 12.5)
     broker = _make_broker(readings=[r])
     snap = BrokerSnapshot(broker)
     await snap.start()
-    await asyncio.sleep(0.05)  # let consume loop run
+
+    # Wait until the consume loop has processed the reading.
+    async def _has_t_cold() -> bool:
+        return await snap.latest("T_cold") is not None
+
+    await _poll_until(_has_t_cold)
 
     result = await snap.latest("T_cold")
     assert result is not None
@@ -74,7 +89,8 @@ async def test_broker_snapshot_handles_no_data() -> None:
     broker = _make_broker()
     snap = BrokerSnapshot(broker)
     await snap.start()
-    await asyncio.sleep(0.02)
+    # No readings — just yield to let the event loop run the consume task once.
+    await asyncio.sleep(0)
 
     result = await snap.latest("T_unknown")
     assert result is None
@@ -91,7 +107,13 @@ async def test_broker_snapshot_latest_all_returns_all_channels() -> None:
     broker = _make_broker(readings=readings)
     snap = BrokerSnapshot(broker)
     await snap.start()
-    await asyncio.sleep(0.05)
+
+    # Wait until both channels appear.
+    async def _both_present() -> bool:
+        ch = await snap.latest_all()
+        return "T_cold" in ch and "T_warm" in ch
+
+    await _poll_until(_both_present)
 
     all_ch = await snap.latest_all()
     assert "T_cold" in all_ch
@@ -162,9 +184,10 @@ async def test_vacuum_adapter_target_format() -> None:
     adapter = VacuumAdapter(predictor)
     result = await adapter.eta_to_target(1e-6)
     assert isinstance(result, VacuumETA)
+    assert result.eta_seconds == pytest.approx(3600.0)
+    assert result.target_mbar == 1e-6
     assert result.trend == "falling"
     assert result.confidence == pytest.approx(0.92)
-    assert result.target_mbar == 1e-6
 
 
 async def test_vacuum_adapter_returns_none_when_predictor_is_none() -> None:
@@ -355,11 +378,21 @@ async def _make_composite_adapter(
 async def test_composite_adapter_parallel_fetch() -> None:
     """All adapters are called and results merged into CompositeStatus."""
     snap_data = {"T_cold": _make_reading("T_cold", 15.0)}
-    adapter, *_ = await _make_composite_adapter(snapshot_all=snap_data)
+    adapter, snap, cooldown, vacuum, alarms, experiment = await _make_composite_adapter(
+        snapshot_all=snap_data
+    )
     result = await adapter.status()
     assert isinstance(result, CompositeStatus)
     assert result.key_temperatures["T_cold"] == 15.0
     assert result.active_alarms == []
+    assert result.cooldown_eta is None
+    assert result.vacuum_eta is None
+    # All sub-adapters must have been awaited in parallel
+    snap.latest_with_labels.assert_awaited_once()
+    cooldown.eta.assert_awaited_once()
+    vacuum.eta_to_target.assert_awaited_once()
+    alarms.active.assert_awaited_once()
+    experiment.status.assert_awaited_once()
 
 
 async def test_composite_adapter_handles_partial_failure() -> None:

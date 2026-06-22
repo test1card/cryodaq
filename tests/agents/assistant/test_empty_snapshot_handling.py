@@ -30,6 +30,18 @@ from cryodaq.core.channel_manager import ChannelManager
 # ---------------------------------------------------------------------------
 
 
+async def _poll_until(cond, interval: float = 0.005) -> None:
+    """Yield control until ``cond()`` returns True. Used instead of fixed sleeps.
+
+    ASYNC110 does not apply here: we are polling an *external* async
+    condition (BrokerSnapshot internal state), not waiting on an event we
+    own and can signal — an asyncio.Event would require modifying
+    production code.
+    """
+    while not await cond():  # noqa: ASYNC110
+        await asyncio.sleep(interval)
+
+
 def _write_mgr(**channels: dict) -> ChannelManager:
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, encoding="utf-8"
@@ -71,7 +83,16 @@ async def test_broker_snapshot_oldest_age_s_returns_float_when_populated() -> No
 
     snap = BrokerSnapshot(broker)
     await snap.start()
-    await asyncio.sleep(0.05)
+
+    # Poll until the consume loop drains the queue — avoids the fixed sleep
+    # race where a slow CI machine may not have processed the item in time.
+    async def _age_ready() -> bool:
+        return await snap.oldest_age_s() is not None
+
+    await asyncio.wait_for(
+        _poll_until(_age_ready),
+        timeout=2.0,
+    )
 
     age = await snap.oldest_age_s()
     assert age is not None
@@ -119,7 +140,16 @@ async def test_broker_snapshot_latest_with_labels_includes_display_name() -> Non
 
     reading = _make_reading("Т7", 3.9)
     queue.put_nowait(reading)
-    await asyncio.sleep(0.05)
+
+    # Poll until the consume loop processes the reading — avoids the fixed
+    # sleep race on slow CI machines.
+    async def _has_t7() -> bool:
+        return "Т7" in await snap.latest_with_labels()
+
+    await asyncio.wait_for(
+        _poll_until(_has_t7),
+        timeout=2.0,
+    )
 
     result = await snap.latest_with_labels()
     assert "Т7" in result
@@ -249,7 +279,12 @@ async def test_composite_adapter_builds_key_temps_from_k_channels() -> None:
         experiment=experiment,
     )
     status = await adapter.status()
-    # Temperatures keyed by display_name, not raw ID
-    assert "Т7 Детектор" in status.key_temperatures
-    assert "Т1 Криостат верх" in status.key_temperatures
+    # Temperatures keyed by display_name, not raw channel ID.
+    # Assert exact values so wrong/swapped readings would fail.
+    assert status.key_temperatures == {
+        "Т7 Детектор": 3.9,
+        "Т1 Криостат верх": 78.2,
+    }
+    # P1 is a pressure channel (unit=mbar) — must NOT appear in key_temperatures.
+    assert "P1" not in status.key_temperatures
     assert status.current_pressure == 1e-6

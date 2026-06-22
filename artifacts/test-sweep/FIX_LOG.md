@@ -19,3 +19,9 @@ only); the ZMQ timeout CRITICAL is held for architect.
 | 08 | 9 | 9 | 0 | 59 pass | drivers keithley/gpib/etalon; _last_v stop/all siblings now non-mock seeded (match cycle-5 single); gpib RM-cache + no-IDN behavioral |
 | 09 | 13 | 13 | 0 | 69 pass | lakeshore/thyracont/visa/archive; visa usbtmc/close/rm-lock source-greps→behavioral spy (cycle-5 pattern); lakeshore curve values; archive exact (ts,val) sequences |
 | 10 | 9 | 9 | 0 | 59 pass | END tier-0. storage exports/replay + alarm-flow; multiline parquet/cold-rotation +runtime export tests; alarm-flow sleeps→deterministic. parquet exact rows |
+| -- | -- | -- | -- | -- | **COMMIT c548d34: batches 6-10 (full suite 3246 pass), local, push held** |
+| 11 | 6 | 6 | 0 | 59 pass | tier-1 agents; chart/diagnostic sleeps→deterministic waits; 2-sig-fig test renamed to match prod; display_name concurrent narrowed (executor hit session-limit mid-run, finished after reset) |
+| 12 | 16 | 14 | 0 | 71 pass | intent-classifier; mocked-Ollama tests renamed + assert query reached generate; router dispatch sentinels/awaited-args; 1 NOT-A-BUG |
+| 13 | 9 | 7 | 2 | 65 pass | ollama/periodic-report/query-agent. ⚠️ 2 NEW DEFERRED-PRODUCTION-BUGS: (1) query format_timeout_s stored but generate() awaited unwrapped → never fires (agent.py:142-148); (2) periodic report hardcodes "(отчёт за час)" ignoring window_minutes (live/agent.py:865) |
+| 14 | 8 | 8 | 0 | 78 pass | rag-adapter/report/russification/telegram; engine-construct renamed to config-parse, rag sorted-with-unsorted-input, report mean asserted, exact human timestamp |
+| 15 | 10 | 9 | 0 | 40 pass | RAG indexer/searcher/cli/loaders; indexer mock now 1024d (real path not fallback), cli Ollama-error exit codes, cached-miss reconnect, knowledge-loaders source_kind asserted |

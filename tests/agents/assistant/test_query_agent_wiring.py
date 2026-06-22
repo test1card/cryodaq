@@ -58,7 +58,9 @@ agent:
 """
     cfg = AssistantConfig.from_yaml_string(yaml)
     assert cfg.query_intent_model == "gemma4:e2b"
+    assert cfg.query_format_model == "gemma4:e2b"
     assert cfg.query_intent_temperature == 0.1
+    assert cfg.query_format_temperature == 0.3
     assert cfg.query_intent_timeout_s == 15.0
     assert cfg.query_format_timeout_s == 30.0
 

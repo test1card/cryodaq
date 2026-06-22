@@ -115,9 +115,9 @@ def test_returns_error_on_handler_exception():
 
 def test_default_timeout_fires_inside_server_envelope():
     """Default timeout_s must fire BEFORE the server's ``HANDLER_TIMEOUT_SLOW_S``
-    envelope (30 s) so the helper's own Russian error wins over the generic
+    envelope so the helper's own Russian error wins over the generic
     ``handler timeout`` reply from the REP server. Cycle-3 fix for Codex
-    finding on commit 0ab42f2."""
+    finding on commit 0ab42f2. H7: envelope bumped to 55s, helper to 50s."""
     import inspect
 
     from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_SLOW_S

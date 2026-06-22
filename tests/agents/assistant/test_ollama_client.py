@@ -281,6 +281,8 @@ async def test_smoke_real_ollama() -> None:
         )
         assert not result.truncated, f"Timed out. model={model}"
         assert result.tokens_out > 0, f"No tokens generated. model={model}"
-        assert len(result.text.strip()) > 0, f"Empty response. model={model}"
+        assert result.text.strip() == "PASS", (
+            f"Expected exactly 'PASS', got {result.text!r}. model={model}"
+        )
     finally:
         await client.close()

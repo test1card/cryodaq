@@ -132,8 +132,9 @@ def test_format_channel_stats_computes_min_max_mean() -> None:
     dataset = _make_dataset(readings=readings)
     result = _format_channel_stats(dataset)
     assert "T1" in result
-    assert "4" in result  # min
-    assert "6" in result  # max
+    assert "мин 4" in result   # min
+    assert "макс 6" in result  # max
+    assert "ср 5" in result    # mean — catches missing or wrong mean value
 
 
 def test_generate_report_intro_disabled_returns_none() -> None:
@@ -207,5 +208,7 @@ def test_operator_notes_excludes_gemma_tagged_entries() -> None:
         ]
     )
     ctx = _build_context(dataset)
-    assert "Гемма" not in ctx["operator_notes"] or "Человек" in ctx["operator_notes"]
+    # Human note must be present; Гемма-tagged text must be absent entirely.
+    assert "Человек: температура достигнута" in ctx["operator_notes"]
     assert "аларм summary" not in ctx["operator_notes"]
+    assert "Гемма" not in ctx["operator_notes"]

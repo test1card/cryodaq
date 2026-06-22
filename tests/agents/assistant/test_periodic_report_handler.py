@@ -16,6 +16,16 @@ from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 
+async def _wait_until(cond_fn, *, deadline_s: float = 1.0) -> None:
+    """Deterministic wait: poll cond_fn() until True within deadline_s seconds."""
+    await asyncio.wait_for(_poll_cond(cond_fn), timeout=deadline_s)
+
+
+async def _poll_cond(cond_fn) -> None:
+    while not cond_fn():  # noqa: ASYNC110
+        await asyncio.sleep(0.005)
+
+
 def _periodic_event(window_minutes: int = 60) -> EngineEvent:
     return EngineEvent(
         event_type="periodic_report_request",
@@ -128,7 +138,7 @@ async def test_periodic_report_handler_dispatches_when_active(tmp_path: Path) ->
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.1)
+    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
 
     telegram._send_to_all.assert_awaited_once()
     sent = telegram._send_to_all.call_args[0][0]
@@ -145,7 +155,8 @@ async def test_periodic_report_handler_skips_when_idle(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.1)
+    # Wait for all handler tasks to finish; then assert nothing was dispatched.
+    await _wait_until(lambda: len(agent._handler_tasks) == 0)
 
     telegram._send_to_all.assert_not_awaited()
     await agent.stop()
@@ -161,7 +172,7 @@ async def test_periodic_report_skip_if_idle_false_dispatches_always(tmp_path: Pa
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.1)
+    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
 
     telegram._send_to_all.assert_awaited_once()
     await agent.stop()
@@ -184,7 +195,9 @@ async def test_periodic_report_handler_handles_empty_response(tmp_path: Path) ->
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.1)
+    # generate is called but _send_to_all must NOT be; wait for handler to finish.
+    await _wait_until(lambda: ollama.generate.await_count >= 1)
+    await _wait_until(lambda: len(agent._handler_tasks) == 0)
 
     telegram._send_to_all.assert_not_awaited()
     await agent.stop()
@@ -199,7 +212,8 @@ async def test_periodic_report_disabled_does_not_handle(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.05)
+    # disabled path skips the handler entirely; wait for handler tasks to drain.
+    await _wait_until(lambda: len(agent._handler_tasks) == 0)
 
     telegram._send_to_all.assert_not_awaited()
     await agent.stop()
@@ -249,6 +263,6 @@ async def test_periodic_report_context_read_failure_bypasses_idle_skip(
     agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
     await agent.start()
     await bus.publish(_periodic_event())
-    await asyncio.sleep(0.05)
+    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
     telegram._send_to_all.assert_awaited_once()
     await agent.stop()

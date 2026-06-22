@@ -121,27 +121,56 @@ def _make_ollama(text: str, truncated: bool = False) -> MagicMock:
     return client
 
 
-async def test_intent_classifier_categorizes_eta_vacuum_query() -> None:
+async def test_intent_classifier_parses_mocked_eta_vacuum_response() -> None:
+    """Parser extracts eta_vacuum from a mocked generate() response.
+
+    Ollama is unconditionally mocked — classification semantics are not
+    tested here.  What IS tested: the query text reaches generate() (so a
+    broken prompt-construction path would be caught), and the response JSON
+    is correctly parsed into ETA_VACUUM.
+    """
+    query = "когда вакуум достигнет 1е-6?"
     ollama = _make_ollama(_j("eta_vacuum", quantity="ETA вакуума"))
     clf = IntentClassifier(ollama)
-    intent = await clf.classify("когда вакуум достигнет 1е-6?")
+    intent = await clf.classify(query)
     assert intent.category == QueryCategory.ETA_VACUUM
+    # Verify the query text actually reached generate() — catches broken
+    # prompt-construction paths without relying on live LLM semantics.
+    call_kwargs = ollama.generate.call_args
+    assert query in str(call_kwargs)
 
 
-async def test_intent_classifier_handles_misspelled_query() -> None:
-    """Classifier still returns valid intent even if the query has typos."""
+async def test_intent_classifier_parses_mocked_current_value_response() -> None:
+    """Parser extracts current_value from a mocked generate() response.
+
+    Renamed from 'handles_misspelled_query': the typo has no effect on a
+    mock — this test only verifies parser correctness and that the query
+    text (typo included) was forwarded to generate().
+    """
+    query = "какая темпертура Т_колд?"  # intentional typo in original test
     resp = _j("current_value", ["T_cold"], quantity="температура")
     ollama = _make_ollama(resp)
     clf = IntentClassifier(ollama)
-    intent = await clf.classify("какая темпертура Т_колд?")  # typo
+    intent = await clf.classify(query)
     assert intent.category == QueryCategory.CURRENT_VALUE
+    call_kwargs = ollama.generate.call_args
+    assert query in str(call_kwargs)
 
 
-async def test_intent_classifier_returns_unknown_on_gibberish() -> None:
+async def test_intent_classifier_parses_mocked_unknown_response() -> None:
+    """Parser returns UNKNOWN when generate() yields an 'unknown' category JSON.
+
+    Renamed from 'returns_unknown_on_gibberish': the mock returns unknown
+    regardless of the query, so this is a parser test, not a semantic one.
+    The query text reaching generate() is verified to catch prompt-path bugs.
+    """
+    query = "asdf qwerty zxcv 123"
     ollama = _make_ollama(_j("unknown"))
     clf = IntentClassifier(ollama)
-    intent = await clf.classify("asdf qwerty zxcv 123")
+    intent = await clf.classify(query)
     assert intent.category == QueryCategory.UNKNOWN
+    call_kwargs = ollama.generate.call_args
+    assert query in str(call_kwargs)
 
 
 async def test_intent_classifier_handles_json_parse_failure() -> None:
@@ -262,7 +291,7 @@ async def test_router_dispatches_composite_status_to_composite() -> None:
     result = await router.fetch(intent, "что сейчас?")
 
     assert "composite_status" in result
-    adapters.composite.status.assert_awaited_once()
+    adapters.composite.status.assert_awaited_once_with()
 
 
 async def test_router_handles_out_of_scope_historical() -> None:
@@ -298,7 +327,7 @@ async def test_router_dispatches_alarm_status() -> None:
     result = await router.fetch(intent, "есть ли тревоги?")
 
     assert "alarm_result" in result
-    adapters.alarms.active.assert_awaited_once()
+    adapters.alarms.active.assert_awaited_once_with()
 
 
 async def test_router_dispatches_phase_info() -> None:
@@ -312,13 +341,23 @@ async def test_router_dispatches_phase_info() -> None:
 
 
 async def test_router_dispatches_eta_vacuum() -> None:
-    adapters = _make_adapters()
+    sentinel = VacuumETA(
+        current_mbar=5e-5,
+        eta_seconds=3600.0,
+        target_mbar=1e-6,
+        trend="falling",
+        confidence=0.9,
+    )
+    adapters = _make_adapters(vacuum_eta=sentinel)
     router = QueryRouter(adapters)
     intent = QueryIntent(category=QueryCategory.ETA_VACUUM)
     result = await router.fetch(intent, "ETA вакуума")
 
     assert "vacuum_eta" in result
-    adapters.vacuum.eta_to_target.assert_awaited_once()
+    assert result["vacuum_eta"] is sentinel
+    # Router must pass exactly 1e-6 as the target pressure — a wrong/None
+    # argument would silently produce a useless ETA for the wrong threshold.
+    adapters.vacuum.eta_to_target.assert_awaited_once_with(1e-6)
 
 
 async def test_router_dispatches_current_value() -> None:
@@ -365,6 +404,11 @@ async def test_router_dispatches_range_stats() -> None:
 
     assert "range_stats" in result
     assert "T_cold" in result["range_stats"]
+    assert result["range_stats"]["T_cold"] is stats
+    assert result["window_minutes"] == 60
+    # Router must pass the resolved channel and the exact window — wrong window
+    # or wrong channel would silently return stats for a different time range.
+    adapters.sqlite.range_stats.assert_awaited_once_with("T_cold", 60)
 
 
 async def test_router_never_raises_on_adapter_exception() -> None:

@@ -210,9 +210,13 @@ async def test_query_agent_out_of_scope_historical_response() -> None:
     resp = await agent.handle_query("что было вчера?")
 
     assert resp != _FALLBACK
-    # Composite and cooldown should NOT be called for out-of-scope
+    # NO service adapter should be called for out-of-scope intents.
     adapters.composite.status.assert_not_awaited()
     adapters.cooldown.eta.assert_not_awaited()
+    adapters.vacuum.eta_to_target.assert_not_awaited()
+    adapters.alarms.active.assert_not_awaited()
+    adapters.experiment.status.assert_not_awaited()
+    adapters.sqlite.range_stats.assert_not_awaited()
 
 
 async def test_query_agent_handles_intent_classifier_failure() -> None:
@@ -356,8 +360,17 @@ async def test_query_agent_rate_limit_separate_chats() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_query_agent_total_timeout_enforcement() -> None:
-    """Truncated format LLM response returns _FALLBACK, not empty string."""
+async def test_query_agent_empty_format_response_returns_fallback() -> None:
+    """Format LLM returning whitespace-only text (not truncated) → _FALLBACK.
+
+    NOTE — DEFERRED-PRODUCTION-BUG (batch-13 HIGH):
+    _format_timeout_s is stored on the agent (agent.py:90) but
+    _handle_query_inner calls `await self._ollama.generate(...)` with NO
+    asyncio.wait_for wrapper (agent.py:142-148). The timeout is never
+    enforced at the await level.  This test covers the whitespace-fallback
+    path; actual timeout enforcement is a src/ gap that requires a separate
+    fix.
+    """
     ollama = MagicMock()
     ollama.generate = AsyncMock(side_effect=[
         _make_gen_result(_intent_json("alarm_status")),

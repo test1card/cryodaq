@@ -51,20 +51,21 @@ def _seed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_searcher_reconnects_after_external_rebuild(tmp_path):
-    """Searcher constructed before index exists; build_index runs;
-    searcher.search() must observe the table even though the cached
-    connection saw an empty db_path at construction time."""
+async def test_searcher_reconnects_after_external_rebuild(tmp_path, monkeypatch):
+    """Cached connection misses the table; reconnect surfaces it.
+
+    Stubs lancedb.connect so the *first* connection returns a DB that
+    claims the table is absent, while the *second* connection (the
+    reconnect) returns a real DB that has the table.  This directly
+    exercises the two-step guard in RagSearcher.search() and proves the
+    reconnect branch ran, not merely that search returned something.
+    """
+    import lancedb as _lancedb
+
     embeddings = _MockEmbeddings()
     db_path = tmp_path / "rag_db"
-    db_path.mkdir(parents=True, exist_ok=True)
 
-    # Searcher created on an empty (but existing) db_path — its cached
-    # _db.list_tables() returns no tables.
-    searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings)
-
-    # External rebuild populates the table on disk; searcher's cached
-    # connection still believes the table is missing.
+    # Build the real index first so disk state is populated.
     _seed(tmp_path)
     await build_index(
         experiments_dir=tmp_path / "experiments",
@@ -74,10 +75,41 @@ async def test_searcher_reconnects_after_external_rebuild(tmp_path):
         embeddings_client=embeddings,
     )
 
-    # The reopen path must materialise the table so the operator gets
-    # results without restarting the engine.
+    real_db = _lancedb.connect(str(db_path))
+
+    connect_calls: list[str] = []
+
+    class _FakeEmptyDB:
+        """Mimics a stale cached connection that does not see the table."""
+
+        uri = str(db_path)
+
+        class _Tables:
+            tables: list[str] = []
+
+        def list_tables(self):  # noqa: ANN201
+            return self._Tables()
+
+    def _patched_connect(uri: str):  # noqa: ANN201
+        connect_calls.append(uri)
+        if len(connect_calls) == 1:
+            # First connect (at RagSearcher.__init__) — stale, no tables.
+            return _FakeEmptyDB()
+        # Second connect (reconnect branch) — real DB with the table.
+        return real_db
+
+    monkeypatch.setattr("cryodaq.agents.rag.searcher.lancedb.connect", _patched_connect)
+
+    searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings)
+
+    # At this point the cached _db has no tables.  search() must reconnect.
     results = await searcher.search("any query", top_k=3)
-    assert len(results) >= 1, "reopen path failed to surface rebuilt index"
+
+    # The reconnect branch fired (connect was called twice).
+    assert len(connect_calls) == 2, (
+        f"expected 2 connect() calls (init + reconnect), got {len(connect_calls)}"
+    )
+    assert len(results) >= 1, "reconnect path must surface the rebuilt index"
 
 
 @pytest.mark.asyncio

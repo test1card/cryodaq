@@ -27,7 +27,8 @@ def test_temperature_rounded_to_one_decimal():
     assert _format_value_for_prompt(294.0, "T_room") == "294.0"
 
 
-def test_pressure_rendered_as_two_sig_fig_scientific():
+def test_pressure_rendered_as_two_decimal_places_scientific():
+    """Pressure values use {v:.2e} — two decimal places in scientific notation (e.g. 1.86e-06)."""
     assert _format_value_for_prompt(1.86e-06, "P_main") == "1.86e-06"
     # 12-digit operator-supplied value collapses to scientific form.
     assert _format_value_for_prompt(0.000000123456, "P_main") == "1.23e-07"

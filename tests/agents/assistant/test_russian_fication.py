@@ -155,7 +155,14 @@ def test_composite_prompt_uses_prognoz_not_eta_label() -> None:
 
 
 def test_composite_prompt_has_good_example() -> None:
-    assert "захолаживания" in p.FORMAT_COMPOSITE_STATUS_USER
+    prompt = p.FORMAT_COMPOSITE_STATUS_USER
+    # "Хороший пример:" marker must exist and precede the example text.
+    assert "Хороший пример:" in prompt
+    marker_pos = prompt.index("Хороший пример:")
+    example_pos = prompt.index("захолаживания", marker_pos)
+    assert example_pos > marker_pos, (
+        "'захолаживания' must appear inside the good-example block, not before it"
+    )
 
 
 def test_eta_cooldown_fallback_uses_russian_bool() -> None:

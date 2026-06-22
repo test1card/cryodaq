@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import lancedb
 import pytest
 
 from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, build_index
@@ -76,44 +77,81 @@ async def test_build_index_skips_loaders_when_dirs_absent(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_build_index_includes_pdf_when_dir_set(tmp_path: Path):
     pdf_dir = _seed_pdfs(tmp_path)
+    db_path = tmp_path / "db"
     stats = await build_index(
         experiments_dir=tmp_path / "no_experiments",
         vault_dir=None,
         sqlite_path=None,
-        db_path=tmp_path / "db",
+        db_path=db_path,
         embeddings_client=_MockEmbeddings(),
         pdf_dir=pdf_dir,
     )
     assert stats["chunks"] >= 1
     assert stats["indexed"] >= 1
 
+    # Verify persisted rows have correct source_kind and representative content.
+    arrow_tbl = lancedb.connect(str(db_path)).open_table("cryodaq_corpus").to_arrow()
+    kinds = set(arrow_tbl.column("source_kind").to_pylist())
+    source_ids = arrow_tbl.column("source_id").to_pylist()
+    texts = arrow_tbl.column("text").to_pylist()
+    assert "equipment_manual" in kinds, f"expected equipment_manual in source_kind; got {kinds}"
+    assert all(s != "" for s in source_ids), "source_id must be non-empty"
+    assert all(len(t) > 0 for t in texts), "text must be non-empty"
+    assert any(
+        "MultiLine TCP" in t or "multiline" in t.lower() for t in texts
+    ), "expected PDF content 'MultiLine TCP commands' in indexed text"
+
 
 @pytest.mark.asyncio
 async def test_build_index_includes_procedures_when_dir_set(tmp_path: Path):
     proc_dir = _seed_procedures(tmp_path)
+    db_path = tmp_path / "db"
     stats = await build_index(
         experiments_dir=tmp_path / "no_experiments",
         vault_dir=None,
         sqlite_path=None,
-        db_path=tmp_path / "db",
+        db_path=db_path,
         embeddings_client=_MockEmbeddings(),
         procedures_dir=proc_dir,
     )
     assert stats["chunks"] >= 1
 
+    # Verify persisted rows have correct source_kind and representative content.
+    arrow_tbl = lancedb.connect(str(db_path)).open_table("cryodaq_corpus").to_arrow()
+    kinds = set(arrow_tbl.column("source_kind").to_pylist())
+    source_ids = arrow_tbl.column("source_id").to_pylist()
+    texts = arrow_tbl.column("text").to_pylist()
+    assert "procedure" in kinds, f"expected procedure in source_kind; got {kinds}"
+    assert all(s != "" for s in source_ids), "source_id must be non-empty"
+    assert any(
+        "cooldown" in t.lower() for t in texts
+    ), "expected procedure content 'cooldown' in indexed text"
+
 
 @pytest.mark.asyncio
 async def test_build_index_includes_reference_when_root_set(tmp_path: Path):
     _seed_reference(tmp_path)
+    db_path = tmp_path / "db"
     stats = await build_index(
         experiments_dir=tmp_path / "no_experiments",
         vault_dir=None,
         sqlite_path=None,
-        db_path=tmp_path / "db",
+        db_path=db_path,
         embeddings_client=_MockEmbeddings(),
         reference_root=tmp_path,
     )
     assert stats["chunks"] >= 2  # README + operator_manual
+
+    # Verify persisted rows contain both reference source_kinds.
+    arrow_tbl = lancedb.connect(str(db_path)).open_table("cryodaq_corpus").to_arrow()
+    kinds = set(arrow_tbl.column("source_kind").to_pylist())
+    source_ids = arrow_tbl.column("source_id").to_pylist()
+    texts = [t.lower() for t in arrow_tbl.column("text").to_pylist()]
+    assert "readme" in kinds, f"expected readme in source_kind; got {kinds}"
+    assert "operator_manual" in kinds, f"expected operator_manual in source_kind; got {kinds}"
+    assert all(s != "" for s in source_ids), "source_id must be non-empty"
+    assert any("readme" in t for t in texts), "expected README content in indexed text"
+    assert any("operator" in t for t in texts), "expected operator_manual content in indexed text"
 
 
 @pytest.mark.asyncio
@@ -121,17 +159,30 @@ async def test_build_index_combines_all_loaders(tmp_path: Path):
     pdf_dir = _seed_pdfs(tmp_path)
     proc_dir = _seed_procedures(tmp_path)
     _seed_reference(tmp_path)
+    db_path = tmp_path / "db"
     stats = await build_index(
         experiments_dir=tmp_path / "no_experiments",
         vault_dir=None,
         sqlite_path=None,
-        db_path=tmp_path / "db",
+        db_path=db_path,
         embeddings_client=_MockEmbeddings(),
         pdf_dir=pdf_dir,
         procedures_dir=proc_dir,
         reference_root=tmp_path,
     )
     assert stats["chunks"] >= 4  # 1 pdf + 1 proc + 2 reference
+
+    # Verify all four source_kinds are present.
+    arrow_tbl = lancedb.connect(str(db_path)).open_table("cryodaq_corpus").to_arrow()
+    kinds = set(arrow_tbl.column("source_kind").to_pylist())
+    source_ids = arrow_tbl.column("source_id").to_pylist()
+    texts = arrow_tbl.column("text").to_pylist()
+    expected_kinds = {"equipment_manual", "procedure", "readme", "operator_manual"}
+    assert expected_kinds <= kinds, (
+        f"expected source_kinds {expected_kinds}; got {kinds}"
+    )
+    assert all(s != "" for s in source_ids), "source_id must be non-empty"
+    assert all(len(t) > 0 for t in texts), "text must be non-empty"
 
 
 @pytest.mark.asyncio

@@ -129,13 +129,19 @@ def test_archive_detail_renders_phases_and_cooldown(agent: AssistantQueryAgent) 
 
 
 def test_archive_detail_none_renders_not_found(agent: AssistantQueryAgent) -> None:
+    """When archive_detail is None all fields are sentinel '—' and the
+    prompt instructs the LLM to surface the not-found fact explicitly."""
     prompt = agent._format_dispatch(
         "детали exp-X",
         QueryCategory.ARCHIVE_DETAIL,
         {"archive_detail": None, "experiment_id": "exp-X"},
     )
     assert "exp-X" in prompt
-    assert "не зафиксировано" in prompt or "—" in prompt
+    # Sentinel values injected by _fmt_archive_detail when result is None
+    assert "(нет данных)" in prompt   # phases_text sentinel
+    assert "(не указано)" in prompt   # cooldown_text sentinel
+    # Template instructs LLM to say the experiment was not found
+    assert "не найден" in prompt
 
 
 def test_archive_detail_missing_duration_renders_unknown(agent: AssistantQueryAgent) -> None:

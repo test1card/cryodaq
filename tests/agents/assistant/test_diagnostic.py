@@ -15,6 +15,24 @@ from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _drain_handler_tasks(agent: AssistantLiveAgent) -> None:
+    """Wait until agent._handler_tasks is empty (all background handlers done).
+
+    Yields control at least once so the agent's _event_loop task can dequeue the
+    published event and create handler tasks before we start draining.
+    """
+    # Yield to let the event loop task pick up the event and spawn handler tasks.
+    await asyncio.sleep(0)
+    # Drain: gather in a loop in case a handler spawns further tasks.
+    while agent._handler_tasks:
+        await asyncio.gather(*list(agent._handler_tasks), return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -131,7 +149,10 @@ async def test_diagnostic_suggestion_runs_after_alarm_summary(tmp_path: Path) ->
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.15)
+    # Wait for handler tasks to drain instead of sleeping a fixed duration.
+    await asyncio.wait_for(
+        _drain_handler_tasks(agent), timeout=5.0
+    )
 
     assert ollama.generate.await_count == 2
     calls = ollama.generate.call_args_list
@@ -156,7 +177,7 @@ async def test_diagnostic_slice_b_disabled_makes_only_one_call(tmp_path: Path) -
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     assert ollama.generate.await_count == 1
     await agent.stop()
@@ -179,7 +200,7 @@ async def test_diagnostic_skipped_for_finalize(tmp_path: Path) -> None:
         experiment_id="exp-001",
     )
     await bus.publish(event)
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     # Only 1 call — no diagnostic for finalize
     assert ollama.generate.await_count == 1
@@ -203,7 +224,7 @@ async def test_diagnostic_handles_missing_history_gracefully(tmp_path: Path) -> 
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     # Both LLM calls still happen despite DB error
     assert ollama.generate.await_count == 2
@@ -230,7 +251,7 @@ async def test_diagnostic_skipped_on_truncated_summary(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     # Only 1 attempt — truncated summary suppresses diagnostic
     assert ollama.generate.await_count == 1
@@ -249,7 +270,7 @@ async def test_diagnostic_counts_toward_rate_limit(tmp_path: Path) -> None:
 
     before = len(agent._call_timestamps)
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     # summary + diagnostic = 2 timestamps recorded
     assert len(agent._call_timestamps) - before == 2
@@ -263,7 +284,7 @@ async def test_diagnostic_prompt_contains_alarm_values(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     assert ollama.generate.await_count == 2
     diag_prompt = ollama.generate.call_args_list[1][0][0]

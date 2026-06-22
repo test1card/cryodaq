@@ -143,8 +143,12 @@ def test_load_pdf_chunk_text_when_page_exceeds_max_chars(tmp_path: Path) -> None
     long_chunks = [c for c in chunks if c.metadata["page_number"] == 1]
     assert len(long_chunks) > 1, "long page must produce > 1 chunk"
     indices = [c.metadata["chunk_index"] for c in long_chunks]
-    assert indices == sorted(indices)
-    assert indices[0] == 0
+    # Indices must be strictly sequential starting from 0 — [0, 0] would be
+    # a duplicate bug that sorted()+[0] checks cannot catch.
+    expected = list(range(len(long_chunks)))
+    assert indices == expected, (
+        f"chunk_index must be sequential 0..N-1; got {indices}"
+    )
 
 
 def test_load_pdf_returns_empty_for_blank_pages(tmp_path: Path) -> None:

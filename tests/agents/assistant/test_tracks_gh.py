@@ -131,9 +131,8 @@ async def test_experiment_adapter_populates_started_human() -> None:
     adapter = ExperimentAdapter(em)
     status = await adapter.status()
     assert status is not None
-    assert status.experiment_started_human is not None
-    # Should contain UTC time format
-    assert "UTC" in status.experiment_started_human
+    # 1746100000.0 UTC → "11:46 UTC 01.05.2025" (verified with datetime.fromtimestamp)
+    assert status.experiment_started_human == "11:46 UTC 01.05.2025"
 
 
 async def test_experiment_adapter_started_human_none_when_no_start_time() -> None:

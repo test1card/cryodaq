@@ -12,8 +12,11 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import io
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
+
+from PIL import Image
 
 from cryodaq.agents.assistant.query.chart_dispatcher import (
     ChartDispatcher,
@@ -35,7 +38,10 @@ def test_render_temperature_chart_returns_bytes_for_valid_data() -> None:
     result = render_temperature_chart(temps)
     assert result is not None
     assert isinstance(result, bytes)
-    assert len(result) > 100  # non-trivial PNG
+    assert result[:4] == b"\x89PNG"  # valid PNG signature
+    # Decode to verify it's a real image with non-trivial content.
+    img = Image.open(io.BytesIO(result))
+    assert img.width > 10 and img.height > 10
 
 
 def test_render_temperature_chart_returns_none_for_empty() -> None:
@@ -77,7 +83,9 @@ async def test_chart_dispatcher_fires_for_composite_status() -> None:
     data = _make_composite_data()
 
     dispatcher.dispatch(QueryCategory.COMPOSITE_STATUS, data, chat_id=123)
-    await asyncio.sleep(0.1)  # let the task run
+    # Drain all created tasks deterministically instead of sleeping.
+    if dispatcher._tasks:
+        await asyncio.gather(*list(dispatcher._tasks))
 
     send.assert_called_once()
     call_args = send.call_args
@@ -91,7 +99,9 @@ async def test_chart_dispatcher_skips_when_snapshot_empty() -> None:
     data = _make_composite_data(snapshot_empty=True)
 
     dispatcher.dispatch(QueryCategory.COMPOSITE_STATUS, data, chat_id=123)
-    await asyncio.sleep(0.1)
+    # snapshot_empty → _should_dispatch returns False → no task created; drain to be safe.
+    if dispatcher._tasks:
+        await asyncio.gather(*list(dispatcher._tasks))
 
     send.assert_not_called()
 
@@ -109,7 +119,9 @@ async def test_chart_dispatcher_skips_non_qualifying_categories() -> None:
     ]:
         dispatcher.dispatch(cat, {}, chat_id=123)
 
-    await asyncio.sleep(0.1)
+    # Non-qualifying categories return early — no tasks created; drain to be safe.
+    if dispatcher._tasks:
+        await asyncio.gather(*list(dispatcher._tasks))
     send.assert_not_called()
 
 
@@ -126,7 +138,8 @@ async def test_chart_dispatcher_no_crash_when_temps_empty() -> None:
         current_pressure=None,
     )
     dispatcher.dispatch(QueryCategory.COMPOSITE_STATUS, {"composite_status": cs}, 123)
-    await asyncio.sleep(0.1)
+    if dispatcher._tasks:
+        await asyncio.gather(*list(dispatcher._tasks))
     send.assert_not_called()
 
 

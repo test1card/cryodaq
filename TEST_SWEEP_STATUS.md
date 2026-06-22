@@ -60,6 +60,13 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
    raise REQ timeout > 55s+slack OR lower slow-cap — depends on Ollama cold-start budget.
 2. **leak-rate command test** (batch 02) — routes through a copied `_dispatch`; testing the
    real handler needs extracting it from the `engine.py` monolith (a prod change).
+3. **shutdown-during-timeout test** (batch 07) — needs src/ instrumentation to prove the
+   cmd thread entered recv_string().
+4. **query format-timeout not enforced** (batch 13) — `query/agent.py:90` stores
+   `_format_timeout_s` but the `generate()` await (agent.py:142-148) is UNWRAPPED, so a hung
+   Ollama format call hangs the query agent. Real gap — wrap in `asyncio.wait_for`.
+5. **periodic-report label hardcoded** (batch 13) — `live/agent.py:865` emits
+   `"(отчёт за час)"` regardless of `window_minutes`; a 30-min report is mislabeled hourly.
 
 ---
 

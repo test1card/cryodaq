@@ -71,20 +71,22 @@ def test_is_available_false_when_searcher_none() -> None:
 
 
 def test_search_returns_knowledge_query_result_with_hits() -> None:
+    # Feed rows in reverse distance order (worse match first) to verify the
+    # adapter does NOT re-sort — order is preserved from the searcher.
     rows = [
-        _StubSearchResult(
-            chunk_id="c1",
-            source_kind="vault",
-            source_id="procedure-cooldown.md",
-            text="Чтобы запустить cooldown, нажмите Ctrl+E…",
-            score=0.4,
-        ),
         _StubSearchResult(
             chunk_id="c2",
             source_kind="experiment_metadata",
             source_id="exp-2025-12-01",
             text="Cooldown стартовал в 09:00, длительность 8 часов.",
             score=0.7,
+        ),
+        _StubSearchResult(
+            chunk_id="c1",
+            source_kind="vault",
+            source_id="procedure-cooldown.md",
+            text="Чтобы запустить cooldown, нажмите Ctrl+E…",
+            score=0.4,
         ),
     ]
     adapter = RAGAdapter(_make_searcher(rows))
@@ -96,9 +98,12 @@ def test_search_returns_knowledge_query_result_with_hits() -> None:
     assert result.total_hits == 2
     assert result.source_kind_filter is None
     assert all(isinstance(h, KnowledgeQueryHit) for h in result.hits)
-    assert result.hits[0].source == "procedure-cooldown.md"
-    assert result.hits[0].source_kind == "vault"
-    assert result.hits[0].distance == pytest.approx(0.4)
+    # Adapter preserves searcher order: 0.7 first, 0.4 second (no re-sort).
+    assert result.hits[0].source == "exp-2025-12-01"
+    assert result.hits[0].distance == pytest.approx(0.7)
+    assert result.hits[1].source == "procedure-cooldown.md"
+    assert result.hits[1].source_kind == "vault"
+    assert result.hits[1].distance == pytest.approx(0.4)
 
 
 def test_search_returns_none_when_searcher_unavailable() -> None:
@@ -256,4 +261,8 @@ def test_search_truncates_long_chunk_text_in_snippet() -> None:
     result = _run(adapter.search("query"))
 
     assert result is not None
-    assert len(result.hits[0].snippet) <= 281  # 280 + ellipsis margin
+    snippet = result.hits[0].snippet
+    assert len(snippet) <= 281          # 280 chars + 1-char ellipsis margin
+    assert snippet.endswith("…")        # truncated with ellipsis
+    assert snippet.startswith("Описание")  # prefix preserved
+    assert "  " not in snippet         # whitespace collapsed by _truncate_snippet
