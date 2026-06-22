@@ -385,16 +385,35 @@ async def test_get_state() -> None:
 
 
 async def test_detector_warmup_pattern_matches_full_channel() -> None:
-    """Regex pattern '\u042212 .*' from interlocks.yaml matches full channel name."""
-    import re
+    """The Cyrillic '\u042212 .*' interlock pattern (from interlocks.yaml) is driven
+    through the REAL InterlockEngine, not a standalone `re` call: an over-threshold
+    reading on the full Cyrillic channel name trips and fires the action, while a
+    Latin 'T12 ...' channel does not match the Cyrillic pattern and must not trip."""
+    full_name = "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
 
-    pattern = "\u042212 .*"
-    full_name = (
-        "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
+    broker, engine, called = await _make_engine()
+    engine.add_condition(
+        _make_condition(
+            name="detector_warmup",
+            channel_pattern="\u042212 .*",
+            threshold=300.0,
+            comparison=">",
+        )
     )
-    assert re.fullmatch(pattern, full_name), f"Pattern {pattern!r} should match {full_name!r}"
-    # Also verify it does NOT match Latin T12
-    assert not re.fullmatch(pattern, "T12 Something"), "Cyrillic pattern should not match Latin T"
+
+    # Latin 'T12 ...' must NOT match the Cyrillic pattern \u2192 no trip, no action.
+    await broker.publish(Reading.now("T12 Something", 350.0, "K", instrument_id="test"))
+    await asyncio.sleep(0.05)
+    assert engine.get_state()["detector_warmup"] == InterlockState.ARMED
+    assert called == []
+
+    # The full Cyrillic channel name matches \u2192 trips and fires the action exactly once.
+    await broker.publish(Reading.now(full_name, 350.0, "K", instrument_id="test"))
+    await asyncio.sleep(0.05)
+    assert engine.get_state()["detector_warmup"] == InterlockState.TRIPPED
+    assert len(called) == 1
+
+    await engine.stop()
 
 
 async def test_multiple_interlocks() -> None:

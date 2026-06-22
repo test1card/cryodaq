@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from cryodaq.drivers.instruments.keithley_2604b import (
@@ -44,21 +42,34 @@ class _FakeKeithleyTransport:
 
 
 async def test_slew_rate_normal_regulation() -> None:
-    """When R is stable, voltage changes stay within MAX_DELTA_V_PER_STEP."""
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
-    await driver.start_source("smua", p_target=0.5, v_compliance=40.0, i_compliance=1.0)
+    """Across the REAL non-mock regulation path, every commanded source.levelv
+    step stays within MAX_DELTA_V_PER_STEP. The mock path bypasses the limiter,
+    so this drives a fake TSP transport with a stable R whose target sits above
+    one step's reach, and asserts each consecutive step delta is clamped."""
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    # current=1 mA, voltage=10 V → R=10 kΩ → target wants ~v_comp(40 V); from
+    # _last_v=0 the driver must ramp toward it 0.5 V at a time.
+    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
+    driver._transport = fake
+    driver._connected = True
+    driver._channels["smua"].active = True
+    driver._channels["smua"].p_target = 0.5
+    driver._channels["smua"].v_comp = 40.0
+    driver._last_v["smua"] = 0.0
 
-    # Read several cycles — mock has stable R
     for _ in range(5):
         await driver.read_channels()
 
-    # _last_v should be set and finite
-    last_v = driver._last_v["smua"]
-    assert math.isfinite(last_v)
-    assert last_v >= 0.0
-
-    await driver.disconnect()
+    commanded = [float(w.split("=")[1]) for w in fake.writes if "smua.source.levelv" in w]
+    assert len(commanded) >= 5, "each regulation cycle must command a levelv write"
+    # The ramp must actually move (proves the regulation branch ran, not a no-op).
+    assert commanded[-1] > commanded[0]
+    steps = [commanded[0]] + [b - a for a, b in zip(commanded, commanded[1:])]
+    for step in steps:
+        assert abs(step) <= MAX_DELTA_V_PER_STEP + 1e-9, (
+            f"slew limiter must clamp every step to <= {MAX_DELTA_V_PER_STEP} V, "
+            f"saw step {step} V in {commanded}"
+        )
 
 
 async def test_slew_rate_limits_large_v_step() -> None:
@@ -108,19 +119,30 @@ async def test_last_v_resets_on_stop() -> None:
 
 
 async def test_last_v_resets_on_emergency_off_single() -> None:
-    """emergency_off(channel) resets _last_v for that channel only."""
-    driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
-    await driver.connect()
-    await driver.start_source("smua", p_target=0.5, v_compliance=40.0, i_compliance=1.0)
-    await driver.start_source("smub", p_target=0.3, v_compliance=20.0, i_compliance=0.5)
-    await driver.read_channels()
+    """emergency_off(channel) resets ONLY that channel and leaves the other's
+    state intact. Driven through the non-mock path so smub's preserved _last_v
+    is observable (the mock path never seeds it, making 'preserved' and 'reset'
+    indistinguishable)."""
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
+    driver._transport = fake
+    driver._connected = True
+    # Seed both channels as live with distinct nonzero levels.
+    for ch, level in (("smua", 12.0), ("smub", 7.0)):
+        driver._channels[ch].active = True
+        driver._last_v[ch] = level
 
     await driver.emergency_off("smua")
-    assert driver._last_v["smua"] == 0.0
-    # smub was not affected by emergency_off on smua
-    # (it was reset because emergency_off("smua") only targets smua)
 
-    await driver.disconnect()
+    # smua zeroed and deactivated; smub fully preserved.
+    assert driver._last_v["smua"] == 0.0
+    assert driver._channels["smua"].active is False
+    assert driver._last_v["smub"] == 7.0, "emergency_off('smua') must not touch smub"
+    assert driver._channels["smub"].active is True
+    # Only smua received an OUTPUT_OFF write on the bus.
+    off_writes = [w for w in fake.writes if "source.output" in w and "OUTPUT_OFF" in w]
+    assert any("smua" in w for w in off_writes)
+    assert not any("smub" in w for w in off_writes), "smub must not be commanded OFF"
 
 
 async def test_last_v_resets_on_emergency_off_all() -> None:

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sys
 import types
 
+from cryodaq.core.broker import DataBroker
+from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.drivers.base import InstrumentDriver
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 
@@ -66,10 +71,78 @@ async def test_gpib_different_buses_independent():
     assert t1._bus_prefix != t2._bus_prefix
 
 
-async def test_gpib_no_ifc_in_codebase():
-    """IFC recovery is removed — no send_ifc method."""
+async def test_gpib_send_ifc_is_available_level2_recovery():
+    """IFC (Interface Clear) IS the Level-2 bus recovery: GPIBTransport exposes a
+    public, awaitable send_ifc() (the scheduler calls it on bus lockup). In mock
+    mode it is a no-op that reports success. (This replaces a stale test that
+    asserted IFC was 'removed' — production re-added it as send_ifc.)"""
     t = GPIBTransport(mock=True)
-    assert not hasattr(t, "_send_ifc") or not callable(getattr(t, "_send_ifc", None))
+    assert callable(getattr(t, "send_ifc", None)), "send_ifc must exist as recovery"
+    assert await t.send_ifc() is True
+
+
+class _SpyGPIBTransport:
+    """Records Level-1 (clear_bus) and Level-2 (send_ifc) recovery calls."""
+
+    def __init__(self) -> None:
+        self.clear_calls = 0
+        self.ifc_calls = 0
+        self.ifc_fired = asyncio.Event()
+
+    async def clear_bus(self) -> bool:
+        self.clear_calls += 1
+        return True
+
+    async def send_ifc(self) -> bool:
+        self.ifc_calls += 1
+        self.ifc_fired.set()
+        return True
+
+
+class _FailingGPIBDriver(InstrumentDriver):
+    """Driver whose every read raises — drives the bus into escalating recovery."""
+
+    def __init__(self, name: str, transport: _SpyGPIBTransport) -> None:
+        super().__init__(name, mock=False)
+        self._transport = transport
+        self._connected = True
+
+    async def connect(self) -> None:
+        self._connected = True
+
+    async def disconnect(self) -> None:
+        self._connected = False
+
+    async def read_channels(self):
+        raise RuntimeError("simulated GPIB bus lockup")
+
+
+async def test_gpib_ifc_recovery_invokes_send_ifc():
+    """Behavioral integration (replaces a source grep): when reads keep failing,
+    the scheduler's GPIB recovery escalates and ACTUALLY awaits transport.send_ifc()
+    at Level 2 — proven by spying the transport, not by reading source text."""
+    broker = DataBroker()
+    sched = Scheduler(broker=broker, sqlite_writer=None)
+    transport = _SpyGPIBTransport()
+    driver = _FailingGPIBDriver("ls218", transport)
+    sched.add(
+        InstrumentConfig(driver=driver, poll_interval_s=0.01, resource_str="GPIB0::12::INSTR")
+    )
+    state = sched._instruments["ls218"]
+
+    sched._running = True
+    task = asyncio.create_task(sched._gpib_poll_loop("GPIB0", [state]))
+    try:
+        # Level 2 fires on the 3rd consecutive bus error; well within 5s.
+        await asyncio.wait_for(transport.ifc_fired.wait(), timeout=5.0)
+    finally:
+        sched._running = False
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    assert transport.ifc_calls >= 1, "Level-2 recovery must invoke send_ifc()"
+    assert transport.clear_calls >= 1, "Level-1 clear_bus must run before IFC escalation"
 
 
 async def test_gpib_connect_does_not_send_idn():

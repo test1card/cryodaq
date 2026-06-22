@@ -98,21 +98,28 @@ async def test_multiline_reading_round_trip_value_preserved(
     assert abs(row[0] - original) < 1e-12
 
 
-def test_multiline_persistence_path_is_channel_agnostic() -> None:
-    """Static contract check: SQLiteWriter.write_immediate signature
-    accepts ``list[Reading]`` and the persisted column set is
-    (timestamp, instrument_id, channel, value, unit, status). Nothing
-    in the writer pre-filters by channel name.
-    """
-    import inspect
+async def test_multiline_persistence_path_is_channel_agnostic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Runtime proof (was a source grep): the writer treats `channel` as an
+    opaque string. A single batch mixing a plain temperature channel with
+    MultiLine_* channels must persist ALL of them — no channel-name filtering."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
 
-    src = inspect.getsource(SQLiteWriter)
-    # The INSERT statement must enumerate channel without a WHERE clause
-    # that could exclude MultiLine_*; the v0.55.4 baseline has just the
-    # one canonical INSERT into readings.
-    assert "INSERT INTO readings" in src
-    assert "WHERE channel" not in src.split("INSERT INTO readings")[1].split(";")[0], (
-        "SQLiteWriter must not filter readings by channel name"
+    mixed = [
+        _ml_reading("T12 Теплообменник 2", 4.2),  # plain (non-MultiLine) channel
+        _ml_reading("MultiLine_1/length_ch1", 12.345),
+        _ml_reading("MultiLine_1/env_humidity", 45.0),
+    ]
+    await writer.write_immediate(mixed)
+
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
+    assert db_files, "No DB file created"
+    channels = _all_channels(db_files[0])
+    assert channels == sorted(r.channel for r in mixed), (
+        "every channel in the batch must persist; the writer must not filter by name"
     )
 
 

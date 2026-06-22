@@ -642,13 +642,11 @@ async def test_safe_off_fault_latched_shields_emergency_off():
     assert off_completed.is_set(), "Cancellation of _safe_off swallowed shielded _ensure_output_off"
 
 
-def test_fault_callback_shielded_in_source():
-    """Regression lock: _fault_log_callback must be shielded in source."""
-    from pathlib import Path
-
-    src = Path("src/cryodaq/core/safety_manager.py").read_text(encoding="utf-8")
-    assert "log_task = asyncio.create_task" in src
-    assert "asyncio.shield(log_task)" in src
+# NOTE: a source-grep "regression lock" for the asyncio.shield(log_task) call
+# used to live here. Removed in cycle 5 — it was false confidence (a comment
+# would satisfy it). The shield is proven behaviorally by
+# test_fault_log_callback_survives_outer_cancellation and
+# test_fault_log_callback_runs_even_if_publish_fails below.
 
 
 async def test_fault_log_callback_runs_even_if_publish_fails():

@@ -11,15 +11,46 @@ from unittest.mock import patch
 import pytest
 
 
-def test_gpib_transport_no_default_executor():
+@pytest.mark.asyncio
+async def test_gpib_query_and_write_use_dedicated_executor():
+    """Behavioral proof (not a source grep): non-mock query() and write() must
+    dispatch their blocking VISA calls to the transport's OWN single-worker
+    executor, never the default (None) executor. Spies the running loop's
+    run_in_executor and asserts the executor argument identity."""
+    import asyncio
+
     from cryodaq.drivers.transport.gpib import GPIBTransport
 
-    src = inspect.getsource(GPIBTransport)
-    assert "ThreadPoolExecutor" in src, "GPIBTransport must use a dedicated ThreadPoolExecutor"
-    assert "run_in_executor(None" not in src, (
-        "GPIBTransport must NOT use the default executor for VISA calls"
-    )
-    assert "_get_executor" in src
+    class _FakeResource:
+        # write() is read as an argument to run_in_executor before the spy runs,
+        # so the attribute must exist (the spy short-circuits, never calling it).
+        def write(self, *a, **k) -> None: ...
+        def read(self, *a, **k) -> str:
+            return ""
+
+    transport = GPIBTransport(mock=False)
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._resource = _FakeResource()  # non-None so the mock/None guards fall through
+
+    loop = asyncio.get_running_loop()
+    captured: list[object] = []
+
+    def spy(executor, func, *args):
+        captured.append(executor)
+        fut = loop.create_future()
+        fut.set_result("MODEL218S")  # short-circuit; don't touch the fake resource
+        return fut
+
+    with patch.object(loop, "run_in_executor", side_effect=spy):
+        await transport.query("*IDN?")
+        await transport.write("*CLS")
+
+    assert len(captured) == 2, "both query and write must dispatch via run_in_executor"
+    dedicated = transport._get_executor()
+    assert dedicated is not None
+    for ex in captured:
+        assert ex is dedicated, "VISA calls must use the dedicated executor, not None"
+    dedicated.shutdown(wait=False)
 
 
 def test_usbtmc_transport_no_default_executor():

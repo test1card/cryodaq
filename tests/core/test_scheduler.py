@@ -233,16 +233,39 @@ async def test_stop_graceful_drain_completes_inflight():
 
 
 async def test_stop_drain_timeout_forces_cancel():
-    """P1: if drain times out, forced cancel still works."""
-    broker = DataBroker()
-    sched = Scheduler(broker=broker, sqlite_writer=None)
-    sched._DRAIN_TIMEOUT_S = 0.1  # very short
+    """P1: if a poll is stuck mid-read past the drain timeout, stop() must escalate
+    to a forced cancel. Uses the REAL drain_timeout_s ctor param (production reads
+    self._drain_timeout_s, not the _DRAIN_TIMEOUT_S a prior test set) and a driver
+    whose read blocks, so the timeout→cancel path actually executes."""
 
-    driver = MockDriver("slow")
-    sched.add(InstrumentConfig(driver=driver, poll_interval_s=60.0, resource_str="mock"))
+    class BlockingDriver(MockDriver):
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+            self.read_started = False
+            self.cancelled = False
+
+        async def read_channels(self) -> list[Reading]:
+            self.read_started = True
+            try:
+                await asyncio.sleep(30)  # block well past the drain timeout
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            return [Reading.now("CH1", 4.2, "K", instrument_id="test")]
+
+    broker = DataBroker()
+    sched = Scheduler(broker=broker, sqlite_writer=None, drain_timeout_s=0.05)
+
+    driver = BlockingDriver("slow")
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.01, resource_str="mock"))
 
     await sched.start()
-    await asyncio.sleep(0.05)  # let it start
-    await sched.stop()  # drain should timeout, force cancel
+    await asyncio.sleep(0.1)  # let the poll enter the blocking read
+    assert driver.read_started, "poll must be in-flight for the drain path to matter"
 
-    # If we got here, stop returned — drain timeout + cancel worked
+    await sched.stop()  # drain times out → forced cancel
+
+    # The stuck poll was force-cancelled, and the instrument was disconnected.
+    assert driver.cancelled, "drain timeout must escalate to task.cancel()"
+    assert driver.disconnect_calls >= 1
+    assert driver._connected is False
