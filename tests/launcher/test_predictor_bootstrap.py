@@ -10,11 +10,10 @@ Covers:
 
 from __future__ import annotations
 
-import inspect
 import logging
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,24 +31,80 @@ def test_check_predictor_bootstrap_hint_exists() -> None:
     assert hasattr(mod.LauncherWindow, "_check_predictor_bootstrap_hint")
 
 
+def _make_fake_self(replay_source=None):
+    """Minimal stand-in for LauncherWindow for _start_engine calls."""
+    ns = types.SimpleNamespace(
+        _mock=False,
+        _replay_source=replay_source,
+        _replay_speed=5.0,
+        _replay_phase="cooldown",
+        _replay_loop=False,
+        _force_replay=False,
+        _legacy_channel_era=None,
+        _engine_proc=None,
+        _engine_external=False,
+        _engine_stderr_handler=None,
+        _engine_stderr_logger=None,
+        _engine_stderr_thread=None,
+        _restart_pending=False,
+    )
+    # _check_predictor_bootstrap_hint will be patched at call-site
+    ns._check_predictor_bootstrap_hint = lambda: None
+    return ns
+
+
 def test_start_engine_calls_hint_in_non_replay_path() -> None:
+    """_start_engine must call _check_predictor_bootstrap_hint when not in replay mode."""
     import cryodaq.launcher as mod
 
-    src = inspect.getsource(mod.LauncherWindow._start_engine)
-    assert "_check_predictor_bootstrap_hint" in src
-    assert "replay_source" in src
+    fake = _make_fake_self(replay_source=None)
+    hint_called = []
+
+    def _spy_hint():
+        hint_called.append(True)
+
+    fake._check_predictor_bootstrap_hint = _spy_hint
+
+    with (
+        patch("cryodaq.launcher._is_port_busy", return_value=False),
+        patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
+        patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
+        patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
+    ):
+        m = MagicMock()
+        m.pid = 99
+        m.stderr = None
+        mock_popen.return_value = m
+        mod.LauncherWindow._start_engine(fake, wait=False)
+
+    assert hint_called, "_check_predictor_bootstrap_hint was NOT called in non-replay path"
 
 
 def test_hint_is_not_triggered_in_replay_branch() -> None:
-    """The guard must come before the replay/non-replay branch split."""
+    """_start_engine must NOT call _check_predictor_bootstrap_hint in replay mode."""
     import cryodaq.launcher as mod
 
-    src = inspect.getsource(mod.LauncherWindow._start_engine)
-    hint_idx = src.find("_check_predictor_bootstrap_hint")
-    replay_guard_idx = src.find("replay_source")
-    # hint call should appear inside the non-replay guard (i.e., after checking
-    # replay_source), not after the else: that builds the real-engine command
-    assert hint_idx < replay_guard_idx + 50  # both on the same early guard block
+    fake = _make_fake_self(replay_source=Path("/data/cool_run.db"))
+    hint_called = []
+
+    def _spy_hint():
+        hint_called.append(True)
+
+    fake._check_predictor_bootstrap_hint = _spy_hint
+
+    with (
+        patch("cryodaq.launcher._is_port_busy", return_value=False),
+        patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
+        patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
+        patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
+    ):
+        m = MagicMock()
+        m.pid = 99
+        m.stderr = None
+        mock_popen.return_value = m
+        mod.LauncherWindow._start_engine(fake, wait=False)
+
+    assert not hint_called, "_check_predictor_bootstrap_hint was called in replay path — must be suppressed"
 
 
 # ---------------------------------------------------------------------------

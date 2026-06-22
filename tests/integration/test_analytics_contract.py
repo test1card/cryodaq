@@ -298,9 +298,14 @@ def test_phase_swap_preserves_series_count_in_temperature_overview(qt_app):
         view.set_phase("cooldown")
         slots_after = view.active_widgets()
         same_widget = slots_after["top_right"]
-        if isinstance(same_widget, aw.TemperatureOverviewWidget):
-            after = len(same_widget._series.get("Т1 Криостат верх", aw._ChannelSeries()).xs)
-            assert after >= before
+        assert isinstance(same_widget, aw.TemperatureOverviewWidget), (
+            f"Expected TemperatureOverviewWidget in top_right after phase swap to cooldown, "
+            f"got {type(same_widget).__name__}"
+        )
+        after = len(same_widget._series.get("Т1 Криостат верх", aw._ChannelSeries()).xs)
+        assert after >= before, (
+            f"Series count dropped after phase swap: before={before}, after={after}"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────

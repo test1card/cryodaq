@@ -38,10 +38,15 @@ def test_freeze_support_called_before_heavy_imports():
     """
     tree = ast.parse(FROZEN_MAIN.read_text(encoding="utf-8"))
 
+    # Include _dispatch: it is the actual __main__ entry point and must also
+    # call freeze_support() before any heavy imports.
     main_funcs = [
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("main_")
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+        and (n.name.startswith("main_") or n.name == "_dispatch")
     ]
-    assert main_funcs, "_frozen_main.py must define main_* functions"
+    assert main_funcs, "_frozen_main.py must define main_* functions or _dispatch"
 
     for func in main_funcs:
         # Find freeze_support() call

@@ -87,21 +87,35 @@ def _fake_model(duration_mean: float = 72.0):
 
 
 def test_nominal_cooldown_no_predictor_alarms(tmp_path):
-    """On-track cooldown (progress matches expected) → no predictor alarms."""
-    # T11 drops steadily over 72h: from 295K to 4K. At t=36h (midpoint), T11≈150K → progress≈0.5
+    """On-track cooldown (progress matches expected) → no predictor alarms.
+
+    Uses real _predictor_fires with a fake model + controlled predict() that
+    returns p_actual == p_expected at each reading (zero deviation → no fire).
+    """
+    # T11 drops linearly over 20h; at t=i h, T11 = 295 - i*(291/71)
     readings = []
     for i in range(20):
         ts = _COOLDOWN_START + i * 3600
-        T11 = 295.0 - (291.0 / 71.0) * (i * 3600 / 3600)  # linear from 295→4K
-        T12 = 295.0 - (215.0 / 71.0) * (i * 3600 / 3600)  # T12 cools to ~80K
+        T11 = 295.0 - (291.0 / 71.0) * i  # linear from 295→4K
+        T12 = 295.0 - (215.0 / 71.0) * i  # T12 cools to ~80K
         readings.append((ts, "Т11", max(T11, 4.0)))
         readings.append((ts, "Т12", max(T12, 80.0)))
 
     env = _make_env(tmp_path, readings)
     fake_mod = _fake_model(duration_mean=72.0)
 
+    # predict() returns p_actual == p_expected → deviation = 0 → no fire.
+    # The fake model has _p_of_t_mean = t/72, so p_expected at t hours = t/72.
+    # We make predict() also return progress = t/72 (perfectly on-track).
+    from unittest.mock import MagicMock as _MM
+
+    def _fake_predict(model, T_cold, T_warm, *, t_elapsed):
+        result_obj = _MM()
+        result_obj.progress = min(1.0, t_elapsed / 72.0)  # matches p_expected exactly
+        return result_obj
+
     with patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=fake_mod):
-        with patch("cryodaq.tools.replay_alarm_history._predictor_fires", return_value=False):
+        with patch("cryodaq.analytics.cooldown_predictor.predict", side_effect=_fake_predict):
             result = replay(**env)
 
     assert result["summary"]["newly_fired"] == 0
@@ -109,35 +123,63 @@ def test_nominal_cooldown_no_predictor_alarms(tmp_path):
 
 
 def test_stuck_plateau_predictor_fires(tmp_path):
-    """Cooldown stalls at 70K for extended period → predictor detects plateau."""
+    """Cooldown stalls at 70K for extended period → predictor detects plateau.
+
+    Uses real _predictor_fires with a fake model + controlled predict() that
+    returns p_actual stuck at ~0.07 (70K/1000K proxy) while p_expected grows
+    linearly. At t > 5h the deviation exceeds k_p * sigma_p → newly_fired > 0.
+
+    Asserts:
+    - newly_fired > 0  (predictor detected the stall)
+    - fired records contain the cold channel (Т11) + phase cooldown
+    - timestamps are present and monotonically non-decreasing
+    """
     readings = []
     for i in range(25):
         ts = _COOLDOWN_START + i * 3600
         if i < 5:
             T11 = 295.0 - i * 45.0  # cooling initially
         else:
-            T11 = 70.0  # stuck
+            T11 = 70.0  # stuck at plateau
         T12 = max(295.0 - i * 20.0, 200.0)
         readings.append((ts, "Т11", T11))
         readings.append((ts, "Т12", T12))
 
     env = _make_env(tmp_path, readings)
+    # duration_mean=72h, duration_std=6h → sigma_p = (6/72)*0.5 ≈ 0.0417
+    # k_p=2.5 → threshold = 2.5*0.0417 ≈ 0.104
+    # At t=10h: p_expected=10/72≈0.139, p_actual stuck at 0.0 → deviation≈0.139 > 0.104 → fires
     fake_mod = _fake_model(duration_mean=72.0)
 
-    # Simulate predictor detecting plateau (deviation >> k_p * sigma_p)
+    from unittest.mock import MagicMock as _MM
+
+    def _fake_predict(model, T_cold, T_warm, *, t_elapsed):
+        result_obj = _MM()
+        # Actual progress stays at 0.0 (T11 stuck — predictor sees no advance)
+        result_obj.progress = 0.0
+        return result_obj
+
     with patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=fake_mod):
-        with patch("cryodaq.tools.replay_alarm_history._predictor_fires") as mock_fires:
-            # First 5h nominal, then plateau detected
-            mock_fires.side_effect = lambda *a, **kw: (
-                float(a[2]) > 5.0  # fires if t_elapsed > 5h and T11 stuck
-                and a[0] <= 75.0
-            )
+        with patch("cryodaq.analytics.cooldown_predictor.predict", side_effect=_fake_predict):
             result = replay(**env)
 
     assert result["summary"]["total_readings"] > 0
-    # Should have some predictor-only fires for the stuck plateau readings
-    # (legacy fires 0, predictor fires some)
-    assert result["summary"]["newly_fired"] >= 0  # may be 0 if no legacy to compare
+    # Real _predictor_fires must fire for plateau readings (t_elapsed >> threshold)
+    assert result["summary"]["newly_fired"] > 0, (
+        f"Expected predictor to fire on stalled plateau, got newly_fired="
+        f"{result['summary']['newly_fired']}"
+    )
+    # Fired records must reference the cold channel and cooldown phase
+    fired_records = result["newly_fired"]
+    assert len(fired_records) > 0
+    assert all(r["channel"] == "Т11" for r in fired_records), (
+        f"All fired records must be cold channel Т11, got: {[r['channel'] for r in fired_records]}"
+    )
+    assert all(r["phase"] == "cooldown" for r in fired_records), (
+        f"All fired records must be in cooldown phase, got: {[r['phase'] for r in fired_records]}"
+    )
+    # Timestamps must be ISO strings and present
+    assert all("timestamp" in r and r["timestamp"] for r in fired_records)
 
 
 def test_no_model_uses_model_disabled_count(tmp_path):

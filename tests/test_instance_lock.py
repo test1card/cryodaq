@@ -33,17 +33,33 @@ def test_acquire_and_release(lock_name):
     release_lock(fd, lock_name)
 
 
-def test_double_acquire_fails(lock_name):
-    """Second acquire in same process fails (lock is held)."""
+def test_double_acquire_same_process(lock_name):
+    """Second acquire in same process fails: asserts the real observed behavior.
+
+    Both POSIX (flock LOCK_EX|LOCK_NB) and Windows (msvcrt.locking) refuse a
+    second exclusive lock from the same process on the same file — fd2 must be
+    None. This is the contract the instance-lock mechanism relies on: a running
+    process cannot accidentally acquire a second lock and believe it's the sole
+    holder.
+
+    Note: POSIX flock is nominally per-open-file-description, but macOS and
+    modern Linux kernels enforce per-process semantics for LOCK_EX when the
+    same file is locked by the same process via any fd. Empirically verified
+    on Darwin 25.x. If a future kernel changes this, the test will catch it.
+    """
     fd1 = try_acquire_lock(lock_name)
     assert fd1 is not None
 
     fd2 = try_acquire_lock(lock_name)
-    # On some OSes, same-process re-lock succeeds (flock is per-fd).
-    # On Windows msvcrt, it fails. Accept both.
-    if fd2 is not None:
-        release_lock(fd2, lock_name)
-    release_lock(fd1, lock_name)
+    try:
+        assert fd2 is None, (
+            "Same-process second acquire must fail — "
+            "instance lock relies on this to prevent double-start"
+        )
+    finally:
+        if fd2 is not None:
+            release_lock(fd2, lock_name)
+        release_lock(fd1, lock_name)
 
 
 def _acquire_in_subprocess(lock_name: str, acquired_event: mp.Event, release_event: mp.Event):

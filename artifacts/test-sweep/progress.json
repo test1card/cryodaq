@@ -1,8 +1,11 @@
 {
   "mode": "fix",
   "find_next_batch": 22,
-  "fix_next_batch": 16,
+  "fix_next_batch": 21,
   "fix_max_batch_with_findings": 21,
+  "verify_next_batch": 0,
+  "verify_max_batch": 21,
+  "phase3_verify_planned": true,
   "total_batches": 35,
   "started": "2026-06-22",
   "findings_total": 232,

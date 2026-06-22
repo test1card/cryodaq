@@ -262,17 +262,46 @@ def test_calibration_store_backward_compatible_load_rebuilds_index(tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 
-def test_calibration_index_uses_atomic_write():
-    """B-1.2: calibration.py index/curve writes must use atomic_write_text."""
-    source = Path("src/cryodaq/analytics/calibration.py").read_text(encoding="utf-8")
-    import re
+def test_calibration_index_uses_atomic_write(tmp_path, monkeypatch):
+    """B-1.2: save_curve, _write_index, and export_curve_cof must all route
+    through atomic_write_text — not bare write_text calls on state files."""
+    import cryodaq.core.atomic_write as _aw_mod
 
-    raw_state_writes = re.findall(r"_index_path\.write_text|target\.write_text\(json", source)
-    assert len(raw_state_writes) == 0, (
-        f"Found {len(raw_state_writes)} raw write_text calls for state files — "
-        f"should all route through atomic_write_text"
+    called_paths: list[Path] = []
+
+    original_atomic = _aw_mod.atomic_write_text
+
+    def _spy(path: Path, text: str) -> None:
+        called_paths.append(Path(path))
+        original_atomic(path, text)
+
+    monkeypatch.setattr(_aw_mod, "atomic_write_text", _spy)
+
+    # Also patch the name as imported inside calibration module
+    import cryodaq.analytics.calibration as _cal_mod
+
+    monkeypatch.setattr(_cal_mod, "atomic_write_text", _spy, raising=False)
+
+    store = CalibrationStore(tmp_path)
+    samples = _sample_series()
+    curve = store.fit_curve("CH2", samples)
+
+    called_paths.clear()
+    store.save_curve(curve)
+
+    # save_curve writes the JSON curve file + index — both via atomic_write_text
+    suffixes = {p.suffix for p in called_paths}
+    assert ".json" in suffixes, f"save_curve did not call atomic_write_text for .json; calls={called_paths}"
+    assert any("index" in p.name for p in called_paths), (
+        f"_write_index did not call atomic_write_text; calls={called_paths}"
     )
-    assert "atomic_write_text" in source
+
+    called_paths.clear()
+    store.export_curve_cof("CH2")
+
+    assert any(p.suffix == ".cof" for p in called_paths), (
+        f"export_curve_cof did not call atomic_write_text for .cof; calls={called_paths}"
+    )
 
 
 # ---------------------------------------------------------------------------

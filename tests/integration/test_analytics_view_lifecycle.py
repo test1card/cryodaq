@@ -220,6 +220,11 @@ def test_r_thermal_placeholder_has_f8_text(app):
     """r_thermal_placeholder must mention F8 as the unblock criterion."""
     w = aw.create("r_thermal_placeholder")
     assert isinstance(w, aw.PlaceholderCard)
-    # The PlaceholderCard must have been created with the F8 subtitle.
-    # We verify by checking the title stored on the widget.
-    assert "R" in w._title
+    # The PlaceholderCard subtitle must mention F8 as the unblock criterion.
+    # The subtitle is rendered into a QLabel body — scan all child QLabel texts.
+    from PySide6.QtWidgets import QLabel
+    label_texts = [lbl.text() for lbl in w.findChildren(QLabel)]
+    assert any("F8" in t for t in label_texts), (
+        f"PlaceholderCard for r_thermal_placeholder must mention F8 in a label; "
+        f"got labels={label_texts!r}"
+    )

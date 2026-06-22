@@ -188,10 +188,12 @@ async def test_get_file_path_returns_none_on_error() -> None:
 
 
 async def test_download_file_returns_bytes() -> None:
+    """download_file must fetch from the Telegram CDN URL and return the raw bytes."""
     bot = _make_bot()
+    expected_bytes = b"\xff\xd8\xff" + b"\x00" * 100
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.read = AsyncMock(return_value=b"\xff\xd8\xff" + b"\x00" * 100)
+    mock_resp.read = AsyncMock(return_value=expected_bytes)
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=mock_resp)
     cm.__aexit__ = AsyncMock(return_value=False)
@@ -200,8 +202,20 @@ async def test_download_file_returns_bytes() -> None:
     with patch.object(bot, "_get_session", return_value=session):
         result = await bot.download_file("photos/file.jpg")
 
-    assert result is not None
-    assert isinstance(result, bytes)
+    # Verify exact bytes returned
+    assert result == expected_bytes, f"Expected exact bytes, got {result!r}"
+
+    # Verify the correct Telegram CDN URL was requested
+    called_url = session.get.call_args[0][0]
+    assert "api.telegram.org/file/bot" in called_url, (
+        f"Expected CDN URL with /file/bot, got: {called_url!r}"
+    )
+    assert "photos/file.jpg" in called_url, (
+        f"Expected file path in URL, got: {called_url!r}"
+    )
+    assert "token:TEST" in called_url, (
+        f"Expected bot token in CDN URL, got: {called_url!r}"
+    )
 
 
 async def test_download_file_returns_none_on_error() -> None:
@@ -236,6 +250,7 @@ async def test_send_message_with_keyboard_returns_message_id() -> None:
 
 
 async def test_edit_message_calls_api() -> None:
+    """edit_message must POST to editMessageText with the correct payload."""
     bot = _make_bot()
     mock_resp = MagicMock()
     mock_resp.status = 200
@@ -248,9 +263,19 @@ async def test_edit_message_calls_api() -> None:
         await bot.edit_message(123, 5, "updated text")
 
     session.post.assert_called_once()
+    call_url = session.post.call_args[0][0]
+    assert "editMessageText" in call_url, (
+        f"Expected editMessageText endpoint, got: {call_url!r}"
+    )
+    call_kwargs = session.post.call_args[1]
+    payload = call_kwargs.get("json", {})
+    assert payload.get("chat_id") == 123, f"chat_id mismatch: {payload}"
+    assert payload.get("message_id") == 5, f"message_id mismatch: {payload}"
+    assert payload.get("text") == "updated text", f"text mismatch: {payload}"
 
 
 async def test_answer_callback_calls_api() -> None:
+    """answer_callback must POST to answerCallbackQuery with the callback_query_id."""
     bot = _make_bot()
     mock_resp = MagicMock()
     mock_resp.status = 200
@@ -261,5 +286,16 @@ async def test_answer_callback_calls_api() -> None:
     session.post.return_value = cm
     with patch.object(bot, "_get_session", return_value=session):
         await bot.answer_callback("cb_id_123")
+
+    session.post.assert_called_once()
+    call_url = session.post.call_args[0][0]
+    assert "answerCallbackQuery" in call_url, (
+        f"Expected answerCallbackQuery endpoint, got: {call_url!r}"
+    )
+    call_kwargs = session.post.call_args[1]
+    payload = call_kwargs.get("json", {})
+    assert payload.get("callback_query_id") == "cb_id_123", (
+        f"callback_query_id mismatch: {payload}"
+    )
 
     session.post.assert_called_once()

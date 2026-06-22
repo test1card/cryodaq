@@ -21,6 +21,19 @@ Authoritative machine state: `artifacts/test-sweep/progress.json`
 
 ---
 
+## PLANNED PHASE 3 — VERIFY pass (amend cycle) after FIX completes
+Once the FIX pass reaches batch 21, the loop rolls into a VERIFY pass (NOT stop):
+re-run Codex (gpt-5.5 high, read-only) over the now-STRENGTHENED test files of each
+batch 0–21, looking specifically for problems the fix pass may have INTRODUCED:
+- over-fitting / brittle assertions tied to implementation details (will break on a
+  valid refactor),
+- over-mocking that re-hides the production path,
+- tests that pass but still don't prove the named behavior (residual false-confidence),
+- logic errors / tautologies reintroduced, or an executor that weakened a test.
+Process: one batch/iteration → Codex re-review → write `verify-batch-NN.md` → if real
+problems, fix via executor (test-only) + re-verify → log in `VERIFY_LOG.md`. progress.json
+tracks `verify_next_batch`. This is the amend cycle; expect findings at this scale.
+
 ## HOW TO RESUME
 
 ### Continue the FIX pass (current activity, no Codex needed)
@@ -67,6 +80,11 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
    Ollama format call hangs the query agent. Real gap — wrap in `asyncio.wait_for`.
 5. **periodic-report label hardcoded** (batch 13) — `live/agent.py:865` emits
    `"(отчёт за час)"` regardless of `window_minutes`; a 30-min report is mislabeled hourly.
+6. **diagnostic-alarm pipeline test** (batch 18) — needs src/ to expose the
+   `_sensor_diag_tick` closure to test the real diag→alarm→telegram path end-to-end.
+
+NOTE: secret-token leak guard (batch 18) — RESOLVED, not deferred: runtime __dict__
+inspection now confirms all 3 Telegram classes store tokens as SecretStr only (no leak).
 
 ---
 

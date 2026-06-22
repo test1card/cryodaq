@@ -344,6 +344,11 @@ async def test_cmd_phase_invalid_returns_error() -> None:
 
 
 async def test_escalation_chain_sends() -> None:
+    """Both zero-delay escalation levels send their messages.
+
+    Waits by gathering all pending tasks directly instead of a fixed sleep,
+    so the test is deterministic and not flaky under slow CI.
+    """
     from cryodaq.notifications.escalation import EscalationService
 
     notifier = MagicMock()
@@ -358,8 +363,10 @@ async def test_escalation_chain_sends() -> None:
     svc = EscalationService(notifier, config)
     await svc.escalate("test_event", "Тест эскалации")
 
-    # Ждём завершения задач
-    await asyncio.sleep(0.05)
+    # Await all pending tasks directly — no fixed sleep, deterministic completion.
+    pending_tasks = list(svc._pending.values())
+    assert len(pending_tasks) == 2, f"Expected 2 pending tasks, got {len(pending_tasks)}"
+    await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     assert notifier.send_message.call_count == 2
     called_ids = {call.args[0] for call in notifier.send_message.call_args_list}
@@ -367,6 +374,15 @@ async def test_escalation_chain_sends() -> None:
 
 
 async def test_escalation_cancel_stops() -> None:
+    """cancel() must cancel the pending task and remove it from _pending.
+
+    The 60-minute delay means send_message would never fire within the test,
+    so we cannot rely on absence of calls as proof. Instead we assert:
+    1. After escalate(), _pending contains the task for the event.
+    2. After cancel(), _pending no longer contains the key.
+    3. The task itself reports cancelled (task.cancelled() is True).
+    send_message is also expected not to be called (belt-and-suspenders).
+    """
     from cryodaq.notifications.escalation import EscalationService
 
     notifier = MagicMock()
@@ -374,13 +390,28 @@ async def test_escalation_cancel_stops() -> None:
 
     config = {
         "escalation": [
-            {"chat_id": 111, "delay_minutes": 60},  # большая задержка — не успеет
+            {"chat_id": 111, "delay_minutes": 60},  # large delay — must be cancelled
         ]
     }
     svc = EscalationService(notifier, config)
     await svc.escalate("shift_missed", "Оператор не ответил")
+
+    # Task must be registered immediately after escalate()
+    pending_key = "shift_missed_111"
+    assert pending_key in svc._pending, (
+        f"Expected task key '{pending_key}' in _pending after escalate(), "
+        f"got keys: {list(svc._pending)}"
+    )
+    task_ref = svc._pending[pending_key]
+    assert not task_ref.done(), "Task should be waiting (not done) before cancel()"
+
     await svc.cancel("shift_missed")
 
-    await asyncio.sleep(0.05)
-
+    # cancel() awaits the task cancellation — task must be done and cancelled
+    assert task_ref.cancelled(), "Task must be in cancelled state after cancel()"
+    # Key must be removed from _pending
+    assert pending_key not in svc._pending, (
+        f"Key '{pending_key}' must be removed from _pending after cancel()"
+    )
+    # Belt-and-suspenders: send_message must not have been called
     notifier.send_message.assert_not_called()

@@ -76,4 +76,6 @@ async def test_drain_cancels_after_timeout() -> None:
     await _drain_dispatch_tasks(tasks, logger, timeout=0.1)
     await asyncio.sleep(0.05)
 
-    assert t.cancelled() or t.done()
+    # Must be cancelled, not just done via normal completion (which would mean
+    # the timeout logic is broken and the slow sink actually finished normally).
+    assert t.cancelled(), f"Expected task cancelled after timeout; done={t.done()}, cancelled={t.cancelled()}"

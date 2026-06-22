@@ -93,13 +93,19 @@ def test_finalize_uses_default_config_when_yaml_missing(
         experiments_dir=tmp_path / "experiments",
     )
 
+    seen: list[dict] = []
+
     async def fake_rebuild(self, cfg):  # type: ignore[no-untyped-def]
+        seen.append(cfg)
         return {"chunks": 0, "embedded": 0, "indexed": 0, "db_path": "x"}
 
     monkeypatch.setattr(RAGIndexSink, "_rebuild_index", fake_rebuild)
 
     result = _run(sink.write(_make_export()))
     assert result.success is True
+    # Verify the sink passed an empty config (not None, not a stale dict)
+    # when the YAML file is absent — proves the fallback path is exercised.
+    assert seen == [{}], f"Expected rebuild called with empty cfg, got: {seen}"
 
 
 # ---------------------------------------------------------------------------

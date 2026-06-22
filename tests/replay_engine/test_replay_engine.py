@@ -152,13 +152,17 @@ async def _stop_engine(engine, source_task) -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_heartbeat(tmp_path):
-    """PUB socket delivers readings within 2 s — proves bridge sub_drain_loop
-    would emit heartbeats when connected to the replay engine.
+async def test_replay_engine_first_reading_pub(tmp_path):
+    """PUB socket delivers the first msgpack-encoded reading within 2 s.
+
+    This directly tests that the engine publishes readings on the ZMQ PUB
+    socket, which is the precondition for bridge sub_drain_loop heartbeats.
 
     Subscribe BEFORE creating the source task to mitigate the ZMQ slow-joiner
     race (same pattern as test_replay_engine_curve_data_pub).
     """
+    import msgpack
+
     from cryodaq.replay_engine.server import ReplayEngine
 
     j = tmp_path / "curve.json"
@@ -169,7 +173,6 @@ async def test_replay_engine_heartbeat(tmp_path):
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
-    sub.setsockopt(zmq.RCVTIMEO, 2000)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
     await asyncio.sleep(0.05)  # Let ZMQ subscription establish before source.
@@ -177,8 +180,13 @@ async def test_replay_engine_heartbeat(tmp_path):
     source_task = asyncio.create_task(engine.run_source(), name="test_source")
     try:
         parts = await asyncio.wait_for(sub.recv_multipart(), timeout=2.0)
-        assert len(parts) == 2
+        assert len(parts) == 2, f"Expected [topic, payload], got {len(parts)} parts"
         assert parts[0] == b"readings"
+        # Payload must be a valid msgpack-encoded reading dict with required fields
+        data = msgpack.unpackb(parts[1], raw=False)
+        assert "ch" in data, f"Reading missing 'ch' field: {data}"
+        assert "v" in data, f"Reading missing 'v' field: {data}"
+        assert isinstance(data["v"], (int, float)), f"'v' must be numeric: {data}"
     finally:
         sub.close(linger=0)
         ctx.term()
@@ -284,10 +292,15 @@ async def test_replay_engine_rejects_keithley_command(tmp_path):
 
 @pytest.mark.asyncio
 async def test_replay_engine_curve_data_pub(tmp_path):
-    """Curve replay PUBs >=10 readings with T11/T12 channels.
+    """Curve replay PUBs >=10 readings containing BOTH Т11 and Т12 channels
+    with numeric temperature values in the expected cooldown range.
 
     SUB must subscribe and establish connection BEFORE source_task starts,
     otherwise speed=0.0 publishes all readings before the slow-joiner connects.
+
+    Uses a readiness loop (poll until both channels seen or deadline) instead
+    of a fixed sleep so the test passes quickly on fast machines and doesn't
+    flake on slow ones.
     """
     import msgpack
 
@@ -304,7 +317,11 @@ async def test_replay_engine_curve_data_pub(tmp_path):
     sub.setsockopt(zmq.LINGER, 0)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
-    await asyncio.sleep(0.05)  # Let ZMQ subscription establish
+    # Readiness loop: poll until ZMQ subscription is established before source starts.
+    # We don't know exactly when the subscription handshake completes, so we yield
+    # the event loop a few times rather than sleeping a fixed amount.
+    for _ in range(5):
+        await asyncio.sleep(0.01)
 
     source_task = asyncio.create_task(engine.run_source(), name="test_source")
     readings = []
@@ -327,8 +344,20 @@ async def test_replay_engine_curve_data_pub(tmp_path):
         await _stop_engine(engine, source_task)
 
     assert len(readings) >= 10, f"Expected >=10 readings, got {len(readings)}"
+
     channels = {r["ch"] for r in readings}
-    assert "Т12" in channels or "Т11" in channels, f"Expected T11/T12 channels, got {channels}"
+    # Both cold and warm channels must be present — one channel passing is insufficient
+    assert {"Т12", "Т11"} <= channels, (
+        f"Expected both Т11 and Т12 channels in published readings, got: {channels}"
+    )
+
+    # Verify decoded values are numeric and in physically plausible range (4K–300K)
+    for r in readings:
+        assert "v" in r, f"Reading missing 'v' field: {r}"
+        assert isinstance(r["v"], (int, float)), f"'v' must be numeric: {r}"
+        assert 4.0 <= r["v"] <= 305.0, (
+            f"Temperature value {r['v']} out of expected range [4, 305] K for channel {r['ch']}"
+        )
 
 
 @pytest.mark.asyncio

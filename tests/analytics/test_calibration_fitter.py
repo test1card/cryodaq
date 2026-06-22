@@ -80,9 +80,24 @@ def test_extract_pairs_basic(data_dir) -> None:
         "Т2",
     )
     assert len(pairs) == 200
-    for srdg_val, krdg_val in pairs:
-        assert srdg_val > 0
-        assert krdg_val >= 1.5
+
+    # Sort by SRDG so index is predictable (extractor may return any order)
+    sorted_pairs = sorted(pairs, key=lambda p: p[0])
+
+    # _populate_db inserts srdg_val = 5.0 + i*0.5 for i in range(200)
+    # → SRDG: 5.0, 5.5, 6.0, …, 104.5
+    # krdg_val = _synthetic_dt670(srdg_val) = max(1.5, 1600/(srdg+15) + 0.05*sin(srdg/5))
+    first_srdg = 5.0
+    mid_srdg = 5.0 + 99 * 0.5  # i=99 → 54.5
+    last_srdg = 5.0 + 199 * 0.5  # i=199 → 104.5
+
+    expected_first_krdg = _synthetic_dt670(first_srdg)
+    expected_mid_krdg = _synthetic_dt670(mid_srdg)
+    expected_last_krdg = _synthetic_dt670(last_srdg)
+
+    assert sorted_pairs[0] == pytest.approx((first_srdg, expected_first_krdg), abs=1e-6)
+    assert sorted_pairs[99] == pytest.approx((mid_srdg, expected_mid_krdg), abs=1e-6)
+    assert sorted_pairs[199] == pytest.approx((last_srdg, expected_last_krdg), abs=1e-6)
 
 
 def test_extract_filters_ovl(tmp_path) -> None:
@@ -141,6 +156,10 @@ def test_time_alignment_filter(tmp_path) -> None:
         tmp_path, 99.0, 120.0, "ref", "tgt", max_time_delta_s=2.0
     )
     assert len(pairs) == 1
+    # Only the aligned pair (srdg=82.5, krdg=77.0) should survive
+    assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.01), (
+        f"Wrong pair retained: {pairs[0]}; expected (82.5, 77.0)"
+    )
 
 
 # ------------------------------------------------------------------
@@ -148,20 +167,54 @@ def test_time_alignment_filter(tmp_path) -> None:
 # ------------------------------------------------------------------
 
 
-def test_downsample_preserves_curvature(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
-    downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=50)
+def test_downsample_preserves_curvature() -> None:
+    """High-curvature kink region must retain higher per-unit density than flat tails.
 
-    assert len(downsampled) <= 80  # roughly around target
-    assert len(downsampled) >= 20
+    Fixture: 600 points across srdg in [0, 100].
+    - srdg in [0, 45]: krdg = 100.0  (perfectly flat, zero curvature)
+    - srdg = 50: krdg = 50.0         (sharp kink — maximum second-derivative spike)
+    - srdg in [55, 100]: krdg = 10.0 (perfectly flat again)
 
-    # Check that low-SRDG region (high curvature) has more density
-    sorted_ds = sorted(downsampled, key=lambda p: p[0])
-    mid = sorted_ds[len(sorted_ds) // 2][0]
-    low_count = sum(1 for s, _ in sorted_ds if s < mid)
-    high_count = sum(1 for s, _ in sorted_ds if s >= mid)
-    # Low-SRDG (low temp, high curvature) should have >= high-SRDG
-    assert low_count >= high_count * 0.5  # not a strict requirement
+    The kink region [45, 55] covers 10/100 = 10% of the SRDG range.
+    After downsampling the per-unit density there must exceed the flat tails.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+
+    pairs: list[tuple[float, float]] = []
+    # Left flat: srdg [0, 45], krdg = 100
+    for s in np.linspace(0.1, 44.9, 250):
+        pairs.append((float(s), 100.0 + rng.normal(0, 1e-4)))
+    # Sharp kink transition [45, 55]: krdg falls 100 → 50 → 10
+    for s in np.linspace(45.0, 50.0, 50):
+        frac = (s - 45.0) / 5.0
+        pairs.append((float(s), 100.0 - 50.0 * frac + rng.normal(0, 1e-4)))
+    for s in np.linspace(50.0, 55.0, 50):
+        frac = (s - 50.0) / 5.0
+        pairs.append((float(s), 50.0 - 40.0 * frac + rng.normal(0, 1e-4)))
+    # Right flat: srdg [55, 100], krdg = 10
+    for s in np.linspace(55.1, 99.9, 250):
+        pairs.append((float(s), 10.0 + rng.normal(0, 1e-4)))
+
+    target = 60
+    downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=target)
+
+    assert len(downsampled) >= target // 3
+    assert len(downsampled) <= target * 3
+
+    # Per-unit density: kink [45, 55] (10 units) vs flat tails (90 units)
+    kink_count = sum(1 for s, _ in downsampled if 45.0 <= s <= 55.0)
+    flat_count = sum(1 for s, _ in downsampled if s < 45.0 or s > 55.0)
+
+    kink_density = kink_count / 10.0   # points per SRDG unit in kink zone
+    flat_density = flat_count / 90.0   # points per SRDG unit in flat zones
+
+    assert kink_density > flat_density, (
+        f"Curvature-preserving downsample failed: "
+        f"kink_density={kink_density:.3f} not > flat_density={flat_density:.3f}  "
+        f"(kink_count={kink_count}, flat_count={flat_count}, total={len(downsampled)})"
+    )
 
 
 def test_downsample_preserves_boundaries(data_dir) -> None:
@@ -262,7 +315,23 @@ def test_coverage_empty_regions(tmp_path) -> None:
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
     statuses = [b["status"] for b in coverage]
-    assert "empty" in statuses  # gap in middle
+    assert "empty" in statuses, "Expected 'empty' bins in the gap region between T=4K and T=300K"
+
+    # Data exists only at the two extremes: bins [0] and [9] must be non-empty
+    # (SRDG values: cluster at 80.0 for T=4K group and at 5.0 for T=300K group)
+    # The MIDDLE bins (indices 1..8) must contain the gap — at least some must be empty
+    middle_statuses = statuses[1:9]
+    assert "empty" in middle_statuses, (
+        f"No empty bins in middle range; statuses={statuses}"
+    )
+
+    # Both endpoint bins must be non-empty (dense or medium or sparse)
+    assert statuses[0] != "empty", f"First bin unexpectedly empty; statuses={statuses}"
+    assert statuses[-1] != "empty", f"Last bin unexpectedly empty; statuses={statuses}"
+
+    # Total point count preserved
+    total = sum(b["point_count"] for b in coverage)
+    assert total == len(pairs)
 
 
 # ------------------------------------------------------------------

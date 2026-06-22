@@ -13,7 +13,7 @@ from __future__ import annotations
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
@@ -343,11 +343,18 @@ def test_extract_channels_late_binding_reflects_renames() -> None:
     """Renames made to channel_manager reflect in next _extract_channels call."""
     mgr = _make_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
     handler = _make_handler(channel_manager=mgr)
-    # Before rename: "детектор" matches
+    # Before rename: "Детектор" matches by display name
     assert "Т7" in handler._extract_channels("Детектор сейчас при 4K")
-    # After rename (update config — for test, just verify that fresh read works)
-    # The mgr is the SAME object, late binding means each call reads current state
-    assert "Т7" in handler._extract_channels("на детекторе")
+    # After rename: "Болометр" should now match; old name "Детектор" must not
+    mgr.set_name("Т7", "Болометр")
+    result_after = handler._extract_channels("Болометр установлен при 4K")
+    assert "Т7" in result_after, (
+        "_extract_channels must reflect renamed display name (late binding)"
+    )
+    result_old_name = handler._extract_channels("Детектор сейчас при 4K")
+    assert "Т7" not in result_old_name, (
+        "_extract_channels must NOT match old display name after rename"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +363,13 @@ def test_extract_channels_late_binding_reflects_renames() -> None:
 
 
 async def test_cleanup_loop_removes_expired_entries() -> None:
+    """_cleanup_loop must evict expired entries and keep fresh ones.
+
+    We patch asyncio.sleep to raise CancelledError after one iteration so
+    the real production _cleanup_loop body runs exactly once without waiting.
+    """
+    import asyncio
+
     bot = _make_bot()
     handler = _make_handler(bot=bot)
 
@@ -383,19 +397,26 @@ async def test_cleanup_loop_removes_expired_entries() -> None:
             target_experiment_id="exp-001",
         )
 
-    # Manually trigger cleanup (bypass sleep)
-    async with handler._lock:
-        now = datetime.now(UTC)
-        expired = [
-            k for k, p in handler._pending.items()
-            if (now - p.arrived_at).total_seconds() > _PENDING_TTL_S
-        ]
-        for k in expired:
-            handler._pending.pop(k, None)
+    # Run the real _cleanup_loop: patch sleep to return immediately on first
+    # call, then raise CancelledError to exit the while-True loop.
+    call_count = 0
+
+    async def _fake_sleep(_duration):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            raise asyncio.CancelledError
+
+    with patch("asyncio.sleep", side_effect=_fake_sleep):
+        await handler._cleanup_loop()
 
     async with handler._lock:
-        assert "old_key" not in handler._pending
-        assert "new_key" in handler._pending
+        assert "old_key" not in handler._pending, (
+            "_cleanup_loop must remove expired entry"
+        )
+        assert "new_key" in handler._pending, (
+            "_cleanup_loop must keep fresh entry"
+        )
 
 
 # ---------------------------------------------------------------------------

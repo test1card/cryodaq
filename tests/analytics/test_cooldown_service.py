@@ -237,8 +237,12 @@ async def test_cooldown_detection_start(tmp_path: Path):
             await broker.publish(r_w)
             await asyncio.sleep(0.01)  # Let consume loop process
 
-        # Let the consume loop finish processing
-        await asyncio.sleep(0.5)
+        # Poll for COOLING state with a hard deadline (no fixed sleep)
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if service._detector.phase.value == "cooling":
+                break
+            await asyncio.sleep(0.02)
 
         assert service._detector.phase.value == "cooling", (
             f"Expected cooling, got {service._detector.phase.value}"
@@ -265,7 +269,13 @@ async def test_idle_when_stable_temperature(tmp_path: Path):
             await broker.publish(r)
             await asyncio.sleep(0.01)
 
-        await asyncio.sleep(0.5)
+        # Poll for a short deadline; idle is the default so it should remain
+        # idle within one event-loop drain pass
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while asyncio.get_event_loop().time() < deadline:
+            if service._detector.phase.value != "idle":
+                break  # unexpected transition — fail below
+            await asyncio.sleep(0.02)
 
         assert service._detector.phase.value == "idle", (
             f"Expected idle, got {service._detector.phase.value}"
@@ -412,6 +422,30 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
             assert "future_t" in meta, "Missing future_t trajectory in metadata"
             assert "future_T_cold_mean" in meta
 
+            future_t = meta["future_t"]
+            future_T = meta["future_T_cold_mean"]
+
+            # Both must be lists of equal length
+            assert isinstance(future_t, list), f"future_t is {type(future_t)}, expected list"
+            assert isinstance(future_T, list), f"future_T_cold_mean is {type(future_T)}, expected list"
+            assert len(future_t) == len(future_T), (
+                f"future_t length {len(future_t)} != future_T_cold_mean length {len(future_T)}"
+            )
+            assert len(future_t) > 0, "future_t trajectory is empty"
+
+            # All values must be finite
+            import math as _math
+            for i, v in enumerate(future_t):
+                assert _math.isfinite(v), f"future_t[{i}] = {v} is not finite"
+            for i, v in enumerate(future_T):
+                assert _math.isfinite(v), f"future_T_cold_mean[{i}] = {v} is not finite"
+
+            # future_t must be monotonically non-decreasing (time moves forward)
+            for i in range(1, len(future_t)):
+                assert future_t[i] >= future_t[i - 1], (
+                    f"future_t not monotonic at index {i}: {future_t[i - 1]} → {future_t[i]}"
+                )
+
     finally:
         await service.stop()
         await broker.unsubscribe("test_meta")
@@ -454,12 +488,22 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
     await service.start()
 
     try:
-        # Publish cooling readings
-        readings = _cooldown_readings(n=30, T_start=295.0, rate_K_per_h=-15.0, channel="T_cold")
-        for r in readings:
-            await broker.publish(r)
+        # Publish cooling readings on BOTH channels so the detector can
+        # fully transition (the service subscribes to T_cold + T_warm).
+        # Without a model the predict loop must stay silent regardless.
+        readings_cold = _cooldown_readings(
+            n=30, T_start=295.0, rate_K_per_h=-15.0, channel="T_cold"
+        )
+        readings_warm = _cooldown_readings(
+            n=30, T_start=295.0, rate_K_per_h=-8.0, channel="T_warm"
+        )
+        for r_c, r_w in zip(readings_cold, readings_warm):
+            await broker.publish(r_c)
+            await broker.publish(r_w)
+            await asyncio.sleep(0.005)
 
-        await asyncio.sleep(0.3)
+        # Give predict loop several intervals to fire (predict_interval_s=0.05)
+        await asyncio.sleep(0.4)
 
         # Queue must be empty — no predictions without a model
         assert results_queue.empty(), "Service emitted predictions despite no model on disk"

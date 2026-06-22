@@ -66,7 +66,7 @@ def _push_power_law(
 
 
 def test_fit_exponential_synthetic() -> None:
-    pred = VacuumTrendPredictor(config={"min_points": 10})
+    pred = VacuumTrendPredictor(config={"min_points": 10, "min_points_combined": 300})
     log_p_ult = -6.0
     A = 5.0
     tau = 300.0
@@ -74,8 +74,13 @@ def test_fit_exponential_synthetic() -> None:
     pred.update()
     p = pred.get_prediction()
     assert p is not None
-    assert p.model_type != "insufficient_data"
+    # Must select exponential model (not power_law or combined)
+    assert p.model_type == "exponential"
     assert p.confidence > 0.95
+    # Fit params within ±10% of ground truth
+    assert abs(p.fit_params["log_p_ult"] - log_p_ult) / abs(log_p_ult) < 0.10
+    assert abs(p.fit_params["A"] - A) / A < 0.10
+    assert abs(p.fit_params["tau"] - tau) / tau < 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +89,7 @@ def test_fit_exponential_synthetic() -> None:
 
 
 def test_fit_power_law_synthetic() -> None:
-    pred = VacuumTrendPredictor(config={"min_points": 10})
+    pred = VacuumTrendPredictor(config={"min_points": 10, "min_points_combined": 300})
     log_p_ult = -6.0
     B = 3.0
     alpha = 1.0
@@ -92,8 +97,24 @@ def test_fit_power_law_synthetic() -> None:
     pred.update()
     p = pred.get_prediction()
     assert p is not None
-    assert p.model_type != "insufficient_data"
+    # Must select power_law model (not exponential or combined)
+    assert p.model_type == "power_law"
     assert p.confidence > 0.90
+    # log_p_ult must be recovered within ±10%
+    assert abs(p.fit_params["log_p_ult"] - log_p_ult) / abs(log_p_ult) < 0.10
+    # B and alpha are correlated in the fit (changing both while keeping
+    # B*t^(-alpha) constant gives equivalent fits); validate via predictions
+    # at two timepoints spanning the data range instead of raw param values.
+    # Ground truth: logP(t) = -6 + 3 * t^(-1).
+    for t_check in [50.0, 500.0]:
+        fitted_logP = (
+            p.fit_params["log_p_ult"]
+            + p.fit_params["B"] * (t_check ** (-p.fit_params["alpha"]))
+        )
+        gt_logP = log_p_ult + B * (t_check ** (-alpha))
+        assert abs(fitted_logP - gt_logP) < 0.1, (
+            f"Model prediction mismatch at t={t_check}: fitted={fitted_logP:.3f}, gt={gt_logP:.3f}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +136,13 @@ def test_fit_combined_synthetic() -> None:
     pred.update()
     p = pred.get_prediction()
     assert p is not None
-    assert p.model_type != "insufficient_data"
+    # BIC must select combined model — pure exponential/power_law won't capture both terms
+    assert p.model_type == "combined"
     assert p.confidence > 0.90
+    # Key params within ±10% of ground truth
+    assert abs(p.fit_params["log_p_ult"] - log_p_ult) / abs(log_p_ult) < 0.10
+    assert abs(p.fit_params["A"] - A) / A < 0.10
+    assert abs(p.fit_params["tau"] - tau) / tau < 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -144,20 +170,28 @@ def test_model_selection_prefers_simple() -> None:
 
 
 def test_eta_computation_exponential() -> None:
+    # Target 1e-5, P_ult = 1e-7 (reachable). Push only 50 points so current
+    # pressure is still well above 1e-5 (target is still AHEAD, not yet reached).
+    # Analytical: log10(P(t)) = -7 + 5*exp(-t/300). Target at log10(1e-5)=-5
+    # => 5*exp(-t/300)=2 => t = 300*ln(2.5) ≈ 275 s from t=0.
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
+            "min_points_combined": 300,
             "targets_mbar": [1e-5],
         }
     )
-    _push_exponential(pred, -7.0, 5.0, 300.0, n=200, dt=5.0)
+    _push_exponential(pred, -7.0, 5.0, 300.0, n=50, dt=5.0)  # span 0..245 s
     pred.update()
     p = pred.get_prediction()
     assert p is not None
+    assert p.model_type == "exponential"
     eta = p.eta_targets.get("1e-05")
-    # Should be finite — the model can reach 1e-5 since P_ult = 1e-7
+    # ETA must be finite and strictly positive (target not yet reached)
     assert eta is not None
-    assert eta >= 0
+    assert eta > 0.0
+    # Rough closed-form check: ETA should be O(100-600 s) from current position
+    assert 10.0 < eta < 5000.0
 
 
 # ---------------------------------------------------------------------------
@@ -166,19 +200,32 @@ def test_eta_computation_exponential() -> None:
 
 
 def test_eta_computation_power_law() -> None:
+    # logP(t) = -6 + 8 * t^(-0.3). P_ult=1e-6, target=1e-5 (log=-5).
+    # At last data point t=255 s: logP(255) = -6 + 8/255^0.3 ≈ -4.38 > -5 (target AHEAD).
+    # The fitted power_law model must give ETA > 0 to reach log=-5.
+    # B=8 ∈ [0,30] and alpha=0.3 ∈ [0.01,5.0] are within fit bounds.
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
+            "min_points_combined": 300,
             "targets_mbar": [1e-5],
         }
     )
-    _push_power_law(pred, -7.0, 3.0, 1.0, n=200, dt=5.0, t0=10.0)
+    # Push 50 pts: t spans 10..255 s
+    for i in range(50):
+        t = 10.0 + i * 5.0
+        logP = -6.0 + 8.0 * max(t, 1.0) ** (-0.3)
+        pred.push(t, 10.0**logP)
     pred.update()
     p = pred.get_prediction()
     assert p is not None
+    assert p.model_type == "power_law"
     eta = p.eta_targets.get("1e-05")
+    # ETA must be finite and strictly positive (target not yet reached at last data point)
     assert eta is not None
-    assert eta >= 0
+    assert eta > 0.0
+    # Fitted model gives ETA ≈ 500s; broad tolerance for fit non-linearity
+    assert eta < 1_000_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -307,12 +354,30 @@ def test_insufficient_data() -> None:
 
 def test_buffer_sliding_window() -> None:
     pred = VacuumTrendPredictor(config={"window_s": 100, "min_points": 5})
-    # Push 50 points spanning 250 seconds (dt=5)
+    # Push 50 points spanning t=0..245s (dt=5s). After last push at t=245,
+    # cutoff = 245-100 = 145. Points at t>=145 are retained.
+    expected_values: list[tuple[float, float]] = []
     for i in range(50):
         t = i * 5.0
-        pred.push(t, 1e-3 * math.exp(-i * 0.01))
-    # Buffer should only have points from t >= 150 (250-100)
-    assert len(pred._buffer) <= 21  # ~20 points in last 100s
+        p_mbar = 1e-3 * math.exp(-i * 0.01)
+        pred.push(t, p_mbar)
+        if t >= 145.0:
+            expected_values.append((t, math.log10(p_mbar)))
+
+    t_last = 49 * 5.0  # 245 s
+    cutoff = t_last - 100.0  # 145 s
+
+    # All retained timestamps must be within the window
+    retained_ts = [t for t, _ in pred._buffer]
+    assert all(t >= cutoff for t in retained_ts), (
+        f"Buffer contains points older than cutoff {cutoff}: min ts = {min(retained_ts)}"
+    )
+    # Exact count: points at t=145,150,...,245 => (245-145)/5+1 = 21 points
+    assert len(pred._buffer) == len(expected_values)
+    # Values match (log10 stored internally)
+    for (buf_t, buf_lp), (exp_t, exp_lp) in zip(pred._buffer, expected_values):
+        assert abs(buf_t - exp_t) < 1e-9
+        assert abs(buf_lp - exp_lp) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -321,20 +386,36 @@ def test_buffer_sliding_window() -> None:
 
 
 def test_all_log_scale() -> None:
-    pred = VacuumTrendPredictor(config={"min_points": 10})
-    # Push data where linear P would give very different fit than log₁₀(P)
-    # Exponential decay from 1 mbar to 1e-6 mbar
+    # Ground truth: logP(t) = -6 + 6*exp(-t/300).
+    # At t=0: logP=0 (1 mbar). At t=999s (last): logP=-6+6*exp(-999/300)≈-6+0.30=-5.70.
+    # A log-space fit must recover log_p_ult≈-6 and A≈6.
+    # A linear-P fit would be dominated by the large early values and give very different params.
+    pred = VacuumTrendPredictor(config={"min_points": 10, "min_points_combined": 300})
     _push_exponential(pred, -6.0, 6.0, 300.0, n=200, dt=5.0)
     pred.update()
     p = pred.get_prediction()
     assert p is not None
-    # Good R² on log scale means fit was done in log space
+    assert p.model_type == "exponential"
     assert p.confidence > 0.95
-    # Extrapolation is in log space
+
+    # The fit_params are the log-space model parameters.
+    # A linear-P fit would converge to a wildly different log_p_ult and A;
+    # a correct log-space fit must recover the ground-truth params within ±10%.
+    assert abs(p.fit_params["log_p_ult"] - (-6.0)) / 6.0 < 0.10
+    assert abs(p.fit_params["A"] - 6.0) / 6.0 < 0.10
+    assert abs(p.fit_params["tau"] - 300.0) / 300.0 < 0.10
+
+    # Extrapolation array is in log₁₀ space (not raw mbar)
     assert len(p.extrapolation_logP) > 0
-    # Values should be in log₁₀ range (between -10 and 5)
     for v in p.extrapolation_logP:
-        assert -15 < v < 10
+        assert -15.0 < v < 5.0, f"extrapolation_logP value {v} out of log₁₀ range"
+
+    # Verify the extrapolation_t and extrapolation_logP are a consistent
+    # independent trajectory (not just a copy of the raw data)
+    assert len(p.extrapolation_t) == len(p.extrapolation_logP)
+    # The trajectory must extend beyond the last data point (t_max ~ 995 s)
+    t_max_data = 199 * 5.0  # last pushed timestamp (relative to t0=0)
+    assert max(p.extrapolation_t) > t_max_data
 
 
 # ---------------------------------------------------------------------------
@@ -436,25 +517,42 @@ def test_start_stop_lifecycle() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20. test_update_interval_respected — _update not called faster than interval
+# 20. test_update_interval_config_stored — update_interval_s is config storage
 # ---------------------------------------------------------------------------
 
 
-def test_update_interval_respected() -> None:
+def test_update_interval_config_stored() -> None:
+    """update_interval_s is stored as config; the engine tick loop enforces it.
+
+    VacuumTrendPredictor does NOT self-throttle — every call to update()
+    recomputes. The interval is exposed so the engine integration layer
+    (VacuumTrendEngine / plugin runner) can skip ticks that arrive sooner
+    than update_interval_s. This test verifies the contract:
+      1. Config is stored faithfully.
+      2. Calling update() twice in succession still produces a valid prediction
+         (i.e. the predictor does NOT silently drop the second call).
+    """
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
             "update_interval_s": 30,
         }
     )
-    # Verify config is stored
+    # Config stored
     assert pred.update_interval_s == 30
-    # The engine integration layer respects this interval;
-    # the predictor itself exposes the config for the caller to enforce.
-    # Push data and verify update works
+
+    # Push data, call update() twice — both must return a valid prediction
     _push_exponential(pred, -6.0, 5.0, 300.0, n=100, dt=5.0)
     pred.update()
-    assert pred.get_prediction() is not None
+    p1 = pred.get_prediction()
+    assert p1 is not None
+    assert p1.model_type != "insufficient_data"
+
+    # Second immediate call: predictor does not throttle itself
+    pred.update()
+    p2 = pred.get_prediction()
+    assert p2 is not None
+    assert p2.model_type != "insufficient_data"
 
 
 # ---------------------------------------------------------------------------
@@ -484,41 +582,55 @@ def test_engine_config_loading() -> None:
     assert pred.anomaly_sigma == 3.0
 
 
-def test_engine_feed_and_command_response() -> None:
-    """Simulate engine feed → update → get_vacuum_trend response."""
+def test_predictor_serialization_contract() -> None:
+    """VacuumPrediction → asdict() → JSON round-trip produces the exact fields the
+    ZMQ command handler sends to the GUI.
+
+    This is a PREDICTOR CONTRACT test, not an engine integration test.
+    The real engine handler (zmq_bridge vacuum_trend command) calls
+    ``asdict(pred.get_prediction())`` and wraps it in ``{"ok": True, ...}``.
+    We verify that contract here without wiring the full engine stack.
+    """
     config = {
         "min_points": 10,
         "targets_mbar": [1e-4, 1e-5],
     }
     pred = VacuumTrendPredictor(config=config)
-
-    # Simulate pressure readings arriving (like _vacuum_trend_feed)
     _push_exponential(pred, -7.0, 6.0, 300.0, n=200, dt=5.0)
-
-    # Simulate tick
     pred.update()
 
-    # Simulate command handler response
     p = pred.get_prediction()
     assert p is not None
     d = asdict(p)
+
+    # --- Field contract: every field the ZMQ bridge relies on must be present ---
+    assert "model_type" in d
+    assert "p_ultimate_mbar" in d
+    assert "eta_targets" in d
+    assert "trend" in d
+    assert "confidence" in d
+    assert "residual_std" in d
+    assert "fit_params" in d
+    assert "extrapolation_t" in d
+    assert "extrapolation_logP" in d
+    assert "updated_at" in d
+
+    # --- Type contract ---
+    assert d["model_type"] != "insufficient_data"
+    assert isinstance(d["p_ultimate_mbar"], float)
+    assert isinstance(d["eta_targets"], dict)
+    assert d["trend"] in ("pumping_down", "stable", "rising", "anomaly")
+    assert isinstance(d["extrapolation_t"], list)
+    assert len(d["extrapolation_t"]) > 0
+    assert isinstance(d["confidence"], float)
+    assert 0.0 <= d["confidence"] <= 1.0
+
+    # --- JSON-serialization contract ---
+    # ZMQ bridge: json.dumps({"ok": True, **asdict(pred)}, default=str)
     response = {"ok": True, **d}
-
-    # Verify response structure (what GUI will receive)
-    assert response["ok"] is True
-    assert response["model_type"] != "insufficient_data"
-    assert isinstance(response["p_ultimate_mbar"], float)
-    assert isinstance(response["eta_targets"], dict)
-    assert response["trend"] in ("pumping_down", "stable", "rising", "anomaly")
-    assert isinstance(response["extrapolation_t"], list)
-    assert len(response["extrapolation_t"]) > 0
-    assert isinstance(response["confidence"], float)
-    assert 0 <= response["confidence"] <= 1
-
-    # Regression: response must be JSON-serializable with default=str
-    # (ZMQ bridge uses json.dumps(reply, default=str) to handle datetime)
     json_str = json.dumps(response, default=str)
-    assert isinstance(json_str, str)
     parsed = json.loads(json_str)
     assert parsed["ok"] is True
     assert parsed["model_type"] != "insufficient_data"
+    assert isinstance(parsed["extrapolation_t"], list)
+    assert len(parsed["extrapolation_t"]) > 0

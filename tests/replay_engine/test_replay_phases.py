@@ -302,6 +302,11 @@ async def test_handle_command_blocks_experiment_finalize(
 async def test_handle_command_blocks_safety_command(
     replay_engine_with_stub,
 ) -> None:
+    # Branch-distinguishing: verify the denylist specifically blocks this command,
+    # not just that the engine returned ok=False (which unknown cmds also do).
+    assert _is_command_blocked("safety_acknowledge") is True, (
+        "safety_acknowledge must be in the blocked prefixes (safety_*)"
+    )
     result = await replay_engine_with_stub._handle_command(
         {"cmd": "safety_acknowledge"}
     )

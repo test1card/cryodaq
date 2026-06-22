@@ -178,8 +178,9 @@ async def test_report_generation_uses_new_output_names_and_sections(
 
 
 async def test_report_generation_for_cooldown_template_uses_archive_tables(
-    manager: ExperimentManager, tmp_path: Path
+    manager: ExperimentManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -190,15 +191,28 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(
     await _seed_experiment_data(tmp_path, exp_id)
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
+    # Remove the live DB so that generate() MUST fall back to the archive CSV.
+    # If the generator silently skips the archive and reads only from the live
+    # DB, the temperature/pressure data would be absent from the report.
+    live_db = tmp_path / "data_2026-03-16.db"
+    if live_db.exists():
+        live_db.unlink()
+
     result = ReportGenerator(tmp_path).generate(exp_id)
 
-    assert (
-        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
-    ).exists()
+    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    assert archive_csv.exists(), "finalize must produce measured_values.csv"
+
     text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
     assert "Тревоги" in text
-    assert "Таблица измеренных величин" in text
+    # "Таблица измеренных величин" only appears if cooldown_test template
+    # is extended to include result_tables_section; assert the seeded
+    # temperature data (T_STAGE = 4.3 K) appears via the cooldown kv_table
+    # — proving readings were loaded from the archive CSV, not the deleted DB.
+    assert "4.30 К" in text, (
+        "Seeded T_STAGE=4.3 K must appear in report — archive CSV not read"
+    )
 
 
 async def test_report_disabled_template_is_respected(
@@ -268,7 +282,9 @@ async def test_report_generation_graceful_without_pdf_tooling(
 async def test_report_generation_can_use_archived_measured_values_without_live_db(
     manager: ExperimentManager,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     exp_id = manager.start_experiment(
         name="Archive source",
         title="Archive source",
@@ -290,6 +306,7 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
         writer._conn = None
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
+    # Delete live DB — generator must fall back to the archive CSV exclusively.
     db_path = tmp_path / "data_2026-03-16.db"
     if db_path.exists():
         db_path.unlink()
@@ -297,9 +314,20 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
-    assert (
-        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
-    ).exists()
+    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    assert archive_csv.exists(), "finalize must produce measured_values.csv"
+
+    text = _doc_text(result.docx_path)
+    # Seeded T_STAGE=4.3 K must surface in the cooldown kv_table ("4.30 К"),
+    # proving the extractor loaded readings from the archive CSV not the live DB.
+    assert "4.30 К" in text, (
+        "Seeded T_STAGE=4.3 K not found in report — archive CSV path broken"
+    )
+    # Seeded pressure reading channel name must appear in the archive CSV.
+    csv_text = archive_csv.read_text(encoding="utf-8")
+    assert "K1/smua/power" in csv_text, "K1/smua/power not found in archive CSV"
+    assert "P_MAIN/pressure" in csv_text, "P_MAIN/pressure not found in archive CSV"
+    assert "T_STAGE" in csv_text, "T_STAGE not found in archive CSV"
 
 
 def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:

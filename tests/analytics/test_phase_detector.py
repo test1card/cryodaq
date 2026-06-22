@@ -182,40 +182,55 @@ async def test_teardown_detection() -> None:
 
 
 async def test_full_phase_sequence() -> None:
+    """One continuous chronological stream must produce phases in order:
+    preparation → cooldown → measurement.
+
+    Buffer-clearing between batches is NOT used — the detector sees a single
+    uninterrupted feed (timestamps increase monotonically with dt=2s so the
+    auto-reset 300s gap guard never fires).
+    """
     d = _make_detector(stabilization_window_s=30, rate_window_s=60)
-    phases_seen: list[str] = []
 
-    def feed(temps, dt_s=2.0, start_ts=0.0, pressures=None):
-        t_r = _make_temp_readings("T7", temps, dt_s=dt_s, start_ts=start_ts)
-        if pressures:
-            p_r = _make_pressure_readings("P1", pressures, dt_s=dt_s, start_ts=start_ts)
-            combined = []
-            for t, p in zip(t_r, p_r):
-                combined.extend([t, p])
-            return combined
-        return t_r
+    # Use a single shared timestamp counter so readings are always chronological.
+    base_ts = 1_000.0
+    dt_s = 2.0
 
-    # Preparation: room temp
-    r = feed([295.0] * 100, start_ts=0)
-    m = await d.process(r)
-    phases_seen.append(_get_phase(m))
+    def next_ts(n: int, start: float) -> list[float]:
+        return [start + i * dt_s for i in range(n)]
 
-    # Cooldown: rapid decrease
-    d._temp_buf.clear()
-    r = feed([295.0 - i * 3.0 for i in range(100)], start_ts=10000)
-    m = await d.process(r)
-    phases_seen.append(_get_phase(m))
+    # -----------------------------------------------------------------------
+    # Batch 1 — PREPARATION: room temp (295 K, no pressure data)
+    # -----------------------------------------------------------------------
+    ts1 = base_ts
+    temps1 = [295.0] * 100
+    r1 = _make_temp_readings("T7", temps1, dt_s=dt_s, start_ts=ts1)
+    m1 = await d.process(r1)
+    phase1 = _get_phase(m1)
 
-    # Measurement: stable at target
-    d._temp_buf.clear()
-    d._stable_since = None
-    r = feed([4.2 + 0.01 * ((-1) ** i) for i in range(100)], start_ts=20000)
-    m = await d.process(r)
-    phases_seen.append(_get_phase(m))
+    # -----------------------------------------------------------------------
+    # Batch 2 — COOLDOWN: from 295 K down to ~5 K at -3 K/step.
+    # Timestamps continue from where Batch 1 ended.
+    # -----------------------------------------------------------------------
+    ts2 = ts1 + 100 * dt_s  # 1200.0
+    temps2 = [max(295.0 - i * 3.0, 5.0) for i in range(100)]
+    r2 = _make_temp_readings("T7", temps2, dt_s=dt_s, start_ts=ts2)
+    m2 = await d.process(r2)
+    phase2 = _get_phase(m2)
 
-    assert "preparation" in phases_seen
-    assert "cooldown" in phases_seen
-    assert "measurement" in phases_seen
+    # -----------------------------------------------------------------------
+    # Batch 3 — MEASUREMENT: stable at 4.2 K for > stabilization_window_s (30s)
+    # = 15 readings at dt=2s → 30s. We push 80 to be safe.
+    # -----------------------------------------------------------------------
+    ts3 = ts2 + 100 * dt_s  # 1400.0
+    temps3 = [4.2 + 0.01 * ((-1) ** i) for i in range(80)]
+    r3 = _make_temp_readings("T7", temps3, dt_s=dt_s, start_ts=ts3)
+    m3 = await d.process(r3)
+    phase3 = _get_phase(m3)
+
+    # Exact ordered sequence
+    assert phase1 == "preparation", f"Batch1 expected 'preparation', got '{phase1}'"
+    assert phase2 == "cooldown", f"Batch2 expected 'cooldown', got '{phase2}'"
+    assert phase3 == "measurement", f"Batch3 expected 'measurement', got '{phase3}'"
 
 
 # ---------------------------------------------------------------------------

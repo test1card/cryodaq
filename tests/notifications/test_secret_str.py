@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
-
-import pytest
-
 from cryodaq.notifications._secrets import SecretStr
 
 
@@ -41,38 +37,102 @@ def test_secret_str_bool_and_eq():
     assert SecretStr("a") != SecretStr("b")
 
 
-def test_telegram_notifier_no_plain_url_attribute():
-    """TelegramNotifier must NOT store a plain-string _api_url containing the token."""
-    from cryodaq.notifications import telegram
+def _walk_attrs(obj, seen=None):
+    """Recursively yield all string values reachable from obj.__dict__."""
+    if seen is None:
+        seen = set()
+    obj_id = id(obj)
+    if obj_id in seen:
+        return
+    seen.add(obj_id)
+    try:
+        d = object.__getattribute__(obj, "__dict__")
+    except AttributeError:
+        return
+    for v in d.values():
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, (list, tuple, set, frozenset)):
+            for item in v:
+                if isinstance(item, str):
+                    yield item
+                else:
+                    yield from _walk_attrs(item, seen)
+        elif isinstance(v, dict):
+            for item in v.values():
+                if isinstance(item, str):
+                    yield item
+                else:
+                    yield from _walk_attrs(item, seen)
+        elif hasattr(v, "__dict__"):
+            yield from _walk_attrs(v, seen)
 
-    src = inspect.getsource(telegram)
-    if "self._api_url = f" in src:
-        pytest.fail(
-            "TelegramNotifier still stores _api_url as f-string with the token. "
-            "Phase 2b K.1: must compute on demand via _build_api_url()."
-        )
 
+def test_telegram_notifier_no_plain_token_in_attrs():
+    """TelegramNotifier must NOT store the raw token in any instance attribute.
 
-def test_telegram_command_bot_no_plain_api_attribute():
-    """TelegramCommandBot must compute _api on demand from SecretStr."""
-    from cryodaq.notifications import telegram_commands
+    Runtime check: instantiate with a sentinel token, walk __dict__ recursively,
+    assert the raw token string never appears as a plain string attribute.
+    The token should only materialise inside _build_api_url() at call time.
+    """
+    from cryodaq.notifications.telegram import TelegramNotifier
 
-    src = inspect.getsource(telegram_commands)
-    # The old `self._api = f"https://..."` constant string is gone.
-    assert 'self._api = f"https' not in src, (
-        "TelegramCommandBot still stores plain f-string self._api"
+    sentinel = "SENTINEL_TOKEN_12345"
+    notifier = TelegramNotifier(bot_token=sentinel, chat_id=99999)
+
+    # Walk all instance attributes: raw sentinel must not appear as plain str.
+    # SecretStr wrapping is fine — its __str__/__repr__ mask it.
+    plain_values = list(_walk_attrs(notifier))
+    assert sentinel not in plain_values, (
+        f"TelegramNotifier stores raw token in a plain attribute: {plain_values}"
     )
-    # And the bot uses SecretStr.
-    assert "SecretStr" in src
+
+    # The token must materialise correctly when building the URL on demand.
+    url = notifier._build_api_url("sendMessage")
+    assert sentinel in url, "_build_api_url() must include the token in the URL"
 
 
-def test_periodic_report_no_plain_url_attribute():
-    """PeriodicReporter must not store the URL with the token as an attr."""
-    from cryodaq.notifications import periodic_report
+def test_telegram_command_bot_no_plain_token_in_attrs():
+    """TelegramCommandBot must NOT store the raw token in any instance attribute."""
+    from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
-    src = inspect.getsource(periodic_report)
-    assert "self._api_url = f" not in src
-    assert "SecretStr" in src
+    sentinel = "SENTINEL_TOKEN_12345"
+    bot = TelegramCommandBot(
+        broker=None,
+        alarm_engine=None,
+        bot_token=sentinel,
+        allowed_chat_ids=[123],
+        commands_enabled=True,
+    )
+
+    plain_values = list(_walk_attrs(bot))
+    assert sentinel not in plain_values, (
+        f"TelegramCommandBot stores raw token in a plain attribute: {plain_values}"
+    )
+
+    # Token must appear in the URL built on demand.
+    api_url = bot._api  # property calls get_secret_value()
+    assert sentinel in api_url, "bot._api must materialise the token in the URL"
+
+
+def test_periodic_reporter_no_plain_token_in_attrs():
+    """PeriodicReporter must NOT store the raw token in any instance attribute."""
+    from unittest.mock import MagicMock
+
+    from cryodaq.notifications.periodic_report import PeriodicReporter
+
+    sentinel = "SENTINEL_TOKEN_12345"
+    reporter = PeriodicReporter(
+        broker=MagicMock(),
+        alarm_engine=MagicMock(),
+        bot_token=sentinel,
+        chat_id=99999,
+    )
+
+    plain_values = list(_walk_attrs(reporter))
+    assert sentinel not in plain_values, (
+        f"PeriodicReporter stores raw token in a plain attribute: {plain_values}"
+    )
 
 
 def test_telegram_notifier_constructed_with_secret_str():

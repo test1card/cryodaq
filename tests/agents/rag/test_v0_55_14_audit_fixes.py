@@ -88,6 +88,10 @@ def test_swap_replaces_existing_canonical_table(tmp_path: Path) -> None:
     assert table.count_rows() == 3
     # Staging slot is cleaned up
     assert "test_corpus__staging" not in db.list_tables().tables
+    # Stale row (chunk_99) must not appear; new rows present
+    ids = set(table.to_arrow().column("chunk_id").to_pylist())
+    assert "chunk_99" not in ids, "Stale row from pre-existing table survived the swap"
+    assert {"chunk_0", "chunk_1", "chunk_2"} == ids
 
 
 def test_swap_cleans_up_orphaned_staging(tmp_path: Path) -> None:
@@ -107,6 +111,10 @@ def test_swap_cleans_up_orphaned_staging(tmp_path: Path) -> None:
 
     assert table.count_rows() == 1
     assert "test_corpus__staging" not in db.list_tables().tables
+    # Orphaned staging row (chunk_99) must not bleed into canonical table
+    ids = set(table.to_arrow().column("chunk_id").to_pylist())
+    assert "chunk_99" not in ids, "Orphaned staging row leaked into canonical table"
+    assert ids == {"chunk_0"}
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +162,10 @@ def test_load_experiment_metadata_handles_string_phases_field(tmp_path: Path) ->
     )
 
     chunks = load_experiment_metadata(tmp_path)
-    # Loader should yield no fatal error; if a chunk is produced,
-    # the description text survives.
-    if chunks:
-        assert "valid" in chunks[0].text
+    # Loader must produce at least one chunk and the description text survives.
+    assert chunks, "Expected at least one chunk even when phases field is not a list"
+    text = "\n".join(c.text for c in chunks)
+    assert "valid" in text, f"Expected 'valid' in chunk text, got: {text!r}"
 
 
 def test_load_operator_log_entries_coerces_non_string_message(tmp_path: Path) -> None:
@@ -255,35 +263,70 @@ def test_chunk_text_single_short_chunk() -> None:
 def test_build_index_offloads_loaders_via_to_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The synchronous filesystem-walking loaders must run via
-    asyncio.to_thread so the event loop stays responsive during a
-    finalize-time rebuild."""
+    """All synchronous filesystem-walking loaders must run via asyncio.to_thread
+    so the event loop stays responsive during a finalize-time rebuild.
+
+    Enables experiments_dir, vault_dir, and sqlite_path so all three
+    corresponding loaders are exercised.  A heartbeat counter verifies
+    the event loop continued to process tasks while loaders ran.
+    """
     from cryodaq.agents.rag import indexer
 
     seen: list[str] = []
+    heartbeat_ticks: list[int] = [0]
 
     original_to_thread = asyncio.to_thread
 
     async def spy_to_thread(func, *args, **kwargs):
-        seen.append(getattr(func, "__name__", repr(func)))
-        return await original_to_thread(func, *args, **kwargs)
+        name = getattr(func, "__name__", repr(func))
+        seen.append(name)
+        # Yield control to the event loop before and after each blocking call
+        await asyncio.sleep(0)
+        heartbeat_ticks[0] += 1
+        result = await original_to_thread(func, *args, **kwargs)
+        await asyncio.sleep(0)
+        heartbeat_ticks[0] += 1
+        return result
 
     monkeypatch.setattr(indexer.asyncio, "to_thread", spy_to_thread)
+
+    # Prepare minimal vault dir (empty — load_vault_notes handles missing gracefully)
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+
+    # Prepare minimal sqlite DB with operator_log table (may be empty)
+    sqlite_path = tmp_path / "data_2026.db"
+    conn = sqlite3.connect(str(sqlite_path))
+    conn.execute(
+        "CREATE TABLE operator_log ("
+        "id INTEGER PRIMARY KEY, timestamp TEXT, message TEXT, "
+        "author TEXT, experiment_id TEXT, tags TEXT)"
+    )
+    conn.commit()
+    conn.close()
 
     embeddings = MagicMock()
     embeddings.embed = AsyncMock(return_value=[0.0] * 384)
 
     asyncio.run(
         build_index(
-            experiments_dir=tmp_path / "experiments",  # empty
-            vault_dir=None,
-            sqlite_path=None,
+            experiments_dir=tmp_path / "experiments",  # empty dir
+            vault_dir=vault_dir,
+            sqlite_path=sqlite_path,
             db_path=tmp_path / "lance",
             embeddings_client=embeddings,
         )
     )
 
-    assert "load_experiment_metadata" in seen
+    # All three loaders must have been dispatched via to_thread
+    assert "load_experiment_metadata" in seen, f"to_thread calls: {seen}"
+    assert "load_vault_notes" in seen, f"to_thread calls: {seen}"
+    assert "load_operator_log_entries" in seen, f"to_thread calls: {seen}"
+
+    # Event loop must have ticked at least once per loader call
+    assert heartbeat_ticks[0] >= len([s for s in seen if s.startswith("load_")]) * 2, (
+        f"Event loop heartbeats ({heartbeat_ticks[0]}) too low for {seen}"
+    )
 
 
 def test_build_index_returns_zero_stats_on_empty_corpus(tmp_path: Path) -> None:
