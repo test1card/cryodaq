@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -225,40 +225,97 @@ def test_reading_without_alarm_name_is_dropped(app):
 
 
 def test_reading_activated_adds_row(app):
+    """Activated reading: private state correct AND rendered cells match."""
     panel = AlarmPanel()
     panel._handle_reading(
         _alarm_reading("cold_plate_hot", "CRITICAL", "activated", value=300.0, threshold=290.0)
     )
+    # Private state (existing assertions — keep them)
     assert "cold_plate_hot" in panel._alarms
     row = panel._alarms["cold_plate_hot"]
     assert row.severity == "CRITICAL"
     assert row.state == "active"
     assert row.trigger_count == 1
 
+    # Rendered table: row exists
+    assert panel._table.rowCount() == 1
+
+    # Col 0: SeverityChip with CRITICAL severity
+    chip = panel._table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.severity == "CRITICAL"
+    assert chip.text() == "КРИТ"
+
+    # Col 1: alarm name
+    name_item = panel._table.item(0, 1)
+    assert name_item is not None
+    assert name_item.text() == "cold_plate_hot"
+
+    # Col 7: ACK button present (state == "active")
+    btn = panel._table.cellWidget(0, 7)
+    assert isinstance(btn, QPushButton)
+    assert btn.text() == "ПОДТВЕРДИТЬ"
+
 
 def test_reading_acknowledged_updates_state(app):
+    """Acknowledged reading: action cell shows 'Подтв.' and chip is muted."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("x", "WARNING", "activated"))
     panel._handle_reading(_alarm_reading("x", "WARNING", "acknowledged"))
+    # Private state
     assert panel._alarms["x"].state == "acknowledged"
+
+    # Rendered: action cell item has the acknowledged label
+    # Note: Qt v1 table does not call removeCellWidget before setItem,
+    # so the previous button may persist as a widget overlay — we check
+    # the item text which is what the src sets.
+    action_item = panel._table.item(0, 7)
+    assert action_item is not None
+    assert action_item.text() == "Подтв."
+
+    # Col 0: chip shows muted acknowledged state (checkmark prefix)
+    chip = panel._table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.text().startswith("✓")
 
 
 def test_reading_cleared_updates_state(app):
+    """Cleared reading: action cell shows 'Сброшена'."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("x", "WARNING", "activated"))
     panel._handle_reading(_alarm_reading("x", "WARNING", "cleared"))
+    # Private state
     assert panel._alarms["x"].state == "cleared"
+
+    # Rendered: action cell item has the cleared label
+    # Note: Qt v1 table does not call removeCellWidget before setItem,
+    # so the previous button may persist as a widget overlay — we check
+    # the item text which is what the src sets.
+    action_item = panel._table.item(0, 7)
+    assert action_item is not None
+    assert action_item.text() == "Сброшена"
 
 
 def test_reading_reactivated_increments_trigger_count(app):
+    """Trigger count increments AND the rendered count cell reflects it."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("x", "INFO", "activated"))
     panel._handle_reading(_alarm_reading("x", "INFO", "cleared"))
     panel._handle_reading(_alarm_reading("x", "INFO", "activated"))
+    # Private count
     assert panel._alarms["x"].trigger_count == 2
+
+    # Rendered count cell (col 6)
+    count_item = panel._table.item(0, 6)
+    assert count_item is not None
+    assert count_item.text() == "2"
 
 
 def test_reading_invalid_value_defaults_to_zero(app):
+    # DEFERRED-NAN-11: prod does not coerce NaN→0 for reading.value
+    # (alarm_panel.py:608-611 uses float(reading.value) which leaves NaN).
+    # Architect decision needed: either add coercion in prod or rename test.
+    # Only the threshold (not_a_number → 0.0) coercion is tested here.
     panel = AlarmPanel()
     reading = Reading(
         timestamp=datetime.now(UTC),
@@ -311,12 +368,18 @@ def test_set_connected_same_value_is_noop(app):
 
 
 def test_set_connected_enables_v1_ack_buttons(app):
+    """ACK button in the rendered table cell (col 7) must be gated by connected."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
-    # Rebuild triggered the button with current connected state (False).
-    assert panel._v1_ack_buttons[0].isEnabled() is False
+    # Rendered cell button starts disabled (not connected)
+    btn = panel._table.cellWidget(0, 7)
+    assert isinstance(btn, QPushButton)
+    assert btn.isEnabled() is False
     panel.set_connected(True)
-    assert panel._v1_ack_buttons[0].isEnabled() is True
+    # After connect, rendered button enabled
+    btn = panel._table.cellWidget(0, 7)
+    assert isinstance(btn, QPushButton)
+    assert btn.isEnabled() is True
     panel._v2_poll_timer.stop()
 
 
@@ -336,6 +399,7 @@ def test_update_v2_status_empty_payload_clears(app):
 
 
 def test_update_v2_status_populates_table(app):
+    """v2 payload: private dict correct AND rendered cells match."""
     panel = AlarmPanel()
     payload = {
         "ok": True,
@@ -355,6 +419,24 @@ def test_update_v2_status_populates_table(app):
     assert panel._body_stack.currentIndex() == 1
     assert panel._v2_empty_label.isHidden() is True
 
+    # Rendered cells
+    chip = panel._v2_table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.severity == "CRITICAL"
+    assert chip.text() == "КРИТ"
+
+    id_item = panel._v2_table.item(0, 1)
+    assert id_item is not None
+    assert id_item.text() == "cold_plate"
+
+    msg_item = panel._v2_table.item(0, 2)
+    assert msg_item is not None
+    assert msg_item.text() == "Cold plate overheat"
+
+    ch_item = panel._v2_table.item(0, 3)
+    assert ch_item is not None
+    assert ch_item.text() == "T1, T2"
+
 
 def test_update_v2_status_emits_count_signal(app):
     panel = AlarmPanel()
@@ -367,8 +449,9 @@ def test_update_v2_status_emits_count_signal(app):
 
 
 def test_update_v2_status_truncates_long_message(app):
+    """Truncated message: exact max length (_V2_MESSAGE_MAX_CHARS=80) + '…' + correct prefix."""
     panel = AlarmPanel()
-    long_msg = "x" * 200
+    long_msg = "A" * 200
     panel.update_v2_status(
         {
             "ok": True,
@@ -379,8 +462,12 @@ def test_update_v2_status_truncates_long_message(app):
     )
     cell = panel._v2_table.item(0, 2)
     assert cell is not None
-    assert cell.text().endswith("…")
-    assert len(cell.text()) < len(long_msg)
+    text = cell.text()
+    # Exact truncation: 79 chars + "…" = 80 chars total
+    assert text.endswith("…")
+    assert len(text) == 80  # _V2_MESSAGE_MAX_CHARS
+    # Preserved prefix: first 79 chars match original
+    assert text[:79] == long_msg[:79]
 
 
 def test_update_v2_status_malformed_payload_is_safe(app):
@@ -398,16 +485,23 @@ def test_get_active_v2_count(app):
 
 
 def test_v2_row_ack_button_disabled_before_connect(app):
+    """Rendered ACK button (cellWidget col 5) is disabled before connect."""
     panel = AlarmPanel()
     panel.update_v2_status({"ok": True, "active": {"a": {"level": "CRITICAL"}}})
-    assert panel._v2_ack_buttons[0].isEnabled() is False
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton)
+    assert btn.text() == "ПОДТВЕРДИТЬ"
+    assert btn.isEnabled() is False
 
 
 def test_v2_row_ack_button_enabled_after_connect(app):
+    """Rendered ACK button (cellWidget col 5) is enabled after connect."""
     panel = AlarmPanel()
     panel.update_v2_status({"ok": True, "active": {"a": {"level": "CRITICAL"}}})
     panel.set_connected(True)
-    assert panel._v2_ack_buttons[0].isEnabled() is True
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton)
+    assert btn.isEnabled() is True
     panel._v2_poll_timer.stop()
 
 
@@ -445,6 +539,13 @@ def test_v2_acknowledged_row_replaces_button_with_label(app):
     # No entry registered in the button list — keep the indexing consistent.
     assert len(panel._v2_ack_buttons) == 0
 
+    # Acknowledged chip: must use muted palette (acknowledged=True)
+    chip = panel._v2_table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    # Acknowledged chip shows checkmark prefix and uses SURFACE_MUTED background
+    assert chip.text().startswith("✓")
+    assert theme.SURFACE_MUTED in chip.styleSheet()
+
 
 def test_v2_unacknowledged_row_keeps_ack_button(app):
     """Unacknowledged row must still render the interactive button."""
@@ -462,13 +563,26 @@ def test_v2_unacknowledged_row_keeps_ack_button(app):
             },
         }
     )
-    assert panel._v2_table.cellWidget(0, 5) is not None
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton)
+    assert btn.text() == "ПОДТВЕРДИТЬ"
+    assert btn.isEnabled() is False  # not connected yet
     assert panel._v2_table.item(0, 5) is None
     assert len(panel._v2_ack_buttons) == 1
 
+    # Clicking the button dispatches the correct alarm_id
+    _StubWorker.dispatched = []
+    panel.set_connected(True)
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton)
+    btn.click()
+    assert _StubWorker.dispatched == [{"cmd": "alarm_v2_ack", "alarm_name": "cold_plate"}]
+    panel._v2_poll_timer.stop()
+
 
 def test_v2_ack_button_transitions_to_label_on_engine_update(app):
-    """Engine flips acknowledged flag on next poll → row transitions."""
+    """Engine flips acknowledged flag on next poll → row transitions.
+    Chip must also switch to muted acknowledged palette."""
     panel = AlarmPanel()
     # First poll: unack.
     panel.update_v2_status(
@@ -504,6 +618,14 @@ def test_v2_ack_button_transitions_to_label_on_engine_update(app):
     cell = panel._v2_table.item(0, 5)
     assert cell is not None
     assert "Подтв." in cell.text()
+    # acknowledged_by name in label
+    assert "vlad" in cell.text()
+
+    # Chip transitioned to muted acknowledged palette
+    chip = panel._v2_table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.text().startswith("✓")
+    assert theme.SURFACE_MUTED in chip.styleSheet()
 
 
 # ----------------------------------------------------------------------
@@ -516,7 +638,8 @@ def test_summary_shows_criticals(app):
     panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
     panel._handle_reading(_alarm_reading("b", "CRITICAL", "activated"))
     # Phase III.D plural: n=2 → "критических" (few = genitive singular).
-    assert "критических" in panel._summary_label.text()
+    text = panel._summary_label.text()
+    assert "2 критических" in text
     assert panel._summary_label.isHidden() is False
 
 
@@ -524,7 +647,8 @@ def test_summary_shows_warnings(app):
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("a", "WARNING", "activated"))
     # Phase III.D plural: n=1 → "предупреждение" (singular nominative).
-    assert "предупреждение" in panel._summary_label.text()
+    text = panel._summary_label.text()
+    assert "1 предупреждение" in text
 
 
 def test_summary_shows_warnings_genitive_plural_for_five(app):
@@ -572,6 +696,7 @@ def test_poll_in_flight_guard_prevents_double_dispatch(app):
 
 
 def test_poll_result_ok_updates_table(app):
+    """Poll result with ok=True: private dict AND rendered table populated."""
     panel = AlarmPanel()
     panel.set_connected(True)
     _StubWorker.next_result = {
@@ -580,17 +705,30 @@ def test_poll_result_ok_updates_table(app):
     }
     panel._poll_v2_status()
     assert panel._v2_alarms == {"a": {"level": "WARNING", "message": "m"}}
+    # Rendered table: 1 row, chip severity WARNING
+    assert panel._v2_table.rowCount() == 1
+    chip = panel._v2_table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.severity == "WARNING"
     panel._v2_poll_timer.stop()
 
 
 def test_poll_result_failure_preserves_last_state(app):
-    """Fail-OPEN: engine error must not wipe table."""
+    """Fail-OPEN: engine error must not wipe table — rendered rows and payload preserved."""
     panel = AlarmPanel()
-    panel.update_v2_status({"ok": True, "active": {"a": {"level": "CRITICAL"}}})
+    panel.update_v2_status({"ok": True, "active": {"a": {"level": "CRITICAL", "message": "hot"}}})
     panel.set_connected(True)
     _StubWorker.next_result = {"ok": False, "error": "boom"}
     panel._poll_v2_status()
+    # Private dict preserved
     assert "a" in panel._v2_alarms
+    assert panel._v2_alarms["a"]["level"] == "CRITICAL"
+    assert panel._v2_alarms["a"]["message"] == "hot"
+    # Rendered table still has the row
+    assert panel._v2_table.rowCount() == 1
+    chip = panel._v2_table.cellWidget(0, 0)
+    assert isinstance(chip, SeverityChip)
+    assert chip.severity == "CRITICAL"
     panel._v2_poll_timer.stop()
 
 
@@ -610,21 +748,31 @@ def test_poll_result_non_dict_is_safe(app):
 
 
 def test_v1_acknowledge_dispatches_zmq_command(app):
+    """CLICK the rendered ACK button — verifies button→command wiring."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("hot", "CRITICAL", "activated"))
     panel.set_connected(True)
     _StubWorker.dispatched = []
-    panel._acknowledge("hot")
+    # Click the rendered button in col 7 (not private _acknowledge)
+    btn = panel._table.cellWidget(0, 7)
+    assert isinstance(btn, QPushButton), "ACK button must be rendered in col 7"
+    assert btn.isEnabled(), "Button must be enabled after set_connected(True)"
+    btn.click()
     assert _StubWorker.dispatched == [{"cmd": "alarm_acknowledge", "alarm_name": "hot"}]
     panel._v2_poll_timer.stop()
 
 
 def test_v2_acknowledge_dispatches_zmq_command(app):
+    """CLICK the rendered ACK button in v2 table col 5 — verifies wiring."""
     panel = AlarmPanel()
     panel.update_v2_status({"ok": True, "active": {"cold": {"level": "CRITICAL"}}})
     panel.set_connected(True)
     _StubWorker.dispatched = []
-    panel._acknowledge_v2("cold")
+    # Click the rendered button in col 5 (not private _acknowledge_v2)
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton), "ACK button must be rendered in v2 col 5"
+    assert btn.isEnabled(), "Button must be enabled after set_connected(True)"
+    btn.click()
     assert _StubWorker.dispatched == [{"cmd": "alarm_v2_ack", "alarm_name": "cold"}]
     panel._v2_poll_timer.stop()
 
@@ -635,19 +783,35 @@ def test_v2_acknowledge_dispatches_zmq_command(app):
 
 
 def test_disconnect_keeps_v1_rows(app):
+    """Disconnect must keep rendered v1 table rows visible, ACK button disabled."""
     panel = AlarmPanel()
     panel._handle_reading(_alarm_reading("a", "CRITICAL", "activated"))
     panel.set_connected(True)
     panel.set_connected(False)
+    # Private dict preserved
     assert panel._alarms != {}
+    # Rendered table still has the row
+    assert panel._table.rowCount() == 1
+    # ACK button visible but disabled (fail-open: show stale data, no action)
+    btn = panel._table.cellWidget(0, 7)
+    assert isinstance(btn, QPushButton)
+    assert btn.isEnabled() is False
 
 
 def test_disconnect_keeps_v2_rows(app):
+    """Disconnect must keep rendered v2 table rows visible, ACK button disabled."""
     panel = AlarmPanel()
     panel.update_v2_status({"ok": True, "active": {"a": {"level": "CRITICAL"}}})
     panel.set_connected(True)
     panel.set_connected(False)
+    # Private dict preserved
     assert panel._v2_alarms != {}
+    # Rendered table still has the row
+    assert panel._v2_table.rowCount() == 1
+    # ACK button visible but disabled
+    btn = panel._v2_table.cellWidget(0, 5)
+    assert isinstance(btn, QPushButton)
+    assert btn.isEnabled() is False
 
 
 # ----------------------------------------------------------------------
