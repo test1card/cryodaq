@@ -1,6 +1,6 @@
 {
-  "mode": "find",
-  "find_next_batch": 31,
+  "mode": "done",
+  "find_next_batch": 35,
   "fix_next_batch": 22,
   "fix_max_batch_with_findings": 21,
   "verify_next_batch": 22,
@@ -10,5 +10,5 @@
   "started": "2026-06-22",
   "findings_total": 232,
   "batches_done": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
-  "note": "FIX pass DONE + VERIFY pass DONE (batches 0-21). mode=find: next optional phase is the Codex adversarial FIND pass over GUI batches 22-34 (find_next_batch=22), which needs Codex (usage-limited until ~6:14AM). ZMQ timeout CRITICAL + 10 deferred-ledger items held for architect/prod-fix worktree. Verify batches 19/20/21 reviewed inline (Codex limit)."
+  "note": "ENTIRE SWEEP COMPLETE (35 batches, 0-34). tier-0+1 (0-21): FIX + VERIFY done & committed (suite green 3246/0). tier-2 GUI (22-34): adversarial FIND done — 346 findings (1 CRIT alarm-panel NaN, 153 HIGH) documented in batch-NN-findings.md, feed a FUTURE fix pass; never fixed (FIND-only). 2 CRIT prod-gaps + all deferred-ledger items (11 total) held for architect / prod-fix worktree. No src/ ever touched; all local, nothing pushed."
 }

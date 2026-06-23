@@ -18,9 +18,14 @@ executor agents strengthening the found weak tests). State lives in
   2 real flakes caught (sub-µs `time.time` boundary; process-randomized `hash()`) + 1 safety-flake
   refix (p0 await_count race) + 1 bonus time-of-day bug. Deferred ledger grew to 10 items (all need
   src seams). Batches 19/20/21 reviewed INLINE (Codex usage-limited). VERIFY_LOG.md has the table.
-- **NEXT (optional, mode now `find`):** the Codex adversarial FIND pass over the never-swept GUI
-  batches 22-34 (`find_next_batch=22`) — needs Codex (usage-limited until ~6:14 AM). That feeds a
-  future fix pass. Nothing else outstanding in this worktree.
+- **GUI FIND pass:** ✅ **COMPLETE — batches 22-34 (13 batches, 1175 GUI tests) adversarially
+  reviewed.** 346 findings (1 CRIT, 153 HIGH, 132 MED, 60 LOW) in `batch-22..34-findings.md`,
+  rolled up in SUMMARY.md (T2 + ALL rows). FIND-only — **never fixed**; these feed a future GUI fix
+  pass. Dominant GUI anti-patterns: WIDGET-CONTRACT-WEAK (assert private attrs/handlers vs rendered
+  output), ACTION/SAFETY-CONTROL-WEAK (keithley source-control + preflight safety-gate tests call
+  private methods vs clicking → wiring unproven), MOCK-BYPASS, value-blind curve `getData()`/labels.
+- **ENTIRE SWEEP COMPLETE (35 batches, 0-34).** Nothing outstanding in this worktree. 2 CRIT prod-gaps
+  (ZMQ timeout item 1, alarm-panel NaN item 11) + the deferred ledger held for architect / prod-fix worktree.
 - **Committed (local, push held):** fix batches 0-5 `64590b0`, 6-10 `c548d34`, 11-15 `c805dcf`,
   16-20 `ee93591`, 21 `ad4a879`; verify 0-4 `28b2ef0`, 5-9 `eb15835`, 10-14 `8da5487`, 15-19
   `a37c9d2`, 20-21 = latest. **Nothing pushed.**
