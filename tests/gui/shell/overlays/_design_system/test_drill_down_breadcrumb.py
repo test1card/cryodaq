@@ -16,7 +16,7 @@ def app():
 
 
 def test_breadcrumb_back_requested_emitted(app):
-    breadcrumb = DrillDownBreadcrumb("\u0410\u0440\u0445\u0438\u0432")
+    breadcrumb = DrillDownBreadcrumb("Архив")
     received: list[bool] = []
     breadcrumb.back_requested.connect(lambda: received.append(True))
 
@@ -25,7 +25,7 @@ def test_breadcrumb_back_requested_emitted(app):
 
 
 def test_breadcrumb_close_requested_emitted(app):
-    breadcrumb = DrillDownBreadcrumb("\u0410\u0440\u0445\u0438\u0432")
+    breadcrumb = DrillDownBreadcrumb("Архив")
     received: list[bool] = []
     breadcrumb.close_requested.connect(lambda: received.append(True))
 
@@ -33,25 +33,34 @@ def test_breadcrumb_close_requested_emitted(app):
     assert received == [True]
 
 
+# LOW: assert _overlay_label.text() equals/elides the new name (not just tooltip)
 def test_breadcrumb_overlay_name_updates_display(app):
-    breadcrumb = DrillDownBreadcrumb("\u0410\u0440\u0445\u0438\u0432")
+    breadcrumb = DrillDownBreadcrumb("Архив")
     breadcrumb.resize(500, 32)
-    breadcrumb.set_overlay_name("\u041d\u043e\u0432\u043e\u0435 \u0438\u043c\u044f")
+    new_name = "Новое имя"
+    breadcrumb.set_overlay_name(new_name)
     app.processEvents()
 
-    assert (
-        "\u041d\u043e\u0432\u043e\u0435 \u0438\u043c\u044f" in breadcrumb._overlay_label.toolTip()
+    # tooltip must always be the full name
+    assert new_name in breadcrumb._overlay_label.toolTip(), (
+        f"Tooltip must contain full name {new_name!r}, "
+        f"got {breadcrumb._overlay_label.toolTip()!r}"
+    )
+    # _overlay_label.text() must equal or elide the new name
+    label_text = breadcrumb._overlay_label.text()
+    assert label_text, "_overlay_label.text() must not be empty after set_overlay_name"
+    # Either the full name fits, or an elided prefix is shown (ends with "…")
+    assert new_name.startswith(label_text.rstrip("…")) or label_text == new_name, (
+        f"_overlay_label.text() must equal or elide {new_name!r}, got {label_text!r}"
     )
 
 
 def test_breadcrumb_back_label_updates_button(app):
-    breadcrumb = DrillDownBreadcrumb("\u0410\u0440\u0445\u0438\u0432")
-    breadcrumb.set_back_label("\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430")
-    assert (
-        "\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430" in breadcrumb._back_button.text()
-    )
+    breadcrumb = DrillDownBreadcrumb("Архив")
+    breadcrumb.set_back_label("Аналитика")
+    assert "Аналитика" in breadcrumb._back_button.text()
 
 
 def test_breadcrumb_can_hide_close_button(app):
-    breadcrumb = DrillDownBreadcrumb("\u0410\u0440\u0445\u0438\u0432", show_close_button=False)
+    breadcrumb = DrillDownBreadcrumb("Архив", show_close_button=False)
     assert breadcrumb._close_button.isHidden()

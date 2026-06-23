@@ -15,3 +15,15 @@ def test_all_options_returns_five():
     assert len(opts) == 5
     assert opts[0] == TimeWindow.MIN_1
     assert opts[-1] == TimeWindow.ALL
+
+
+# LOW: assert full ordered list [MIN_1, HOUR_1, HOUR_6, HOUR_24, ALL]
+def test_all_options_full_ordered_list():
+    opts = TimeWindow.all_options()
+    assert opts == [
+        TimeWindow.MIN_1,
+        TimeWindow.HOUR_1,
+        TimeWindow.HOUR_6,
+        TimeWindow.HOUR_24,
+        TimeWindow.ALL,
+    ], f"Expected ordered [MIN_1, HOUR_1, HOUR_6, HOUR_24, ALL], got {opts!r}"
