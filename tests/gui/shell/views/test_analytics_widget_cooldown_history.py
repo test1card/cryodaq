@@ -195,16 +195,21 @@ def test_twenty_cooldowns_all_rendered(app):
     assert list(ys) == pytest.approx([float(i + 1) for i in range(20)]), (
         f"Y values wrong/reordered: {list(ys)}"
     )
-    # Representative X: first entry is 2026-04-01T10:30:00+00:00.
-    expected_x0 = _dt.fromisoformat("2026-04-01T10:30:00+00:00").timestamp()
-    assert xs[0] == pytest.approx(expected_x0), (
-        f"X[0] wrong: {xs[0]} != {expected_x0}"
+    # Full X series: every timestamp must match the parsed cooldown_started_at.
+    # A wrong date or reordered entry will fail here — count-only checks hide these.
+    expected_xs = [
+        _dt.fromisoformat(f"2026-04-{i + 1:02d}T10:30:00+00:00").timestamp()
+        for i in range(20)
+    ]
+    assert list(xs) == pytest.approx(expected_xs), (
+        f"X series wrong/reordered:\n  got:      {list(xs)}\n  expected: {expected_xs}"
     )
-    # Last entry is 2026-04-20T10:30:00+00:00.
-    expected_x19 = _dt.fromisoformat("2026-04-20T10:30:00+00:00").timestamp()
-    assert xs[19] == pytest.approx(expected_x19), (
-        f"X[19] wrong: {xs[19]} != {expected_x19}"
-    )
+    # Full point identity: zip Y and X to confirm pairing is also correct.
+    for idx, (x_got, y_got, x_exp, y_exp) in enumerate(
+        zip(xs, ys, expected_xs, [float(i + 1) for i in range(20)], strict=True)
+    ):
+        assert x_got == pytest.approx(x_exp), f"point {idx}: X mismatch {x_got} != {x_exp}"
+        assert y_got == pytest.approx(y_exp), f"point {idx}: Y mismatch {y_got} != {y_exp}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

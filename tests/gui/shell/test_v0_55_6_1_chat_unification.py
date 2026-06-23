@@ -47,13 +47,16 @@ def test_knowledge_base_in_main_overlay_items() -> None:
     assert seen == ["knowledge_base"], (
         f"tool_clicked emitted wrong key: {seen}"
     )
-    # Setting active must render ACCENT_400 in border-left stylesheet.
+    # Setting active must render the specific border-left declaration.
+    # Assert the exact declaration (not token-anywhere) so hover/bg colours
+    # cannot produce a false positive.
     from cryodaq.gui import theme
 
     rail.set_active("knowledge_base")
     ss = btn.styleSheet()
-    assert theme.ACCENT_400 in ss, (
-        f"Active knowledge_base button missing ACCENT_400: {ss!r}"
+    _active_border = f"border-left: 3px solid {theme.ACCENT_400}"
+    assert _active_border in ss, (
+        f"Active knowledge_base button missing border-left declaration: {ss!r}"
     )
     # Also verify the source list for completeness (existing contract).
     names = [name for name, _, _ in tool_rail._OVERLAY_ITEMS]

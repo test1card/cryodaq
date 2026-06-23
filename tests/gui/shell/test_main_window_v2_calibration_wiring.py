@@ -130,23 +130,44 @@ def test_k_reading_reaches_overlay():
         _stop_timers(w)
 
 
-def test_raw_reading_routes_through_to_acquisition_widget():
+def test_calibration_raw_reading_routing_contract():
+    """Two distinct contracts on one hosted panel (one MainWindowV2 — keeps
+    QThread churn at baseline):
+
+    (A) SHELL contract — CURRENT behavior: MainWindowV2._dispatch_reading forwards
+        only ``unit == "K"`` readings to calibration (main_window_v2.py:438), so a
+        raw / ``sensor_unit`` reading dispatched through the shell does NOT reach
+        the panel's live acquisition feed.
+    (B) PANEL contract: CalibrationPanel.on_reading, called directly with a raw
+        reading in acquisition mode, DOES render it in the live feed.
+
+    DEFERRED-CALIB-ROUTING (architect): CalibrationPanel.on_reading is documented
+    (calibration_panel.py:10) to route ``_raw`` / ``sensor_unit`` readings to the
+    live feed, yet the shell never forwards them — acquisition stats instead
+    arrive via the ``calibration_acquisition_status`` poll (_on_mode_result).
+    Whether the shell SHOULD also forward sensor_unit readings to populate the
+    live raw-pair feed during acquisition is an open Calibration-v2 data-flow
+    question for the architect, NOT auto-patched here. (A) pins current behavior
+    so a future intentional change is visible."""
+    from PySide6.QtCore import QCoreApplication
+
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("calibration")
-        # Transition to acquisition mode so the overlay's filter accepts.
         w._calibration_panel._on_mode_result({"ok": True, "active": True, "point_count": 0})
-        w._dispatch_reading(_raw_reading("Т1_raw", 1234.5))
-        from PySide6.QtCore import QCoreApplication
 
+        # (A) Shell forwards only unit=="K": a raw reading via the shell does not
+        #     reach the live feed.
+        w._dispatch_reading(_raw_reading("Т1_raw", 1234.5))
         QCoreApplication.processEvents()
-        # Shell routes by unit=="K" — sensor_unit readings don't go
-        # through _dispatch_reading's calibration branch. Call overlay
-        # directly to verify the filter path.
+        text_after_shell = w._calibration_panel._acquisition_widget._live_text.toPlainText()
+        assert "Т1_raw" not in text_after_shell
+
+        # (B) Panel-level: on_reading called directly with a raw reading renders it.
         w._calibration_panel.on_reading(_raw_reading("Т2_raw", 2345.6))
-        text = w._calibration_panel._acquisition_widget._live_text.toPlainText()
-        assert "Т2_raw" in text
+        text_after_panel = w._calibration_panel._acquisition_widget._live_text.toPlainText()
+        assert "Т2_raw" in text_after_panel
     finally:
         _stop_timers(w)
 

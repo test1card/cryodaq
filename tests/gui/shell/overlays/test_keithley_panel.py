@@ -12,6 +12,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+import cryodaq.gui.shell.overlays.keithley_panel as _kp_mod
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.keithley_panel import (
@@ -65,16 +66,87 @@ def _state_reading(key: str, state: str) -> Reading:
     return _reading(f"analytics/keithley_channel_state/{key}", 0.0, "", state=state)
 
 
-def _spy_dispatch(block: _SmuChannelBlock) -> list[dict]:
-    """Monkey-patch _dispatch_command on a block; return the collected calls list."""
-    calls: list[dict] = []
+class _CmdList(list):
+    """A list of captured cmd dicts that also tracks whether each worker was started.
 
-    def _capture(cmd: dict) -> None:
-        calls.append(cmd)
-        # Do NOT call original — no real ZMQ in tests.
+    Returned by _spy_dispatch(); behaves as list[dict] for assert purposes,
+    but also exposes ``workers`` for start()/finished verification.
+    """
 
-    block._dispatch_command = _capture  # type: ignore[method-assign]
-    return calls
+    def __init__(self) -> None:
+        super().__init__()
+        self.workers: list[_FakeWorker] = []
+
+
+class _FakeWorker:
+    """Minimal ZmqCommandWorker stand-in.
+
+    Captures ``cmd``, records that ``start()`` was called, and exposes a
+    ``finished`` attribute whose ``.connect()`` can be called (prod code
+    always calls ``worker.finished.connect(self._on_command_result)``).
+    A wrong cmd dict or a missing ``start()`` call will make the spy
+    assertion fail, proving the real ``_dispatch_command`` body ran.
+    """
+
+    class _Signal:
+        def connect(self, *args) -> None:  # noqa: ANN002
+            pass
+
+    def __init__(self, cmd: dict, parent=None) -> None:
+        self.cmd = cmd
+        self.parent_obj = parent
+        self.started = False
+        self.finished = _FakeWorker._Signal()
+
+    def start(self) -> None:
+        self.started = True
+
+
+# Module-level spy state: maps block → CmdList; one patch covers all blocks.
+_spy_by_block: dict[int, _CmdList] = {}
+_spy_original = None
+
+
+def _spy_dispatch(block: _SmuChannelBlock) -> _CmdList:
+    """Patch ZmqCommandWorker at module level so the real _dispatch_command body runs.
+
+    Multiple calls (e.g. for smua + smub in A+B tests) share one module patch —
+    workers are routed to per-block _CmdList by parent identity.
+
+    Returns a live _CmdList (subclass of list[dict]) that is populated when
+    ZmqCommandWorker is instantiated with ``parent=block``.
+    """
+    global _spy_original  # noqa: PLW0603
+
+    captured = _CmdList()
+    _spy_by_block[id(block)] = captured
+
+    if _spy_original is None:
+        # First installation: save the real class and install our interceptor.
+        _spy_original = _kp_mod.ZmqCommandWorker
+
+        def _fake_cls(cmd: dict, parent=None) -> _FakeWorker:  # type: ignore[return-value]
+            w = _FakeWorker(cmd, parent=parent)
+            # Route to the correct per-block capture list by parent identity.
+            target = _spy_by_block.get(id(parent))
+            if target is not None:
+                target.workers.append(w)
+                target.append(cmd)
+            return w
+
+        _kp_mod.ZmqCommandWorker = _fake_cls  # type: ignore[assignment]
+
+    return captured
+
+
+def _restore_spy(block: _SmuChannelBlock) -> None:
+    """Remove block from the spy registry; restore the module when all blocks done."""
+    global _spy_original  # noqa: PLW0603
+
+    _spy_by_block.pop(id(block), None)
+    if not _spy_by_block and _spy_original is not None:
+        _kp_mod.ZmqCommandWorker = _spy_original
+        _spy_original = None
 
 
 # ----------------------------------------------------------------------
@@ -176,14 +248,18 @@ def test_start_click_emits_signal_with_default_spin_values(app):
     seen: list[tuple[str, float, float, float]] = []
     panel.channel_start_requested.connect(lambda k, p, v, i: seen.append((k, p, v, i)))
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._start_btn.click()
 
-    panel._smua_block._start_btn.click()
-
-    assert seen == [("smua", 0.5, 40.0, 1.0)]
-    # SAFETY: exact ZMQ command dict must match.
-    assert dispatched == [
-        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
-    ]
+        assert seen == [("smua", 0.5, 40.0, 1.0)]
+        # SAFETY: exact ZMQ command dict must match.
+        assert dispatched == [
+            {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+        ]
+        # SAFETY: ZmqCommandWorker.start() must have been called (worker actually launched).
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_start_click_reflects_user_adjusted_spins(app):
@@ -195,14 +271,17 @@ def test_start_click_reflects_user_adjusted_spins(app):
     seen: list[tuple[str, float, float, float]] = []
     panel.channel_start_requested.connect(lambda k, p, v, i: seen.append((k, p, v, i)))
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._start_btn.click()
 
-    panel._smua_block._start_btn.click()
-
-    assert seen == [("smua", 1.234, 50.0, 0.5)]
-    # SAFETY: exact ZMQ command dict must match adjusted spin values.
-    assert dispatched == [
-        {"cmd": "keithley_start", "channel": "smua", "p_target": 1.234, "v_comp": 50.0, "i_comp": 0.5}
-    ]
+        assert seen == [("smua", 1.234, 50.0, 0.5)]
+        # SAFETY: exact ZMQ command dict must match adjusted spin values.
+        assert dispatched == [
+            {"cmd": "keithley_start", "channel": "smua", "p_target": 1.234, "v_comp": 50.0, "i_comp": 0.5}
+        ]
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_stop_click_emits_channel_signal(app):
@@ -212,12 +291,15 @@ def test_stop_click_emits_channel_signal(app):
     seen: list[str] = []
     panel.channel_stop_requested.connect(seen.append)
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._stop_btn.click()
 
-    panel._smua_block._stop_btn.click()
-
-    assert seen == ["smua"]
-    # SAFETY: exact stop command.
-    assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
+        assert seen == ["smua"]
+        # SAFETY: exact stop command.
+        assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_emergency_requires_warning_confirmation(app, monkeypatch):
@@ -226,16 +308,19 @@ def test_emergency_requires_warning_confirmation(app, monkeypatch):
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        # RULE-INTER-004: destructive action uses QMessageBox.warning (not .question).
+        monkeypatch.setattr(
+            QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
+        )
+        panel._smua_block._emergency_btn.click()
 
-    # RULE-INTER-004: destructive action uses QMessageBox.warning (not .question).
-    monkeypatch.setattr(
-        QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
-    )
-    panel._smua_block._emergency_btn.click()
-
-    assert seen == ["smua"]
-    # SAFETY: exact emergency command dispatched.
-    assert dispatched == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
+        assert seen == ["smua"]
+        # SAFETY: exact emergency command dispatched.
+        assert dispatched == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_emergency_cancel_suppresses_signal(app, monkeypatch):
@@ -244,17 +329,20 @@ def test_emergency_cancel_suppresses_signal(app, monkeypatch):
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Cancel),
+        )
+        panel._smua_block._emergency_btn.click()
 
-    monkeypatch.setattr(
-        QMessageBox,
-        "warning",
-        staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Cancel),
-    )
-    panel._smua_block._emergency_btn.click()
-
-    assert seen == []
-    # SAFETY: Cancel must produce NO dispatched command — not just no signal.
-    assert dispatched == []
+        assert seen == []
+        # SAFETY: Cancel must produce NO dispatched command — not just no signal.
+        assert dispatched == []
+        assert dispatched.workers == [], "no worker should be created on cancel"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 # ----------------------------------------------------------------------
@@ -330,19 +418,22 @@ def test_p_spin_debounces_to_single_signal_when_on(app):
     seen: list[tuple[str, float]] = []
     panel.channel_target_updated.connect(lambda k, p: seen.append((k, p)))
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        # Rapid-fire spin changes — debounce should collapse to one command.
+        panel._smua_block._p_spin.setValue(0.6)
+        panel._smua_block._p_spin.setValue(0.7)
+        panel._smua_block._p_spin.setValue(0.8)
 
-    # Rapid-fire spin changes — debounce should collapse to one command.
-    panel._smua_block._p_spin.setValue(0.6)
-    panel._smua_block._p_spin.setValue(0.7)
-    panel._smua_block._p_spin.setValue(0.8)
+        # Fire debounce timer immediately (deterministic, no fixed sleep).
+        panel._smua_block._p_debounce.stop()
+        panel._smua_block._send_p_target()
 
-    # Fire debounce timer immediately (deterministic, no fixed sleep).
-    panel._smua_block._p_debounce.stop()
-    panel._smua_block._send_p_target()
-
-    assert seen == [("smua", 0.8)]
-    # SAFETY: exact set_target command with final spin value.
-    assert dispatched == [{"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.8}]
+        assert seen == [("smua", 0.8)]
+        # SAFETY: exact set_target command with final spin value.
+        assert dispatched == [{"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.8}]
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_limits_spin_debounces_to_single_signal_when_on(app):
@@ -352,19 +443,22 @@ def test_limits_spin_debounces_to_single_signal_when_on(app):
     seen: list[tuple[str, float, float]] = []
     panel.channel_limits_updated.connect(lambda k, v, i: seen.append((k, v, i)))
     dispatched = _spy_dispatch(panel._smub_block)
+    try:
+        panel._smub_block._v_spin.setValue(42.0)
+        panel._smub_block._i_spin.setValue(0.75)
 
-    panel._smub_block._v_spin.setValue(42.0)
-    panel._smub_block._i_spin.setValue(0.75)
+        # Fire debounce timer immediately (deterministic).
+        panel._smub_block._limits_debounce.stop()
+        panel._smub_block._send_limits()
 
-    # Fire debounce timer immediately (deterministic).
-    panel._smub_block._limits_debounce.stop()
-    panel._smub_block._send_limits()
-
-    assert seen == [("smub", 42.0, 0.75)]
-    # SAFETY: exact set_limits command with final spin values.
-    assert dispatched == [
-        {"cmd": "keithley_set_limits", "channel": "smub", "v_comp": 42.0, "i_comp": 0.75}
-    ]
+        assert seen == [("smub", 42.0, 0.75)]
+        # SAFETY: exact set_limits command with final spin values.
+        assert dispatched == [
+            {"cmd": "keithley_set_limits", "channel": "smub", "v_comp": 42.0, "i_comp": 0.75}
+        ]
+        assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smub_block)
 
 
 def test_p_spin_suppressed_when_channel_off(app):
@@ -374,15 +468,18 @@ def test_p_spin_suppressed_when_channel_off(app):
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._p_spin.setValue(0.75)
+        # Try to fire the debounce path — should be suppressed by state guard.
+        panel._smua_block._p_debounce.stop()
+        panel._smua_block._send_p_target()
 
-    panel._smua_block._p_spin.setValue(0.75)
-    # Try to fire the debounce path — should be suppressed by state guard.
-    panel._smua_block._p_debounce.stop()
-    panel._smua_block._send_p_target()
-
-    assert seen == []
-    # SAFETY: no command dispatched when channel is off.
-    assert dispatched == []
+        assert seen == []
+        # SAFETY: no command dispatched when channel is off.
+        assert dispatched == []
+        assert dispatched.workers == []
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_p_spin_suppressed_when_channel_fault(app):
@@ -392,14 +489,17 @@ def test_p_spin_suppressed_when_channel_fault(app):
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
     dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._p_spin.setValue(0.9)
+        panel._smua_block._p_debounce.stop()
+        panel._smua_block._send_p_target()
 
-    panel._smua_block._p_spin.setValue(0.9)
-    panel._smua_block._p_debounce.stop()
-    panel._smua_block._send_p_target()
-
-    assert seen == []
-    # SAFETY: no command dispatched when channel is in fault state.
-    assert dispatched == []
+        assert seen == []
+        # SAFETY: no command dispatched when channel is in fault state.
+        assert dispatched == []
+        assert dispatched.workers == []
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 # ----------------------------------------------------------------------
@@ -414,19 +514,24 @@ def test_start_ab_emits_panel_signal_and_shows_banner(app):
     panel.both_channels_start_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
     dispatched_a = _spy_dispatch(panel._smua_block)
     dispatched_b = _spy_dispatch(panel._smub_block)
+    try:
+        panel._start_both_btn.click()
 
-    panel._start_both_btn.click()
-
-    assert count["n"] == 1
-    assert not panel._banner_label.isHidden()
-    # SAFETY: both per-channel start commands dispatched with exact payloads.
-    # Default spins: p=0.5, v=40.0, i=1.0
-    assert dispatched_a == [
-        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
-    ]
-    assert dispatched_b == [
-        {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
-    ]
+        assert count["n"] == 1
+        assert not panel._banner_label.isHidden()
+        # SAFETY: both per-channel start commands dispatched with exact payloads.
+        # Default spins: p=0.5, v=40.0, i=1.0
+        assert dispatched_a == [
+            {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+        ]
+        assert dispatched_b == [
+            {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+        ]
+        assert all(w.started for w in dispatched_a.workers), "smua worker not started"
+        assert all(w.started for w in dispatched_b.workers), "smub worker not started"
+    finally:
+        _restore_spy(panel._smua_block)
+        _restore_spy(panel._smub_block)
 
 
 def test_stop_ab_emits_panel_signal(app):
@@ -438,13 +543,18 @@ def test_stop_ab_emits_panel_signal(app):
     panel.both_channels_stop_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
     dispatched_a = _spy_dispatch(panel._smua_block)
     dispatched_b = _spy_dispatch(panel._smub_block)
+    try:
+        panel._stop_both_btn.click()
 
-    panel._stop_both_btn.click()
-
-    assert count["n"] == 1
-    # SAFETY: both per-channel stop commands dispatched.
-    assert dispatched_a == [{"cmd": "keithley_stop", "channel": "smua"}]
-    assert dispatched_b == [{"cmd": "keithley_stop", "channel": "smub"}]
+        assert count["n"] == 1
+        # SAFETY: both per-channel stop commands dispatched.
+        assert dispatched_a == [{"cmd": "keithley_stop", "channel": "smua"}]
+        assert dispatched_b == [{"cmd": "keithley_stop", "channel": "smub"}]
+        assert all(w.started for w in dispatched_a.workers), "smua worker not started"
+        assert all(w.started for w in dispatched_b.workers), "smub worker not started"
+    finally:
+        _restore_spy(panel._smua_block)
+        _restore_spy(panel._smub_block)
 
 
 def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
@@ -464,17 +574,22 @@ def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
     panel.channel_emergency_requested.connect(lambda k: emits["per_channel"].append(k))
     dispatched_a = _spy_dispatch(panel._smua_block)
     dispatched_b = _spy_dispatch(panel._smub_block)
+    try:
+        panel._emergency_both_btn.click()
 
-    panel._emergency_both_btn.click()
-
-    # Exactly one panel-level confirmation dialog.
-    assert calls["dialog"] == 1
-    assert emits["panel"] == 1
-    # Per-channel signals fire too so shell can dispatch per-channel commands.
-    assert sorted(emits["per_channel"]) == ["smua", "smub"]
-    # SAFETY: both per-channel emergency commands dispatched.
-    assert dispatched_a == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
-    assert dispatched_b == [{"cmd": "keithley_emergency_off", "channel": "smub"}]
+        # Exactly one panel-level confirmation dialog.
+        assert calls["dialog"] == 1
+        assert emits["panel"] == 1
+        # Per-channel signals fire too so shell can dispatch per-channel commands.
+        assert sorted(emits["per_channel"]) == ["smua", "smub"]
+        # SAFETY: both per-channel emergency commands dispatched.
+        assert dispatched_a == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
+        assert dispatched_b == [{"cmd": "keithley_emergency_off", "channel": "smub"}]
+        assert all(w.started for w in dispatched_a.workers), "smua emergency worker not started"
+        assert all(w.started for w in dispatched_b.workers), "smub emergency worker not started"
+    finally:
+        _restore_spy(panel._smua_block)
+        _restore_spy(panel._smub_block)
 
 
 # ----------------------------------------------------------------------
@@ -487,15 +602,20 @@ def test_teeth_wrong_channel_fails(app):
     panel = KeithleyPanel()
     panel.set_connected(True)
     dispatched = _spy_dispatch(panel._smua_block)
-    panel._smua_block._start_btn.click()
-    # A wrong channel "smub" in the start command must NOT match.
-    assert dispatched != [
-        {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
-    ]
-    # And the correct one does match.
-    assert dispatched == [
-        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
-    ]
+    try:
+        panel._smua_block._start_btn.click()
+        # A wrong channel "smub" in the start command must NOT match.
+        assert dispatched != [
+            {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+        ]
+        # And the correct one does match.
+        assert dispatched == [
+            {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+        ]
+        # Worker must have been started — proves real _dispatch_command ran.
+        assert dispatched.workers and dispatched.workers[0].started
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 def test_teeth_wrong_cmd_name_fails(app, monkeypatch):
@@ -504,11 +624,15 @@ def test_teeth_wrong_cmd_name_fails(app, monkeypatch):
     panel.set_connected(True)
     panel._smua_block.apply_state("on")
     dispatched = _spy_dispatch(panel._smua_block)
-    panel._smua_block._stop_btn.click()
-    # Wrong cmd name must NOT match.
-    assert dispatched != [{"cmd": "keithley_start", "channel": "smua"}]
-    # Correct one matches.
-    assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
+    try:
+        panel._smua_block._stop_btn.click()
+        # Wrong cmd name must NOT match.
+        assert dispatched != [{"cmd": "keithley_start", "channel": "smua"}]
+        # Correct one matches.
+        assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
+        assert dispatched.workers and dispatched.workers[0].started
+    finally:
+        _restore_spy(panel._smua_block)
 
 
 # ----------------------------------------------------------------------

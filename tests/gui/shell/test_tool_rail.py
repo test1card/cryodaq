@@ -56,29 +56,31 @@ def test_buttons_emit_tool_clicked_with_name() -> None:
 
 
 def test_set_active_marks_one_button() -> None:
-    # HIGH: assert rendered border-left/active-icon-color QSS, not private _active.
-    # _apply_style() sets border-left to ACCENT_400 when active, transparent when not.
-    # _refresh_icon() uses ACCENT_400 color when active.
+    # HIGH: assert the specific border-left declaration set by _apply_style(),
+    # not just token-anywhere presence which would pass if ACCENT_400 appeared
+    # in a hover color or background instead.
+    _active_border = f"border-left: 3px solid {theme.ACCENT_400}"
+    _inactive_border = "border-left: 3px solid transparent"
+
     _app()
     rail = ToolRail()
     rail.set_active("source")
-    # Active button: border-left must contain ACCENT_400.
     source_ss = rail._buttons["source"].styleSheet()
     home_ss = rail._buttons["home"].styleSheet()
-    assert theme.ACCENT_400 in source_ss, (
-        f"Active button 'source' missing ACCENT_400 in border-left: {source_ss!r}"
+    assert _active_border in source_ss, (
+        f"Active button 'source' missing active border-left declaration: {source_ss!r}"
     )
-    assert theme.ACCENT_400 not in home_ss, (
-        f"Inactive button 'home' must not have ACCENT_400: {home_ss!r}"
+    assert _inactive_border in home_ss, (
+        f"Inactive button 'home' must have transparent border-left: {home_ss!r}"
     )
     rail.set_active("home")
     source_ss2 = rail._buttons["source"].styleSheet()
     home_ss2 = rail._buttons["home"].styleSheet()
-    assert theme.ACCENT_400 in home_ss2, (
-        f"Active button 'home' missing ACCENT_400: {home_ss2!r}"
+    assert _active_border in home_ss2, (
+        f"Active button 'home' missing active border-left declaration: {home_ss2!r}"
     )
-    assert theme.ACCENT_400 not in source_ss2, (
-        f"Inactive button 'source' must not have ACCENT_400: {source_ss2!r}"
+    assert _inactive_border in source_ss2, (
+        f"Inactive button 'source' must have transparent border-left: {source_ss2!r}"
     )
 
 

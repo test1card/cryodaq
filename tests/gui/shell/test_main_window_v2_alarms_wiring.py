@@ -87,8 +87,11 @@ def test_tick_sets_alarm_connected_true_when_recent():
     """Freeze monotonic clock so 'recent' is deterministic.
 
     Assert rendered effect: ACK buttons enabled (connection gate open).
+    Injects a real v1 alarm first so the button list is non-empty.
     """
     import unittest.mock as mock
+
+    from PySide6.QtCore import QCoreApplication
 
     _app()
     w = MainWindowV2()
@@ -97,18 +100,18 @@ def test_tick_sets_alarm_connected_true_when_recent():
         w._last_reading_time = frozen
         with mock.patch("time.monotonic", return_value=frozen + 0.5):
             w._tick_status()
-        # Rendered gating: all ACK buttons must be enabled when connected.
         assert w._alarm_panel._connected is True
-        # Inject an alarm so ACK buttons exist, then verify enablement.
-        from PySide6.QtCore import QCoreApplication
 
-
+        # Inject a live v1 alarm so _v1_ack_buttons is non-empty.
         panel: AlarmPanel = w._alarm_panel
         panel.set_connected(True)
-        # Verify via _apply_ack_enabled side-effect: no buttons disabled.
-        for btn in list(panel._v1_ack_buttons) + list(panel._v2_ack_buttons):
-            assert btn.isEnabled(), "ACK button should be enabled when connected"
+        panel._handle_reading(_alarm_reading("test_alarm_conn_true"))
         QCoreApplication.processEvents()
+
+        v1_btns = panel._v1_ack_buttons
+        assert len(v1_btns) > 0, "v1 ACK button list is empty after injecting alarm"
+        for btn in v1_btns:
+            assert btn.isEnabled(), "ACK button should be enabled when connected"
     finally:
         _stop_timers(w)
 
@@ -117,26 +120,34 @@ def test_tick_sets_alarm_connected_false_when_stale():
     """Freeze monotonic clock so 'stale' is deterministic (10 s gap).
 
     Assert rendered effect: ACK buttons disabled (connection gate closed).
+    Injects a real v1 alarm first so the button list is non-empty.
     """
     import unittest.mock as mock
+
+    from PySide6.QtCore import QCoreApplication
 
     _app()
     w = MainWindowV2()
     try:
         frozen = 100_000.0
+        # First inject alarm while connected so ACK buttons are created.
+        panel: AlarmPanel = w._alarm_panel
+        panel.set_connected(True)
+        panel._handle_reading(_alarm_reading("test_alarm_conn_false"))
+        QCoreApplication.processEvents()
+
+        v1_btns = panel._v1_ack_buttons
+        assert len(v1_btns) > 0, "v1 ACK button list is empty after injecting alarm"
+
+        # Now simulate stale reading → set_connected(False).
         w._last_reading_time = frozen - 10.0
         with mock.patch("time.monotonic", return_value=frozen):
             w._tick_status()
         assert w._alarm_panel._connected is False
-        from PySide6.QtCore import QCoreApplication
-
-
-        panel: AlarmPanel = w._alarm_panel
-        panel.set_connected(False)
-        # Verify via _apply_ack_enabled: all ACK buttons disabled.
-        for btn in list(panel._v1_ack_buttons) + list(panel._v2_ack_buttons):
-            assert not btn.isEnabled(), "ACK button should be disabled when disconnected"
         QCoreApplication.processEvents()
+
+        for btn in v1_btns:
+            assert not btn.isEnabled(), "ACK button should be disabled when disconnected"
     finally:
         _stop_timers(w)
 

@@ -112,6 +112,8 @@ def test_on_reading_stores_under_short_id() -> None:
 def test_experiment_click_emits_signal() -> None:
     # MED: use QTest.mouseClick on the real _ClickableLabel to exercise
     # mousePressEvent path, not emit private clicked directly.
+    # bar.show() is required: QTest.mouseClick only delivers events to
+    # visible/enabled widgets; without show() the click is silently dropped.
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
@@ -121,15 +123,21 @@ def test_experiment_click_emits_signal() -> None:
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
     bar._stale_timer.stop()
+    bar.show()
+    assert bar._exp_label.isVisible(), "_exp_label must be visible before click"
+    assert bar._exp_label.isEnabled(), "_exp_label must be enabled before click"
     fired = []
     bar.experiment_clicked.connect(lambda: fired.append(True))
     QTest.mouseClick(bar._exp_label, Qt.MouseButton.LeftButton)
     assert fired == [True]
+    bar.hide()
 
 
 def test_alarms_click_emits_signal() -> None:
     # MED: use QTest.mouseClick on the real _ClickableLabel to exercise
     # mousePressEvent path, not emit private clicked directly.
+    # bar.show() is required: QTest.mouseClick only delivers events to
+    # visible/enabled widgets; without show() the click is silently dropped.
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
@@ -139,10 +147,14 @@ def test_alarms_click_emits_signal() -> None:
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
     bar._stale_timer.stop()
+    bar.show()
+    assert bar._alarms_label.isVisible(), "_alarms_label must be visible before click"
+    assert bar._alarms_label.isEnabled(), "_alarms_label must be enabled before click"
     fired = []
     bar.alarms_clicked.connect(lambda: fired.append(True))
     QTest.mouseClick(bar._alarms_label, Qt.MouseButton.LeftButton)
     assert fired == [True]
+    bar.hide()
 
 
 def test_set_alarm_count_updates_label() -> None:

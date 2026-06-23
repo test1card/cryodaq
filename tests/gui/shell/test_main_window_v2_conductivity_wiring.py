@@ -95,25 +95,50 @@ def test_temperature_reading_reaches_overlay():
     w = MainWindowV2()
     try:
         w._ensure_overlay("conductivity")
-        # Inject a visible T channel so the overlay accepts it.
         from PySide6.QtCore import QCoreApplication
         from PySide6.QtWidgets import QCheckBox
 
-        cb = QCheckBox("Т1")
-        w._conductivity_panel._checkboxes["Т1"] = cb
-        # v0.55.2 A3: chain checkboxes live in a QGridLayout (2-col compact);
-        # drop the Т1 stub into the top-left cell.
-        w._conductivity_panel._ch_layout.addWidget(cb, 0, 0)
-        cb.stateChanged.connect(lambda state: w._conductivity_panel._on_check("Т1", state))
-        cb.setChecked(True)
-        # Dispatch the reading through the shell — it should reach the overlay.
-        w._dispatch_reading(_temp_reading("Т1", 77.3))
+        panel = w._conductivity_panel
+
+        # Inject two visible channels so _chain has ≥2 elements and _update_table
+        # actually produces at least one data row with t_hot / t_cold cells.
+        for col, ch in enumerate(("Т1", "Т2")):
+            cb = QCheckBox(ch)
+            panel._checkboxes[ch] = cb
+            panel._ch_layout.addWidget(cb, 0, col)
+            cb.stateChanged.connect(
+                lambda state, _ch=ch: panel._on_check(_ch, state)
+            )
+            cb.setChecked(True)
+
         QCoreApplication.processEvents()
-        # Assert stored value (feeds R/G table on next _refresh tick).
-        assert w._conductivity_panel._temps.get("Т1") == 77.3
-        # Invoke the rendering path explicitly to confirm the stored value
-        # propagates without error into the live display.
-        w._conductivity_panel._refresh()
+
+        # Dispatch both readings through the shell.
+        w._dispatch_reading(_temp_reading("Т1", 77.3))
+        w._dispatch_reading(_temp_reading("Т2", 4.2))
+        QCoreApplication.processEvents()
+
+        # Assert stored values (feeds table on next _refresh tick).
+        assert panel._temps.get("Т1") == 77.3
+        assert panel._temps.get("Т2") == 4.2
+
+        # Call _refresh() to drive _update_table and verify rendered cells.
+        panel._refresh()
+        QCoreApplication.processEvents()
+
+        table = panel._table
+        assert table.rowCount() >= 1, "_refresh() produced no table rows"
+        # Column 1 = t_hot formatted as .4f, column 2 = t_cold formatted as .4f.
+        t_hot_item = table.item(0, 1)
+        t_cold_item = table.item(0, 2)
+        assert t_hot_item is not None, "t_hot cell (col 1) is None after _refresh()"
+        assert t_cold_item is not None, "t_cold cell (col 2) is None after _refresh()"
+        assert t_hot_item.text() == f"{77.3:.4f}", (
+            f"t_hot cell text wrong: {t_hot_item.text()!r}"
+        )
+        assert t_cold_item.text() == f"{4.2:.4f}", (
+            f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        )
     finally:
         _stop_timers(w)
 

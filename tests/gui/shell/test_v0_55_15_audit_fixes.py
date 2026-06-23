@@ -245,42 +245,75 @@ def test_multiline_channel_state_window_tracks_min_max() -> None:
 
 
 def test_chat_panel_worker_list_does_not_grow_unbounded(qapp) -> None:
-    """v0.55.15 (Codex audit SCOPE 5 finding 5.4) — simulate many
-    completed queries; the workers list must shrink as senders fire
-    finished signals, instead of accumulating QThread refs forever.
-    HIGH: instantiate the REAL AssistantChatPanel, patch worker/sender
-    minimally, call _on_response(), assert workers/inflight/busy state.
+    """v0.55.15 (Codex audit SCOPE 5 finding 5.4) — call the real send_query()
+    with a QObject-based fake worker so the Qt signal system delivers the
+    finished signal and self.sender() returns the actual fake instance.
+
+    This exercises the real _on_response() cleanup branch (isinstance check,
+    _workers.remove, deleteLater) without spawning real ZMQ threads.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
     from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-    # Instantiate the real widget (QApplication is available via qapp fixture).
-    # Patch ZmqCommandWorker at module level so construction doesn't spin up ZMQ.
-    with patch(
-        "cryodaq.gui.shell.overlays._assistant_chat_widget.ZmqCommandWorker"
-    ) as MockWorkerCls:
-        MockWorkerCls.return_value = MagicMock(spec=ZmqCommandWorker)
-        panel = AssistantChatPanel()
+    delete_later_calls: list[object] = []
 
-    # Simulate three completed queries: append a fake worker, then let
-    # _on_response() clean it up via self.sender().
-    for _i in range(3):
-        worker = MagicMock(spec=ZmqCommandWorker)
-        worker.wait = MagicMock()
-        worker.deleteLater = MagicMock()
-        panel._workers.append(worker)
-        panel._inflight = worker
+    class _FakeWorker(ZmqCommandWorker):
+        """Real ZmqCommandWorker subclass: isinstance check passes, signal system works.
 
-        # Patch self.sender() to return this worker, then call the real method.
-        with patch.object(panel, "sender", return_value=worker):
-            panel._on_response({"ok": True, "response": "test reply"})
+        Overrides run() to prevent actual ZMQ calls, and start() to avoid
+        spawning a real QThread (which would call run() asynchronously).
+        """
 
-    # After three completed rounds, list must be empty and panel not busy.
-    assert panel._workers == [], (
-        f"Worker list not cleaned up: {panel._workers}"
+        def __init__(self, cmd: dict, parent=None) -> None:  # noqa: ANN001
+            super().__init__(cmd, parent=parent)  # calls QThread.__init__ properly
+
+        def run(self) -> None:  # type: ignore[override]
+            pass  # do NOT call ZMQ
+
+        def start(self) -> None:  # type: ignore[override]
+            pass  # do not spawn a thread
+
+        def wait(self, msecs: int = -1) -> bool:  # type: ignore[override]
+            return True
+
+        def deleteLater(self) -> None:  # type: ignore[override]
+            delete_later_calls.append(self)
+            super().deleteLater()
+
+    created_workers: list[_FakeWorker] = []
+
+    def _fake_worker_cls(cmd: dict, parent=None) -> _FakeWorker:
+        w = _FakeWorker(cmd, parent=parent)
+        created_workers.append(w)
+        return w
+
+    panel = AssistantChatPanel()
+
+    # Run three query→response cycles using the real send_query() path.
+    for i in range(3):
+        with patch(
+            "cryodaq.gui.shell.overlays._assistant_chat_widget.ZmqCommandWorker",
+            side_effect=_fake_worker_cls,
+        ):
+            panel.send_query(f"question {i}")
+
+        # Exactly one worker should have been created and inflight.
+        assert panel._inflight is created_workers[-1]
+        assert len(panel._workers) == 1
+
+        # Emit finished from the fake worker — Qt delivers to _on_response,
+        # and self.sender() returns the real _FakeWorker instance.
+        created_workers[-1].finished.emit({"ok": True, "response": f"reply {i}"})
+        QCoreApplication.processEvents()
+
+        # After each response: list cleared, inflight cleared, input re-enabled.
+        assert panel._workers == [], f"cycle {i}: _workers not emptied"
+        assert panel._inflight is None, f"cycle {i}: _inflight not cleared"
+        assert panel._input.isEnabled(), f"cycle {i}: input still disabled"
+
+    # deleteLater() called once per completed worker (3 total).
+    assert len(delete_later_calls) == 3, (
+        f"deleteLater() called {len(delete_later_calls)} times, expected 3"
     )
-    assert panel._inflight is None
-    # set_busy(False) re-enables the input — verify widget is not stuck busy.
-    assert panel._input.isEnabled()

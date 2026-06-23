@@ -252,9 +252,11 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
 
         monkeypatch.setattr(_kp_mod, "ZmqCommandWorker", _FakeWorker)
 
-        # Trigger Start click — this goes through _on_start_clicked →
-        # _dispatch_command with the exact command dict.
-        block._on_start_clicked()
+        # Click the REAL Start button (enabled by connected + safety-ready) so
+        # the rendered clicked → _on_start_clicked → _dispatch_command wiring is
+        # exercised end-to-end, not a private handler call.
+        assert block._start_btn.isEnabled(), "Start must be enabled when connected + safety-ready"
+        block._start_btn.click()
 
         assert len(captured_cmds) == 1, "exactly one command must be dispatched"
         cmd = captured_cmds[0]
@@ -263,5 +265,19 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
         assert abs(cmd["p_target"] - 0.050) < 1e-9
         assert abs(cmd["v_comp"] - 10.0) < 1e-9
         assert abs(cmd["i_comp"] - 0.005) < 1e-9
+
+        # Drive Stop on the SAME hosted panel (no second MainWindowV2 — keeps the
+        # test's QThread churn at baseline). Put the channel in the running state
+        # so Stop becomes enabled, click the real Stop button, assert keithley_stop.
+        captured_cmds.clear()
+        block._channel_state = "on"
+        block._update_control_enablement()
+        assert block._stop_btn.isEnabled(), "Stop must be enabled when channel is running"
+        block._stop_btn.click()
+
+        assert len(captured_cmds) == 1, "exactly one stop command must be dispatched"
+        stop_cmd = captured_cmds[0]
+        assert stop_cmd["cmd"] == "keithley_stop"
+        assert stop_cmd["channel"] == "smua"
     finally:
         _stop_timers(w)
