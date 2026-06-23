@@ -148,7 +148,7 @@ def test_header_date_formatted(app):
 
 
 def test_duration_computed_for_completed_experiment(app):
-    """8-hour experiment must show '8.0 ч'."""
+    """8-hour experiment must show exactly '8.0 ч'."""
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
@@ -158,7 +158,7 @@ def test_duration_computed_for_completed_experiment(app):
                 end_time="2026-04-15T18:00:00+00:00",
             )
         )
-    assert "8.0" in w._duration_label.text()
+    assert w._duration_label.text() == "8.0 ч"
 
 
 def test_duration_in_progress_when_no_end_time(app):
@@ -174,7 +174,7 @@ def test_duration_in_progress_when_no_end_time(app):
 
 
 def test_phases_rendered_in_label(app):
-    """Phase list with valid start/end times must appear in phases label."""
+    """Phase list with valid start/end times must render exact label text."""
     w = _make_widget()
     phases = [
         {
@@ -186,8 +186,7 @@ def test_phases_rendered_in_label(app):
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(phases=phases))
-    assert "cooldown" in w._phases_label.text()
-    assert "6.0" in w._phases_label.text()
+    assert w._phases_label.text() == "cooldown: 6.0 ч"
 
 
 def test_empty_phases_renders_dash(app):
@@ -212,10 +211,16 @@ def test_alarm_fetch_triggered_with_start_ts(app):
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(start_time="2026-04-15T10:00:00+00:00"))
 
-    # First call is alarm_v2_history, second is readings_history (F19 sub-item 1)
-    assert mock_cls.call_count == 2
-    alarm_cmd = mock_cls.call_args_list[0][0][0]
-    assert alarm_cmd["cmd"] == "alarm_v2_history"
+    # F19 issues 2 workers (alarm_v2_history + readings_history). Select the
+    # alarm_v2_history call by name so the assert is independent of dispatch
+    # order / any added ancillary fetch — only that exactly one is issued.
+    alarm_cmds = [
+        c.args[0]
+        for c in mock_cls.call_args_list
+        if c.args and c.args[0].get("cmd") == "alarm_v2_history"
+    ]
+    assert len(alarm_cmds) == 1
+    alarm_cmd = alarm_cmds[0]
     assert "start_ts" in alarm_cmd
     assert alarm_cmd["start_ts"] == pytest.approx(
         datetime(2026, 4, 15, 10, 0, 0, tzinfo=UTC).timestamp(), abs=1
@@ -239,14 +244,14 @@ def test_alarm_fetch_worker_has_parent(app):
 
 
 def test_alarm_count_zero_alarms(app):
-    """Empty history must render '0 (0 пред. / 0 крит.)'."""
+    """Empty history must render exactly '0 (0 пред. / 0 крит.)'."""
     w = _make_widget()
     w._on_alarms_loaded({"ok": True, "history": []})
-    assert "0" in w._alarm_label.text()
+    assert w._alarm_label.text() == "0 (0 пред. / 0 крит.)"
 
 
 def test_alarm_count_with_warnings_and_criticals(app):
-    """2 warnings + 1 critical must show '3 (2 пред. / 1 крит.)'."""
+    """2 warnings + 1 critical must show exactly '3 (2 пред. / 1 крит.)'."""
     w = _make_widget()
     history = [
         _alarm_entry(alarm_id="a1", level="WARNING"),
@@ -255,10 +260,7 @@ def test_alarm_count_with_warnings_and_criticals(app):
         _alarm_entry(alarm_id="a1", transition="CLEARED"),
     ]
     w._on_alarms_loaded({"ok": True, "history": history})
-    text = w._alarm_label.text()
-    assert "3" in text
-    assert "2" in text
-    assert "1" in text
+    assert w._alarm_label.text() == "3 (2 пред. / 1 крит.)"
 
 
 def test_alarm_count_error_shows_dash(app):
@@ -272,13 +274,13 @@ def test_alarm_count_error_shows_dash(app):
 
 
 def test_artifact_paths_derived_from_artifact_dir(app):
-    """artifact_dir must produce DOCX and PDF paths in labels."""
+    """artifact_dir must produce full paths in labels, including the 'reports/' subdir."""
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(artifact_dir="/data/exp_001"))
-    assert "report_editable.docx" in w._docx_label.text()
-    assert "report_raw.pdf" in w._pdf_label.text()
+    assert w._docx_label.text() == "/data/exp_001/reports/report_editable.docx"
+    assert w._pdf_label.text() == "/data/exp_001/reports/report_raw.pdf"
 
 
 def test_no_artifact_dir_shows_dash(app):
@@ -308,7 +310,7 @@ def test_content_shown_after_status_received(app):
 
 
 def test_top3_alarms_shows_most_frequent_names(app):
-    """Top-3 most-triggered alarm names shown with counts in _top_alarms_label."""
+    """Top-3 most-triggered alarm names shown with counts, ordered by frequency."""
     w = _make_widget()
     history = [
         _alarm_entry(alarm_id="t_high", level="WARNING"),
@@ -321,12 +323,7 @@ def test_top3_alarms_shows_most_frequent_names(app):
         _alarm_entry(alarm_id="t_high", transition="CLEARED"),
     ]
     w._on_alarms_loaded({"ok": True, "history": history})
-    text = w._top_alarms_label.text()
-    # Most frequent (t_high ×3) must appear first
-    assert "t_high" in text
-    assert "pressure" in text
-    # drift should appear (3rd most frequent ×1)
-    assert "drift" in text
+    assert w._top_alarms_label.text() == "t_high ×3; pressure ×2; drift ×1"
 
 
 def test_top3_alarms_no_history_shows_net(app):
@@ -344,16 +341,22 @@ def test_top3_alarms_error_shows_dash(app):
 
 
 def test_top3_alarms_shows_at_most_three(app):
-    """When more than 3 alarms exist, only top 3 are displayed."""
+    """When more than 3 alarms exist, only top 3 are displayed with exact counts."""
     w = _make_widget()
+    # 10 distinct alarm IDs, each triggered once → top 3 are alarm_0/1/2 (all equal ×1)
     history = [
         _alarm_entry(alarm_id=f"alarm_{i}")
         for i in range(10)
     ]
     w._on_alarms_loaded({"ok": True, "history": history})
     text = w._top_alarms_label.text()
-    # Max 3 entries separated by ";"
-    assert text.count(";") <= 2
+    # Exactly 2 semicolons → 3 entries
+    assert text.count(";") == 2
+    # Each entry has "×1" (all triggered once)
+    parts = text.split("; ")
+    assert len(parts) == 3
+    for part in parts:
+        assert "×1" in part
 
 
 # ─── F19 sub-item 3: Clickable artifact links ──────────────────────────────────
@@ -368,22 +371,22 @@ def test_artifact_links_are_clickable_labels(app):
 
 
 def test_artifact_link_set_path_updates_text_and_path(app):
-    """set_path() must update displayed text and internal _path."""
+    """set_path() must update DISPLAYED label text to the full file path."""
     from cryodaq.gui.shell.views.analytics_widgets import _ClickableLabel
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(artifact_dir="/data/exp_001"))
     assert isinstance(w._docx_label, _ClickableLabel)
-    assert w._docx_label._path != ""
-    assert "report_editable.docx" in w._docx_label._path
+    # The displayed text (not _path) must be the full DOCX path
+    assert w._docx_label.text() == "/data/exp_001/reports/report_editable.docx"
 
 
 # ─── F19 sub-item 1: Channel min/max/mean stats ────────────────────────────────
 
 
 def test_stats_loaded_renders_channel_stats(app):
-    """_on_stats_loaded with valid data must populate _stats_label with channel stats."""
+    """_on_stats_loaded must render full 'min–max (ср mean)' lines per channel."""
     w = _make_widget()
     data = {
         "Т1": [[1000.0, 10.0], [1001.0, 20.0], [1002.0, 30.0]],
@@ -391,10 +394,10 @@ def test_stats_loaded_renders_channel_stats(app):
     }
     w._on_stats_loaded({"ok": True, "data": data})
     text = w._stats_label.text()
-    assert "Т1" in text
-    assert "Т2" in text
-    # Min=10, max=30, mean=20 for T1
-    assert "10" in text and "30" in text
+    # Т1: min=10, max=30, mean=20 — exact line format
+    assert "Т1: 10.00–30.00 (ср 20.00)" in text
+    # Т2: min=5, max=5, mean=5
+    assert "Т2: 5.00–5.00 (ср 5.00)" in text
 
 
 def test_stats_loaded_empty_data_shows_no_data(app):

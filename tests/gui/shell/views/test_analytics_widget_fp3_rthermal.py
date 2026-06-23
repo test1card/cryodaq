@@ -82,12 +82,18 @@ def test_construction_overlay_hidden(app) -> None:
 
 def test_none_data_hides_overlay(app) -> None:
     w = RThermalLiveWidget()
-    # Manually show the overlay first
+    # Manually show the overlay and set some curve data first
     w._asym_line.setVisible(True)
     w._asym_band.setVisible(True)
     w.set_r_thermal_data(None)
     assert not w._asym_line.isVisible()
     assert not w._asym_band.isVisible()
+    # Labels must revert to dashes
+    assert w._value_label.text() == "—"
+    assert w._delta_label.text() == "ΔR / мин: —"
+    # Data curve must be cleared
+    xs, ys = w._curve.getData()
+    assert xs is None or len(xs) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +109,16 @@ def test_not_converged_overlay_hidden(app) -> None:
 
     with patch.object(w._ss_predictor, "get_prediction", return_value=not_converged):
         with patch.object(w._ss_predictor, "update"):
-            w.set_r_thermal_data(_r_thermal_data(history=history))
+            w.set_r_thermal_data(_r_thermal_data(current=0.120, delta=-0.001, history=history))
     assert not w._asym_line.isVisible()
     assert not w._asym_band.isVisible()
+    # Rendered value label must show exact formatted string
+    assert w._value_label.text() == "0.120 К/Вт"
+    assert w._delta_label.text() == "ΔR / мин: -0.001"
+    # Data curve must have the 10 history points plotted
+    xs, ys = w._curve.getData()
+    assert len(xs) == 10
+    assert ys[0] == pytest.approx(history[0][1], rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +145,9 @@ def test_converged_overlay_visible(app) -> None:
 
 
 def test_overlay_position_and_band(app) -> None:
+    # Fixed inputs: t_predicted=0.10, amplitude=0.04, confidence=0.8
+    # sigma = |0.04| * max(0, 1 - 0.8) = 0.04 * 0.2 = 0.008  (literal, not re-derived)
+    # Expected band: [0.10 - 0.008, 0.10 + 0.008] = [0.092, 0.108]
     w = RThermalLiveWidget()
     now = time.time()
     history = [(now - 100 + i, 0.15) for i in range(5)]
@@ -141,7 +157,6 @@ def test_overlay_position_and_band(app) -> None:
         percent_settled=70.0,
         confidence=0.8,
     )
-    expected_sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)  # 0.04 * 0.2 = 0.008
 
     with patch.object(w._ss_predictor, "get_prediction", return_value=pred):
         with patch.object(w._ss_predictor, "update"):
@@ -149,8 +164,8 @@ def test_overlay_position_and_band(app) -> None:
 
     assert w._asym_line.value() == pytest.approx(0.10, rel=1e-6)
     lo, hi = w._asym_band.getRegion()
-    assert lo == pytest.approx(0.10 - expected_sigma, rel=1e-6)
-    assert hi == pytest.approx(0.10 + expected_sigma, rel=1e-6)
+    assert lo == pytest.approx(0.092, abs=1e-9)
+    assert hi == pytest.approx(0.108, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +256,9 @@ def test_empty_history_hides_stale_overlay(app) -> None:
 
 
 def test_high_confidence_narrow_band(app) -> None:
+    # Fixed inputs: amplitude=0.05, t_predicted=0.10
+    # low_conf=0.5:  sigma = 0.05 * (1 - 0.5) = 0.025 → band [0.075, 0.125]
+    # high_conf=0.99: sigma = 0.05 * (1 - 0.99) = 0.0005 → band [0.0995, 0.1005]
     w = RThermalLiveWidget()
     now = time.time()
     history = [(now + i, 0.15) for i in range(5)]
@@ -252,12 +270,12 @@ def test_high_confidence_narrow_band(app) -> None:
         with patch.object(w._ss_predictor, "update"):
             w.set_r_thermal_data(_r_thermal_data(history=history))
     lo_lc, hi_lc = w._asym_band.getRegion()
-    band_width_low = hi_lc - lo_lc
+    assert lo_lc == pytest.approx(0.075, abs=1e-9)
+    assert hi_lc == pytest.approx(0.125, abs=1e-9)
 
     with patch.object(w._ss_predictor, "get_prediction", return_value=high_conf):
         with patch.object(w._ss_predictor, "update"):
             w.set_r_thermal_data(_r_thermal_data(history=history))
     lo_hc, hi_hc = w._asym_band.getRegion()
-    band_width_high = hi_hc - lo_hc
-
-    assert band_width_high < band_width_low
+    assert lo_hc == pytest.approx(0.0995, abs=1e-9)
+    assert hi_hc == pytest.approx(0.1005, abs=1e-9)

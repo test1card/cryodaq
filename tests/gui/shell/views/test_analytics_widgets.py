@@ -82,10 +82,11 @@ def test_temperature_overview_constructs(app):
 
 
 def test_temperature_overview_accepts_readings(app):
+    ts = 1_000_000.0
     w = aw.TemperatureOverviewWidget()
     readings = {
         "Т1": Reading(
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.fromtimestamp(ts, tz=UTC),
             instrument_id="LS218_1",
             channel="Т1",
             value=295.0,
@@ -95,6 +96,13 @@ def test_temperature_overview_accepts_readings(app):
     }
     w.set_temperature_readings(readings)
     assert "Т1" in w._curves
+    # Rendered curve must contain the timestamp and value
+    xs, ys = w._curves["Т1"].getData()
+    assert len(xs) >= 1
+    assert ts in [pytest.approx(x, rel=1e-6) for x in xs]
+    # The 295.0 value must appear in the ys at the same index
+    idx = list(xs).index(min(xs, key=lambda x: abs(x - ts)))
+    assert ys[idx] == pytest.approx(295.0, rel=1e-6)
 
 
 def test_vacuum_prediction_wraps_log_y_prediction(app):
@@ -123,8 +131,8 @@ def test_r_thermal_live_set_data_updates_labels(app):
     w.set_r_thermal_data(
         RThermalData(current_value=1.234, delta_per_minute=0.05, last_updated_ts=1.0)
     )
-    assert "1.234" in w._value_label.text()
-    assert "+0.050" in w._delta_label.text()
+    assert w._value_label.text() == "1.234 К/Вт"
+    assert w._delta_label.text() == "ΔR / мин: +0.050"
 
 
 def test_pressure_current_uses_shared_pressure_plot(app):
