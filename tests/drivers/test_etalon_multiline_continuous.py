@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,9 @@ def test_read_channels_continuous_emits_first_cycle() -> None:
     driver = MultiLineDriver(
         "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
     )
-    ts = time.time()
+    # Deterministic timestamp so regressions to Reading.now() are caught.
+    ts = 1_700_000_000.0
+    expected_ts = datetime.fromtimestamp(ts, tz=UTC)
     cycle = CycleSnapshot(timestamp=ts, channels=(_channel_data(1), _channel_data(2)))
     driver._last_cycle = cycle
     out = driver._read_channels_continuous()
@@ -129,6 +132,12 @@ def test_read_channels_continuous_emits_first_cycle() -> None:
     assert env_by_channel["ML1/env_temperature"] == pytest.approx(22.5)
     assert env_by_channel["ML1/env_pressure"] == pytest.approx(1013.25)
     assert env_by_channel["ML1/env_humidity"] == pytest.approx(45.0)
+    # Assert timestamp propagated from CycleSnapshot — regression to Reading.now()
+    # would produce a different (wall-clock) datetime and fail.
+    for r in out:
+        assert r.timestamp == expected_ts, (
+            f"{r.channel}: timestamp {r.timestamp!r} != {expected_ts!r}"
+        )
 
 
 def test_decimation_drops_cycles_inside_target_interval() -> None:
@@ -360,11 +369,14 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
         "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
         burst_dir=tmp_path,
     )
+    # Deterministic per-cycle timestamps so cycle_ts regression is caught.
+    ts_base = 1_700_000_000.0
+    cycle_timestamps = [ts_base + k * 1.0 for k in range(3)]
     await driver.burst_start()
     for k in range(3):
         driver._burst_buffer.append(
             CycleSnapshot(
-                timestamp=time.time() + k * 0.01,
+                timestamp=cycle_timestamps[k],
                 channels=(_channel_data(1), _channel_data(2)),
             )
         )
@@ -401,6 +413,13 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
     channel_idx_vals = set(table.column("channel_index").to_pylist())
     assert channel_idx_vals == {1, 2}, (
         f"channel_index must contain both channels 1 and 2, got {channel_idx_vals}"
+    )
+    # Assert cycle_ts propagated from CycleSnapshot.timestamp (raw float).
+    # Each cycle timestamp appears once per channel (2 channels), in cycle order.
+    expected_cycle_ts = [ts for ts in cycle_timestamps for _ in range(2)]
+    actual_cycle_ts = table.column("cycle_ts").to_pylist()
+    assert actual_cycle_ts == pytest.approx(expected_cycle_ts), (
+        f"cycle_ts mismatch: {actual_cycle_ts!r} != {expected_cycle_ts!r}"
     )
 
 

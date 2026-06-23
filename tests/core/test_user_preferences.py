@@ -44,7 +44,13 @@ def test_history_dedup(tmp_path: Path) -> None:
 def test_history_max_limit(tmp_path: Path) -> None:
     prefs = UserPreferences(tmp_path / "prefs.json")
     for i in range(25):
-        prefs._add_to_history("operator_history", f"Operator-{i:02d}")
+        prefs.save_last_experiment(
+            template_id="t",
+            operator=f"Operator-{i:02d}",
+            sample="S",
+            cryostat="C",
+            description="",
+        )
 
     history = prefs.get_history("operator")
     # Exactly 20 entries kept (not fewer — tests that truncation happened).

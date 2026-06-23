@@ -148,20 +148,23 @@ async def test_gpib_ifc_recovery_invokes_send_ifc():
 async def test_gpib_connect_does_not_send_idn(monkeypatch):
     """open() must NOT send *IDN? — only opens resource + VISA Clear.
 
-    Driven through the non-mock path (mock=True returns before _blocking_connect,
-    so the assertion was vacuously true). A fake resource records every write/query
-    call; the test asserts none contain '*IDN?'."""
+    The real _blocking_connect() runs against a fake pyvisa ResourceManager so
+    every attribute assignment, clear(), and set_visa_attribute() call goes to
+    _FakeResource.  Any *IDN? write/query inside _blocking_connect would be
+    caught; patching the method itself would let an accidental send slip through.
+    """
 
     class _FakeResource:
         def __init__(self) -> None:
             self.writes: list[str] = []
             self.queries: list[str] = []
+            self.clears: int = 0
             self.write_termination = ""
             self.read_termination = ""
             self.timeout = 3000
 
         def clear(self) -> None:
-            pass
+            self.clears += 1
 
         def set_visa_attribute(self, attr: int, value: object) -> None:
             pass
@@ -176,17 +179,31 @@ async def test_gpib_connect_does_not_send_idn(monkeypatch):
             self.queries.append(cmd)
             return ""
 
+        def close(self) -> None:
+            pass
+
     fake_resource = _FakeResource()
 
-    def _fake_blocking_connect(self) -> None:
-        # Simulate what _blocking_connect does: sets _resource, no *IDN?.
-        self._resource = fake_resource
+    class _FakeRM:
+        def open_resource(self, resource_str: str) -> _FakeResource:  # noqa: ARG002
+            return fake_resource
 
-    monkeypatch.setattr(GPIBTransport, "_blocking_connect", _fake_blocking_connect)
+    # Inject fake pyvisa so _get_rm() constructs _FakeRM instead of the real RM.
+    monkeypatch.setitem(
+        sys.modules,
+        "pyvisa",
+        types.SimpleNamespace(ResourceManager=_FakeRM),
+    )
+    # Clear cached RMs so _get_rm() calls the fake constructor.
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
 
     t = GPIBTransport(mock=False)
     await t.open("GPIB0::12::INSTR")
 
+    # Verify the real _blocking_connect configured the resource correctly.
+    assert fake_resource.clears >= 1, "VISA clear() must be called during connect"
+
+    # Main assertion: no *IDN? ever written or queried.
     idn_writes = [w for w in fake_resource.writes if "*IDN?" in w.upper()]
     idn_queries = [q for q in fake_resource.queries if "*IDN?" in q.upper()]
     assert not idn_writes, f"open() must not write *IDN?, but saw: {idn_writes}"

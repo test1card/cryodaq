@@ -389,10 +389,12 @@ def test_finalize_button_uses_accent_not_status_fault(app):
 
 def test_format_time_same_day_returns_hh_mm(app):
     """Item 11: same calendar day timeline entry uses HH:MM only."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
-    now = datetime.now(UTC)
-    same_day = now - timedelta(hours=2)
+    # Anchor to noon today (same pattern as the yesterday test) to avoid the
+    # day-boundary bug: `now - 2h` crosses midnight when run between 00:00-02:00,
+    # making a "same day" timestamp land on the previous calendar day.
+    same_day = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
     text = ExperimentOverlay._format_time(same_day.isoformat())
     assert len(text) == 5
     assert text[2] == ":"

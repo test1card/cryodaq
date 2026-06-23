@@ -413,9 +413,13 @@ async def test_run_permitted_state_is_actively_monitored():
         f"Stale critical channel in RUN_PERMITTED must transition to FAULT_LATCHED, "
         f"got {sm._state}. F1 regression: monitoring disabled during source start"
     )
-    # fault_reason must contain evidence of the stale channel (not a generic message)
-    assert "Т1 Криостат верх" in sm._fault_reason or "Устаревшие" in sm._fault_reason, (
-        f"fault_reason must name the stale channel, got: {sm._fault_reason!r}"
+    # fault_reason must contain the exact stale channel name — prod format is
+    # "Устаревшие данные канала {ch}" (safety_manager.py:951).
+    # The weak "or Устаревшие" branch is intentionally removed: a generic stale
+    # message without the channel name would pass the old check but miss a
+    # regression where the wrong channel (or no channel) is reported.
+    assert "Т1 Криостат верх" in sm._fault_reason, (
+        f"fault_reason must name the stale channel 'Т1 Криостат верх', got: {sm._fault_reason!r}"
     )
 
 

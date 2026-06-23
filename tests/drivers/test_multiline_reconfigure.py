@@ -76,13 +76,9 @@ def test_reconfigure_replaces_channel_set_atomically() -> None:
 def test_reconfigure_refreshes_mock_nominals() -> None:
     driver = _driver()
     _run(driver.reconfigure_channels([7, 14]))
-    # Nominals match the standard formula 1000 + ch * 50 for each channel
-    assert 7 in driver._mock_nominal_lengths_mm
-    assert 14 in driver._mock_nominal_lengths_mm
-    assert 1 not in driver._mock_nominal_lengths_mm
-    # Verify exact formula values — not just key presence.
-    assert driver._mock_nominal_lengths_mm[7] == pytest.approx(1350.0)   # 1000 + 7*50
-    assert driver._mock_nominal_lengths_mm[14] == pytest.approx(1700.0)  # 1000 + 14*50
+    # Exact mapping — detects both stale keys (e.g. original ch1) and wrong values.
+    # Formula: 1000 + ch * 50 → ch7=1350.0, ch14=1700.0.
+    assert driver._mock_nominal_lengths_mm == {7: 1350.0, 14: 1700.0}
 
 
 def test_reconfigure_takes_effect_next_poll_in_averaged_mode() -> None:

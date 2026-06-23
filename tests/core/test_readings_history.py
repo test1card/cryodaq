@@ -24,7 +24,12 @@ def writer_with_data(tmp_path: Path):
     loop = asyncio.new_event_loop()
     loop.run_until_complete(writer.start_immediate())
 
-    base_ts = time.time() - 7200  # 2 hours ago
+    # Anchor to a whole second: row timestamps round-trip losslessly through
+    # datetime.fromtimestamp (microsecond precision), so the inclusive-boundary
+    # filter (timestamp >= base_ts + 50*30) lands deterministically on row 50.
+    # A sub-second base_ts (raw time.time()) makes row 50's stored microsecond
+    # value jitter above/below from_ts by its fractional part → flaky 49/50.
+    base_ts = float(int(time.time()) - 7200)  # 2 hours ago, whole-second anchor
     readings: list[Reading] = []
     for i in range(100):
         ts = base_ts + i * 30  # every 30 seconds
@@ -81,21 +86,39 @@ def test_read_readings_history_all(writer_with_data) -> None:
 
 
 def test_read_readings_history_time_filter(writer_with_data) -> None:
-    """Filter by from_ts should return only recent points with correct values."""
+    """Filter by from_ts returns exactly the rows at the inclusive boundary.
+
+    base_ts is a float (time.time() - 7200) and each row is spaced exactly
+    30 s apart, so from_ts = base_ts + 50*30 lands precisely on row index 50.
+    SQLiteWriter uses timestamp >= ? (inclusive), so the result must be exactly
+    50 rows: indices 50..99.  Allowing 49 would let a regression to
+    timestamp > ? (exclusive) go undetected.
+    """
     writer, base_ts = writer_with_data
-    from_ts = base_ts + 50 * 30  # midpoint — rows 50..99
+    # Row i has timestamp base_ts + i * 30.  Row 50 is the exact boundary.
+    from_ts = base_ts + 50 * 30
     data = writer._read_readings_history(from_ts=from_ts)
-    # 50 points from midpoint onward (±1 for float precision)
-    assert 49 <= len(data["Т1 Камера"]) <= 51, (
-        f"Expected ~50 points after midpoint filter, got {len(data['Т1 Камера'])}"
-    )
     points = data["Т1 Камера"]
-    # All returned timestamps must be >= from_ts
+
+    # Exactly 50 rows: indices 50..99 (inclusive lower bound).
+    assert len(points) == 50, (
+        f"Expected exactly 50 points after midpoint filter (timestamp >= boundary), "
+        f"got {len(points)}"
+    )
+    # All returned timestamps must be >= from_ts (timestamps are exact multiples).
     for ts, _ in points:
-        assert ts >= from_ts - 1.0, f"Timestamp {ts} before from_ts {from_ts}"
-    # Values must correspond to rows 50+ (value = 4.2 + i * 0.01, i >= 50)
-    assert points[0][1] >= 4.2 + 50 * 0.01 - 1e-6, (
-        f"First filtered value must be >= {4.2 + 50 * 0.01:.4f}, got {points[0][1]}"
+        assert ts >= from_ts, f"Timestamp {ts} is before from_ts {from_ts}"
+    # First returned point must be row 50: value = 4.2 + 50 * 0.01
+    expected_first_value = 4.2 + 50 * 0.01
+    assert abs(points[0][1] - expected_first_value) < 1e-6, (
+        f"First filtered point must be row 50 (value={expected_first_value:.4f}), "
+        f"got {points[0][1]}"
+    )
+    # Last returned point must be row 99: value = 4.2 + 99 * 0.01
+    expected_last_value = 4.2 + 99 * 0.01
+    assert abs(points[-1][1] - expected_last_value) < 1e-6, (
+        f"Last filtered point must be row 99 (value={expected_last_value:.4f}), "
+        f"got {points[-1][1]}"
     )
 
 

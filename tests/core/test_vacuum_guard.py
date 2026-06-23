@@ -252,5 +252,25 @@ async def test_alarm_message_contains_factual_data_only():
     assert event is not None, "alarm event must not be None when guard is FIRED"
     msg = event.message.lower()
     assert "детектор" not in msg
-    assert "VSP63D_1/pressure".lower() in event.message.lower() or "мбар" in event.message.lower()
     assert event.level == "CRITICAL"
+    # channels list must contain both the pressure and reference-temperature channels
+    assert "VSP63D_1/pressure" in event.channels, (
+        f"pressure channel must be in event.channels; got {event.channels}"
+    )
+    assert "Т12" in event.channels, (
+        f"reference temp channel must be in event.channels; got {event.channels}"
+    )
+    # values dict must carry the exact numeric values fed in tick 2
+    assert event.values.get("VSP63D_1/pressure") == pytest.approx(5e-2), (
+        f"pressure value must be 5e-2 mbar; got {event.values}"
+    )
+    assert event.values.get("Т12") == pytest.approx(245.0), (
+        f"temp value must be 245.0 K; got {event.values}"
+    )
+    # formatted values must appear in the alarm message
+    assert "5" in event.message or "0.05" in event.message or "5e" in event.message.lower(), (
+        f"pressure value must appear in alarm message; got {event.message!r}"
+    )
+    assert "245" in event.message, (
+        f"temperature value must appear in alarm message; got {event.message!r}"
+    )

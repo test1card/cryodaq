@@ -204,15 +204,35 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
             await super().connect()
             concurrent_count -= 1
 
+    # Each driver signals its own event when connect() finishes.
+    d1_connected = asyncio.Event()
+    d2_connected = asyncio.Event()
+
+    _orig_OrderedDriver_connect = OrderedDriver.connect
+
+    async def _patched_connect_d1(self) -> None:
+        await _orig_OrderedDriver_connect(self)
+        d1_connected.set()
+
+    async def _patched_connect_d2(self) -> None:
+        await _orig_OrderedDriver_connect(self)
+        d2_connected.set()
+
     d1 = OrderedDriver("gpib_first")
     d2 = OrderedDriver("gpib_second")
+    d1.connect = lambda: _patched_connect_d1(d1)  # type: ignore[method-assign]
+    d2.connect = lambda: _patched_connect_d2(d2)  # type: ignore[method-assign]
 
     sched = Scheduler(broker)
     sched.add(InstrumentConfig(driver=d1, poll_interval_s=0.05, resource_str="GPIB0::12::INSTR"))
     sched.add(InstrumentConfig(driver=d2, poll_interval_s=0.05, resource_str="GPIB0::11::INSTR"))
 
     await sched.start()
-    await asyncio.sleep(0.3)
+    # Wait until both connects complete — no fixed sleep.
+    await asyncio.wait_for(
+        asyncio.gather(d1_connected.wait(), d2_connected.wait()),
+        timeout=5.0,
+    )
     await sched.stop()
 
     # Both must have connected

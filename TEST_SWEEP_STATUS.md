@@ -108,6 +108,20 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
    Testing the real path needs extracting the closure (prod change), same monolith pattern
    as items 2 & 6. NOT auto-fixed in the verify pass.
 
+8. **ZMQ test-infra seams** (batch 07 VERIFY) — three test-only-impossible items needing src
+   seams: (a) `test_engine_commands_keep_inner_timeouts_wired` — `_LOG_GET_TIMEOUT_S` /
+   `_EXPERIMENT_STATUS_TIMEOUT_S` feed `asyncio.wait_for` inside engine command handlers; a
+   behavioral test needs a live engine+storage or an injectable timeout seam (kept as a
+   constant-existence check meanwhile). (b) real-timeout flake tests
+   (`test_cmd_timeout_emits_warning`, `test_cmd_socket_recovers_after_timeout`,
+   `test_subprocess_sends_heartbeat`, `test_heartbeat_has_timestamp`,
+   `test_bridge_subprocess_receives_published_readings`) wait on the hardcoded 35s REQ timeout /
+   5s heartbeat / slow-joiner deadlines — deterministic only with src-injectable timeouts/intervals;
+   "adequate-slack" for now. (c) `test_overflow_counter_emits_warning_on_queue_full` — warning
+   emission is a closure inside `zmq_bridge_main`; full determinism needs a src warning-emit helper.
+   None block correctness; all are testability improvements coupled to the same ZMQ-layer refactor
+   as item 1.
+
 NOTE: secret-token leak guard (batch 18) — RESOLVED, not deferred: runtime __dict__
 inspection now confirms all 3 Telegram classes store tokens as SecretStr only (no leak).
 

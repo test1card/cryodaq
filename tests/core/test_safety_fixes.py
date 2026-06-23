@@ -242,22 +242,28 @@ async def test_ok_status_passes():
 
 
 async def test_rate_limit_ignores_non_temperature():
-    """Voltage readings with huge dV/dt must NOT trigger FAULT_LATCHED."""
+    """Voltage readings with huge dV/dt must NOT trigger FAULT_LATCHED.
+
+    The voltage channel IS configured as critical so the stale-check machinery
+    is active.  Unit is 'V', not 'K', so _collect_loop must exclude it from
+    the rate estimator.  A slope that would definitely fault a K-channel
+    (>60 samples, +100 V per sample) must leave state == RUNNING.
+    """
     mgr, broker = await _make_manager(stale=30.0)
-    # No critical channels so stale-check won't fire; rate check is unit-gated
-    mgr._config.critical_channels = []
+    # Make voltage channel critical — stale machinery is now engaged.
+    # stale_timeout_s=30 and we keep feeding, so stale-check won't fire either.
+    mgr._config.critical_channels = [re.compile(r"Keithley/voltage")]
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
-        # Get to RUNNING first (no critical channels needed)
-        await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
+        # Seed a fresh voltage reading so the channel is not stale at run-start
+        await _feed(broker, channel="Keithley/voltage", value=0.0, unit="V")
         await asyncio.sleep(1.5)
-        await mgr.request_run(0.5, 40.0, 1.0)
+        result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert result["ok"] is True, f"request_run failed: {result.get('error')}"
         assert mgr.state == SafetyState.RUNNING
 
-        # Publish >=60 voltage readings spanning a high dV/dt so the rate estimator
-        # CAN compute a rate (needs >= min_points=60).  Unit is "V" so the rate-check
-        # loop (which gates on unit=="K" via _collect_loop) must never see these
-        # readings in the estimator, and no fault must fire.
+        # Publish >=60 voltage readings at a slope that would fault if unit were K.
+        # Unit is "V" so _collect_loop must gate them out of the rate estimator.
         for i in range(65):
             v = float(i) * 100.0  # +100 V per sample → enormous rate if it were K
             r = Reading.now(channel="Keithley/voltage", value=v, unit="V", instrument_id="test")
@@ -267,12 +273,14 @@ async def test_rate_limit_ignores_non_temperature():
         # Allow monitor loop to run
         await asyncio.sleep(1.5)
 
-        # Confirm the estimator has NO entry for the voltage channel (unit-gated)
-        assert "Keithley/voltage" not in mgr._rate_estimator.channels(), (
-            "Voltage channel must not be pushed into the rate estimator (unit != 'K')"
-        )
+        # Primary assertion: manager stayed RUNNING — voltage is excluded at the
+        # unit level even though the channel IS critical.
         assert mgr.state == SafetyState.RUNNING, (
             f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
+        )
+        # Secondary: confirm the estimator has NO entry for the voltage channel.
+        assert "Keithley/voltage" not in mgr._rate_estimator.channels(), (
+            "Voltage channel must not be pushed into the rate estimator (unit != 'K')"
         )
     finally:
         await mgr.stop()

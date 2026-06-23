@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 import pytest
 
 from cryodaq.core.zmq_bridge import (
-    _SLOW_COMMANDS,
     HANDLER_TIMEOUT_FAST_S,
     HANDLER_TIMEOUT_SLOW_S,
     ZMQCommandServer,
@@ -153,7 +152,12 @@ async def test_publisher_subscriber_integration() -> None:
 
 
 def test_slow_commands_set_covers_experiment_lifecycle() -> None:
-    """Every known-slow command routes to HANDLER_TIMEOUT_SLOW_S, not the fast tier."""
+    """Every known-slow command routes to HANDLER_TIMEOUT_SLOW_S, not the fast tier.
+
+    Assert only the behavioral contract: _timeout_for(cmd) == HANDLER_TIMEOUT_SLOW_S.
+    The private _SLOW_COMMANDS set is an implementation detail — membership in it
+    is implied by the routing result, not asserted directly.
+    """
     for cmd in (
         "experiment_finalize",
         "experiment_stop",
@@ -167,19 +171,19 @@ def test_slow_commands_set_covers_experiment_lifecycle() -> None:
         "calibration_v2_fit",
         "calibration_v2_extract",
     ):
-        assert cmd in _SLOW_COMMANDS
-        assert _timeout_for({"cmd": cmd}) == HANDLER_TIMEOUT_SLOW_S
+        assert _timeout_for({"cmd": cmd}) == HANDLER_TIMEOUT_SLOW_S, (
+            f"command {cmd!r} must route to HANDLER_TIMEOUT_SLOW_S"
+        )
 
 
 def test_slow_commands_covers_safety_critical_hardware_ops() -> None:
-    """HF2 — keithley_emergency_off and keithley_stop must use the 30 s envelope.
+    """HF2 — keithley_emergency_off and keithley_stop must use the slow envelope.
 
     USBTMC under stress (USB reconnect, instrument busy) can take 5–10 s.
     The fast 2-second envelope would cancel the hardware command mid-flight,
     leaving the Keithley output in an unknown state during a fault event.
+    Assert only the routing behavior, not _SLOW_COMMANDS membership directly.
     """
-    assert "keithley_emergency_off" in _SLOW_COMMANDS
-    assert "keithley_stop" in _SLOW_COMMANDS
     assert _timeout_for({"cmd": "keithley_emergency_off"}) == HANDLER_TIMEOUT_SLOW_S
     assert _timeout_for({"cmd": "keithley_stop"}) == HANDLER_TIMEOUT_SLOW_S
 

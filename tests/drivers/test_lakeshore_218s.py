@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cryodaq.analytics.calibration import CalibrationSample, CalibrationStore
+from cryodaq.analytics.calibration import (
+    CalibrationCurve,
+    CalibrationSample,
+    CalibrationStore,
+    CalibrationZone,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
@@ -438,12 +443,30 @@ async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
 
 async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(tmp_path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve(
-        "ls218s:CH1",
-        _calibration_samples("CH1"),
+    # Build a hand-crafted curve with known, independently-computable output so the
+    # assertion does NOT delegate back to store.evaluate (which would be circular).
+    # Zone: raw_min=80, raw_max=90, order-1 Chebyshev coefficients (c0=15, c1=2).
+    # At raw=82.98:
+    #   scaled = (2*(82.98 - 80.0) / (90.0 - 80.0)) - 1 = (2*2.98/10.0) - 1 = -0.404
+    #   value  = c0*T0(scaled) + c1*T1(scaled) = 15.0*1 + 2.0*(-0.404) = 14.192
+    _EXPECTED_CALIBRATED = 14.192
+    zone = CalibrationZone(
+        raw_min=80.0,
+        raw_max=90.0,
+        order=1,
+        coefficients=(15.0, 2.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    curve = CalibrationCurve(
+        curve_id="test-curve-f1",
+        sensor_id="ls218s:CH1",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         raw_unit="sensor_unit",
-        min_points_per_zone=3,
-        target_rmse_k=0.2,
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(zone,),
     )
     store.save_curve(curve)
     store.assign_curve(
@@ -470,27 +493,46 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
     assert readings[0].unit == "K"
     assert readings[0].raw == pytest.approx(82.98)
-    # Core behavioral assertion: value must equal store.evaluate output, not raw KRDG.
-    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
+    # Independent hard-coded expected — does NOT call store.evaluate (breaks tautology).
+    assert readings[0].value == pytest.approx(_EXPECTED_CALIBRATED, abs=1e-3)
 
 
 async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(
     tmp_path,
 ) -> None:
     store = CalibrationStore(tmp_path)
-    curve_ch1 = store.fit_curve(
-        "ls218s:CH1",
-        _calibration_samples("CH1"),
-        raw_unit="sensor_unit",
-        min_points_per_zone=3,
-        target_rmse_k=0.2,
+    # Same hand-crafted zone as F1: raw_min=80, raw_max=90, coefficients=(15, 2).
+    # At raw=82.98 (SRDG for CH1 from RAW_RESPONSE):
+    #   scaled = (2*(82.98 - 80.0) / 10.0) - 1 = -0.404
+    #   value  = 15.0 + 2.0*(-0.404) = 14.192
+    _EXPECTED_CALIBRATED_CH1 = 14.192
+    _zone = CalibrationZone(
+        raw_min=80.0,
+        raw_max=90.0,
+        order=1,
+        coefficients=(15.0, 2.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
     )
-    curve_ch2 = store.fit_curve(
-        "ls218s:CH2",
-        _calibration_samples("CH2"),
+    curve_ch1 = CalibrationCurve(
+        curve_id="test-curve-ch1-f2",
+        sensor_id="ls218s:CH1",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         raw_unit="sensor_unit",
-        min_points_per_zone=3,
-        target_rmse_k=0.2,
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(_zone,),
+    )
+    # CH2 curve exists (needed for assignment) but policy="off" so it is never evaluated.
+    curve_ch2 = CalibrationCurve(
+        curve_id="test-curve-ch2-f2",
+        sensor_id="ls218s:CH2",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        raw_unit="sensor_unit",
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(_zone,),
     )
     store.save_curve(curve_ch1)
     store.save_curve(curve_ch2)
@@ -518,12 +560,16 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     await driver.connect()
     readings = await driver.read_channels()
 
+    # CH1 — curve applied (hybrid: policy="on").
     assert readings[0].metadata["reading_mode"] == "curve"
+    assert readings[0].metadata["raw_source"] == "SRDG"
+    assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
+    assert readings[0].raw == pytest.approx(82.98)  # must record the SRDG raw we fed
+    # Independent hard-coded expected — does NOT call store.evaluate (breaks tautology).
+    assert readings[0].value == pytest.approx(_EXPECTED_CALIBRATED_CH1, abs=1e-3)
+    # CH2 — krdg passthrough (hybrid: policy="off"): value equals raw KRDG (4.891 K).
     assert readings[1].metadata["reading_mode"] == "krdg"
     assert readings[1].metadata["raw_source"] == "KRDG"
-    # CH1 — curve applied: value must equal store.evaluate output.
-    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
-    # CH2 — krdg passthrough: value must equal raw KRDG float (4.891 K from NORMAL_RESPONSE).
     assert readings[1].value == pytest.approx(4.891)
 
 

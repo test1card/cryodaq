@@ -230,6 +230,10 @@ async def test_wal_recovery_after_crash(tmp_path: Path, monkeypatch: pytest.Monk
     p = ctx.Process(target=_subprocess_write_and_crash, args=(str(tmp_path), ts_iso, 10))
     p.start()
     p.join(timeout=30)
+    if p.is_alive():
+        p.kill()
+        p.join()
+        pytest.fail("Crash-writer subprocess did not exit within 30 s — killed to prevent pytest hang")
     # os._exit(1) → exit code 1 (non-zero but not a crash signal)
     assert p.exitcode == 1, f"Subprocess exited with unexpected code {p.exitcode}"
 
