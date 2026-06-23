@@ -26,11 +26,25 @@ def app():
 
 
 def test_apply_fusion_dark_palette_sets_fusion_style(app):
-    apply_fusion_dark_palette(app)
-    # Qt6 wraps the active style in QStyleSheetStyle once any
-    # stylesheet is installed, hiding the Fusion identity from
-    # app.style().metaObject(). The helper caches an intent flag on
-    # the QApplication so the invariant can be asserted directly.
+    from unittest.mock import patch
+
+    style_calls: list[str] = []
+
+    original_set_style = app.setStyle
+
+    def _spy_set_style(name):
+        style_calls.append(name)
+        return original_set_style(name)
+
+    with patch.object(app, "setStyle", side_effect=_spy_set_style):
+        apply_fusion_dark_palette(app)
+
+    # Helper must call app.setStyle("Fusion") — deleting that call must fail this test.
+    assert "Fusion" in style_calls, (
+        f"apply_fusion_dark_palette must call app.setStyle('Fusion'); "
+        f"got style_calls={style_calls}"
+    )
+    # Intent flag also set.
     assert app.property("_cryodaq_fusion_applied") is True
 
 

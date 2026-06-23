@@ -80,6 +80,20 @@ def test_push_insight_renders_one_card() -> None:
         if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
     ]
     assert len(cards) == 1
+    card = cards[0]
+
+    # Assert rendered label texts — message and trigger chip visible in card.
+    from PySide6.QtWidgets import QLabel
+    labels = card.findChildren(QLabel)
+    label_texts = [lb.text() for lb in labels]
+    # The LLM message text must appear in one of the card's QLabels.
+    assert any("Аномалия датчика T2." in t for t in label_texts), (
+        f"message text not found in card labels: {label_texts}"
+    )
+    # The trigger chip text for "sensor_anomaly_critical" must be rendered.
+    chip = card.findChildren(_TriggerChip)
+    assert len(chip) == 1
+    assert chip[0].text() == "ДАТЧИК"
     panel.deleteLater()
 
 
@@ -92,6 +106,20 @@ def test_push_insight_uses_provided_timestamp() -> None:
 
     assert len(panel._entries) == 1
     assert panel._entries[0].timestamp == ts
+
+    # Assert the rendered timestamp label in the card shows the expected time.
+    cards = [
+        panel._cards_layout.itemAt(i).widget()
+        for i in range(panel._cards_layout.count())
+        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
+    ]
+    assert len(cards) == 1
+    from PySide6.QtWidgets import QLabel
+    label_texts = [lb.text() for lb in cards[0].findChildren(QLabel)]
+    expected_time = ts.astimezone().strftime("%H:%M:%S")
+    assert any(expected_time in t for t in label_texts), (
+        f"timestamp {expected_time!r} not found in card labels: {label_texts}"
+    )
     panel.deleteLater()
 
 
@@ -110,6 +138,26 @@ def test_panel_keeps_last_10_insights() -> None:
     assert len(panel._entries) == _MAX_INSIGHTS
     # Newest entry (last pushed) is first (appendleft)
     assert panel._entries[0].text == f"Сообщение {_MAX_INSIGHTS + 2}"
+
+    # Assert rendered cards == exactly 10, newest message first.
+    cards = [
+        panel._cards_layout.itemAt(i).widget()
+        for i in range(panel._cards_layout.count())
+        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
+    ]
+    assert len(cards) == _MAX_INSIGHTS, (
+        f"expected {_MAX_INSIGHTS} rendered cards, got {len(cards)}"
+    )
+    from PySide6.QtWidgets import QLabel
+    # Cards are laid out newest-first (same order as _entries).
+    for idx, card in enumerate(cards):
+        label_texts = [lb.text() for lb in card.findChildren(QLabel)]
+        expected_msg = f"Сообщение {_MAX_INSIGHTS + 2 - idx}"
+        assert any(expected_msg in t for t in label_texts), (
+            f"card[{idx}] should show {expected_msg!r}, got {label_texts}"
+        )
+    # _count_label shows "10/10".
+    assert panel._count_label.text() == f"{_MAX_INSIGHTS}/{_MAX_INSIGHTS}"
     panel.deleteLater()
 
 
@@ -120,12 +168,21 @@ def test_panel_layout_count_matches_entries() -> None:
     for i in range(5):
         panel.push_insight(f"Сообщение {i}", "experiment_finalize")
 
-    card_count = sum(
-        1
+    cards = [
+        panel._cards_layout.itemAt(i).widget()
         for i in range(panel._cards_layout.count())
         if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
-    )
-    assert card_count == 5
+    ]
+    assert len(cards) == 5
+
+    # Assert visible card texts match pushed messages (newest first).
+    from PySide6.QtWidgets import QLabel
+    for idx, card in enumerate(cards):
+        label_texts = [lb.text() for lb in card.findChildren(QLabel)]
+        expected_msg = f"Сообщение {4 - idx}"
+        assert any(expected_msg in t for t in label_texts), (
+            f"card[{idx}] should show {expected_msg!r}, got {label_texts}"
+        )
     panel.deleteLater()
 
 

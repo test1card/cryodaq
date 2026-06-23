@@ -12,10 +12,12 @@ Scheduler→SQLiteWriter→DataBroker path.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from PySide6.QtCore import QCoreApplication
 
+from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.views.analytics_widgets import TemperatureOverviewWidget
 
 
@@ -29,26 +31,81 @@ def qapp():
     yield app
 
 
+def _seed(widget: TemperatureOverviewWidget) -> None:
+    """Render a real temperature curve so the no-op snapshot has live state to
+    protect (a snapshot of an empty widget proves nothing)."""
+    widget.set_temperature_readings(
+        {
+            "Т1": Reading(
+                timestamp=datetime.fromtimestamp(1_000_000.0, tz=UTC),
+                instrument_id="LS218_1",
+                channel="Т1",
+                value=295.0,
+                unit="K",
+                metadata={},
+            )
+        }
+    )
+
+
+def _snapshot(widget: TemperatureOverviewWidget) -> dict:
+    """Immutable snapshot of rendered curve data + curve keys.
+
+    Captures ``getData()`` as tuples rather than the live ``PlotDataItem``
+    objects, so an in-place mutation/clear of an existing curve is caught — a
+    shallow ``dict(_curves)`` would alias the same object and compare equal.
+    """
+    curves = {}
+    for ch, curve in widget._curves.items():
+        xs, ys = curve.getData()
+        curves[ch] = (
+            tuple(xs) if xs is not None else (),
+            tuple(ys) if ys is not None else (),
+        )
+    return {"curve_keys": tuple(sorted(widget._curves)), "curves": curves}
+
+
 def test_temperature_overview_pressure_setter_is_noop(qapp) -> None:
     widget = TemperatureOverviewWidget()
-    # No-op should not raise on any reasonable input
+    _seed(widget)
+    before = _snapshot(widget)
+
     widget.set_pressure_reading(None)
+
+    assert _snapshot(widget) == before, "set_pressure_reading must not change rendered curves"
 
 
 def test_temperature_overview_keithley_setter_is_noop(qapp) -> None:
     widget = TemperatureOverviewWidget()
+    _seed(widget)
+    before = _snapshot(widget)
+
     widget.set_keithley_readings({"smua": None})
+
+    assert _snapshot(widget) == before, "set_keithley_readings must not change rendered curves"
 
 
 def test_temperature_overview_experiment_status_setter_is_noop(qapp) -> None:
     widget = TemperatureOverviewWidget()
+    _seed(widget)
+    before = _snapshot(widget)
+
     widget.set_experiment_status({"phase": "measurement"})
     widget.set_experiment_status(None)
+
+    assert _snapshot(widget) == before, "set_experiment_status must not change rendered curves"
 
 
 def test_temperature_overview_cold_temperature_setter_is_noop(qapp) -> None:
     widget = TemperatureOverviewWidget()
+    _seed(widget)
+    before = _snapshot(widget)
+
     widget.set_cold_temperature_reading(None)
+
+    assert _snapshot(widget) == before, (
+        "set_cold_temperature_reading must not change rendered curves"
+    )
 
 
 def test_analytics_dispatch_no_warning_for_no_op_widgets(

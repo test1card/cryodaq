@@ -111,18 +111,40 @@ def test_none_data_shows_placeholder_and_clears_prediction(app) -> None:
 def test_active_prediction_renders_trajectory(app) -> None:
     w = CooldownPredictionWidget()
     now = time.time()
-    data = _cooldown_data(
-        predicted=[(now + 60, 80.0), (now + 120, 70.0)],
-        ci=[(now + 60, 75.0, 85.0), (now + 120, 65.0, 75.0)],
-    )
+    predicted = [(now + 60, 80.0), (now + 120, 70.0)]
+    ci = [(now + 60, 75.0, 85.0), (now + 120, 65.0, 75.0)]
+    data = _cooldown_data(predicted=predicted, ci=ci)
 
-    with patch.object(w._ss_predictor, "get_prediction", return_value=None):
+    set_pred_calls: list[tuple] = []
+    original_set_pred = w._inner.set_prediction
+
+    def _spy_set_pred(central, lower_ci, upper_ci, ci_level_pct):
+        set_pred_calls.append((central, lower_ci, upper_ci, ci_level_pct))
+        original_set_pred(central, lower_ci, upper_ci, ci_level_pct)
+
+    with (
+        patch.object(w._ss_predictor, "get_prediction", return_value=None),
+        patch.object(w._inner, "set_prediction", side_effect=_spy_set_pred),
+    ):
         w.set_cooldown_data(data)
 
     assert not w._placeholder.isVisible()
     assert not w._asym_line.isVisible()
     assert not w._asym_band.isVisible()
     assert not w._steady_badge.isVisible()
+
+    # set_prediction must have been called with the actual trajectory data.
+    assert len(set_pred_calls) == 1, (
+        f"expected 1 set_prediction call, got {len(set_pred_calls)}"
+    )
+    central_arg, lower_arg, upper_arg, ci_pct_arg = set_pred_calls[0]
+    # Central: exact (t, v) pairs from predicted.
+    assert central_arg == [(now + 60, 80.0), (now + 120, 70.0)]
+    # Lower CI: (t, lo) pairs extracted from ci triples.
+    assert lower_arg == [(now + 60, 75.0), (now + 120, 65.0)]
+    # Upper CI: (t, hi) pairs extracted from ci triples.
+    assert upper_arg == [(now + 60, 85.0), (now + 120, 75.0)]
+    assert ci_pct_arg == pytest.approx(67.0)
 
 
 # 4. Cold reading feeds buffer + predictor + history
@@ -242,6 +264,8 @@ def test_invalid_predictor_shows_placeholder(app) -> None:
 
     assert w._placeholder.isVisible()
     assert not w._asym_line.isVisible()
+    assert not w._asym_band.isVisible()
+    assert not w._steady_badge.isVisible()
 
 
 # 8. Stale-prediction clear on transition

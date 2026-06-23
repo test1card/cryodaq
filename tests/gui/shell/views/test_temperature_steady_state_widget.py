@@ -70,18 +70,45 @@ def test_widget_registered_in_factory(app: QApplication) -> None:
 
 
 def test_routes_t12_reading_to_predictor(app: QApplication) -> None:
+    from unittest.mock import patch
+
     w = TemperatureSteadyStateWidget()
-    w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=0.0)})
-    assert w._buffers["T12"] == [(0.0, 4.2)]
+    # Use ts=1.0: _last_ts initialises to 0.0, so ts > 0.0 is True and
+    # add_point fires. ts=0.0 would be suppressed by the dedup guard.
+    with patch.object(w._predictors["T12"], "add_point") as mock_add:
+        w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=1.0)})
+
+    # Buffer populated correctly.
+    assert w._buffers["T12"] == [(1.0, 4.2)]
     assert w._buffers["T11"] == []
+    # Predictor received exactly one point with correct args.
+    mock_add.assert_called_once_with("T12", 1.0, 4.2)
+    # Curve carries the data point.
+    xs, ys = w._curves["T12"].getData()
+    assert list(xs) == [1.0]
+    assert list(ys) == pytest.approx([4.2])
+    # Hero label updated (falls back to last-value + стабилизация while unsettled).
+    hero_text = w._hero_labels["T12"].text()
+    assert "4.2" in hero_text or "4.20" in hero_text
     w.deleteLater()
 
 
 def test_routes_t11_reading_to_predictor(app: QApplication) -> None:
+    from unittest.mock import patch
+
     w = TemperatureSteadyStateWidget()
-    w.set_temperature_readings({"Т11": _reading("Т11", 6.1, ts=0.0)})
-    assert w._buffers["T11"] == [(0.0, 6.1)]
+    # Use ts=1.0 to pass the dedup guard (_last_ts starts at 0.0).
+    with patch.object(w._predictors["T11"], "add_point") as mock_add:
+        w.set_temperature_readings({"Т11": _reading("Т11", 6.1, ts=1.0)})
+
+    assert w._buffers["T11"] == [(1.0, 6.1)]
     assert w._buffers["T12"] == []
+    mock_add.assert_called_once_with("T11", 1.0, 6.1)
+    xs, ys = w._curves["T11"].getData()
+    assert list(xs) == [1.0]
+    assert list(ys) == pytest.approx([6.1])
+    hero_text = w._hero_labels["T11"].text()
+    assert "6.1" in hero_text or "6.10" in hero_text
     w.deleteLater()
 
 
@@ -89,11 +116,24 @@ def test_short_id_split_handles_full_channel_names(app: QApplication) -> None:
     """Drivers emit ``"Т12 Криостат верх"``; the split-on-space heuristic
     must reduce that to ``Т12`` before predictor routing.
     """
+    from unittest.mock import patch
+
     w = TemperatureSteadyStateWidget()
-    w.set_temperature_readings(
-        {"Т12 Криостат верх": _reading("Т12 Криостат верх", 4.5, ts=1.0)}
-    )
+    with patch.object(w._predictors["T12"], "add_point") as mock_add:
+        w.set_temperature_readings(
+            {"Т12 Криостат верх": _reading("Т12 Криостат верх", 4.5, ts=1.0)}
+        )
+
     assert w._buffers["T12"] == [(1.0, 4.5)]
+    # Predictor fed through the short-id split path.
+    mock_add.assert_called_once_with("T12", 1.0, 4.5)
+    # Curve updated with the value.
+    xs, ys = w._curves["T12"].getData()
+    assert list(xs) == [1.0]
+    assert list(ys) == pytest.approx([4.5])
+    # Hero label shows the new value.
+    hero_text = w._hero_labels["T12"].text()
+    assert "4.5" in hero_text or "4.50" in hero_text
     w.deleteLater()
 
 
@@ -155,13 +195,35 @@ def test_buffer_decimates_on_overflow(app: QApplication, monkeypatch) -> None:
 
 def test_predictor_only_fed_on_new_timestamps(app: QApplication) -> None:
     """Replay/idempotent push: same ts must not double-feed the predictor."""
+    from unittest.mock import patch
+
     w = TemperatureSteadyStateWidget()
-    w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=10.0)})
-    w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=10.0)})
+    add_calls: list[tuple] = []
+
+    original_add = w._predictors["T12"].add_point
+
+    def _spy(channel, ts, val):
+        add_calls.append((channel, ts, val))
+        original_add(channel, ts, val)
+
+    with patch.object(w._predictors["T12"], "add_point", side_effect=_spy):
+        w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=10.0)})
+        w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=10.0)})  # duplicate ts
+
+    # Duplicate timestamp must NOT call add_point a second time.
+    assert len(add_calls) == 1, (
+        f"add_point called {len(add_calls)} times for duplicate ts; expected 1"
+    )
+    assert add_calls[0] == ("T12", 10.0, 4.2)
     assert w._last_ts["T12"] == 10.0
-    # Fresh timestamp moves the cursor.
-    w.set_temperature_readings({"Т12": _reading("Т12", 4.3, ts=11.0)})
+
+    # Fresh timestamp moves the cursor and feeds the predictor once more.
+    with patch.object(w._predictors["T12"], "add_point", side_effect=_spy):
+        w.set_temperature_readings({"Т12": _reading("Т12", 4.3, ts=11.0)})
+
     assert w._last_ts["T12"] == 11.0
+    assert len(add_calls) == 2
+    assert add_calls[1] == ("T12", 11.0, 4.3)
     w.deleteLater()
 
 

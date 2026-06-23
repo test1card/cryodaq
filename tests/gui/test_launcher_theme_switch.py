@@ -37,36 +37,95 @@ def _make_window(lock_fd: int | None = 42, engine_external: bool = False) -> obj
 
 
 def test_theme_switch_shuts_down_bridge_before_execv() -> None:
+    """Bridge shutdown happens and precedes execv; ordering enforced via call-log."""
+    calls: list[str] = []
     stub = _make_window()
+    stub._bridge.shutdown = MagicMock(
+        name="bridge.shutdown", side_effect=lambda: calls.append("bridge")
+    )
+    stub._stop_engine = MagicMock(
+        name="stop_engine", side_effect=lambda: calls.append("engine")
+    )
     from cryodaq.launcher import LauncherWindow
 
-    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
-        LauncherWindow._restart_gui_with_theme_change(stub)
+    def _execv_side_effect(*_a, **_kw):
+        calls.append("execv")
+        raise SystemExit(0)
 
-    stub._bridge.shutdown.assert_called_once()
-    mock_execv.assert_called_once()
+    with (
+        patch("cryodaq.launcher.os.execv", side_effect=_execv_side_effect),
+        patch("cryodaq.launcher.release_lock"),
+    ):
+        import pytest
+        with pytest.raises(SystemExit):
+            LauncherWindow._restart_gui_with_theme_change(stub)
+
+    assert "bridge" in calls
+    assert "execv" in calls
+    assert calls.index("bridge") < calls.index("execv"), (
+        f"bridge must shut down before execv; got {calls}"
+    )
 
 
 def test_theme_switch_stops_engine_before_execv() -> None:
+    """Engine stop happens and precedes execv; ordering enforced via call-log."""
+    calls: list[str] = []
     stub = _make_window()
+    stub._bridge.shutdown = MagicMock(
+        name="bridge.shutdown", side_effect=lambda: calls.append("bridge")
+    )
+    stub._stop_engine = MagicMock(
+        name="stop_engine", side_effect=lambda: calls.append("engine")
+    )
     from cryodaq.launcher import LauncherWindow
 
-    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
-        LauncherWindow._restart_gui_with_theme_change(stub)
+    def _execv_side_effect(*_a, **_kw):
+        calls.append("execv")
+        raise SystemExit(0)
 
-    stub._stop_engine.assert_called_once()
-    mock_execv.assert_called_once()
+    with (
+        patch("cryodaq.launcher.os.execv", side_effect=_execv_side_effect),
+        patch("cryodaq.launcher.release_lock"),
+    ):
+        import pytest
+        with pytest.raises(SystemExit):
+            LauncherWindow._restart_gui_with_theme_change(stub)
+
+    assert "engine" in calls
+    assert "execv" in calls
+    assert calls.index("engine") < calls.index("execv"), (
+        f"engine stop must happen before execv; got {calls}"
+    )
 
 
 def test_theme_switch_releases_launcher_lock() -> None:
+    """Lock release happens before execv; execv raises SystemExit to stop execution."""
+    calls: list[str] = []
     stub = _make_window(lock_fd=7)
     from cryodaq.launcher import LauncherWindow
 
-    with patch("cryodaq.launcher.os.execv"), patch("cryodaq.launcher.release_lock") as mock_release:
-        LauncherWindow._restart_gui_with_theme_change(stub)
+    def _release_side_effect(fd, name):
+        calls.append(f"release:{fd}:{name}")
+
+    def _execv_side_effect(*_a, **_kw):
+        calls.append("execv")
+        raise SystemExit(0)
+
+    import pytest
+    with (
+        patch("cryodaq.launcher.os.execv", side_effect=_execv_side_effect),
+        patch("cryodaq.launcher.release_lock", side_effect=_release_side_effect) as mock_release,
+    ):
+        with pytest.raises(SystemExit):
+            LauncherWindow._restart_gui_with_theme_change(stub)
 
     mock_release.assert_called_once_with(7, ".launcher.lock")
     assert stub._lock_fd is None
+    assert "release:7:.launcher.lock" in calls
+    assert "execv" in calls
+    assert calls.index("release:7:.launcher.lock") < calls.index("execv"), (
+        f"lock must be released before execv; got {calls}"
+    )
 
 
 def test_theme_switch_skips_lock_release_if_no_fd() -> None:
@@ -80,7 +139,7 @@ def test_theme_switch_skips_lock_release_if_no_fd() -> None:
 
 
 def test_theme_switch_order_bridge_then_engine() -> None:
-    """Bridge shutdown MUST happen BEFORE engine terminate.
+    """Bridge shutdown MUST happen BEFORE engine terminate, both BEFORE execv.
 
     Correctness-critical, not stylistic: if the engine dies first, the
     bridge's outstanding REQ is left talking to a socket whose process
@@ -88,18 +147,39 @@ def test_theme_switch_order_bridge_then_engine() -> None:
     to drain the reply-pending state cleanly. Shutting the bridge down
     first guarantees the REQ/REP pair is quiesced before engine teardown.
     """
+    import pytest
+
     calls: list[str] = []
     stub = _make_window()
     stub._bridge.shutdown = MagicMock(side_effect=lambda: calls.append("bridge"))
     stub._stop_engine = MagicMock(side_effect=lambda: calls.append("engine"))
+    # Log the port-wait in the same ordered log AND avoid the real 5s poll on
+    # a busy port. Returns True (ports free) so the method proceeds.
+    stub._wait_engine_stopped = MagicMock(
+        side_effect=lambda *a, **k: (calls.append("wait"), True)[1]
+    )
 
     from cryodaq.launcher import LauncherWindow
 
-    with patch("cryodaq.launcher.os.execv"), patch("cryodaq.launcher.release_lock"):
-        LauncherWindow._restart_gui_with_theme_change(stub)
+    def _execv_side_effect(*_a, **_kw):
+        calls.append("execv")
+        raise SystemExit(0)
 
-    assert calls == ["bridge", "engine"], (
-        f"expected bridge shutdown before engine stop, got {calls}"
+    def _release_side_effect(*_a, **_kw):
+        calls.append("release")
+
+    with (
+        patch("cryodaq.launcher.os.execv", side_effect=_execv_side_effect),
+        patch("cryodaq.launcher.release_lock", side_effect=_release_side_effect),
+    ):
+        with pytest.raises(SystemExit):
+            LauncherWindow._restart_gui_with_theme_change(stub)
+
+    # Full concrete teardown order — every step in ONE ordered log so a
+    # reordering (e.g. releasing the lock or re-execing before the engine is
+    # stopped) is caught, not just the bridge/engine pair.
+    assert calls == ["bridge", "engine", "wait", "release", "execv"], (
+        f"teardown must be bridge→engine→wait→lock-release→execv; got {calls}"
     )
 
 
