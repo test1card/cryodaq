@@ -38,3 +38,6 @@ Manifest: `manifest.json`. Progress: `progress.json`.
 | 19 | 1 | 96 | 0 | 3 | 2 | 1 | HIGH=replay-predictor mocks thing-under-test, escalation-cancel 0.05s; telegram allowlist+SSL CLEAN; 7/10 clean |
 | 20 | 1 | 100 | 0 | 3 | 5 | 2 | HIGH=engine-shutdown-drain copy-of-prod, summary-metadata hand-built, frozen-entry AST misses _dispatch; 7/15 clean |
 | 21 | 1 | 92 | 0 | 3 | 10 | 4 | HIGH=web-dashboard stale patch target, launcher-signals assert non-prod _restart_engine; many launcher/zmq source-greps; 4/12 clean |
+| 22 | 1 | 82 | 0 | 5 | 4 | 5 | **GUI FIND begins.** HIGH=web XSS-escaping 4x source-grep (SECURITY) + sensor-grid routing guarded-pass; value-blind dashboard widgets; 3/12 clean |
+| 23 | 2 | 87 | 0 | 15 | 13 | 6 | GUI widgets: pervasive WIDGET-CONTRACT-WEAK (private-handler calls + private-attr asserts vs rendered text/enabled/stylesheet); phase_aware 14, sensor_cell 6, phase_stepper 3; 2/11 clean |
+| 24 | 2 | 60 | **1** | 12 | 8 | 1 | alarm-panel overlay (safety-adjacent). **CRIT=NaN value not coerced→0 (test hides potential prod gap, architect — ledger item 11)**; ACK tests call private _acknowledge vs clicking button; private-state vs rendered cells |

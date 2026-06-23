@@ -146,6 +146,14 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
     then they keep inspect.getsource / module-level QTimer-is-Qt-class guards (the no-dup-QTimer test can't
     catch a local UnboundLocalError binding without real construction). Test-quality only.
 
+11. **🔴 Alarm-panel NaN value not coerced** (batch 24 GUI FIND, CRIT — architect confirm) —
+    `test_reading_invalid_value_defaults_to_zero` (test_alarm_panel.py:261) sends value=NaN but
+    asserts only the threshold; static analysis says prod `float(reading.value)` (alarm_panel.py:608-611)
+    leaves NaN uncoerced, so the test's named "defaults to zero" contract is NOT enforced. Needs
+    architect/prod confirmation: either coerce non-finite reading values to 0 in the panel (prod fix) +
+    assert the rendered value cell, or correct the test. NOT auto-fixed (GUI FIND feeds a future fix
+    pass; this is a potential prod gap like the batch-07 ZMQ timeout CRIT / item 1).
+
 NOTE: secret-token leak guard (batch 18) — RESOLVED & re-hardened in VERIFY: the runtime walker now scans
 __dict__ values + __slots__ across the MRO + nested containers, stops at SecretStr, and asserts
 isinstance(_bot_token, SecretStr) for all 3 Telegram classes (TelegramNotifier, TelegramCommandBot,
