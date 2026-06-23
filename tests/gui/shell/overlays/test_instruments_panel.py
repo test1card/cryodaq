@@ -178,26 +178,55 @@ def test_extract_bare_analytics_channel_dropped(app):
 
 
 def test_new_instrument_creates_card(app):
+    from PySide6.QtCore import QCoreApplication
+
     panel = InstrumentsPanel()
-    panel._handle_reading(_reading("Т1", instrument_id="LS218_1"))
+    # Drive via public on_reading() — verifies the full Signal routing path.
+    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 1
     assert "LS218_1" in panel._cards
+    # Card label must display the instrument name.
+    card = panel._cards["LS218_1"]
+    assert card._name_label.text() == "LS218_1", (
+        f"Card name label wrong: {card._name_label.text()!r}"
+    )
+    # Indicator must be present (a _StatusIndicator, not a label).
+    assert isinstance(card._indicator, _StatusIndicator)
+    # Empty-state overlay must be hidden after the first reading.
+    assert panel._empty_cards_label.isHidden() is True
 
 
 def test_repeated_reading_updates_same_card(app):
+    from PySide6.QtCore import QCoreApplication
+
     panel = InstrumentsPanel()
-    panel._handle_reading(_reading("Т1", instrument_id="LS218_1"))
-    panel._handle_reading(_reading("Т2", instrument_id="LS218_1"))
+    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    QCoreApplication.processEvents()
+    panel.on_reading(_reading("Т2", instrument_id="LS218_1"))
+    QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 1
     assert panel._cards["LS218_1"].total_readings == 2
+    # Assert rendered counter text — not just the private total_readings int.
+    counter_text = panel._cards["LS218_1"]._counters_label.text()
+    assert counter_text == "Показания: 2 | Ошибки: 0", (
+        f"Counter label text wrong: {counter_text!r}"
+    )
 
 
 def test_two_distinct_instruments_create_two_cards(app):
+    from PySide6.QtCore import QCoreApplication
+
     panel = InstrumentsPanel()
-    panel._handle_reading(_reading("Т1", instrument_id="LS218_1"))
-    panel._handle_reading(_reading("Keithley_1/smua/voltage"))
+    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    QCoreApplication.processEvents()
+    panel.on_reading(_reading("Keithley_1/smua/voltage"))
+    QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 2
     assert {"LS218_1", "Keithley_1"}.issubset(panel._cards.keys())
+    # Assert both visible card names are displayed correctly.
+    assert panel._cards["LS218_1"]._name_label.text() == "LS218_1"
+    assert panel._cards["Keithley_1"]._name_label.text() == "Keithley_1"
 
 
 def test_reading_without_instrument_id_and_no_prefix_dropped(app):
@@ -250,6 +279,12 @@ def test_stale_detection_marks_fault(app):
     card._timeout_s = _MIN_TIMEOUT_S
     card.refresh_liveness()
     assert card.indicator_color == theme.STATUS_FAULT
+    # Assert rendered status label text (not just indicator color).
+    assert "Нет связи" in card._status_label.text(), (
+        f"Stale card status label wrong: {card._status_label.text()!r}"
+    )
+    # Counters must still reflect the one reading.
+    assert "Показания: 1" in card._counters_label.text()
 
 
 def test_fresh_reading_recovers_to_ok(app):
@@ -257,8 +292,17 @@ def test_fresh_reading_recovers_to_ok(app):
     card._last_reading_time = time.monotonic() - 1000.0
     card.refresh_liveness()
     assert card.indicator_color == theme.STATUS_FAULT
+    assert "Нет связи" in card._status_label.text(), (
+        f"Pre-recovery status label wrong: {card._status_label.text()!r}"
+    )
     card.update_from_reading(_reading("x", instrument_id="inst"))
     assert card.indicator_color == theme.STATUS_OK
+    # After fresh reading, status must say Норма.
+    assert "Норма" in card._status_label.text(), (
+        f"Post-recovery status label wrong: {card._status_label.text()!r}"
+    )
+    # Counters must reflect the new reading.
+    assert "Показания: 1" in card._counters_label.text()
 
 
 # ----------------------------------------------------------------------
@@ -267,12 +311,26 @@ def test_fresh_reading_recovers_to_ok(app):
 
 
 def test_status_indicator_is_painted_qframe(app):
+    from PySide6.QtWidgets import QFrame, QLabel
+
     ind = _StatusIndicator()
-    # Painted — no text.
-    assert not hasattr(ind, "text") or callable(getattr(ind, "text", lambda: ""))
+    # Must be a QFrame subclass (painted, not a text label).
+    assert isinstance(ind, QFrame), f"_StatusIndicator must be QFrame, got {type(ind)}"
+    # Must NOT be a QLabel (which has a text() method and renders glyphs).
+    assert not isinstance(ind, QLabel), "_StatusIndicator must not be a QLabel"
+    # Must have no text() method on the instance (painted, no glyph dependency).
+    assert not hasattr(ind, "text"), (
+        "_StatusIndicator must not have text() — it is a painted widget, not a text label"
+    )
+    # Fixed size enforced (circle geometry).
+    assert ind.width() > 0 and ind.height() > 0
+    assert ind.minimumWidth() == ind.maximumWidth(), "Indicator must have fixed width"
+    # QSS contract: border-radius for circle + DS border token.
     qss = ind.styleSheet()
-    assert "border-radius" in qss
-    assert theme.BORDER_SUBTLE in qss
+    assert "border-radius" in qss, f"border-radius missing from styleSheet: {qss!r}"
+    assert theme.BORDER_SUBTLE in qss, f"BORDER_SUBTLE token missing from styleSheet: {qss!r}"
+    # Color accessor must work.
+    assert ind.current_color() == theme.STATUS_STALE
 
 
 def test_status_indicator_color_updates_via_setter(app):
@@ -331,6 +389,27 @@ def test_poll_result_populates_table(app):
     }
     panel.set_connected(True)  # fires the immediate poll which consumes next_result
     assert panel.sensor_diag_section.row_count == 1
+
+    # Assert exact channel name in first row (column 0).
+    table = panel.sensor_diag_section._table
+    assert table.item(0, 0).text() == "Т1 Plate", (
+        f"Row channel name wrong: {table.item(0, 0).text()!r}"
+    )
+    # Assert health score in last column (column 6) = "95".
+    assert table.item(0, 6).text() == "95", (
+        f"Health score wrong: {table.item(0, 6).text()!r}"
+    )
+    # Health 95 → STATUS_OK color on health column.
+    fg = table.item(0, 6).foreground().color().name()
+    assert fg.lower() == theme.STATUS_OK.lower(), (
+        f"Health color wrong for score 95: {fg!r}"
+    )
+    # Summary chip must show "1 ОК".
+    chip_texts = [w.text() for w in panel.sensor_diag_section._chip_widgets]
+    assert any("1 ОК" in t for t in chip_texts), (
+        f"Summary chip '1 ОК' missing; chips: {chip_texts}"
+    )
+
     panel._diag_poll_timer.stop()
 
 
@@ -365,6 +444,15 @@ def test_seven_columns_rendered(app):
     )
     section = panel.sensor_diag_section
     assert section._table.columnCount() == 7
+    # Assert exact column headers in order (not just count).
+    expected_headers = ["Канал", "T (K)", "Шум (мК)", "Дрейф (мК/мин)", "Выбросы", "Корр.", "Здоровье"]
+    actual_headers = [
+        section._table.horizontalHeaderItem(c).text()
+        for c in range(section._table.columnCount())
+    ]
+    assert actual_headers == expected_headers, (
+        f"Column headers mismatch:\n  expected: {expected_headers}\n  got: {actual_headers}"
+    )
 
 
 def test_health_column_colored_ok(app):
@@ -494,19 +582,38 @@ def test_disconnect_keeps_diag_rows(app):
     panel = InstrumentsPanel()
     panel.set_connected(True)
     panel.set_diagnostics(
-        {"Т1": {"channel_name": "Т1", "health_score": 40}},
+        {"Т1": {"channel_name": "Т1 Plate", "health_score": 40}},
         {"healthy": 0, "warning": 0, "critical": 1},
     )
     panel.set_connected(False)
     assert panel.sensor_diag_section.row_count == 1
+    # Assert row text is preserved (not blanked on disconnect).
+    table = panel.sensor_diag_section._table
+    assert table.item(0, 0).text() == "Т1 Plate", (
+        f"Row channel name wrong after disconnect: {table.item(0, 0).text()!r}"
+    )
+    # Health score 40 → FAULT color preserved.
+    fg = table.item(0, 6).foreground().color().name()
+    from cryodaq.gui import theme as _theme
+    assert fg.lower() == _theme.STATUS_FAULT.lower(), (
+        f"Health color wrong after disconnect: {fg!r}"
+    )
 
 
 def test_disconnect_keeps_cards_alive(app):
+    from PySide6.QtCore import QCoreApplication
+
     panel = InstrumentsPanel()
-    panel._handle_reading(_reading("Т1", instrument_id="LS218_1"))
+    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    QCoreApplication.processEvents()
     panel.set_connected(True)
     panel.set_connected(False)
     assert panel.get_instrument_count() == 1
+    # Card must still display the instrument name after disconnect.
+    card = panel._cards["LS218_1"]
+    assert card._name_label.text() == "LS218_1"
+    # Card status should NOT be reset to empty — liveness timer will update it.
+    assert card._status_label.text() != "", "Status label must not be cleared on disconnect"
 
 
 # ----------------------------------------------------------------------

@@ -63,53 +63,95 @@ def test_cooldown_footer_status_label_has_auto_arm_tooltip(panel: AlarmPanel) ->
 
 
 def test_cooldown_footer_initial_state_says_waiting(panel: AlarmPanel) -> None:
-    panel._update_cooldown_ui("DISARMED", progress=None, eta_h=None)
-    assert "Ожидает" in panel._cooldown_status_lbl.text()
+    # Drive via _on_cooldown_status() with the real result payload — not the
+    # private _update_cooldown_ui() bypass. Asserts the full result path.
+    panel._on_cooldown_status({"state": "DISARMED", "progress": None, "eta_h": None})
+    assert "Ожидает" in panel._cooldown_status_lbl.text(), (
+        f"DISARMED must show 'Ожидает', got: {panel._cooldown_status_lbl.text()!r}"
+    )
 
 
 def test_cooldown_footer_armed_state_displays_active(panel: AlarmPanel) -> None:
-    panel._update_cooldown_ui("ARMED", progress=None, eta_h=None)
-    assert "Активен" in panel._cooldown_status_lbl.text()
+    panel._on_cooldown_status({"state": "ARMED", "progress": None, "eta_h": None})
+    assert "Активен" in panel._cooldown_status_lbl.text(), (
+        f"ARMED must show 'Активен', got: {panel._cooldown_status_lbl.text()!r}"
+    )
 
 
 def test_cooldown_footer_watchdog_state(panel: AlarmPanel) -> None:
     panel.show()
     try:
-        panel._update_cooldown_ui("WATCHDOG", progress=None, eta_h=None, t_cold=4.5)
-        assert "Сторож" in panel._cooldown_status_lbl.text()
+        panel._on_cooldown_status(
+            {"state": "WATCHDOG", "progress": None, "eta_h": None, "t_cold": 4.5}
+        )
+        assert "Сторож" in panel._cooldown_status_lbl.text(), (
+            f"WATCHDOG must show 'Сторож', got: {panel._cooldown_status_lbl.text()!r}"
+        )
         assert panel._cooldown_eta_lbl.isVisible()
-        assert "Т11" in panel._cooldown_eta_lbl.text()
+        assert "Т11" in panel._cooldown_eta_lbl.text(), (
+            f"Eta label must mention Т11 for WATCHDOG, got: {panel._cooldown_eta_lbl.text()!r}"
+        )
     finally:
         panel.hide()
 
 
 def test_cooldown_footer_fired_uses_status_fault_color(panel: AlarmPanel) -> None:
-    panel._update_cooldown_ui("FIRED", progress=0.6, eta_h=2.5)
+    panel._on_cooldown_status({"state": "FIRED", "progress": 0.6, "eta_h": 2.5})
     style = panel._cooldown_status_lbl.styleSheet()
-    assert theme.STATUS_FAULT in style
+    assert theme.STATUS_FAULT in style, (
+        f"FIRED state must use STATUS_FAULT color; styleSheet={style!r}"
+    )
+    # Also assert text is rendered (not just color).
+    assert "ПРЕДУПРЕЖДЕНИЕ" in panel._cooldown_status_lbl.text() or \
+        "захолажив" in panel._cooldown_status_lbl.text().lower() or \
+        "план" in panel._cooldown_status_lbl.text().lower(), (
+        f"FIRED status text unexpected: {panel._cooldown_status_lbl.text()!r}"
+    )
 
 
 def test_cooldown_footer_auto_disarmed_uses_status_ok_color(panel: AlarmPanel) -> None:
-    panel._update_cooldown_ui("AUTO_DISARMED", progress=None, eta_h=None)
+    panel._on_cooldown_status({"state": "AUTO_DISARMED", "progress": None, "eta_h": None})
     style = panel._cooldown_status_lbl.styleSheet()
-    assert theme.STATUS_OK in style
-    assert "Захолаживание завершено" in panel._cooldown_status_lbl.text()
+    assert theme.STATUS_OK in style, (
+        f"AUTO_DISARMED must use STATUS_OK color; styleSheet={style!r}"
+    )
+    assert "Захолаживание завершено" in panel._cooldown_status_lbl.text(), (
+        f"AUTO_DISARMED text wrong: {panel._cooldown_status_lbl.text()!r}"
+    )
 
 
 def test_cooldown_footer_progress_bar_only_visible_while_watching(panel: AlarmPanel) -> None:
     panel.show()
     try:
-        panel._update_cooldown_ui("DISARMED", progress=None, eta_h=None)
-        assert not panel._cooldown_progress.isVisible()
-        panel._update_cooldown_ui("WATCHING", progress=0.5, eta_h=2.0)
-        assert panel._cooldown_progress.isVisible()
+        panel._on_cooldown_status({"state": "DISARMED", "progress": None, "eta_h": None})
+        assert not panel._cooldown_progress.isVisible(), (
+            "Progress bar must be hidden for DISARMED"
+        )
+        panel._on_cooldown_status({"state": "WATCHING", "progress": 0.5, "eta_h": 2.0})
+        assert panel._cooldown_progress.isVisible(), (
+            "Progress bar must be visible for WATCHING"
+        )
         assert panel._cooldown_progress.value() == 50
     finally:
         panel.hide()
 
 
 def test_cooldown_footer_no_arm_handler_attributes(panel: AlarmPanel) -> None:
-    """Defensive: no zombie arm/disarm handlers left on the panel."""
+    """No zombie arm/disarm handlers AND no arm/disarm control in the footer
+    widget tree — verifies the UI contract, not just attribute absence."""
+    # Attribute-level check (implementation guard).
     assert not hasattr(panel, "_on_cooldown_arm_clicked")
     assert not hasattr(panel, "_on_cooldown_disarm_clicked")
     assert not hasattr(panel, "_cooldown_arm_btn")
+    # Widget-tree check: the cooldown groupbox must contain no QPushButton
+    # (already covered by test_cooldown_footer_has_no_push_button, but
+    # repeated here to make the no-arm contract explicit at the handler level).
+    box = _cooldown_groupbox(panel)
+    assert box is not None
+    arm_buttons = [
+        btn for btn in box.findChildren(QPushButton)
+        if any(kw in btn.text().lower() for kw in ("arm", "disarm", "захолаж", "взвод"))
+    ]
+    assert arm_buttons == [], (
+        f"No arm/disarm buttons must exist in cooldown footer; found: {arm_buttons}"
+    )
