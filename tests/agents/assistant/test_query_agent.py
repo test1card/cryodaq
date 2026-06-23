@@ -198,7 +198,27 @@ async def test_query_agent_composite_status_parallel() -> None:
 
 async def test_query_agent_out_of_scope_historical_response() -> None:
     """out_of_scope_historical: no data fetch; LLM renders polite refusal."""
-    adapters = _make_adapters()
+    base = _make_adapters()
+
+    # Add explicit archive + rag mocks so we can assert they are NOT called.
+    archive = MagicMock()
+    archive.list = AsyncMock(return_value=None)
+    archive.detail = AsyncMock(return_value=None)
+
+    rag = MagicMock()
+    rag.search = AsyncMock(return_value=None)
+
+    adapters = QueryAdapters(
+        broker_snapshot=base.broker_snapshot,
+        cooldown=base.cooldown,
+        vacuum=base.vacuum,
+        sqlite=base.sqlite,
+        alarms=base.alarms,
+        experiment=base.experiment,
+        composite=base.composite,
+        archive=archive,
+        rag=rag,
+    )
 
     ollama = MagicMock()
     ollama.generate = AsyncMock(side_effect=[
@@ -217,6 +237,14 @@ async def test_query_agent_out_of_scope_historical_response() -> None:
     adapters.alarms.active.assert_not_awaited()
     adapters.experiment.status.assert_not_awaited()
     adapters.sqlite.range_stats.assert_not_awaited()
+    # broker_snapshot methods must also not be called.
+    adapters.broker_snapshot.latest.assert_not_awaited()
+    adapters.broker_snapshot.latest_all.assert_not_awaited()
+    adapters.broker_snapshot.latest_age_s.assert_not_awaited()
+    # archive and rag adapters must not be called.
+    archive.list.assert_not_awaited()
+    archive.detail.assert_not_awaited()
+    rag.search.assert_not_awaited()
 
 
 async def test_query_agent_handles_intent_classifier_failure() -> None:

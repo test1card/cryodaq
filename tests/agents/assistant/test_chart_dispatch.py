@@ -149,11 +149,17 @@ async def test_chart_dispatcher_no_crash_when_temps_empty() -> None:
 
 
 async def test_log_task_exception_logs_on_error() -> None:
+    import pytest
+
     async def failing_coro() -> None:
         raise ValueError("chart broke")
 
     task = asyncio.create_task(failing_coro())
-    await asyncio.sleep(0.01)  # let task fail
+    # Await the task to completion so it is DONE-with-error before inspecting it.
+    with pytest.raises(ValueError, match="chart broke"):
+        await task
+
+    assert task.done() and not task.cancelled()
 
     with patch("cryodaq.agents.assistant.query.chart_dispatcher.logger") as mock_log:
         _log_task_exception(task)
@@ -161,12 +167,18 @@ async def test_log_task_exception_logs_on_error() -> None:
 
 
 async def test_log_task_exception_ignores_cancelled() -> None:
+    import contextlib
+
     async def cancelled_coro() -> None:
         await asyncio.sleep(10)
 
     task = asyncio.create_task(cancelled_coro())
     task.cancel()
-    await asyncio.sleep(0.01)  # let cancellation propagate
+    # Deterministically finish cancellation before calling _log_task_exception.
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert task.cancelled()
 
     with patch("cryodaq.agents.assistant.query.chart_dispatcher.logger") as mock_log:
         _log_task_exception(task)

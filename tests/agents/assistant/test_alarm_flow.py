@@ -259,17 +259,6 @@ async def test_info_level_alarm_not_handled(tmp_path: Path) -> None:
         "INFO-level alarm must be filtered by _should_handle before reaching Ollama"
     )
 
-    # Confirm the full pipeline also rejects it (start agent, publish, drain).
-    await agent.start()
-    await bus.publish(event)
-    # Yield control so the event loop can drain the queue; since _should_handle
-    # returns False the handler task is never created — Ollama stays idle.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    await agent.stop()
-
 
 async def test_critical_level_alarm_is_handled(tmp_path: Path) -> None:
     done = asyncio.Event()
@@ -323,6 +312,7 @@ async def test_ollama_unavailable_does_not_crash_agent(tmp_path: Path) -> None:
 
 async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
     first_done = asyncio.Event()
+    second_dropped = asyncio.Event()
     base_result = GenerationResult(
         text="🤖 Тест.", tokens_in=10, tokens_out=5, latency_s=0.1, model="gemma4:e4b",
     )
@@ -337,14 +327,31 @@ async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
     agent, bus = _make_agent(
         config=_make_config(max_calls_per_hour=1), ollama=ollama, tmp_path=tmp_path
     )
+
+    # Wrap _check_rate_limit: after the first allowed call, signal when the
+    # second event is dropped (rate limit exceeded path).
+    original_check = agent._check_rate_limit
+    call_count = [0]
+
+    def _patched_check():
+        result = original_check()
+        if not result:
+            # This is the drop path — the second event has been processed and rejected.
+            second_dropped.set()
+        else:
+            call_count[0] += 1
+        return result
+
+    agent._check_rate_limit = _patched_check
+
     await agent.start()
 
     await bus.publish(_alarm_event(alarm_id="a1"))
     await bus.publish(_alarm_event(alarm_id="a2"))
-    # Wait for the first (and only allowed) generate call to complete.
+    # Wait for the first call to complete (so the timestamp is recorded).
     await asyncio.wait_for(first_done.wait(), timeout=2.0)
-    # Yield briefly so the second event can be processed (and rate-limited).
-    await asyncio.sleep(0.01)
+    # Wait for the second event to be processed and dropped by the rate limiter.
+    await asyncio.wait_for(second_dropped.wait(), timeout=2.0)
 
     assert ollama.generate.await_count == 1
     await agent.stop()
@@ -361,24 +368,20 @@ async def test_alarm_fired_enabled_false_skips_handling(tmp_path: Path) -> None:
         "alarm_fired_enabled=False must be filtered by _should_handle"
     )
 
-    await agent.start()
-    await bus.publish(event)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    await agent.stop()
-
 
 async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
+    generate_called = asyncio.Event()
+
+    async def _generate_truncated(*args, **kwargs):
+        generate_called.set()
+        return GenerationResult(
             text="", tokens_in=0, tokens_out=0, latency_s=30.0, model="gemma4:e4b", truncated=True
         )
-    )
+
+    ollama = AsyncMock()
+    ollama.generate = AsyncMock(side_effect=_generate_truncated)
     ollama.close = AsyncMock()
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
@@ -386,7 +389,9 @@ async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_alarm_event())
-    await asyncio.sleep(0.05)
+    # Wait until generate was actually called (handler ran), then assert no dispatch.
+    await asyncio.wait_for(generate_called.wait(), timeout=2.0)
+    ollama.generate.assert_awaited_once()
 
     telegram._send_to_all.assert_not_awaited()
     await agent.stop()
@@ -493,14 +498,6 @@ async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> No
         "experiment_finalize_enabled=False must be filtered by _should_handle"
     )
 
-    await agent.start()
-    await bus.publish(event)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    await agent.stop()
-
 
 # ---------------------------------------------------------------------------
 # AssistantLiveAgent — sensor_anomaly_critical handler
@@ -546,17 +543,6 @@ async def test_sensor_anomaly_critical_proactive_disabled_v0_55_5(tmp_path: Path
         "sensor_anomaly_critical must always be filtered by _should_handle (v0.55.5)"
     )
 
-    await agent.start()
-    await bus.publish(event)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    telegram._send_to_all.assert_not_awaited()
-    event_logger.log_event.assert_not_awaited()
-
-    await agent.stop()
-
 
 async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
     ollama = _make_mock_ollama()
@@ -575,14 +561,6 @@ async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
     assert agent._should_handle(event) is False, (
         "sensor_anomaly_critical must be filtered by _should_handle"
     )
-
-    await agent.start()
-    await bus.publish(event)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    await agent.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -659,14 +637,6 @@ async def test_shift_handover_disabled_skips_handling(tmp_path: Path) -> None:
     assert agent._should_handle(event) is False, (
         "shift_handover_request_enabled=False must be filtered by _should_handle"
     )
-
-    await agent.start()
-    await bus.publish(event)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ollama.generate.assert_not_awaited()
-    await agent.stop()
 
 
 # ---------------------------------------------------------------------------

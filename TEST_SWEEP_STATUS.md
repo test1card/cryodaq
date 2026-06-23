@@ -122,6 +122,14 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
    None block correctness; all are testability improvements coupled to the same ZMQ-layer refactor
    as item 1.
 
+9. **RAGAdapter defensive sort** (batch 14 VERIFY, minor) — `KnowledgeQueryResult` schema docstring
+   promises `hits` "sorted ascending by distance", but `RAGAdapter.search`
+   (query/adapters/rag_adapter.py) does NOT sort — it preserves the searcher's order (LanceDB returns
+   ascending-by-distance) and only applies a distance cutoff. The contract holds in practice via
+   LanceDB; a defensive `sorted(hits, key=distance)` in the adapter would make the documented
+   guarantee hold for any searcher. Test reframed honestly to assert "preserves searcher order +
+   distance cutoff" (not "sorts"). Prod hardening only — not a correctness bug.
+
 NOTE: secret-token leak guard (batch 18) — RESOLVED, not deferred: runtime __dict__
 inspection now confirms all 3 Telegram classes store tokens as SecretStr only (no leak).
 

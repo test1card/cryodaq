@@ -475,9 +475,16 @@ async def test_safety_publish_failure_does_not_crash() -> None:
         # Feed a healthy reading to trigger SAFE_OFF → READY transition
         await _feed_safety(sb)
 
-        # Deadline-poll until the state machine reaches READY (up to 2 s)
+        # Deadline-poll until BOTH the state reaches READY AND the transition's
+        # publish attempt has actually landed (up to 2 s). The state flips to
+        # READY synchronously, but the READY-state publish is an awaited task that
+        # can lag under load — polling on the publish count too (not just the
+        # state) removes the race where await_count is read before that task runs.
         deadline = asyncio.get_event_loop().time() + 2.0
-        while mgr.state != SafetyState.READY:
+        while not (
+            mgr.state == SafetyState.READY
+            and failing_broker.publish.await_count > baseline_count
+        ):
             if asyncio.get_event_loop().time() >= deadline:
                 break
             await asyncio.sleep(0.05)

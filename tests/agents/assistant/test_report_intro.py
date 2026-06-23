@@ -124,17 +124,19 @@ def test_format_phases_lists_all_phases() -> None:
 
 
 def test_format_channel_stats_computes_min_max_mean() -> None:
+    # Use distinctive values so min != mean != max and mean is non-trivial.
+    # 4.0+5.0+10.0 = 19/3 = 6.333... → formatted as "6.333" by :.4g
     readings = [
         _FakeReading("T1", 4.0, "K"),
         _FakeReading("T1", 5.0, "K"),
-        _FakeReading("T1", 6.0, "K"),
+        _FakeReading("T1", 10.0, "K"),
     ]
     dataset = _make_dataset(readings=readings)
     result = _format_channel_stats(dataset)
     assert "T1" in result
-    assert "мин 4" in result   # min
-    assert "макс 6" in result  # max
-    assert "ср 5" in result    # mean — catches missing or wrong mean value
+    assert "мин 4 K" in result      # min — format: {val:.4g}{unit_str}
+    assert "макс 10 K" in result    # max — distinct from mean
+    assert "ср 6.333 K" in result   # mean = 19/3, :.4g → "6.333"
 
 
 def test_generate_report_intro_disabled_returns_none() -> None:

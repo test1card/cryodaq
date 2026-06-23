@@ -17,6 +17,7 @@ from cryodaq.agents.assistant.query.adapters.experiment_adapter import Experimen
 from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
 from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
 from cryodaq.agents.assistant.query.schemas import (
+    ActiveAlarmInfo,
     AlarmStatusResult,
     CompositeStatus,
     CooldownETA,
@@ -89,9 +90,7 @@ async def test_broker_snapshot_handles_no_data() -> None:
     broker = _make_broker()
     snap = BrokerSnapshot(broker)
     await snap.start()
-    # No readings — just yield to let the event loop run the consume task once.
-    await asyncio.sleep(0)
-
+    # Empty cache — latest() is synchronously deterministic: no data → None.
     result = await snap.latest("T_unknown")
     assert result is None
 
@@ -378,15 +377,48 @@ async def _make_composite_adapter(
 async def test_composite_adapter_parallel_fetch() -> None:
     """All adapters are called and results merged into CompositeStatus."""
     snap_data = {"T_cold": _make_reading("T_cold", 15.0)}
+    sentinel_cd = CooldownETA(
+        t_remaining_hours=3.5,
+        t_remaining_low_68=3.0,
+        t_remaining_high_68=4.0,
+        progress=0.45,
+        phase="cooldown",
+        n_references=12,
+        cooldown_active=True,
+        T_cold=42.0,
+    )
+    sentinel_vac = VacuumETA(
+        current_mbar=1e-3,
+        eta_seconds=3600.0,
+        target_mbar=1e-6,
+        trend="falling",
+        confidence=0.8,
+    )
+    sentinel_alarm = AlarmStatusResult(
+        active=[ActiveAlarmInfo(
+            alarm_id="ALM-1",
+            level="WARNING",
+            channels=["T_cold"],
+            triggered_at=None,
+        )]
+    )
     adapter, snap, cooldown, vacuum, alarms, experiment = await _make_composite_adapter(
-        snapshot_all=snap_data
+        snapshot_all=snap_data,
+        cd_eta=sentinel_cd,
+        vac_eta=sentinel_vac,
+        alarm_result=sentinel_alarm,
     )
     result = await adapter.status()
     assert isinstance(result, CompositeStatus)
+    # Temperature merged from snapshot
     assert result.key_temperatures["T_cold"] == 15.0
-    assert result.active_alarms == []
-    assert result.cooldown_eta is None
-    assert result.vacuum_eta is None
+    # Cooldown ETA passed through — a bug dropping it would fail here
+    assert result.cooldown_eta is sentinel_cd
+    # Vacuum ETA passed through — a bug dropping it would fail here
+    assert result.vacuum_eta is sentinel_vac
+    # Alarm merged — a bug dropping alarms would fail here
+    assert len(result.active_alarms) == 1
+    assert result.active_alarms[0].alarm_id == "ALM-1"
     # All sub-adapters must have been awaited in parallel
     snap.latest_with_labels.assert_awaited_once()
     cooldown.eta.assert_awaited_once()

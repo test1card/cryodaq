@@ -22,14 +22,24 @@ from cryodaq.core.event_bus import EngineEvent, EventBus
 async def _drain_handler_tasks(agent: AssistantLiveAgent) -> None:
     """Wait until agent._handler_tasks is empty (all background handlers done).
 
-    Yields control at least once so the agent's _event_loop task can dequeue the
-    published event and create handler tasks before we start draining.
+    Yields control repeatedly until the agent's _event_loop task has dequeued
+    the published event and created at least one handler task, then awaits all
+    handler tasks WITHOUT return_exceptions so any handler failure surfaces as a
+    test error.  If the event is correctly skipped (no handler spawned), we
+    drain after a bounded wait rather than hanging.
     """
-    # Yield to let the event loop task pick up the event and spawn handler tasks.
-    await asyncio.sleep(0)
-    # Drain: gather in a loop in case a handler spawns further tasks.
+    # Yield repeatedly (up to ~50 ms) until the event loop picks up the event
+    # and spawns at least one handler task.
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if agent._handler_tasks:
+            break
+
+    # Drain: gather WITHOUT return_exceptions so handler failures fail the test.
+    # Loop in case a completed handler spawns further tasks.
     while agent._handler_tasks:
-        await asyncio.gather(*list(agent._handler_tasks), return_exceptions=True)
+        tasks = list(agent._handler_tasks)
+        await asyncio.gather(*tasks)  # propagates exceptions
 
 
 # ---------------------------------------------------------------------------

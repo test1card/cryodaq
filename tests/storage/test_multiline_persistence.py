@@ -38,17 +38,18 @@ def _all_channels(db_path: Path) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
-async def test_multiline_reading_writes_to_sqlite_before_broker_publish(
+async def test_multiline_reading_writes_to_sqlite(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    """The persistence-first invariant lives at the Scheduler level
-    (scheduler.py:390 → sqlite_writer.write_immediate before
-    broker.publish_batch). The SQLiteWriter itself does no channel
-    filtering, so MultiLine readings persist by construction.
+    """Proves the SQLiteWriter side of persistence: regardless of channel name,
+    every Reading handed to write_immediate lands in the readings table.
 
-    This test proves the SQLiteWriter side: regardless of channel name,
-    every Reading we hand to it lands in the readings table.
+    Note: the persistence-before-publish ordering invariant (scheduler.py:390
+    sqlite_writer.write_immediate → broker.publish_batch) is tested at the
+    Scheduler level in tests/core/test_persistence_ordering.py, not here.
+    This test proves SQLiteWriter accepts MultiLine channel names without
+    filtering — the writer treats channel as an opaque string.
     """
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
@@ -121,47 +122,6 @@ async def test_multiline_persistence_path_is_channel_agnostic(
     assert channels == sorted(r.channel for r in mixed), (
         "every channel in the batch must persist; the writer must not filter by name"
     )
-
-
-def test_multiline_parquet_archive_is_channel_agnostic() -> None:
-    """parquet_archive.py reads from the SQLite readings table without
-    a channel filter. Verify the source matches that contract so a
-    future regression that adds a hardcoded filter is caught here.
-    """
-    import inspect
-
-    from cryodaq.storage import parquet_archive
-
-    src = inspect.getsource(parquet_archive)
-    # The archive reads readings via SELECT; ensure no hardcoded
-    # 'WHERE channel NOT LIKE' or 'channel != "MultiLine_*"' filter.
-    forbidden = (
-        "channel NOT LIKE",
-        "channel != 'MultiLine",
-        "channel != \"MultiLine",
-        "MultiLine NOT IN",
-    )
-    for f in forbidden:
-        assert f not in src, f"parquet_archive contains channel filter '{f}'"
-
-
-def test_multiline_cold_rotation_is_channel_agnostic() -> None:
-    """F17 cold rotation reads SQLite rows for archival; the same
-    no-filter contract applies.
-    """
-    import inspect
-
-    from cryodaq.storage import cold_rotation
-
-    src = inspect.getsource(cold_rotation)
-    forbidden = (
-        "channel NOT LIKE",
-        "channel != 'MultiLine",
-        "channel != \"MultiLine",
-        "MultiLine NOT IN",
-    )
-    for f in forbidden:
-        assert f not in src, f"cold_rotation contains channel filter '{f}'"
 
 
 def test_multiline_parquet_archive_runtime_channel_agnostic(

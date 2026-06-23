@@ -218,17 +218,43 @@ async def test_classifier_picks_up_rename_without_restart() -> None:
 
 
 async def test_classifier_concurrent_calls_include_channel_hints() -> None:
-    """Two concurrent classify() calls each receive the full channel hint in their system prompt."""
+    """Snapshot coherence under a mid-concurrent rename.
+
+    The first classify() call captures its prompt with the OLD channel name
+    ("Азотная плита"), then blocks on a gate.  While it is blocked the manager
+    is renamed so "Азотная плита" → "Криоплита".  The gate is then released so
+    the second classify() call runs and captures its prompt with the NEW name.
+
+    Assertions:
+    - prompt[0] contains "Азотная плита" (old, pre-rename snapshot)
+    - prompt[0] does NOT contain "Криоплита"
+    - prompt[1] contains "Криоплита" (new, post-rename snapshot)
+    - prompt[1] does NOT contain "Азотная плита"
+    """
     import asyncio
+
+    gate = asyncio.Event()       # blocks first generate until rename is done
+    first_captured = asyncio.Event()  # signals that first prompt has been stored
+    captured_prompts: list[str] = []
 
     mgr = _make_manager(**{
         "Т7": {"name": "Детектор", "visible": True},
         "Т12": {"name": "Азотная плита", "visible": True},
     })
-    captured_prompts: list[str] = []
+
+    call_count = 0
 
     async def fake_generate(user_prompt, *, model, system, temperature, max_tokens):
-        captured_prompts.append(system)
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: capture prompt, signal it, then wait for gate.
+            captured_prompts.append(system)
+            first_captured.set()
+            await asyncio.wait_for(gate.wait(), timeout=5.0)
+        else:
+            # Second call: rename already done — capture new snapshot.
+            captured_prompts.append(system)
         r = MagicMock()
         r.text = _j("current_value", ["Т7"])
         r.truncated = False
@@ -238,14 +264,25 @@ async def test_classifier_concurrent_calls_include_channel_hints() -> None:
     client.generate = fake_generate
     clf = IntentClassifier(client, channel_manager=mgr)
 
-    await asyncio.gather(
-        clf.classify("какая T7?"),
-        clf.classify("что на азотной плите?"),
-    )
+    async def first_call() -> None:
+        await clf.classify("какая T7?")
+
+    async def second_call() -> None:
+        # Wait until first call has captured its prompt, then rename and release.
+        await asyncio.wait_for(first_captured.wait(), timeout=5.0)
+        mgr.set_name("Т12", "Криоплита")
+        gate.set()
+        await clf.classify("что на криоплите?")
+
+    await asyncio.gather(first_call(), second_call())
+
     assert len(captured_prompts) == 2
-    for prompt in captured_prompts:
-        assert "Т7" in prompt
-        assert "Т12" in prompt
+    # prompt[0] captured BEFORE rename
+    assert "Азотная плита" in captured_prompts[0]
+    assert "Криоплита" not in captured_prompts[0]
+    # prompt[1] captured AFTER rename
+    assert "Криоплита" in captured_prompts[1]
+    assert "Азотная плита" not in captured_prompts[1]
 
 
 # ---------------------------------------------------------------------------

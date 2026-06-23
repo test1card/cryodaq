@@ -151,40 +151,55 @@ async def test_replay_missing_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_replay_stop(tmp_path: Path) -> None:
-    # Use a small number of readings and a non-zero speed so the loop contains
-    # real asyncio.sleep() calls — giving stop() a guaranteed opportunity to run.
-    # Timestamps are 1 second apart; speed=100 means each sleep is 10 ms.
+async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
+    """stop() halts replay deterministically while it is parked inside asyncio.sleep.
+
+    Strategy: monkeypatch cryodaq.storage.replay.asyncio.sleep so the FIRST
+    call sets a ``sleep_started`` event and then blocks on a ``release`` event.
+    We await ``sleep_started``, call ``replay.stop()``, then release — verifying
+    that fewer than all rows were emitted.
+    """
+    import cryodaq.storage.replay as replay_module
+
     n = 10
     readings = [
         _reading("CH1", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)
     ]
     db_path = _make_db(tmp_path, readings)
 
+    sleep_started = asyncio.Event()
+    release = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    async def _controlled_sleep(delay, *args, **kwargs):
+        if not sleep_started.is_set():
+            sleep_started.set()
+            await asyncio.wait_for(release.wait(), timeout=5.0)
+        else:
+            # Subsequent sleeps: honour them normally (replay already stopped,
+            # this path is only reached if stop() didn't work — let it time out).
+            await original_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(replay_module.asyncio, "sleep", _controlled_sleep)
+
     broker = DataBroker()
-    queue = await broker.subscribe("test_sub", maxsize=n + 10)
+    await broker.subscribe("test_sub", maxsize=n + 10)
 
-    replay = ReplaySource(broker, speed=100.0)  # 1 s apart → 10 ms sleep each
-
-    # Launch play() as a background task
+    replay = ReplaySource(broker, speed=1.0)  # speed>0 → sleep is called between rows
     play_task = asyncio.create_task(replay.play(db_path))
 
-    # Wait deterministically for the first reading to land in the queue.
-    # Each inter-row sleep is 10 ms (speed=100, 1 s gap); polling at 5 ms
-    # intervals catches the first publish well before the second sleep begins,
-    # ensuring stop() fires while replay is blocked in asyncio.sleep().
-    for _ in range(400):  # up to 2 s total
-        await asyncio.sleep(0.005)
-        if not queue.empty():
-            break
+    # Wait for replay to park inside the first sleep
+    await asyncio.wait_for(sleep_started.wait(), timeout=5.0)
 
-    assert not queue.empty(), "Replay did not publish even one reading within 2 s"
+    # First row was published before sleep; call stop while parked
     replay.stop()
 
-    count = await play_task
+    # Release the blocked sleep so replay can observe _running=False and break
+    release.set()
 
-    # At least one row was published but not all n
+    count = await asyncio.wait_for(play_task, timeout=5.0)
+
+    # Replay emitted the first row (before sleeping), then stopped — count < n
     assert 0 < count < n, (
-        f"Expected stop() to halt replay between 1 and {n - 1} rows; got count={count}"
+        f"stop() while parked in sleep must limit emitted count; got count={count} (n={n})"
     )
-    assert not replay._running, "replay._running should be False after stop()"

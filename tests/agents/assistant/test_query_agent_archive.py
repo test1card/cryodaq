@@ -137,11 +137,16 @@ def test_archive_detail_none_renders_not_found(agent: AssistantQueryAgent) -> No
         {"archive_detail": None, "experiment_id": "exp-X"},
     )
     assert "exp-X" in prompt
-    # Sentinel values injected by _fmt_archive_detail when result is None
+    # Sentinel values injected by _fmt_archive_detail when result is None —
+    # these are unique to the None branch and absent in the found branch
+    # (found branch uses "(нет фазы захолаживания в архиве этого эксперимента)"
+    # for cooldown_text, never "(не указано)").
     assert "(нет данных)" in prompt   # phases_text sentinel
     assert "(не указано)" in prompt   # cooldown_text sentinel
-    # Template instructs LLM to say the experiment was not found
-    assert "не найден" in prompt
+    # NOTE: "не найден" appears in FORMAT_ARCHIVE_DETAIL_USER for BOTH found
+    # and not-found paths (it's a static template instruction to the LLM),
+    # so asserting it here would be tautological. The two sentinels above are
+    # the meaningful discriminators for the None path.
 
 
 def test_archive_detail_missing_duration_renders_unknown(agent: AssistantQueryAgent) -> None:
