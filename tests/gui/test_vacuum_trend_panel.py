@@ -112,7 +112,11 @@ def test_eta_display_format() -> None:
     assert _fmt_eta(600.0) == "10мин"
     assert _fmt_eta(8100.0) == "2ч 15мин"
 
-    # Test in panel context
+    # Test in panel context — assert exact rendered label texts.
+    # eta_targets sorted ascending by float(key):
+    #   "0.001"  → 0.0     → "✓"        → label "1.0e-03: ✓"
+    #   "1e-05"  → 3600.0  → "1ч 0мин"  → label "1.0e-05: 1ч 0мин"
+    #   "1e-08"  → None    → "—"        → label "1.0e-08: —"
     _app()
     panel = VacuumTrendPanel()
     panel.set_prediction(
@@ -120,8 +124,18 @@ def test_eta_display_format() -> None:
             eta_targets={"0.001": 0.0, "1e-05": 3600.0, "1e-08": None},
         )
     )
-    # Check labels were created
     assert len(panel._eta_labels) == 3
+
+    # The panel sorts eta_targets ascending by float(key):
+    # float("1e-08") < float("1e-05") < float("0.001")
+    # So label order is: 1e-8 → "—", 1e-5 → "1ч 0мин", 0.001 → "✓"
+    label_texts = [
+        panel._eta_labels[k].text()
+        for k in sorted(panel._eta_labels.keys(), key=lambda x: float(x))
+    ]
+    assert label_texts[0] == "1.0e-08: —", f"got {label_texts[0]!r}"
+    assert label_texts[1] == "1.0e-05: 1ч 0мин", f"got {label_texts[1]!r}"
+    assert label_texts[2] == "1.0e-03: ✓", f"got {label_texts[2]!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +145,16 @@ def test_eta_display_format() -> None:
 
 def test_graph_log_scale() -> None:
     _app()
+    extrap_t = [100, 200, 300, 400, 500]
+    extrap_logP = [-4.0, -4.5, -5.0, -5.5, -6.0]
+    # Use two eta_targets so we get exactly two target lines at known positions.
+    eta_targets = {"1e-05": 3600.0, "1e-07": None}
     panel = VacuumTrendPanel()
     panel.set_prediction(
         _make_prediction(
-            extrap_t=[100, 200, 300, 400, 500],
-            extrap_logP=[-4.0, -4.5, -5.0, -5.5, -6.0],
+            extrap_t=extrap_t,
+            extrap_logP=extrap_logP,
+            eta_targets=eta_targets,
         )
     )
 
@@ -145,14 +164,22 @@ def test_graph_log_scale() -> None:
     label_text = left_axis.labelText
     assert "log" in label_text.lower() or "₁₀" in label_text
 
-    # Verify extrapolation data is in log scale (values between -10 and 5)
+    # Verify extrapolation curve has exact x/y arrays.
     extrap_data = panel._extrap_curve.getData()
     assert extrap_data is not None
-    ys = extrap_data[1]
-    assert len(ys) == 5
-    assert all(-10 < y < 5 for y in ys)
+    xs, ys = extrap_data
+    assert list(xs) == [float(t) for t in extrap_t], f"x mismatch: {list(xs)}"
+    assert list(ys) == extrap_logP, f"y mismatch: {list(ys)}"
 
-    # Verify target lines are at log₁₀ positions
-    for line in panel._target_lines:
-        pos = line.value()
-        assert -10 < pos < 0  # log₁₀(mbar) targets are negative
+    # Verify target lines are at exact log₁₀ positions.
+    expected_log_positions = sorted(
+        math.log10(float(k)) for k in eta_targets.keys()
+    )
+    actual_positions = sorted(line.value() for line in panel._target_lines)
+    assert len(actual_positions) == len(expected_log_positions), (
+        f"expected {len(expected_log_positions)} target lines, got {len(actual_positions)}"
+    )
+    for actual, expected in zip(actual_positions, expected_log_positions):
+        assert abs(actual - expected) < 1e-10, (
+            f"target line at {actual}, expected {expected}"
+        )

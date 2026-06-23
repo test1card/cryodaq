@@ -8,7 +8,6 @@ data-flow watchdog.
 
 from __future__ import annotations
 
-import inspect
 import logging
 import time
 
@@ -108,7 +107,10 @@ def _drain_poll_readings_until(bridge: ZmqBridge, predicate, timeout: float = 2.
 
 def test_poll_readings_updates_last_reading_time():
     """An actual reading (not heartbeat/warning) updates
-    _last_reading_time; a heartbeat updates only _last_heartbeat."""
+    _last_reading_time; a heartbeat updates only _last_heartbeat.
+    Exact Reading fields are verified — not just length."""
+    from cryodaq.drivers.base import ChannelStatus
+
     bridge = ZmqBridge()
 
     # Heartbeat alone must NOT touch _last_reading_time.
@@ -117,10 +119,11 @@ def test_poll_readings_updates_last_reading_time():
     assert bridge._last_reading_time == 0.0
     assert bridge._last_heartbeat > 0.0
 
-    # A real reading must update _last_reading_time.
+    # A real reading must update _last_reading_time and carry correct fields.
+    ts = time.time()
     bridge._data_queue.put(
         {
-            "timestamp": time.time(),
+            "timestamp": ts,
             "instrument_id": "mock",
             "channel": "T1",
             "value": 42.0,
@@ -135,6 +138,11 @@ def test_poll_readings_updates_last_reading_time():
         bridge, lambda b: b._last_reading_time > before
     )
     assert len(readings) == 1
+    r = readings[0]
+    assert r.channel == "T1"
+    assert r.value == 42.0
+    assert r.unit == "K"
+    assert r.status == ChannelStatus.OK
     assert bridge._last_reading_time > before
 
 
@@ -293,7 +301,8 @@ def test_command_channel_not_stalled_on_fresh_bridge():
 
 def test_command_channel_stalled_after_recent_timeout():
     """Injecting a ``cmd_timeout`` control message via data_queue must
-    flip ``command_channel_stalled`` to True inside the watchdog window."""
+    flip ``command_channel_stalled`` to True inside the watchdog window,
+    and the launcher must restart the bridge when it observes that state."""
     bridge = _build_bridge_with_fake_proc()
     bridge._last_heartbeat = time.monotonic()
     bridge._data_queue.put(
@@ -308,6 +317,49 @@ def test_command_channel_stalled_after_recent_timeout():
 
     assert bridge._last_cmd_timeout > 0.0
     assert bridge.command_channel_stalled(timeout_s=10.0) is True
+
+    # Verify the launcher's watchdog path calls shutdown + start on the bridge
+    # when command_channel_stalled() is True (B1 failure shape).
+    from cryodaq.launcher import LauncherWindow
+
+    class _CmdStalledBridge:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self) -> bool:
+            return True
+
+        def is_alive(self) -> bool:
+            return True
+
+        def data_flow_stalled(self) -> bool:
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return True
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    class _Dummy:
+        def __init__(self) -> None:
+            self._bridge = _CmdStalledBridge()
+
+        def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+    dummy = _Dummy()
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert dummy._bridge.shutdown_calls == 1, "launcher must shut down bridge on cmd stall"
+    assert dummy._bridge.start_calls == 1, "launcher must restart bridge on cmd stall"
 
 
 def test_command_channel_not_stalled_after_window_expires(monkeypatch):
@@ -393,14 +445,95 @@ def test_launcher_poll_drains_before_data_stall_restart():
     assert dummy._bridge.restarted is False
 
 
-def test_launcher_poll_logs_reason_distinction():
-    """Launcher still distinguishes heartbeat failure from data starvation."""
+def test_launcher_poll_reason_distinct_per_stall_type(caplog):
+    """_poll_bridge_data must restart the bridge (shutdown+start exactly once)
+    for EACH of the three stall types AND log a reason whose token is unique to
+    that type — heartbeat-stale ('heartbeat') vs data-flow-stalled ('readings')
+    vs command-channel-stalled ('command'). Asserts the expected token is
+    present, the OTHER two tokens are ABSENT, and all three messages differ —
+    catching wrong-reason logging and a missing restart on any single branch."""
+    import logging
+
     from cryodaq.launcher import LauncherWindow
 
-    source = inspect.getsource(LauncherWindow._poll_bridge_data)
-    assert "no heartbeat" in source
-    assert "no readings" in source
-    assert "poll_readings" in source
+    class _ConfigurableBridge:
+        def __init__(self, *, healthy, alive, data_stalled, cmd_stalled) -> None:
+            self._healthy = healthy
+            self._alive = alive
+            self._data_stalled = data_stalled
+            self._cmd_stalled = cmd_stalled
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self) -> bool:
+            return self._healthy
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def data_flow_stalled(self) -> bool:
+            return self._data_stalled
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return self._cmd_stalled
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    class _Dummy:
+        def __init__(self, bridge) -> None:
+            self._bridge = bridge
+
+        def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+    # name -> (bridge kwargs, token that MUST be present, tokens that MUST be absent)
+    cases = {
+        "heartbeat": (
+            dict(healthy=False, alive=True, data_stalled=False, cmd_stalled=False),
+            "heartbeat",
+            ("readings", "command"),
+        ),
+        "readings": (
+            dict(healthy=True, alive=True, data_stalled=True, cmd_stalled=False),
+            "readings",
+            ("heartbeat", "command"),
+        ),
+        "command": (
+            dict(healthy=True, alive=True, data_stalled=False, cmd_stalled=True),
+            "command",
+            ("heartbeat", "readings"),
+        ),
+    }
+
+    messages: dict[str, str] = {}
+    for name, (kwargs, present, absent) in cases.items():
+        bridge = _ConfigurableBridge(**kwargs)
+        dummy = _Dummy(bridge)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="cryodaq.launcher"):
+            LauncherWindow._poll_bridge_data(dummy)
+
+        assert bridge.shutdown_calls == 1, f"{name}: expected exactly one shutdown"
+        assert bridge.start_calls == 1, f"{name}: expected exactly one start (restart)"
+        log = " ".join(caplog.messages).lower()
+        assert present in log, (
+            f"{name}: expected reason token '{present}' in log, got: {caplog.messages}"
+        )
+        for tok in absent:
+            assert tok not in log, (
+                f"{name}: unexpected token '{tok}' in {name} log: {caplog.messages}"
+            )
+        messages[name] = log
+
+    # All three normalized reason messages must be mutually distinct.
+    assert len(set(messages.values())) == 3, f"stall reasons must all differ: {messages}"
 
 
 def test_launcher_restarts_bridge_on_command_channel_stalled():

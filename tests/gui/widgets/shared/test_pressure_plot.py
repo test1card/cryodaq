@@ -60,43 +60,95 @@ def test_scientific_tick_formatter_handles_invalid():
 
 
 def test_subscribes_to_global_window(app):
+    """After set_window(HOUR_1) the subscribed plot's X range must narrow to 1h."""
+    import time as _time
+
     plot = PressurePlot()
+    # Give it some data so the X range is meaningful.
+    now = _time.time()
+    plot.set_series([now - 7200.0, now - 3600.0, now], [1e-5, 1.1e-5, 1.2e-5])
+
     controller = get_time_window_controller()
-    # Changing controller does not crash the subscribed plot.
     controller.set_window(TimeWindow.HOUR_1)
-    # And the plot survives — the subscription callback ran without raising.
+
+    # Process any pending Qt signals.
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
+    pi = plot.plot_item.getPlotItem()
+    x_lo, x_hi = pi.getViewBox().viewRange()[0]
+    span = x_hi - x_lo
+    # HOUR_1 = 3600s; allow ±10% for timing jitter between set_window and assertion.
+    assert 3240 <= span <= 3960, (
+        f"Expected X span ≈ 3600s for HOUR_1, got {span:.1f}s"
+    )
     assert plot.plot_item is not None
 
 
 def test_forward_looking_skips_subscribe(app):
-    plot = PressurePlot(forward_looking=True)
-    controller = get_time_window_controller()
-    # Forward-looking plot must not crash on window change, but also
-    # must not rely on the controller — toggle twice, plot remains intact.
-    controller.set_window(TimeWindow.HOUR_1)
-    controller.set_window(TimeWindow.MIN_1)
-    assert plot.plot_item is not None
-    # Source-level guard: the plot module must gate the connect on
-    # `not forward_looking` (grep-assert as a regression guard).
-    import inspect
+    """Forward-looking plot must ignore global window changes — X range unchanged."""
+    import time as _time
 
-    src = inspect.getsource(PressurePlot.__init__)
-    assert "if not self._forward_looking" in src
+    from PySide6.QtWidgets import QApplication
+
+    plot = PressurePlot(forward_looking=True)
+    # Give it data so there's a defined X range.
+    now = _time.time()
+    plot.set_series([now - 60.0, now], [1e-5, 1.2e-5])
+    QApplication.processEvents()
+
+    pi = plot.plot_item.getPlotItem()
+    x_lo_before, x_hi_before = pi.getViewBox().viewRange()[0]
+
+    controller = get_time_window_controller()
+    controller.set_window(TimeWindow.HOUR_1)
+    QApplication.processEvents()
+    controller.set_window(TimeWindow.MIN_1)
+    QApplication.processEvents()
+
+    x_lo_after, x_hi_after = pi.getViewBox().viewRange()[0]
+
+    # X range must be unchanged — forward-looking plot does not subscribe.
+    assert abs(x_lo_after - x_lo_before) < 1.0, (
+        f"Forward-looking X-left changed: {x_lo_before} → {x_lo_after}"
+    )
+    assert abs(x_hi_after - x_hi_before) < 1.0, (
+        f"Forward-looking X-right changed: {x_hi_before} → {x_hi_after}"
+    )
+    assert plot.plot_item is not None
 
 
 def test_non_positive_values_guarded(app):
+    """Non-positive values must be clamped to a positive fallback before setData.
+
+    pyqtgraph in log-Y mode calls log10 internally, so getData() returns
+    log10(clamped_y). The fallback for non-positive inputs is the minimum
+    positive value in the series (here 1e-5), so all three getData() Y values
+    must equal log10(1e-5) = -5.0.
+    """
+    import math as _math
+
     plot = PressurePlot()
+    # inputs: [0.0, -1.0, 1e-5] — two non-positive, one positive
     plot.set_series([1.0, 2.0, 3.0], [0.0, -1.0, 1e-5])
-    # Underlying curve stores data (and on log-Y: stores log10(y)).
-    # Guard ensures we never pass a non-positive value; once the plot
-    # is log-Y, PlotDataItem may expose log10 values. Pull the
-    # original array we passed via the opts dict to verify the
-    # replacement actually happened.
-    opts = plot._curve.opts
-    raw_y = opts.get("y")
-    if raw_y is not None:
-        assert 1e-12 in list(raw_y)
-        assert all(v > 0 for v in raw_y)
+
+    xs, ys = plot._curve.getData()
+    assert xs is not None and ys is not None, "getData() returned None"
+    assert len(ys) == 3, f"Expected 3 Y values, got {len(ys)}"
+
+    # All getData() Y values must be finite (no -inf from log10(0) or log10(-1)).
+    assert all(_math.isfinite(v) for v in ys), (
+        f"All getData() Y must be finite after clamping, got: {list(ys)}"
+    )
+
+    # The fallback is min positive = 1e-5; log10(1e-5) = -5.0.
+    # Both clamped slots AND the original 1e-5 map to the same log10 value.
+    expected_log = _math.log10(1e-5)
+    for i, v in enumerate(ys):
+        assert abs(v - expected_log) < 1e-9, (
+            f"ys[{i}]={v} expected log10(1e-5)={expected_log} "
+            f"(non-positive clamped to 1e-5 fallback)"
+        )
 
 
 def test_set_title_updates(app):
@@ -238,14 +290,48 @@ def test_pressure_set_series_all_non_positive_does_not_crash(app):
     assert y_lo_log < _math.log10(1e-12) < y_hi_log
 
 
-def test_dashboard_pressure_uses_shared_component():
-    """IV.1 finding 3 — dashboard pressure plot composes the shared plot."""
-    import inspect
+def test_dashboard_pressure_uses_shared_component(app):
+    """IV.1 finding 3 — dashboard PressurePlotWidget composes PressurePlot and
+    routes data through it. Verified behaviorally: instantiate the widget,
+    refresh() with known data, assert the shared curve gets the expected (x,y)."""
+    import time as _time
 
+    from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
     from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 
-    src = inspect.getsource(PressurePlotWidget)
-    assert "PressurePlot" in src
-    assert "from cryodaq.gui.widgets.shared.pressure_plot import PressurePlot" in inspect.getsource(
-        inspect.getmodule(PressurePlotWidget)
+    # Assert structural composition first.
+    buf = ChannelBufferStore()
+    widget = PressurePlotWidget(buf)
+    assert isinstance(widget._shared, PressurePlot), (
+        f"_shared must be PressurePlot, got {type(widget._shared)}"
+    )
+
+    # Feed data into the buffer for the expected channel and refresh.
+    now = _time.time()
+    pressures = [1.2e-5, 1.1e-5, 1.0e-5]
+    times = [now - 2.0, now - 1.0, now]
+    for t, v in zip(times, pressures):
+        buf.append("VSP63D_1/pressure", t, v)
+
+    widget.refresh()
+
+    # The shared PressurePlot curve must carry the data we fed in.
+    # pyqtgraph log-Y mode: getData() returns (x, log10(y)).
+    import math as _math
+
+    curve = widget._shared._curve
+    assert curve is not None, "_shared._curve is None after refresh()"
+    raw_x, raw_y = curve.getData()
+    assert raw_x is not None, "curve getData() x is None after refresh()"
+    assert raw_y is not None, "curve getData() y is None after refresh()"
+    assert len(raw_x) == 3, f"expected 3 x points, got {len(raw_x)}"
+    assert len(raw_y) == 3, f"expected 3 y points, got {len(raw_y)}"
+    # All getData() Y values are log10(pressure) — must be finite (no -inf from bad clamping).
+    assert all(_math.isfinite(v) for v in raw_y), (
+        f"all getData() Y must be finite, got {list(raw_y)}"
+    )
+    # The maximum pressure 1.2e-5 → log10(1.2e-5) ≈ -4.921.
+    expected_log_max = _math.log10(1.2e-5)
+    assert any(abs(v - expected_log_max) < 1e-6 for v in raw_y), (
+        f"Expected log10(1.2e-5)≈{expected_log_max:.4f} in curve getData() Y, got {list(raw_y)}"
     )
