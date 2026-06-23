@@ -103,8 +103,32 @@ def test_overlay_no_experiment_disables_finalize(app):
     assert not overlay._finalize_btn.isEnabled()
 
 
-def test_overlay_card_save_payload(app):
+def test_overlay_card_save_payload(app, monkeypatch):
+    """Click Save button with a stubbed ZmqCommandWorker; assert command payload."""
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    sent_payloads: list[dict] = []
+
+    class _StubWorker:
+        """Captures payload without starting a real thread."""
+
+        def __init__(self, payload: dict, parent=None):
+            sent_payloads.append(payload)
+
+        @property
+        def finished(self):
+            return self
+
+        def connect(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _StubWorker)
+
     overlay = ExperimentOverlay()
+    overlay.set_connected(True)
     overlay.set_experiment(
         {
             "name": "E",
@@ -119,14 +143,51 @@ def test_overlay_card_save_payload(app):
         phase_history=[],
     )
     overlay._sample_edit.setText("NewSample")
-    payload = overlay._build_card_payload()
+    # Clear payloads accumulated by set_experiment (e.g. log_get timeline load).
+    sent_payloads.clear()
+    # Click the real Save button — triggers _on_save_card → _build_card_payload → worker.
+    overlay._save_btn.click()
+
+    update_cmds = [p for p in sent_payloads if p.get("cmd") == "experiment_update"]
+    assert len(update_cmds) == 1, f"expected 1 experiment_update ZMQ command, got {sent_payloads!r}"
+    payload = update_cmds[0]
     assert payload["sample"] == "NewSample"
     assert payload["experiment_id"] == "e1"
     assert "custom_fields" in payload
 
 
-def test_overlay_abort_in_more_menu(app):
+def test_overlay_abort_in_more_menu(app, monkeypatch):
+    """Abort lives in the ⋯ More menu, not the footer.
+
+    Assert: (1) no visible abort button in footer;
+            (2) _on_abort_clicked fires the experiment_abort ZMQ command.
+    """
+    import unittest.mock as mock
+
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    sent_payloads: list[dict] = []
+
+    class _StubWorker:
+        def __init__(self, payload: dict, parent=None):
+            sent_payloads.append(payload)
+
+        @property
+        def finished(self):
+            return self
+
+        def connect(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _StubWorker)
+
     overlay = ExperimentOverlay()
+    overlay.set_connected(True)
     overlay.set_experiment(
         {
             "name": "E",
@@ -137,16 +198,27 @@ def test_overlay_abort_in_more_menu(app):
         },
         [],
     )
-    # Abort is NOT a direct visible button in footer — it's in ⋯ menu
-    from PySide6.QtWidgets import QPushButton
 
+    # 1. Abort must NOT appear as a visible footer button.
     buttons = overlay.findChildren(QPushButton)
     visible_abort = [
         b
         for b in buttons
-        if "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c" in b.text() and not b.isHidden()
+        if "Прервать" in b.text() and not b.isHidden()
     ]
-    assert len(visible_abort) == 0  # only in menu
+    assert len(visible_abort) == 0, "abort button must not be visible in footer"
+
+    # 2. Trigger abort via the handler the More-menu action calls.
+    # Auto-dismiss confirmation dialog: patch exec + clickedButton so cancel branch skipped.
+    with mock.patch.object(QMessageBox, "exec", return_value=None):
+        with mock.patch.object(QMessageBox, "clickedButton", return_value=None):
+            overlay._on_abort_clicked()
+
+    abort_cmds = [p for p in sent_payloads if p.get("cmd") == "experiment_abort"]
+    assert len(abort_cmds) == 1, (
+        f"expected 1 experiment_abort ZMQ command, got: {sent_payloads!r}"
+    )
+    assert abort_cmds[0]["experiment_id"] == "e1"
 
 
 # ----------------------------------------------------------------------
@@ -387,40 +459,99 @@ def test_finalize_button_uses_accent_not_status_fault(app):
     assert theme.STATUS_FAULT not in ss
 
 
-def test_format_time_same_day_returns_hh_mm(app):
-    """Item 11: same calendar day timeline entry uses HH:MM only."""
+def test_format_time_same_day_returns_hh_mm(app, monkeypatch):
+    """Item 11: same calendar day timeline entry uses HH:MM only.
+
+    Freeze datetime.now in the experiment_overlay module to a fixed noon
+    so the test is immune to midnight boundary and wall-clock drift.
+    """
     from datetime import UTC, datetime
 
-    # Anchor to noon today (same pattern as the yesterday test) to avoid the
-    # day-boundary bug: `now - 2h` crosses midnight when run between 00:00-02:00,
-    # making a "same day" timestamp land on the previous calendar day.
-    same_day = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
-    text = ExperimentOverlay._format_time(same_day.isoformat())
-    assert len(text) == 5
-    assert text[2] == ":"
+    import cryodaq.gui.shell.experiment_overlay as _eo_mod
+
+    # Fixed "now": 2026-06-15 12:00:00 UTC
+    frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    # Entry is from the same day at 09:30
+    same_day = datetime(2026, 6, 15, 9, 30, 0, tzinfo=UTC)
+
+    real_datetime = _eo_mod.datetime
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen_now.astimezone(tz) if tz else frozen_now
+
+    monkeypatch.setattr(_eo_mod, "datetime", _FrozenDatetime)
+    try:
+        text = ExperimentOverlay._format_time(same_day.isoformat())
+    finally:
+        monkeypatch.setattr(_eo_mod, "datetime", real_datetime)
+
+    assert len(text) == 5, f"same-day format should be HH:MM (5 chars), got {text!r}"
+    assert text[2] == ":", f"separator must be ':', got {text!r}"
+    assert text == "09:30"
 
 
-def test_format_time_yesterday_prefixed(app):
-    """Item 11: yesterday's entries prefixed with «вчера»."""
-    from datetime import UTC, datetime, timedelta
+def test_format_time_yesterday_prefixed(app, monkeypatch):
+    """Item 11: yesterday's entries prefixed with «вчера».
 
-    # Use noon local time to avoid day-boundary flakiness.
-    base = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
-    yesterday = base - timedelta(days=1)
-    text = ExperimentOverlay._format_time(yesterday.isoformat())
-    assert text.startswith("вчера ")
+    Freeze datetime.now so «yesterday» is deterministic.
+    """
+    from datetime import UTC, datetime
+
+    import cryodaq.gui.shell.experiment_overlay as _eo_mod
+
+    frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    yesterday_ts = datetime(2026, 6, 14, 15, 45, 0, tzinfo=UTC)
+
+    real_datetime = _eo_mod.datetime
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen_now.astimezone(tz) if tz else frozen_now
+
+    monkeypatch.setattr(_eo_mod, "datetime", _FrozenDatetime)
+    try:
+        text = ExperimentOverlay._format_time(yesterday_ts.isoformat())
+    finally:
+        monkeypatch.setattr(_eo_mod, "datetime", real_datetime)
+
+    assert text.startswith("вчера "), f"yesterday format should start with 'вчера ', got {text!r}"
+    assert text == "вчера 15:45"
 
 
-def test_format_time_older_than_yesterday_shows_date(app):
-    """Item 11: entries older than yesterday show DD.MM prefix."""
-    from datetime import UTC, datetime, timedelta
+def test_format_time_older_than_yesterday_shows_date(app, monkeypatch):
+    """Item 11: entries older than yesterday show DD.MM prefix.
 
-    base = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
-    old = base - timedelta(days=5)
-    text = ExperimentOverlay._format_time(old.isoformat())
+    Freeze datetime.now so «5 days ago» is deterministic.
+    """
+    from datetime import UTC, datetime
+
+    import cryodaq.gui.shell.experiment_overlay as _eo_mod
+
+    frozen_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    old_ts = datetime(2026, 6, 10, 8, 0, 0, tzinfo=UTC)
+
+    real_datetime = _eo_mod.datetime
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen_now.astimezone(tz) if tz else frozen_now
+
+    monkeypatch.setattr(_eo_mod, "datetime", _FrozenDatetime)
+    try:
+        text = ExperimentOverlay._format_time(old_ts.isoformat())
+    finally:
+        monkeypatch.setattr(_eo_mod, "datetime", real_datetime)
+
     # Format "DD.MM HH:MM" — 11 chars total.
-    assert len(text) == 11
-    assert text[2] == "." and text[5] == " " and text[8] == ":"
+    assert len(text) == 11, f"older format should be DD.MM HH:MM (11 chars), got {text!r}"
+    assert text[2] == "." and text[5] == " " and text[8] == ":", (
+        f"format separators wrong in {text!r}"
+    )
+    assert text == "10.06 08:00"
 
 
 def test_no_close_button_on_experiment_overlay(app):
@@ -506,10 +637,26 @@ def test_create_button_disabled_when_disconnected(app):
     assert overlay._landing_create_btn.isEnabled() is False
 
 
-def test_current_phase_pill_uses_accent_not_status_ok(app):
+def test_current_phase_pill_uses_accent_not_status_ok(app, monkeypatch):
     """IV.2 B.2 — phase pill current-state tier is ACCENT (UI activation),
-    not STATUS_OK (reserved for safety/running-status)."""
-    from cryodaq.gui import theme
+    not STATUS_OK (reserved for safety/running-status).
+
+    Monkeypatch ACCENT and STATUS_OK to distinct sentinel hex values so the
+    assertion is never vacuously skipped when they happen to be equal.
+    """
+    import cryodaq.gui.shell.experiment_overlay as _eo_mod  # noqa: F401
+    import cryodaq.gui.theme as _theme_mod
+
+    _SENTINEL_ACCENT = "#aabbcc"
+    _SENTINEL_STATUS_OK = "#001122"
+
+    monkeypatch.setattr(_theme_mod, "ACCENT", _SENTINEL_ACCENT)
+    monkeypatch.setattr(_theme_mod, "STATUS_OK", _SENTINEL_STATUS_OK)
+    # experiment_overlay imports from theme at module level; patch there too.
+    import cryodaq.gui.shell.experiment_overlay as _eo
+    if hasattr(_eo, "theme"):
+        monkeypatch.setattr(_eo.theme, "ACCENT", _SENTINEL_ACCENT)
+        monkeypatch.setattr(_eo.theme, "STATUS_OK", _SENTINEL_STATUS_OK)
 
     overlay = ExperimentOverlay()
     overlay.set_experiment(
@@ -524,8 +671,10 @@ def test_current_phase_pill_uses_accent_not_status_ok(app):
         phase_history=[],
     )
     ss = overlay._phase_pills["cooldown"].styleSheet()
-    assert theme.ACCENT in ss, f"current phase pill missing ACCENT: {ss!r}"
-    if theme.ACCENT != theme.STATUS_OK:
-        assert theme.STATUS_OK not in ss, (
-            f"current phase pill leaked STATUS_OK (reserved for safety): {ss!r}"
-        )
+    assert _SENTINEL_ACCENT in ss, (
+        f"current phase pill missing ACCENT sentinel {_SENTINEL_ACCENT!r}: {ss!r}"
+    )
+    assert _SENTINEL_STATUS_OK not in ss, (
+        f"current phase pill leaked STATUS_OK sentinel {_SENTINEL_STATUS_OK!r} "
+        f"(reserved for safety): {ss!r}"
+    )

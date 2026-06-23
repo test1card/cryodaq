@@ -182,13 +182,17 @@ def test_cooldown_eta_without_future_trajectory_stays_empty():
 def test_unknown_analytics_channel_is_silently_dropped():
     """The v2 panel has no generic sink. Any analytics/* channel that
     isn't cooldown_predictor/cooldown_eta must be a no-op on the panel
-    — no AttributeError, no set_cooldown, no set_r_thermal."""
+    — no AttributeError, no set_cooldown, no set_r_thermal, no set_pressure."""
     _app()
     w = MainWindowV2()
     _stop_timers(w)
     w._ensure_overlay("analytics")
     # Prior state: panel was initialised in empty state.
     assert w._analytics_view._last_cooldown is None
+    assert w._analytics_view._last_pressure_reading is None
+
+    # Capture snapshot before dispatching unknown channels.
+    snapshot_before = dict(w._analytics_snapshot)
 
     for channel in (
         "analytics/safety_state",
@@ -202,8 +206,18 @@ def test_unknown_analytics_channel_is_silently_dropped():
             _make_reading(channel, value=1.0, metadata={"state": "safe_off"})
         )
 
-    # Panel's snapshot is untouched — adapter dropped the readings.
-    assert w._analytics_view._last_cooldown is None
+    # Panel's snapshot is untouched — adapter dropped all unknown readings.
+    assert w._analytics_view._last_cooldown is None, (
+        "set_cooldown must not be called for unknown analytics channels"
+    )
+    assert w._analytics_view._last_pressure_reading is None, (
+        "set_pressure_reading must not be called for unknown analytics channels"
+    )
+    # No new setter keys added to the snapshot.
+    assert w._analytics_snapshot == snapshot_before, (
+        f"Snapshot changed after unknown channels: "
+        f"new keys = {set(w._analytics_snapshot) - set(snapshot_before)}"
+    )
 
 
 def test_analytics_reading_without_panel_opened_does_not_crash():
@@ -350,6 +364,22 @@ def test_mbar_latin_pressure_reading_reaches_analytics():
         "Pressure reading with unit='mbar' was silently dropped; "
         "main_window_v2.py guard must accept both 'мбар' and 'mbar'"
     )
+    # Assert the Reading value that was forwarded is exactly the dispatched one.
+    # _analytics_snapshot stores args tuples: {"set_pressure_reading": (reading,)}
+    snapshot_args = w._analytics_snapshot["set_pressure_reading"]
+    dispatched_reading = snapshot_args[0] if snapshot_args else None
+    assert dispatched_reading is not None, "snapshot args must not be empty"
+    assert dispatched_reading.value == 1.5e-6, (
+        f"Reading value forwarded to analytics: expected 1.5e-6, got {dispatched_reading.value!r}"
+    )
+    assert dispatched_reading.unit == "mbar", (
+        f"Reading unit forwarded to analytics: expected 'mbar', got {dispatched_reading.unit!r}"
+    )
+    # AnalyticsView stores the last pressure reading; verify it reached the view.
+    assert w._analytics_view._last_pressure_reading is not None, (
+        "AnalyticsView._last_pressure_reading must be set after dispatch"
+    )
+    assert w._analytics_view._last_pressure_reading.value == 1.5e-6
 
 
 def test_temperature_overview_xaxis_scrolls_with_live_readings():

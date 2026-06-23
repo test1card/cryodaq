@@ -50,9 +50,12 @@ def test_tool_rail_click_switches_overlay() -> None:
     _stop_timers(w)
     # "alarms" is eagerly registered (it feeds the watch bar count), so
     # opening it doesn't trigger lazy construction of any other panel.
-    w._on_tool_clicked("alarms")
+    # Drive via the real ToolRail button click so tool_clicked signal fires.
+    w._tool_rail._buttons["alarms"].click()
+    assert w._overlay.currentWidget() is w._alarm_panel
     assert w._overlay.current_overlay == "alarms"
     assert w._tool_rail._buttons["alarms"]._active is True
-    w._on_tool_clicked("home")
+    w._tool_rail._buttons["home"].click()
+    assert w._overlay.currentWidget() is w._overview_panel
     assert w._overlay.current_overlay == "home"
     assert w._tool_rail._buttons["home"]._active is True

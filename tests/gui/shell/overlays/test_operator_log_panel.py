@@ -222,16 +222,81 @@ def test_default_filter_is_last_8h(app):
     assert panel._filter_buttons[_FILTER_CHIP_LAST_8H].isChecked()
 
 
-def test_chip_selection_mutual_exclusion(app):
+def test_chip_selection_mutual_exclusion(app, monkeypatch):
+    """Click filter buttons (real signal path) and assert:
+    - checked state is mutually exclusive
+    - timeline renders the right entries after filter switch.
+    """
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QLabel
+
+    import cryodaq.gui.shell.overlays.operator_log_panel as _mod
+
+    # Stub ZmqCommandWorker so __init__'s refresh_entries() is a no-op.
+    class _NoOpWorker:
+        def __init__(self, payload: dict, parent=None):
+            pass
+
+        @property
+        def finished(self):
+            return self
+
+        def connect(self, cb):
+            pass
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(_mod, "ZmqCommandWorker", _NoOpWorker)
+
     panel = OperatorLogPanel()
-    panel._on_chip_selected(_FILTER_CHIP_ALL)
+
+    now = datetime.now(UTC)
+    panel._entries_all = [
+        _entry(id=1, ts=now - timedelta(hours=1), message="recent message"),
+        _entry(id=2, ts=now - timedelta(hours=30), message="old message"),
+    ]
+
+    # Click the ALL button via the real UI button (drives the signal).
+    # _on_chip_selected calls refresh_entries (stubbed) then _apply_filters.
+    panel._filter_buttons[_FILTER_CHIP_ALL].click()
+    panel._apply_filters()
+    QCoreApplication.processEvents()
+
     assert panel._active_filter == _FILTER_CHIP_ALL
     assert panel._filter_buttons[_FILTER_CHIP_ALL].isChecked()
     assert not panel._filter_buttons[_FILTER_CHIP_LAST_8H].isChecked()
-    panel._on_chip_selected(_FILTER_CHIP_LAST_24H)
+
+    # Timeline must render BOTH entries when filter=ALL.
+    labels = panel._timeline_container.findChildren(QLabel)
+    label_texts = [lbl.text() for lbl in labels]
+    assert any("recent message" in t for t in label_texts), (
+        f"'recent message' missing from ALL-filter timeline: {label_texts!r}"
+    )
+    assert any("old message" in t for t in label_texts), (
+        f"'old message' missing from ALL-filter timeline: {label_texts!r}"
+    )
+
+    # Click the LAST_24H button — only recent entry should appear.
+    panel._filter_buttons[_FILTER_CHIP_LAST_24H].click()
+    panel._apply_filters()
+    QCoreApplication.processEvents()
+
     assert panel._active_filter == _FILTER_CHIP_LAST_24H
     assert panel._filter_buttons[_FILTER_CHIP_LAST_24H].isChecked()
     assert not panel._filter_buttons[_FILTER_CHIP_ALL].isChecked()
+
+    labels2 = panel._timeline_container.findChildren(QLabel)
+    label_texts2 = [lbl.text() for lbl in labels2]
+    assert any("recent message" in t for t in label_texts2), (
+        f"'recent message' missing from LAST_24H timeline: {label_texts2!r}"
+    )
+    assert not any("old message" in t for t in label_texts2), (
+        f"'old message' should be filtered out by LAST_24H: {label_texts2!r}"
+    )
 
 
 def test_last_8h_filters_client_side(app):
@@ -405,18 +470,89 @@ def test_on_reading_ignores_non_log_channels(app):
     assert called["refresh"] == 0
 
 
-def test_on_reading_triggers_refresh_on_operator_log_entry(app):
+def test_on_reading_triggers_refresh_on_operator_log_entry(app, monkeypatch):
+    """on_reading for operator_log_entry channel must call refresh_entries.
+
+    Stub ZmqCommandWorker to return a fake result immediately, then assert
+    the timeline widget renders the entry text.
+    """
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QLabel
+
+    import cryodaq.gui.shell.overlays.operator_log_panel as _mod
+
+    fake_entry = _entry(
+        id=1,
+        ts=datetime.now(UTC),
+        message="refreshed entry message",
+    )
+
+    class _ImmediateWorker:
+        """Calls the finished callback synchronously with a fake result."""
+
+        def __init__(self, payload: dict, parent=None):
+            self._cb = None
+
+        def connect(self, cb):
+            self._cb = cb
+
+        def start(self):
+            if self._cb:
+                self._cb({"ok": True, "entries": [fake_entry]})
+
+        def isFinished(self):
+            return True
+
+    # Worker attribute access goes through `finished` signal in real code:
+    # worker.finished.connect(self._on_refresh_result)
+    # We need to patch so worker.finished returns an object with .connect.
+    class _WorkerWithSignal:
+        def __init__(self, payload: dict, parent=None):
+            self._payload = payload
+            self._cbs: list = []
+
+        @property
+        def finished(self):
+            return self
+
+        def connect(self, cb):
+            self._cbs.append(cb)
+
+        def start(self):
+            for cb in self._cbs:
+                cb({"ok": True, "entries": [fake_entry]})
+
+        def isFinished(self):
+            return True
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(_mod, "ZmqCommandWorker", _WorkerWithSignal)
+
     panel = OperatorLogPanel()
+    panel._on_chip_selected(_FILTER_CHIP_ALL)
+
     called = {"refresh": 0}
-    original = panel.refresh_entries
+    original_refresh = panel.refresh_entries
 
     def spy() -> None:
         called["refresh"] += 1
-        original()
+        original_refresh()
 
     panel.refresh_entries = spy  # type: ignore[method-assign]
     panel.on_reading(_log_entry_reading())
+    QCoreApplication.processEvents()
+
+    # refresh_entries must have been called.
     assert called["refresh"] == 1
+
+    # Timeline must render the returned entry text.
+    labels = panel._timeline_container.findChildren(QLabel)
+    label_texts = [lbl.text() for lbl in labels]
+    assert any("refreshed entry message" in t for t in label_texts), (
+        f"timeline did not render the refreshed entry; labels: {label_texts!r}"
+    )
 
 
 # ----------------------------------------------------------------------

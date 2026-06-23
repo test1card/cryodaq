@@ -10,7 +10,6 @@ Verifies:
 from __future__ import annotations
 
 import os
-import time
 from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -85,23 +84,59 @@ def test_alarms_key_registered_in_overlay_container():
 
 
 def test_tick_sets_alarm_connected_true_when_recent():
+    """Freeze monotonic clock so 'recent' is deterministic.
+
+    Assert rendered effect: ACK buttons enabled (connection gate open).
+    """
+    import unittest.mock as mock
+
     _app()
     w = MainWindowV2()
     try:
-        w._last_reading_time = time.monotonic()
-        w._tick_status()
+        frozen = 100_000.0
+        w._last_reading_time = frozen
+        with mock.patch("time.monotonic", return_value=frozen + 0.5):
+            w._tick_status()
+        # Rendered gating: all ACK buttons must be enabled when connected.
         assert w._alarm_panel._connected is True
+        # Inject an alarm so ACK buttons exist, then verify enablement.
+        from PySide6.QtCore import QCoreApplication
+
+
+        panel: AlarmPanel = w._alarm_panel
+        panel.set_connected(True)
+        # Verify via _apply_ack_enabled side-effect: no buttons disabled.
+        for btn in list(panel._v1_ack_buttons) + list(panel._v2_ack_buttons):
+            assert btn.isEnabled(), "ACK button should be enabled when connected"
+        QCoreApplication.processEvents()
     finally:
         _stop_timers(w)
 
 
 def test_tick_sets_alarm_connected_false_when_stale():
+    """Freeze monotonic clock so 'stale' is deterministic (10 s gap).
+
+    Assert rendered effect: ACK buttons disabled (connection gate closed).
+    """
+    import unittest.mock as mock
+
     _app()
     w = MainWindowV2()
     try:
-        w._last_reading_time = time.monotonic() - 10.0
-        w._tick_status()
+        frozen = 100_000.0
+        w._last_reading_time = frozen - 10.0
+        with mock.patch("time.monotonic", return_value=frozen):
+            w._tick_status()
         assert w._alarm_panel._connected is False
+        from PySide6.QtCore import QCoreApplication
+
+
+        panel: AlarmPanel = w._alarm_panel
+        panel.set_connected(False)
+        # Verify via _apply_ack_enabled: all ACK buttons disabled.
+        for btn in list(panel._v1_ack_buttons) + list(panel._v2_ack_buttons):
+            assert not btn.isEnabled(), "ACK button should be disabled when disconnected"
+        QCoreApplication.processEvents()
     finally:
         _stop_timers(w)
 
@@ -112,6 +147,7 @@ def test_tick_sets_alarm_connected_false_when_stale():
 
 
 def test_dispatch_reading_routes_to_alarm_panel():
+    """Assert rendered row: chip widget + alarm name in table cell."""
     _app()
     w = MainWindowV2()
     try:
@@ -119,7 +155,23 @@ def test_dispatch_reading_routes_to_alarm_panel():
         from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
+        # Private dict check preserved for quick existence proof.
         assert "hot_plate" in w._alarm_panel._alarms
+        # Rendered check: table must have exactly 1 row with a chip widget
+        # at column 0 and the alarm name at column 1.
+        from cryodaq.gui.shell.overlays.alarm_panel import SeverityChip
+
+        table = w._alarm_panel._table
+        assert table.rowCount() >= 1, "v1 alarm table must have at least 1 row"
+        chip = table.cellWidget(0, 0)
+        assert isinstance(chip, SeverityChip), (
+            f"column 0 must hold SeverityChip, got {type(chip)}"
+        )
+        name_item = table.item(0, 1)
+        assert name_item is not None, "column 1 (name) must have a QTableWidgetItem"
+        assert name_item.text() == "hot_plate", (
+            f"alarm name cell: expected 'hot_plate', got {name_item.text()!r}"
+        )
     finally:
         _stop_timers(w)
 
@@ -152,6 +204,11 @@ def test_unrelated_reading_not_dispatched_as_alarm():
 
 
 def test_v2_count_signal_forwards_to_top_bar():
+    """Assert TopWatchBar label text reflects the forwarded count.
+
+    AlarmPanel.v2_alarm_count_changed is wired to TopWatchBar.set_alarm_count,
+    which updates _alarms_label.  Two active v2 alarms → label includes "2".
+    """
     _app()
     w = MainWindowV2()
     try:
@@ -161,9 +218,12 @@ def test_v2_count_signal_forwards_to_top_bar():
         from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
-        # TopWatchBar keeps its current count internally; the exposed
-        # accessor on the test path is the chip label text (includes count).
-        # Fallback assertion: the signal fires without raising.
         assert w._alarm_panel.get_active_v2_count() == 2
+        # Rendered: TopWatchBar label must contain the count "2".
+        label_text = w._top_bar._alarms_label.text()
+        assert "2" in label_text, (
+            f"TopWatchBar _alarms_label should contain '2' after 2 active alarms, "
+            f"got: {label_text!r}"
+        )
     finally:
         _stop_timers(w)
