@@ -6,6 +6,7 @@ Never raises from handle_query(); returns Russian error string on all failures.
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import logging
 import time
@@ -139,12 +140,22 @@ class AssistantQueryAgent:
             system_prompt = format_with_brand(
                 FORMAT_RESPONSE_SYSTEM, self._config.brand_name
             )
-            result = await self._ollama.generate(
-                user_prompt,
-                model=self._format_model,
-                system=system_prompt,
-                temperature=self._format_temperature,
-                max_tokens=2048,
+            # Bound the format LLM call by _format_timeout_s. Without this
+            # wrapper a hung Ollama format call (cold model load that never
+            # returns, stalled socket) hangs the whole query agent
+            # indefinitely. On timeout asyncio.TimeoutError propagates to the
+            # broad ``except Exception`` below → errors logged, response stays
+            # _FALLBACK (bounded fallback). _format_timeout_s is stored in
+            # __init__ (default 20 s).
+            result = await asyncio.wait_for(
+                self._ollama.generate(
+                    user_prompt,
+                    model=self._format_model,
+                    system=system_prompt,
+                    temperature=self._format_temperature,
+                    max_tokens=2048,
+                ),
+                timeout=self._format_timeout_s,
             )
             if result.truncated or not result.text.strip():
                 errors.append("format_llm_truncated_or_empty")

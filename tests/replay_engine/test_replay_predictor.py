@@ -313,7 +313,26 @@ async def test_replay_engine_publishes_derived_metrics_through_pub(
     sub.setsockopt(zmq.LINGER, 0)
     sub.connect(_TEST_PUB)
     sub.subscribe(b"readings")
-    await asyncio.sleep(0.1)  # slow-joiner mitigation (matches test_replay_engine.py)
+
+    # Deterministic slow-joiner barrier (replaces a fixed asyncio.sleep): publish
+    # readiness probes through the real PUB stream until our SUB actually
+    # receives one, proving the subscription is live before run_source() begins.
+    from cryodaq.replay_engine.server import READINESS_PROBE_CHANNEL
+
+    _ready_deadline = asyncio.get_event_loop().time() + 5.0
+    while True:
+        await engine.publish_readiness_probe()
+        try:
+            _parts = await asyncio.wait_for(sub.recv_multipart(), timeout=0.1)
+        except TimeoutError:
+            assert asyncio.get_event_loop().time() < _ready_deadline, (
+                "SUB never received a readiness probe — PUB/SUB wiring is broken"
+            )
+            continue
+        if len(_parts) == 2:
+            _probe = msgpack.unpackb(_parts[1], raw=False)
+            if _probe.get("ch", "") == READINESS_PROBE_CHANNEL:
+                break
 
     source_task = asyncio.create_task(engine.run_source(), name="test_source")
 

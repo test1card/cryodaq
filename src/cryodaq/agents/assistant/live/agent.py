@@ -862,7 +862,7 @@ class AssistantLiveAgent:
                 result.text,
                 targets=targets,
                 audit_id=audit_id,
-                prefix_suffix="(отчёт за час)",
+                prefix_suffix=f"(отчёт {_report_window_label(window_minutes)})",
             )
 
         await self._audit.log(
@@ -902,6 +902,32 @@ def _build_targets(config: AssistantConfig) -> list[OutputTarget]:
     if config.output_gui_insight:
         targets.append(OutputTarget.GUI_INSIGHT)
     return targets
+
+
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Russian numeral agreement: 1 → *one*, 2-4 → *few*, else *many*,
+    with the 11-14 teens exception (always *many*)."""
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return many
+    last = n % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def _report_window_label(window_minutes: int) -> str:
+    """Russian label for a periodic-report time window, used as the dispatch
+    ``prefix_suffix`` so the operator sees the *actual* window instead of a
+    hardcoded "за час": 60 → "за час", 30 → "за 30 минут", 120 → "за 2 часа"."""
+    if window_minutes > 0 and window_minutes % 60 == 0:
+        hours = window_minutes // 60
+        if hours == 1:
+            return "за час"
+        return f"за {hours} {_plural_ru(hours, 'час', 'часа', 'часов')}"
+    return f"за {window_minutes} {_plural_ru(window_minutes, 'минуту', 'минуты', 'минут')}"
 
 
 def _format_age(age_s: float | None) -> str:
