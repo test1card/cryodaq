@@ -6,7 +6,7 @@
   "gui_verify_inbatch_done": [31, 32, 33, 34],
   "gui_verify_pass_done_batches": [22, 23, 24, 25, 26, 27, 28, 29, 30],
   "gui_verify_pass_pending_batches": [],
-  "gui_verify_residuals": "batch28 experiment_overlay More-menu MED not closed (QMenu.exec un-patchable in PySide6 + teardown segfault); reverted to committed test. batch29 calibration sensor_unit routing = DEFERRED-CALIB-ROUTING (architect).",
+  "gui_verify_residuals": "ALL test-quality residuals CLOSED. batch28 experiment_overlay More-menu MED CLOSED 2026-06-23 (Codex back): replace module-level QMenu with a non-modal fake (real QActions, no-op exec) — runs the real _show_more_menu build logic, asserts the «Прервать» action present + wired + dispatches experiment_abort, zero modal loops so no segfault; combined-11 178 pass exit 0; Codex PASS. Only architect-domain items remain (ESCALATION.md): alarm-panel NaN CRIT, DEFERRED-CALIB-ROUTING, items 7/10/12.",
   "full_gate_green": "2026-06-23: gate1 palette 7/0 + suite 3260/0/2; gate2 (post-VERIFY) palette 7/0 + suite 3261/0/2 (575s)",
   "sweep_complete": "2026-06-23: GUI FIX 22-34 (in-batch Codex VERIFY 31-34) + GUI VERIFY pass 22-30 (Codex wave1+2) + escalation (ESCALATION.md) all done & committed; full suite green x2; nothing pushed. Open: architect decisions in ESCALATION.md (alarm-panel NaN CRIT, DEFERRED-CALIB-ROUTING, items 7/10/12).",
   "find_next_batch": 35,

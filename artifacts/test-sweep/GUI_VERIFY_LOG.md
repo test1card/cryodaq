@@ -42,9 +42,12 @@ architectural HIGHs myself.
   isolation but destabilizes combined-run teardown (process segfault, EXIT=139,
   bisected to this file). Reverted to the committed test (proves footer-absence +
   `_on_abort_clicked` dispatches the exact experiment_abort with patched
-  confirmation). **Residual:** the menu *contains* the abort action is not directly
-  asserted — closing it headlessly is genuinely hostile (un-patchable modal +
-  teardown instability); the abort dispatch + footer-absence ARE asserted. **28
+  confirmation). **RESIDUAL NOW CLOSED (2026-06-23, Codex back):** replaced the
+  module-level `QMenu` reference in the overlay module with a NON-MODAL fake (real
+  `QAction`s, no-op `exec`) — runs the real `_show_more_menu` build logic with zero
+  modal event loops, asserts the «Прервать» action is present + wired +
+  dispatches `experiment_abort`. Combined-11 group 178 pass, exit 0 (no segfault);
+  Codex VERIFY PASS. **28
   accent LOW** — relaxed brittle token-name/count greps to behavior/role.
 - **29 keithley_wiring HIGH (SAFETY)** — premise was wrong (mw_v2 does NOT forward
   keithley commands; the KeithleyPanel dispatches keithley_start/stop directly via

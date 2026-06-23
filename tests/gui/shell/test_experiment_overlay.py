@@ -160,12 +160,25 @@ def test_overlay_abort_in_more_menu(app, monkeypatch):
     """Abort lives in the ⋯ More menu, not the footer.
 
     Assert: (1) no visible abort button in footer;
-            (2) _on_abort_clicked fires the experiment_abort ZMQ command.
+            (2) _show_more_menu BUILDS a menu containing the «Прервать» action
+                and connects it to the abort handler (so a regression that stops
+                adding/wiring it is caught — not just that _on_abort_clicked
+                works standalone);
+            (3) triggering that action dispatches the exact experiment_abort cmd.
+
+    QMenu.exec is an un-patchable blocking modal in PySide6 (shiboken resolves it
+    from the C++ metaobject) and driving it via a timer destabilises combined-run
+    teardown (process segfault). Instead, replace the module-level ``QMenu``
+    reference the overlay uses with a non-modal fake: real ``QAction`` objects
+    (so ``triggered.connect`` / ``trigger`` work) but a no-op ``exec`` — so the
+    real menu-building code runs with NO modal event loop.
     """
     import unittest.mock as mock
 
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QMessageBox, QPushButton
 
+    import cryodaq.gui.shell.experiment_overlay as _ov_mod
     import cryodaq.gui.zmq_client as _zmq_mod
 
     sent_payloads: list[dict] = []
@@ -186,6 +199,28 @@ def test_overlay_abort_in_more_menu(app, monkeypatch):
 
     monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _StubWorker)
 
+    # Non-modal QMenu fake — runs the real _show_more_menu build logic without a
+    # blocking exec(); records the built menu so we can inspect its actions.
+    created_menus: list = []
+
+    class _FakeMenu:
+        def __init__(self, parent=None):
+            created_menus.append(self)
+            self._actions: list[QAction] = []
+
+        def addAction(self, text):  # noqa: ANN001
+            act = QAction(text)
+            self._actions.append(act)
+            return act
+
+        def actions(self):
+            return list(self._actions)
+
+        def exec(self, *args, **kwargs):  # no modal
+            return None
+
+    monkeypatch.setattr(_ov_mod, "QMenu", _FakeMenu)
+
     overlay = ExperimentOverlay()
     overlay.set_connected(True)
     overlay.set_experiment(
@@ -201,18 +236,22 @@ def test_overlay_abort_in_more_menu(app, monkeypatch):
 
     # 1. Abort must NOT appear as a visible footer button.
     buttons = overlay.findChildren(QPushButton)
-    visible_abort = [
-        b
-        for b in buttons
-        if "Прервать" in b.text() and not b.isHidden()
-    ]
+    visible_abort = [b for b in buttons if "Прервать" in b.text() and not b.isHidden()]
     assert len(visible_abort) == 0, "abort button must not be visible in footer"
 
-    # 2. Trigger abort via the handler the More-menu action calls.
-    # Auto-dismiss confirmation dialog: patch exec + clickedButton so cancel branch skipped.
+    # 2. _show_more_menu builds the menu + adds the «Прервать» action.
+    overlay._show_more_menu()
+    assert created_menus, "_show_more_menu did not build a menu"
+    menu = created_menus[-1]
+    abort_action = next((a for a in menu.actions() if "Прервать" in a.text()), None)
+    assert abort_action is not None, "More menu must contain the «Прервать» action"
+
+    # 3. The action is wired to the abort handler → dispatches experiment_abort.
+    #    QMessageBox.exec / clickedButton ARE patchable, so patch them so the
+    #    confirmation proceeds.
     with mock.patch.object(QMessageBox, "exec", return_value=None):
         with mock.patch.object(QMessageBox, "clickedButton", return_value=None):
-            overlay._on_abort_clicked()
+            abort_action.trigger()
 
     abort_cmds = [p for p in sent_payloads if p.get("cmd") == "experiment_abort"]
     assert len(abort_cmds) == 1, (
