@@ -13,10 +13,17 @@ executor agents strengthening the found weak tests). State lives in
   usage limit. 232 findings recorded (1 CRIT, 49 HIGH, 115 MED, 67 LOW).
 - **FIX pass:** ✅ **COMPLETE — batches 0–21 all fixed & verified green** (~290 weak tests
   strengthened). Final clean CI-mirror gate (2026-06-23): **3248 pass / 0 fail / 3 skip**.
-- **VERIFY pass (mode now `fix-verify`):** Codex amend-cycle review of the strengthened files,
-  `verify_next_batch` 0→21. **This is the current activity.**
-- **Committed (local, push held):** batches 0-5 `64590b0`, 6-10 `c548d34`, 11-15 `c805dcf`,
-  16-20 `ee93591`, 21 + fix-pass-complete marker = latest commit.
+- **VERIFY pass:** ✅ **COMPLETE — batches 0-21 all amend-reviewed** (Codex gpt-5.5 read-only →
+  test-only executor fixes → independent re-run). ~60 residual false-confidence problems fixed +
+  2 real flakes caught (sub-µs `time.time` boundary; process-randomized `hash()`) + 1 safety-flake
+  refix (p0 await_count race) + 1 bonus time-of-day bug. Deferred ledger grew to 10 items (all need
+  src seams). Batches 19/20/21 reviewed INLINE (Codex usage-limited). VERIFY_LOG.md has the table.
+- **NEXT (optional, mode now `find`):** the Codex adversarial FIND pass over the never-swept GUI
+  batches 22-34 (`find_next_batch=22`) — needs Codex (usage-limited until ~6:14 AM). That feeds a
+  future fix pass. Nothing else outstanding in this worktree.
+- **Committed (local, push held):** fix batches 0-5 `64590b0`, 6-10 `c548d34`, 11-15 `c805dcf`,
+  16-20 `ee93591`, 21 `ad4a879`; verify 0-4 `28b2ef0`, 5-9 `eb15835`, 10-14 `8da5487`, 15-19
+  `a37c9d2`, 20-21 = latest. **Nothing pushed.**
 
 Authoritative machine state: `artifacts/test-sweep/progress.json`
 (`mode`, `verify_next_batch`, `fix_next_batch`, `find_next_batch`).
