@@ -314,20 +314,39 @@ def test_coverage_empty_regions(tmp_path) -> None:
     pairs = CalibrationFitter.extract_pairs(tmp_path, 999.0, 1050.0, "ref", "tgt")
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
-    statuses = [b["status"] for b in coverage]
-    assert "empty" in statuses, "Expected 'empty' bins in the gap region between T=4K and T=300K"
+    # compute_coverage bins over temperature (krdg = second element of pairs).
+    # Data: 20 pairs at T=4.0 K, 20 pairs at T=300.0 K, nothing in between.
+    # 10 bins over [4.0, 300.0] → width ≈ 29.6 K each.
+    #   Bin 0 [4.0, 33.6):  all 20 cold points → point_count == 20
+    #   Bins 1–8:            empty gap           → point_count == 0, status == "empty"
+    #   Bin 9 [270.4, 300.0]: all 20 warm points → point_count == 20
 
-    # Data exists only at the two extremes: bins [0] and [9] must be non-empty
-    # (SRDG values: cluster at 80.0 for T=4K group and at 5.0 for T=300K group)
-    # The MIDDLE bins (indices 1..8) must contain the gap — at least some must be empty
-    middle_statuses = statuses[1:9]
-    assert "empty" in middle_statuses, (
-        f"No empty bins in middle range; statuses={statuses}"
+    assert len(coverage) == 10, f"Expected 10 bins, got {len(coverage)}"
+
+    assert coverage[0]["point_count"] == 20, (
+        f"Bin 0 should have 20 cold points; got {coverage[0]}"
+    )
+    assert coverage[-1]["point_count"] == 20, (
+        f"Bin 9 should have 20 warm points; got {coverage[-1]}"
     )
 
-    # Both endpoint bins must be non-empty (dense or medium or sparse)
-    assert statuses[0] != "empty", f"First bin unexpectedly empty; statuses={statuses}"
-    assert statuses[-1] != "empty", f"Last bin unexpectedly empty; statuses={statuses}"
+    # All middle bins (indices 1–8) must be empty
+    for idx in range(1, 9):
+        b = coverage[idx]
+        assert b["point_count"] == 0, (
+            f"Middle bin {idx} should have 0 points; got {b}"
+        )
+        assert b["status"] == "empty", (
+            f"Middle bin {idx} should have status='empty'; got {b}"
+        )
+
+    # Both endpoint bins must be non-empty
+    assert coverage[0]["status"] != "empty", (
+        f"Bin 0 unexpectedly empty; got {coverage[0]}"
+    )
+    assert coverage[-1]["status"] != "empty", (
+        f"Bin 9 unexpectedly empty; got {coverage[-1]}"
+    )
 
     # Total point count preserved
     total = sum(b["point_count"] for b in coverage)

@@ -130,8 +130,19 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
    guarantee hold for any searcher. Test reframed honestly to assert "preserves searcher order +
    distance cutoff" (not "sorts"). Prod hardening only — not a correctness bug.
 
-NOTE: secret-token leak guard (batch 18) — RESOLVED, not deferred: runtime __dict__
-inspection now confirms all 3 Telegram classes store tokens as SecretStr only (no leak).
+10. **Launcher real-construction tests** (batch 18 VERIFY) — three launcher tests can't reach the real
+    path test-only and need a src seam: (a) `test_launcher_replay.py` argparse tests duplicate the parser
+    because `launcher.main()` builds it inline — needs a prod `_parse_args(argv)` helper extracted from
+    main(). (b) the window-title and no-duplicate-QTimer tests want a real offscreen `LauncherWindow`, but
+    `LauncherWindow.__init__` calls `_start_engine()` unconditionally (launcher.py:341), so it can't be
+    constructed test-only without a constructable seam (e.g. an injectable/skippable engine start). Until
+    then they keep inspect.getsource / module-level QTimer-is-Qt-class guards (the no-dup-QTimer test can't
+    catch a local UnboundLocalError binding without real construction). Test-quality only.
+
+NOTE: secret-token leak guard (batch 18) — RESOLVED & re-hardened in VERIFY: the runtime walker now scans
+__dict__ values + __slots__ across the MRO + nested containers, stops at SecretStr, and asserts
+isinstance(_bot_token, SecretStr) for all 3 Telegram classes (TelegramNotifier, TelegramCommandBot,
+PeriodicReporter). Teeth-checked (a plain-str token attr is caught). No leak.
 
 ---
 

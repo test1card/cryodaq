@@ -235,7 +235,10 @@ async def test_cooldown_detection_start(tmp_path: Path):
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
             await broker.publish(r_w)
-            await asyncio.sleep(0.01)  # Let consume loop process
+            # Yield to the event loop so the consume task processes each batch;
+            # no fixed sleep — a single yield is enough since the consume task
+            # is already waiting on its queue.
+            await asyncio.sleep(0)
 
         # Poll for COOLING state with a hard deadline (no fixed sleep)
         deadline = asyncio.get_event_loop().time() + 2.0
@@ -414,37 +417,39 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
         assert "cooldown_active" in meta
         assert meta["cooldown_active"] is True
 
-        # Trajectory for GUI — may be absent if progress >= 0.98 but
-        # should be present at start of cooldown
-        # (we accept absent if cooldown is nearly done, which shouldn't
-        #  happen 8 h into a 20 h run)
-        if meta.get("progress", 0.0) < 0.98:
-            assert "future_t" in meta, "Missing future_t trajectory in metadata"
-            assert "future_T_cold_mean" in meta
+        # This fixture is early cooldown (60 readings at -15 K/h from 295 K)
+        # — progress must be well below 0.98, not nearly done.
+        assert meta["progress"] < 0.98, (
+            f"Expected early-cooldown progress < 0.98, got {meta['progress']}"
+        )
 
-            future_t = meta["future_t"]
-            future_T = meta["future_T_cold_mean"]
+        # Trajectory for GUI must be present unconditionally at early cooldown
+        assert "future_t" in meta, "Missing future_t trajectory in metadata"
+        assert "future_T_cold_mean" in meta
 
-            # Both must be lists of equal length
-            assert isinstance(future_t, list), f"future_t is {type(future_t)}, expected list"
-            assert isinstance(future_T, list), f"future_T_cold_mean is {type(future_T)}, expected list"
-            assert len(future_t) == len(future_T), (
-                f"future_t length {len(future_t)} != future_T_cold_mean length {len(future_T)}"
+        future_t = meta["future_t"]
+        future_T = meta["future_T_cold_mean"]
+
+        # Both must be lists of equal length
+        assert isinstance(future_t, list), f"future_t is {type(future_t)}, expected list"
+        assert isinstance(future_T, list), f"future_T_cold_mean is {type(future_T)}, expected list"
+        assert len(future_t) == len(future_T), (
+            f"future_t length {len(future_t)} != future_T_cold_mean length {len(future_T)}"
+        )
+        assert len(future_t) > 0, "future_t trajectory is empty"
+
+        # All values must be finite
+        import math as _math
+        for i, v in enumerate(future_t):
+            assert _math.isfinite(v), f"future_t[{i}] = {v} is not finite"
+        for i, v in enumerate(future_T):
+            assert _math.isfinite(v), f"future_T_cold_mean[{i}] = {v} is not finite"
+
+        # future_t must be monotonically non-decreasing (time moves forward)
+        for i in range(1, len(future_t)):
+            assert future_t[i] >= future_t[i - 1], (
+                f"future_t not monotonic at index {i}: {future_t[i - 1]} → {future_t[i]}"
             )
-            assert len(future_t) > 0, "future_t trajectory is empty"
-
-            # All values must be finite
-            import math as _math
-            for i, v in enumerate(future_t):
-                assert _math.isfinite(v), f"future_t[{i}] = {v} is not finite"
-            for i, v in enumerate(future_T):
-                assert _math.isfinite(v), f"future_T_cold_mean[{i}] = {v} is not finite"
-
-            # future_t must be monotonically non-decreasing (time moves forward)
-            for i in range(1, len(future_t)):
-                assert future_t[i] >= future_t[i - 1], (
-                    f"future_t not monotonic at index {i}: {future_t[i - 1]} → {future_t[i]}"
-                )
 
     finally:
         await service.stop()
@@ -488,9 +493,9 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
     await service.start()
 
     try:
-        # Publish cooling readings on BOTH channels so the detector can
-        # fully transition (the service subscribes to T_cold + T_warm).
-        # Without a model the predict loop must stay silent regardless.
+        # Publish cooling readings on BOTH channels so the consume loop
+        # populates _last_T_cold and _last_T_warm — this ensures the
+        # "no prediction" is due to the missing MODEL, not missing sensor data.
         readings_cold = _cooldown_readings(
             n=30, T_start=295.0, rate_K_per_h=-15.0, channel="T_cold"
         )
@@ -500,12 +505,28 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
             await broker.publish(r_w)
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)  # yield — no fixed wall-clock sleep
 
-        # Give predict loop several intervals to fire (predict_interval_s=0.05)
-        await asyncio.sleep(0.4)
+        # Drain the consume queue so T_cold/T_warm are populated
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if (
+                service._last_T_cold is not None
+                and service._last_T_warm is not None
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert service._last_T_cold is not None, "T_cold never reached consume loop"
+        assert service._last_T_warm is not None, "T_warm never reached consume loop"
 
-        # Queue must be empty — no predictions without a model
+        # Confirm model is indeed absent (the precondition for this test)
+        assert service._model is None, "Model should not exist in no_model dir"
+
+        # Drive _do_predict() deterministically — verifies one iteration actually ran
+        # and produced no result (no publish to broker) because model is None.
+        await service._do_predict()
+
+        # Queue must be empty — _do_predict returns immediately when _model is None
         assert results_queue.empty(), "Service emitted predictions despite no model on disk"
     finally:
         await service.stop()

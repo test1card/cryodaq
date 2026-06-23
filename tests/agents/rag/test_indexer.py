@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -12,7 +13,12 @@ from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, build_index
 
 
 class _MockEmbeddings:
-    """Returns a deterministic _EMBEDDING_DIM-sized vector keyed off the input text."""
+    """Returns a deterministic _EMBEDDING_DIM-sized vector keyed off the input text.
+
+    Uses hashlib.md5 so the seed is stable across Python processes regardless of
+    PYTHONHASHSEED.  The +1 in the numerator guarantees the seed is strictly
+    positive (> 0), so the resulting vector is never all-zero.
+    """
 
     def __init__(self, dim: int = _EMBEDDING_DIM) -> None:
         self.dim = dim
@@ -20,7 +26,7 @@ class _MockEmbeddings:
 
     async def embed(self, text: str) -> list[float]:
         self.calls.append(text)
-        seed = (hash(text) % 100) / 100.0
+        seed = (hashlib.md5(text.encode("utf-8")).digest()[0] + 1) / 256.0  # always > 0
         return [seed] * self.dim
 
 

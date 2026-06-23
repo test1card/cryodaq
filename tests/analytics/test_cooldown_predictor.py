@@ -596,26 +596,21 @@ async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path
     loaded = load_model(tmp_path)
     assert loaded.n_curves == model.n_curves
 
-    # Compute expected floors from the fixture's literal curve minima
-    from cryodaq.analytics.cooldown_predictor import (
-        T_COLD_END_FALLBACK,
-        T_WARM_END_FALLBACK,
-        _derive_floors,
-    )
-    from cryodaq.analytics.cooldown_predictor import (
-        ReferenceCurve as _RC,
-    )
-    raw_for_expected = [
-        _RC(
-            name=d["name"], date=d["date"], t_hours=d["t_hours"],
-            T_cold=d["T_cold"], T_warm=d["T_warm"],
-            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
-            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
-            T_warm_final=d["T_warm_final"],
-        )
-        for d in synthetic_curves
-    ]
-    expected_cold_end, expected_warm_end = _derive_floors(raw_for_expected)
+    # Expected floors computed BY HAND from the fixture's known minima (seed 42).
+    # The synthetic_curves fixture (conftest.py) uses RandomState(42) and produces
+    # 9 curves with these T_cold and T_warm minima:
+    #   cold_mins: [7.60, 7.68, 5.97, 6.31, 7.66, 5.94, 5.55, 7.34, 5.24]
+    #   warm_mins: [103.97, 84.81, 92.43, 93.57, 99.92, 89.56, 98.83, 94.86, 95.72]
+    #
+    # _derive_floors formula:
+    #   T_cold_end = max(1.0, min(cold_mins) - 0.5) = max(1.0, 5.238... - 0.5) = 4.738...
+    #   T_warm_end = max(50.0, min(warm_mins) - 2.0) = max(50.0, 84.814... - 2.0) = 82.814...
+    #
+    # Substituting literal arithmetic (independent of _derive_floors):
+    _COLD_MIN_FIXTURE = 5.238214802103644   # min T_cold across all 9 synthetic curves
+    _WARM_MIN_FIXTURE = 84.81452007433214   # min T_warm across all 9 synthetic curves
+    expected_cold_end = max(1.0, _COLD_MIN_FIXTURE - 0.5)   # = 4.738214802103644
+    expected_warm_end = max(50.0, _WARM_MIN_FIXTURE - 2.0)  # = 82.81452007433214
 
     assert loaded.T_cold_end == pytest.approx(expected_cold_end, abs=0.01), (
         f"loaded.T_cold_end={loaded.T_cold_end} != expected {expected_cold_end}"
@@ -623,7 +618,11 @@ async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path
     assert loaded.T_warm_end == pytest.approx(expected_warm_end, abs=0.01), (
         f"loaded.T_warm_end={loaded.T_warm_end} != expected {expected_warm_end}"
     )
-    # Floors must not fall back to the generic constants
+    # Floors must not fall back to the generic constants (2.5 K / 75.0 K)
+    # — both hand-computed values are well above the clamp threshold so they
+    # differ from the fallbacks by more than 1 K.
+    from cryodaq.analytics.cooldown_predictor import T_COLD_END_FALLBACK, T_WARM_END_FALLBACK
+
     assert loaded.T_cold_end != pytest.approx(T_COLD_END_FALLBACK, abs=0.01), (
         "Legacy model loaded with fallback T_cold_end instead of re-deriving from curves"
     )

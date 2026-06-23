@@ -287,20 +287,26 @@ def test_calibration_index_uses_atomic_write(tmp_path, monkeypatch):
     curve = store.fit_curve("CH2", samples)
 
     called_paths.clear()
-    store.save_curve(curve)
+    curve_path = store.save_curve(curve)
 
-    # save_curve writes the JSON curve file + index — both via atomic_write_text
-    suffixes = {p.suffix for p in called_paths}
-    assert ".json" in suffixes, f"save_curve did not call atomic_write_text for .json; calls={called_paths}"
-    assert any("index" in p.name for p in called_paths), (
-        f"_write_index did not call atomic_write_text; calls={called_paths}"
+    # save_curve writes the JSON curve file + index — both via atomic_write_text.
+    # Assert the EXACT paths, not just suffixes.
+    index_path = tmp_path / "index.yaml"
+    assert curve_path in called_paths, (
+        f"save_curve did not call atomic_write_text for curve JSON {curve_path}; calls={called_paths}"
+    )
+    assert index_path in called_paths, (
+        f"_write_index did not call atomic_write_text for {index_path}; calls={called_paths}"
     )
 
     called_paths.clear()
-    store.export_curve_cof("CH2")
+    cof_path = store.export_curve_cof("CH2")
 
-    assert any(p.suffix == ".cof" for p in called_paths), (
-        f"export_curve_cof did not call atomic_write_text for .cof; calls={called_paths}"
+    assert cof_path in called_paths, (
+        f"export_curve_cof did not call atomic_write_text for {cof_path}; calls={called_paths}"
+    )
+    assert index_path in called_paths, (
+        f"export_curve_cof did not call atomic_write_text for index {index_path}; calls={called_paths}"
     )
 
 

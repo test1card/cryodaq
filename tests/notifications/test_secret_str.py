@@ -37,100 +37,164 @@ def test_secret_str_bool_and_eq():
     assert SecretStr("a") != SecretStr("b")
 
 
-def _walk_attrs(obj, seen=None):
-    """Recursively yield all string values reachable from obj.__dict__."""
+def _walk_plain_strings(obj, seen=None):
+    """Recursively yield all plain string values stored in a cryodaq object.
+
+    Security contract: a raw token must NOT appear as a plain ``str`` in any
+    reachable location of the object graph.  A token wrapped in SecretStr is
+    acceptable — SecretStr is explicitly excluded from recursion because its
+    ``_value`` slot is the *intended* storage location (masked from repr/str).
+
+    Coverage:
+    - ``__dict__`` values (instance attributes)
+    - ``__slots__`` attribute values on the class MRO
+    - Nested ``list``/``tuple``/``set``/``frozenset`` elements
+    - Nested ``dict`` values (not keys — keys are attribute names, not tokens)
+
+    Recursion stops at:
+    - Objects already visited (cycle guard via ``id``)
+    - ``SecretStr`` instances (wrapping is correct by design)
+    - Non-cryodaq objects (Mocks, stdlib, third-party) to avoid false
+      positives from test infrastructure
+    """
     if seen is None:
         seen = set()
     obj_id = id(obj)
     if obj_id in seen:
         return
     seen.add(obj_id)
+
+    # Stop at SecretStr — that IS the correct wrapper; do not unwrap it.
+    if isinstance(obj, SecretStr):
+        return
+
+    # Only recurse into cryodaq-owned objects; stop at Mocks / stdlib / etc.
+    mod = getattr(type(obj), "__module__", "") or ""
+    if not mod.startswith("cryodaq."):
+        return
+
+    # Gather all attribute values from __dict__ and __slots__
+    attr_values: list = []
+
     try:
         d = object.__getattribute__(obj, "__dict__")
+        attr_values.extend(d.values())
     except AttributeError:
-        return
-    for v in d.values():
+        pass
+
+    for cls in type(obj).__mro__:
+        for slot in getattr(cls, "__slots__", ()):
+            # Skip SecretStr's own _value slot — already guarded above
+            try:
+                attr_values.append(getattr(obj, slot))
+            except AttributeError:
+                pass
+
+    for v in attr_values:
         if isinstance(v, str):
             yield v
+        elif isinstance(v, SecretStr):
+            pass  # correct storage — do not unwrap
         elif isinstance(v, (list, tuple, set, frozenset)):
             for item in v:
                 if isinstance(item, str):
                     yield item
                 else:
-                    yield from _walk_attrs(item, seen)
+                    yield from _walk_plain_strings(item, seen)
         elif isinstance(v, dict):
             for item in v.values():
                 if isinstance(item, str):
                     yield item
                 else:
-                    yield from _walk_attrs(item, seen)
-        elif hasattr(v, "__dict__"):
-            yield from _walk_attrs(v, seen)
+                    yield from _walk_plain_strings(item, seen)
+        else:
+            yield from _walk_plain_strings(v, seen)
+
+
+_SENTINEL = "SENTINEL_TOK_9f3a"
 
 
 def test_telegram_notifier_no_plain_token_in_attrs():
-    """TelegramNotifier must NOT store the raw token in any instance attribute.
+    """TelegramNotifier must NOT store the raw token in any plain attribute.
 
-    Runtime check: instantiate with a sentinel token, walk __dict__ recursively,
-    assert the raw token string never appears as a plain string attribute.
-    The token should only materialise inside _build_api_url() at call time.
+    Walks __dict__ values AND __slots__ attributes recursively (cryodaq objects
+    only; stops at SecretStr so the correct wrapper is not unwrapped).
+    Also asserts that _bot_token is a SecretStr instance (not a bare str).
     """
     from cryodaq.notifications.telegram import TelegramNotifier
 
-    sentinel = "SENTINEL_TOKEN_12345"
-    notifier = TelegramNotifier(bot_token=sentinel, chat_id=99999)
+    notifier = TelegramNotifier(bot_token=_SENTINEL, chat_id=99999)
 
-    # Walk all instance attributes: raw sentinel must not appear as plain str.
-    # SecretStr wrapping is fine — its __str__/__repr__ mask it.
-    plain_values = list(_walk_attrs(notifier))
-    assert sentinel not in plain_values, (
+    # _bot_token must be wrapped in SecretStr, never stored as a bare str
+    assert isinstance(notifier._bot_token, SecretStr), (
+        f"TelegramNotifier._bot_token must be SecretStr, got {type(notifier._bot_token)}"
+    )
+
+    plain_values = list(_walk_plain_strings(notifier))
+    assert _SENTINEL not in plain_values, (
         f"TelegramNotifier stores raw token in a plain attribute: {plain_values}"
     )
 
     # The token must materialise correctly when building the URL on demand.
     url = notifier._build_api_url("sendMessage")
-    assert sentinel in url, "_build_api_url() must include the token in the URL"
+    assert _SENTINEL in url, "_build_api_url() must include the token in the URL"
 
 
 def test_telegram_command_bot_no_plain_token_in_attrs():
-    """TelegramCommandBot must NOT store the raw token in any instance attribute."""
+    """TelegramCommandBot must NOT store the raw token in any plain attribute.
+
+    Walks __dict__ values AND __slots__ attributes recursively (cryodaq objects
+    only; stops at SecretStr so the correct wrapper is not unwrapped).
+    Also asserts that _bot_token is a SecretStr instance (not a bare str).
+    """
     from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
-    sentinel = "SENTINEL_TOKEN_12345"
     bot = TelegramCommandBot(
         broker=None,
         alarm_engine=None,
-        bot_token=sentinel,
+        bot_token=_SENTINEL,
         allowed_chat_ids=[123],
         commands_enabled=True,
     )
 
-    plain_values = list(_walk_attrs(bot))
-    assert sentinel not in plain_values, (
+    assert isinstance(bot._bot_token, SecretStr), (
+        f"TelegramCommandBot._bot_token must be SecretStr, got {type(bot._bot_token)}"
+    )
+
+    plain_values = list(_walk_plain_strings(bot))
+    assert _SENTINEL not in plain_values, (
         f"TelegramCommandBot stores raw token in a plain attribute: {plain_values}"
     )
 
     # Token must appear in the URL built on demand.
     api_url = bot._api  # property calls get_secret_value()
-    assert sentinel in api_url, "bot._api must materialise the token in the URL"
+    assert _SENTINEL in api_url, "bot._api must materialise the token in the URL"
 
 
 def test_periodic_reporter_no_plain_token_in_attrs():
-    """PeriodicReporter must NOT store the raw token in any instance attribute."""
+    """PeriodicReporter must NOT store the raw token in any plain attribute.
+
+    Walks __dict__ values AND __slots__ attributes recursively (cryodaq objects
+    only; stops at SecretStr so the correct wrapper is not unwrapped).
+    Also asserts that _bot_token is a SecretStr instance (not a bare str).
+    """
     from unittest.mock import MagicMock
 
     from cryodaq.notifications.periodic_report import PeriodicReporter
 
-    sentinel = "SENTINEL_TOKEN_12345"
     reporter = PeriodicReporter(
         broker=MagicMock(),
         alarm_engine=MagicMock(),
-        bot_token=sentinel,
+        bot_token=_SENTINEL,
         chat_id=99999,
     )
 
-    plain_values = list(_walk_attrs(reporter))
-    assert sentinel not in plain_values, (
+    assert isinstance(reporter._bot_token, SecretStr), (
+        f"PeriodicReporter._bot_token must be SecretStr, got {type(reporter._bot_token)}"
+    )
+
+    plain_values = list(_walk_plain_strings(reporter))
+    assert _SENTINEL not in plain_values, (
         f"PeriodicReporter stores raw token in a plain attribute: {plain_values}"
     )
 

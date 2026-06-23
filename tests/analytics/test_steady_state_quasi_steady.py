@@ -92,6 +92,12 @@ def test_fast_drift_NOT_quasi_steady() -> None:
     # The curve_fit path must succeed (valid=True); the fallback valid=False
     # only fires when curve_fit fails, which it should not on clean linear data.
     assert pred.valid is True
+    # Fit fields must be non-degenerate — a degenerate valid=True fallback
+    # (e.g. tau_s=0 or amplitude=0) must not pass this test.
+    assert pred.tau_s > 0, f"tau_s={pred.tau_s} must be positive after curve_fit"
+    assert abs(pred.amplitude) > 1e-6, (
+        f"amplitude={pred.amplitude} must be non-zero after curve_fit"
+    )
 
 
 def test_high_noise_NOT_quasi_steady() -> None:

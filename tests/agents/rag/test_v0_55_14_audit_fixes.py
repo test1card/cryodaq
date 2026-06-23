@@ -263,38 +263,52 @@ def test_chunk_text_single_short_chunk() -> None:
 def test_build_index_offloads_loaders_via_to_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """All synchronous filesystem-walking loaders must run via asyncio.to_thread
-    so the event loop stays responsive during a finalize-time rebuild.
+    """build_index must offload sync loaders via asyncio.to_thread so the event
+    loop stays responsive while a loader blocks in its worker thread.
 
-    Enables experiments_dir, vault_dir, and sqlite_path so all three
-    corresponding loaders are exercised.  A heartbeat counter verifies
-    the event loop continued to process tasks while loaders ran.
+    Proof of genuine event-loop responsiveness:
+    1. Monkeypatch load_vault_notes to block on a threading.Event (not yet set).
+    2. Run build_index as an asyncio Task.
+    3. Concurrently run a heartbeat coroutine that ticks every 5 ms.
+    4. Wait (bounded, 3 s) until load_vault_notes is confirmed blocked (a second
+       threading.Event set at loader entry).
+    5. Assert heartbeat has advanced ≥ 3 ticks while the loader is blocked
+       — proves the event loop was NOT blocked.
+    6. Set the release Event so the loader (and build_index) can complete.
+    7. Await build_index completion with a 10 s timeout.
     """
+    import threading
+
+    from cryodaq.agents.rag import document_loader as _dl_mod
     from cryodaq.agents.rag import indexer
 
+    # Two threading events for loader coordination.
+    _loader_entered = threading.Event()   # set inside the blocked loader
+    _loader_release = threading.Event()   # set by the test to unblock the loader
+
+    original_load_vault_notes = _dl_mod.load_vault_notes
+
     seen: list[str] = []
-    heartbeat_ticks: list[int] = [0]
 
-    original_to_thread = asyncio.to_thread
+    def _blocking_load_vault_notes(vault_dir):
+        """Replacement that blocks until released — runs in worker thread."""
+        seen.append("load_vault_notes")
+        _loader_entered.set()                         # signal: we are now blocked
+        _loader_release.wait(timeout=10.0)            # block until test releases us
+        return original_load_vault_notes(vault_dir)
 
-    async def spy_to_thread(func, *args, **kwargs):
-        name = getattr(func, "__name__", repr(func))
-        seen.append(name)
-        # Yield control to the event loop before and after each blocking call
-        await asyncio.sleep(0)
-        heartbeat_ticks[0] += 1
-        result = await original_to_thread(func, *args, **kwargs)
-        await asyncio.sleep(0)
-        heartbeat_ticks[0] += 1
-        return result
+    monkeypatch.setattr(_dl_mod, "load_vault_notes", _blocking_load_vault_notes)
+    # Also patch the name as imported inside indexer
+    monkeypatch.setattr(indexer, "load_vault_notes", _blocking_load_vault_notes, raising=False)
 
-    monkeypatch.setattr(indexer.asyncio, "to_thread", spy_to_thread)
+    # Verify build_index uses asyncio.to_thread for loaders; if not, this test
+    # would deadlock (loader blocks event loop) — detect early via a short timeout.
 
-    # Prepare minimal vault dir (empty — load_vault_notes handles missing gracefully)
+    # Prepare minimal vault dir
     vault_dir = tmp_path / "vault"
     vault_dir.mkdir()
 
-    # Prepare minimal sqlite DB with operator_log table (may be empty)
+    # Prepare minimal sqlite DB
     sqlite_path = tmp_path / "data_2026.db"
     conn = sqlite3.connect(str(sqlite_path))
     conn.execute(
@@ -308,25 +322,68 @@ def test_build_index_offloads_loaders_via_to_thread(
     embeddings = MagicMock()
     embeddings.embed = AsyncMock(return_value=[0.0] * 384)
 
-    asyncio.run(
-        build_index(
-            experiments_dir=tmp_path / "experiments",  # empty dir
-            vault_dir=vault_dir,
-            sqlite_path=sqlite_path,
-            db_path=tmp_path / "lance",
-            embeddings_client=embeddings,
+    async def _run() -> None:
+        heartbeat_ticks: list[int] = [0]
+        heartbeat_done = asyncio.Event()
+
+        async def _heartbeat() -> None:
+            try:
+                while not heartbeat_done.is_set():
+                    await asyncio.sleep(0.005)   # 5 ms
+                    heartbeat_ticks[0] += 1
+            except asyncio.CancelledError:
+                pass
+
+        hb_task = asyncio.create_task(_heartbeat())
+        build_task = asyncio.create_task(
+            build_index(
+                experiments_dir=tmp_path / "experiments",
+                vault_dir=vault_dir,
+                sqlite_path=sqlite_path,
+                db_path=tmp_path / "lance",
+                embeddings_client=embeddings,
+            )
         )
-    )
 
-    # All three loaders must have been dispatched via to_thread
-    assert "load_experiment_metadata" in seen, f"to_thread calls: {seen}"
-    assert "load_vault_notes" in seen, f"to_thread calls: {seen}"
-    assert "load_operator_log_entries" in seen, f"to_thread calls: {seen}"
+        # Wait until the loader is confirmed blocked in its worker thread (bounded 3 s).
+        # We poll with asyncio.sleep so the event loop keeps running during the wait.
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while not _loader_entered.is_set():
+            if asyncio.get_event_loop().time() > deadline:
+                _loader_release.set()    # prevent deadlock before failing
+                hb_task.cancel()
+                pytest.fail(
+                    "load_vault_notes was not called within 3 s — "
+                    "build_index may not be offloading loaders via asyncio.to_thread"
+                )
+            await asyncio.sleep(0.005)
 
-    # Event loop must have ticked at least once per loader call
-    assert heartbeat_ticks[0] >= len([s for s in seen if s.startswith("load_")]) * 2, (
-        f"Event loop heartbeats ({heartbeat_ticks[0]}) too low for {seen}"
-    )
+        # Loader is confirmed blocked in worker thread.
+        # Give the heartbeat coroutine several scheduling rounds to accumulate ticks.
+        for _ in range(10):
+            await asyncio.sleep(0.010)   # 10 ms per iteration → at least 2 ticks each
+
+        # Loader is blocked in worker thread; assert heartbeat has advanced.
+        ticks_while_blocked = heartbeat_ticks[0]
+        assert ticks_while_blocked >= 3, (
+            f"Event loop did not tick while loader was blocked "
+            f"(heartbeat_ticks={ticks_while_blocked}); "
+            "loader may be running on the event loop thread instead of to_thread"
+        )
+
+        # Release the blocked loader so build_index can finish.
+        _loader_release.set()
+
+        # Await build_index with a generous timeout.
+        await asyncio.wait_for(build_task, timeout=10.0)
+
+        heartbeat_done.set()
+        await hb_task
+
+    asyncio.run(_run())
+
+    # Confirm load_vault_notes was indeed called.
+    assert "load_vault_notes" in seen, f"load_vault_notes was not called; seen={seen}"
 
 
 def test_build_index_returns_zero_stats_on_empty_corpus(tmp_path: Path) -> None:

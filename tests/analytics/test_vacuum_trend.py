@@ -7,6 +7,7 @@ import math
 from dataclasses import asdict
 
 import numpy as np
+import pytest
 
 from cryodaq.analytics.vacuum_trend import (
     VacuumTrendPredictor,
@@ -102,9 +103,11 @@ def test_fit_power_law_synthetic() -> None:
     assert p.confidence > 0.90
     # log_p_ult must be recovered within ±10%
     assert abs(p.fit_params["log_p_ult"] - log_p_ult) / abs(log_p_ult) < 0.10
-    # B and alpha are correlated in the fit (changing both while keeping
-    # B*t^(-alpha) constant gives equivalent fits); validate via predictions
-    # at two timepoints spanning the data range instead of raw param values.
+    # B and alpha are jointly unidentifiable: different (B, alpha) pairs can produce
+    # equivalent fits over finite data (e.g. B=0.35, alpha=0.38 fits B=3, alpha=1 data
+    # equally well over t=10..1005 s). The real bound: verify the fitted power-law
+    # TERM B_fit*t^(-alpha_fit) reproduces ground truth at two timepoints within
+    # 0.1 log-decades (proves correct curve shape, not raw parameter recovery).
     # Ground truth: logP(t) = -6 + 3 * t^(-1).
     for t_check in [50.0, 500.0]:
         fitted_logP = (
@@ -143,6 +146,19 @@ def test_fit_combined_synthetic() -> None:
     assert abs(p.fit_params["log_p_ult"] - log_p_ult) / abs(log_p_ult) < 0.10
     assert abs(p.fit_params["A"] - A) / A < 0.10
     assert abs(p.fit_params["tau"] - tau) / tau < 0.10
+    # B and alpha: the 5-param combined fit has strong B/alpha degeneracy —
+    # different (B, alpha) pairs produce equivalent fits over finite data, so
+    # raw parameter recovery is not a reliable bound. The real bound: verify
+    # the fitted power-law TERM B_fit*t^(-alpha_fit) reproduces ground truth at
+    # two timepoints within 0.15 log-decades (proves the power-law component is
+    # correctly captured; 0.15 decade ≈ 40% in linear P).
+    # Ground truth power-law term: B * t^(-alpha) = 2.0 * t^(-0.8).
+    for t_check in [50.0, 500.0]:
+        fitted_pl = p.fit_params["B"] * (t_check ** (-p.fit_params["alpha"]))
+        gt_pl = B * (t_check ** (-alpha))
+        assert abs(fitted_pl - gt_pl) < 0.15, (
+            f"Power-law term mismatch at t={t_check}: fitted={fitted_pl:.4f}, gt={gt_pl:.4f}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +188,19 @@ def test_model_selection_prefers_simple() -> None:
 def test_eta_computation_exponential() -> None:
     # Target 1e-5, P_ult = 1e-7 (reachable). Push only 50 points so current
     # pressure is still well above 1e-5 (target is still AHEAD, not yet reached).
-    # Analytical: log10(P(t)) = -7 + 5*exp(-t/300). Target at log10(1e-5)=-5
-    # => 5*exp(-t/300)=2 => t = 300*ln(2.5) ≈ 275 s from t=0.
+    # Analytical: log10(P(t)) = -7 + 5*exp(-t/300). Target at log10(1e-5)=-5.
+    # Solve: 5*exp(-t*/300) = 2  =>  t* = 300*ln(2.5) = 274.888 s from t=0.
+    # Data spans t=0..245 s (n=50, dt=5), so t_current=245 s.
+    # Closed-form ETA = t* - t_current = 300*ln(2.5) - 245 ≈ 29.888 s.
+    log_p_ult = -7.0
+    A = 5.0
+    tau = 300.0
+    t_current = 245.0  # last pushed t = (50-1)*5 = 245
+    log_target = -5.0  # log10(1e-5)
+    # log_p_ult + A*exp(-t*/tau) = log_target  =>  A*exp(-t*/tau) = log_target - log_p_ult
+    # t* = -tau * ln((log_target - log_p_ult) / A)
+    _eta_expected = -tau * math.log((log_target - log_p_ult) / A) - t_current
+    # _eta_expected ≈ 300*ln(2.5) - 245 ≈ 29.888 s
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
@@ -181,7 +208,7 @@ def test_eta_computation_exponential() -> None:
             "targets_mbar": [1e-5],
         }
     )
-    _push_exponential(pred, -7.0, 5.0, 300.0, n=50, dt=5.0)  # span 0..245 s
+    _push_exponential(pred, log_p_ult, A, tau, n=50, dt=5.0)  # span 0..245 s
     pred.update()
     p = pred.get_prediction()
     assert p is not None
@@ -190,8 +217,10 @@ def test_eta_computation_exponential() -> None:
     # ETA must be finite and strictly positive (target not yet reached)
     assert eta is not None
     assert eta > 0.0
-    # Rough closed-form check: ETA should be O(100-600 s) from current position
-    assert 10.0 < eta < 5000.0
+    # Tight closed-form check: fit params ±10% propagate ~10% error on ETA
+    assert eta == pytest.approx(_eta_expected, abs=5.0), (
+        f"ETA={eta:.3f}s deviates from closed-form {_eta_expected:.3f}s by more than 5s"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +231,12 @@ def test_eta_computation_exponential() -> None:
 def test_eta_computation_power_law() -> None:
     # logP(t) = -6 + 8 * t^(-0.3). P_ult=1e-6, target=1e-5 (log=-5).
     # At last data point t=255 s: logP(255) = -6 + 8/255^0.3 ≈ -4.38 > -5 (target AHEAD).
-    # The fitted power_law model must give ETA > 0 to reach log=-5.
     # B=8 ∈ [0,30] and alpha=0.3 ∈ [0.01,5.0] are within fit bounds.
+    log_p_ult_true = -6.0
+    B_true = 8.0
+    alpha_true = 0.3
+    log_target = -5.0
+    t_current = 255.0  # last pushed t = 10 + 49*5
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
@@ -214,7 +247,7 @@ def test_eta_computation_power_law() -> None:
     # Push 50 pts: t spans 10..255 s
     for i in range(50):
         t = 10.0 + i * 5.0
-        logP = -6.0 + 8.0 * max(t, 1.0) ** (-0.3)
+        logP = log_p_ult_true + B_true * max(t, 1.0) ** (-alpha_true)
         pred.push(t, 10.0**logP)
     pred.update()
     p = pred.get_prediction()
@@ -224,8 +257,27 @@ def test_eta_computation_power_law() -> None:
     # ETA must be finite and strictly positive (target not yet reached at last data point)
     assert eta is not None
     assert eta > 0.0
-    # Fitted model gives ETA ≈ 500s; broad tolerance for fit non-linearity
-    assert eta < 1_000_000.0
+    # Closed-form ETA from FITTED params (independent of binary search):
+    # logP(t*) = log_p_ult_fit + B_fit * t*^(-alpha_fit) = log_target
+    # => t* = (B_fit / (log_target - log_p_ult_fit))^(1/alpha_fit)
+    # This is computed independently from the production ETA (which uses binary search).
+    B_fit = p.fit_params["B"]
+    alpha_fit = p.fit_params["alpha"]
+    lpu_fit = p.fit_params["log_p_ult"]
+    rhs = log_target - lpu_fit
+    assert rhs > 0, (
+        f"log_target ({log_target}) must be > log_p_ult_fit ({lpu_fit}) for ETA to be finite"
+    )
+    t_star_closed = (B_fit / rhs) ** (1.0 / alpha_fit)
+    eta_closed = t_star_closed - t_current
+    assert eta_closed > 0.0, f"Closed-form ETA {eta_closed:.1f}s must be positive"
+    # Binary-search ETA must match closed-form within 15s.
+    # The binary search terminates when t_hi - t_lo < 1s, but with alpha≈0.03
+    # the curve is extremely flat near t_star, so small t errors amplify to
+    # ~10s ETA error. 15s tolerance is the tightest realistic bound for this fit.
+    assert abs(eta - eta_closed) < 15.0, (
+        f"Binary-search ETA={eta:.3f}s deviates from closed-form {eta_closed:.3f}s by more than 15s"
+    )
 
 
 # ---------------------------------------------------------------------------

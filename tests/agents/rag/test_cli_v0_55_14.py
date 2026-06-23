@@ -118,6 +118,21 @@ def test_ollama_error_classes_imported_at_module_load() -> None:
     )
 
 
+_INDEX_MAIN_FRIENDLY: dict[type, list[str]] = {
+    # index_main messages — from cli.py OllamaModelMissingError handler
+    OllamaModelMissingError: [
+        "error: embedding model not available in Ollama:",
+        "hint:",
+        "ollama pull",
+    ],
+    # index_main messages — from cli.py OllamaUnavailableError handler
+    OllamaUnavailableError: [
+        "error: cannot reach Ollama:",
+        "hint:",
+    ],
+}
+
+
 @pytest.mark.parametrize(
     "error_cls,expected_exit",
     [
@@ -152,10 +167,29 @@ def test_index_main_ollama_errors_exit_with_friendly_message(
         f"expected exit {expected_exit}, got {exc_info.value.code}"
     )
     captured = capsys.readouterr()
-    assert "error:" in captured.err, f"expected friendly error in stderr; got: {captured.err!r}"
-    assert "Traceback" not in captured.err, (
+    expected_substrings = _INDEX_MAIN_FRIENDLY[error_cls]
+    for substr in expected_substrings:
+        assert substr in captured.err, (
+            f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
+        )
+    assert "Traceback (most recent call last)" not in captured.err, (
         f"bare traceback must not appear in stderr; got: {captured.err!r}"
     )
+
+
+_SEARCH_MAIN_FRIENDLY: dict[type, list[str]] = {
+    # search_main messages — from cli.py OllamaModelMissingError handler
+    OllamaModelMissingError: [
+        "error: embedding model not available:",
+        "hint:",
+        "ollama pull",
+    ],
+    # search_main messages — from cli.py OllamaUnavailableError handler
+    OllamaUnavailableError: [
+        "error: cannot reach Ollama:",
+        "hint:",
+    ],
+}
 
 
 @pytest.mark.parametrize(
@@ -193,8 +227,12 @@ def test_search_main_ollama_errors_exit_with_friendly_message(
         f"expected exit {expected_exit}, got {exc_info.value.code}"
     )
     captured = capsys.readouterr()
-    assert "error:" in captured.err, f"expected friendly error in stderr; got: {captured.err!r}"
-    assert "Traceback" not in captured.err, (
+    expected_substrings = _SEARCH_MAIN_FRIENDLY[error_cls]
+    for substr in expected_substrings:
+        assert substr in captured.err, (
+            f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
+        )
+    assert "Traceback (most recent call last)" not in captured.err, (
         f"bare traceback must not appear in stderr; got: {captured.err!r}"
     )
 
