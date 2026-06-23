@@ -50,7 +50,7 @@ def test_refresh_empty_buffer(app):
             )
 
 
-# HIGH: assert _plot_items["Т1"] getData() got exact (x, y) arrays
+# HIGH: assert _plot_items["Т1"] getData() got exact paired (x, y) arrays
 def test_refresh_with_data(app):
     buf = ChannelBufferStore()
     mgr = ChannelManager()
@@ -67,9 +67,11 @@ def test_refresh_with_data(app):
     assert xdata is not None and ydata is not None, (
         "getData() must return arrays after refresh with data"
     )
-    xs = list(xdata)
-    ys = list(ydata)
-    assert 1000.0 in xs, f"x=1000.0 must be in curve data, got xs={xs}"
-    assert 1001.0 in xs, f"x=1001.0 must be in curve data, got xs={xs}"
-    assert 77.5 in ys, f"y=77.5 must be in curve data, got ys={ys}"
-    assert 78.0 in ys, f"y=78.0 must be in curve data, got ys={ys}"
+    # Prod: refresh() calls item.setData(x=xs, y=ys) with raw values —
+    # no transform applied. Assert exact paired arrays.
+    assert list(xdata) == pytest.approx([1000.0, 1001.0]), (
+        f"x data must be exactly [1000.0, 1001.0], got {list(xdata)}"
+    )
+    assert list(ydata) == pytest.approx([77.5, 78.0]), (
+        f"y data must be exactly [77.5, 78.0], got {list(ydata)}"
+    )

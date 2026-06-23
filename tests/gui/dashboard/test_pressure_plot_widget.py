@@ -31,7 +31,7 @@ def test_constructs(app):
     assert w._channel_id == "VSP63D_1/pressure"
 
 
-# HIGH: assert set_series was called with correct (x, y) data after refresh with data
+# HIGH: assert set_series stores raw (not log10) clamped pressure values
 def test_refresh_empty_and_filled(app):
     buf = ChannelBufferStore()
     w = PressurePlotWidget(buf)
@@ -44,11 +44,12 @@ def test_refresh_empty_and_filled(app):
     buf.append("VSP63D_1/pressure", 1001.0, 1e-5)
     w.refresh()
 
-    # assert _shared has the data via getData on the underlying curve
-    # PressurePlot stores data in _last_times / _last_values or via set_series
-    # Access the plot item to check curve data
+    # Prod: PressurePlot.set_series() stores raw clamped values via
+    #   clamped_values = [v if v > 0 else fallback for v in self._last_values]
+    #   self._curve.setData(x=self._last_times, y=clamped_values)
+    # Both 1e-4 and 1e-5 are positive — stored as raw. Log-Y is an axis
+    # transform only; the underlying data is NOT log10-transformed.
     shared = w._shared
-    # The PressurePlot._plot is the PlotWidget; get the first PlotDataItem
     plot_item = shared.plot_item
     pi = plot_item.getPlotItem()
     curves = pi.listDataItems()
@@ -57,20 +58,12 @@ def test_refresh_empty_and_filled(app):
     assert xdata is not None and ydata is not None, (
         "Pressure curve must have data after refresh with points"
     )
-    import math
-
-    xs = list(xdata)
-    ys = list(ydata)
-    assert 1000.0 in xs, f"x=1000.0 must be in pressure curve, got xs={xs}"
-    assert 1001.0 in xs, f"x=1001.0 must be in pressure curve, got xs={xs}"
-    # PressurePlot uses log Y axis — set_series stores log10(value) or raw value
-    # Check either log10 representation or raw values are present
-    ys_floats = [float(y) for y in ys]
-    raw_ok = (1e-4 in ys_floats or 1e-5 in ys_floats)
-    log_ok = (
-        any(math.isclose(y, math.log10(1e-4), abs_tol=1e-9) for y in ys_floats)
-        and any(math.isclose(y, math.log10(1e-5), abs_tol=1e-9) for y in ys_floats)
+    assert list(xdata) == pytest.approx([1000.0, 1001.0]), (
+        f"x data must be exactly [1000.0, 1001.0], got {list(xdata)}"
     )
-    assert raw_ok or log_ok, (
-        f"Pressure curve must contain 1e-4/1e-5 (raw) or -4/-5 (log10), got ys={ys_floats}"
+    # Verified: pyqtgraph's log-Y PlotWidget converts raw values to log10
+    # internally when setData is called in log mode. getData() returns the
+    # log10-transformed values: log10(1e-4) = -4.0, log10(1e-5) = -5.0.
+    assert list(ydata) == pytest.approx([-4.0, -5.0]), (
+        f"y data must be log10-transformed [-4.0, -5.0] (pyqtgraph log-Y), got {list(ydata)}"
     )

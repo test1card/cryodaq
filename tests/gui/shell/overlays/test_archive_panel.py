@@ -374,6 +374,9 @@ def test_export_csv_click_cancel_no_worker(app, monkeypatch):
     # Signal emitted BEFORE dialog per current ordering; either way, no worker started.
     assert seen == ["csv"]
     assert not panel._export_in_flight
+    assert panel._export_workers == [], (
+        f"No export worker must be created on cancel, got: {panel._export_workers}"
+    )
     assert panel._export_csv_btn.isEnabled()
 
 
@@ -385,6 +388,9 @@ def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
     panel._export_hdf5_btn.click()
     assert not panel._export_in_flight
+    assert panel._export_workers == [], (
+        f"No export worker must be created on cancel, got: {panel._export_workers}"
+    )
 
 
 def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
@@ -395,6 +401,9 @@ def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     panel._export_xlsx_btn.click()
     assert not panel._export_in_flight
+    assert panel._export_workers == [], (
+        f"No export worker must be created on cancel, got: {panel._export_workers}"
+    )
 
 
 def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
@@ -409,6 +418,9 @@ def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
     panel._export_parquet_btn.click()
     assert seen == ["parquet"]
     assert not panel._export_in_flight
+    assert panel._export_workers == [], (
+        f"No export worker must be created on cancel, got: {panel._export_workers}"
+    )
     assert panel._export_parquet_btn.isEnabled()
 
 

@@ -656,11 +656,19 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
     stabilizing, the Stop button MUST remain enabled so the operator
     can abort the sweep and send keithley_stop. Start must stay
     disabled (no new sweeps on dead link). Codex II.5 residual fix.
+
+    Fix: use button click (not private _on_auto_start), capture every
+    dispatched command, then click Stop after disconnect and assert the
+    exact keithley_stop command + idle/timer state.
     """
     import cryodaq.gui.shell.overlays.conductivity_panel as module
 
+    dispatched: list[dict] = []
+
     class _StubWorker:
-        def __init__(self, *a, **kw) -> None:
+        def __init__(self, cmd: dict, *a, **kw) -> None:
+            dispatched.append(cmd)
+
             class _FakeSignal:
                 def connect(self, *_a) -> None:
                     return None
@@ -680,17 +688,38 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
     panel._checkboxes["Т2"].setChecked(True)
     panel.set_connected(True)
 
-    panel._on_auto_start()
+    # Start via button click (not private call).
+    panel._auto_start_btn.click()
     assert panel._auto_state == "stabilizing"
     assert panel._auto_start_btn.isEnabled() is False
     assert panel._auto_stop_btn.isEnabled() is True
 
+    # Engine disconnects mid-sweep.
     panel.set_connected(False)
 
     assert panel._auto_stop_btn.isEnabled() is True, (
         "Stop button must stay enabled during stabilizing even if "
         "engine disconnects — operator must be able to abort."
     )
+    assert panel._auto_start_btn.isEnabled() is False
+
+    # Operator clicks Stop. Clear commands captured during start.
+    dispatched.clear()
+    panel._auto_stop_btn.click()
+
+    # Prod: _on_auto_stop sends {"cmd": "keithley_stop", "channel": _smu_channel()}
+    # and transitions to idle with timer stopped.
+    assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}], (
+        f"Stop after disconnect must dispatch keithley_stop on smua, got: {dispatched}"
+    )
+    assert panel._auto_state == "idle", (
+        f"State must be idle after Stop, got: {panel._auto_state!r}"
+    )
+    assert not panel._auto_timer.isActive(), (
+        "Auto timer must be stopped after operator Stop"
+    )
+    assert panel._auto_stop_btn.isEnabled() is False
+    # Start re-enables only if connected; connection is down so must stay disabled.
     assert panel._auto_start_btn.isEnabled() is False
 
 

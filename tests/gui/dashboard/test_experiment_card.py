@@ -174,7 +174,6 @@ def test_experiment_card_phase_stepper_reflects_current_phase(app):
     card = ExperimentCard()
     card.set_experiment(_make_data(current_phase="measurement"))
     stepper = card._phase_stepper
-    assert stepper._current_phase == "measurement"
 
     # "measurement" pill must use ACCENT (current-phase UI activation color).
     current_pill = stepper._pills["measurement"]

@@ -137,15 +137,9 @@ def test_cooldown_footer_progress_bar_only_visible_while_watching(panel: AlarmPa
 
 
 def test_cooldown_footer_no_arm_handler_attributes(panel: AlarmPanel) -> None:
-    """No zombie arm/disarm handlers AND no arm/disarm control in the footer
-    widget tree — verifies the UI contract, not just attribute absence."""
-    # Attribute-level check (implementation guard).
-    assert not hasattr(panel, "_on_cooldown_arm_clicked")
-    assert not hasattr(panel, "_on_cooldown_disarm_clicked")
-    assert not hasattr(panel, "_cooldown_arm_btn")
-    # Widget-tree check: the cooldown groupbox must contain no QPushButton
-    # (already covered by test_cooldown_footer_has_no_push_button, but
-    # repeated here to make the no-arm contract explicit at the handler level).
+    """No arm/disarm QPushButton must exist anywhere in the cooldown footer
+    widget tree — the UI contract is verified by rendered widgets, not
+    private attribute presence."""
     box = _cooldown_groupbox(panel)
     assert box is not None
     arm_buttons = [

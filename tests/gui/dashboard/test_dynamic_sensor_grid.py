@@ -31,7 +31,17 @@ def test_grid_rebuilds_on_channel_change(app, mock_channel_mgr, buffer_store):
 
 
 def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
+    import time
+
     grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+
+    # Seed the buffer with fresh data for each channel so refresh_from_buffer
+    # actually updates the displayed value (not just calls through to stale path).
+    seed_values = {"Т1": 77.5, "Т2": 55.3, "Т3": 42.1}
+    now = time.time()
+    for ch_id, val in seed_values.items():
+        buffer_store.append(ch_id, now, val)
+
     # Spy on each cell's refresh_from_buffer to confirm it is called.
     call_counts: dict[str, int] = {ch_id: 0 for ch_id in grid._cells}
     original_methods: dict[str, object] = {}
@@ -57,6 +67,16 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
     # Restore originals.
     for ch_id, cell in grid._cells.items():
         cell.refresh_from_buffer = original_methods[ch_id]
+
+    # Assert each cell's displayed value was updated through the real path.
+    # Prod formats as f"{value:.2f}" for values in 0.01..1000 range.
+    for ch_id, val in seed_values.items():
+        cell = grid._cells[ch_id]
+        expected = f"{val:.2f}"
+        actual = cell._value_widget.text()
+        assert expected in actual, (
+            f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
+        )
 
 
 def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):

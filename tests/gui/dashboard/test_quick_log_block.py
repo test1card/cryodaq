@@ -59,8 +59,15 @@ def test_single_entry_shown(app):
 # HIGH: assert exactly newest two messages present, no third
 def test_max_2_entries_visible(app):
     w = QuickLogBlock()
+    # Prod set_entries(entries) takes the list as-is (no sort) and shows
+    # entries[:2]. The docstring says "newest first", so the caller must
+    # supply the list newest-first.
+    # Use DESCENDING timestamps: Entry 0 has the latest time (17:19),
+    # Entry 1 has 17:18, …, Entry 19 has 17:00 — so entries[0] is
+    # genuinely newest and the assertion is internally consistent.
     entries = [
-        {"timestamp": f"2026-04-15T17:{i:02d}:00", "message": f"Entry {i}"} for i in range(20)
+        {"timestamp": f"2026-04-15T17:{19 - i:02d}:00", "message": f"Entry {i}"}
+        for i in range(20)
     ]
     w.set_entries(entries)
     # The widget shows newest-first (entries[0] is newest)
@@ -72,15 +79,15 @@ def test_max_2_entries_visible(app):
     first_text = w._entry_labels[0].text()
     second_text = w._entry_labels[1].text()
     assert "Entry 0" in first_text, (
-        f"First label must show newest (Entry 0), got: {first_text!r}"
+        f"First label must show newest (Entry 0 / 17:19), got: {first_text!r}"
     )
     assert "Entry 1" in second_text, (
-        f"Second label must show second-newest (Entry 1), got: {second_text!r}"
+        f"Second label must show second-newest (Entry 1 / 17:18), got: {second_text!r}"
     )
     # No third entry label
     all_entry_texts = [lbl.text() for lbl in w.findChildren(QLabel) if "Entry 2" in lbl.text()]
     assert len(all_entry_texts) == 0, (
-        "Entry 2 (third oldest) must not be visible"
+        "Entry 2 (third entry) must not be visible"
     )
 
 
