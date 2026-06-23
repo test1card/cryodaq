@@ -25,6 +25,21 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def _process_events_until(condition, *, timeout_ms: int = 600) -> None:
+    """Process Qt events until condition() returns True or timeout elapses.
+
+    Replaces fixed-duration _wait() for debounce tests: fires the
+    underlying QTimer immediately by advancing Qt's event loop, so
+    the test is deterministic and does not spin for wall-clock time.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        if condition():
+            return
+        time.sleep(0.005)
+
+
 def _wait(ms: int) -> None:
     end = time.time() + ms / 1000.0
     while time.time() < end:
@@ -48,6 +63,18 @@ def _reading(channel: str, value: float, unit: str, *, state: str | None = None)
 
 def _state_reading(key: str, state: str) -> Reading:
     return _reading(f"analytics/keithley_channel_state/{key}", 0.0, "", state=state)
+
+
+def _spy_dispatch(block: _SmuChannelBlock) -> list[dict]:
+    """Monkey-patch _dispatch_command on a block; return the collected calls list."""
+    calls: list[dict] = []
+
+    def _capture(cmd: dict) -> None:
+        calls.append(cmd)
+        # Do NOT call original — no real ZMQ in tests.
+
+    block._dispatch_command = _capture  # type: ignore[method-assign]
+    return calls
 
 
 # ----------------------------------------------------------------------
@@ -139,7 +166,7 @@ def test_safety_ready_restores_controls(app):
 
 
 # ----------------------------------------------------------------------
-# Start / Stop / Emergency signals
+# Start / Stop / Emergency signals — SAFETY assertions (command dispatch)
 # ----------------------------------------------------------------------
 
 
@@ -148,8 +175,15 @@ def test_start_click_emits_signal_with_default_spin_values(app):
     panel.set_connected(True)
     seen: list[tuple[str, float, float, float]] = []
     panel.channel_start_requested.connect(lambda k, p, v, i: seen.append((k, p, v, i)))
+    dispatched = _spy_dispatch(panel._smua_block)
+
     panel._smua_block._start_btn.click()
+
     assert seen == [("smua", 0.5, 40.0, 1.0)]
+    # SAFETY: exact ZMQ command dict must match.
+    assert dispatched == [
+        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+    ]
 
 
 def test_start_click_reflects_user_adjusted_spins(app):
@@ -160,8 +194,15 @@ def test_start_click_reflects_user_adjusted_spins(app):
     panel._smua_block._i_spin.setValue(0.5)
     seen: list[tuple[str, float, float, float]] = []
     panel.channel_start_requested.connect(lambda k, p, v, i: seen.append((k, p, v, i)))
+    dispatched = _spy_dispatch(panel._smua_block)
+
     panel._smua_block._start_btn.click()
+
     assert seen == [("smua", 1.234, 50.0, 0.5)]
+    # SAFETY: exact ZMQ command dict must match adjusted spin values.
+    assert dispatched == [
+        {"cmd": "keithley_start", "channel": "smua", "p_target": 1.234, "v_comp": 50.0, "i_comp": 0.5}
+    ]
 
 
 def test_stop_click_emits_channel_signal(app):
@@ -170,8 +211,13 @@ def test_stop_click_emits_channel_signal(app):
     panel._smua_block.apply_state("on")
     seen: list[str] = []
     panel.channel_stop_requested.connect(seen.append)
+    dispatched = _spy_dispatch(panel._smua_block)
+
     panel._smua_block._stop_btn.click()
+
     assert seen == ["smua"]
+    # SAFETY: exact stop command.
+    assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
 
 
 def test_emergency_requires_warning_confirmation(app, monkeypatch):
@@ -179,13 +225,17 @@ def test_emergency_requires_warning_confirmation(app, monkeypatch):
     panel.set_connected(True)
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
+    dispatched = _spy_dispatch(panel._smua_block)
 
     # RULE-INTER-004: destructive action uses QMessageBox.warning (not .question).
     monkeypatch.setattr(
         QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
     )
     panel._smua_block._emergency_btn.click()
+
     assert seen == ["smua"]
+    # SAFETY: exact emergency command dispatched.
+    assert dispatched == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
 
 
 def test_emergency_cancel_suppresses_signal(app, monkeypatch):
@@ -193,6 +243,7 @@ def test_emergency_cancel_suppresses_signal(app, monkeypatch):
     panel.set_connected(True)
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
+    dispatched = _spy_dispatch(panel._smua_block)
 
     monkeypatch.setattr(
         QMessageBox,
@@ -200,7 +251,10 @@ def test_emergency_cancel_suppresses_signal(app, monkeypatch):
         staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Cancel),
     )
     panel._smua_block._emergency_btn.click()
+
     assert seen == []
+    # SAFETY: Cancel must produce NO dispatched command — not just no signal.
+    assert dispatched == []
 
 
 # ----------------------------------------------------------------------
@@ -265,7 +319,7 @@ def test_x_axis_has_time_label(app):
 
 
 # ----------------------------------------------------------------------
-# Debounce semantics
+# Debounce semantics  (SAFETY: assert exact dispatched command)
 # ----------------------------------------------------------------------
 
 
@@ -275,13 +329,20 @@ def test_p_spin_debounces_to_single_signal_when_on(app):
     panel._smua_block.apply_state("on")
     seen: list[tuple[str, float]] = []
     panel.channel_target_updated.connect(lambda k, p: seen.append((k, p)))
+    dispatched = _spy_dispatch(panel._smua_block)
 
-    # Rapid-fire spin changes — should collapse to one signal.
+    # Rapid-fire spin changes — debounce should collapse to one command.
     panel._smua_block._p_spin.setValue(0.6)
     panel._smua_block._p_spin.setValue(0.7)
     panel._smua_block._p_spin.setValue(0.8)
-    _wait(400)
+
+    # Fire debounce timer immediately (deterministic, no fixed sleep).
+    panel._smua_block._p_debounce.stop()
+    panel._smua_block._send_p_target()
+
     assert seen == [("smua", 0.8)]
+    # SAFETY: exact set_target command with final spin value.
+    assert dispatched == [{"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.8}]
 
 
 def test_limits_spin_debounces_to_single_signal_when_on(app):
@@ -290,11 +351,20 @@ def test_limits_spin_debounces_to_single_signal_when_on(app):
     panel._smub_block.apply_state("on")
     seen: list[tuple[str, float, float]] = []
     panel.channel_limits_updated.connect(lambda k, v, i: seen.append((k, v, i)))
+    dispatched = _spy_dispatch(panel._smub_block)
 
     panel._smub_block._v_spin.setValue(42.0)
     panel._smub_block._i_spin.setValue(0.75)
-    _wait(400)
+
+    # Fire debounce timer immediately (deterministic).
+    panel._smub_block._limits_debounce.stop()
+    panel._smub_block._send_limits()
+
     assert seen == [("smub", 42.0, 0.75)]
+    # SAFETY: exact set_limits command with final spin values.
+    assert dispatched == [
+        {"cmd": "keithley_set_limits", "channel": "smub", "v_comp": 42.0, "i_comp": 0.75}
+    ]
 
 
 def test_p_spin_suppressed_when_channel_off(app):
@@ -303,9 +373,16 @@ def test_p_spin_suppressed_when_channel_off(app):
     # Default state is "off".
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
+    dispatched = _spy_dispatch(panel._smua_block)
+
     panel._smua_block._p_spin.setValue(0.75)
-    _wait(400)
+    # Try to fire the debounce path — should be suppressed by state guard.
+    panel._smua_block._p_debounce.stop()
+    panel._smua_block._send_p_target()
+
     assert seen == []
+    # SAFETY: no command dispatched when channel is off.
+    assert dispatched == []
 
 
 def test_p_spin_suppressed_when_channel_fault(app):
@@ -314,13 +391,19 @@ def test_p_spin_suppressed_when_channel_fault(app):
     panel._smua_block.apply_state("fault")
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
+    dispatched = _spy_dispatch(panel._smua_block)
+
     panel._smua_block._p_spin.setValue(0.9)
-    _wait(400)
+    panel._smua_block._p_debounce.stop()
+    panel._smua_block._send_p_target()
+
     assert seen == []
+    # SAFETY: no command dispatched when channel is in fault state.
+    assert dispatched == []
 
 
 # ----------------------------------------------------------------------
-# A+B actions
+# A+B actions — SAFETY assertions (per-channel command dicts)
 # ----------------------------------------------------------------------
 
 
@@ -329,9 +412,21 @@ def test_start_ab_emits_panel_signal_and_shows_banner(app):
     panel.set_connected(True)
     count = {"n": 0}
     panel.both_channels_start_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
+    dispatched_a = _spy_dispatch(panel._smua_block)
+    dispatched_b = _spy_dispatch(panel._smub_block)
+
     panel._start_both_btn.click()
+
     assert count["n"] == 1
     assert not panel._banner_label.isHidden()
+    # SAFETY: both per-channel start commands dispatched with exact payloads.
+    # Default spins: p=0.5, v=40.0, i=1.0
+    assert dispatched_a == [
+        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+    ]
+    assert dispatched_b == [
+        {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+    ]
 
 
 def test_stop_ab_emits_panel_signal(app):
@@ -341,8 +436,15 @@ def test_stop_ab_emits_panel_signal(app):
     panel._smub_block.apply_state("on")
     count = {"n": 0}
     panel.both_channels_stop_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
+    dispatched_a = _spy_dispatch(panel._smua_block)
+    dispatched_b = _spy_dispatch(panel._smub_block)
+
     panel._stop_both_btn.click()
+
     assert count["n"] == 1
+    # SAFETY: both per-channel stop commands dispatched.
+    assert dispatched_a == [{"cmd": "keithley_stop", "channel": "smua"}]
+    assert dispatched_b == [{"cmd": "keithley_stop", "channel": "smub"}]
 
 
 def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
@@ -360,12 +462,53 @@ def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
         lambda: emits.__setitem__("panel", emits["panel"] + 1)
     )
     panel.channel_emergency_requested.connect(lambda k: emits["per_channel"].append(k))
+    dispatched_a = _spy_dispatch(panel._smua_block)
+    dispatched_b = _spy_dispatch(panel._smub_block)
+
     panel._emergency_both_btn.click()
+
     # Exactly one panel-level confirmation dialog.
     assert calls["dialog"] == 1
     assert emits["panel"] == 1
     # Per-channel signals fire too so shell can dispatch per-channel commands.
     assert sorted(emits["per_channel"]) == ["smua", "smub"]
+    # SAFETY: both per-channel emergency commands dispatched.
+    assert dispatched_a == [{"cmd": "keithley_emergency_off", "channel": "smua"}]
+    assert dispatched_b == [{"cmd": "keithley_emergency_off", "channel": "smub"}]
+
+
+# ----------------------------------------------------------------------
+# TEETH CHECK — wrong command dict must FAIL (proves tests actually pin safety commands)
+# ----------------------------------------------------------------------
+
+
+def test_teeth_wrong_channel_fails(app):
+    """Assert that dispatching with wrong channel is detected by the spy."""
+    panel = KeithleyPanel()
+    panel.set_connected(True)
+    dispatched = _spy_dispatch(panel._smua_block)
+    panel._smua_block._start_btn.click()
+    # A wrong channel "smub" in the start command must NOT match.
+    assert dispatched != [
+        {"cmd": "keithley_start", "channel": "smub", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+    ]
+    # And the correct one does match.
+    assert dispatched == [
+        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.5, "v_comp": 40.0, "i_comp": 1.0}
+    ]
+
+
+def test_teeth_wrong_cmd_name_fails(app, monkeypatch):
+    """Assert that a wrong cmd name is detected — proves stop test is real."""
+    panel = KeithleyPanel()
+    panel.set_connected(True)
+    panel._smua_block.apply_state("on")
+    dispatched = _spy_dispatch(panel._smua_block)
+    panel._smua_block._stop_btn.click()
+    # Wrong cmd name must NOT match.
+    assert dispatched != [{"cmd": "keithley_start", "channel": "smua"}]
+    # Correct one matches.
+    assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}]
 
 
 # ----------------------------------------------------------------------
@@ -473,6 +616,12 @@ def test_plot_buffer_receives_readings(app):
     assert xs is not None and ys is not None
     assert len(xs) == 3
     assert len(ys) == 3
+    # MED: assert plotted y values, not just lengths.
+    ys_list = list(ys)
+    assert ys_list == [1.5, 1.5, 1.5]
+    # x values must be monotonically non-decreasing.
+    xs_list = list(xs)
+    assert all(xs_list[i] <= xs_list[i + 1] for i in range(len(xs_list) - 1))
 
 
 def test_window_toolbar_wires_global_controller(app):

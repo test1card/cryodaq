@@ -221,12 +221,16 @@ def test_panel_environment_render(panel: MultiLinePanel) -> None:
 
 
 def test_reset_button_sets_baseline(panel: MultiLinePanel) -> None:
+    """MED: click the row reset cell widget button; assert displayed delta text."""
     panel.on_reading(_length_reading(1, 100.0))
     panel.on_reading(_length_reading(1, 101.0))
-    assert panel.reset_channel(1) is True
+    # _confirm_resets is False on the fixture — button click goes straight through.
+    reset_btn = panel._table.cellWidget(0, 4)  # _COL_RESET == 4
+    assert reset_btn is not None, "Reset cell widget not found at column 4"
+    reset_btn.click()
     state = panel._states[1]
     assert state.baseline_value_mm == 101.0
-    # Subsequent reading shows Δ.
+    # Subsequent reading shows Δ in the rendered table cell.
     panel.on_reading(_length_reading(1, 101.5))
     delta_text = panel._table.item(0, 2).text()
     assert "+0.500000" in delta_text
