@@ -26,23 +26,40 @@ def app():
 
 
 class _FakeSignal:
-    def connect(self, *_a, **_k) -> None:
-        return None
+    """Emitting fake signal: stores the slot and fires it synchronously on emit()."""
+
+    def __init__(self) -> None:
+        self._slot = None
+
+    def connect(self, slot) -> None:
+        self._slot = slot
+
+    def emit(self, *args) -> None:
+        if self._slot is not None:
+            self._slot(*args)
 
 
 class _StubWorker:
     """Plain-Python stub for ZmqCommandWorker — avoids Qt+MagicMock
-    interaction across thread boundary (II.2 lesson)."""
+    interaction across thread boundary (II.2 lesson).
+
+    ``next_result`` maps cmd strings to the result dict to emit on start().
+    When a cmd has an entry, finished.emit(result) fires synchronously so
+    chained callbacks (e.g. lookup → set_channel_policy) run in the test.
+    """
 
     dispatched: list[dict] = []
+    next_result: dict[str, dict] = {}  # cmd → result dict
 
     def __init__(self, cmd, *, parent=None) -> None:
-        self._cmd = cmd
-        _StubWorker.dispatched.append(dict(cmd))
+        self._cmd = dict(cmd)
+        _StubWorker.dispatched.append(self._cmd)
         self.finished = _FakeSignal()
 
     def start(self) -> None:
-        return None
+        result = _StubWorker.next_result.get(self._cmd.get("cmd", ""))
+        if result is not None:
+            self.finished.emit(result)
 
     def isRunning(self) -> bool:
         return False
@@ -53,6 +70,7 @@ def _reset_stub(monkeypatch):
     import cryodaq.gui.shell.overlays.calibration_panel as module
 
     _StubWorker.dispatched = []
+    _StubWorker.next_result = {}
     _ResultsWidget._last_export_result = None
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     yield
@@ -70,6 +88,15 @@ def test_panel_constructs_and_exposes_three_modes(app):
     assert panel._setup_widget is not None
     assert panel._acquisition_widget is not None
     assert panel._results_widget is not None
+    # Default mode is setup: stack shows the setup widget.
+    assert panel._stack.currentWidget() is panel._setup_widget
+    # Section title rendered inside the setup widget.
+    from PySide6.QtWidgets import QLabel
+    texts = [lbl.text() for lbl in panel._setup_widget.findChildren(QLabel)]
+    assert any("Параметры калибровки" in t for t in texts)
+    # Start button present.
+    assert panel._setup_widget._start_btn is not None
+    assert "Начать" in panel._setup_widget._start_btn.text()
 
 
 def test_panel_starts_in_setup_mode(app):
@@ -98,54 +125,77 @@ def test_panel_header_cyrillic_uppercase(app):
 def test_setup_reference_combo_populated(app):
     panel = CalibrationPanel()
     combo = panel._setup_widget._reference_combo
-    # Should have at least one item from the real instruments.yaml;
-    # if empty, combo falls back to "Нет LakeShore каналов" placeholder.
-    assert combo.count() >= 1
+    # Real instruments.yaml has LakeShore channels; combo must not be the
+    # placeholder-only state.
+    items = [combo.itemText(i) for i in range(combo.count())]
+    non_placeholder = [t for t in items if t != "Нет LakeShore каналов"]
+    assert len(non_placeholder) >= 1, f"Expected real channels, got: {items}"
+    # First channel should be from the first instrument group (LS218_1).
+    assert non_placeholder[0].startswith("LS218")
 
 
 def test_setup_target_checkboxes_default_checked(app):
     panel = CalibrationPanel()
-    for cb in panel._setup_widget._target_checkboxes.values():
-        assert cb.isChecked() is True
+    # Must have checkbox keys (from real instruments.yaml).
+    assert len(panel._setup_widget._target_checkboxes) >= 1, (
+        "No target checkboxes — instruments.yaml not loaded"
+    )
+    for key, cb in panel._setup_widget._target_checkboxes.items():
+        assert cb.isChecked() is True, f"Checkbox {key!r} not checked by default"
 
 
 def test_setup_start_without_reference_warns(app):
     panel = CalibrationPanel()
-    # Force no-reference state by clearing combo.
+    # Connect so the start button is enabled by engine-gate logic.
+    panel.set_connected(True)
+    # Force no-reference state by swapping combo content.
     panel._setup_widget._reference_combo.clear()
     panel._setup_widget._reference_combo.addItem("Нет LakeShore каналов")
-    panel._setup_widget._on_start_clicked()
+    # Click the rendered button — catches broken button→slot wiring.
+    panel._setup_widget._start_btn.click()
     assert "опорный" in panel._banner_label.text().lower()
     assert panel._banner_label.text() != ""
 
 
 def test_setup_start_without_targets_warns(app):
     panel = CalibrationPanel()
+    # Ensure a valid reference exists so only the target check fires.
+    if not panel._setup_widget._all_channels:
+        pytest.skip("no LakeShore channels in instruments.yaml")
+    # Connect so the start button is enabled.
+    panel.set_connected(True)
+    panel._setup_widget._reference_combo.setCurrentIndex(0)
     # Uncheck every target.
     for cb in panel._setup_widget._target_checkboxes.values():
         cb.setChecked(False)
-    panel._setup_widget._on_start_clicked()
+    panel._setup_widget._start_btn.click()
     text = panel._banner_label.text().lower()
-    # "опорный" when no reference either, or "целевой" when no targets.
-    assert "целевой" in text or "опорный" in text
+    assert "целевой" in text, f"Expected target warning, got: {text!r}"
 
 
 def test_setup_start_dispatches_experiment_start(app):
     panel = CalibrationPanel()
-    # Ensure at least one target + reference.
-    if panel._setup_widget._reference_combo.count() == 0:
-        pytest.skip("no LakeShore channels loaded; skip dispatch test")
+    # Real instruments.yaml is present — no skip needed.
+    if not panel._setup_widget._all_channels:
+        pytest.skip("no LakeShore channels in instruments.yaml")
+    # Ensure at least one target checked (default state).
     ref = panel._setup_widget._reference_combo.currentText()
-    if ref == "Нет LakeShore каналов":
-        pytest.skip("placeholder reference — skip")
-    panel._setup_widget._on_start_clicked()
+    assert ref != "Нет LakeShore каналов"
+    # Enable the start button (requires connected state).
+    panel.set_connected(True)
+    panel._setup_widget._start_btn.click()
     start_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "experiment_start"]
     assert len(start_cmds) == 1
     cmd = start_cmds[0]
     assert cmd["template_id"] == "calibration"
-    assert "custom_fields" in cmd
-    assert "reference_channel" in cmd["custom_fields"]
-    assert "target_channels" in cmd["custom_fields"]
+    assert cmd["operator"] == ""
+    cf = cmd["custom_fields"]
+    assert "reference_channel" in cf
+    assert "target_channels" in cf
+    # reference_channel must be stripped (no instrument prefix).
+    assert ":" not in cf["reference_channel"]
+    # target_channels is a comma-joined string of stripped sensor IDs.
+    assert ":" not in cf["target_channels"]
 
 
 # ----------------------------------------------------------------------
@@ -231,14 +281,14 @@ def test_coverage_bar_uses_status_tokens(app):
 
 
 def test_coverage_bar_empty_bins_paints_nothing(app):
-    # Smoke: paintEvent should not raise on empty bins.
+    # Call set_coverage([]) so the real setter + update() path runs.
     bar = CoverageBar()
-    bar._bins = []
-    # Force the widget to have a sensible size.
     bar.resize(200, 24)
-    # paintEvent requires a QPaintEvent arg; testing via .update() +
-    # processEvents is overkill for this smoke. Just confirm the
-    # early-return path exists.
+    bar.show()
+    bar.set_coverage([])
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+    # Empty bins: no segments painted (early-return in paintEvent).
     assert bar._bins == []
 
 
@@ -250,7 +300,9 @@ def test_coverage_bar_empty_bins_paints_nothing(app):
 def test_results_set_channels_populates_combo(app):
     panel = CalibrationPanel()
     panel._results_widget.set_channels(["Т1", "Т2", "Т3"])
-    assert panel._results_widget._channel_combo.count() == 3
+    combo = panel._results_widget._channel_combo
+    assert combo.count() == 3
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Т1", "Т2", "Т3"]
     assert panel._results_widget._current_sensor_id == "Т1"
 
 
@@ -375,7 +427,13 @@ def test_export_json_dispatches_json_path(app, monkeypatch, tmp_path):
     panel._results_widget._export_json_btn.click()
     export_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_export"]
     assert len(export_cmds) == 1
-    assert export_cmds[0]["json_path"] == str(out)
+    cmd = export_cmds[0]
+    assert cmd["sensor_id"] == "Т5"
+    assert cmd["json_path"] == str(out)
+    # No other format path keys in this command.
+    assert "curve_cof_path" not in cmd
+    assert "curve_340_path" not in cmd
+    assert "table_path" not in cmd
 
 
 # ----------------------------------------------------------------------
@@ -393,34 +451,64 @@ def test_apply_without_selection_shows_error(app):
 
 
 def test_apply_channel_policy_only_dispatches_lookup_and_policy(app):
+    """No global toggle: lookup fires first, then its finished signal
+    (emitted synchronously by the emitting stub) chains set_channel_policy.
+    Both commands must appear; set_global_mode must not.
+    """
     panel = CalibrationPanel()
     panel.set_connected(True)
     panel._results_widget.set_channels(["Т1"])
     # Global unchecked — only channel policy path fires.
     panel._results_widget._global_checkbox.setChecked(False)
     panel._results_widget._policy_combo.setCurrentText("Включить")
+    # Emitting stub: lookup returns ok so _after_lookup_for_policy fires.
+    _StubWorker.next_result = {
+        "calibration_curve_lookup": {"ok": True, "assignment": {"curve_id": "curve-abc"}},
+    }
     _StubWorker.dispatched = []
     panel._results_widget._apply_btn.click()
     cmds = [c["cmd"] for c in _StubWorker.dispatched]
-    # Lookup fires first, then set_channel_policy deferred to lookup's
-    # finished signal (which doesn't fire in stub). So only lookup
-    # visible in this synchronous stub; set_global_mode MUST NOT appear.
     assert "calibration_runtime_set_global" not in cmds
     assert "calibration_curve_lookup" in cmds
+    assert "calibration_runtime_set_channel_policy" in cmds
+    # Verify exact policy payload.
+    policy_cmd = next(c for c in _StubWorker.dispatched if c["cmd"] == "calibration_runtime_set_channel_policy")
+    assert policy_cmd["sensor_id"] == "Т1"
+    assert policy_cmd["policy"] == "on"
+    assert "channel_key" in policy_cmd
+    assert "curve_id" in policy_cmd
 
 
 def test_apply_global_plus_channel_dispatches_global_first(app):
+    """Global toggle checked: set_global fires first (synchronously emits
+    ok via stub), then lookup fires (also emits ok), then set_channel_policy.
+    Full ordered payload sequence verified.
+    """
     panel = CalibrationPanel()
     panel.set_connected(True)
     panel._results_widget.set_channels(["Т1"])
     panel._results_widget._global_checkbox.setChecked(True)
     panel._results_widget._policy_combo.setCurrentText("Включить")
+    # Emitting stub: both global and lookup return ok so full chain runs.
+    _StubWorker.next_result = {
+        "calibration_runtime_set_global": {"ok": True},
+        "calibration_curve_lookup": {"ok": True, "assignment": {"curve_id": "curve-xyz"}},
+    }
     _StubWorker.dispatched = []
     panel._results_widget._apply_btn.click()
     cmds = [c["cmd"] for c in _StubWorker.dispatched]
-    # First dispatch should be set_global; set_channel_policy is chained
-    # to global's finished signal (no-op under stub). Lookup also chained.
+    # Ordered: global → lookup → set_channel_policy.
     assert cmds[0] == "calibration_runtime_set_global"
+    assert "calibration_curve_lookup" in cmds
+    assert "calibration_runtime_set_channel_policy" in cmds
+    # Global mode payload.
+    global_cmd = _StubWorker.dispatched[0]
+    assert global_cmd["global_mode"] == "on"
+    # Policy payload.
+    policy_cmd = next(c for c in _StubWorker.dispatched if c["cmd"] == "calibration_runtime_set_channel_policy")
+    assert policy_cmd["sensor_id"] == "Т1"
+    assert policy_cmd["policy"] == "on"
+    assert policy_cmd["curve_id"] == "curve-xyz"
 
 
 # ----------------------------------------------------------------------

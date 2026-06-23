@@ -100,6 +100,21 @@ def test_panel_renders_core_surfaces(app):
     assert panel._export_parquet_btn is not None
     assert panel._refresh_btn is not None
     assert panel._regenerate_btn is not None
+    # Rendered text: header label must be visible.
+    from PySide6.QtWidgets import QLabel
+    titles = [lbl.text() for lbl in panel.findChildren(QLabel) if lbl.text().startswith("АРХИВ")]
+    assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
+    # Export buttons are enabled once connected.
+    panel.set_connected(True)
+    assert panel._export_csv_btn.isEnabled()
+    # Clicking CSV with a cancelled dialog does not crash or leave in-flight.
+    from unittest import mock as _mock
+
+    from PySide6.QtWidgets import QFileDialog
+
+    with _mock.patch.object(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", ""))):
+        panel._export_csv_btn.click()
+    assert not panel._export_in_flight
 
 
 def test_panel_header_uses_cyrillic_uppercase(app):
@@ -118,9 +133,17 @@ def test_table_has_nine_columns_with_cyrillic_headers(app):
     headers = [
         panel._table.horizontalHeaderItem(i).text() for i in range(panel._table.columnCount())
     ]
-    assert "Начало" in headers
-    assert "Отчёт" in headers
-    assert "Данные" in headers
+    assert headers == [
+        "Начало",
+        "Конец",
+        "Эксперимент",
+        "Шаблон",
+        "Оператор",
+        "Образец",
+        "Статус",
+        "Отчёт",
+        "Данные",
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -347,7 +370,7 @@ def test_export_csv_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     seen: list[str] = []
     panel.export_requested.connect(seen.append)
-    panel._on_export_csv_clicked()
+    panel._export_csv_btn.click()
     # Signal emitted BEFORE dialog per current ordering; either way, no worker started.
     assert seen == ["csv"]
     assert not panel._export_in_flight
@@ -360,7 +383,7 @@ def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
-    panel._on_export_hdf5_clicked()
+    panel._export_hdf5_btn.click()
     assert not panel._export_in_flight
 
 
@@ -370,7 +393,7 @@ def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
-    panel._on_export_xlsx_clicked()
+    panel._export_xlsx_btn.click()
     assert not panel._export_in_flight
 
 
@@ -383,16 +406,16 @@ def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     seen: list[str] = []
     panel.export_requested.connect(seen.append)
-    panel._on_export_parquet_clicked()
+    panel._export_parquet_btn.click()
     assert seen == ["parquet"]
     assert not panel._export_in_flight
     assert panel._export_parquet_btn.isEnabled()
 
 
 def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
-    """IV.4 F1: picking a path fires up the in-process worker and
-    marks the export in flight. The worker itself runs synchronously
-    in the monkeypatched runner, so we only observe state transitions."""
+    """IV.4 F1: picking a path fires up the in-process worker and marks the
+    export in-flight flag. We fake only the low-level parquet helper so the
+    real _start_export_worker / button wiring runs end-to-end."""
     panel = ArchivePanel()
     panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
@@ -404,14 +427,23 @@ def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
         staticmethod(lambda *a, **k: (str(output), "Parquet файлы (*.parquet)")),
     )
 
-    started: list[tuple[str, str]] = []
+    import cryodaq.storage.parquet_archive as pa_mod
 
-    def fake_start(self_panel, kind: str, runner, *, unit: str) -> None:
-        started.append((kind, unit))
+    class _FakeResult:
+        rows_written = 0
 
-    monkeypatch.setattr(ArchivePanel, "_start_export_worker", fake_start)
-    panel._on_export_parquet_clicked()
-    assert started == [("parquet", "строк")]
+    monkeypatch.setattr(
+        pa_mod,
+        "export_experiment_readings_to_parquet",
+        lambda **_kw: _FakeResult(),
+    )
+
+    panel._export_parquet_btn.click()
+    # Worker is created — either in-flight or already finished (fast path).
+    # The real _start_export_worker sets _export_in_flight=True before spawning.
+    assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
+    banner = panel._banner_label.text()
+    assert "0" in banner or "Parquet" in banner or "строк" in banner
 
 
 def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
@@ -448,17 +480,8 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
 
     monkeypatch.setattr(pa_mod, "export_experiment_readings_to_parquet", fake_export)
 
-    captured_runner: list = []
-
-    def capture_runner(self_panel, kind: str, runner, *, unit: str) -> None:
-        captured_runner.append((kind, runner, unit))
-
-    monkeypatch.setattr(ArchivePanel, "_start_export_worker", capture_runner)
-    panel._on_export_parquet_clicked()
-    assert captured_runner
-    _, runner, _ = captured_runner[0]
-    rows = runner()
-    assert rows == 123
+    panel._export_parquet_btn.click()
+    assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
     assert captured["experiment_id"] == "bulk_export"
     assert captured["output_path"] == output
     assert captured["start_time"].year == 2000
@@ -586,15 +609,16 @@ def test_init_does_not_fire_refresh_worker(app, monkeypatch):
 def test_first_connect_triggers_refresh_when_empty(app, monkeypatch):
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    started: list = []
+    dispatched: list[dict] = []
 
     class _StubWorker:
-        def __init__(self, *a, **kw) -> None:
-            self._a = a
+        def __init__(self, cmd, **kw) -> None:
+            self._cmd = dict(cmd)
+            dispatched.append(self._cmd)
             self.finished = MagicMock()
 
         def start(self) -> None:
-            started.append(self._a)
+            pass
 
         def isRunning(self) -> bool:
             return False
@@ -602,7 +626,11 @@ def test_first_connect_triggers_refresh_when_empty(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(started) == 1
+    assert len(dispatched) == 1
+    cmd = dispatched[0]
+    assert cmd["cmd"] == "experiment_archive_list"
+    assert "sort_by" in cmd
+    assert "descending" in cmd
 
 
 # ----------------------------------------------------------------------
@@ -617,14 +645,15 @@ def test_refresh_archive_suppresses_duplicate_while_in_flight(app, monkeypatch):
     """
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    started: list = []
+    dispatched: list[dict] = []
 
     class _StubWorker:
-        def __init__(self, *a, **kw) -> None:
+        def __init__(self, cmd, **kw) -> None:
+            dispatched.append(dict(cmd))
             self.finished = MagicMock()
 
         def start(self) -> None:
-            started.append(True)
+            pass
 
         def isRunning(self) -> bool:
             return False
@@ -632,17 +661,19 @@ def test_refresh_archive_suppresses_duplicate_while_in_flight(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(started) == 1  # cold-start deferred refresh
+    assert len(dispatched) == 1  # cold-start deferred refresh
+    assert dispatched[0]["cmd"] == "experiment_archive_list"
     assert panel._refresh_in_flight is True
     # Duplicate — should be a no-op.
     panel.refresh_archive()
-    assert len(started) == 1
+    assert len(dispatched) == 1
     # Simulate result — flag clears.
     panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="e1")]})
     assert panel._refresh_in_flight is False
-    # Now manual refresh spawns a new worker.
+    # Now manual refresh spawns a new worker with a valid archive-list command.
     panel.refresh_archive()
-    assert len(started) == 2
+    assert len(dispatched) == 2
+    assert dispatched[1]["cmd"] == "experiment_archive_list"
 
 
 def test_reconnect_flap_no_duplicate_refresh(app, monkeypatch):
@@ -683,14 +714,15 @@ def test_refresh_failure_clears_in_flight_flag(app, monkeypatch):
     """
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    started: list = []
+    dispatched: list[dict] = []
 
     class _StubWorker:
-        def __init__(self, *a, **kw) -> None:
+        def __init__(self, cmd, **kw) -> None:
+            dispatched.append(dict(cmd))
             self.finished = MagicMock()
 
         def start(self) -> None:
-            started.append(True)
+            pass
 
         def isRunning(self) -> bool:
             return False
@@ -698,14 +730,15 @@ def test_refresh_failure_clears_in_flight_flag(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(started) == 1
+    assert len(dispatched) == 1
     assert panel._refresh_in_flight is True
     # Simulate engine failure.
     panel._on_refresh_result({"ok": False, "error": "engine timeout"})
     assert panel._refresh_in_flight is False
-    # Retry works.
+    # Retry dispatches a valid archive-list command.
     panel.refresh_archive()
-    assert len(started) == 2
+    assert len(dispatched) == 2
+    assert dispatched[1]["cmd"] == "experiment_archive_list"
 
 
 def test_repeat_connect_does_not_refetch_when_entries_present(app, monkeypatch):
@@ -835,7 +868,7 @@ def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubCSVExporter._next_result = 12345
     _patch_csv(monkeypatch, tmp_path)
 
-    panel._on_export_csv_clicked()
+    panel._export_csv_btn.click()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "12345" in panel._banner_label.text()
@@ -861,7 +894,7 @@ def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
     _StubCSVExporter._next_result = OSError("disk full")
     _patch_csv(monkeypatch, tmp_path)
 
-    panel._on_export_csv_clicked()
+    panel._export_csv_btn.click()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "disk full" in panel._banner_label.text()
@@ -888,7 +921,7 @@ def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubHDF5Exporter._next_result = 777
     _patch_hdf5(monkeypatch, tmp_path)
 
-    panel._on_export_hdf5_clicked()
+    panel._export_hdf5_btn.click()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "777" in panel._banner_label.text()
@@ -911,7 +944,7 @@ def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubXLSXExporter._next_result = 999
     _patch_xlsx(monkeypatch, tmp_path)
 
-    panel._on_export_xlsx_clicked()
+    panel._export_xlsx_btn.click()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "999" in panel._banner_label.text()
@@ -925,7 +958,11 @@ def test_export_thread_retained_during_run_then_pruned(
     """While the export is running the QThread + worker must be retained
     (otherwise the Python wrapper can be GC'd mid-flight and crash the
     PySide signal path). On completion both lists are pruned.
+    Uses an event-gated fake exporter (no fixed sleep) so the thread
+    actually starts before we sample the retained-worker list.
     """
+    import threading
+
     panel = ArchivePanel()
     panel.set_connected(True)
     output = tmp_path / "out.csv"
@@ -938,20 +975,30 @@ def test_export_thread_retained_during_run_then_pruned(
         staticmethod(lambda *a, **k: (str(output), "CSV (*.csv)")),
     )
 
-    class _SlowCSVExporter(_StubCSVExporter):
+    # Gate: test holds the exporter inside export() until we've verified
+    # the in-flight state, then releases it.
+    _started = threading.Event()
+    _release = threading.Event()
+
+    class _GatedCSVExporter(_StubCSVExporter):
         def export(self, output_path, **kwargs) -> int:
-            time.sleep(0.15)
+            _started.set()
+            _release.wait(timeout=5.0)
             return 1
 
     import cryodaq.paths as paths_module
     import cryodaq.storage.csv_export as csv_module
 
-    monkeypatch.setattr(csv_module, "CSVExporter", _SlowCSVExporter)
+    monkeypatch.setattr(csv_module, "CSVExporter", _GatedCSVExporter)
     monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
 
-    panel._on_export_csv_clicked()
+    panel._export_csv_btn.click()
+    # Wait until the worker thread has actually entered export().
+    assert _started.wait(timeout=5.0), "exporter never started"
+    # While export() is blocked: worker must be retained.
     assert len(panel._export_workers) == 1
     assert panel._export_in_flight is True
-
+    # Release the exporter to let the thread finish.
+    _release.set()
     assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
     assert _wait_until(lambda: len(panel._export_workers) == 0)
