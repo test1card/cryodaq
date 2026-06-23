@@ -74,16 +74,32 @@ def test_multiline_panel_with_instrument_id_rejects_unrelated_channel(qapp) -> N
 
 
 def test_multiline_panel_on_reading_skips_other_instrument(qapp) -> None:
+    # MED: assert rendered table row count + count label, not just _states absence.
     panel = MultiLinePanel(instrument_id="MultiLine_1")
     panel.on_reading(_reading("MultiLine_2/length_ch1"))
-    # No state created for the other instrument
+    # No state created for the other instrument.
     assert not panel._states
+    # Rendered: table has zero rows, count label shows "0 каналов".
+    assert panel._table.rowCount() == 0
+    assert panel._channel_count_label.text() == "0 каналов", (
+        f"Count label wrong: {panel._channel_count_label.text()!r}"
+    )
 
 
 def test_multiline_panel_on_reading_accepts_own_instrument(qapp) -> None:
+    # MED: assert rendered row + formatted value cell + count label.
     panel = MultiLinePanel(instrument_id="MultiLine_1")
-    panel.on_reading(_reading("MultiLine_1/length_ch1"))
+    panel.on_reading(_reading("MultiLine_1/length_ch1", value=1.234))
     assert 1 in panel._states
+    # Rendered: table has one row for channel 1.
+    assert panel._table.rowCount() == 1
+    # Value cell (_COL_VALUE = 1) shows the formatted float.
+    val_text = panel._table.item(0, 1).text()
+    assert "1.2340" in val_text, f"Value cell text wrong: {val_text!r}"
+    # Count label reflects one channel.
+    assert panel._channel_count_label.text() == "1 канал", (
+        f"Count label wrong: {panel._channel_count_label.text()!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,19 +195,33 @@ def test_overlay_container_register_overwrite_releases_displaced_widget(
     qapp,
 ) -> None:
     """v0.55.15 — re-registering under an existing name should also
-    deleteLater() the displaced widget so it doesn't leak."""
+    deleteLater() the displaced widget so it doesn't leak.
+    HIGH: spy/override deleteLater on 'first' to verify it is actually called,
+    not just check that the mapping points to 'second'.
+    """
+    from unittest.mock import patch
+
     container = OverlayContainer()
     container.register("home", QLabel("home"))
 
     first = QLabel("first")
     second = QLabel("second")
     container.register("test", first)
-    container.register("test", second)
 
-    # Only 'second' is registered now; 'first' has been removed and
-    # scheduled for deletion (deleteLater() is async — test only
-    # asserts the registration mapping is correct).
+    delete_later_called = []
+    original_delete_later = first.deleteLater
+
+    def spy_delete_later():
+        delete_later_called.append(True)
+        original_delete_later()
+
+    with patch.object(first, "deleteLater", side_effect=spy_delete_later):
+        container.register("test", second)
+
+    # Mapping must point to second.
     assert container._pages["test"] is second
+    # deleteLater() must have been called on the displaced widget.
+    assert delete_later_called, "deleteLater() was not called on displaced widget"
 
 
 # ---------------------------------------------------------------------------
@@ -214,43 +244,43 @@ def test_multiline_channel_state_window_tracks_min_max() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chat_panel_worker_list_does_not_grow_unbounded() -> None:
+def test_chat_panel_worker_list_does_not_grow_unbounded(qapp) -> None:
     """v0.55.15 (Codex audit SCOPE 5 finding 5.4) — simulate many
     completed queries; the workers list must shrink as senders fire
-    finished signals, instead of accumulating QThread refs forever."""
-    from unittest.mock import MagicMock
+    finished signals, instead of accumulating QThread refs forever.
+    HIGH: instantiate the REAL AssistantChatPanel, patch worker/sender
+    minimally, call _on_response(), assert workers/inflight/busy state.
+    """
+    from unittest.mock import MagicMock, patch
 
-    from cryodaq.gui.shell.overlays._assistant_chat_widget import (
-        AssistantChatPanel,
-    )
+    from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
     from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-    # AssistantChatPanel is a QWidget — needs a QApplication, but for
-    # this test we exercise just the worker-list cleanup logic without
-    # actually instantiating the widget. We construct fake senders and
-    # call _on_response with self.sender() returning the fake.
-    panel = MagicMock(spec=AssistantChatPanel)
-    panel._workers = []
-    panel._inflight = None
+    # Instantiate the real widget (QApplication is available via qapp fixture).
+    # Patch ZmqCommandWorker at module level so construction doesn't spin up ZMQ.
+    with patch(
+        "cryodaq.gui.shell.overlays._assistant_chat_widget.ZmqCommandWorker"
+    ) as MockWorkerCls:
+        MockWorkerCls.return_value = MagicMock(spec=ZmqCommandWorker)
+        panel = AssistantChatPanel()
 
-    # Simulate three completed queries
+    # Simulate three completed queries: append a fake worker, then let
+    # _on_response() clean it up via self.sender().
     for _i in range(3):
         worker = MagicMock(spec=ZmqCommandWorker)
         worker.wait = MagicMock()
         worker.deleteLater = MagicMock()
         panel._workers.append(worker)
         panel._inflight = worker
-        # Drive the cleanup logic directly
-        panel.sender = MagicMock(return_value=worker)
-        # Mirror the real cleanup logic from the patched method
-        sender = panel.sender()
-        if isinstance(sender, ZmqCommandWorker) and sender in panel._workers:
-            try:
-                sender.wait(0)
-            except RuntimeError:
-                pass
-            panel._workers.remove(sender)
-            sender.deleteLater()
-        panel._inflight = None
 
-    assert panel._workers == []
+        # Patch self.sender() to return this worker, then call the real method.
+        with patch.object(panel, "sender", return_value=worker):
+            panel._on_response({"ok": True, "response": "test reply"})
+
+    # After three completed rounds, list must be empty and panel not busy.
+    assert panel._workers == [], (
+        f"Worker list not cleaned up: {panel._workers}"
+    )
+    assert panel._inflight is None
+    # set_busy(False) re-enables the input — verify widget is not stuck busy.
+    assert panel._input.isEnabled()

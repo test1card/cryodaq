@@ -138,15 +138,30 @@ def test_empty_cooldowns_shows_empty_state(app):
 
 
 def test_one_cooldown_populates_scatter(app):
-    """N=1 cooldown entry must populate the scatter and show the plot."""
+    """N=1 cooldown entry must populate the scatter and show the plot.
+    MED: assert X == parsed cooldown_started_at timestamp + Y == duration.
+    """
+    from datetime import datetime as _dt
+
+    COOLDOWN_STARTED_AT = "2026-04-15T10:30:00+00:00"
+    DURATION_HOURS = 6.0
     w = _make_widget()
-    w._on_history_loaded({"ok": True, "cooldowns": [_cooldown_entry()]})
+    w._on_history_loaded(
+        {"ok": True, "cooldowns": [_cooldown_entry(
+            cooldown_started_at=COOLDOWN_STARTED_AT,
+            duration_hours=DURATION_HOURS,
+        )]}
+    )
 
     assert not w._plot.isHidden()
     assert w._empty_label.isHidden()
     xs, ys = w._scatter.getData()
     assert xs is not None and len(xs) == 1
-    assert ys[0] == pytest.approx(6.0)
+    # Y must equal the duration_hours value exactly.
+    assert ys[0] == pytest.approx(DURATION_HOURS)
+    # X must equal the parsed cooldown_started_at POSIX timestamp.
+    expected_ts = _dt.fromisoformat(COOLDOWN_STARTED_AT).timestamp()
+    assert xs[0] == pytest.approx(expected_ts)
     assert len(w._cooldowns) == 1
 
 
@@ -156,7 +171,12 @@ def test_one_cooldown_populates_scatter(app):
 
 
 def test_twenty_cooldowns_all_rendered(app):
-    """N=20 cooldown entries must all appear in the scatter."""
+    """N=20 cooldown entries must all appear in the scatter.
+    HIGH: assert full ys == [1.0..20.0] + representative parsed X so wrong
+    dates/durations/order cannot hide behind a count-only check.
+    """
+    from datetime import datetime as _dt
+
     w = _make_widget()
     entries = [
         _cooldown_entry(
@@ -171,6 +191,20 @@ def test_twenty_cooldowns_all_rendered(app):
     xs, ys = w._scatter.getData()
     assert len(xs) == 20
     assert len(w._cooldowns) == 20
+    # Full Y series must equal [1.0, 2.0, ..., 20.0] in order.
+    assert list(ys) == pytest.approx([float(i + 1) for i in range(20)]), (
+        f"Y values wrong/reordered: {list(ys)}"
+    )
+    # Representative X: first entry is 2026-04-01T10:30:00+00:00.
+    expected_x0 = _dt.fromisoformat("2026-04-01T10:30:00+00:00").timestamp()
+    assert xs[0] == pytest.approx(expected_x0), (
+        f"X[0] wrong: {xs[0]} != {expected_x0}"
+    )
+    # Last entry is 2026-04-20T10:30:00+00:00.
+    expected_x19 = _dt.fromisoformat("2026-04-20T10:30:00+00:00").timestamp()
+    assert xs[19] == pytest.approx(expected_x19), (
+        f"X[19] wrong: {xs[19]} != {expected_x19}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -202,10 +236,17 @@ def test_error_response_does_not_populate_scatter(app):
 
 
 def test_zmq_failure_graceful_empty(app):
-    """If ZMQ returns ok=False (engine not running), widget stays in empty
-    state without crashing — simulates 'construction without engine connection'
-    acceptance criterion."""
+    """If ZMQ returns ok=False (engine not running), widget shows error banner.
+    LOW: pick exact expected state for ok=False — _on_history_loaded hides
+    _empty_label and shows _error_label (not "either or").
+    """
     w = _make_widget()
-    # Simulate ZMQ timeout/failure response
+    # Simulate ZMQ timeout/failure response (no "error" key → bare ok=False).
     w._on_history_loaded({"ok": False})
-    assert not w._empty_label.isHidden() or not w._error_label.isHidden()
+    # Per src: ok=False → _empty_label.setHidden(True) + _error_label.setHidden(False)
+    assert w._empty_label.isHidden(), (
+        "Empty label must be hidden on ok=False"
+    )
+    assert not w._error_label.isHidden(), (
+        "Error label must be visible on ok=False"
+    )

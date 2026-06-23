@@ -17,21 +17,32 @@ def _app() -> QApplication:
 
 
 def test_tool_rail_constructs() -> None:
+    # MED: assert exact visible button keys/order+tooltips, not just subset.
+    # Prod now has multiline + knowledge_base; subset check would pass even if
+    # either were absent.
     _app()
     rail = ToolRail()
-    expected = {
+    expected_keys = [
         "home",
         "new_experiment",
         "experiment",
         "source",
         "analytics",
         "conductivity",
+        "multiline",
         "alarms",
         "log",
+        "knowledge_base",
         "instruments",
         "more",
-    }
-    assert expected.issubset(rail._buttons.keys())
+    ]
+    assert list(rail._buttons.keys()) == expected_keys, (
+        f"Button order/keys mismatch: {list(rail._buttons.keys())}"
+    )
+    # Spot-check a few tooltips are set (exact strings from src).
+    assert rail._buttons["knowledge_base"].toolTip() == "База знаний"
+    assert rail._buttons["multiline"].toolTip() == "MultiLine"
+    assert rail._buttons["home"].toolTip() == "Дашборд"
 
 
 def test_buttons_emit_tool_clicked_with_name() -> None:
@@ -45,14 +56,30 @@ def test_buttons_emit_tool_clicked_with_name() -> None:
 
 
 def test_set_active_marks_one_button() -> None:
+    # HIGH: assert rendered border-left/active-icon-color QSS, not private _active.
+    # _apply_style() sets border-left to ACCENT_400 when active, transparent when not.
+    # _refresh_icon() uses ACCENT_400 color when active.
     _app()
     rail = ToolRail()
     rail.set_active("source")
-    assert rail._buttons["source"]._active is True
-    assert rail._buttons["home"]._active is False
+    # Active button: border-left must contain ACCENT_400.
+    source_ss = rail._buttons["source"].styleSheet()
+    home_ss = rail._buttons["home"].styleSheet()
+    assert theme.ACCENT_400 in source_ss, (
+        f"Active button 'source' missing ACCENT_400 in border-left: {source_ss!r}"
+    )
+    assert theme.ACCENT_400 not in home_ss, (
+        f"Inactive button 'home' must not have ACCENT_400: {home_ss!r}"
+    )
     rail.set_active("home")
-    assert rail._buttons["home"]._active is True
-    assert rail._buttons["source"]._active is False
+    source_ss2 = rail._buttons["source"].styleSheet()
+    home_ss2 = rail._buttons["home"].styleSheet()
+    assert theme.ACCENT_400 in home_ss2, (
+        f"Active button 'home' missing ACCENT_400: {home_ss2!r}"
+    )
+    assert theme.ACCENT_400 not in source_ss2, (
+        f"Inactive button 'source' must not have ACCENT_400: {source_ss2!r}"
+    )
 
 
 def test_rail_width_matches_design_token() -> None:
@@ -73,12 +100,25 @@ def test_buttons_are_square_56() -> None:
 
 
 def test_mnemonic_shortcuts_defined_for_canonical_panels() -> None:
-    # DESIGN: docs/design-system/tokens/keyboard-shortcuts.md (AD-002).
-    # Canonical mnemonic scheme must cover these eight panels at minimum.
+    # MED: assert exact _MNEMONIC_SHORTCUTS map (key → overlay name), not just
+    # that the key exists. A wrong overlay mapping passes the old check.
     _app()
     ToolRail()
-    for seq in ("Ctrl+L", "Ctrl+E", "Ctrl+A", "Ctrl+K", "Ctrl+M", "Ctrl+R", "Ctrl+C", "Ctrl+D"):
+    expected_map = {
+        "Ctrl+L": "log",
+        "Ctrl+E": "experiment",
+        "Ctrl+A": "analytics",
+        "Ctrl+K": "source",
+        "Ctrl+M": "alarms",
+        "Ctrl+R": "archive",
+        "Ctrl+C": "conductivity",
+        "Ctrl+D": "instruments",
+    }
+    for seq, overlay_key in expected_map.items():
         assert seq in _MNEMONIC_SHORTCUTS, f"{seq} missing from ToolRail registry"
+        assert _MNEMONIC_SHORTCUTS[seq] == overlay_key, (
+            f"{seq} maps to {_MNEMONIC_SHORTCUTS[seq]!r}, expected {overlay_key!r}"
+        )
 
 
 def test_mnemonic_shortcut_emits_tool_clicked() -> None:

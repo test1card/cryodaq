@@ -218,11 +218,14 @@ def test_set_r_thermal_none_shows_dash(app):
 
 
 def test_set_pressure_reading_forwards_to_pressure_widget(app):
+    # MED: assert stored (ts, value) pair + PressurePlot rendered series,
+    # not just len(_series)==1.
     view = AnalyticsView()
     view.set_phase(None)  # new contract: layout applied on first set_phase call
     # Fallback has pressure_current in top_right.
+    ts_dt = datetime(2026, 4, 15, 10, 30, 0, tzinfo=UTC)
     reading = Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=ts_dt,
         instrument_id="VSP63D_1",
         channel="VSP63D_1/pressure",
         value=1e-5,
@@ -232,26 +235,67 @@ def test_set_pressure_reading_forwards_to_pressure_widget(app):
     view.set_pressure_reading(reading)
     pressure_widget = view.active_widgets()["top_right"]
     assert len(pressure_widget._series) == 1
+    # Assert stored (ts, value) pair is correct.
+    stored_ts, stored_val = pressure_widget._series[0]
+    assert stored_ts == pytest.approx(ts_dt.timestamp())
+    assert stored_val == pytest.approx(1e-5)
+    # Assert PressurePlot rendered series reflects the data.
+    # PressurePlot clamps values and plots log10 on Y; 1e-5 → -5.0.
+    xs, ys = pressure_widget._plot._curve.getData()
+    assert xs is not None and len(xs) >= 1
+    import math
+    assert ys[-1] == pytest.approx(math.log10(1e-5))
 
 
 def test_set_instrument_health_forwards_to_sensor_widget(app):
+    # MED: assert grid labels + SeverityChip rendered state (text/color),
+    # not just chip key presence.
+    from cryodaq.gui import theme
+    from cryodaq.gui.widgets.shared import pressure_plot  # noqa: F401 (ensure import ok)
+
     view = AnalyticsView()
     view.set_phase(None)  # new contract: layout applied on first set_phase call
     view.set_instrument_health({"Т1": "OK", "Т2": "WARNING"})
     sensor_widget = view.active_widgets()["bottom_right"]
     assert "Т1" in sensor_widget._chips
     assert "Т2" in sensor_widget._chips
+    # Grid must have 2 rows (one per sensor, sorted).
+    # sorted({"Т1": "OK", "Т2": "WARNING"}) → [("Т1", "OK"), ("Т2", "WARNING")]
+    assert sensor_widget._grid.rowCount() == 2
+    # Name labels in column 0: find by iterating grid items.
+    name_labels = []
+    for row in range(sensor_widget._grid.rowCount()):
+        item = sensor_widget._grid.itemAtPosition(row, 0)
+        if item and item.widget():
+            name_labels.append(item.widget().text())
+    assert "Т1" in name_labels and "Т2" in name_labels
+    # SeverityChip for WARNING must use STATUS_WARNING color.
+    chip_t2 = sensor_widget._chips["Т2"]
+    assert theme.STATUS_WARNING in chip_t2.styleSheet(), (
+        f"WARNING chip missing STATUS_WARNING: {chip_t2.styleSheet()!r}"
+    )
+    # SeverityChip text: "OK" severity falls back to severity[:4] = "OK  "
+    # but the chip label for "OK" renders as the raw text since it's not in
+    # _SEVERITY_LABELS — check it contains the severity text.
+    chip_t1 = sensor_widget._chips["Т1"]
+    assert chip_t1.text() != "", "OK chip text must not be empty"
 
 
 def test_setter_on_widget_without_method_does_not_raise(app):
     """Duck-typing: a setter whose forwarded method nobody implements
-    should silently no-op, not crash."""
+    should silently no-op, not crash.
+    MED: call set_phase(None) first so fallback layout is actually applied
+    (the old test never applied a layout, so it was a guarded pass).
+    """
     view = AnalyticsView()
-    # sensor_health_summary has no set_cooldown_data method, yet it is
-    # in the fallback bottom_right slot. Calling set_cooldown on view
-    # must be safe.
+    view.set_phase(None)  # ensure fallback layout is mounted
+    # sensor_health_summary (bottom_right) has no set_cooldown method.
+    # Calling set_cooldown on view must silently no-op for that widget.
     data = CooldownData(t_hours=1.0, ci_hours=0.1, phase="phase1", progress_pct=10.0)
     view.set_cooldown(data)  # no exception
+    # Verify fallback layout is actually active (not just empty).
+    slots = view.active_widgets()
+    assert "main" in slots and "bottom_right" in slots
 
 
 # ----------------------------------------------------------------------
