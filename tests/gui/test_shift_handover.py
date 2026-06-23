@@ -91,13 +91,22 @@ def test_shift_start_dialog_creates_with_operators() -> None:
     assert not dialog._start_btn.isEnabled()
 
 
+def _click_accept_button(btn_box):
+    """Click the real AcceptRole button (clicked → accepted) instead of
+    emitting `accepted` directly — proves the OK button is wired to accept."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    for btn in btn_box.buttons():
+        if btn_box.buttonRole(btn) == QDialogButtonBox.ButtonRole.AcceptRole:
+            btn.click()
+            return btn
+    raise AssertionError("no AcceptRole button in the QDialogButtonBox")
+
+
 def test_shift_start_dialog_accepts_with_operator() -> None:
     _app()
     config = {"operators": ["Фоменко В.Н."]}
     dialog = ShiftStartDialog(config)
-
-    dialog._checks = [{"name": "test", "ok": True, "detail": "OK"}]
-    dialog._start_btn.setEnabled(True)
 
     received = []
     dialog.shift_started.connect(lambda op, sid: received.append((op, sid)))
@@ -109,7 +118,14 @@ def test_shift_start_dialog_accepts_with_operator() -> None:
     patcher, _ = _patch_worker_capture()
     with patcher, patch("cryodaq.gui.zmq_client.send_command", return_value={"ok": True}):
         dialog._operator_combo.setCurrentText("Фоменко В.Н.")
-        dialog._on_accept()
+        # Drive the REAL gate: _start_btn is created disabled
+        # (shift_handover.py:150) and only enabled by _on_checks_result when the
+        # engine check passes (:198) — NOT manually. Prove start is gated.
+        assert not dialog._start_btn.isEnabled()
+        dialog._on_checks_result({"ok": True})
+        assert dialog._start_btn.isEnabled(), "engine-ok must enable the start button"
+        # Click the real AcceptRole button (clicked → accepted → _on_accept).
+        _click_accept_button(dialog._btn_box)
 
     assert len(received) == 1
     assert received[0][0] == "Фоменко В.Н."
@@ -122,10 +138,9 @@ def test_shift_start_dialog_accepts_with_operator() -> None:
 
 
 def test_periodic_prompt_submits_log_entry() -> None:
-    """Phase 2c baseline cleanup: shift_handover dispatches via ZmqCommandWorker
-    on a Qt thread now (was direct send_command). Patch the worker class
-    to capture the payload synchronously instead of waiting on the thread.
-    """
+    """Clicking the accept button in ShiftPeriodicPrompt dispatches a log_entry."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
     _app()
     dialog = ShiftPeriodicPrompt(
         operator="Фоменко В.Н.",
@@ -136,7 +151,10 @@ def test_periodic_prompt_submits_log_entry() -> None:
 
     patcher, captured = _patch_worker_capture()
     with patcher:
-        dialog._on_submit()
+        # Drive the real button wiring: btn_box.accepted → _on_submit
+        btn_box = dialog.findChild(QDialogButtonBox)
+        assert btn_box is not None, "ShiftPeriodicPrompt must have a QDialogButtonBox"
+        _click_accept_button(btn_box)
 
     assert len(captured) == 1, f"Expected 1 worker dispatch, got {len(captured)}"
     payload = captured[0]
@@ -157,6 +175,8 @@ def test_shift_end_dialog_generates_summary() -> None:
     the compiled Markdown body is embedded in the ``message`` field — the
     header line carries the operator + free-form comment and is followed
     by the full Markdown summary."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
     _app()
     import time
 
@@ -175,7 +195,10 @@ def test_shift_end_dialog_generates_summary() -> None:
         dialog.shift_ended.connect(lambda: received.append(True))
 
         dialog._comment.setPlainText("Штатно, система стабильна")
-        dialog._on_end()
+        # Drive the real "Сдать смену" accept path via QDialogButtonBox.accepted
+        btn_box = dialog.findChild(QDialogButtonBox)
+        assert btn_box is not None, "ShiftEndDialog must have a QDialogButtonBox"
+        _click_accept_button(btn_box)
 
     log_entries = [p for p in captured if p.get("cmd") == "log_entry"]
     assert len(log_entries) == 1
@@ -377,7 +400,11 @@ def test_shift_end_dialog_saves_markdown_body_to_operator_log() -> None:
         dialog._alarms_section_text = "— тревог не было"
         dialog._temperatures_section_text = "| Канал | ... |"
         dialog._experiment_section_text = "- эксперимент X"
-        dialog._on_end()
+        # Drive the real "Сдать смену" accept path via QDialogButtonBox.accepted
+        from PySide6.QtWidgets import QDialogButtonBox
+        btn_box = dialog.findChild(QDialogButtonBox)
+        assert btn_box is not None, "ShiftEndDialog must have a QDialogButtonBox"
+        _click_accept_button(btn_box)
     log_payloads = [p for p in captured if p.get("cmd") == "log_entry"]
     assert log_payloads
     payload = log_payloads[0]

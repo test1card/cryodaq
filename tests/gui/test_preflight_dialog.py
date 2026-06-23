@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui.widgets.preflight_dialog import PreFlightCheck, PreFlightDialog
+from cryodaq.gui.widgets.preflight_dialog import PreFlightDialog
 
 
 def _app() -> QApplication:
@@ -55,45 +55,104 @@ def _make_dialog(monkeypatch, safety_result=None, extra_cmds=None):
 
 
 def test_dialog_creates_without_crash(monkeypatch) -> None:
+    """Dialog creates, has expected title, loading label, disabled start, initial checks."""
     dialog = _make_dialog(monkeypatch)
     assert dialog is not None
+    assert dialog.windowTitle() == "Проверка готовности к эксперименту"
+    # Loading label hidden after checks complete (all 3 async + disk done)
+    assert not dialog._loading_label.isVisible()
+    # Start button must exist
+    assert dialog._start_btn is not None
+    # At least the named checks were populated
+    check_names = {c.name for c in dialog._checks}
+    assert "Engine подключён" in check_names
+    assert "Тревоги" in check_names
 
 
 def test_checks_list_not_empty(monkeypatch) -> None:
+    """Required named checks (safety/disk/alarm) are rendered with statuses."""
     dialog = _make_dialog(monkeypatch)
-    assert len(dialog._checks) > 0
+    # Named required checks must be present
+    check_names = {c.name for c in dialog._checks}
+    assert "Engine подключён" in check_names, "safety connectivity check missing"
+    assert "Тревоги" in check_names, "alarm check missing"
+    # Every check must have a valid status
+    for c in dialog._checks:
+        assert c.status in ("ok", "warning", "error"), f"invalid status {c.status!r} for {c.name}"
+    # Summary must be set after checks complete
+    assert dialog._summary_label.text() != ""
+    # Start button state follows the check results: default safety ok + no alarms → enabled
+    assert dialog._start_btn is not None
+    assert dialog._start_btn.isEnabled()
 
 
 def test_error_disables_start(monkeypatch) -> None:
-    """Engine недоступен → error → кнопка Начать disabled."""
+    """Engine недоступен → error check rendered + failure summary + start disabled."""
     dialog = _make_dialog(monkeypatch, safety_result={"ok": False, "error": "timeout"})
+    # Checks must have completed (not still pending)
+    assert dialog._pending_checks == 0, (
+        f"Checks not complete: _pending_checks={dialog._pending_checks}"
+    )
+    # At least one error check must exist
+    error_checks = [c for c in dialog._checks if c.status == "error"]
+    assert len(error_checks) >= 1, (
+        f"No error checks found; all checks: {[(c.name, c.status) for c in dialog._checks]}"
+    )
+    # The engine-connectivity check must be the error
+    engine_check = next((c for c in dialog._checks if c.name == "Engine подключён"), None)
+    assert engine_check is not None, "Engine подключён check missing"
+    assert engine_check.status == "error"
+    # Summary must reflect errors
+    assert "ошибки" in dialog._summary_label.text().lower() or "❌" in dialog._summary_label.text()
+    # Start must be disabled BECAUSE of the error (not merely by default)
     assert dialog._start_btn is not None
     assert not dialog._start_btn.isEnabled()
 
 
 def test_all_ok_enables_start(monkeypatch) -> None:
-    """Все проверки ok → кнопка Начать enabled."""
+    """Successful safety/alarm responses through real async path → start enabled."""
+    # _make_dialog drives the real ZmqCommandWorker path with:
+    #   safety_status → ok, state=safe_off
+    #   alarm_v2_status → ok, active={}
+    #   get_sensor_diagnostics → ok=False (→ warning, not error)
     dialog = _make_dialog(monkeypatch)
-    # Manually set all checks to ok and rebuild
-    dialog._checks = [
-        PreFlightCheck("Engine подключён", "ok", ""),
-        PreFlightCheck("Safety state", "ok", "safe_off"),
-        PreFlightCheck("Диск", "ok", "500 ГБ свободно"),
-    ]
-    dialog._rebuild_checks_ui()
+    # Checks completed
+    assert dialog._pending_checks == 0
+    # No error checks
+    error_checks = [c for c in dialog._checks if c.status == "error"]
+    assert len(error_checks) == 0, (
+        f"Unexpected errors: {[(c.name, c.status, c.detail) for c in error_checks]}"
+    )
+    # Summary indicates ready or warnings-only
+    summary = dialog._summary_label.text()
+    assert "✅" in summary or "⚠️" in summary
+    # Start must be enabled
     assert dialog._start_btn is not None
     assert dialog._start_btn.isEnabled()
 
 
 def test_warnings_allow_start(monkeypatch) -> None:
-    """Только предупреждения → кнопка Начать enabled."""
-    dialog = _make_dialog(monkeypatch)
-    dialog._checks = [
-        PreFlightCheck("Engine подключён", "ok", ""),
-        PreFlightCheck("Тревоги", "warning", "1 активных: test_alarm"),
-        PreFlightCheck("Диск", "warning", "8.5 ГБ"),
-    ]
-    dialog._rebuild_checks_ui()
+    """Active alarms → warning via real alarm path → start still enabled."""
+    dialog = _make_dialog(
+        monkeypatch,
+        extra_cmds={
+            "alarm_v2_status": {
+                "ok": True,
+                "active": {"test_alarm": {"severity": "warning"}},
+                "history": [],
+            },
+        },
+    )
+    # Checks completed
+    assert dialog._pending_checks == 0
+    # Alarm check must be a warning
+    alarm_check = next((c for c in dialog._checks if c.name == "Тревоги"), None)
+    assert alarm_check is not None, "Alarm check not found"
+    assert alarm_check.status == "warning"
+    # Summary shows warnings
+    summary = dialog._summary_label.text()
+    assert "⚠️" in summary or "предупреждения" in summary.lower()
+    # Start must be enabled despite warnings
     assert dialog._start_btn is not None
     assert dialog._start_btn.isEnabled()
 

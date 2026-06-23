@@ -98,13 +98,21 @@ def test_backend_state_off_controls_visual_off_even_with_nonzero_telemetry() -> 
 
 
 def test_keithley_strip_is_monitoring_only() -> None:
-    """KeithleyStrip is for monitoring — no start/stop buttons (removed in v0.13)."""
+    """KeithleyStrip is for monitoring — no start/stop/emergency QPushButtons rendered."""
+    from PySide6.QtWidgets import QPushButton
+
     _app()
     widget = KeithleyStrip()
-    # Quick-action methods removed — overview is monitoring only
-    assert not hasattr(widget, "_on_quick_start")
-    assert not hasattr(widget, "_on_quick_stop")
-    assert not hasattr(widget, "_on_emergency_off")
+    # No start/stop/emergency action buttons must exist as children
+    buttons = widget.findChildren(QPushButton)
+    action_keywords = ("start", "stop", "emergency", "старт", "стоп", "аварий")
+    action_buttons = [
+        b for b in buttons
+        if any(kw in b.text().lower() for kw in action_keywords)
+    ]
+    assert len(action_buttons) == 0, (
+        f"KeithleyStrip must have no action buttons, found: {[b.text() for b in action_buttons]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +178,19 @@ def test_quick_log_widget_renders_only_first_line_of_multiline_message() -> None
 
 
 def test_compact_temp_card_emits_toggled_signal() -> None:
-    _app()
+    """QTest.mouseClick drives real Qt dispatch — not a direct mousePressEvent bypass."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
     from cryodaq.gui.widgets.overview_panel import CompactTempCard
 
+    _app()
     card = CompactTempCard("Т1", "Stage A")
-    received = []
+    card.show()  # widget must be visible for QTest to hit it
+    received: list[str] = []
     card.toggled.connect(lambda ch: received.append(ch))
 
-    card.mousePressEvent(None)
+    QTest.mouseClick(card, Qt.MouseButton.LeftButton)
 
     assert received == ["Т1"]
 

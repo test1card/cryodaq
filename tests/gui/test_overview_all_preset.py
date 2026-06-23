@@ -42,37 +42,10 @@ def test_button_label_is_vsyo(app):
     )
 
 
-@pytest.mark.skip(
-    reason="ExperimentStatusWidget replaced by _OrphanedStub in Phase UI-1 v2; proper fix in Block B"  # noqa: E501
-)
-def test_child_status_widget_caches_experiment(app):
-    """ExperimentStatusWidget._on_refresh_result populates the cache that
-    OverviewPanel reads via the child reference."""
-    panel = _make_panel()
-    child = panel._experiment_status
-    assert child._cached_active_experiment is None
-
-    fake_payload = {
-        "ok": True,
-        "active_experiment": {
-            "name": "Test",
-            "start_time": "2026-04-01T10:00:00+00:00",
-        },
-    }
-    child._on_refresh_result(fake_payload)
-    assert child._cached_active_experiment is not None
-    assert child._cached_active_experiment.get("start_time") == "2026-04-01T10:00:00+00:00"
-
-    # OverviewPanel slot must read it via the child (no own cache set).
-    captured: list[int] = []
-    panel._cached_active_experiment = None
-    panel._load_history = lambda hours: captured.append(hours)  # type: ignore[method-assign]
-    panel._on_all_clicked()
-    assert len(captured) == 1, "slot must reach experiment via child widget"
-
-    # When result.ok is False or active_experiment is missing, cache must clear.
-    child._on_refresh_result({"ok": True, "active_experiment": None})
-    assert child._cached_active_experiment is None
+# test_child_status_widget_caches_experiment was permanently skipped because
+# ExperimentStatusWidget was replaced by _OrphanedStub in Phase UI-1 v2 and
+# _OrphanedStub has no _on_refresh_result / _cached_active_experiment contract.
+# The test is deleted rather than kept as a silent skip (dead coverage).
 
 
 def test_all_preset_uses_experiment_start_when_active(app, monkeypatch):
@@ -90,7 +63,8 @@ def test_all_preset_uses_experiment_start_when_active(app, monkeypatch):
     captured: list[int] = []
     monkeypatch.setattr(panel, "_load_history", lambda hours: captured.append(hours))
 
-    panel._on_all_clicked()
+    # Drive the real button click (tests the _btn_all → _on_all_clicked wiring)
+    panel._btn_all.click()
 
     assert len(captured) == 1
     # 2 hours rounded up → 2 hours of history
@@ -111,7 +85,8 @@ def test_all_preset_falls_back_to_panel_start_when_no_experiment(app, monkeypatc
     captured: list[int] = []
     monkeypatch.setattr(panel, "_load_history", lambda hours: captured.append(hours))
 
-    panel._on_all_clicked()
+    # Drive the real button click
+    panel._btn_all.click()
 
     assert len(captured) == 1
     # 1.5 hours → 2 (math.ceil)
@@ -128,7 +103,8 @@ def test_all_preset_handles_invalid_start_time(app, monkeypatch):
     captured: list[int] = []
     monkeypatch.setattr(panel, "_load_history", lambda hours: captured.append(hours))
 
-    panel._on_all_clicked()
+    # Drive the real button click
+    panel._btn_all.click()
 
     assert len(captured) == 1
     # Fallback path: <1h → math.ceil(3500/3600)=1
@@ -144,7 +120,8 @@ def test_all_preset_minimum_window_one_hour(app, monkeypatch):
     captured: list[int] = []
     monkeypatch.setattr(panel, "_load_history", lambda hours: captured.append(hours))
 
-    panel._on_all_clicked()
+    # Drive the real button click
+    panel._btn_all.click()
 
     assert len(captured) == 1
     assert captured[0] == 1
