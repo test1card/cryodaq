@@ -33,5 +33,10 @@ def test_dashboard_view_routes_temperature_reading_to_cell(app):
     )
     view.on_reading(reading)
     cell = view._sensor_grid._cells.get("\u04221")
-    if cell is not None:
-        assert "4.21" in cell._value_widget.text()
+    assert cell is not None, (
+        "DashboardView.on_reading() must route the reading to a SensorCell for channel \u04221; "
+        "cell was not created \u2014 check ChannelManager registration and on_reading dispatch"
+    )
+    assert "4.21" in cell._value_widget.text(), (
+        f"Expected '4.21' in cell value text, got {cell._value_widget.text()!r}"
+    )

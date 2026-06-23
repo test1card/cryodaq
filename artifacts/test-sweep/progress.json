@@ -1,5 +1,7 @@
 {
-  "mode": "done",
+  "mode": "gui-fix",
+  "gui_fix_next_batch": 23,
+  "gui_fix_max_batch": 34,
   "find_next_batch": 35,
   "fix_next_batch": 22,
   "fix_max_batch_with_findings": 21,

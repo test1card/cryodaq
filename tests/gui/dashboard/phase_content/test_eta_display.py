@@ -37,8 +37,12 @@ def test_eta_display_shows_unavailable_when_none(app):
 def test_eta_display_shows_confidence_range_when_provided(app):
     w = EtaDisplay()
     w.set_eta(3600, confidence_seconds=1800)
-    assert "1\u0447" in w._value_label.text()
-    assert "\u00b1" in w._confidence_label.text()
+    assert w._value_label.text() == "1\u0447", (
+        f"Expected '1\u0447', got {w._value_label.text()!r}"
+    )
+    assert w._confidence_label.text() == "\u00b1 30\u043c\u0438\u043d", (
+        f"Expected '\u00b1 30\u043c\u0438\u043d', got {w._confidence_label.text()!r}"
+    )
 
 
 def test_eta_display_hides_confidence_when_none(app):

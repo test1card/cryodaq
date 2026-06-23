@@ -145,11 +145,22 @@ def test_main_nonzero_on_bad_speed(tmp_path):
     assert rc == 2
 
 
-def test_main_dry_run_does_not_bind(tmp_path, capsys):
+def test_main_dry_run_does_not_bind(tmp_path, capsys, monkeypatch):
     db = tmp_path / "session.db"
     _seed_db(db, _sample_rows())
+
+    # publisher_socket must NOT be called during dry-run.
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("publisher_socket() was called during --dry-run")
+
+    monkeypatch.setattr(replay_session, "publisher_socket", _fail_if_called)
+
     rc = replay_session.main(["--db", str(db), "--dry-run"])
     assert rc == 0
+
     out = capsys.readouterr().out
-    # Dry-run prints Reading reprs; first sample row's channel appears.
-    assert "T1" in out
+    # Dry-run prints up to 10 Reading reprs via print(reading).
+    # First row: channel=T1, value=290.0, unit=K.
+    assert "T1" in out, f"Expected channel T1 in dry-run output, got:\n{out}"
+    assert "290.0" in out, f"Expected value 290.0 in dry-run output, got:\n{out}"
+    assert "K" in out, f"Expected unit K in dry-run output, got:\n{out}"

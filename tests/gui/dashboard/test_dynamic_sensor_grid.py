@@ -32,7 +32,31 @@ def test_grid_rebuilds_on_channel_change(app, mock_channel_mgr, buffer_store):
 
 def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
     grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
-    grid.refresh()  # should not raise
+    # Spy on each cell's refresh_from_buffer to confirm it is called.
+    call_counts: dict[str, int] = {ch_id: 0 for ch_id in grid._cells}
+    original_methods: dict[str, object] = {}
+    for ch_id, cell in grid._cells.items():
+        original = cell.refresh_from_buffer
+        original_methods[ch_id] = original
+
+        def _make_spy(cid: str, orig):
+            def _spy():
+                call_counts[cid] += 1
+                orig()
+            return _spy
+
+        cell.refresh_from_buffer = _make_spy(ch_id, original)
+
+    grid.refresh()
+
+    for ch_id in grid._cells:
+        assert call_counts[ch_id] == 1, (
+            f"cell {ch_id!r}.refresh_from_buffer() called {call_counts[ch_id]} times, expected 1"
+        )
+
+    # Restore originals.
+    for ch_id, cell in grid._cells.items():
+        cell.refresh_from_buffer = original_methods[ch_id]
 
 
 def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):

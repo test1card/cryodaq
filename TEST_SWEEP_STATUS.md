@@ -159,6 +159,19 @@ the broken-WAL range, so tests creating a real SQLiteWriter must
     assert the rendered value cell, or correct the test. NOT auto-fixed (GUI FIND feeds a future fix
     pass; this is a potential prod gap like the batch-07 ZMQ timeout CRIT / item 1).
 
+12. **XSS-escaping tests need a browser harness** (batch 22 GUI FIX) — tests/web/test_xss_escaping.py's
+    4 escaping guards stay source-grep (kept with DEFERRED-XSS-01 markers) because escaping is CLIENT-SIDE
+    JS: `escapeHtml` lives in the JS embedded in src/cryodaq/web/server.py:466, FastAPI endpoints return
+    raw JSON, and the browser escapes before innerHTML. Proving the rendered output is safe needs a
+    Playwright/Selenium harness (out of scope for the pytest suite). The source-grep guards still catch
+    helper removal/bypass. Test-infra item.
+
+NOTE (parallel worktree): the deferred PROD items (ledger 1-6 engine-closure/timeout/label class) are being
+resolved by a separate prod-fix agent in `/Users/vladimir/Projects/cryodaq-prodfix` (branch prod-fixes) —
+recent commits there bound the query format-timeout, derive the periodic-report label from window_minutes,
+add a deterministic replay PUB-readiness probe, and extract 4 engine testability helpers. Those land on the
+prod-fixes branch (separate from this master GUI-test-strengthening work); do not duplicate them here.
+
 NOTE: secret-token leak guard (batch 18) — RESOLVED & re-hardened in VERIFY: the runtime walker now scans
 __dict__ values + __slots__ across the MRO + nested containers, stops at SecretStr, and asserts
 isinstance(_bot_token, SecretStr) for all 3 Telegram classes (TelegramNotifier, TelegramCommandBot,
