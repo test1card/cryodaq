@@ -64,7 +64,9 @@ def test_tick_sets_overlay_connected_true_when_recent():
         w._ensure_overlay("conductivity")
         w._last_reading_time = time.monotonic()
         w._tick_status()
-        assert w._conductivity_panel._connected is True
+        # Visible contract: set_connected(True) enables the auto-sweep Start
+        # button (idle state → start_ok = connected and not stabilizing).
+        assert w._conductivity_panel._auto_start_btn.isEnabled() is True
     finally:
         _stop_timers(w)
 
@@ -76,7 +78,9 @@ def test_tick_sets_overlay_connected_false_when_stale():
         w._ensure_overlay("conductivity")
         w._last_reading_time = time.monotonic() - 10.0
         w._tick_status()
-        assert w._conductivity_panel._connected is False
+        # Visible contract: set_connected(False) disables the auto-sweep Start
+        # button.
+        assert w._conductivity_panel._auto_start_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 
@@ -92,6 +96,7 @@ def test_temperature_reading_reaches_overlay():
     try:
         w._ensure_overlay("conductivity")
         # Inject a visible T channel so the overlay accepts it.
+        from PySide6.QtCore import QCoreApplication
         from PySide6.QtWidgets import QCheckBox
 
         cb = QCheckBox("Т1")
@@ -103,11 +108,12 @@ def test_temperature_reading_reaches_overlay():
         cb.setChecked(True)
         # Dispatch the reading through the shell — it should reach the overlay.
         w._dispatch_reading(_temp_reading("Т1", 77.3))
-        # Allow signal delivery.
-        from PySide6.QtCore import QCoreApplication
-
         QCoreApplication.processEvents()
+        # Assert stored value (feeds R/G table on next _refresh tick).
         assert w._conductivity_panel._temps.get("Т1") == 77.3
+        # Invoke the rendering path explicitly to confirm the stored value
+        # propagates without error into the live display.
+        w._conductivity_panel._refresh()
     finally:
         _stop_timers(w)
 
@@ -121,7 +127,10 @@ def test_power_reading_reaches_overlay():
         from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
+        # Assert stored value AND that it renders into the power label.
         assert w._conductivity_panel._power == 0.037
+        w._conductivity_panel._update_power_label()
+        assert "0.037" in w._conductivity_panel._power_label.text()
     finally:
         _stop_timers(w)
 
@@ -163,7 +172,8 @@ def test_lazy_open_replays_connection_when_recent():
         w._last_reading_time = time.monotonic()
         w._ensure_overlay("conductivity")
         assert w._conductivity_panel is not None
-        assert w._conductivity_panel._connected is True
+        # Visible contract: lazy-open with recent reading → Start button enabled.
+        assert w._conductivity_panel._auto_start_btn.isEnabled() is True
     finally:
         _stop_timers(w)
 
@@ -173,7 +183,8 @@ def test_lazy_open_disconnected_on_cold_start():
     w = MainWindowV2()
     try:
         w._ensure_overlay("conductivity")
-        assert w._conductivity_panel._connected is False
+        # Visible contract: cold-open → Start button disabled.
+        assert w._conductivity_panel._auto_start_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 

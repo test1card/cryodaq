@@ -110,7 +110,12 @@ def test_cooldown_cache_populated_before_view_opened():
 
 def test_cooldown_replayed_into_view_on_first_open():
     """Opening AnalyticsView after a cooldown reading has been dispatched
-    must result in the view's internal cache being populated via replay."""
+    must result in the view's internal cache being populated via replay.
+
+    Uses the real navigation path (_on_tool_clicked) so OverlayContainer
+    switches to the analytics widget — proves the full open contract, not
+    just _ensure_overlay in isolation.
+    """
     _app()
     reset_time_window_controller()
     w = MainWindowV2()
@@ -119,28 +124,37 @@ def test_cooldown_replayed_into_view_on_first_open():
     w._dispatch_reading(_cooldown_reading(t_hours=3.5))
     assert w._analytics_view is None
 
-    w._ensure_overlay("analytics")
+    # Navigate via the real tool-rail handler.
+    w._on_tool_clicked("analytics")
     assert w._analytics_view is not None
+    # OverlayContainer must have switched to the analytics widget.
+    assert w._overlay.current_overlay == "analytics"
+    # Replayed cooldown value must be in the view's cache.
     assert w._analytics_view._last_cooldown is not None
     assert w._analytics_view._last_cooldown.t_hours == 3.5
 
 
 def test_phase_replayed_into_view_on_first_open():
     """If a phase has been received before AnalyticsView is opened, the
-    phase must be applied during replay so the correct widget layout is shown."""
+    phase must be applied during replay so the correct widget layout is shown.
+
+    Uses real navigation so OverlayContainer switch is also verified.
+    """
     _app()
     reset_time_window_controller()
     w = MainWindowV2()
     _stop_timers(w)
 
     w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_001"},
+        "active_experiment": {"experiment_id": "exp_001"},
         "current_phase": "cooldown",
     })
     assert w._analytics_view is None
 
-    w._ensure_overlay("analytics")
+    w._on_tool_clicked("analytics")
     assert w._analytics_view is not None
+    assert w._overlay.current_overlay == "analytics"
+    # Phase replayed → layout is in cooldown mode.
     assert w._analytics_view.current_phase() == "cooldown"
 
 
@@ -152,23 +166,29 @@ def test_phase_replayed_into_view_on_first_open():
 def test_close_and_reopen_replays_from_shell_cache():
     """Closing the AnalyticsView (nulling the reference) and reopening it
     must replay the shell-level snapshot, not rely on the now-destroyed
-    view instance's internal cache."""
+    view instance's internal cache.
+
+    Uses real navigation for both open and reopen so OverlayContainer
+    current widget is exercised, not just _ensure_overlay in isolation.
+    """
     _app()
     reset_time_window_controller()
     w = MainWindowV2()
     _stop_timers(w)
 
-    # Open view and receive cooldown data while it is open.
-    w._ensure_overlay("analytics")
+    # First open via navigation + receive cooldown data.
+    w._on_tool_clicked("analytics")
     w._dispatch_reading(_cooldown_reading(t_hours=6.0))
     assert w._analytics_view._last_cooldown.t_hours == 6.0
 
     # Simulate view close: null the reference (shell cache persists).
     w._analytics_view = None
 
-    # Reopen: factory creates a fresh AnalyticsView; replay must repopulate it.
-    w._ensure_overlay("analytics")
+    # Reopen via navigation: factory creates a fresh AnalyticsView; replay
+    # must repopulate it and OverlayContainer must switch back to analytics.
+    w._on_tool_clicked("analytics")
     assert w._analytics_view is not None
+    assert w._overlay.current_overlay == "analytics"
     assert w._analytics_view._last_cooldown is not None
     assert w._analytics_view._last_cooldown.t_hours == 6.0
 
@@ -438,7 +458,7 @@ def test_keithley_voltage_cached_when_view_not_open():
 
 def test_keithley_snapshot_replayed_on_view_open():
     """Accumulated Keithley readings must be replayed into the analytics view
-    when it is first opened."""
+    when it is first opened — all channels and exact values."""
     _app()
     reset_time_window_controller()
     w = MainWindowV2()
@@ -448,9 +468,14 @@ def test_keithley_snapshot_replayed_on_view_open():
         w._dispatch_reading(_keithley_reading(measurement=measurement, value=value))
 
     w._ensure_overlay("analytics")
-    # View's keithley cache must contain all three channel readings.
-    assert w._analytics_view._last_keithley_readings
-    assert "KEITHLEY_2604B_1/smua/voltage" in w._analytics_view._last_keithley_readings
+    readings = w._analytics_view._last_keithley_readings
+    # All three channels must be present with exact values.
+    assert "KEITHLEY_2604B_1/smua/voltage" in readings
+    assert readings["KEITHLEY_2604B_1/smua/voltage"].value == 1.0
+    assert "KEITHLEY_2604B_1/smua/current" in readings
+    assert readings["KEITHLEY_2604B_1/smua/current"].value == 0.01
+    assert "KEITHLEY_2604B_1/smua/power" in readings
+    assert readings["KEITHLEY_2604B_1/smua/power"].value == 0.01
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -509,6 +534,8 @@ def test_k_reading_forwarded_to_analytics_view_when_open():
     w._dispatch_reading(k_reading)
 
     assert "Т2" in w._analytics_view._last_temperature_readings
+    # Assert exact forwarded value — proves correct channel + value routing.
+    assert w._analytics_view._last_temperature_readings["Т2"].value == 4.2
 
 
 def test_set_fault_never_added_to_snapshot():

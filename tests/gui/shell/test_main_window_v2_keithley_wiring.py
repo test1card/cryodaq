@@ -101,7 +101,9 @@ def test_keithley_overlay_receives_connection_state_on_open():
         w._last_reading_time = time.monotonic()
         w._ensure_overlay("source")
         assert w._keithley_panel is not None
-        assert w._keithley_panel._connected is True
+        # Visible contract: connected → emergency button enabled on both channels.
+        assert w._keithley_panel._smua_block._emergency_btn.isEnabled() is True
+        assert w._keithley_panel._smub_block._emergency_btn.isEnabled() is True
     finally:
         _stop_timers(w)
 
@@ -113,7 +115,9 @@ def test_keithley_overlay_receives_disconnection_on_open_with_no_readings():
         # Cold-start: _last_reading_time == 0.0 — overlay should open disconnected.
         w._ensure_overlay("source")
         assert w._keithley_panel is not None
-        assert w._keithley_panel._connected is False
+        # Visible contract: disconnected → emergency button disabled on both channels.
+        assert w._keithley_panel._smua_block._emergency_btn.isEnabled() is False
+        assert w._keithley_panel._smub_block._emergency_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 
@@ -126,11 +130,13 @@ def test_keithley_overlay_receives_connection_state_via_tick():
         # Simulate recent data → tick flips connected to True.
         w._last_reading_time = time.monotonic()
         w._tick_status()
-        assert w._keithley_panel._connected is True
+        # Visible contract: connected → emergency button enabled.
+        assert w._keithley_panel._smua_block._emergency_btn.isEnabled() is True
         # Advance silence past the 3 s threshold → tick flips to False.
         w._last_reading_time = time.monotonic() - 10.0
         w._tick_status()
-        assert w._keithley_panel._connected is False
+        # Visible contract: disconnected → emergency button disabled.
+        assert w._keithley_panel._smua_block._emergency_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 
@@ -196,6 +202,66 @@ def test_keithley_overlay_connection_replay_on_lazy_open():
     try:
         # No reading yet → cold-start disconnected.
         w._ensure_overlay("source")
-        assert w._keithley_panel._connected is False
+        # Visible contract: cold-open → emergency button disabled (no connection).
+        assert w._keithley_panel._smua_block._emergency_btn.isEnabled() is False
+        assert w._keithley_panel._smub_block._emergency_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+# ----------------------------------------------------------------------
+# SAFETY GAP: exact keithley command dict forwarding
+# ----------------------------------------------------------------------
+
+
+def test_smua_start_dispatches_exact_command_dict(monkeypatch):
+    """SAFETY PATH: clicking Start on channel smua must dispatch the exact
+    keithley_start command dict with p_target / v_comp / i_comp to the engine.
+
+    Patches ZmqCommandWorker at the panel-module level so the ZMQ socket is
+    never opened and the spawned command dict is captured synchronously.
+    """
+    from unittest.mock import MagicMock
+
+    _app()
+    w = MainWindowV2()
+    try:
+        # Open overlay connected + safety ready so Start is enabled.
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        w._keithley_panel.set_connected(True)
+        w._keithley_panel.set_safety_ready(True)
+
+        block = w._keithley_panel._smua_block
+        # Set known spin values.
+        block._p_spin.setValue(0.050)
+        block._v_spin.setValue(10.0)
+        block._i_spin.setValue(0.005)
+
+        captured_cmds: list[dict] = []
+
+        class _FakeWorker:
+            def __init__(self, cmd: dict, parent=None):
+                captured_cmds.append(cmd)
+                self.finished = MagicMock()
+
+            def start(self):
+                pass
+
+        import cryodaq.gui.shell.overlays.keithley_panel as _kp_mod
+
+        monkeypatch.setattr(_kp_mod, "ZmqCommandWorker", _FakeWorker)
+
+        # Trigger Start click — this goes through _on_start_clicked →
+        # _dispatch_command with the exact command dict.
+        block._on_start_clicked()
+
+        assert len(captured_cmds) == 1, "exactly one command must be dispatched"
+        cmd = captured_cmds[0]
+        assert cmd["cmd"] == "keithley_start"
+        assert cmd["channel"] == "smua"
+        assert abs(cmd["p_target"] - 0.050) < 1e-9
+        assert abs(cmd["v_comp"] - 10.0) < 1e-9
+        assert abs(cmd["i_comp"] - 0.005) < 1e-9
     finally:
         _stop_timers(w)

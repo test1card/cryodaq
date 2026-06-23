@@ -21,16 +21,30 @@ def test_dialog_validates_empty_name(app):
     dialog = NewExperimentDialog(available_templates=[])
     dialog._name_edit.setText("")
     dialog._operator_combo.setEditText("V")
+
+    received: list = []
+    dialog.experiment_create_requested.connect(received.append)
     dialog._on_create_clicked()
+
+    # No signal emitted, dialog not accepted, exact error shown.
+    assert received == [], "signal must not fire on invalid input"
     assert not dialog._validation_label.isHidden()
+    assert dialog._validation_label.text() == "Введите название"
 
 
 def test_dialog_validates_empty_operator(app):
     dialog = NewExperimentDialog(available_templates=[])
     dialog._name_edit.setText("Test")
     dialog._operator_combo.setEditText("")
+
+    received: list = []
+    dialog.experiment_create_requested.connect(received.append)
     dialog._on_create_clicked()
+
+    # No signal emitted, dialog not accepted, exact error shown.
+    assert received == [], "signal must not fire on invalid input"
     assert not dialog._validation_label.isHidden()
+    assert dialog._validation_label.text() == "Введите оператора"
 
 
 def test_dialog_emits_payload_on_valid_submit(app):

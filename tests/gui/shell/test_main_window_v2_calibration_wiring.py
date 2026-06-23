@@ -67,7 +67,12 @@ def test_tick_sets_overlay_connected_true_when_recent():
         w._ensure_overlay("calibration")
         w._last_reading_time = time.monotonic()
         w._tick_status()
-        assert w._calibration_panel._connected is True
+        # Visible contract: set_connected(True) enables import buttons and
+        # starts the mode-poll timer.
+        panel = w._calibration_panel
+        assert panel._setup_widget._import_340_btn.isEnabled() is True
+        assert panel._setup_widget._import_json_btn.isEnabled() is True
+        assert panel._mode_timer.isActive() is True
     finally:
         _stop_timers(w)
 
@@ -77,9 +82,18 @@ def test_tick_sets_overlay_connected_false_when_stale():
     w = MainWindowV2()
     try:
         w._ensure_overlay("calibration")
+        # First connect so state differs.
+        w._last_reading_time = time.monotonic()
+        w._tick_status()
+        # Then go stale.
         w._last_reading_time = time.monotonic() - 10.0
         w._tick_status()
-        assert w._calibration_panel._connected is False
+        # Visible contract: set_connected(False) disables import buttons and
+        # stops the mode-poll timer.
+        panel = w._calibration_panel
+        assert panel._setup_widget._import_340_btn.isEnabled() is False
+        assert panel._setup_widget._import_json_btn.isEnabled() is False
+        assert panel._mode_timer.isActive() is False
     finally:
         _stop_timers(w)
 
@@ -90,17 +104,28 @@ def test_tick_sets_overlay_connected_false_when_stale():
 
 
 def test_k_reading_reaches_overlay():
+    """Shell dispatcher must call CalibrationPanel.on_reading for K-unit readings.
+
+    The overlay filters internally (_raw/sensor_unit only) and in SETUP mode
+    drops K readings — so _live_text stays empty — but the dispatch contract
+    is verified by spying the call.
+    """
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("calibration")
-        # Shell dispatcher sends any unit=="K" reading to the calibration
-        # overlay. The overlay filters internally (_raw/sensor_unit only)
-        # and in SETUP mode drops everything — so _live_text stays empty,
-        # but the dispatcher contract is honored.
+        received: list = []
+        original_on_reading = w._calibration_panel.on_reading
+
+        def spy(r):  # type: ignore[override]
+            received.append(r)
+            return original_on_reading(r)
+
+        w._calibration_panel.on_reading = spy  # type: ignore[method-assign]
         w._dispatch_reading(_k_reading("Т1", 77.3))
-        # No crash, no state mutation.
-        assert w._calibration_panel is not None
+        # Shell must have called on_reading exactly once.
+        assert len(received) == 1
+        assert received[0].channel == "Т1"
     finally:
         _stop_timers(w)
 
@@ -160,7 +185,10 @@ def test_lazy_open_replays_connection_when_recent():
     try:
         w._last_reading_time = time.monotonic()
         w._ensure_overlay("calibration")
-        assert w._calibration_panel._connected is True
+        # Visible contract: lazy-open with recent reading → import buttons enabled.
+        panel = w._calibration_panel
+        assert panel._setup_widget._import_340_btn.isEnabled() is True
+        assert panel._setup_widget._import_json_btn.isEnabled() is True
     finally:
         _stop_timers(w)
 
@@ -170,7 +198,10 @@ def test_lazy_open_disconnected_on_cold_start():
     w = MainWindowV2()
     try:
         w._ensure_overlay("calibration")
-        assert w._calibration_panel._connected is False
+        # Visible contract: cold-open → import buttons disabled.
+        panel = w._calibration_panel
+        assert panel._setup_widget._import_340_btn.isEnabled() is False
+        assert panel._setup_widget._import_json_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 
