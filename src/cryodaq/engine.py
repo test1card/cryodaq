@@ -2104,7 +2104,13 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _alarm_v2_configs:
         logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
     else:
-        logger.info("Alarm Engine v2: config/alarms_v3.yaml не найден, v2 отключён")
+        # A missing config file now raises AlarmConfigError (fail-closed, aborts
+        # the engine), so this branch is reached only when the file exists and
+        # parses but defines zero alarms — the message must reflect that.
+        logger.info(
+            "Alarm Engine v2: config/alarms_v3.yaml не содержит определений "
+            "алармов — v2-движку нечего оценивать"
+        )
 
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
     _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
