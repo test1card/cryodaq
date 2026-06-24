@@ -103,31 +103,60 @@ async def test_tripped_to_acknowledged() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Cooldown prevents re-trip within cooldown window
+# 3. Cooldown dedups the notification but the protective action still runs
 # ---------------------------------------------------------------------------
 
 
-async def test_cooldown_prevents_retrip() -> None:
+async def test_cooldown_dedups_notification_but_still_protects(caplog) -> None:
+    """Interlocks are latching (TRIPPED → ARMED only via operator acknowledge).
+    If the operator acknowledges while the value is STILL in breach, the
+    protection must re-trip and re-run the action — it must NOT go blind for the
+    rest of the cooldown window. The cooldown only deduplicates the loud
+    operator-facing CRITICAL announcement, not the protective action."""
+    import logging
+
     broker, engine, called = await _make_engine()
-    # Use a very long cooldown so the second publish definitely falls within it
+    # Very long cooldown so the second breach definitely falls within it.
     engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=60.0))
 
-    # First trip
+    # First trip → action runs, loud CRITICAL announcement emitted.
     await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
+    assert len(called) == 1
 
-    # Acknowledge to return to ARMED so the cooldown logic is exercised
+    # Operator acknowledges but the cause is NOT fixed (value still > threshold).
     engine.acknowledge("high_temp")
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
 
-    # Publish again — still within cooldown, should NOT trip
-    await broker.publish(Reading.now("T1", 400.0, "K", instrument_id="test"))
-    await asyncio.sleep(0.05)
+    caplog.clear()
+    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
+        await broker.publish(Reading.now("T1", 400.0, "K", instrument_id="test"))
+        await asyncio.sleep(0.05)
 
-    # Still ARMED because cooldown is active
-    assert engine.get_state()["high_temp"] == InterlockState.ARMED
-    assert len(called) == 1  # action called only once
+    # MUST re-trip: protection is not blinded by the cooldown.
+    assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
+    assert len(called) == 2, "protective action must run again on the persisting breach"
+    # ...but the loud trip announcement is deduplicated within the cooldown window.
+    assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text
+
+    await engine.stop()
+
+
+async def test_cooldown_does_not_suppress_first_announcement(caplog) -> None:
+    """Sanity: the FIRST trip (no prior last_trip_time) is never suppressed."""
+    import logging
+
+    broker, engine, called = await _make_engine()
+    engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=60.0))
+
+    caplog.clear()
+    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
+        await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
+        await asyncio.sleep(0.05)
+
+    assert len(called) == 1
+    assert "БЛОКИРОВКА СРАБОТАЛА" in caplog.text
 
     await engine.stop()
 
@@ -373,7 +402,7 @@ async def test_event_history_bounded() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_load_config_yaml(tmp_path: Path) -> None:
+async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
     """load_config must parse threshold, comparison, channel_pattern, action, and cooldown_s.
 
     All fields are verified BEHAVIORALLY — no private internals accessed:
@@ -381,7 +410,8 @@ async def test_load_config_yaml(tmp_path: Path) -> None:
        and fires the action.
     2. A reading on a non-matching channel does NOT trip.
     3. After acknowledging and re-arming, a second matching reading within the cooldown
-       window does NOT fire the action again (proving cooldown_s was loaded).
+       window still PROTECTS (re-trips + re-runs the action) but the loud trip
+       announcement is deduplicated — proving cooldown_s was loaded and is active.
     """
     config_data = {
         "interlocks": [
@@ -440,19 +470,30 @@ async def test_load_config_yaml(tmp_path: Path) -> None:
             "(channel_pattern may not have been loaded)"
         )
 
-        # --- Behavioral check 3: cooldown prevents immediate re-trip ---
+        # --- Behavioral check 3: cooldown_s loaded → re-trip within the window
+        #     still protects (action runs) but the loud announcement is deduped ---
         # After acknowledge, state is ARMED with last_trip_time set.
-        # cooldown_s=60 means a second matching reading within 60s is suppressed.
-        await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
-        await asyncio.sleep(0.05)
-        # Must still be ARMED (not TRIPPED) and action count still 1
-        assert engine.get_state()["overheat"] == InterlockState.ARMED, (
-            "Interlock re-tripped within cooldown_s=60 — cooldown_s may not have been loaded"
+        import logging
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="cryodaq.core.interlock"):
+            await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
+            await asyncio.sleep(0.05)
+        # Protection is NOT blinded by the cooldown — it re-trips and re-acts.
+        assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
+            "Interlock must re-trip on a persisting breach after acknowledge"
         )
-        assert action_count[0] == 1, (
-            f"Action fired {action_count[0]} times; cooldown_s=60 should have suppressed "
-            "the second trip (cooldown_s may not have been loaded)"
+        assert action_count[0] == 2, (
+            f"Action fired {action_count[0]} times; the protective action must run "
+            "again on the persisting breach (protection not blinded by cooldown)"
         )
+        # cooldown_s=60 loaded & active → the loud trip announcement is deduped,
+        # and a cooldown-dedup WARNING is emitted instead.
+        assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text, (
+            "loud trip announcement must be deduplicated within cooldown_s "
+            "(cooldown_s may not have been loaded)"
+        )
+        assert "кулдаун" in caplog.text.lower()
     finally:
         await engine.stop()
 

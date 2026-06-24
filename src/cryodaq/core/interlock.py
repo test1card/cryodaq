@@ -73,8 +73,10 @@ class InterlockCondition:
         Имя действия из словаря actions, переданного в InterlockEngine.
         Например: ``"emergency_off"`` или ``"stop_source"``.
     cooldown_s:
-        Минимальный интервал в секундах между повторными срабатываниями
-        одной и той же блокировки. По умолчанию 0 (без ограничения).
+        Минимальный интервал в секундах между громкими УВЕДОМЛЕНИЯМИ о повторном
+        срабатывании одной и той же блокировки. Защитное действие выполняется при
+        КАЖДОМ нарушении (после re-arm через acknowledge) — кулдаун дедуплицирует
+        только уведомление, но не защиту. По умолчанию 0 (без ограничения).
     """
 
     name: str
@@ -384,39 +386,48 @@ class InterlockEngine:
             if not condition.matches_channel(reading.channel):
                 continue
 
-            # Проверяем кулдаун
-            if condition.cooldown_s > 0 and record.last_trip_time is not None:
-                now = datetime.now(UTC)
-                elapsed = (now - record.last_trip_time).total_seconds()
-                if elapsed < condition.cooldown_s:
-                    logger.debug(
-                        "Блокировка '%s': кулдаун активен (%.1f / %.1f с) — "
-                        "срабатывание пропущено.",
-                        condition.name,
-                        elapsed,
-                        condition.cooldown_s,
-                    )
-                    continue
-
             # Проверяем условие срабатывания
             if condition.is_triggered(reading.value):
-                await self._trip(record, reading)
+                # Кулдаун подавляет ТОЛЬКО дублирующее уведомление, но НЕ само
+                # защитное действие. Блокировки латчащие (TRIPPED → ARMED только
+                # через acknowledge оператора); если после acknowledge нарушение
+                # сохраняется, защита обязана сработать снова. Старое поведение
+                # пропускало срабатывание в окне кулдауна — защита «слепла» на
+                # остаток окна. Теперь действие выполняется всегда, а громкое
+                # уведомление — не чаще раза в cooldown_s.
+                in_cooldown = (
+                    condition.cooldown_s > 0
+                    and record.last_trip_time is not None
+                    and (datetime.now(UTC) - record.last_trip_time).total_seconds()
+                    < condition.cooldown_s
+                )
+                await self._trip(record, reading, suppress_notification=in_cooldown)
 
-    async def _trip(self, record: _InterlockRecord, reading: Reading) -> None:
+    async def _trip(
+        self,
+        record: _InterlockRecord,
+        reading: Reading,
+        *,
+        suppress_notification: bool = False,
+    ) -> None:
         """Выполнить срабатывание блокировки.
 
         Устанавливает состояние TRIPPED, вызывает защитное действие,
         записывает событие и логирует CRITICAL.
+
+        ``suppress_notification=True`` — повторное срабатывание в окне кулдауна:
+        защитное действие выполняется как обычно, но громкое CRITICAL-уведомление
+        и обновление ``last_trip_time`` пропускаются. Кулдаун дедуплицирует только
+        уведомление, не саму защиту.
         """
         condition = record.condition
         now = datetime.now(UTC)
 
         # Смена состояния
         record.state = InterlockState.TRIPPED
-        record.last_trip_time = now
         record.trip_count += 1
 
-        # Запись события
+        # Запись события (аудит — всегда; защитное действие реально выполняется ниже)
         event = InterlockEvent(
             timestamp=now,
             interlock_name=condition.name,
@@ -427,23 +438,35 @@ class InterlockEngine:
         )
         self._events.append(event)
 
-        # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
-        logger.critical(
-            "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
-            "Имя: '%s' | Описание: %s | "
-            "Канал: '%s' | Значение: %.4g | "
-            "Порог: %s %.4g | Действие: '%s' | "
-            "Время: %s | Всего срабатываний: %d",
-            condition.name,
-            condition.description,
-            reading.channel,
-            reading.value,
-            condition.comparison,
-            condition.threshold,
-            condition.action,
-            now.isoformat(),
-            record.trip_count,
-        )
+        if suppress_notification:
+            logger.warning(
+                "Блокировка '%s': повторное срабатывание в окне кулдауна "
+                "(%.4g %s %.4g) — защитное действие выполнено, "
+                "дублирующее уведомление подавлено.",
+                condition.name,
+                reading.value,
+                condition.comparison,
+                condition.threshold,
+            )
+        else:
+            record.last_trip_time = now
+            # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
+            logger.critical(
+                "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
+                "Имя: '%s' | Описание: %s | "
+                "Канал: '%s' | Значение: %.4g | "
+                "Порог: %s %.4g | Действие: '%s' | "
+                "Время: %s | Всего срабатываний: %d",
+                condition.name,
+                condition.description,
+                reading.channel,
+                reading.value,
+                condition.comparison,
+                condition.threshold,
+                condition.action,
+                now.isoformat(),
+                record.trip_count,
+            )
 
         # Вызов защитного действия
         action_callable = self._actions[condition.action]
