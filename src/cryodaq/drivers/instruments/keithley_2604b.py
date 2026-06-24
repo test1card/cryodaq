@@ -232,6 +232,15 @@ class Keithley2604B(InstrumentDriver):
 
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument not connected")
+        if not (
+            math.isfinite(p_target)
+            and math.isfinite(v_compliance)
+            and math.isfinite(i_compliance)
+        ):
+            # Non-finite would be formatted straight into the SCPI level/limit
+            # writes below (and nan defeats the <= 0 guard). Reject at the
+            # hardware boundary regardless of caller.
+            raise ValueError("P/V/I must be finite")
         if p_target <= 0 or v_compliance <= 0 or i_compliance <= 0:
             raise ValueError("P/V/I must be > 0")
         if runtime.active:

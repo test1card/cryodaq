@@ -289,6 +289,24 @@ class SafetyManager:
                     "error": reason,
                 }
 
+            # Non-finite setpoints defeat every ``> max`` / ``<= 0`` guard below
+            # (IEEE-754: ``nan > x`` and ``nan <= 0`` are both False), so a NaN
+            # would otherwise transition the FSM and reach the hardware. Reject
+            # before any limit comparison or state transition. SafetyManager is
+            # the single authority, so this guard must not be bypassable.
+            if not (
+                math.isfinite(p_target) and math.isfinite(v_comp) and math.isfinite(i_comp)
+            ):
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": (
+                        f"Non-finite setpoint rejected: "
+                        f"P={p_target} V={v_comp} I={i_comp}"
+                    ),
+                }
+
             if p_target > self._config.max_power_w:
                 return {
                     "ok": False,
@@ -454,6 +472,9 @@ class SafetyManager:
             if smu_channel not in self._active_sources:
                 return {"ok": False, "error": f"Channel {smu_channel} not active"}
 
+            if not math.isfinite(p_target):
+                return {"ok": False, "error": f"Non-finite p_target rejected: {p_target}"}
+
             if p_target <= 0:
                 return {"ok": False, "error": "p_target must be > 0"}
 
@@ -500,7 +521,13 @@ class SafetyManager:
             if runtime is None or not runtime.active:
                 return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
 
+            # Validate BOTH provided fields before any SCPI write or runtime
+            # mutation. Otherwise update_limits(v_comp=valid, i_comp=nan) would
+            # write a valid voltage limit and only then reject the current —
+            # leaving the hardware in a partially-applied state.
             if v_comp is not None:
+                if not math.isfinite(v_comp):
+                    return {"ok": False, "error": f"Non-finite v_comp rejected: {v_comp}"}
                 if v_comp <= 0:
                     return {"ok": False, "error": "v_comp must be > 0"}
                 if v_comp > self._config.max_voltage_v:
@@ -508,11 +535,10 @@ class SafetyManager:
                         "ok": False,
                         "error": f"V={v_comp}V exceeds limit {self._config.max_voltage_v}V",
                     }
-                if not self._keithley.mock:
-                    await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
-                runtime.v_comp = v_comp  # update only after successful write
 
             if i_comp is not None:
+                if not math.isfinite(i_comp):
+                    return {"ok": False, "error": f"Non-finite i_comp rejected: {i_comp}"}
                 if i_comp <= 0:
                     return {"ok": False, "error": "i_comp must be > 0"}
                 if i_comp > self._config.max_current_a:
@@ -520,6 +546,14 @@ class SafetyManager:
                         "ok": False,
                         "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
                     }
+
+            # All provided values validated — now apply.
+            if v_comp is not None:
+                if not self._keithley.mock:
+                    await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
+                runtime.v_comp = v_comp  # update only after successful write
+
+            if i_comp is not None:
                 if not self._keithley.mock:
                     await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
                 runtime.i_comp = i_comp  # update only after successful write

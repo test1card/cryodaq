@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import signal
 import sys
@@ -138,6 +139,20 @@ async def _periodic_report_tick(
             logger.error("Periodic assistant report tick error: %s", exc)
 
 
+def _coerce_finite_setpoint(raw: Any, name: str) -> float:
+    """Coerce a command setpoint to ``float`` and reject non-finite values.
+
+    Raises ``ValueError`` for non-numeric or non-finite (NaN/Inf) input so the
+    command handler returns a clean error instead of letting a NaN slip toward
+    SafetyManager and the hardware (where ``nan > max`` / ``nan <= 0`` guards do
+    not catch it). Defense in depth — SafetyManager re-checks independently.
+    """
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"Non-finite setpoint {name}={raw!r} rejected")
+    return value
+
+
 async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
@@ -148,9 +163,12 @@ async def _run_keithley_command(
 
     if action == "keithley_start":
         smu_channel = normalize_smu_channel(channel)
-        p = float(cmd.get("p_target", 0))
-        v = float(cmd.get("v_comp", 40))
-        i = float(cmd.get("i_comp", 1.0))
+        try:
+            p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
+            v = _coerce_finite_setpoint(cmd.get("v_comp", 40), "v_comp")
+            i = _coerce_finite_setpoint(cmd.get("i_comp", 1.0), "i_comp")
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "channel": smu_channel, "error": str(exc)}
         return await safety_manager.request_run(p, v, i, channel=smu_channel)
 
     if action == "keithley_stop":
@@ -163,16 +181,28 @@ async def _run_keithley_command(
 
     if action == "keithley_set_target":
         smu_channel = normalize_smu_channel(cmd.get("channel"))
-        p = float(cmd.get("p_target", 0))
+        try:
+            p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "channel": smu_channel, "error": str(exc)}
         return await safety_manager.update_target(p, channel=smu_channel)
 
     if action == "keithley_set_limits":
         smu_channel = normalize_smu_channel(cmd.get("channel"))
-        return await safety_manager.update_limits(
-            channel=smu_channel,
-            v_comp=float(cmd["v_comp"]) if cmd.get("v_comp") is not None else None,
-            i_comp=float(cmd["i_comp"]) if cmd.get("i_comp") is not None else None,
-        )
+        try:
+            v = (
+                _coerce_finite_setpoint(cmd["v_comp"], "v_comp")
+                if cmd.get("v_comp") is not None
+                else None
+            )
+            i = (
+                _coerce_finite_setpoint(cmd["i_comp"], "i_comp")
+                if cmd.get("i_comp") is not None
+                else None
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        return await safety_manager.update_limits(channel=smu_channel, v_comp=v, i_comp=i)
 
     raise ValueError(f"Unsupported Keithley command: {action}")
 

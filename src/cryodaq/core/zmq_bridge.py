@@ -11,6 +11,7 @@ import asyncio
 import errno
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -23,6 +24,42 @@ import zmq.asyncio
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_nonfinite(token: str) -> float:
+    """``json.loads`` ``parse_constant`` hook — reject NaN/Infinity literals."""
+    raise ValueError(f"non-finite JSON literal: {token}")
+
+
+def _parse_finite_float(token: str) -> float:
+    """``json.loads`` ``parse_float`` hook — reject overflowing floats.
+
+    ``parse_constant`` only fires for the literal ``NaN``/``Infinity`` tokens;
+    a perfectly valid JSON number like ``1e999`` parses to ``inf`` via the
+    default float parser. Reject those here too so the boundary is fully
+    finite-clean.
+    """
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number: {token}")
+    return value
+
+
+def _decode_command(raw: bytes | str) -> dict:
+    """Decode a command frame, rejecting non-finite numeric values.
+
+    Python's ``json`` accepts the non-standard ``NaN``/``Infinity``/``-Infinity``
+    tokens by default, and a large literal like ``1e999`` parses to ``inf``; a
+    non-finite setpoint would then defeat the downstream ``> max`` / ``<= 0``
+    limit guards (IEEE-754 makes those comparisons False) and reach the
+    hardware. Rejecting both forms at this trust boundary keeps the whole
+    command surface finite-clean. A rejected value surfaces as a ``ValueError``,
+    handled identically to malformed JSON by the caller.
+    """
+    return json.loads(
+        raw, parse_constant=_reject_nonfinite, parse_float=_parse_finite_float
+    )
+
 
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
@@ -508,8 +545,8 @@ class ZMQCommandServer:
             # Once recv() succeeds, the REP socket is in "awaiting send" state.
             # We MUST send a reply — otherwise the socket is stuck forever.
             try:
-                cmd = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                cmd = _decode_command(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 await self._socket.send(json.dumps({"ok": False, "error": "invalid JSON"}).encode())
                 continue
 
