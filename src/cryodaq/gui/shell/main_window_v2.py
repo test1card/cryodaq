@@ -679,6 +679,20 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
+            # Engine data flow lost — the last-known safety state is no longer
+            # trustworthy. The GUI must not present a stale runtime state as
+            # current (CLAUDE.md: GUI is not the source of truth for runtime
+            # state); a stale green "running" while the engine is gone is
+            # dangerous. Blank the safety strip and force the Keithley overlay
+            # to not-ready. Idempotent: only acts on the transition.
+            if self._last_safety_state is not None:
+                self._last_safety_state = None
+                self._last_safety_reason = ""
+                self._bottom_bar.set_safety_state(None)
+                if self._keithley_panel is not None:
+                    self._keithley_panel.set_safety_ready(
+                        False, "Engine потерян — состояние безопасности неизвестно"
+                    )
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
