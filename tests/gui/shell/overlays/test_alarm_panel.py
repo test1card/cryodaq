@@ -311,17 +311,17 @@ def test_reading_reactivated_increments_trigger_count(app):
     assert count_item.text() == "2"
 
 
-def test_reading_invalid_value_defaults_to_zero(app):
-    # DEFERRED-NAN-11: prod does not coerce NaN→0 for reading.value
-    # (alarm_panel.py:608-611 uses float(reading.value) which leaves NaN).
-    # Architect decision needed: either add coercion in prod or rename test.
-    # Only the threshold (not_a_number → 0.0) coercion is tested here.
+def test_nonfinite_reading_value_renders_dash(app):
+    """A non-finite (NaN/Inf) reading value — e.g. from a faulted sensor — must
+    render as "—" in the alarm value cell, NOT "nan" or a misleading "0", so the
+    operator sees the value is unavailable rather than a plausible measurement.
+    (Resolves the former DEFERRED-NAN-11 escalation.)"""
     panel = AlarmPanel()
     reading = Reading(
         timestamp=datetime.now(UTC),
         instrument_id="x",
         channel="T1",
-        value=float("nan"),  # a number, but invalid strings also coerced
+        value=float("nan"),
         unit="",
         metadata={
             "alarm_name": "bad",
@@ -331,7 +331,21 @@ def test_reading_invalid_value_defaults_to_zero(app):
         },
     )
     panel._handle_reading(reading)
+    # Rendered value cell (col 3) shows the fault marker, not "nan" or "0".
+    assert panel._table.item(0, 3).text() == "—"
+    # A non-numeric threshold config still coerces to 0.0 → rendered "0".
     assert panel._alarms["bad"].threshold == 0.0
+    assert panel._table.item(0, 4).text() == "0"
+
+
+def test_fmt_metric_marks_nonfinite_values():
+    from cryodaq.gui.shell.overlays.alarm_panel import _fmt_metric
+
+    assert _fmt_metric(float("nan")) == "—"
+    assert _fmt_metric(float("inf")) == "—"
+    assert _fmt_metric(float("-inf")) == "—"
+    assert _fmt_metric(0.0) == "0"
+    assert _fmt_metric(295.0) == "295"
 
 
 def test_get_active_v1_count(app):

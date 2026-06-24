@@ -29,6 +29,7 @@ Public API (host push points):
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -152,6 +153,15 @@ def _chip_font() -> QFont:
     font.setPixelSize(theme.FONT_SIZE_XS)
     font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
     return font
+
+
+def _fmt_metric(x: float) -> str:
+    """Format a value/threshold cell. A non-finite (NaN/Inf) reading — e.g. from
+    a faulted sensor — renders as "—" rather than "nan" or a misleading "0", so
+    the operator sees the value is unavailable, not a plausible measurement."""
+    if not math.isfinite(x):
+        return "—"
+    return f"{x:.4g}"
 
 
 def _elapsed_text(elapsed_s: float, *, unit: str = "с") -> str:
@@ -669,8 +679,8 @@ class AlarmPanel(QWidget):
             self._table.setCellWidget(row_idx, 0, chip)
             self._table.setItem(row_idx, 1, _cell(alarm.name))
             self._table.setItem(row_idx, 2, _cell(alarm.channel))
-            self._table.setItem(row_idx, 3, _cell(f"{alarm.value:.4g}", mono_font=True))
-            self._table.setItem(row_idx, 4, _cell(f"{alarm.threshold:.4g}", mono_font=True))
+            self._table.setItem(row_idx, 3, _cell(_fmt_metric(alarm.value), mono_font=True))
+            self._table.setItem(row_idx, 4, _cell(_fmt_metric(alarm.threshold), mono_font=True))
             elapsed = time.monotonic() - alarm.first_triggered
             self._table.setItem(row_idx, 5, _cell(_elapsed_text(elapsed)))
             self._table.setItem(row_idx, 6, _cell(str(alarm.trigger_count), mono_font=True))

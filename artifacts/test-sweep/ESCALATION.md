@@ -7,7 +7,16 @@ are listed worst-first.
 
 ---
 
-## 1. CRIT — alarm-panel does not coerce non-finite reading values
+## 1. ✅ RESOLVED (2026-06-24) — alarm-panel non-finite reading display
+**Fix:** non-finite (NaN/Inf) value/threshold now render as "—" (fault marker),
+not "nan" or a misleading "0" (`alarm_panel.py` `_fmt_metric`). Chosen over
+coerce-to-0 because "0" can read as a plausible cold measurement on a faulted
+sensor. Test `test_nonfinite_reading_value_renders_dash` asserts the rendered
+cell. NOTE: this is the *display*; the deeper command-path NaN gap (a NaN
+setpoint reaching the hardware) was the real CRIT — fixed separately (commit
+98c90ac). Original text retained below for history.
+
+## 1-orig. CRIT — alarm-panel does not coerce non-finite reading values
 **Where:** `src/cryodaq/gui/shell/overlays/alarm_panel.py:608-611` — `float(reading.value)`
 with no `math.isfinite` guard. Test: `tests/gui/shell/overlays/test_alarm_panel.py`
 `test_reading_invalid_value_defaults_to_zero` (kept as-is, marker `DEFERRED-NAN-11`).
