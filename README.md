@@ -173,8 +173,11 @@ cryodaq-engine        # headless engine (реальные приборы)
 cryodaq-gui           # только GUI (подключается к работающему engine)
 cryodaq               # Windows оператор-лончер
 cryodaq-engine --mock # mock-режим (симулированные приборы)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080  # опциональный web
+uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080  # опциональный web (loopback)
 ```
+
+Web-дашборд без аутентификации — биндите только `127.0.0.1`; публичный доступ
+требует reverse proxy с авторизацией (или SSH-туннель).
 
 Вспомогательные CLI:
 

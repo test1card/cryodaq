@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -328,6 +329,62 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     assert "K1/smua/power" in csv_text, "K1/smua/power not found in archive CSV"
     assert "P_MAIN/pressure" in csv_text, "P_MAIN/pressure not found in archive CSV"
     assert "T_STAGE" in csv_text, "T_STAGE not found in archive CSV"
+
+
+async def test_report_generation_graceful_on_soffice_timeout(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung soffice (TimeoutExpired) must degrade to docx-only, not raise.
+
+    Falls back exactly like the missing-soffice path: pdf_path is None and
+    the editable docx is still produced. No exception bubbles to the caller.
+    """
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    exp_id = manager.start_experiment(
+        name="Timeout PDF",
+        title="Timeout PDF",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    # Pretend soffice exists, but make the subprocess hang past its timeout.
+    monkeypatch.setattr(
+        "cryodaq.reporting.generator.shutil.which", lambda _name: "/usr/bin/soffice"
+    )
+
+    def _raise_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="soffice", timeout=120)
+
+    monkeypatch.setattr("cryodaq.reporting.generator.subprocess.run", _raise_timeout)
+
+    result = ReportGenerator(tmp_path).generate(exp_id)
+
+    assert result.docx_path.exists()
+    assert result.docx_path.name == "report_editable.docx"
+    assert result.pdf_path is None
+
+
+def test_gemma_intro_with_control_char_renders_without_raising(tmp_path: Path) -> None:
+    """LLM intro containing a C0 control char must be xml_safe-wrapped (no crash)."""
+    from docx import Document
+
+    from cryodaq.reporting.generator import ReportGenerator
+
+    document = Document()
+    # A bell char (\x07) is illegal in XML 1.0 and would raise inside python-docx
+    # if passed straight through to add_paragraph.
+    ReportGenerator._render_gemma_annotation(document, "Введение.\x07\nВторой абзац.")
+
+    text = "\n".join(p.text for p in document.paragraphs if p.text)
+    assert "Аннотация" in text
+    assert "Введение." in text
+    assert "Второй абзац." in text
+    assert "\x07" not in text
 
 
 def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:

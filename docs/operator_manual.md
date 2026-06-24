@@ -35,7 +35,9 @@ CryoDAQ управляет сбором данных и операторским
 
 - `cryodaq` — операторский launcher
 - `cryodaq-engine --mock` — режим без реальных приборов
-- web dashboard через `uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080`
+- web dashboard через `uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080`
+  (дашборд без аутентификации — биндите только loopback; публичный доступ только
+  через reverse proxy с авторизацией)
 
 ## 3. Главное окно
 

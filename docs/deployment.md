@@ -133,8 +133,11 @@ cryodaq-engine --mock
 Optional web dashboard:
 
 ```powershell
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
 ```
+
+Дашборд не имеет аутентификации — биндите только loopback (`127.0.0.1`).
+Публичный доступ возможен только через reverse proxy с авторизацией (или SSH-туннель).
 
 Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
 (или полного dev/test install path `.[dev,web]`).

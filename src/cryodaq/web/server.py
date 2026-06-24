@@ -54,6 +54,12 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 _CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
 
+# Bounds for unauthenticated read endpoints — a too-large value would scan
+# every data_*.db into memory (/history) or pull an unbounded log (/api/log)
+# and can OOM the web process. Clamp rather than 500.
+_HISTORY_MAX_MINUTES = 1440  # 24 h — covers the dashboard's longest window
+_LOG_MAX_LIMIT = 2000
+
 
 def _send_engine_command(cmd: dict) -> dict:
     """Send a command to the engine via ZMQ REQ/REP. Thread-safe per call."""
@@ -254,6 +260,9 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
     Возвращает словарь: channel → [{"t": iso, "v": float, "u": unit}, ...]
     """
+    # Clamp to a sane window — an unauthenticated caller must not be able to
+    # scan the entire archive into memory via ?minutes=99999999.
+    minutes = max(1, min(minutes, _HISTORY_MAX_MINUTES))
     cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     cutoff_epoch = cutoff.timestamp()
 
@@ -373,6 +382,8 @@ def create_app() -> FastAPI:
     @application.get("/api/log")
     async def api_log(limit: int = 10) -> dict[str, Any]:
         """Последние записи журнала."""
+        # Clamp the unauthenticated limit before forwarding to the engine.
+        limit = max(1, min(limit, _LOG_MAX_LIMIT))
         try:
             result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):

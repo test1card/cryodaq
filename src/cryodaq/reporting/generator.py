@@ -12,6 +12,13 @@ from docx.shared import Cm, Mm, Pt, RGBColor
 from cryodaq.reporting.data import ReportDataExtractor
 from cryodaq.reporting.sections import SECTION_REGISTRY
 
+# Hard wall-clock bound for the best-effort LibreOffice PDF conversion.
+# A hung ``soffice`` (stale lock, headless-profile contention, second
+# instance) would otherwise block the worker thread forever — and a Python
+# thread cannot be killed mid-call — eventually exhausting the thread pool.
+# On timeout the report degrades to docx-only, exactly like a missing soffice.
+_SOFFICE_TIMEOUT_S = 120
+
 
 @dataclass(frozen=True, slots=True)
 class ReportGenerationResult:
@@ -145,10 +152,12 @@ class ReportGenerator:
     @staticmethod
     def _render_gemma_annotation(document: Document, intro_text: str) -> None:
         """Insert Slice C Гемма-generated annotation section after the title page."""
+        from cryodaq.utils.xml_safe import xml_safe
+
         document.add_heading("Аннотация", level=1)
         for para in intro_text.strip().split("\n"):
             if para.strip():
-                document.add_paragraph(para.strip())
+                document.add_paragraph(xml_safe(para.strip()))
         # Auto-generated marker as italicised note
         note = document.add_paragraph()
         run = note.add_run("Аннотация сгенерирована автоматически: Гемма (gemma4:e4b).")
@@ -264,19 +273,30 @@ class ReportGenerator:
         if not soffice:
             return None
         output_dir = source_docx_path.parent
-        subprocess.run(
-            [
-                soffice,
-                "--headless",
-                "--convert-to",
-                "pdf",
-                str(source_docx_path),
-                "--outdir",
-                str(output_dir),
-            ],
-            check=False,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    str(source_docx_path),
+                    "--outdir",
+                    str(output_dir),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=_SOFFICE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            import logging
+
+            logging.getLogger(__name__).error(
+                "ReportGenerator: soffice PDF conversion timed out after %ds — "
+                "report degrades to docx-only",
+                _SOFFICE_TIMEOUT_S,
+            )
+            return None
         produced = output_dir / f"{source_docx_path.stem}.pdf"
         if not produced.exists():
             return None
