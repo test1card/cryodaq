@@ -21,6 +21,17 @@ where each open item is shown NOT to be a code defect.
 | 2b | analytics (numerical) / LLM query+agents / RAG / sensor-diag / rate-est | `POLISH_ASSESSMENT_2_analytics.md` |
 | 2c | GUI shell / launcher / IPC (zmq_client, lifecycle, threading) | `POLISH_ASSESSMENT_2_gui.md` |
 | 3 | CONVERGENCE — cross-module seams, error-path leaks, security boundaries, regression-audit of all 8 fixes, config fail-closed | `POLISH_ASSESSMENT_3_convergence.md` |
+| 4 | CROSS-MODEL COLD AUDIT — Codex (different model) audited the safety FSM + driver + command path from scratch (not diff review) | recorded in `ESCALATION.md` §0 |
+
+**Round 4 is the honesty check — and it earned its keep.** Rounds 1–3 were all
+Claude (same model). A cross-model cold audit (Codex gpt-5.5) of the safety
+authority found **4 source-control-path issues the three same-model rounds
+missed** (3 CRIT, 1 HIGH) — all in the *failure paths* of stop/emergency-off and
+the interlock data channel. **Lesson recorded: same-model convergence is not
+absolute; cross-model review surfaced safety-FSM-vs-driver interactions that
+same-model passes did not.** One was a clear correctness defect (fixed, #22); the
+other three change a documented contract or the data-flow architecture and are
+escalated for architect decision (`ESCALATION.md` §0).
 
 **Round 3 is the convergence signal.** A fresh *cross-cutting* pass (a different
 angle than the module-by-module rounds) walked the integration seams
@@ -67,7 +78,8 @@ stale/contradictory state display.
 | 18 | ollama embed/generate timeout asymmetry + RAG indexer silent corpus degradation | LOW→MED | `d33b019` | ✓ | PASS (amended) |
 | 19 | MainWindowV2 no closeEvent → worker/timer not torn down on exit | MED | `98a6ac3` | ✓ | — |
 | 20 | module `send_command` blocking + main-thread-callable (latent) → guard + contract | LOW | `98a6ac3` | ✓ | — |
-| 21 | stale "не найден" alarm-v2 log string orphaned by the fail-closed fix | LOW | (this) | — | round-3 |
+| 21 | stale "не найден" alarm-v2 log string orphaned by the fail-closed fix | LOW | `2053ef2` | — | round-3 |
+| 22 | `_safe_off` cleared state to SAFE_OFF on a FAILED stop_source (source could regulate while SM believes off) | CRIT | `571eb65` | ✓ | round-4 PASS |
 
 Codex caught and forced fixes for **follow-on gaps** during review (proof the
 review had teeth, not just the first pass): non-atomic `update_limits`, the
@@ -102,18 +114,28 @@ architect-domain decisions, not code defects:
 
 ## 5. Conclusion
 
-THREE independent adversarial passes — two module-by-module (whole `src/cryodaq`
-surface) plus a fresh cross-cutting convergence pass — found 21 actionable items
-(1 CRIT, 5 HIGH, 8 MED, the rest LOW), **all fixed**, each with a regression test
-and (for the substantive ones) a Codex sign-off; follow-on gaps caught by review
-and closed; the two previously-deferred residuals closed too; full suite green
-(3331/0). The decisive evidence is that the third pass, taken from a *different
-angle*, came back essentially dry — one cosmetic log string, now fixed — with a
-traced coverage list and a rejected-false-positives ledger.
+FOUR independent adversarial passes — two module-by-module (whole `src/cryodaq`
+surface), a cross-cutting convergence pass, and a **cross-model** cold audit of
+the safety authority — found 22 actionable items (2 CRIT, 5 HIGH, 8 MED, the rest
+LOW), **all fixed** (each with a regression test and, for the substantive ones, a
+Codex sign-off). The two previously-deferred residuals were closed too; full suite
+green.
 
-**Zero open code items remain.** The only outstanding items are explicit
-architect/product decisions (calibration shell-routing data-flow; a path-allowlist
-for a non-loopback posture; three test-infra refactors), each documented and
-shown not to be a code defect. This is the all-clear, established to the limit of
-what adversarial static review across three angles plus a green test suite can
-prove.
+**The honest takeaway:** rounds 1–3 (same model) converged — round 3 came back
+essentially dry. But that convergence was *within-model*. Round 4, a different
+model auditing the safety FSM cold, found a real CRIT the others missed
+(`_safe_off` not failing closed) plus three more safety-authority issues. **So
+"nothing more to fix" is only ever provisional** — it holds until a sufficiently
+different reviewer looks. What IS established: zero *undisputed code defects*
+remain; every finding any of the four passes raised is either fixed or an explicit,
+documented architect decision.
+
+**Open items are decisions, not defects:** three safety-authority contract/
+architecture choices (`ESCALATION.md` §0 — emergency-off result honesty, connect()
+fail-closed-vs-best-effort, interlock channel overflow policy) and the earlier
+product/test-infra items (calibration routing, path-allowlist, items 7/10/12).
+Each is documented with a recommendation. This is the all-clear to the limit of
+four review angles (including cross-model) plus a green suite — with the standing
+caveat that a fifth, differently-grounded pass could always find more, which is
+exactly why the safety-authority items are escalated for your sign-off rather than
+silently changed.

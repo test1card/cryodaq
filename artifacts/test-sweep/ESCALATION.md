@@ -7,6 +7,55 @@ are listed worst-first.
 
 ---
 
+## 0. SAFETY-AUTHORITY findings — cross-model cold audit (2026-06-24)
+
+An independent **cross-model** cold audit (Codex gpt-5.5, auditing the safety FSM
++ driver from scratch — not reviewing diffs) found four source-control-path issues
+that three same-model (Claude) review rounds had missed. **F1 was a clear
+correctness defect and is FIXED** (commit `571eb65`: `_safe_off` now fails closed
+on a failed `stop_source`). The remaining three change a **documented contract or
+the data-flow architecture**, so they are escalated rather than auto-patched —
+they are safety-authority decisions for the architect.
+
+### 0a. CRIT — `emergency_off` reports success even when readback-verify fails
+**Where:** `keithley_2604b.py:307-341` (`emergency_off` logs CRITICAL on a failed
+OUTPUT_OFF write / `_verify_output_off` but **never raises** — by design, comment
+:330-332) → `safety_manager.py:421-446` (`emergency_off` clears `_active_sources`
+and returns `{"ok": True}`). **Effect:** a failed emergency-off (hardware may still
+be sourcing) is reported to the operator/GUI as **success**; only a CRITICAL log
+fires.
+**Decision:** should `emergency_off` thread per-channel verified-off status back so
+`SafetyManager` returns `ok=False` / a warning when a channel can't be proven off?
+*Recommended:* yes — keep firing all writes (don't stop on first failure), but
+return the verification result so the API is honest. Contract change to the most
+critical path → your call.
+
+### 0b. CRIT — crash-recovery force-off on `connect()` is best-effort (DOCUMENTED)
+**Where:** `keithley_2604b.py:97-116` — `connect()` forces OUTPUT_OFF on both SMUs,
+but a failed force-off only logs CRITICAL and continues; `_connected=True` is set
+regardless. This is **explicitly documented** in CLAUDE.md ("best-effort: if
+force-OFF fails, logs CRITICAL and continues — not guaranteed"). After a prior
+crash that left outputs on, a failed force-off leaves the instrument connected,
+unmanaged, possibly still sourcing.
+**Decision:** keep best-effort (current, documented) or make `connect()` fail
+closed (refuse to connect / latch a fault) if it can't prove both channels off?
+*Trade-off:* fail-closed is safer but blocks startup if the readback is flaky.
+Architect/product call — not auto-changed because it overrides a documented choice.
+
+### 0c. HIGH — interlocks run on `DataBroker` (DROP_OLDEST), not a fail-closed channel
+**Where:** `interlock.py:328` subscribes via `DataBroker` (default `maxsize=10_000`,
+`OverflowPolicy.DROP_OLDEST`, `broker.py:36/62`). The `SafetyBroker` uses
+overflow→FAULT, but the **protective** InterlockEngine does not. If its queue
+overflows (e.g. a slow/blocked trip action backs the loop up), a threshold-
+violating reading can be **dropped before `_process_reading` sees it** → the
+protective action never runs for that reading.
+**Decision:** route interlocks through a fail-closed channel (overflow→FAULT, like
+SafetyBroker) or add a latch-on-interlock-overflow callback? *Recommended:* yes —
+a protective consumer should never silently drop a reading. Changes the data-flow
+architecture → your call.
+
+---
+
 ## 1. ✅ RESOLVED (2026-06-24) — alarm-panel non-finite reading display
 **Fix:** non-finite (NaN/Inf) value/threshold now render as "—" (fault marker),
 not "nan" or a misleading "0" (`alarm_panel.py` `_fmt_metric`). Chosen over
