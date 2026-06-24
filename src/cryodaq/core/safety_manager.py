@@ -411,6 +411,15 @@ class SafetyManager:
 
             await self._safe_off("Operator stop", channels=channels)
             await self._publish_keithley_channel_states("stop")
+            if self._state == SafetyState.FAULT_LATCHED:
+                # _safe_off fail-closed: the turn-off failed and latched a fault.
+                # Report that honestly rather than a successful stop.
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "error": f"Stop failed, fault latched: {self._fault_reason}",
+                }
             return {
                 "ok": True,
                 "state": self._state.value,
@@ -885,7 +894,25 @@ class SafetyManager:
                 try:
                     await self._keithley.stop_source(smu_channel)
                 except Exception as exc:
-                    logger.error("stop_source(%s) failed: %s", smu_channel, exc)
+                    # FAIL CLOSED. A stop that throws may have left the channel
+                    # still active in the driver (``runtime.active`` is only
+                    # cleared AFTER OUTPUT_OFF + verify succeed), so the host-side
+                    # P=const regulation can keep driving voltage. We must NOT
+                    # clear _active_sources and report SAFE_OFF as if the source
+                    # were off. Latch a fault — _fault() clears _active_sources
+                    # and fires the shielded emergency_off (re-attempting
+                    # OUTPUT_OFF + verify). _fault is lock-free and idempotent,
+                    # so calling it here under _cmd_lock is safe.
+                    logger.critical(
+                        "stop_source(%s) failed: %s — latching fault (fail-closed)",
+                        smu_channel,
+                        exc,
+                    )
+                    await self._fault(
+                        f"stop_source({smu_channel}) failed: {exc}",
+                        channel=str(smu_channel),
+                    )
+                    return
 
         self._active_sources.difference_update(channels)
         if self._active_sources:
