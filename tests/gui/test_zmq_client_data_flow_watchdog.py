@@ -445,6 +445,56 @@ def test_launcher_poll_drains_before_data_stall_restart():
     assert dummy._bridge.restarted is False
 
 
+def test_health_watchdog_cooldown_prevents_restart_storm():
+    """A bridge that stays unhealthy across consecutive polls must restart ONCE,
+    not on every poll — the 60s cooldown gives a freshly restarted bridge time to
+    re-establish its heartbeat (without it, is_healthy()==False every poll would
+    hammer restart). Mirrors the command-channel watchdog hardening."""
+    from cryodaq.launcher import LauncherWindow
+
+    class _AlwaysUnhealthyBridge:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings(self):
+            return []
+
+        def is_healthy(self) -> bool:
+            return False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def data_flow_stalled(self) -> bool:
+            return False
+
+        def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    class _Dummy:
+        def __init__(self, bridge) -> None:
+            self._bridge = bridge
+
+        def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+    bridge = _AlwaysUnhealthyBridge()
+    dummy = _Dummy(bridge)
+    # Two consecutive polls on the SAME window (so the cooldown timestamp persists).
+    LauncherWindow._poll_bridge_data(dummy)
+    LauncherWindow._poll_bridge_data(dummy)
+
+    assert bridge.start_calls == 1, "cooldown must prevent a restart storm (got >1 restart)"
+    assert bridge.shutdown_calls == 1
+
+
 def test_launcher_poll_reason_distinct_per_stall_type(caplog):
     """_poll_bridge_data must restart the bridge (shutdown+start exactly once)
     for EACH of the three stall types AND log a reason whose token is unique to

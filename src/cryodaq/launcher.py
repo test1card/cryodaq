@@ -1063,17 +1063,29 @@ class LauncherWindow(QMainWindow):
         for reading in self._bridge.poll_readings():
             self._on_reading_qt(reading)
 
-        if not self._bridge.is_healthy():
-            if self._bridge.is_alive():
-                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
-                self._bridge.shutdown()
+        unhealthy = not self._bridge.is_healthy()
+        # data_flow_stalled only matters when heartbeats are otherwise healthy
+        # (mirrors the original ordering — the not-healthy branch returns first).
+        stalled = self._bridge.data_flow_stalled() if not unhealthy else False
+        if unhealthy or stalled:
+            # 60s cooldown prevents a restart storm: a freshly restarted bridge
+            # needs time to (re)establish its heartbeat, during which is_healthy()
+            # is transiently False — without the cooldown every poll would
+            # restart it again. Same hardening as the command-channel watchdog.
+            now = time.monotonic()
+            last_restart = getattr(self, "_last_health_watchdog_restart", 0.0)
+            if now - last_restart < 60.0:
+                return
+            self._last_health_watchdog_restart = now
+            if unhealthy:
+                if self._bridge.is_alive():
+                    logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+                    self._bridge.shutdown()
+                else:
+                    logger.warning("ZMQ bridge died, restarting...")
             else:
-                logger.warning("ZMQ bridge died, restarting...")
-            self._bridge.start()
-            return
-        if self._bridge.data_flow_stalled():
-            logger.warning("ZMQ bridge not healthy (no readings), restarting...")
-            self._bridge.shutdown()
+                logger.warning("ZMQ bridge not healthy (no readings), restarting...")
+                self._bridge.shutdown()
             self._bridge.start()
             return
         # IV.6 B1 fix: command-channel watchdog. Detects the case where
@@ -1372,8 +1384,13 @@ class LauncherWindow(QMainWindow):
         """Прокрутить asyncio event loop."""
         try:
             self._loop.run_until_complete(_tick_coro())
-        except Exception:
-            pass
+        except Exception as exc:
+            # Pump runs every 10 ms; a persistent fault (e.g. the loop closed
+            # mid-shutdown) would otherwise be completely invisible. Log once at
+            # DEBUG so it is diagnosable without spamming the log every tick.
+            if not getattr(self, "_tick_async_warned", False):
+                self._tick_async_warned = True
+                logger.debug("asyncio pump tick failed (logged once): %s", exc)
 
     # ------------------------------------------------------------------
     # Window events
