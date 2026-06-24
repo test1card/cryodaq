@@ -381,6 +381,13 @@ class CalibrationFitter:
             except Exception:
                 pass
 
+        if not errors:
+            logger.warning(
+                "Калибровка '%s': ни одна точка не оценилась — метрики rmse_k/"
+                "max_abs_error_k будут NaN (вырожденная зона?)",
+                sensor_id,
+            )
+
         rmse = float(np.sqrt(np.mean(np.array(errors) ** 2))) if errors else float("nan")
         max_err = float(np.max(np.abs(errors))) if errors else float("nan")
 

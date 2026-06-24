@@ -184,16 +184,31 @@ async def build_index(
         return {
             "chunks": 0,
             "embedded": 0,
+            "failed": 0,
             "indexed": 0,
             "db_path": str(db_path),
             "table": table_name,
         }
 
     embedded_count = 0
+    failed_count = 0
     vectors: list[list[float]] = []
     for idx, chunk in enumerate(chunks):
         vec = await embeddings_client.embed(chunk.text)
-        if len(vec) != embedding_dim:
+        if not vec:
+            # Empty vector = the embedding FAILED (e.g. an Ollama timeout makes
+            # embed() return []). The zero vector keeps row alignment, but the
+            # chunk is effectively unsearchable, so it must NOT count as a
+            # successful embed — track it so a degraded corpus is visible, not
+            # silently masked as fully embedded.
+            logger.warning(
+                "RAG embedding FAILED on chunk %s (empty vector — likely a "
+                "timeout); substituting zero vector (chunk will not be searchable)",
+                chunk.chunk_id,
+            )
+            vec = [0.0] * embedding_dim
+            failed_count += 1
+        elif len(vec) != embedding_dim:
             logger.warning(
                 "RAG embedding dim mismatch on chunk %s: got %d, expected %d — using zero vector",
                 chunk.chunk_id,
@@ -201,10 +216,21 @@ async def build_index(
                 embedding_dim,
             )
             vec = [0.0] * embedding_dim
+            failed_count += 1
+        else:
+            embedded_count += 1
         vectors.append(vec)
-        embedded_count += 1
         if progress_cb is not None and idx % 50 == 0:
             progress_cb(idx, len(chunks))
+
+    if failed_count:
+        logger.warning(
+            "RAG index built with %d/%d chunks that FAILED to embed — corpus is "
+            "degraded (those chunks are not searchable). Re-run the rebuild once "
+            "the embedding backend is healthy.",
+            failed_count,
+            len(chunks),
+        )
 
     await asyncio.to_thread(db_path.mkdir, parents=True, exist_ok=True)
     db = await asyncio.to_thread(lancedb.connect, str(db_path))
@@ -233,6 +259,7 @@ async def build_index(
     return {
         "chunks": len(chunks),
         "embedded": embedded_count,
+        "failed": failed_count,
         "indexed": indexed_count,
         "db_path": str(db_path),
         "table": table_name,

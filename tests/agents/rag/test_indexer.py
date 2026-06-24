@@ -37,6 +37,13 @@ class _ShortVectorEmbeddings:
         return [0.5] * 10  # intentionally mismatched dim
 
 
+class _EmptyVectorEmbeddings:
+    """Returns [] to simulate an embedding FAILURE (embed() returns [] on timeout)."""
+
+    async def embed(self, text: str) -> list[float]:  # noqa: ARG002
+        return []
+
+
 @pytest.mark.asyncio
 async def test_indexer_empty_corpus_returns_zero_stats(tmp_path):
     stats = await build_index(
@@ -114,6 +121,32 @@ async def test_indexer_with_single_experiment_creates_table(tmp_path, caplog):
     for vec in vectors:
         assert len(vec) == _EMBEDDING_DIM, f"vector dim {len(vec)} != {_EMBEDDING_DIM}"
         assert any(v != 0.0 for v in vec), "vector must be non-zero for correct-dim mock"
+
+
+@pytest.mark.asyncio
+async def test_indexer_empty_embedding_counts_as_failed_not_embedded(tmp_path, caplog):
+    """An empty embedding (embed() returns [] on timeout) must be surfaced as a
+    FAILED embed, not silently masked as embedded — otherwise an index rebuild
+    during a backend outage produces a silently degraded corpus."""
+    _seed_experiment(tmp_path)
+    db_path = tmp_path / "rag_db"
+    with caplog.at_level(logging.WARNING, logger="cryodaq.agents.rag.indexer"):
+        stats = await build_index(
+            experiments_dir=tmp_path / "experiments",
+            vault_dir=None,
+            sqlite_path=None,
+            db_path=db_path,
+            embeddings_client=_EmptyVectorEmbeddings(),
+        )
+    assert stats["chunks"] >= 1
+    # An empty (timeout) embedding must NOT count as a successful embed.
+    assert stats["embedded"] == 0
+    assert stats["failed"] == stats["chunks"], "all failed embeddings must be counted"
+    # Rows are still written (zero vectors) to keep alignment, but the operator
+    # sees the corpus is degraded via failed count + warnings.
+    assert stats["indexed"] == stats["chunks"]
+    assert any("FAILED" in r.message for r in caplog.records), "per-chunk failure must be logged"
+    assert any("degraded" in r.message for r in caplog.records), "degraded-corpus summary must be logged"
 
 
 @pytest.mark.asyncio

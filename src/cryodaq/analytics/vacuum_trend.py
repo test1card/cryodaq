@@ -91,7 +91,10 @@ def _compute_bic(n: int, k: int, residuals: np.ndarray) -> float:
     ss = float(np.sum(residuals**2))
     sigma_sq = ss / n
     if sigma_sq <= 0:
-        return float("-inf")
+        # Perfect fit (residuals ≈ 0): clamp to a large finite floor instead of
+        # -inf so the +k*ln(n) complexity penalty still discriminates models and
+        # an overfit high-param fit cannot auto-win selection (min over BIC).
+        return -1e9 + k * math.log(n)
     return n * math.log(sigma_sq) + k * math.log(n)
 
 

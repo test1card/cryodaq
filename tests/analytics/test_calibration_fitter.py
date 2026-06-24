@@ -382,3 +382,53 @@ def test_fit_end_to_end(data_dir, tmp_path) -> None:
     assert result.curve is not None
     assert result.metrics["rmse_k"] < 1.0  # relaxed for synthetic data
     assert result.sensor_id == "Т2_cal"
+
+
+# ------------------------------------------------------------------
+# Silent-NaN metrics guard (POLISH_FIXES_2)
+# ------------------------------------------------------------------
+
+
+def test_fit_logs_warning_when_all_metric_points_fail(
+    data_dir, tmp_path, caplog
+) -> None:
+    """If no downsampled point can be evaluated, rmse_k/max_abs_error_k go NaN.
+
+    The fit itself still succeeds (curve is built); the metrics are reporting-only.
+    A silent NaN on a calibration the operator is about to apply must surface a
+    WARNING rather than passing silently.
+    """
+    import logging
+
+    cal_dir = tmp_path / "cal"
+    cal_dir.mkdir()
+    store = CalibrationStore(cal_dir)
+
+    # Force every per-point evaluation to throw so the errors list stays empty.
+    def _always_raise(*_args, **_kwargs):
+        raise RuntimeError("degenerate zone — cannot evaluate")
+
+    store.evaluate = _always_raise  # type: ignore[method-assign]
+
+    fitter = CalibrationFitter()
+    with caplog.at_level(logging.WARNING, logger="cryodaq.analytics.calibration_fitter"):
+        result = fitter.fit(
+            data_dir,
+            1000.0,
+            2000.0,
+            "Т1",
+            "Т2",
+            store,
+            target_count=100,
+            min_points_per_zone=3,
+            target_rmse_k=0.5,
+        )
+
+    # Fit still succeeded; metrics are NaN but no longer silent.
+    assert result.curve is not None
+    assert math.isnan(result.metrics["rmse_k"])
+    assert math.isnan(result.metrics["max_abs_error_k"])
+    warnings = [
+        r for r in caplog.records if r.levelno >= logging.WARNING and "NaN" in r.message
+    ]
+    assert warnings, "Expected a WARNING when all metric points fail to evaluate"

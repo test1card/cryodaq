@@ -172,12 +172,22 @@ class OllamaClient:
         # "embeddings": [[float,...]] (always batched, even for one input).
         payload = {"model": model, "input": text}
         session = await self._get_session()
+        t0 = time.monotonic()
         try:
             async with asyncio.timeout(self._timeout_s):
                 async with session.post(url, json=payload) as resp:
                     if resp.status == 404:
                         raise OllamaModelMissingError(model)
                     data: dict[str, Any] = await resp.json(content_type=None)
+        except TimeoutError:
+            # Mirror generate(): on timeout return empty (no raise) so a stalled
+            # embedding degrades to "no embedding" rather than propagating up.
+            logger.warning(
+                "OllamaClient: embed timeout after %.1fs for model %s",
+                time.monotonic() - t0,
+                model,
+            )
+            return []
         except aiohttp.ClientConnectorError as exc:
             raise OllamaUnavailableError(
                 f"Cannot connect to Ollama at {self._base_url}: {exc}"

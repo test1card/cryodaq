@@ -286,3 +286,37 @@ async def test_smoke_real_ollama() -> None:
         )
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Embedding timeout symmetry with generate() (POLISH_FIXES_2)
+# ---------------------------------------------------------------------------
+
+
+async def test_embed_returns_empty_on_timeout() -> None:
+    """embed() must mirror generate(): on timeout return [] instead of raising.
+
+    A stalled embedding call should degrade to "no embedding" rather than
+    propagating TimeoutError up to callers.
+    """
+    client = OllamaClient(timeout_s=30.0)
+    client._session = _mock_session(_mock_response(_success_data()))  # prevent real session
+
+    timeout_cm = AsyncMock()
+    timeout_cm.__aenter__ = AsyncMock(side_effect=TimeoutError())
+    timeout_cm.__aexit__ = AsyncMock(return_value=False)
+
+    _patch = "cryodaq.agents.assistant.shared.ollama_client.asyncio.timeout"
+    with patch(_patch, return_value=timeout_cm):
+        result = await client.embed("some text")
+
+    assert result == []
+
+
+async def test_embed_returns_vector_on_success() -> None:
+    client = OllamaClient()
+    client._session = _mock_session(_mock_response({"embeddings": [[0.1, 0.2, 0.3]]}))
+
+    result = await client.embed("hello")
+
+    assert result == [0.1, 0.2, 0.3]

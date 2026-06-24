@@ -686,3 +686,29 @@ def test_predictor_serialization_contract() -> None:
     assert parsed["model_type"] != "insufficient_data"
     assert isinstance(parsed["extrapolation_t"], list)
     assert len(parsed["extrapolation_t"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# BIC -inf overfit guard (POLISH_FIXES_2)
+# ---------------------------------------------------------------------------
+
+
+def test_bic_perfect_fit_is_finite_and_penalises_complexity() -> None:
+    """A degenerate perfect fit (residuals≈0) must NOT return -inf.
+
+    Otherwise min(BIC) auto-selects whichever model first hit residual≈0,
+    ignoring the complexity penalty. The clamped finite floor must still let
+    the +k*ln(n) term discriminate: a higher-param model pays a larger BIC.
+    """
+    from cryodaq.analytics.vacuum_trend import _compute_bic
+
+    zero_resid = np.zeros(200)
+
+    bic_3 = _compute_bic(200, 3, zero_resid)
+    bic_5 = _compute_bic(200, 5, zero_resid)
+
+    assert math.isfinite(bic_3)
+    assert math.isfinite(bic_5)
+    # Complexity penalty intact: the 5-param perfect fit must cost MORE than
+    # the 3-param perfect fit, so the simpler model wins on a tie.
+    assert bic_5 > bic_3

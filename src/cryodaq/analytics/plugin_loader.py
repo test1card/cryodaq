@@ -211,6 +211,16 @@ class PluginPipeline:
         """
         removed = self._plugins.pop(plugin_id, None)
         if removed is not None:
+            teardown = getattr(removed, "teardown", None)
+            if callable(teardown):
+                try:
+                    teardown()
+                except Exception as exc:
+                    logger.error(
+                        "Ошибка teardown() плагина '%s' — продолжаю выгрузку: %s",
+                        plugin_id,
+                        exc,
+                    )
             logger.info("Плагин выгружен: id='%s'", plugin_id)
         else:
             logger.debug("Попытка выгрузить незарегистрированный плагин '%s'", plugin_id)
@@ -292,6 +302,10 @@ class PluginPipeline:
         обработку данных.
         """
         known_files: dict[str, float] = self._scan_plugins()
+        # mtime увиденный на прошлом скане, но ещё не загруженный — требуем
+        # стабильности (mtime/size не меняются между двумя сканами), чтобы не
+        # зарегистрировать наполовину записанный файл (TOCTOU при save-in-progress).
+        pending: dict[str, float] = {}
 
         while self._running:
             try:
@@ -299,23 +313,40 @@ class PluginPipeline:
 
                 current_files = self._scan_plugins()
 
-                # Новые или изменённые файлы
+                # Новые или изменённые файлы — грузим только после того как
+                # mtime стабилизировался (совпал с предыдущим сканом).
                 for filename, mtime in current_files.items():
-                    if filename not in known_files:
+                    is_new = filename not in known_files
+                    is_changed = not is_new and known_files[filename] != mtime
+                    if not (is_new or is_changed):
+                        continue
+                    if pending.get(filename) != mtime:
+                        # Первое наблюдение нового mtime — отложить до подтверждения.
+                        pending[filename] = mtime
+                        continue
+                    # mtime стабилен между двумя сканами — безопасно загружать.
+                    pending.pop(filename, None)
+                    if is_new:
                         logger.info("Обнаружен новый файл плагина: %s", filename)
                         self._load_plugin(self._plugins_dir / filename)
-                    elif known_files[filename] != mtime:
+                    else:
                         logger.info("Файл плагина изменён, перезагрузка: %s", filename)
                         self._unload_plugin(Path(filename).stem)
                         self._load_plugin(self._plugins_dir / filename)
+                    known_files[filename] = mtime
 
                 # Удалённые файлы
                 for filename in list(known_files.keys()):
                     if filename not in current_files:
                         logger.info("Файл плагина удалён: %s", filename)
                         self._unload_plugin(Path(filename).stem)
+                        known_files.pop(filename, None)
+                        pending.pop(filename, None)
 
-                known_files = current_files
+                # Очистить pending для исчезнувших файлов.
+                for filename in list(pending.keys()):
+                    if filename not in current_files:
+                        pending.pop(filename, None)
 
             except asyncio.CancelledError:
                 return

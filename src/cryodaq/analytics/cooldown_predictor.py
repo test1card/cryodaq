@@ -492,23 +492,18 @@ def predict(
         )[0]
     )
 
-    # Compute rate statistics for outlier detection
-    ref_rates_cold = np.array(
-        [rc.initial_rate_cold for rc in model.curves if rc.initial_rate_cold != 0.0]
-    )
+    # Compute rate statistics for outlier detection (warm only; see below)
     ref_rates_warm = np.array(
         [rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0]
     )
 
-    float(np.mean(ref_rates_cold)) if len(ref_rates_cold) >= 2 else 0.0
-    rate_cold_std = float(np.std(ref_rates_cold)) if len(ref_rates_cold) >= 2 else 999.0
     rate_warm_mean = float(np.mean(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 0.0
     rate_warm_std = float(np.std(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 999.0
 
     # Determine if observed rate is an outlier (>2sigma from mean)
     # Only warm rate is used -- cold rate depends on T_start which varies.
     # Warm rate is the true heat-load discriminator (e.g., illuminator: -3.6 vs typical -22 K/h)
-    use_rate_cold = False  # disabled: unreliable when T_start varies
+    # Cold-rate weighting is intentionally disabled (unreliable when T_start varies).
     use_rate_warm = False
     if observed_rate_warm is not None and rate_warm_std > 0:
         z_warm = abs(observed_rate_warm - rate_warm_mean) / rate_warm_std
@@ -530,11 +525,6 @@ def predict(
 
         # --- Weight 2: rate similarity (only when current rate is outlier) ---
         w_rate = 1.0
-        if use_rate_cold and rc.initial_rate_cold != 0.0:
-            sigma_rc = max(rate_cold_std * 0.5, 2.0)
-            dr = observed_rate_cold - rc.initial_rate_cold
-            w_rate *= np.exp(-0.5 * (dr / sigma_rc) ** 2)
-
         if use_rate_warm and rc.initial_rate_warm != 0.0:
             # Warm rate is often more discriminating (e.g., illuminator)
             sigma_rw = max(rate_warm_std * 0.4, 1.0)
@@ -562,7 +552,7 @@ def predict(
 
     # --- Fallback: if rate weighting killed all references, disable it ---
     rate_weights = np.array([e[5] for e in estimates])
-    if (use_rate_cold or use_rate_warm) and np.max(rate_weights) < 0.01:
+    if use_rate_warm and np.max(rate_weights) < 0.01:
         estimates = [(n, r, d, wp, wp, 1.0) for n, r, d, _, wp, _ in estimates]
 
     t_rems = np.array([e[1] for e in estimates])
