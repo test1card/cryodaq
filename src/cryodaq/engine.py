@@ -1600,8 +1600,13 @@ def _run_experiment_command(
             try:
                 started = _dt.fromisoformat(history[-1]["started_at"])
                 elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Не удалось вычислить elapsed_in_phase_s из started_at=%r: %s — "
+                    "возвращаю 0.0 (display-only)",
+                    history[-1].get("started_at"),
+                    exc,
+                )
         return {
             "ok": True,
             "current_phase": current,

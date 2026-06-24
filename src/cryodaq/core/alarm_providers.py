@@ -8,6 +8,7 @@ ExperimentSetpointProvider — читает setpoints из метаданных 
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC
 from typing import TYPE_CHECKING
@@ -17,6 +18,8 @@ from cryodaq.core.alarm_v2 import PhaseProvider, SetpointProvider
 if TYPE_CHECKING:
     from cryodaq.core.alarm_config import SetpointDef
     from cryodaq.core.experiment import ExperimentManager
+
+logger = logging.getLogger("cryodaq.core.alarm_providers")
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +55,11 @@ class ExperimentPhaseProvider(PhaseProvider):
         last = history[-1]
         started_at_raw = last.get("started_at")
         if not started_at_raw:
+            logger.warning(
+                "Фаза без started_at (%r) — phase-elapsed = 0.0, "
+                "elapsed-time алармы могут быть подавлены",
+                started_at_raw,
+            )
             return 0.0
         # started_at хранится как ISO string
         from datetime import datetime
@@ -63,6 +71,11 @@ class ExperimentPhaseProvider(PhaseProvider):
                     dt = dt.replace(tzinfo=UTC)
                 return time.time() - dt.timestamp()
         except (ValueError, TypeError):
+            logger.warning(
+                "Не удалось распарсить started_at=%r — phase-elapsed = 0.0, "
+                "elapsed-time алармы могут быть подавлены",
+                started_at_raw,
+            )
             return 0.0
         return 0.0
 
