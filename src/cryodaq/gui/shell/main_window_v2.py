@@ -721,6 +721,26 @@ class MainWindowV2(QMainWindow):
         if self._experiment_overlay is not None:
             self._experiment_overlay.set_connected(connected)
 
+    def closeEvent(self, event):  # noqa: ANN001
+        """Teardown: stop the status timer and join the experiment-create worker
+        (the only ZmqCommandWorker this window owns directly) before the C++
+        objects are destroyed, so we don't trip Qt's "QThread: Destroyed while
+        thread is still running" on exit. Panel-owned workers self-clean via
+        their own ``_WorkerCleanupMixin.closeEvent``. Bounded + guarded so
+        teardown can never hang."""
+        try:
+            self._status_timer.stop()
+        except RuntimeError:
+            pass
+        worker = getattr(self, "_create_exp_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.wait(2000)
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
+
     # ------------------------------------------------------------------
     # More-menu actions ported from launcher
     # ------------------------------------------------------------------

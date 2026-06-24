@@ -307,8 +307,31 @@ def set_bridge(bridge: ZmqBridge) -> None:
     _bridge = bridge
 
 
+def _on_qt_main_thread() -> bool:
+    """True if running on the Qt GUI thread (best-effort; False if Qt is absent)."""
+    try:
+        from PySide6.QtCore import QCoreApplication, QThread
+
+        app = QCoreApplication.instance()
+        return app is not None and QThread.currentThread() is app.thread()
+    except Exception:
+        return False
+
+
 def send_command(cmd: dict) -> dict:
-    """Send command via the global bridge (blocking). Used by GUI widgets."""
+    """Send a command via the global bridge. BLOCKING — may take up to ~65 s
+    (the outer REQ reply timeout).
+
+    Contract: GUI code MUST call this from a background ``ZmqCommandWorker``,
+    NEVER the Qt main thread — a main-thread call freezes the UI for the whole
+    timeout. The guard below logs if that contract is ever violated so the
+    misuse is caught in development rather than as a frozen UI in the field.
+    """
+    if _on_qt_main_thread():
+        logger.warning(
+            "send_command() called on the Qt main thread — it blocks up to ~65s "
+            "and will freeze the UI; route it through a ZmqCommandWorker."
+        )
     if _bridge is None:
         return {"ok": False, "error": "ZMQ bridge not initialized"}
     return _bridge.send_command(cmd)

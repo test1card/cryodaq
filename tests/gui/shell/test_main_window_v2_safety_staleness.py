@@ -77,3 +77,18 @@ def test_safety_strip_restored_on_reconnect() -> None:
         assert w._bottom_bar._safety_label.text() != "● —"
     finally:
         _stop_timers(w)
+
+
+def test_closeevent_stops_status_timer() -> None:
+    """closeEvent must stop the status timer so it can't fire into a
+    half-destroyed window (and the QThread teardown stays bounded)."""
+    from PySide6.QtGui import QCloseEvent
+
+    _app()
+    w = MainWindowV2()
+    try:
+        assert w._status_timer.isActive()
+        w.closeEvent(QCloseEvent())
+        assert not w._status_timer.isActive(), "status timer must be stopped on close"
+    finally:
+        _stop_timers(w)
