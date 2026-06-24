@@ -199,6 +199,11 @@ def test_launcher_poll_checks_is_healthy():
         fake_bridge.data_flow_stalled.return_value = False
         fake_bridge.command_channel_stalled.return_value = False
         fake_self._bridge = fake_bridge
+        # Real LauncherWindow leaves these unset until the first watchdog restart
+        # (getattr-defaulted to 0.0); a bare MagicMock would auto-create them as
+        # MagicMocks and break the numeric cooldown comparison.
+        fake_self._last_health_watchdog_restart = 0.0
+        fake_self._last_cmd_watchdog_restart = 0.0
         return fake_self
 
     # Case 1: alive-but-hung → shutdown() then start()

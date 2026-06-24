@@ -405,6 +405,7 @@ def test_build_index_returns_zero_stats_on_empty_corpus(tmp_path: Path) -> None:
     assert stats == {
         "chunks": 0,
         "embedded": 0,
+        "failed": 0,
         "indexed": 0,
         "db_path": str(tmp_path / "lance"),
         "table": "cryodaq_corpus",
