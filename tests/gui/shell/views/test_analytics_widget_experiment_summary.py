@@ -279,8 +279,11 @@ def test_artifact_paths_derived_from_artifact_dir(app):
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(artifact_dir="/data/exp_001"))
-    assert w._docx_label.text() == "/data/exp_001/reports/report_editable.docx"
-    assert w._pdf_label.text() == "/data/exp_001/reports/report_raw.pdf"
+    # Normalize separators: prod builds the path with os.path.join, so on Windows
+    # the label shows backslashes. The contract is the components/order, not the
+    # OS separator.
+    assert w._docx_label.text().replace("\\", "/") == "/data/exp_001/reports/report_editable.docx"
+    assert w._pdf_label.text().replace("\\", "/") == "/data/exp_001/reports/report_raw.pdf"
 
 
 def test_no_artifact_dir_shows_dash(app):
@@ -378,8 +381,9 @@ def test_artifact_link_set_path_updates_text_and_path(app):
         mock_cls.return_value = MagicMock()
         w.set_experiment_status(_make_status(artifact_dir="/data/exp_001"))
     assert isinstance(w._docx_label, _ClickableLabel)
-    # The displayed text (not _path) must be the full DOCX path
-    assert w._docx_label.text() == "/data/exp_001/reports/report_editable.docx"
+    # The displayed text (not _path) must be the full DOCX path (separator-agnostic
+    # — os.path.join yields backslashes on Windows).
+    assert w._docx_label.text().replace("\\", "/") == "/data/exp_001/reports/report_editable.docx"
 
 
 # ─── F19 sub-item 1: Channel min/max/mean stats ────────────────────────────────
