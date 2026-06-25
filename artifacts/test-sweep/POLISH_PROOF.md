@@ -130,11 +130,14 @@ different reviewer looks. What IS established: zero *undisputed code defects*
 remain; every finding any of the four passes raised is either fixed or an explicit,
 documented architect decision.
 
-**Open items are decisions, not defects:** three safety-authority contract/
-architecture choices (`ESCALATION.md` §0 — emergency-off result honesty, connect()
-fail-closed-vs-best-effort, interlock channel overflow policy) and the earlier
-product/test-infra items (calibration routing, path-allowlist, items 7/10/12).
-Each is documented with a recommendation. This is the all-clear to the limit of
+**The three escalated safety-authority items were ADJUDICATED by the architect
+(2026-06-25) as NON-DEFECTS** (`ESCALATION.md` §0): connect() best-effort is a
+documented design choice; emergency_off's best-effort + CRITICAL-log is sound
+(an `ok=False` on a transient readback hiccup would false-alarm); the interlock
+is a secondary layer behind the SafetyBroker authority. Codex over-rated those
+severities — only F1 was a genuine defect (fixed). The remaining open items are
+the earlier product/test-infra decisions (calibration routing, path-allowlist,
+items 7/10/12). This is the all-clear to the limit of
 four review angles (including cross-model) plus a green suite — with the standing
 caveat that a fifth, differently-grounded pass could always find more, which is
 exactly why the safety-authority items are escalated for your sign-off rather than

@@ -14,8 +14,19 @@ An independent **cross-model** cold audit (Codex gpt-5.5, auditing the safety FS
 that three same-model (Claude) review rounds had missed. **F1 was a clear
 correctness defect and is FIXED** (commit `571eb65`: `_safe_off` now fails closed
 on a failed `stop_source`). The remaining three change a **documented contract or
-the data-flow architecture**, so they are escalated rather than auto-patched —
-they are safety-authority decisions for the architect.
+the data-flow architecture**, so they were escalated rather than auto-patched.
+
+> **ARCHITECT RULING (Vladimir, 2026-06-25): 0a / 0b / 0c are ACCEPTED as
+> NON-DEFECTS — no change.** Reasoning: (0b) is an explicit, documented design
+> choice (fail-closed-on-connect would block startup on flaky readback — worse
+> operationally). (0a) best-effort-fire-everything + CRITICAL-log is sound;
+> returning `ok=False` on a transient verify-readback hiccup would raise a FALSE
+> "emergency-off failed" alarm while the source is actually off, and a genuine
+> hardware refusal to honor OUTPUT_OFF is beyond software's remit. (0c) the
+> interlock is a SECONDARY layer; the SafetyBroker (overflow→FAULT) is the real
+> authority and sees every reading on its dedicated channel; a 10k-deep overflow
+> implies a systemic backup, not a realistic protective miss. Codex over-rated
+> the severities; only F1 was a genuine defect. Left below for the record.
 
 ### 0a. CRIT — `emergency_off` reports success even when readback-verify fails
 **Where:** `keithley_2604b.py:307-341` (`emergency_off` logs CRITICAL on a failed
