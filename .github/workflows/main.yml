@@ -49,4 +49,4 @@ jobs:
       - name: Run tests
         # -v names the running test (a Qt segfault on Windows prints no
         # traceback); --timeout turns a hang into a faulthandler dump.
-        run: pytest tests/ --deselect tests/gui/test_app_palette.py --tb=short -v --timeout=120 --timeout-method=thread
+        run: pytest tests/ --deselect tests/gui/test_app_palette.py -x --tb=short -v --timeout=120 --timeout-method=thread
