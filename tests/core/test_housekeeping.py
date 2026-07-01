@@ -74,10 +74,20 @@ async def test_adaptive_throttle_reduces_stable_non_safety_writes(tmp_path: Path
     sched.add(InstrumentConfig(driver=StableDriver([4.0] * 20), poll_interval_s=0.01))
 
     await sched.start()
-    await asyncio.sleep(0.2)
+    # Deterministic across slow/fast CI runners: wait until several readings have
+    # actually flowed rather than a fixed 0.2s sleep (which under-polls a slow
+    # Windows runner and leaves both queues at 1 → a flaky "assert 1 > 1").
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 5.0
+    # noqa justified: we poll an externally-filled broker queue; asyncio.Event
+    # (ASYNC110's suggestion) doesn't apply — there's no signal to await here.
+    while safety_queue.qsize() < 6 and loop.time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
     await sched.stop()
     await writer.stop()
 
+    # Safety sees every reading; the adaptive throttle drops the stable
+    # non-safety data writes, so the data queue must be strictly smaller.
     assert safety_queue.qsize() > data_queue.qsize()
     assert data_queue.qsize() >= 1
 
