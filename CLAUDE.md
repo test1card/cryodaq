@@ -240,6 +240,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/drivers/instruments/keithley_2604b.py` — Keithley 2604B dual-SMU (host-side P=const)
 - `src/cryodaq/drivers/instruments/lakeshore_218s.py` — LakeShore 218S 8-channel thermometer
 - `src/cryodaq/drivers/instruments/thyracont_vsp63d.py` — Thyracont VSP63D vacuum gauge (MV00 + V1)
+- `src/cryodaq/drivers/instruments/etalon_multiline.py` — Etalon MultiLine (TCP/IP) интерферометрическая метрология длины; averaged/continuous + burst-захват вибрации в Parquet
 - `src/cryodaq/drivers/transport/gpib.py` — async GPIB transport via PyVISA
 - `src/cryodaq/drivers/transport/serial.py` — async serial transport via pyserial-asyncio
 - `src/cryodaq/drivers/transport/usbtmc.py` — async USB-TMC transport via PyVISA
@@ -369,6 +370,7 @@ Phase I.1.
 - LakeShore 218S
 - Keithley 2604B
 - Thyracont VSP63D
+- Etalon MultiLine (TCP/IP) — интерферометрическая метрология длины
 
 ## Ключевые правила
 
