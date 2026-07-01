@@ -95,9 +95,13 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
 - **Plugin-архитектура:** ABC-изоляция; сбои callback помечают плагин degraded
   без краша engine.
 - **Housekeeping:** адаптивный throttle + retention + compression.
-- **Cold-storage rotation (F17):** ежедневные SQLite-файлы старше 30 дней
-  автоматически ротируются в Parquet/Zstd. `ArchiveReader` прозрачно читает
-  оба источника по UTC-дням.
+- **Cold-storage rotation (F17, ещё не подключено):** `ColdRotationService`
+  умеет ротировать ежедневные SQLite-файлы старше 30 дней в Parquet/Zstd, а
+  `ArchiveReader` — читать оба источника (hot и cold) по UTC-дням. Оба модуля
+  отгружены и покрыты тестами, но ни один не подключён к рантайму движка:
+  автоматическая ротация не выполняется, ни один путь чтения не использует
+  `ArchiveReader` (см. «Известные ограничения»). Старые SQLite-файлы пока
+  накапливаются; расход диска отслеживает `disk_monitor`.
 - **Оценка утечки (F13):** `LeakRateEstimator` — скользящее окно, OLS-регрессия
   без numpy, история в `data/leak_rate_history.json`. Команды: `leak_rate_start` /
   `leak_rate_stop` (ZMQ). Требует: `chamber.volume_l` в `instruments.local.yaml`.

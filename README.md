@@ -96,9 +96,13 @@ Fully functional in v0.56.4:
 - **Plugin architecture:** ABC isolation; a failing callback marks the plugin
   degraded without crashing the engine.
 - **Housekeeping:** adaptive throttle + retention + compression.
-- **Cold-storage rotation (F17):** daily SQLite files older than 30 days are
-  automatically rotated into Parquet/Zstd. `ArchiveReader` transparently reads
-  both sources by UTC day.
+- **Cold-storage rotation (F17, not yet wired):** `ColdRotationService` can
+  rotate daily SQLite files older than 30 days into Parquet/Zstd, and
+  `ArchiveReader` can read both hot and cold sources by UTC day. Both modules
+  ship and are tested, but neither is wired into the engine runtime yet — no
+  automatic rotation runs and no read path uses `ArchiveReader` (see Known
+  Limitations). Old daily SQLite files currently accumulate; disk usage is
+  covered by `disk_monitor`.
 - **Leak-rate estimation (F13):** `LeakRateEstimator` — a rolling window, OLS
   regression without numpy, history in `data/leak_rate_history.json`. Commands:
   `leak_rate_start` / `leak_rate_stop` (ZMQ). Requires `chamber.volume_l` in
