@@ -116,3 +116,9 @@ MORNING_TRIAGE.md
 PROD_FIX_BRIEF.md
 PROD_FIX_LOG.md
 TEST_SWEEP_STATUS.md
+# Archived docs (historical prompts/handoffs/inventory — kept on disk, out of git).
+docs/cc-prompts-archive/
+docs/handoffs-archive/
+docs/legacy-inventory/
+# Large binaries (e.g. Yandex award decks) — preserved on disk, not tracked.
+*.pptx
