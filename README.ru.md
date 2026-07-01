@@ -335,12 +335,12 @@ Telegram-бот.
 3. Restart engine
 4. Smoke test: trigger alarm в mock mode
 
-Без изменений кода. См. `artifacts/architecture/assistant-v2-vision.md`
+Без изменений кода. См. `docs/architecture/assistant-v2-vision.md`
 §1.6 для деталей.
 
 ### Архитектура
 
-См. `artifacts/architecture/assistant-v2-vision.md` —
+См. `docs/architecture/assistant-v2-vision.md` —
 полная архитектурная картина включая planned Phases 1-3 (periodic
 reports, sinks, archive query).
 

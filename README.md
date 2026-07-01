@@ -339,12 +339,12 @@ See `config/agent.yaml`. Key parameters:
 3. Restart the engine
 4. Smoke test: trigger an alarm in mock mode
 
-No code changes. See `artifacts/architecture/assistant-v2-vision.md`
+No code changes. See `docs/architecture/assistant-v2-vision.md`
 §1.6 for details.
 
 ### Architecture
 
-See `artifacts/architecture/assistant-v2-vision.md` — the full architectural
+See `docs/architecture/assistant-v2-vision.md` — the full architectural
 picture, including planned Phases 1–3 (periodic reports, sinks, archive query).
 
 ### Audit log

@@ -96,3 +96,23 @@ node_modules/
 
 # chutes dispatch script (contains API key — never commit)
 dispatch_chutes.py
+
+# --- push-prep hardening (2026-06-18): caches + secrets ---
+.ruff_cache/
+.mypy_cache/
+.env
+.env.*
+.mcp.json
+
+# --- doc hardening (2026-07-01): session/process scratch — kept on disk, out of git ---
+# artifacts/ is AI-consultation prompts, audit ledgers, handoffs, test-sweep
+# reports — process scratch, not product. (The one referenced architecture doc
+# was moved to docs/architecture/.)
+artifacts/
+*.status
+# Transient per-session root docs (prompts, worktree logs, resume points).
+CC_PROMPT_*.md
+MORNING_TRIAGE.md
+PROD_FIX_BRIEF.md
+PROD_FIX_LOG.md
+TEST_SWEEP_STATUS.md
