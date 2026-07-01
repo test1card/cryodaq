@@ -272,6 +272,14 @@ class PressurePlot(QWidget):
         if self._forward_looking:
             return
         pi = self._plot.getPlotItem()
+        # If this plot's X is slaved to another view via setXLink (the dashboard
+        # links the pressure X to the temperature plot), that master owns the X
+        # range. Writing X here every refresh fights the link: the two plots push
+        # slightly different ranges — different data extents, or a `now` sampled a
+        # moment apart — so the X axis jitters. Defer to the master; the link
+        # still emits sigXRangeChanged, so Y re-fits to the visible window.
+        if pi.getViewBox().linkedView(pg.ViewBox.XAxis) is not None:
+            return
         seconds = window.seconds
         if not math.isfinite(seconds):
             # ALL — X spans the full data history; Y is left to the

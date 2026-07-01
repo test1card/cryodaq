@@ -86,6 +86,39 @@ def test_pressure_y_range_stable_across_same_decade_jitter(app):
     assert lo == int(lo) and hi == int(hi), f"Y bounds not decade-snapped: {y_first}"
 
 
+def test_pressure_x_defers_to_link_master(app):
+    """Regression: when the pressure X is slaved via setXLink (dashboard links
+    it to the temperature plot), set_series must NOT overwrite its own X range —
+    otherwise the two linked plots push slightly different ranges each refresh
+    and the X axis jitters. set_series must leave the link-driven X untouched.
+    """
+    import time as _time
+
+    import pyqtgraph as pg
+
+    # Widgets are left to session GC like the other tests here — do NOT
+    # close()/deleteLater() the raw PlotWidget (pyqtgraph's PlotWidget.close()
+    # double-frees and errors in teardown, polluting later tests).
+    master = pg.PlotWidget()
+    slave = PressurePlot()
+    slave.plot_item.setXLink(master)
+    master.getPlotItem().getViewBox().setXRange(1000.0, 2000.0, padding=0)
+    QApplication.processEvents()
+    x_before = tuple(slave.plot_item.getPlotItem().getViewBox().viewRange()[0])
+
+    now = _time.time()
+    slave.set_series([now - 2, now - 1, now], [3.0e-6, 3.2e-6, 3.1e-6])
+    QApplication.processEvents()
+    x_after = tuple(slave.plot_item.getPlotItem().getViewBox().viewRange()[0])
+
+    # A slaved plot must defer to the master: set_series must not move X.
+    # (Old code called setXRange in _apply_window, fighting the link.)
+    assert x_after == pytest.approx(x_before), (
+        f"slaved pressure X was overwritten by set_series: {x_before} -> {x_after}"
+    )
+    slave.plot_item.setXLink(None)
+
+
 def test_scientific_tick_formatter_handles_invalid():
     axis = ScientificLogAxisItem(orientation="left")
     ticks = axis.tickStrings([float("nan")], scale=1.0, spacing=1.0)
