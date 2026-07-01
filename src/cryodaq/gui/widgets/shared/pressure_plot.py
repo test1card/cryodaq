@@ -121,6 +121,11 @@ class PressurePlot(QWidget):
         # (time-window switch) without requiring the caller to re-push.
         self._last_times: list[float] = []
         self._last_values: list[float] = []
+        # Decade-snapped Y range currently applied to the axis. Kept so we
+        # only call setYRange when the decades actually change — otherwise the
+        # axis stays put across refreshes instead of dancing with every small
+        # min/max fluctuation. None = nothing applied yet / needs re-apply.
+        self._applied_y_decades: tuple[int, int] | None = None
         self._build_ui()
         # Recompute Y whenever the visible X range changes. Dashboard
         # links X to the temperature plot (setXLink), and the time-window
@@ -221,13 +226,19 @@ class PressurePlot(QWidget):
             y_min = min(positive)
             y_max = max(positive)
             fallback = y_min
-            y_lo_log = math.log10(y_min) - 0.5
-            y_hi_log = math.log10(y_max) + 0.5
-            if y_hi_log - y_lo_log < 1.0:
-                mid = 0.5 * (y_lo_log + y_hi_log)
-                y_lo_log = mid - 0.5
-                y_hi_log = mid + 0.5
-            pi.setYRange(y_lo_log, y_hi_log, padding=0)
+            # Snap bounds to integer log-decades and only re-apply when the
+            # decades change. A continuous log10(min)-0.5 .. log10(max)+0.5
+            # range recomputed every refresh made the axis dance vertically
+            # with every small fluctuation; decade-snapping keeps it stable
+            # (and decade-aligned with the tick grid) until the data actually
+            # crosses a decade.
+            lo = math.floor(math.log10(y_min) - 0.5)
+            hi = math.ceil(math.log10(y_max) + 0.5)
+            if hi <= lo:
+                hi = lo + 1
+            if self._applied_y_decades != (lo, hi):
+                self._applied_y_decades = (lo, hi)
+                pi.setYRange(float(lo), float(hi), padding=0)
             return fallback
         # No positive samples anywhere. Explicitly pin a sensible
         # default (eight decades centered on the sentinel) so the
@@ -235,6 +246,7 @@ class PressurePlot(QWidget):
         # rather than getting stranded at whatever Y range the plot
         # happened to hold before.
         pi.setYRange(math.log10(1e-12) - 0.5, math.log10(1e-4) + 0.5, padding=0)
+        self._applied_y_decades = None
         return 1e-12
 
     def _on_x_range_changed(self, _viewbox: object, _x_range: tuple[float, float]) -> None:
@@ -262,13 +274,16 @@ class PressurePlot(QWidget):
         pi = self._plot.getPlotItem()
         seconds = window.seconds
         if not math.isfinite(seconds):
-            # ALL — restore full-history X range. enableAutoRange alone
-            # leaves the prior fixed window visible until the next
-            # setData; call autoRange() directly so the X range jumps
-            # to the full extent of the current curve's data
-            # immediately. Autorange remains armed for subsequent ticks.
-            pi.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
-            pi.autoRange()
+            # ALL — X spans the full data history; Y is left to the
+            # decade-snapped logic in _compute_and_apply_y_range. Do NOT call
+            # pi.autoRange(): with no axis argument it re-fits BOTH axes to the
+            # data on every refresh, overriding the decade-snapped Y range and
+            # making the axis dance. Set X explicitly to the data extent (or
+            # arm X-only autorange when there is no data yet).
+            if self._last_times:
+                pi.setXRange(min(self._last_times), max(self._last_times), padding=0.02)
+            else:
+                pi.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
             return
         now = time.time()
         pi.setXRange(now - seconds, now, padding=0)

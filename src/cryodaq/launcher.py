@@ -795,7 +795,11 @@ class LauncherWindow(QMainWindow):
             available_themes,
         )
 
-        settings_menu = self.menuBar().addMenu("Настройки")
+        # Renamed «Настройки» → «Вид»: the ToolRail already owns the canonical
+        # «Настройки» (channel editor / connection params). This launcher menu
+        # holds display/app preferences (Тема + Подробные логи), so the word
+        # «Настройки» was showing twice in the same window. «Вид» de-collides.
+        settings_menu = self.menuBar().addMenu("Вид")
         theme_menu = settings_menu.addMenu("Тема")
 
         current = _selected_theme_name()

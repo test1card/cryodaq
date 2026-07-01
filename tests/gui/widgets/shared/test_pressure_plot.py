@@ -53,6 +53,39 @@ def test_scientific_tick_formatter_mantissa_not_one():
     assert ticks == ["5e-6"]
 
 
+def test_pressure_y_range_stable_across_same_decade_jitter(app):
+    """Regression: the Y axis must not 'dance'.
+
+    Same-decade min/max fluctuations across refreshes (sensor noise) must
+    leave the Y viewport UNCHANGED — the bounds are snapped to integer
+    log-decades and only re-applied when the data crosses a decade. The old
+    code set log10(min)-0.5 .. log10(max)+0.5 on every refresh, so the axis
+    shifted continuously with every wobble.
+    """
+    import time as _time
+
+    plot = PressurePlot()
+    now = _time.time()
+
+    def _y_range():
+        QApplication.processEvents()
+        return tuple(plot.plot_item.getPlotItem().getViewBox().viewRange()[1])
+
+    # First refresh: vacuum trace ~3e-6 (all inside the 1e-6 decade).
+    plot.set_series([now - 2, now - 1, now], [3.0e-6, 3.2e-6, 3.1e-6])
+    y_first = _y_range()
+    # Second refresh: same decade, different min/max (jitter).
+    plot.set_series([now - 2, now - 1, now], [2.7e-6, 3.6e-6, 3.05e-6])
+    y_second = _y_range()
+
+    assert y_first == pytest.approx(y_second), (
+        f"Y axis danced across same-decade refreshes: {y_first} -> {y_second}"
+    )
+    # Bounds must be decade-snapped (integer log10 values).
+    lo, hi = y_first
+    assert lo == int(lo) and hi == int(hi), f"Y bounds not decade-snapped: {y_first}"
+
+
 def test_scientific_tick_formatter_handles_invalid():
     axis = ScientificLogAxisItem(orientation="left")
     ticks = axis.tickStrings([float("nan")], scale=1.0, spacing=1.0)

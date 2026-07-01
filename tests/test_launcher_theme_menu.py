@@ -16,7 +16,9 @@ LAUNCHER = Path(__file__).resolve().parent.parent / "src" / "cryodaq" / "launche
 def test_launcher_builds_theme_menu() -> None:
     src = LAUNCHER.read_text(encoding="utf-8")
     assert "_build_settings_menu" in src
-    assert 'addMenu("Настройки")' in src
+    # Launcher display menu renamed «Настройки» → «Вид» to de-collide with the
+    # canonical ToolRail «Настройки» (channel editor). Theme submenu unchanged.
+    assert 'addMenu("Вид")' in src
     assert 'addMenu("Тема")' in src
 
 
