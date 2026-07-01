@@ -100,13 +100,19 @@ class SafetyManager:
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[str, tuple[float, float, str]] = {}
-        # Phase 2c CC I.3: min_points raised from 10 to 60 to match
-        # rate_estimator.py's documented noise-suppression recommendation.
-        # At 0.5s poll interval the 120s window holds ~240 points;
-        # min_points=60 = 30s of data before any rate-based fault decision,
-        # which keeps response time acceptable for the 5 K/min threshold
-        # while reducing false-positive rate ~2.4x under LS218 ±0.01 K noise.
-        self._rate_estimator = RateEstimator(window_s=120.0, min_points=60)
+        # HI-1: the gate is the elapsed data SPAN (min_span_s=30), not a raw
+        # point count. The deployed LakeShore poll is 2.0 s
+        # (config/instruments.yaml), so the 120 s window holds only ~61
+        # points; the old min_points=60 gate meant the 5 K/min rate fault
+        # could not arm until a full ~120 s of continuous data accumulated
+        # (dead-window at every RUNNING entry and after any gap) and sat on a
+        # 60/61 knife-edge where two missed polls silently disarmed the check.
+        # Span-based gating arms after ~30 s of data regardless of poll rate
+        # (~15 pts at 2 s, ~60 at 0.5 s) and tolerates missed/late polls:
+        # 30 s of OLS averaging still suppresses LS218 ±0.01 K noise well
+        # below the 5 K/min threshold. min_points=8 is only a small
+        # OLS-stability floor.
+        self._rate_estimator = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
 
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None

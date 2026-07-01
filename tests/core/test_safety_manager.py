@@ -485,6 +485,47 @@ async def test_run_permitted_state_is_actively_monitored():
     )
 
 
+async def test_rate_fault_latches_within_35s_at_deployed_2s_poll():
+    """HI-1 regression: a 10 K/min ramp at the deployed 2.0 s poll must latch a
+    rate FAULT within ~35 s of data — not after a ~120 s dead-window.
+
+    Feeds 2 s-spaced readings directly into the SafetyManager's rate estimator
+    with controlled timestamps (same time-injection approach as the other rate
+    tests — no sleeping) and keeps _latest fresh so stale checks don't fire.
+    """
+    import re
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=None, mock=True)
+    sm._config.critical_channels = [re.compile(r"Т1 .*")]
+    sm._config.stale_timeout_s = 10.0
+
+    channel = "Т1 Криостат верх"
+    sm._state = SafetyState.RUNNING
+
+    t0 = 1_000_000.0
+    ramp_per_sec = 10.0 / 60.0  # 10 K/min, twice the 5 K/min limit
+
+    fault_at_s: float | None = None
+    for i in range(18):  # 18 samples × 2 s = 34 s of simulated data
+        t = t0 + 2.0 * i
+        sm._rate_estimator.push(channel, t, 80.0 + ramp_per_sec * (t - t0))
+        sm._latest[channel] = (time.monotonic(), 80.0, "ok")  # always fresh
+        await sm._run_checks()
+        if sm._state == SafetyState.FAULT_LATCHED:
+            fault_at_s = 2.0 * i
+            break
+
+    assert fault_at_s is not None, (
+        "10 K/min ramp produced no rate FAULT within 34 s of 2 s-spaced data — "
+        "HI-1 dead-window: the dT/dt gate cannot arm at the deployed poll rate"
+    )
+    assert fault_at_s <= 35.0
+    assert "Rate limit exceeded" in sm._fault_reason, (
+        f"fault_reason must be the rate-limit fault, got: {sm._fault_reason!r}"
+    )
+
+
 def test_load_config_fails_on_missing_file(tmp_path):
     """C.2 regression: missing safety.yaml must be startup-fatal."""
     sm = SafetyManager(SafetyBroker(), mock=True)

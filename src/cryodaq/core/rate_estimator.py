@@ -24,11 +24,22 @@ class RateEstimator:
         Ширина скользящего окна в секундах. По умолчанию 120 с.
     min_points:
         Минимальное число точек для вычисления rate. По умолчанию 60.
+    min_span_s:
+        Минимальный временной охват данных (buf[-1].t − buf[0].t) для
+        вычисления rate. None (по умолчанию) — гейт только по min_points.
+        Задаёт poll-rate-независимый гейт: rate появляется после
+        min_span_s секунд данных независимо от интервала опроса.
     """
 
-    def __init__(self, window_s: float = 120.0, min_points: int = 60) -> None:
+    def __init__(
+        self,
+        window_s: float = 120.0,
+        min_points: int = 60,
+        min_span_s: float | None = None,
+    ) -> None:
         self._window_s = window_s
         self._min_points = min_points
+        self._min_span_s = min_span_s
         # Safety cap: 2× window at 10 Hz + 100 margin.
         # Prevents unbounded growth if trim lags; actual usage is window_s × sample_rate.
         self._maxlen: int = max(500, int(window_s * 20) + 100)
@@ -61,6 +72,8 @@ class RateEstimator:
         buf = self._buffers.get(channel)
         if not buf or len(buf) < self._min_points:
             return None
+        if self._min_span_s is not None and buf[-1][0] - buf[0][0] < self._min_span_s:
+            return None
         return _ols_slope_per_min(list(buf))
 
     def get_rate_custom_window(self, channel: str, window_s: float) -> float | None:
@@ -77,6 +90,8 @@ class RateEstimator:
         cutoff = latest_ts - window_s
         points = [(t, v) for t, v in buf if t >= cutoff]
         if len(points) < self._min_points:
+            return None
+        if self._min_span_s is not None and points[-1][0] - points[0][0] < self._min_span_s:
             return None
         return _ols_slope_per_min(points)
 
