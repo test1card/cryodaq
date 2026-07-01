@@ -159,7 +159,9 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
     writer = SQLiteWriter(tmp_path)
     writer._write_batch([_reading(ts=ts)])
     db_path = tmp_path / f"data_{ts.date().isoformat()}.db"
-    writer._conn = None  # release connection
+    if writer._conn is not None:
+        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
+    writer._conn = None
 
     # Wipe the rows so we have a valid-schema but empty DB
     conn = sqlite3.connect(str(db_path))

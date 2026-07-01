@@ -40,7 +40,9 @@ def _populate_db(data_dir: Path, readings: list[Reading]) -> None:
     """Write readings into the data_dir using SQLiteWriter."""
     writer = SQLiteWriter(data_dir)
     writer._write_batch(readings)
-    writer._conn = None  # release without closing (tests don't need graceful teardown)
+    if writer._conn is not None:
+        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
+    writer._conn = None
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict]]:

@@ -39,7 +39,9 @@ def _populate_db(data_dir: Path, readings: list[Reading]) -> None:
     """Write readings directly into the data_dir via SQLiteWriter._write_batch()."""
     writer = SQLiteWriter(data_dir)
     writer._write_batch(readings)
-    writer._conn = None  # release without graceful teardown
+    if writer._conn is not None:
+        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
+    writer._conn = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,8 @@ async def test_xlsx_empty_db_returns_zero(tmp_path: Path) -> None:
     # Initialise the DB schema without inserting any readings
     writer = SQLiteWriter(data_dir)
     writer._ensure_connection(datetime(2026, 3, 14).date())
+    if writer._conn is not None:
+        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
     writer._conn = None
 
     output_path = tmp_path / "out.xlsx"

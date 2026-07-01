@@ -150,7 +150,11 @@ def test_multiline_parquet_archive_runtime_channel_agnostic(
         _ml_reading("MultiLine_1/env_humidity", 45.0, ts=day.replace(second=2)),
     ]
     writer._write_batch(mixed)
-    writer._conn = None  # release connection
+    # Close (not just drop) the connection so Windows can clean up the temp DB
+    # without a WinError 32 on the still-open file handle.
+    if writer._conn is not None:
+        writer._conn.close()
+    writer._conn = None
 
     assert db_path.exists(), "SQLiteWriter must create the daily DB file"
 
@@ -223,6 +227,12 @@ def test_multiline_cold_rotation_runtime_channel_agnostic(
     ]
     writer = SQLiteWriter(data_dir)
     writer._write_batch(mixed)
+    # Close (not just drop) the connection: cold rotation renames/deletes the
+    # source .db, and Windows refuses that while a file handle is still open
+    # (WinError 32). Dropping the ref relies on GC, which Windows doesn't
+    # release in time.
+    if writer._conn is not None:
+        writer._conn.close()
     writer._conn = None
 
     # Rename to the correct old-day filename (SQLiteWriter uses today's date)

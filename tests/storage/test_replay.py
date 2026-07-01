@@ -42,7 +42,9 @@ def _make_db(tmp_path: Path, readings: list[Reading]) -> Path:
     writer._write_batch(readings)
     day = readings[0].timestamp.date()
     db_path = tmp_path / f"data_{day.isoformat()}.db"
-    writer._conn = None  # release connection
+    if writer._conn is not None:
+        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
+    writer._conn = None
     return db_path
 
 
