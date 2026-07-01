@@ -573,6 +573,108 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     assert readings[1].value == pytest.approx(4.891)
 
 
+async def test_runtime_calibration_out_of_range_raw_falls_back_to_krdg(tmp_path) -> None:
+    """CR-1: SRDG raw outside the calibrated span must NOT be silently clipped.
+
+    A clipped evaluation freezes the reported temperature at the curve
+    boundary (dT/dt -> 0), blinding SafetyManager's rate fault. Instead the
+    driver must fall back to the native KRDG reading with
+    runtime_reason="raw_out_of_cal_range".
+    """
+    store = CalibrationStore(tmp_path)
+    # Hand-crafted zone: raw span [80, 90], coefficients (15, 2).
+    # Clipped-at-raw_max evaluation would be 15 + 2*1 = 17.0 K (the frozen value).
+    _FROZEN_BOUNDARY_K = 17.0
+    zone = CalibrationZone(
+        raw_min=80.0,
+        raw_max=90.0,
+        order=1,
+        coefficients=(15.0, 2.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    curve = CalibrationCurve(
+        curve_id="test-curve-oor",
+        sensor_id="ls218s:CH1",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        raw_unit="sensor_unit",
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(zone,),
+    )
+    store.save_curve(curve)
+    store.assign_curve(
+        sensor_id="ls218s:CH1",
+        channel_key="ls218s:CH1",
+        runtime_apply_ready=True,
+        reading_mode_policy="on",
+    )
+    store.set_runtime_global_mode("on")
+
+    # SRDG raw for CH1 drifts ABOVE raw_max=90: first 95.0, then 120.0.
+    oor_raw_1 = (
+        "+9.500000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
+        "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+    )
+    oor_raw_2 = (
+        "+1.200000E+2,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
+        "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+    )
+    # Native KRDG for CH1: 4.235 K on the first read, 6.789 K on the second.
+    normal_2 = (
+        "+006.789E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
+        "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+    )
+
+    krdg_responses = [NORMAL_RESPONSE, normal_2, NORMAL_RESPONSE]
+    srdg_responses = [oor_raw_1, oor_raw_2, RAW_RESPONSE]
+
+    def _query_fn(cmd, **kwargs):
+        stripped = cmd.strip().upper()
+        if stripped == "KRDG?":
+            return krdg_responses.pop(0)
+        if stripped == "SRDG?":
+            return srdg_responses.pop(0)
+        if stripped.startswith("RDGST?"):
+            return "0"  # periodic status sweep: all channels OK
+        return ""
+
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = _wrap_query_with_idn(_query_fn)
+
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
+    driver._transport = transport
+    await driver.connect()
+
+    first = await driver.read_channels()
+    second = await driver.read_channels()
+
+    # Out-of-range raw -> KRDG fallback, not a clipped curve value.
+    assert first[0].metadata["reading_mode"] == "krdg"
+    assert first[0].metadata["raw_source"] == "KRDG"
+    assert first[0].metadata["runtime_reason"] == "raw_out_of_cal_range"
+    assert first[0].status is ChannelStatus.OK
+    assert first[0].value == pytest.approx(4.235)
+    assert first[0].value != pytest.approx(_FROZEN_BOUNDARY_K)
+
+    # A second, higher out-of-range raw must NOT reproduce a frozen boundary
+    # temperature: the published value keeps tracking the native reading.
+    assert second[0].metadata["reading_mode"] == "krdg"
+    assert second[0].metadata["runtime_reason"] == "raw_out_of_cal_range"
+    assert second[0].value == pytest.approx(6.789)
+    assert second[0].value != pytest.approx(first[0].value)
+
+    # In-range path unchanged: raw=82.98 (inside [80, 90]) still uses the curve.
+    third = await driver.read_channels()
+    assert third[0].metadata["reading_mode"] == "curve"
+    assert third[0].metadata["raw_source"] == "SRDG"
+    assert third[0].raw == pytest.approx(82.98)
+    assert third[0].value == pytest.approx(14.192, abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # Per-channel fallback when KRDG? returns < 8 values
 # ---------------------------------------------------------------------------

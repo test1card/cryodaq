@@ -162,6 +162,22 @@ class CalibrationCurve:
             return self.zones[0].evaluate(raw_value)
         return self.zones[-1].evaluate(raw_value)
 
+    def raw_in_range(self, raw_value: float) -> bool:
+        """Report whether *raw_value* lies within the overall calibrated span.
+
+        Unlike :meth:`evaluate`, this performs NO clipping: callers use it to
+        detect out-of-calibration-range readings before evaluation. A clipped
+        evaluation of an out-of-span raw freezes the output at the boundary
+        (dT/dt -> 0), which blinds rate-based safety checks (CR-1).
+
+        Non-finite raw values (NaN/inf) report False.
+        """
+        if not self.zones:
+            return False
+        raw_min = min(zone.raw_min for zone in self.zones)
+        raw_max = max(zone.raw_max for zone in self.zones)
+        return raw_min <= raw_value <= raw_max
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
@@ -311,6 +327,11 @@ class CalibrationStore:
         del magnetic_field_T
         curve = self._require_curve(sensor_id)
         return curve.evaluate(float(raw_value))
+
+    def raw_in_range(self, sensor_id: str, raw_value: float) -> bool:
+        """Report whether *raw_value* is inside the calibrated span (no clipping)."""
+        curve = self._require_curve(sensor_id)
+        return curve.raw_in_range(float(raw_value))
 
     def voltage_to_temp(
         self,

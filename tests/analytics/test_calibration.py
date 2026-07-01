@@ -404,3 +404,53 @@ def test_import_curve_file_rejects_330_suffix(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
     with pytest.raises(ValueError, match="Unsupported calibration import format"):
         store.import_curve_file(fake_330)
+
+
+def test_raw_in_range_reports_span_without_clipping(tmp_path: Path) -> None:
+    """CR-1: raw_in_range must flag out-of-span raws; evaluate keeps clipping."""
+    from cryodaq.analytics.calibration import CalibrationCurve, CalibrationZone
+
+    zone_low = CalibrationZone(
+        raw_min=10.0,
+        raw_max=50.0,
+        order=1,
+        coefficients=(100.0, -20.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    zone_high = CalibrationZone(
+        raw_min=50.0,
+        raw_max=90.0,
+        order=1,
+        coefficients=(60.0, -20.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    curve = CalibrationCurve(
+        curve_id="span-check",
+        sensor_id="sensor-span",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        raw_unit="sensor_unit",
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(zone_low, zone_high),
+    )
+
+    assert curve.raw_in_range(10.0)
+    assert curve.raw_in_range(50.0)
+    assert curve.raw_in_range(90.0)
+    assert curve.raw_in_range(42.0)
+    assert not curve.raw_in_range(9.999)
+    assert not curve.raw_in_range(90.001)
+    assert not curve.raw_in_range(float("nan"))
+
+    # Store-level delegation used by drivers.
+    store = CalibrationStore(tmp_path)
+    store.save_curve(curve)
+    assert store.raw_in_range("sensor-span", 42.0)
+    assert not store.raw_in_range("sensor-span", 120.0)
+
+    # Existing evaluate() semantics unchanged: still clips at the edges.
+    assert curve.evaluate(120.0) == pytest.approx(curve.evaluate(90.0))

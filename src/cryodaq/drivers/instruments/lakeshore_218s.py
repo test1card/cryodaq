@@ -530,6 +530,34 @@ class LakeShore218S(InstrumentDriver):
                 continue
 
             sensor_id = str(assignment.get("sensor_id", "")).strip()
+
+            # CR-1: never evaluate a raw outside the calibrated span — the curve
+            # clips it to the boundary, freezing the published temperature
+            # (dT/dt -> 0) and blinding the SafetyManager rate fault. Fall back
+            # to the native KRDG reading instead.
+            try:
+                raw_in_range = self._calibration_store.raw_in_range(
+                    sensor_id, float(raw_reading.value)
+                )  # type: ignore[union-attr]
+            except Exception:
+                raw_in_range = False
+            if not raw_in_range:
+                self._log_runtime_fallback(
+                    channel_key=str(policy.get("channel_key", "")),
+                    reason="raw_out_of_cal_range",
+                )
+                merged.append(
+                    self._with_runtime_metadata(
+                        reading,
+                        reading_mode="krdg",
+                        raw_source="KRDG",
+                        curve_id=assignment.get("curve_id"),
+                        sensor_id=assignment.get("sensor_id"),
+                        runtime_reason="raw_out_of_cal_range",
+                    )
+                )
+                continue
+
             try:
                 calibrated_value = self._calibration_store.evaluate(
                     sensor_id, float(raw_reading.value)
