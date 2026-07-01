@@ -86,6 +86,9 @@ async def test_adaptive_throttle_reduces_stable_non_safety_writes(tmp_path: Path
     await sched.stop()
     await writer.stop()
 
+    # The precondition must actually have been met — not merely timed out — so a
+    # too-slow runner fails loudly here instead of via a confusing "> " result.
+    assert safety_queue.qsize() >= 6, "throttle test: not enough readings flowed within the wait"
     # Safety sees every reading; the adaptive throttle drops the stable
     # non-safety data writes, so the data queue must be strictly smaller.
     assert safety_queue.qsize() > data_queue.qsize()
