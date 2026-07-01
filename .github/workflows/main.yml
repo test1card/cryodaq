@@ -1,10 +1,21 @@
 name: CryoDAQ CI
 
 on:
+  # Every commit on every branch (a merge to master is a push → covered too).
   push:
-    branches: [master, "ci/**"]
+    branches: ["**"]
+  # Every pull request into master — validates the simulated merge result.
   pull_request:
     branches: [master]
+  # Manual "Run workflow" button in the Actions tab.
+  workflow_dispatch:
+
+# If you push again before CI finishes, cancel the superseded run to save
+# runner minutes — EXCEPT on master, where every mainline commit is fully
+# validated (never cancelled).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   test:
