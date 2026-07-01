@@ -188,3 +188,114 @@ async def test_emergency_off_handles_query_exception(caplog):
         f"No CRITICAL log emitted on query exception. records: "
         f"{[r.message for r in caplog.records]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CR-2: emergency_off must REPORT success/failure so callers can fail closed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_returns_true_on_clean_off():
+    """Writes succeed and readback confirms OFF on both channels → True."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.write = AsyncMock()
+    transport.query = AsyncMock(return_value="0.00000e+00\n")
+    k._transport = transport
+    k._connected = True
+
+    assert await k.emergency_off() is True
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_returns_true_in_mock_mode():
+    k = _make_keithley(mock=True)
+    assert await k.emergency_off() is True
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_returns_false_when_output_off_write_raises():
+    """OUTPUT_OFF write raising means the SMU may still be sourcing — must
+    return False even if the subsequent readback (from a flaky link) says 0."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+
+    async def write_side_effect(cmd: str) -> None:
+        if "OUTPUT_OFF" in cmd:
+            raise OSError("transport hiccup")
+
+    transport.write = AsyncMock(side_effect=write_side_effect)
+    transport.query = AsyncMock(return_value="0.00000e+00\n")
+    k._transport = transport
+    k._connected = True
+
+    assert await k.emergency_off() is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_returns_false_when_readback_still_on():
+    """Readback reports output=1 after OUTPUT_OFF → False."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.write = AsyncMock()
+    transport.query = AsyncMock(return_value="1.00000e+00\n")
+    k._transport = transport
+    k._connected = True
+
+    assert await k.emergency_off() is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_returns_false_on_verify_query_exception():
+    """Readback query raising means OFF is unconfirmed → False (no raise)."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.write = AsyncMock()
+    transport.query = AsyncMock(side_effect=OSError("transport down"))
+    k._transport = transport
+    k._connected = True
+
+    assert await k.emergency_off() is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_single_channel_failure_returns_false():
+    """emergency_off(None) targets both channels; ONE stuck channel → False."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.write = AsyncMock()
+
+    async def query_side_effect(cmd: str, timeout_ms: int | None = None) -> str:
+        if "smub" in cmd:
+            return "1.00000e+00\n"  # smub still ON
+        return "0.00000e+00\n"
+
+    transport.query = AsyncMock(side_effect=query_side_effect)
+    k._transport = transport
+    k._connected = True
+
+    assert await k.emergency_off() is False
+
+
+@pytest.mark.asyncio
+async def test_verify_output_off_returns_bool_per_readback():
+    """_verify_output_off: True iff readback confirms OFF; False on
+    still-on ('1', '1.0e+00') or unparseable responses."""
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.write = AsyncMock()
+    k._transport = transport
+    k._connected = True
+
+    for response, expected in [
+        ("0.00000e+00\n", True),
+        ("0\n", True),
+        ("1.00000e+00\n", False),
+        ("1\n", False),
+        ("garbage\n", False),
+    ]:
+        transport.query = AsyncMock(return_value=response)
+        assert await k._verify_output_off("smua") is expected, (
+            f"readback {response!r} must yield {expected}"
+        )

@@ -14,10 +14,15 @@ from cryodaq.drivers.base import Reading
 
 
 def _mock_keithley():
-    """Create a mock Keithley driver."""
+    """Create a mock Keithley driver.
+
+    ``emergency_off`` returns True per the CR-2 driver contract: True iff
+    every targeted channel's OUTPUT_OFF write succeeded AND readback
+    confirmed the output is OFF.
+    """
     k = MagicMock()
     k.connected = True
-    k.emergency_off = AsyncMock()
+    k.emergency_off = AsyncMock(return_value=True)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -220,6 +225,63 @@ async def test_emergency_off_from_running():
         assert result["ok"] is True
         assert mgr.state == SafetyState.SAFE_OFF
         k.emergency_off.assert_called()
+    finally:
+        await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
+# 9b. CR-2: emergency_off FAILS CLOSED when output OFF cannot be confirmed
+# ---------------------------------------------------------------------------
+
+
+async def test_emergency_off_unconfirmed_latches_fault():
+    """CR-2: if the driver cannot confirm output OFF (write raised or readback
+    still-on → driver returns False), operator emergency_off must NOT report
+    success and must NOT transition to SAFE_OFF (which would stop all
+    stale/heartbeat/rate monitoring while the SMU may still be sourcing).
+    It must latch a FAULT instead."""
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=False)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _feed(broker, "Т1 Криостат верх", 4.5)
+        await asyncio.sleep(1.5)
+        await mgr.request_run(0.5, 40.0, 1.0)
+        assert mgr.state == SafetyState.RUNNING
+
+        result = await mgr.emergency_off()
+
+        assert result["ok"] is False, "must not report success on unconfirmed OFF"
+        assert "error" in result
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"unconfirmed emergency_off must latch FAULT, got {mgr.state}"
+        )
+        assert mgr.state != SafetyState.SAFE_OFF
+    finally:
+        await mgr.stop()
+
+
+async def test_emergency_off_driver_raise_latches_fault():
+    """CR-2: a driver emergency_off that RAISES (transport dead mid-call)
+    must also fail closed: ok=False + FAULT_LATCHED, never SAFE_OFF."""
+    k = _mock_keithley()
+    # First call (operator path via _ensure_output_off) raises; the retry
+    # inside _fault()'s shielded shutdown also raises — both must be survived.
+    k.emergency_off = AsyncMock(side_effect=OSError("transport down"))
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _feed(broker, "Т1 Криостат верх", 4.5)
+        await asyncio.sleep(1.5)
+        await mgr.request_run(0.5, 40.0, 1.0)
+        assert mgr.state == SafetyState.RUNNING
+
+        result = await mgr.emergency_off()
+
+        assert result["ok"] is False
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"emergency_off raise must latch FAULT, got {mgr.state}"
+        )
+        assert mgr.state != SafetyState.SAFE_OFF
     finally:
         await mgr.stop()
 

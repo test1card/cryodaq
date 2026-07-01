@@ -430,7 +430,32 @@ class SafetyManager:
     async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
         async with self._cmd_lock:
             channels = self._resolve_channels(channel)
-            await self._ensure_output_off(channel)
+            confirmed = await self._ensure_output_off(channel)
+            if not confirmed:
+                # FAIL CLOSED (CR-2). The driver could not confirm output OFF
+                # (write raised or readback still reports ON) — the SMU may
+                # still be sourcing. Reporting ok=True and dropping to
+                # SAFE_OFF would silently stop ALL stale/heartbeat/rate
+                # monitoring while power is live. Latch a fault instead —
+                # _fault() clears _active_sources, re-fires the shielded
+                # emergency_off (retry OUTPUT_OFF + verify) and publishes
+                # channel states. _fault is lock-free and idempotent, so
+                # calling it here under _cmd_lock is safe (same discipline
+                # as the stop_source failure path in _safe_off).
+                reason = "emergency_off could not confirm output OFF"
+                logger.critical(
+                    "%s (channels=%s) — latching fault (fail-closed)",
+                    reason,
+                    sorted(channels),
+                )
+                await self._fault(reason, channel=channel or "")
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "active_channels": sorted(self._active_sources),
+                    "error": reason,
+                }
             self._active_sources.difference_update(channels)
             await self._publish_keithley_channel_states("emergency_off")
 
@@ -854,18 +879,29 @@ class SafetyManager:
         except Exception as exc:
             logger.warning("Failed to publish Keithley channel states: %s", exc)
 
-    async def _ensure_output_off(self, channel: str | None = None) -> None:
+    async def _ensure_output_off(self, channel: str | None = None) -> bool:
+        """Force Keithley output OFF. True iff the driver CONFIRMED it.
+
+        CR-2: propagates the driver's confirmation bool so callers can fail
+        closed. False means the SMU may still be sourcing. True when there is
+        no Keithley to shut down.
+        """
         if self._keithley is None:
-            return
+            return True
         try:
-            await self._keithley.emergency_off(channel)
+            confirmed = await self._keithley.emergency_off(channel)
         except TypeError:
-            if channel is None:
-                await self._keithley.emergency_off()
-            else:
+            if channel is not None:
                 raise
+            try:
+                confirmed = await self._keithley.emergency_off()
+            except Exception as exc:
+                logger.critical("_ensure_output_off failed: %s", exc)
+                return False
         except Exception as exc:
             logger.critical("_ensure_output_off failed: %s", exc)
+            return False
+        return bool(confirmed)
 
     async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
         if self._state == SafetyState.FAULT_LATCHED:
