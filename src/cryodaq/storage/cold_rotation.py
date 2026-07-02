@@ -23,6 +23,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cryodaq.core.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # Parquet schema for cold rotation: same columns as parquet_archive.py minus
@@ -35,6 +37,21 @@ _COLD_SCHEMA = pa.schema(
         ("value", pa.float64()),
         ("unit", pa.string()),
         ("status", pa.string()),
+    ]
+)
+
+# Parquet schema for the operator_log audit trail (CR-3). The daily SQLite
+# file also holds operator_log; rotation must preserve it or the audit trail is
+# lost forever when the DB is unlinked. Timestamp kept as raw epoch float for a
+# lossless audit record.
+_OPERATOR_LOG_SCHEMA = pa.schema(
+    [
+        ("timestamp", pa.float64()),
+        ("experiment_id", pa.string()),
+        ("author", pa.string()),
+        ("source", pa.string()),
+        ("message", pa.string()),
+        ("tags", pa.string()),
     ]
 )
 
@@ -207,6 +224,22 @@ class ColdRotationService:
 
         size_original = db_path.stat().st_size
 
+        # Step 0 (CR-3 follow-up): source_data has no cold-storage export yet.
+        # If this day carries source_data rows, do NOT rotate at all. Rotating
+        # would either destroy them (Step 5 delete) or leave the file kept but
+        # already index-marked as rotated — excluding it from future candidates
+        # forever and double-counting its readings for any reader that unions
+        # the live DB with the cold Parquet. Skip cleanly (nothing written,
+        # nothing indexed, file stays a candidate); revisit when source_data
+        # gains a cold-export path.
+        if self._table_has_rows(db_path, "source_data"):
+            logger.warning(
+                "source_data in %s has rows and no cold export exists — "
+                "skipping rotation entirely (SQLite kept, not indexed)",
+                db_path.name,
+            )
+            return None
+
         # Step 1: Read all rows from SQLite
         try:
             rows = self._read_all_rows(db_path)
@@ -249,6 +282,46 @@ class ColdRotationService:
             archive_path.unlink(missing_ok=True)
             return None
 
+        # Step 3.5: Preserve operator_log audit trail (CR-3). The daily DB also
+        # holds operator_log; without this the whole audit trail is destroyed
+        # when the SQLite file is unlinked in Step 5.
+        operator_log_rel: str | None = None
+        operator_log_rows_count = 0
+        try:
+            operator_log_rows = self._read_operator_log_rows(db_path)
+        except Exception:
+            logger.exception(
+                "Failed to read operator_log from %s — leaving SQLite intact, "
+                "cleaning up Parquet",
+                db_path.name,
+            )
+            archive_path.unlink(missing_ok=True)
+            return None
+
+        if operator_log_rows:
+            operator_log_rel = (
+                f"year={day.year}/month={day.month:02d}/{db_path.stem}.operator_log.parquet"
+            )
+            operator_log_path = self._archive_dir / operator_log_rel
+            operator_log_rows_count = len(operator_log_rows)
+            try:
+                self._write_operator_log_parquet(operator_log_path, operator_log_rows)
+                actual_ol = pq.read_metadata(str(operator_log_path)).num_rows
+                if actual_ol != operator_log_rows_count:
+                    raise RuntimeError(
+                        f"operator_log row count mismatch: expected "
+                        f"{operator_log_rows_count}, got {actual_ol}"
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to preserve operator_log for %s — leaving SQLite intact, "
+                    "cleaning up Parquet",
+                    db_path.name,
+                )
+                operator_log_path.unlink(missing_ok=True)
+                archive_path.unlink(missing_ok=True)
+                return None
+
         # Step 4: Update index
         size_archive = archive_path.stat().st_size
         checksum = self._md5_hex(archive_path)
@@ -262,6 +335,8 @@ class ColdRotationService:
                 size_archive=size_archive,
                 checksum=checksum,
                 rotated_at=rotated_at,
+                operator_log_rel=operator_log_rel,
+                operator_log_rows=operator_log_rows_count,
             )
         except Exception:
             logger.exception(
@@ -269,9 +344,13 @@ class ColdRotationService:
                 db_path.name,
             )
             archive_path.unlink(missing_ok=True)
+            if operator_log_rel is not None:
+                (self._archive_dir / operator_log_rel).unlink(missing_ok=True)
             return None
 
-        # Step 5: Delete SQLite + sidecars
+        # Step 5: Delete SQLite + sidecars. Safe now: readings and operator_log
+        # are preserved in Parquet, and source_data was verified empty at entry
+        # (Step 0), so no table with rows is destroyed.
         for suffix in ("", "-wal", "-shm"):
             sidecar = db_path.parent / (db_path.name + suffix)
             sidecar.unlink(missing_ok=True)
@@ -320,6 +399,52 @@ class ColdRotationService:
                 )
                 for row in cursor.fetchall()
             ]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _read_operator_log_rows(
+        self, db_path: Path
+    ) -> list[tuple[float, str | None, str, str, str, str]]:
+        """Return all operator_log rows as tuples (empty if table absent)."""
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            if not self._table_exists(conn, "operator_log"):
+                return []
+            cursor = conn.execute(
+                "SELECT timestamp, experiment_id, author, source, message, tags "
+                "FROM operator_log ORDER BY timestamp"
+            )
+            return [
+                (
+                    float(row["timestamp"]),
+                    None if row["experiment_id"] is None else str(row["experiment_id"]),
+                    str(row["author"]),
+                    str(row["source"]),
+                    str(row["message"]),
+                    str(row["tags"]),
+                )
+                for row in cursor.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def _table_has_rows(self, db_path: Path, table: str) -> bool:
+        """Return True if *table* exists in *db_path* and holds at least one row."""
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            if not self._table_exists(conn, table):
+                return False
+            row = conn.execute(f"SELECT EXISTS(SELECT 1 FROM {table})").fetchone()
+            return bool(row[0])
         finally:
             conn.close()
 
@@ -373,6 +498,45 @@ class ColdRotationService:
         finally:
             writer.close()
 
+    def _write_operator_log_parquet(
+        self,
+        archive_path: Path,
+        rows: list[tuple[float, str | None, str, str, str, str]],
+    ) -> None:
+        """Write operator_log rows to a companion Parquet file (Zstd)."""
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamps: list[float] = []
+        experiment_ids: list[str | None] = []
+        authors: list[str] = []
+        sources: list[str] = []
+        messages: list[str] = []
+        tags: list[str] = []
+        for ts_epoch, exp_id, author, source, message, tag in rows:
+            timestamps.append(ts_epoch)
+            experiment_ids.append(exp_id)
+            authors.append(author)
+            sources.append(source)
+            messages.append(message)
+            tags.append(tag)
+
+        table = pa.table(
+            {
+                "timestamp": pa.array(timestamps, type=pa.float64()),
+                "experiment_id": pa.array(experiment_ids, type=pa.string()),
+                "author": pa.array(authors, type=pa.string()),
+                "source": pa.array(sources, type=pa.string()),
+                "message": pa.array(messages, type=pa.string()),
+                "tags": pa.array(tags, type=pa.string()),
+            },
+            schema=_OPERATOR_LOG_SCHEMA,
+        )
+        pq.write_table(
+            table,
+            str(archive_path),
+            compression="zstd",
+            compression_level=self._zstd_level,
+        )
+
     # ------------------------------------------------------------------
     # Index management
     # ------------------------------------------------------------------
@@ -409,22 +573,29 @@ class ColdRotationService:
         size_archive: int,
         checksum: str,
         rotated_at: datetime,
+        operator_log_rel: str | None = None,
+        operator_log_rows: int = 0,
     ) -> None:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         idx = self._read_index()
-        idx["files"].append(
-            {
-                "original_name": db_path.name,
-                "archive_path": archive_rel,
-                "rotated_at": rotated_at.isoformat(),
-                "row_count": row_count,
-                "size_bytes_original": size_original,
-                "size_bytes_archive": size_archive,
-                "checksum_md5": checksum,
-            }
-        )
-        self._index_path().write_text(
-            json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8"
+        entry = {
+            "original_name": db_path.name,
+            "archive_path": archive_rel,
+            "rotated_at": rotated_at.isoformat(),
+            "row_count": row_count,
+            "size_bytes_original": size_original,
+            "size_bytes_archive": size_archive,
+            "checksum_md5": checksum,
+        }
+        if operator_log_rel is not None:
+            entry["operator_log_path"] = operator_log_rel
+            entry["operator_log_rows"] = operator_log_rows
+        idx["files"].append(entry)
+        # Atomic write (temp + os.replace): a crash mid-write must never leave a
+        # truncated index.json that bricks both rotation and ArchiveReader reads.
+        atomic_write_text(
+            self._index_path(),
+            json.dumps(idx, indent=2, ensure_ascii=False),
         )
 
     # ------------------------------------------------------------------

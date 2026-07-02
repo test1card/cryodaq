@@ -125,7 +125,7 @@ class HDF5Exporter:
         # Группировка: instrument_id → channel → [(ts, value, unit)]
         data: dict[str, dict[str, _ChannelData]] = {}
         for row in rows:
-            ts_str, inst_id, channel, value, unit, _status = (
+            ts_str, inst_id, channel, value, unit, status = (
                 row["timestamp"],
                 row["instrument_id"],
                 row["channel"],
@@ -135,15 +135,18 @@ class HDF5Exporter:
             )
             ts = _parse_timestamp(ts_str).timestamp()
             data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(
-                ts, value
+                ts, value, status if status is not None else ""
             )
 
         # Запись в HDF5
+        str_dt = h5py.string_dtype()
         count = 0
         for inst_id, channels in data.items():
-            inst_group = hf.require_group(_sanitize_name(inst_id))
+            inst_group = hf.create_group(_unique_child_name(hf, _sanitize_name(inst_id)))
             for ch_name, ch_data in channels.items():
-                ch_group = inst_group.require_group(_sanitize_name(ch_name))
+                ch_group = inst_group.create_group(
+                    _unique_child_name(inst_group, _sanitize_name(ch_name))
+                )
                 ch_group.create_dataset(
                     "timestamp",
                     data=ch_data.timestamps,
@@ -154,6 +157,15 @@ class HDF5Exporter:
                 ch_group.create_dataset(
                     "value",
                     data=ch_data.values,
+                    chunks=True,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                # Preserve the per-reading status column (D-C15).
+                ch_group.create_dataset(
+                    "status",
+                    data=ch_data.statuses,
+                    dtype=str_dt,
                     chunks=True,
                     compression="gzip",
                     compression_opts=4,
@@ -255,19 +267,35 @@ class HDF5Exporter:
 class _ChannelData:
     """Накопитель данных одного канала для экспорта."""
 
-    __slots__ = ("unit", "timestamps", "values")
+    __slots__ = ("unit", "timestamps", "values", "statuses")
 
     def __init__(self, unit: str) -> None:
         self.unit = unit
         self.timestamps: list[float] = []
         self.values: list[float] = []
+        self.statuses: list[str] = []
 
-    def append(self, ts: float, value: float) -> None:
+    def append(self, ts: float, value: float, status: str = "") -> None:
         self.timestamps.append(ts)
         self.values.append(value)
+        self.statuses.append(status)
 
 
 def _sanitize_name(name: str) -> str:
     """Привести строку к допустимому имени HDF5-группы."""
     # Заменяем пробелы и спецсимволы на подчёркивания
     return name.replace("/", "_").replace(" ", "_").replace(":", "_")
+
+
+def _unique_child_name(parent: h5py.Group, base: str) -> str:
+    """Return a name unique within ``parent`` (append _2, _3 … on collision).
+
+    Distinct source names can sanitize to the same string (e.g. 'A:B' and
+    'A B' → 'A_B'); reusing the group then crashes on duplicate datasets.
+    """
+    if base not in parent:
+        return base
+    i = 2
+    while f"{base}_{i}" in parent:
+        i += 1
+    return f"{base}_{i}"

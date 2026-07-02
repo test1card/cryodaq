@@ -162,6 +162,22 @@ class CalibrationCurve:
             return self.zones[0].evaluate(raw_value)
         return self.zones[-1].evaluate(raw_value)
 
+    def raw_in_range(self, raw_value: float) -> bool:
+        """Report whether *raw_value* lies within the overall calibrated span.
+
+        Unlike :meth:`evaluate`, this performs NO clipping: callers use it to
+        detect out-of-calibration-range readings before evaluation. A clipped
+        evaluation of an out-of-span raw freezes the output at the boundary
+        (dT/dt -> 0), which blinds rate-based safety checks (CR-1).
+
+        Non-finite raw values (NaN/inf) report False.
+        """
+        if not self.zones:
+            return False
+        raw_min = min(zone.raw_min for zone in self.zones)
+        raw_max = max(zone.raw_max for zone in self.zones)
+        return raw_min <= raw_value <= raw_max
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
@@ -312,6 +328,11 @@ class CalibrationStore:
         curve = self._require_curve(sensor_id)
         return curve.evaluate(float(raw_value))
 
+    def raw_in_range(self, sensor_id: str, raw_value: float) -> bool:
+        """Report whether *raw_value* is inside the calibrated span (no clipping)."""
+        curve = self._require_curve(sensor_id)
+        return curve.raw_in_range(float(raw_value))
+
     def voltage_to_temp(
         self,
         sensor_id: str,
@@ -357,8 +378,33 @@ class CalibrationStore:
         return curve
 
     def load_curves(self, curves_dir: Path) -> None:
+        # HI-3: restore the ACTIVE curve per sensor deterministically. The old
+        # `for path in sorted(glob): self.load_curve(path)` let whichever curve
+        # sorted last win — and curve dirs are named by random uuid4 hex, so a
+        # sensor with >=2 fitted curves got an arbitrary active curve after a
+        # restart, silently clobbering the operator's persisted assignment.
+        # Group loaded curves by sensor, then pick the one named by the
+        # persisted assignment (index.yaml, loaded at construction); absent a
+        # valid assignment, pick the newest fit_timestamp.
+        loaded_by_sensor: dict[str, list[CalibrationCurve]] = {}
         for path in sorted(curves_dir.glob("**/*.json")):
-            self.load_curve(path)
+            curve = CalibrationCurve.from_payload(json.loads(path.read_text(encoding="utf-8")))
+            loaded_by_sensor.setdefault(curve.sensor_id, []).append(curve)
+        for sensor_id, curves in loaded_by_sensor.items():
+            assignment = self._assignments.get(sensor_id) or {}
+            assigned_id = str(assignment.get("curve_id", "")).strip()
+            active: CalibrationCurve | None = None
+            if assigned_id:
+                active = next((c for c in curves if c.curve_id == assigned_id), None)
+            if active is None:
+                active = max(curves, key=lambda c: c.fit_timestamp)
+            self._curves[sensor_id] = active
+            # Only (re)write the assignment when it does not already point at the
+            # selected curve — preserves a valid persisted assignment untouched,
+            # creates a default for an unassigned sensor, and repairs a dangling
+            # assignment whose curve is missing from disk.
+            if active.curve_id != assigned_id:
+                self._ensure_assignment(sensor_id=sensor_id, curve_id=active.curve_id)
         self._write_index()
 
     def import_curve_json(self, path: Path) -> CalibrationCurve:
@@ -651,19 +697,40 @@ class CalibrationStore:
         runtime_apply_ready: bool = False,
         reading_mode_policy: str = "inherit",
     ) -> dict[str, Any]:
-        curve = self._resolve_curve(sensor_id=sensor_id, curve_id=curve_id)
+        # HI-3: honor an explicitly requested curve_id even when it is not the
+        # in-memory active curve. The store keeps only one curve per sensor in
+        # memory (the active one), and _resolve_curve(sensor_id=...) ignores
+        # curve_id — so previously assign_curve(sensor_id, curve_id="older")
+        # silently recorded whichever curve was last loaded, and the operator
+        # could not pin an older fitted curve. Accept the requested id when its
+        # curve.json exists on disk for this sensor; otherwise fall back to the
+        # normal resolver (which raises for a truly unknown id).
+        requested_id = str(curve_id).strip() if curve_id else ""
+        active_ids = {c.curve_id for c in self._curves.values()}
+        if (
+            requested_id
+            and requested_id not in active_ids
+            and self._curves_dir is not None
+            and self._curve_path(sensor_id, requested_id).exists()
+        ):
+            resolved_sensor_id, resolved_curve_id = sensor_id, requested_id
+        else:
+            curve = self._resolve_curve(sensor_id=sensor_id, curve_id=curve_id)
+            resolved_sensor_id, resolved_curve_id = curve.sensor_id, curve.curve_id
         normalized_policy = str(reading_mode_policy).strip().lower() or "inherit"
         if normalized_policy not in {"inherit", "off", "on"}:
             raise ValueError("reading_mode_policy must be 'inherit', 'off', or 'on'.")
         assignment = {
-            "sensor_id": curve.sensor_id,
-            "curve_id": curve.curve_id,
-            "channel_key": str(channel_key).strip() if channel_key is not None else curve.sensor_id,
+            "sensor_id": resolved_sensor_id,
+            "curve_id": resolved_curve_id,
+            "channel_key": str(channel_key).strip()
+            if channel_key is not None
+            else resolved_sensor_id,
             "updated_at": _utcnow().isoformat(),
             "runtime_apply_ready": bool(runtime_apply_ready),
             "reading_mode_policy": normalized_policy,
         }
-        self._assignments[curve.sensor_id] = assignment
+        self._assignments[resolved_sensor_id] = assignment
         self._write_index()
         return dict(assignment)
 

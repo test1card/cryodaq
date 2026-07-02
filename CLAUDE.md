@@ -87,7 +87,9 @@ cryodaq                        # Operator launcher
 cryodaq-engine                 # Run engine headless (real instruments)
 cryodaq-engine --mock          # Run engine with simulated data
 cryodaq-gui                    # Run GUI only (connects to engine over ZMQ)
-uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
+uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
+# Dashboard is unauthenticated: bind loopback only. For LAN access route
+# via SSH tunnel — never bind 0.0.0.0 (see web/server.py module docstring).
 install.bat                    # Windows installer helper
 python create_shortcut.py      # Create desktop shortcut
 cryodaq-cooldown build --data cooldown_v5/ --output model/

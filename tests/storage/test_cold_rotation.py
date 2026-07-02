@@ -458,6 +458,183 @@ def test_wal_shm_sidecar_deleted(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _add_operator_log(db_path: Path, rows: int, base_ts: float | None = None) -> None:
+    """Add an operator_log table with *rows* audit entries to an existing DB."""
+    if base_ts is None:
+        base_ts = datetime(2026, 3, 20, tzinfo=UTC).timestamp()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS operator_log ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp REAL NOT NULL,"
+        "  experiment_id TEXT,"
+        "  author TEXT NOT NULL DEFAULT '',"
+        "  source TEXT NOT NULL DEFAULT '',"
+        "  message TEXT NOT NULL,"
+        "  tags TEXT NOT NULL DEFAULT '[]'"
+        ")"
+    )
+    conn.executemany(
+        "INSERT INTO operator_log (timestamp, experiment_id, author, source, message, tags) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (base_ts + i, "EXP-1", "operator", "gui", f"note {i}", "[]")
+            for i in range(rows)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# test_operator_log_preserved_on_rotation  (CR-3: audit trail must survive)
+# ---------------------------------------------------------------------------
+
+
+def test_operator_log_preserved_on_rotation(tmp_path: Path) -> None:
+    """Rotating a daily DB must NOT destroy its operator_log audit trail.
+
+    Before the fix, rotation exported only the ``readings`` table then deleted
+    the whole SQLite file — permanently losing operator_log rows. After the
+    fix the operator_log rows must remain retrievable post-rotation.
+    """
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_name = _old_db_name(40, today)
+    db_path = data_dir / old_name
+    _create_db(db_path, rows=20)
+    _add_operator_log(db_path, rows=5)
+
+    service = ColdRotationService(
+        data_dir=data_dir,
+        archive_dir=archive_dir,
+        age_days=30,
+        enabled=True,
+    )
+
+    results = asyncio.run(service.run_once(now=today))
+
+    assert len(results) == 1
+
+    # operator_log rows MUST still be retrievable after rotation (not lost).
+    ol_files = list(archive_dir.rglob("*.operator_log.parquet"))
+    assert len(ol_files) == 1, f"operator_log not preserved: {ol_files}"
+    ol_table = pq.read_table(str(ol_files[0]))
+    assert ol_table.num_rows == 5
+    messages = ol_table.column("message").to_pylist()
+    assert "note 0" in messages
+    assert "note 4" in messages
+
+
+# ---------------------------------------------------------------------------
+# test_source_data_rows_block_deletion  (CR-3: reserved table not destroyed)
+# ---------------------------------------------------------------------------
+
+
+def test_source_data_rows_block_deletion(tmp_path: Path) -> None:
+    """CR-3 follow-up: a day with unexported source_data rows is NOT rotated at
+    all — SQLite kept, no Parquet written, and the file is left out of the index
+    so it stays a future candidate and cannot be double-counted."""
+    import asyncio
+    import json as _json
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_name = _old_db_name(40, today)
+    db_path = data_dir / old_name
+    _create_db(db_path, rows=10)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS source_data ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp TEXT NOT NULL,"
+        "  channel TEXT NOT NULL,"
+        "  voltage REAL, current REAL, resistance REAL, power REAL"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO source_data (timestamp, channel, voltage) VALUES (?, ?, ?)",
+        ("2026-03-20T00:00:00+00:00", "smua", 1.5),
+    )
+    conn.commit()
+    conn.close()
+
+    service = ColdRotationService(
+        data_dir=data_dir,
+        archive_dir=archive_dir,
+        age_days=30,
+        enabled=True,
+    )
+
+    results = asyncio.run(service.run_once(now=today))
+
+    # Rotation is skipped entirely for this file.
+    assert results == [], "day with unexported source_data must not be rotated"
+    assert db_path.exists(), "SQLite with unexported source_data rows must be kept"
+    # Nothing written to cold storage...
+    assert list(archive_dir.rglob("*.parquet")) == []
+    # ...and the file is not recorded in the index (stays a future candidate).
+    index_file = archive_dir / "index.json"
+    if index_file.exists():
+        idx = _json.loads(index_file.read_text(encoding="utf-8"))
+        assert all(f["original_name"] != old_name for f in idx.get("files", []))
+
+
+# ---------------------------------------------------------------------------
+# test_index_written_atomically  (ME-11 / D-C10: crash-safe index write)
+# ---------------------------------------------------------------------------
+
+
+def test_index_written_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """index.json must be written via atomic_write_text (temp + os.replace)."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from cryodaq.storage import cold_rotation as cr
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_name = _old_db_name(40, today)
+    _create_db(data_dir / old_name, rows=15)
+
+    service = ColdRotationService(
+        data_dir=data_dir,
+        archive_dir=archive_dir,
+        age_days=30,
+        enabled=True,
+    )
+
+    # Spy that wraps the real atomic writer. setattr fails outright if the fix
+    # (import + use of atomic_write_text) is not present — right-reason failure.
+    real_atomic = cr.atomic_write_text
+    spy = MagicMock(side_effect=real_atomic)
+    monkeypatch.setattr(cr, "atomic_write_text", spy)
+
+    results = asyncio.run(service.run_once(now=today))
+
+    assert len(results) == 1
+    assert spy.called, "index.json write must go through atomic_write_text"
+    written_paths = [call.args[0] for call in spy.call_args_list]
+    assert (archive_dir / "index.json") in written_paths
+    # No stray temp file left behind by the atomic write.
+    assert list(archive_dir.glob(".index.json.*")) == []
+    # And the index is valid, complete JSON.
+    index = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    assert len(index["files"]) == 1
+
+
 def test_daemon_start_stop(tmp_path: Path) -> None:
     """start() creates a task; stop() cancels it cleanly."""
     import asyncio

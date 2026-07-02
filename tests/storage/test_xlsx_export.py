@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import openpyxl
@@ -219,3 +220,77 @@ async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
     assert count == data_rows, (
         f"Return value {count} must equal actual data rows written {data_rows}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. ME-9 / D-C8 — small vacuum-range values must not be truncated to 0.000
+# ---------------------------------------------------------------------------
+
+
+async def test_xlsx_preserves_small_vacuum_values(tmp_path: Path) -> None:
+    """A 1e-7 mbar reading must round-trip as a non-zero cell value.
+
+    Regression: exporter pre-rounded to 3 decimals with number_format "0.000",
+    collapsing vacuum pressures (1e-3..1e-9 mbar) to 0.000.
+    """
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    _populate_db(data_dir, [_reading("VAC", 1e-7, "mbar", ts=ts)])
+
+    output_path = tmp_path / "vac.xlsx"
+    XLSXExporter(data_dir).export(output_path)
+
+    wb = openpyxl.load_workbook(output_path)
+    ws = wb["Данные"]
+    header = [cell.value for cell in ws[1]]
+    col = header.index("VAC") + 1
+    val = ws.cell(row=2, column=col).value
+
+    assert val is not None, "vacuum cell is empty"
+    assert val != 0.0, f"vacuum value truncated to zero: {val}"
+    assert abs(val - 1e-7) < 1e-12, f"vacuum value not preserved: {val}"
+
+
+# ---------------------------------------------------------------------------
+# 8. D-C18 — mixed TEXT (legacy ISO) + REAL timestamps must not raise
+# ---------------------------------------------------------------------------
+
+
+async def test_xlsx_mixed_timestamp_types(tmp_path: Path) -> None:
+    """Sorting mixed str/float timestamp keys must not raise TypeError."""
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    _populate_db(data_dir, [_reading("CH1", 1.0, "K", ts=ts)])  # REAL ts row
+
+    db_path = data_dir / f"data_{ts.date().isoformat()}.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-03-14T13:00:00+00:00", "ls218s", "CH1", 2.0, "K", "ok"),
+    )
+    conn.commit()
+    conn.close()
+
+    output_path = tmp_path / "mixed.xlsx"
+    count = XLSXExporter(data_dir).export(output_path)  # must not raise TypeError
+    assert count == 2, f"expected 2 exported timestamps, got {count}"
+
+
+# ---------------------------------------------------------------------------
+# 9. D-C9 / ME-10 — early local-hours range must select correct UTC day file
+# ---------------------------------------------------------------------------
+
+
+async def test_xlsx_selects_utc_day_for_early_local_hours(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 13, 22, 30, 0, tzinfo=UTC)  # data_2026-03-13.db
+    _populate_db(data_dir, [_reading("CH1", 1.0, "K", ts=ts)])
+
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 14, 0, 0, 0, tzinfo=msk)  # 2026-03-13 21:00 UTC
+    end = datetime(2026, 3, 14, 6, 0, 0, tzinfo=msk)  # 2026-03-14 03:00 UTC
+
+    output_path = tmp_path / "early.xlsx"
+    count = XLSXExporter(data_dir).export(output_path, start=start, end=end)
+    assert count == 1, f"early-hours UTC day file dropped: got {count}"

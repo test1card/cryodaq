@@ -558,7 +558,14 @@ def predict(
     t_rems = np.array([e[1] for e in estimates])
     t_tots = np.array([e[2] for e in estimates])
     weights = np.array([e[3] for e in estimates])
-    weights /= weights.sum()
+    w_sum = float(weights.sum())
+    if not np.isfinite(w_sum) or w_sum <= 0.0:
+        # All progress weights underflowed to 0 (elapsed far from every
+        # reference, > ~39 sigma). weights /= weights.sum() would yield NaN
+        # and poison the whole PredictionResult (ME-13). Fall back to
+        # uniform weighting so the ensemble still returns a finite ETA.
+        weights = np.ones(len(estimates))
+    weights = weights / weights.sum()
 
     t_rem_mean = float(np.average(t_rems, weights=weights))
     t_tot_mean = float(np.average(t_tots, weights=weights))

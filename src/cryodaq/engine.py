@@ -20,6 +20,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 # Windows: pyzmq требует SelectorEventLoop (не Proactor)
@@ -1856,6 +1857,24 @@ async def _watchdog(
         return
 
 
+def _push_if_finite(push: Callable[..., None], *args: Any) -> bool:
+    """Forward a live reading into a rolling estimator, dropping non-finite samples.
+
+    HI-2/ME-15: drivers emit value=NaN on SENSOR_ERROR/TIMEOUT and the
+    scheduler still publishes those readings. One NaN inside an OLS window
+    makes the slope undefined (rate_estimator returns None), blinding the
+    estimator for up to the whole window length (~120 s / ~1 h). The last
+    positional argument is the reading value; NaN/±inf samples are dropped
+    (not forwarded) so they never enter the rolling window.
+
+    Returns True when the sample was forwarded to ``push``.
+    """
+    if not math.isfinite(args[-1]):
+        return False
+    push(*args)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Основной цикл
 # ---------------------------------------------------------------------------
@@ -2246,7 +2265,9 @@ async def _run_engine(*, mock: bool = False) -> None:
             while True:
                 reading: Reading = await queue.get()
                 _alarm_v2_state_tracker.update(reading)
-                _alarm_v2_rate.push(
+                # HI-2: drop NaN/inf so a flapping sensor can't poison the OLS window
+                _push_if_finite(
+                    _alarm_v2_rate.push,
                     reading.channel,
                     reading.timestamp.timestamp(),
                     reading.value,
@@ -2321,7 +2342,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             while True:
                 reading: Reading = await queue.get()
-                sensor_diag.push(
+                # HI-2: drop NaN/inf so error readings don't poison diagnostics buffers
+                _push_if_finite(
+                    sensor_diag.push,
                     reading.channel,
                     reading.timestamp.timestamp(),
                     reading.value,
@@ -2388,7 +2411,9 @@ async def _run_engine(*, mock: bool = False) -> None:
                         continue
                 elif not pressure_channel and reading.unit != "mbar":
                     continue
-                vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
+                # HI-2/ME-15: VacuumTrendPredictor.push only rejects P <= 0,
+                # so NaN would slip through — drop non-finite here.
+                _push_if_finite(vacuum_trend.push, reading.timestamp.timestamp(), reading.value)
         except asyncio.CancelledError:
             return
 

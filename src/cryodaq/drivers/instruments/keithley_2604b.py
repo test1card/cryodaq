@@ -304,7 +304,15 @@ class Keithley2604B(InstrumentDriver):
         )
         return self._parse_buffer_response(raw)
 
-    async def emergency_off(self, channel: str | None = None) -> None:
+    async def emergency_off(self, channel: str | None = None) -> bool:
+        """Force output OFF on the targeted channel(s). NEVER raises.
+
+        Returns True iff, for EVERY targeted channel, the ``levelv = 0`` +
+        ``OUTPUT_OFF`` writes succeeded AND the readback verify confirmed the
+        output is OFF. Returns False otherwise — the instrument may still be
+        sourcing and callers must FAIL CLOSED (CR-2: SafetyManager latches a
+        fault instead of reporting SAFE_OFF).
+        """
         channels = [normalize_smu_channel(channel)] if channel is not None else list(SMU_CHANNELS)
         for smu_channel in channels:
             runtime = self._channels[smu_channel]
@@ -314,8 +322,9 @@ class Keithley2604B(InstrumentDriver):
             self._compliance_count[smu_channel] = 0
 
         if self.mock or not self._connected:
-            return
+            return True
 
+        all_confirmed = True
         for smu_channel in channels:
             try:
                 await self._transport.write(f"{smu_channel}.source.levelv = 0")
@@ -324,14 +333,16 @@ class Keithley2604B(InstrumentDriver):
                 )
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
+                all_confirmed = False
             # SAFETY (Phase 2a Codex G.1): readback-verify each channel.
             # emergency_off is the most critical path — silent failure here
             # is unacceptable. _verify_output_off logs CRITICAL on mismatch.
             # Wrap in try because the caller is already in an emergency path
             # and a raise here would just propagate noise; the CRITICAL log
-            # is the signalling mechanism (alarm pipeline filters on level).
+            # plus the False return are the signalling mechanisms (CR-2).
             try:
-                await self._verify_output_off(smu_channel)
+                if not await self._verify_output_off(smu_channel):
+                    all_confirmed = False
             except Exception as exc:
                 log.critical(
                     "%s: emergency_off verify FAILED on %s: %s — instrument may still be sourcing!",
@@ -339,6 +350,8 @@ class Keithley2604B(InstrumentDriver):
                     smu_channel,
                     exc,
                 )
+                all_confirmed = False
+        return all_confirmed
 
     async def check_error(self) -> str | None:
         if not self._connected:
@@ -376,9 +389,17 @@ class Keithley2604B(InstrumentDriver):
             log.error("%s: diagnostics error: %s", self.name, exc)
         return result
 
-    async def _verify_output_off(self, channel: str) -> None:
+    async def _verify_output_off(self, channel: str) -> bool:
+        """Readback-verify that ``channel``'s output is OFF.
+
+        Returns True iff the readback confirms output OFF; False on a
+        still-on readback or an unparseable response (CRITICAL logged, not
+        raised). Transport exceptions from the query DO propagate — callers
+        that must not raise (emergency_off) catch them and map to False,
+        while stop_source keeps its fail-closed raise-through behavior.
+        """
         if self.mock or not self._connected:
-            return
+            return True
         smu_channel = normalize_smu_channel(channel)
         response = await self._transport.query(
             f"print({smu_channel}.source.output)", timeout_ms=3000
@@ -388,10 +409,13 @@ class Keithley2604B(InstrumentDriver):
                 log.critical(
                     "%s: %s still reports output=%s", self.name, smu_channel, response.strip()
                 )
+                return False
         except ValueError:
             log.critical(
                 "%s: %s unexpected output response: %r", self.name, smu_channel, response.strip()
             )
+            return False
+        return True
 
     def _parse_iv_response(self, raw: str, channel: SmuChannel) -> tuple[float, float]:
         parts = raw.strip().split("\t")

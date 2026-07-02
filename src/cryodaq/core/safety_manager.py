@@ -100,13 +100,19 @@ class SafetyManager:
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[str, tuple[float, float, str]] = {}
-        # Phase 2c CC I.3: min_points raised from 10 to 60 to match
-        # rate_estimator.py's documented noise-suppression recommendation.
-        # At 0.5s poll interval the 120s window holds ~240 points;
-        # min_points=60 = 30s of data before any rate-based fault decision,
-        # which keeps response time acceptable for the 5 K/min threshold
-        # while reducing false-positive rate ~2.4x under LS218 ±0.01 K noise.
-        self._rate_estimator = RateEstimator(window_s=120.0, min_points=60)
+        # HI-1: the gate is the elapsed data SPAN (min_span_s=30), not a raw
+        # point count. The deployed LakeShore poll is 2.0 s
+        # (config/instruments.yaml), so the 120 s window holds only ~61
+        # points; the old min_points=60 gate meant the 5 K/min rate fault
+        # could not arm until a full ~120 s of continuous data accumulated
+        # (dead-window at every RUNNING entry and after any gap) and sat on a
+        # 60/61 knife-edge where two missed polls silently disarmed the check.
+        # Span-based gating arms after ~30 s of data regardless of poll rate
+        # (~15 pts at 2 s, ~60 at 0.5 s) and tolerates missed/late polls:
+        # 30 s of OLS averaging still suppresses LS218 ±0.01 K noise well
+        # below the 5 K/min threshold. min_points=8 is only a small
+        # OLS-stability floor.
+        self._rate_estimator = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
 
         self._queue: asyncio.Queue[Reading] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
@@ -430,7 +436,32 @@ class SafetyManager:
     async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
         async with self._cmd_lock:
             channels = self._resolve_channels(channel)
-            await self._ensure_output_off(channel)
+            confirmed = await self._ensure_output_off(channel)
+            if not confirmed:
+                # FAIL CLOSED (CR-2). The driver could not confirm output OFF
+                # (write raised or readback still reports ON) — the SMU may
+                # still be sourcing. Reporting ok=True and dropping to
+                # SAFE_OFF would silently stop ALL stale/heartbeat/rate
+                # monitoring while power is live. Latch a fault instead —
+                # _fault() clears _active_sources, re-fires the shielded
+                # emergency_off (retry OUTPUT_OFF + verify) and publishes
+                # channel states. _fault is lock-free and idempotent, so
+                # calling it here under _cmd_lock is safe (same discipline
+                # as the stop_source failure path in _safe_off).
+                reason = "emergency_off could not confirm output OFF"
+                logger.critical(
+                    "%s (channels=%s) — latching fault (fail-closed)",
+                    reason,
+                    sorted(channels),
+                )
+                await self._fault(reason, channel=channel or "")
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "active_channels": sorted(self._active_sources),
+                    "error": reason,
+                }
             self._active_sources.difference_update(channels)
             await self._publish_keithley_channel_states("emergency_off")
 
@@ -854,18 +885,29 @@ class SafetyManager:
         except Exception as exc:
             logger.warning("Failed to publish Keithley channel states: %s", exc)
 
-    async def _ensure_output_off(self, channel: str | None = None) -> None:
+    async def _ensure_output_off(self, channel: str | None = None) -> bool:
+        """Force Keithley output OFF. True iff the driver CONFIRMED it.
+
+        CR-2: propagates the driver's confirmation bool so callers can fail
+        closed. False means the SMU may still be sourcing. True when there is
+        no Keithley to shut down.
+        """
         if self._keithley is None:
-            return
+            return True
         try:
-            await self._keithley.emergency_off(channel)
+            confirmed = await self._keithley.emergency_off(channel)
         except TypeError:
-            if channel is None:
-                await self._keithley.emergency_off()
-            else:
+            if channel is not None:
                 raise
+            try:
+                confirmed = await self._keithley.emergency_off()
+            except Exception as exc:
+                logger.critical("_ensure_output_off failed: %s", exc)
+                return False
         except Exception as exc:
             logger.critical("_ensure_output_off failed: %s", exc)
+            return False
+        return bool(confirmed)
 
     async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
         if self._state == SafetyState.FAULT_LATCHED:

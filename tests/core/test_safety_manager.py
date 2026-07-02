@@ -14,10 +14,15 @@ from cryodaq.drivers.base import Reading
 
 
 def _mock_keithley():
-    """Create a mock Keithley driver."""
+    """Create a mock Keithley driver.
+
+    ``emergency_off`` returns True per the CR-2 driver contract: True iff
+    every targeted channel's OUTPUT_OFF write succeeded AND readback
+    confirmed the output is OFF.
+    """
     k = MagicMock()
     k.connected = True
-    k.emergency_off = AsyncMock()
+    k.emergency_off = AsyncMock(return_value=True)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -225,6 +230,63 @@ async def test_emergency_off_from_running():
 
 
 # ---------------------------------------------------------------------------
+# 9b. CR-2: emergency_off FAILS CLOSED when output OFF cannot be confirmed
+# ---------------------------------------------------------------------------
+
+
+async def test_emergency_off_unconfirmed_latches_fault():
+    """CR-2: if the driver cannot confirm output OFF (write raised or readback
+    still-on → driver returns False), operator emergency_off must NOT report
+    success and must NOT transition to SAFE_OFF (which would stop all
+    stale/heartbeat/rate monitoring while the SMU may still be sourcing).
+    It must latch a FAULT instead."""
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=False)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _feed(broker, "Т1 Криостат верх", 4.5)
+        await asyncio.sleep(1.5)
+        await mgr.request_run(0.5, 40.0, 1.0)
+        assert mgr.state == SafetyState.RUNNING
+
+        result = await mgr.emergency_off()
+
+        assert result["ok"] is False, "must not report success on unconfirmed OFF"
+        assert "error" in result
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"unconfirmed emergency_off must latch FAULT, got {mgr.state}"
+        )
+        assert mgr.state != SafetyState.SAFE_OFF
+    finally:
+        await mgr.stop()
+
+
+async def test_emergency_off_driver_raise_latches_fault():
+    """CR-2: a driver emergency_off that RAISES (transport dead mid-call)
+    must also fail closed: ok=False + FAULT_LATCHED, never SAFE_OFF."""
+    k = _mock_keithley()
+    # First call (operator path via _ensure_output_off) raises; the retry
+    # inside _fault()'s shielded shutdown also raises — both must be survived.
+    k.emergency_off = AsyncMock(side_effect=OSError("transport down"))
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _feed(broker, "Т1 Криостат верх", 4.5)
+        await asyncio.sleep(1.5)
+        await mgr.request_run(0.5, 40.0, 1.0)
+        assert mgr.state == SafetyState.RUNNING
+
+        result = await mgr.emergency_off()
+
+        assert result["ok"] is False
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"emergency_off raise must latch FAULT, got {mgr.state}"
+        )
+        assert mgr.state != SafetyState.SAFE_OFF
+    finally:
+        await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
 # 10. Cannot start from FAULT_LATCHED
 # ---------------------------------------------------------------------------
 
@@ -420,6 +482,47 @@ async def test_run_permitted_state_is_actively_monitored():
     # regression where the wrong channel (or no channel) is reported.
     assert "Т1 Криостат верх" in sm._fault_reason, (
         f"fault_reason must name the stale channel 'Т1 Криостат верх', got: {sm._fault_reason!r}"
+    )
+
+
+async def test_rate_fault_latches_within_35s_at_deployed_2s_poll():
+    """HI-1 regression: a 10 K/min ramp at the deployed 2.0 s poll must latch a
+    rate FAULT within ~35 s of data — not after a ~120 s dead-window.
+
+    Feeds 2 s-spaced readings directly into the SafetyManager's rate estimator
+    with controlled timestamps (same time-injection approach as the other rate
+    tests — no sleeping) and keeps _latest fresh so stale checks don't fire.
+    """
+    import re
+
+    broker = SafetyBroker()
+    sm = SafetyManager(broker, keithley_driver=None, mock=True)
+    sm._config.critical_channels = [re.compile(r"Т1 .*")]
+    sm._config.stale_timeout_s = 10.0
+
+    channel = "Т1 Криостат верх"
+    sm._state = SafetyState.RUNNING
+
+    t0 = 1_000_000.0
+    ramp_per_sec = 10.0 / 60.0  # 10 K/min, twice the 5 K/min limit
+
+    fault_at_s: float | None = None
+    for i in range(18):  # 18 samples × 2 s = 34 s of simulated data
+        t = t0 + 2.0 * i
+        sm._rate_estimator.push(channel, t, 80.0 + ramp_per_sec * (t - t0))
+        sm._latest[channel] = (time.monotonic(), 80.0, "ok")  # always fresh
+        await sm._run_checks()
+        if sm._state == SafetyState.FAULT_LATCHED:
+            fault_at_s = 2.0 * i
+            break
+
+    assert fault_at_s is not None, (
+        "10 K/min ramp produced no rate FAULT within 34 s of 2 s-spaced data — "
+        "HI-1 dead-window: the dT/dt gate cannot arm at the deployed poll rate"
+    )
+    assert fault_at_s <= 35.0
+    assert "Rate limit exceeded" in sm._fault_reason, (
+        f"fault_reason must be the rate-limit fault, got: {sm._fault_reason!r}"
     )
 
 

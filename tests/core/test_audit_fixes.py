@@ -370,3 +370,94 @@ def test_gpib_resource_closed_on_clear_failure() -> None:
     mock_res.close.assert_called_once()
     # _resource must still be None (not assigned)
     assert transport._resource is None
+
+
+# ---------------------------------------------------------------------------
+# HI-2 / ME-15: NaN readings must not poison rolling analytics estimators
+# ---------------------------------------------------------------------------
+
+
+def test_push_if_finite_drops_nonfinite_values() -> None:
+    """The feed guard forwards finite samples and drops NaN/±inf."""
+    from cryodaq.engine import _push_if_finite
+
+    calls: list[tuple] = []
+
+    def fake_push(*args: object) -> None:
+        calls.append(args)
+
+    assert _push_if_finite(fake_push, "T1", 0.0, 4.2) is True
+    assert _push_if_finite(fake_push, "T1", 1.0, float("nan")) is False
+    assert _push_if_finite(fake_push, "T1", 2.0, float("inf")) is False
+    assert _push_if_finite(fake_push, "T1", 3.0, float("-inf")) is False
+    # vacuum_trend-style (timestamp, value) signature
+    assert _push_if_finite(fake_push, 4.0, float("nan")) is False
+    assert calls == [("T1", 0.0, 4.2)]
+
+
+def test_nan_poisons_unguarded_rate_estimator() -> None:
+    """Characterizes HI-2: one raw NaN blinds get_rate for the whole window."""
+    from cryodaq.core.rate_estimator import RateEstimator
+
+    est = RateEstimator(window_s=120.0, min_points=5)
+    for i in range(5):
+        est.push("T1", float(i), 300.0 - i)
+    est.push("T1", 5.0, float("nan"))  # SENSOR_ERROR reading
+    for i in range(6, 11):
+        est.push("T1", float(i), 300.0 - i)
+
+    assert est.get_rate("T1") is None
+
+
+def test_nan_reading_does_not_poison_rate_estimator_via_guard() -> None:
+    """Fed through the engine guard, a mid-stream NaN is dropped and the
+    estimator still yields a usable rate afterward."""
+    from cryodaq.core.rate_estimator import RateEstimator
+    from cryodaq.engine import _push_if_finite
+
+    est = RateEstimator(window_s=120.0, min_points=5)
+    for i in range(5):
+        _push_if_finite(est.push, "T1", float(i), 300.0 - i)
+    # Flapping sensor: SENSOR_ERROR/TIMEOUT reading arrives as NaN
+    _push_if_finite(est.push, "T1", 5.0, float("nan"))
+    for i in range(6, 11):
+        _push_if_finite(est.push, "T1", float(i), 300.0 - i)
+
+    rate = est.get_rate("T1")
+    assert rate is not None
+    # cooling at exactly 1 unit/s → −60 unit/min OLS slope
+    assert rate == pytest.approx(-60.0, rel=1e-6)
+
+
+def test_nan_does_not_enter_vacuum_trend_buffer_via_guard() -> None:
+    """ME-15: VacuumTrendPredictor.push only rejects P <= 0, so NaN slips
+    through its own guard — the engine feed guard must drop it first."""
+    import math
+
+    from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
+    from cryodaq.engine import _push_if_finite
+
+    vt = VacuumTrendPredictor(config={})
+    assert _push_if_finite(vt.push, 0.0, 1e-3) is True
+    assert _push_if_finite(vt.push, 1.0, float("nan")) is False
+    assert _push_if_finite(vt.push, 2.0, 9e-4) is True
+
+    assert len(vt._buffer) == 2
+    assert all(math.isfinite(log_p) for _, log_p in vt._buffer)
+
+
+def test_engine_feed_sites_guard_nonfinite_pushes() -> None:
+    """All three estimator feed loops in _run_engine route through the guard."""
+    import inspect
+    import re
+
+    from cryodaq import engine
+
+    src = re.sub(r"\s+", "", inspect.getsource(engine._run_engine))
+    assert "_push_if_finite(_alarm_v2_rate.push," in src
+    assert "_push_if_finite(sensor_diag.push," in src
+    assert "_push_if_finite(vacuum_trend.push," in src
+    # No unguarded direct pushes of live readings remain in the feed loops
+    assert "_alarm_v2_rate.push(reading" not in src
+    assert "sensor_diag.push(reading" not in src
+    assert "vacuum_trend.push(reading" not in src

@@ -404,3 +404,158 @@ def test_import_curve_file_rejects_330_suffix(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
     with pytest.raises(ValueError, match="Unsupported calibration import format"):
         store.import_curve_file(fake_330)
+
+
+def test_raw_in_range_reports_span_without_clipping(tmp_path: Path) -> None:
+    """CR-1: raw_in_range must flag out-of-span raws; evaluate keeps clipping."""
+    from cryodaq.analytics.calibration import CalibrationCurve, CalibrationZone
+
+    zone_low = CalibrationZone(
+        raw_min=10.0,
+        raw_max=50.0,
+        order=1,
+        coefficients=(100.0, -20.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    zone_high = CalibrationZone(
+        raw_min=50.0,
+        raw_max=90.0,
+        order=1,
+        coefficients=(60.0, -20.0),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=2,
+    )
+    curve = CalibrationCurve(
+        curve_id="span-check",
+        sensor_id="sensor-span",
+        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        raw_unit="sensor_unit",
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(zone_low, zone_high),
+    )
+
+    assert curve.raw_in_range(10.0)
+    assert curve.raw_in_range(50.0)
+    assert curve.raw_in_range(90.0)
+    assert curve.raw_in_range(42.0)
+    assert not curve.raw_in_range(9.999)
+    assert not curve.raw_in_range(90.001)
+    assert not curve.raw_in_range(float("nan"))
+
+    # Store-level delegation used by drivers.
+    store = CalibrationStore(tmp_path)
+    store.save_curve(curve)
+    assert store.raw_in_range("sensor-span", 42.0)
+    assert not store.raw_in_range("sensor-span", 120.0)
+
+    # Existing evaluate() semantics unchanged: still clips at the edges.
+    assert curve.evaluate(120.0) == pytest.approx(curve.evaluate(90.0))
+
+
+def _constant_curve(sensor_id: str, curve_id: str, fit_ts: datetime, temp_k: float):
+    """Build a curve that evaluates to a constant temperature everywhere.
+
+    A single Chebyshev coefficient (T,) makes evaluate() return T for any raw,
+    so two curves with different temp_k are trivially distinguishable.
+    """
+    from cryodaq.analytics.calibration import CalibrationCurve, CalibrationZone
+
+    zone = CalibrationZone(
+        raw_min=0.0,
+        raw_max=10.0,
+        order=0,
+        coefficients=(temp_k,),
+        rmse_k=0.0,
+        max_abs_error_k=0.0,
+        point_count=6,
+    )
+    return CalibrationCurve(
+        curve_id=curve_id,
+        sensor_id=sensor_id,
+        fit_timestamp=fit_ts,
+        raw_unit="ohm",
+        sensor_kind="generic",
+        source_session_ids=(),
+        zones=(zone,),
+    )
+
+
+def test_load_curves_restores_persisted_assignment_not_glob_order(tmp_path: Path) -> None:
+    """HI-3: after restart the ACTIVE curve must be the assigned one.
+
+    The assigned (older) curve lives in dir 'aaa-old' and the newer unassigned
+    curve in dir 'zzz-new', so sorted-glob loads the unassigned curve LAST —
+    the buggy code would make it active and clobber the persisted assignment.
+    """
+    sensor_id = "sensor-hi3"
+    older = _constant_curve(
+        sensor_id, "aaa-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0
+    )
+    newer = _constant_curve(
+        sensor_id, "zzz-new", datetime(2026, 2, 1, tzinfo=UTC), 200.0
+    )
+
+    store = CalibrationStore(tmp_path)
+    store.save_curve(older)
+    store.save_curve(newer)
+    # Operator explicitly assigns the OLDER curve; persisted in index.yaml.
+    store.assign_curve(sensor_id=sensor_id, curve_id="aaa-old")
+
+    reloaded = CalibrationStore(tmp_path)
+    reloaded.load_curves(tmp_path / "curves")
+
+    assert reloaded.evaluate(sensor_id, 5.0) == pytest.approx(100.0)
+    lookup = reloaded.lookup_curve(sensor_id=sensor_id)
+    assert lookup["assignment"]["curve_id"] == "aaa-old"
+    assert lookup["curve"]["curve_id"] == "aaa-old"
+
+
+def test_load_curves_without_assignment_picks_latest_fit_timestamp(tmp_path: Path) -> None:
+    """HI-3: with no persisted assignment, the newest fit must win, not glob order.
+
+    The NEWEST curve is placed in dir 'aaa-new' (globs first) and the OLDER in
+    'zzz-old' (globs last) so the buggy last-loaded-wins code picks the older.
+    """
+    import json as _json
+
+    sensor_id = "sensor-hi3-noassign"
+    newest = _constant_curve(
+        sensor_id, "aaa-new", datetime(2026, 3, 1, tzinfo=UTC), 200.0
+    )
+    older = _constant_curve(
+        sensor_id, "zzz-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0
+    )
+    for curve in (newest, older):
+        target = tmp_path / "curves" / sensor_id / curve.curve_id / "curve.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_json.dumps(curve.to_payload()), encoding="utf-8")
+
+    store = CalibrationStore(tmp_path)
+    store.load_curves(tmp_path / "curves")
+
+    assert store.evaluate(sensor_id, 5.0) == pytest.approx(200.0)
+    lookup = store.lookup_curve(sensor_id=sensor_id)
+    assert lookup["assignment"]["curve_id"] == "aaa-new"
+    assert lookup["curve"]["curve_id"] == "aaa-new"
+
+
+def test_load_curves_single_curve_unchanged(tmp_path: Path) -> None:
+    """Single curve per sensor: loads and is active, as before."""
+    sensor_id = "sensor-hi3-single"
+    only = _constant_curve(
+        sensor_id, "only-curve", datetime(2026, 1, 15, tzinfo=UTC), 150.0
+    )
+    store = CalibrationStore(tmp_path)
+    store.save_curve(only)
+
+    reloaded = CalibrationStore(tmp_path)
+    reloaded.load_curves(tmp_path / "curves")
+
+    assert reloaded.evaluate(sensor_id, 5.0) == pytest.approx(150.0)
+    lookup = reloaded.lookup_curve(sensor_id=sensor_id)
+    assert lookup["assignment"]["curve_id"] == "only-curve"
+    assert lookup["curve"]["curve_id"] == "only-curve"

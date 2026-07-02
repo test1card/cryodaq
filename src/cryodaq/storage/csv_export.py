@@ -9,12 +9,20 @@ from __future__ import annotations
 import csv
 import logging
 import sqlite3
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_day(dt: datetime | None) -> date | None:
+    """Return the UTC calendar day for a datetime (naive treated as UTC)."""
+    if dt is None:
+        return None
+    aware = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return aware.date()
 
 
 class CSVExporter:
@@ -115,6 +123,12 @@ class CSVExporter:
         if start is None and end is None:
             return all_files
 
+        # Daily files are named by UTC day; normalize the caller-supplied
+        # range to UTC before deriving the day (mirrors ArchiveReader.query),
+        # otherwise early-hours rows in another tz drop the correct day file.
+        start_day = _utc_day(start)
+        end_day = _utc_day(end)
+
         result: list[Path] = []
         for path in all_files:
             # Извлечь дату из имени файла: data_2026-03-14.db
@@ -125,9 +139,9 @@ class CSVExporter:
             except ValueError:
                 continue
 
-            if start is not None and file_date < start.date():
+            if start_day is not None and file_date < start_day:
                 continue
-            if end is not None and file_date > end.date():
+            if end_day is not None and file_date > end_day:
                 continue
             result.append(path)
 

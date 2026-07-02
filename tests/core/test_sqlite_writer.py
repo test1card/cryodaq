@@ -5,7 +5,7 @@ from __future__ import annotations
 import multiprocessing
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -489,3 +489,27 @@ def test_sqlite_writer_raises_when_wal_unavailable(tmp_path: Path, monkeypatch) 
 
     with pytest.raises(RuntimeError, match="WAL"):
         writer._ensure_connection(date.today())
+
+
+# ---------------------------------------------------------------------------
+# D-C9 / ME-10 — operator-log day filter must normalize to UTC
+# ---------------------------------------------------------------------------
+
+
+def test_operator_log_paths_utc_day_for_early_local_hours(tmp_path: Path) -> None:
+    """_operator_log_db_paths must derive the day from UTC, not caller tz.
+
+    Regression: it compared UTC-named daily files against caller-tz
+    start.date()/end.date(), dropping the correct UTC-day file when the
+    local-time start was in the early hours.
+    """
+    writer = SQLiteWriter(tmp_path)
+    (tmp_path / "data_2026-03-13.db").touch()  # UTC-named daily file
+
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 14, 0, 0, 0, tzinfo=msk)  # 2026-03-13 21:00 UTC
+    end = datetime(2026, 3, 14, 6, 0, 0, tzinfo=msk)  # 2026-03-14 03:00 UTC
+
+    paths = writer._operator_log_db_paths(start_time=start, end_time=end)
+    names = {p.name for p in paths}
+    assert "data_2026-03-13.db" in names, f"UTC day file dropped: {names}"
