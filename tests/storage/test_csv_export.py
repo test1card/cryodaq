@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -166,3 +166,31 @@ async def test_empty_result(tmp_path: Path) -> None:
     header, rows = _read_csv(output_path)
     assert header == _EXPECTED_HEADER, "Header row missing or wrong in empty export"
     assert len(rows) == 0, "Expected no data rows in empty export"
+
+
+# ---------------------------------------------------------------------------
+# 6. D-C9 / ME-10 — early local-hours range must select correct UTC day file
+# ---------------------------------------------------------------------------
+
+
+async def test_csv_selects_utc_day_for_early_local_hours(tmp_path: Path) -> None:
+    """A range whose local start is 00:00 MSK must still select the UTC day file.
+
+    Regression: _find_db_files compared UTC-named files against caller-tz
+    start.date()/end.date(), dropping early-hours rows.
+    """
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 13, 22, 30, 0, tzinfo=UTC)  # lives in data_2026-03-13.db
+    _populate_db(data_dir, [_reading("CH1", 1.0, "K", ts=ts)])
+
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 14, 0, 0, 0, tzinfo=msk)  # 2026-03-13 21:00 UTC
+    end = datetime(2026, 3, 14, 6, 0, 0, tzinfo=msk)  # 2026-03-14 03:00 UTC
+
+    output_path = tmp_path / "early.csv"
+    count = CSVExporter(data_dir).export(output_path, start=start, end=end)
+
+    _, rows = _read_csv(output_path)
+    assert count == 1, f"early-hours UTC day file dropped: got {count}"
+    assert len(rows) == 1
+    assert rows[0]["channel"] == "CH1"

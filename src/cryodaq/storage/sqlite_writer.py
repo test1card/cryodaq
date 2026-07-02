@@ -492,9 +492,20 @@ class SQLiteWriter:
         if start_time is None and end_time is None:
             return db_files
 
+        # Daily files are named by UTC day; normalize the caller-supplied range
+        # to UTC before deriving the day (mirrors ArchiveReader.query), else an
+        # early-hours local start selects the wrong day file and drops rows.
         selected: list[Path] = []
-        start_day = start_time.date() if start_time is not None else None
-        end_day = end_time.date() if end_time is not None else None
+        start_day = (
+            (start_time.astimezone(UTC) if start_time.tzinfo else start_time.replace(tzinfo=UTC)).date()
+            if start_time is not None
+            else None
+        )
+        end_day = (
+            (end_time.astimezone(UTC) if end_time.tzinfo else end_time.replace(tzinfo=UTC)).date()
+            if end_time is not None
+            else None
+        )
         for db_path in db_files:
             try:
                 day = date.fromisoformat(db_path.stem.removeprefix("data_"))

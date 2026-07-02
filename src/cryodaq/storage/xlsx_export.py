@@ -16,6 +16,27 @@ logger = logging.getLogger(__name__)
 _XLSX_MAX_ROWS = 1_048_576
 
 
+def _utc_day(dt: datetime | None) -> date | None:
+    """Return the UTC calendar day for a datetime (naive treated as UTC)."""
+    if dt is None:
+        return None
+    aware = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return aware.date()
+
+
+def _ts_sort_key(raw: object) -> float:
+    """Comparable sort key for mixed REAL/legacy-ISO timestamp keys.
+
+    A data dir may mix REAL(float) epoch timestamps and legacy ISO-string
+    timestamps; ``sorted`` on the raw keys raises TypeError. Normalize each
+    to an epoch float first.
+    """
+    try:
+        return _parse_timestamp(raw).timestamp()
+    except (ValueError, TypeError, OSError):
+        return float("inf")
+
+
 class XLSXExporter:
     """Экспортирует данные из SQLite daily-файлов в Excel .xlsx.
 
@@ -118,7 +139,7 @@ class XLSXExporter:
             by_time[r["timestamp"]][r["channel"]] = r["value"]
 
         row_num = 2
-        for ts_str in sorted(by_time.keys()):
+        for ts_str in sorted(by_time.keys(), key=_ts_sort_key):
             if row_num >= _XLSX_MAX_ROWS:
                 logger.warning(
                     "XLSX row limit reached (%d). Truncating export — some data omitted.",
@@ -141,8 +162,13 @@ class XLSXExporter:
             for col, ch in enumerate(unique_channels, 2):
                 v = channel_values.get(ch)
                 if v is not None:
-                    cell = ws_data.cell(row=row_num, column=col, value=round(v, 3))
-                    cell.number_format = "0.000"
+                    # Write the full float value (no pre-rounding): vacuum
+                    # pressures span 1e-3..1e-9 mbar and were collapsed to 0.000
+                    # by round(v, 3) + "0.000" format. "General" lets Excel pick
+                    # a representation that preserves both small and wide-range
+                    # magnitudes.
+                    cell = ws_data.cell(row=row_num, column=col, value=v)
+                    cell.number_format = "General"
 
             row_num += 1
 
@@ -207,6 +233,12 @@ class XLSXExporter:
         if start is None and end is None:
             return all_files
 
+        # Daily files are named by UTC day; normalize the caller-supplied
+        # range to UTC before deriving the day (mirrors ArchiveReader.query),
+        # otherwise early-hours rows in another tz drop the correct day file.
+        start_day = _utc_day(start)
+        end_day = _utc_day(end)
+
         result: list[Path] = []
         for path in all_files:
             date_str = path.stem.replace("data_", "")
@@ -214,9 +246,9 @@ class XLSXExporter:
                 file_date = date.fromisoformat(date_str)
             except ValueError:
                 continue
-            if start is not None and file_date < start.date():
+            if start_day is not None and file_date < start_day:
                 continue
-            if end is not None and file_date > end.date():
+            if end_day is not None and file_date > end_day:
                 continue
             result.append(path)
 

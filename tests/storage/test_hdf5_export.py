@@ -201,3 +201,65 @@ async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
                 )
 
         hf.visititems(_check_compression)
+
+
+# ---------------------------------------------------------------------------
+# 7. D-C15 — status column must be preserved (not dropped)
+# ---------------------------------------------------------------------------
+
+
+async def test_hdf5_preserves_status(tmp_path: Path) -> None:
+    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
+    readings = [
+        _reading("T_STAGE", 4.2, "K", ts=ts, status=ChannelStatus.OK),
+        _reading(
+            "T_STAGE",
+            4.3,
+            "K",
+            ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC),
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+    ]
+    db_path = _populate_db(tmp_path, readings)
+    output_path = tmp_path / "status.h5"
+
+    HDF5Exporter().export(db_path, output_path)
+
+    with h5py.File(str(output_path), "r") as hf:
+        grp = hf["ls218s"]["T_STAGE"]
+        assert "status" in grp, f"status dataset dropped: {list(grp.keys())}"
+        statuses = [
+            s.decode() if isinstance(s, bytes) else s for s in grp["status"]
+        ]
+        assert len(statuses) == 2, f"expected 2 statuses, got {statuses}"
+        assert statuses[0] == ChannelStatus.OK.value
+        assert statuses[1] == ChannelStatus.SENSOR_ERROR.value
+
+
+# ---------------------------------------------------------------------------
+# 8. D-C16 — channel names that sanitize to the same string must not crash
+# ---------------------------------------------------------------------------
+
+
+async def test_hdf5_sanitize_name_collision(tmp_path: Path) -> None:
+    """Two distinct names collapsing to one sanitized name must not raise.
+
+    'A:B' and 'A B' both sanitize to 'A_B'; naive require_group reuse then
+    fails on the second create_dataset('timestamp').
+    """
+    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
+    readings = [
+        _reading("A:B", 1.0, "K", ts=ts),
+        _reading("A B", 2.0, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
+    ]
+    db_path = _populate_db(tmp_path, readings)
+    output_path = tmp_path / "collide.h5"
+
+    count = HDF5Exporter().export(db_path, output_path)  # must not raise
+    assert count == 2, f"expected 2 exported readings, got {count}"
+
+    with h5py.File(str(output_path), "r") as hf:
+        inst = hf["ls218s"]
+        # Both channels must be represented as distinct groups
+        ch_groups = [k for k in inst if isinstance(inst[k], h5py.Group)]
+        assert len(ch_groups) == 2, f"collision dropped a channel: {ch_groups}"
