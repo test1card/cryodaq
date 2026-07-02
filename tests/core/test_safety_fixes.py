@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -56,6 +57,31 @@ async def _feed(
     r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test", status=status)
     await broker.publish(r)
     await asyncio.sleep(0.02)
+
+
+async def _publish_rising(broker, channel, *, start, step, count, base, dt_s=0.5):
+    """Publish `count` rising Kelvin readings on `channel` with EXPLICIT, evenly
+    spaced timestamps (base + i*dt_s).
+
+    The RateEstimator gates on the buffer's *timestamp* span (min_span_s=30 s),
+    not the sample count, so a steep rise must be simulated across a realistic
+    poll window rather than packed into milliseconds of wall-clock. dt_s=0.5 s ×
+    count≥60 gives ≥30 s of span while keeping the test near-instant. Returns the
+    timestamp just past the last sample so callers can chain a second batch.
+    """
+    ts = base
+    for i in range(count):
+        r = Reading(
+            timestamp=base + timedelta(seconds=i * dt_s),
+            instrument_id="test",
+            channel=channel,
+            value=start + i * step,
+            unit="K",
+        )
+        await broker.publish(r)
+        await asyncio.sleep(0.001)
+        ts = base + timedelta(seconds=(i + 1) * dt_s)
+    return ts
 
 
 async def _get_to_running(mgr, broker):
@@ -292,16 +318,15 @@ async def test_rate_limit_catches_critical_temperature():
     mgr._config.critical_channels = [re.compile("Т1.*")]
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
-        # Phase 2c CC I.3: SafetyManager rate estimator now requires >=60
-        # samples (was 10) before producing a slope estimate. The test
-        # therefore needs to push enough data to fill the buffer before any
-        # rate-based fault check can trigger.
-        for i in range(80):
-            # +1 K per sample at 1 ms cadence → effectively a steep rise
-            temp = 4.0 + i * 1.0
-            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
-            await broker.publish(r)
-            await asyncio.sleep(0.001)
+        # The rate estimator gates on the buffer's timestamp SPAN (min_span_s=30 s),
+        # not the sample count, so a steep rise must be simulated across a realistic
+        # ≥30 s poll window rather than packed into milliseconds of wall-clock.
+        # 80 samples × 0.5 s ≈ 40 s span; +1 K/sample ⇒ ~120 K/min, far above the
+        # 5 K/min limit. Timestamps are anchored in the recent past so they stay
+        # monotonic and ≤ now.
+        crit = "Т1 Криостат верх"
+        base = datetime.now(UTC) - timedelta(seconds=90)
+        next_ts = await _publish_rising(broker, crit, start=4.0, step=1.0, count=80, base=base)
 
         await asyncio.sleep(1.5)
 
@@ -313,12 +338,9 @@ async def test_rate_limit_catches_critical_temperature():
                 assert mgr.state == SafetyState.FAULT_LATCHED
                 return
 
-        # Feed more rapidly rising samples to keep triggering rate check
-        for i in range(80):
-            temp = 84.0 + i * 1.0
-            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
-            await broker.publish(r)
-            await asyncio.sleep(0.001)
+        # Feed more rapidly rising samples to keep triggering rate check,
+        # continuing the synthetic clock so the buffer span keeps growing.
+        await _publish_rising(broker, crit, start=84.0, step=1.0, count=80, base=next_ts)
 
         await asyncio.sleep(1.5)
 
@@ -344,23 +366,24 @@ async def test_rate_limit_ignores_non_critical_channel():
         assert result["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # Feed >=60 rapidly changing data on a NON-critical channel (T4 — disconnected sensor).
-        # 65 samples guarantees the rate estimator CAN compute a rate for this channel
-        # (needs >= min_points=60), so the test actually exercises the critical-channel
-        # gate rather than just relying on the estimator returning None.
-        for i in range(65):
-            temp = 4.0 + i * 10.0  # +10 K per sample → well above 5 K/min limit
-            r = Reading.now(channel="Т4 Радиатор 2", value=temp, unit="K", instrument_id="test")
-            await broker.publish(r)
-            await asyncio.sleep(0.01)
+        # Feed rapidly changing data on a NON-critical channel (T4 — disconnected sensor)
+        # across a synthetic ≥30 s span so the rate estimator ACTUALLY computes a
+        # rate for it (it gates on min_span_s=30 s, not sample count). This ensures
+        # the test exercises the critical-channel gate rather than passing only
+        # because the estimator returned None for too-short a window.
+        base = datetime.now(UTC)
+        await _publish_rising(
+            broker, "Т4 Радиатор 2", start=4.0, step=10.0, count=65, base=base
+        )  # +10 K/sample ⇒ well above the 5 K/min limit
 
         # Keep critical channel fresh so stale-check doesn't fire
         await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
         await asyncio.sleep(1.5)
 
-        # Confirm the estimator DID record the non-critical channel (received enough samples)
-        assert mgr._rate_estimator.buffer_size("Т4 Радиатор 2") >= 60, (
-            "Expected >=60 samples in rate estimator for Т4 to prove the channel gate was tested"
+        # Confirm the estimator DID compute a rate for the non-critical channel —
+        # proving the critical-channel gate (not a None rate) is what prevents the fault.
+        assert mgr._rate_estimator.get_rate("Т4 Радиатор 2") is not None, (
+            "Expected a computed rate for Т4 (≥30 s span) to prove the channel gate was tested"
         )
         assert mgr.state == SafetyState.RUNNING, (
             f"Non-critical channel rate must not trigger FAULT_LATCHED, got {mgr.state}"
@@ -418,16 +441,13 @@ async def test_rate_limit_faults_on_critical_channel():
         assert (await mgr.request_run(0.5, 40.0, 1.0))["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # Drive a steep dT/dt on the critical channel. The RateEstimator needs
-        # >= min_points (60) samples in-window before it reports a rate, so feed
-        # 65 rising samples (+0.5 K each, kept < 40 K). dT/dt is then far above
-        # the 5 K/min limit.
-        for i in range(65):
-            r = Reading.now(
-                channel=crit, value=4.5 + i * 0.5, unit="K", instrument_id="test"
-            )
-            await broker.publish(r)
-            await asyncio.sleep(0.01)
+        # Drive a steep dT/dt on the critical channel. The RateEstimator reports a
+        # rate only once the buffer spans >= min_span_s (30 s) — a poll-rate-
+        # independent gate — so feed 65 rising samples (+0.5 K each, kept < 40 K)
+        # across a synthetic 0.5 s cadence ≈ 32 s span. dT/dt is then far above the
+        # 5 K/min limit. Timestamps continue from the READY-reaching _feed above.
+        base = datetime.now(UTC)
+        await _publish_rising(broker, crit, start=4.5, step=0.5, count=65, base=base)
         await asyncio.sleep(1.5)
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
