@@ -386,6 +386,7 @@ class SensorDiagnosticsEngine:
 
                 if (
                     elapsed >= self._critical_duration_s
+                    and state.current_status == "critical"
                     and state.last_critical_published_ts is None
                 ):
                     event = self._alarm_publisher.publish_diagnostic_alarm(
@@ -653,6 +654,13 @@ class SensorDiagnosticsEngine:
         correlation: float | None,
         T_current: float,
     ) -> int:
+        # NaN current reading → cannot be scored healthy (D-C19). A NaN
+        # slips through the disconnected(>350)/shorted(<=0) comparisons
+        # (all comparisons with NaN are False) and would otherwise reach
+        # the insufficient-data branch below and return 100.
+        if not math.isfinite(T_current):
+            return 0
+
         # Disconnected / shorted → immediate low score
         if T_current > 350.0 or T_current <= 0.0:
             return 0
