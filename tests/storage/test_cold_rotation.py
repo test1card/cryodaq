@@ -537,8 +537,11 @@ def test_operator_log_preserved_on_rotation(tmp_path: Path) -> None:
 
 
 def test_source_data_rows_block_deletion(tmp_path: Path) -> None:
-    """If source_data holds rows (no cold export), the SQLite file is kept."""
+    """CR-3 follow-up: a day with unexported source_data rows is NOT rotated at
+    all — SQLite kept, no Parquet written, and the file is left out of the index
+    so it stays a future candidate and cannot be double-counted."""
     import asyncio
+    import json as _json
 
     data_dir = tmp_path / "data"
     archive_dir = tmp_path / "archive"
@@ -574,10 +577,16 @@ def test_source_data_rows_block_deletion(tmp_path: Path) -> None:
 
     results = asyncio.run(service.run_once(now=today))
 
-    assert len(results) == 1
-    # readings preserved in Parquet, but SQLite kept because source_data has rows
-    assert results[0].archive_path.exists()
+    # Rotation is skipped entirely for this file.
+    assert results == [], "day with unexported source_data must not be rotated"
     assert db_path.exists(), "SQLite with unexported source_data rows must be kept"
+    # Nothing written to cold storage...
+    assert list(archive_dir.rglob("*.parquet")) == []
+    # ...and the file is not recorded in the index (stays a future candidate).
+    index_file = archive_dir / "index.json"
+    if index_file.exists():
+        idx = _json.loads(index_file.read_text(encoding="utf-8"))
+        assert all(f["original_name"] != old_name for f in idx.get("files", []))
 
 
 # ---------------------------------------------------------------------------

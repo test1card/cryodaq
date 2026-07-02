@@ -224,6 +224,22 @@ class ColdRotationService:
 
         size_original = db_path.stat().st_size
 
+        # Step 0 (CR-3 follow-up): source_data has no cold-storage export yet.
+        # If this day carries source_data rows, do NOT rotate at all. Rotating
+        # would either destroy them (Step 5 delete) or leave the file kept but
+        # already index-marked as rotated — excluding it from future candidates
+        # forever and double-counting its readings for any reader that unions
+        # the live DB with the cold Parquet. Skip cleanly (nothing written,
+        # nothing indexed, file stays a candidate); revisit when source_data
+        # gains a cold-export path.
+        if self._table_has_rows(db_path, "source_data"):
+            logger.warning(
+                "source_data in %s has rows and no cold export exists — "
+                "skipping rotation entirely (SQLite kept, not indexed)",
+                db_path.name,
+            )
+            return None
+
         # Step 1: Read all rows from SQLite
         try:
             rows = self._read_all_rows(db_path)
@@ -332,19 +348,12 @@ class ColdRotationService:
                 (self._archive_dir / operator_log_rel).unlink(missing_ok=True)
             return None
 
-        # Step 5: Delete SQLite + sidecars — ONLY if every table that holds rows
-        # has been preserved. source_data has no cold-storage export yet; if it
-        # carries rows, keep the SQLite file rather than destroy them (CR-3).
-        if self._table_has_rows(db_path, "source_data"):
-            logger.warning(
-                "source_data in %s has rows and no cold export exists — keeping "
-                "SQLite file to avoid data loss (readings preserved in Parquet)",
-                db_path.name,
-            )
-        else:
-            for suffix in ("", "-wal", "-shm"):
-                sidecar = db_path.parent / (db_path.name + suffix)
-                sidecar.unlink(missing_ok=True)
+        # Step 5: Delete SQLite + sidecars. Safe now: readings and operator_log
+        # are preserved in Parquet, and source_data was verified empty at entry
+        # (Step 0), so no table with rows is destroyed.
+        for suffix in ("", "-wal", "-shm"):
+            sidecar = db_path.parent / (db_path.name + suffix)
+            sidecar.unlink(missing_ok=True)
 
         logger.info(
             "Rotated %s → %s (%d rows, %.1f MB → %.1f MB)",
