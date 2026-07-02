@@ -9,6 +9,58 @@
 
 ## [Unreleased]
 
+---
+
+## [0.57.0] — 2026-07-02 — аудит безопасности: fail-closed на краях
+
+Пакет исправлений по итогам исчерпывающего adversarial-аудита от 2026-07-01.
+Ядро safety-FSM подтверждено как надёжное; исправления закрывают места, где
+периферия отказывала «в открытую» (fail-open) вместо fail-closed, плюс ряд
+ошибок корректности в экспорте, аналитике и ротации холодного хранилища.
+Каждое исправление сопровождается тестом, который падал на старом коде.
+
+### Changed
+
+- **emergency_off теперь fail-closed.** При невозможности подтвердить, что выход
+  SMU выключен (ошибка записи или readback показывает «включено»), SafetyManager
+  латчит `FAULT_LATCHED` вместо ложного перехода в `SAFE_OFF`. Раньше это молча
+  останавливало весь мониторинг (stale/heartbeat/rate) при потенциально всё ещё
+  подающем питание источнике. `Keithley2604B.emergency_off` возвращает `bool`
+  (2ea47f4).
+- **Rate-of-rise защита (5 K/min) взводится по временно́му охвату данных, а не по
+  числу точек.** `min_span_s=30` вместо `min_points=60`: при реальном опросе
+  LakeShore 2.0 s это убирает ~120-секундное «слепое окно» на входе в RUNNING и
+  устойчиво к пропущенным опросам (a017358).
+- **Runtime-калибровка вне диапазона откатывается на KRDG.** Значение SRDG за
+  пределами калибровки больше не «замораживается» на границе с `status=OK` (что
+  обнуляло dT/dt и слепило rate-защиту) — публикуется нативный KRDG (b38c360).
+- **Детерминированный выбор активной калибровочной кривой после рестарта** — по
+  сохранённому назначению, иначе по новейшему `fit_timestamp`, вместо порядка
+  glob; `assign_curve` теперь учитывает явный `curve_id` (c55963e).
+- Веб-дэшборд в документации привязан к loopback (127.0.0.1), а не 0.0.0.0
+  (8701e88).
+
+### Fixed
+
+- **Ротация холодного хранилища больше не уничтожает `operator_log` и
+  `source_data`.** Раньше экспортировалась только таблица `readings`, после чего
+  весь дневной SQLite-файл удалялся. Теперь `operator_log` сохраняется в
+  companion-Parquet с проверкой числа строк (fail-closed), а день с непере­несёнными
+  `source_data` не ротируется вовсе; `index.json` пишется атомарно (902a194,
+  61bfed3).
+- **NaN больше не отравляет rolling-эстиматоры.** Non-finite отсекается перед
+  подачей в alarm-v2 rate / sensor-diagnostics / vacuum-trend; один NaN не
+  ослепляет оценку на всё окно (bb62193, 366fa18).
+- Sensor-diagnostics не эскалирует в CRITICAL по одному лишь истёкшему времени —
+  требуется фактический критический статус; канал из одних NaN больше не
+  оценивается как «здоровый» (366fa18).
+- Cooldown-предиктор не выдаёт NaN ETA при обнулении всех progress-весов;
+  `VacuumTrendPredictor.push` отклоняет non-finite (366fa18).
+- Экспорт: XLSX сохраняет малые значения (давление 1e-9 mbar больше не 0.000) и
+  не падает на смешанных TEXT/REAL timestamp; CSV/XLSX/operator-log фильтруют
+  дневные файлы по UTC-дню (а не по таймзоне вызывающего); HDF5 сохраняет колонку
+  `status` и устойчив к коллизиям имён (0e01724).
+
 ### Infrastructure
 
 - CI lint gate доведён до зелёного: ruff auto-fixes (F401/I001/UP), `line-length`
@@ -17,6 +69,40 @@
   с pyzmq 27.x).
 - Починены 7 ранее падавших тестов, которые CI не показывал, потому что
   обрывался на шаге линта до запуска pytest.
+
+### Known Issues
+
+- **Interlock + NaN:** пороговые интерлоки не срабатывают на NaN (сравнения с NaN
+  ложны). Оставлено без изменений намеренно (риск ложных emergency-off);
+  критические каналы уже покрыты NaN-fault в SafetyManager. Решение по политике —
+  за архитектором.
+- F17/F28 (`ColdRotationService`, `ArchiveReader`) остаются НЕ подключёнными к
+  рантайму; документация приведена в соответствие (2c001ad). Логика ротации
+  исправлена «на будущее».
+- Отложено: регенерация `requirements-lock.txt`, base-dir jail для путей
+  калибровки, удаление orphaned legacy-виджетов, sentinel для non-finite в
+  persistence-first.
+
+### Test baseline
+
+- Полный `pytest -q` — зелёный. Затронутые срезы (core/storage/analytics/drivers)
+  плюс новые audit-fix тесты проходят; ruff clean.
+
+### Tags
+
+- `v0.57.0` → merge-commit d187a46 (feat/audit-fixes → master).
+
+### Selected commits in this release
+
+- 2ea47f4 — emergency_off fail-closed
+- b38c360 — calibration KRDG fallback
+- 902a194, 61bfed3 — cold rotation preserves operator_log/source_data
+- a017358 — rate-gate span-based
+- bb62193 — NaN estimator guards
+- c55963e — deterministic calibration curve selection
+- 0e01724 — storage export correctness
+- 366fa18 — analytics numerical guards
+- 2c001ad, 8701e88 — doc accuracy (F17/ArchiveReader, loopback bind)
 
 ---
 
