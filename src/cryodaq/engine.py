@@ -2371,13 +2371,14 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             while True:
                 reading: Reading = await queue.get()
-                # HI-2: drop NaN/inf so error readings don't poison diagnostics buffers
-                _push_if_finite(
-                    sensor_diag.push,
-                    reading.channel,
-                    reading.timestamp.timestamp(),
-                    reading.value,
-                )
+                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно;
+                # не годное показание не отравляет буферы диагностики.
+                if reading.is_usable():
+                    sensor_diag.push(
+                        reading.channel,
+                        reading.timestamp.timestamp(),
+                        reading.value,
+                    )
         except asyncio.CancelledError:
             return
 
@@ -2440,9 +2441,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                         continue
                 elif not pressure_channel and reading.unit != "mbar":
                     continue
-                # HI-2/ME-15: VacuumTrendPredictor.push only rejects P <= 0,
-                # so NaN would slip through — drop non-finite here.
-                _push_if_finite(vacuum_trend.push, reading.timestamp.timestamp(), reading.value)
+                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно.
+                # push сохраняет свою доменную защиту P <= 0 (log₁₀ не определён).
+                if reading.is_usable():
+                    vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
         except asyncio.CancelledError:
             return
 

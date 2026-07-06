@@ -401,6 +401,11 @@ class CooldownService:
                 reading_ts = reading.timestamp.timestamp()
                 self._last_reading_ts = reading_ts
 
+                # NaN-доктрина: не годное показание (NaN/±inf или статус ошибки)
+                # не попадает в детектор/буфер — staleness всё равно обновлён.
+                if not reading.is_usable():
+                    continue
+
                 if reading.channel == self._channel_cold:
                     self._last_T_cold = reading.value
                     # Update detector (use reading timestamp for correct dT/dt)
