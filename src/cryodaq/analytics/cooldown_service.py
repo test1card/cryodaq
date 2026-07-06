@@ -223,6 +223,11 @@ class CooldownService:
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
 
+        # Task 8a: lazily-loaded cooldown_baseline config from plugins.yaml
+        # (None = not loaded yet). The fingerprint tap is flag-guarded and
+        # off the hot path, so we read plugins.yaml once, on first cooldown end.
+        self._baseline_cfg: dict[str, Any] | None = None
+
         # F-ReplayPredictor (v0.56.3): track latest reading timestamp from
         # the data stream so predict() works correctly with accelerated
         # replay (where wall-clock time and reading timestamps decouple).
@@ -597,7 +602,74 @@ class CooldownService:
                 except Exception as exc:
                     logger.error("Ошибка auto-ingest: %s", exc)
 
+        # Task 8a: persist a cooldown fingerprint BEFORE clearing the buffer.
+        # Flag-guarded, off hot-path, and never allowed to break cooldown-end
+        # handling — the helper swallows and logs every error.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            self._persist_cooldown_fingerprint,
+            t_hours,
+            T_cold,
+        )
+
         # Reset for next cycle
         self._buffer.clear()
         self._cooldown_wall_start = None
         self._detector.reset()
+
+    def _load_baseline_config(self) -> dict[str, Any]:
+        """Load the ``cooldown_baseline`` block from plugins.yaml once.
+
+        Cached on the instance. Returns an empty dict on any failure so the
+        tap simply stays disabled.
+        """
+        if self._baseline_cfg is not None:
+            return self._baseline_cfg
+        cfg: dict[str, Any] = {}
+        try:
+            import yaml
+
+            from cryodaq.paths import get_config_dir
+
+            path = get_config_dir() / "plugins.yaml"
+            if path.exists():
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                cfg = raw.get("cooldown_baseline", {}) or {}
+        except Exception as exc:  # noqa: BLE001 — config read must never raise here
+            logger.error("Ошибка чтения cooldown_baseline из plugins.yaml: %s", exc)
+        self._baseline_cfg = cfg
+        return cfg
+
+    def _persist_cooldown_fingerprint(self, t_hours: Any, T_cold: Any) -> None:
+        """Best-effort: build + persist a cooldown fingerprint. Never raises.
+
+        Vacuum enrichment (ultimate_vacuum) is left null here: the service has
+        no SQLite reader handle, and wiring one requires touching engine
+        construction (out of scope for this backend task). ``build_fingerprint``
+        accepts a ``pressures`` series, so the capability is available for a
+        later off-hot-path enrichment.
+        """
+        try:
+            cfg = self._load_baseline_config()
+            if not cfg.get("enabled", False):
+                return
+
+            from cryodaq.analytics.cooldown_fingerprint import (
+                build_fingerprint,
+                save_fingerprint,
+            )
+            from cryodaq.paths import get_data_dir
+
+            fp = build_fingerprint(
+                list(t_hours),
+                list(T_cold),
+                cooldown_start_ts=self._detector.cooldown_start_ts or 0.0,
+                base_threshold_K=float(cfg.get("base_threshold_K", 5.0)),
+                pressures=None,
+            )
+            history_dir = get_data_dir() / "cooldown_history"
+            save_fingerprint(fp, history_dir)
+            logger.info("Cooldown fingerprint сохранён: %s", fp.fingerprint_id)
+        except Exception as exc:  # noqa: BLE001 — tap must never break cooldown end
+            logger.error("Ошибка сохранения cooldown fingerprint: %s", exc)

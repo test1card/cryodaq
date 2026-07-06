@@ -50,3 +50,12 @@ vacuum_trend:
   trend_threshold_log10_per_s: 1.0e-4     # d(log₁₀P)/dt threshold
   extrapolation_horizon_factor: 2.0       # extrapolate 2× window ahead
   pressure_channel: ""                     # auto-detect any mbar-unit reading
+
+cooldown_baseline:
+  # Task 8a: per-cooldown fingerprint + golden-baseline comparison (backend).
+  # Additive and opt-in — when disabled the cooldown-end tap is a no-op.
+  enabled: false
+  base_threshold_K: 5.0                     # T_cold at/below this = "at base"
+  thresholds:
+    time_to_base_frac: 0.30                 # >+30% time-to-base vs golden -> degraded
+    vacuum_decades: 1.0                     # >=1 decade worse ultimate vacuum -> degraded
