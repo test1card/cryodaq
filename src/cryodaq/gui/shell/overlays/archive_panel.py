@@ -386,7 +386,17 @@ class ArchivePanel(QWidget):
         root.addWidget(self._build_banner())
         root.addWidget(self._build_filter_bar_card())
         root.addWidget(self._build_content_split(), stretch=1)
+        root.addWidget(self._build_cooldown_history_card())
         root.addWidget(self._build_export_card())
+
+    def _build_cooldown_history_card(self) -> QWidget:
+        # Task 8b: «История охлаждений» — reads fingerprints/baseline from
+        # data/cooldown_history/ directly (no engine round-trip). Degrades to
+        # an empty state when cooldown_baseline is disabled or history empty.
+        from cryodaq.gui.shell.overlays.cooldown_baseline_card import CooldownBaselineCard
+
+        self._cooldown_history_card = CooldownBaselineCard()
+        return self._cooldown_history_card
 
     def _build_header(self) -> QWidget:
         header = QWidget()

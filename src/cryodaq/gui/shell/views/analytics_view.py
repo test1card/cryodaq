@@ -33,7 +33,7 @@ from pathlib import Path
 
 import yaml
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -159,8 +159,28 @@ class AnalyticsView(QWidget):
         # the log. Cleared on every phase transition via _apply_layout.
         self._warned_setters: set[tuple[str, str | None]] = set()
 
-        self._grid = QGridLayout(self)
-        self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        # Outer column: a persistent cooldown-baseline verdict badge on top
+        # (Task 8b — hidden when the feature is disabled or no baseline set),
+        # then the phase-aware grid. The grid lives on an inner container so
+        # `_place_in_slot` / `active_widgets` keep their existing semantics.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        outer.setSpacing(theme.SPACE_2)
+
+        from cryodaq.gui.shell.overlays.cooldown_baseline_card import CooldownVerdictBadge
+
+        self._verdict_badge = CooldownVerdictBadge()
+        badge_row = QHBoxLayout()
+        badge_row.setContentsMargins(0, 0, 0, 0)
+        badge_row.setSpacing(theme.SPACE_2)
+        badge_row.addStretch()
+        badge_row.addWidget(self._verdict_badge)
+        outer.addLayout(badge_row)
+
+        grid_host = QWidget()
+        outer.addWidget(grid_host, stretch=1)
+        self._grid = QGridLayout(grid_host)
+        self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(theme.SPACE_3)
         # Layout is intentionally NOT applied here. _ensure_overlay in
         # MainWindowV2 calls set_phase() exactly once after construction,
@@ -182,6 +202,8 @@ class AnalyticsView(QWidget):
         self._layout_applied = True
         key = _resolve_phase_key(phase, self._layout_config)
         self._apply_layout(key)
+        # Re-read the on-disk fingerprint/baseline state (cheap, phase-rate).
+        self._verdict_badge.refresh()
 
     def current_phase(self) -> str | None:
         return self._phase
