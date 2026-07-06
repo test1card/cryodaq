@@ -43,6 +43,19 @@ _IV_FIELDS = (
     ("power", "W"),
 )
 
+# TSP dead-man watchdog (Task 9): inert firmware backstop below the host
+# SafetyManager, gated on _wdog_enabled (default False). See tsp/cryodaq_wdog.lua.
+_WDOG_SCRIPT: str | None = None
+
+
+def _load_wdog_script() -> str:
+    global _WDOG_SCRIPT
+    if _WDOG_SCRIPT is None:
+        from cryodaq.paths import get_tsp_dir
+
+        _WDOG_SCRIPT = (get_tsp_dir() / "cryodaq_wdog.lua").read_text(encoding="utf-8")
+    return _WDOG_SCRIPT
+
 
 @dataclass
 class ChannelRuntime:
@@ -60,11 +73,17 @@ class Keithley2604B(InstrumentDriver):
         resource_str: str,
         *,
         mock: bool = False,
+        watchdog_enabled: bool = False,
+        watchdog_timeout_s: float = 5.0,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
         self._transport = USBTMCTransport(mock=mock)
         self._instrument_id = ""
+        # TSP dead-man watchdog plumbing (default OFF → byte-identical stream).
+        self._wdog_enabled = bool(watchdog_enabled)
+        self._wdog_timeout_s = float(watchdog_timeout_s)
+        self._wdog_armed = False
         self._channels: dict[SmuChannel, ChannelRuntime] = {
             "smua": ChannelRuntime(channel="smua"),
             "smub": ChannelRuntime(channel="smub"),
@@ -114,11 +133,13 @@ class Keithley2604B(InstrumentDriver):
             await self._transport.close()
             raise
         self._connected = True
+        await self._wdog_arm()
 
     async def disconnect(self) -> None:
         if not self._connected:
             return
         await self.emergency_off()
+        await self._wdog_disarm()
         await self._transport.close()
         self._connected = False
 
@@ -128,6 +149,8 @@ class Keithley2604B(InstrumentDriver):
 
         if self.mock:
             return self._mock_readings()
+
+        await self._wdog_pet()
 
         readings: list[Reading] = []
         for smu_channel in SMU_CHANNELS:
@@ -388,6 +411,66 @@ class Keithley2604B(InstrumentDriver):
         except Exception as exc:
             log.error("%s: diagnostics error: %s", self.name, exc)
         return result
+
+    # --- TSP dead-man watchdog (Task 9) -------------------------------------
+    # All methods are no-ops unless _wdog_enabled and not mock, so the default
+    # command stream is byte-identical to the pre-watchdog driver.
+
+    async def _wdog_arm(self) -> None:
+        """Upload + arm the firmware watchdog. NON-fatal on failure: connect
+        still succeeds, _wdog_armed stays False, and a CRITICAL log flags the
+        degraded run (SafetyManager remains the sole host-side authority — the
+        firmware backstop is simply absent)."""
+        if not self._wdog_enabled or self.mock:
+            return
+        try:
+            await self._transport.write(_load_wdog_script())
+            await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
+            await self._transport.write("cryodaq_wdog_run()")
+            self._wdog_armed = True
+            log.info("%s: TSP watchdog armed (timeout=%.1fs)", self.name, self._wdog_timeout_s)
+        except Exception as exc:
+            self._wdog_armed = False
+            log.critical(
+                "%s: TSP watchdog upload/arm FAILED — running WITHOUT firmware "
+                "backstop (degraded): %s",
+                self.name,
+                exc,
+            )
+
+    async def _wdog_pet(self) -> None:
+        """Refresh the firmware deadline. No-op unless enabled+armed."""
+        if not (self._wdog_enabled and self._wdog_armed) or self.mock:
+            return
+        try:
+            await self._transport.write("cryodaq_wdog_pet()")
+        except Exception as exc:
+            log.error("%s: TSP watchdog pet failed: %s", self.name, exc)
+
+    async def _wdog_disarm(self) -> None:
+        """Clean release of the firmware watchdog on disconnect."""
+        if not (self._wdog_enabled and self._wdog_armed) or self.mock:
+            return
+        try:
+            await self._transport.write("cryodaq_wdog_disarm()")
+        except Exception as exc:
+            log.error("%s: TSP watchdog disarm failed: %s", self.name, exc)
+        finally:
+            self._wdog_armed = False
+
+    async def wdog_tripped(self) -> bool:
+        """True iff the firmware watchdog latched a trip (killed outputs while
+        the host was away). Inert (returns False, no bus I/O) unless the
+        watchdog is enabled+armed on a real connected instrument — so the
+        SafetyManager reconcile is a no-op under the default-OFF flag."""
+        if not (self._wdog_enabled and self._wdog_armed) or self.mock or not self._connected:
+            return False
+        try:
+            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+            return float(raw.strip()) > 0.5
+        except Exception as exc:
+            log.error("%s: TSP watchdog trip query failed: %s", self.name, exc)
+            return False
 
     async def _verify_output_off(self, channel: str) -> bool:
         """Readback-verify that ``channel``'s output is OFF.

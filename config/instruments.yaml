@@ -81,6 +81,16 @@ instruments:
     mode: averaged
     target_rate_hz: 1.0
 
+# Keithley 2604B TSP dead-man watchdog (firmware backstop below the host
+# SafetyManager). DEFAULT OFF — go-live is a separate bench-verified phase.
+# When enabled, the driver uploads tsp/cryodaq_wdog.lua on connect and pets
+# it on every poll; a missed deadline kills both SMU outputs in firmware and
+# latches a trip the host reconciles to FAULT.
+keithley:
+  watchdog:
+    enabled: false
+    timeout_s: 5.0
+
 chamber:
   volume_l: 0.0  # OPERATOR: set actual chamber volume in litres
   leak_rate:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import re
@@ -1065,6 +1066,27 @@ class SafetyManager:
                     return
 
         if self._keithley is not None and not self._mock:
+            # Watchdog reconcile: if the firmware dead-man watchdog killed the
+            # outputs while the host was away, latch FAULT. Silently re-arming
+            # over a tripped watchdog is worse than having no watchdog. Inert
+            # unless the driver's watchdog is enabled+armed (wdog_tripped()
+            # returns False, no bus I/O, under the default-OFF flag). getattr +
+            # isawaitable keep it safe against drivers/test doubles lacking the
+            # method (returns a non-awaitable → skipped, no false fault).
+            wdog_check = getattr(self._keithley, "wdog_tripped", None)
+            if callable(wdog_check):
+                try:
+                    result = wdog_check()
+                    tripped = await result if inspect.isawaitable(result) else False
+                except Exception as exc:
+                    logger.error("Watchdog reconcile query failed: %s", exc)
+                    tripped = False
+                if tripped:
+                    await self._fault(
+                        "Keithley firmware watchdog tripped — outputs killed while host away"
+                    )
+                    return
+
             if self._active_sources:
                 for smu_channel in sorted(self._active_sources):
                     if not self._has_fresh_keithley_data(now, smu_channel):

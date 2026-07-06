@@ -1757,7 +1757,14 @@ def _load_drivers(
         elif itype == "keithley_2604b":
             from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
-            driver = Keithley2604B(name, resource, mock=mock)
+            wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
+            driver = Keithley2604B(
+                name,
+                resource,
+                mock=mock,
+                watchdog_enabled=bool(wdog_cfg.get("enabled", False)),
+                watchdog_timeout_s=float(wdog_cfg.get("timeout_s", 5.0)),
+            )
         elif itype == "thyracont_vsp63d":
             from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
 
