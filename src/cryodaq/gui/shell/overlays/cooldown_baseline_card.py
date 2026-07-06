@@ -27,6 +27,7 @@ collision with the unrelated F3 ``CooldownHistoryWidget`` (duration plot).
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -204,10 +205,15 @@ class CooldownBaselineCard(QWidget):
         super().__init__(parent)
         self._history_dir = Path(history_dir) if history_dir else _default_history_dir()
         cfg = _load_baseline_cfg(config_path)
-        self._enabled = bool(cfg.get("enabled", False)) if enabled is None else bool(enabled)
+        # Strict-bool: a quoted YAML `enabled: "false"` must NOT enable the
+        # card (mirrors the engine-side watchdog fix, commit b132fab).
+        self._enabled = (
+            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
+        )
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._entries: list[CooldownFingerprint] = []
         self._baseline_id: str | None = None
+        self._populated = False
 
         self.setObjectName("cooldownBaselineCard")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -219,11 +225,22 @@ class CooldownBaselineCard(QWidget):
             f"}}"
         )
         self._build_ui()
-        self.refresh()
+        # Populate is deferred to the first showEvent: the Архив overlay is
+        # built on demand, so this keeps the fingerprint glob+parse off the
+        # shell-construction path and off users who never open the card.
+        # ponytail: sync FS read on the GUI thread, bounded by first-show +
+        # local disk; move list+compare to a QThread worker if the history
+        # dir ever lives on network storage.
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt override
+        super().showEvent(event)
+        if not self._populated:
+            self._populated = True
+            self.refresh()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -453,9 +470,13 @@ class CooldownVerdictBadge(QLabel):
         super().__init__(parent)
         self._history_dir = Path(history_dir) if history_dir else _default_history_dir()
         cfg = _load_baseline_cfg(config_path)
-        self._enabled = bool(cfg.get("enabled", False)) if enabled is None else bool(enabled)
+        # Strict-bool: quoted YAML `enabled: "false"` must NOT enable the badge.
+        self._enabled = (
+            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
+        )
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._verdict: str | None = None
+        self._last_read_ts: float | None = None
 
         self.setObjectName("cooldownVerdictBadge")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -467,10 +488,23 @@ class CooldownVerdictBadge(QLabel):
         self.setFont(font)
         self.refresh()
 
+    # Throttle disk re-reads: the badge refreshes on every phase change, so
+    # skip the fingerprint glob+parse if the last read was very recent.
+    # ponytail: fixed 5 s window on the GUI thread; move list+compare to a
+    # QThread worker if the history dir ever lives on network storage.
+    _READ_THROTTLE_S = 5.0
+
     def verdict(self) -> str | None:
         return self._verdict
 
     def refresh(self) -> None:
+        now = time.monotonic()
+        if (
+            self._last_read_ts is not None
+            and now - self._last_read_ts < self._READ_THROTTLE_S
+        ):
+            return
+        self._last_read_ts = now
         self._verdict = self._compute_verdict()
         if self._verdict is None:
             self.setVisible(False)

@@ -35,6 +35,12 @@ def _app() -> QApplication:
     return app
 
 
+def _show(card) -> None:
+    """Trigger the card's deferred first populate (Fix B) via showEvent."""
+    card.show()
+    _app().processEvents()
+
+
 def _fp(
     fid: str,
     *,
@@ -71,6 +77,7 @@ def test_card_empty_state_when_disabled(tmp_path: Path) -> None:
     _app()
     _seed(tmp_path)
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=False)
+    _show(card)
     assert card._empty_label.isVisibleTo(card)
     assert not card._table.isVisibleTo(card)
     assert card._table.rowCount() == 0
@@ -79,6 +86,7 @@ def test_card_empty_state_when_disabled(tmp_path: Path) -> None:
 def test_card_empty_state_when_history_empty(tmp_path: Path) -> None:
     _app()
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
     assert card._empty_label.isVisibleTo(card)
     assert card._table.rowCount() == 0
 
@@ -87,6 +95,7 @@ def test_card_populates_from_history(tmp_path: Path) -> None:
     _app()
     _seed(tmp_path)
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
     assert card._table.rowCount() == 2
     assert not card._empty_label.isVisible()
     ids = {fp.fingerprint_id for fp in card.entries()}
@@ -97,6 +106,7 @@ def test_pin_selected_writes_baseline_pointer(tmp_path: Path) -> None:
     _app()
     _seed(tmp_path)
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
     card.select_fingerprint("cd_1000")
     card._on_pin_clicked()
     assert (tmp_path / BASELINE_POINTER).exists()
@@ -109,6 +119,7 @@ def test_delta_display_vs_baseline(tmp_path: Path) -> None:
     _seed(tmp_path)
     set_baseline("cd_1000", tmp_path)
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
     card.select_fingerprint("cd_2000")
     text = card._delta_label.text()
     # +10 h vs the 10 h baseline = +100% time-to-base — delta must be shown.
@@ -153,3 +164,82 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
     set_baseline("cd_1000", tmp_path)
     badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
     assert badge.verdict() == "ok"
+
+
+# --------------------------------------------------------------------------
+# Fix A — strict-bool `enabled` parse (quoted YAML "false" must not enable)
+# --------------------------------------------------------------------------
+
+
+def _write_cfg(tmp_path: Path, enabled_value: str) -> Path:
+    cfg = tmp_path / "plugins.yaml"
+    cfg.write_text(
+        f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8"
+    )
+    return cfg
+
+
+def test_card_quoted_false_config_disables(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    cfg = _write_cfg(tmp_path, '"false"')
+    card = CooldownBaselineCard(history_dir=tmp_path, config_path=cfg)
+    _show(card)
+    assert card._enabled is False
+    assert card._empty_label.isVisibleTo(card)
+    assert not card._table.isVisibleTo(card)
+
+
+def test_badge_quoted_false_config_disables(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    set_baseline("cd_1000", tmp_path)
+    cfg = _write_cfg(tmp_path, '"false"')
+    badge = CooldownVerdictBadge(history_dir=tmp_path, config_path=cfg)
+    assert badge.verdict() is None
+
+
+# --------------------------------------------------------------------------
+# Fix B — deferred card populate + throttled badge reads
+# --------------------------------------------------------------------------
+
+
+def test_card_defers_directory_read_until_shown(tmp_path: Path, monkeypatch) -> None:
+    _app()
+    _seed(tmp_path)
+    import cryodaq.gui.shell.overlays.cooldown_baseline_card as mod
+
+    calls = {"n": 0}
+    real = mod.list_fingerprints
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "list_fingerprints", counting)
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    assert calls["n"] == 0  # constructed but not shown → no disk listing
+    _show(card)
+    assert calls["n"] >= 1  # showEvent triggers the populate
+    assert card._table.rowCount() == 2
+
+
+def test_badge_throttles_reads_within_window(tmp_path: Path, monkeypatch) -> None:
+    _app()
+    _seed(tmp_path)
+    set_baseline("cd_1000", tmp_path)
+    import cryodaq.gui.shell.overlays.cooldown_baseline_card as mod
+
+    calls = {"n": 0}
+    real = mod.list_fingerprints
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "list_fingerprints", counting)
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    first = calls["n"]
+    assert first >= 1  # ctor reads
+    badge.refresh()  # immediate second refresh is throttled
+    assert calls["n"] == first
