@@ -146,6 +146,47 @@ def test_state_endpoint_shape(client) -> None:
     assert "channels" in data
 
 
+def test_alarms_redacts_acknowledged_by(client) -> None:
+    """/api/v1/alarms must not leak the operator who acknowledged an alarm."""
+    active = {
+        "T1_high": {
+            "level": "warning",
+            "message": "T1 high",
+            "acknowledged": True,
+            "acknowledged_by": "SECRET_OPERATOR",
+        }
+    }
+
+    async def _fake(req: dict) -> dict:
+        assert req == {"cmd": "alarm_v2_status"}
+        return {"ok": True, "active": active}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = client.get("/api/v1/alarms")
+
+    assert resp.status_code == 200
+    assert "SECRET_OPERATOR" not in resp.text
+    alarm = resp.json()["active"]["T1_high"]
+    assert "acknowledged_by" not in alarm
+    assert alarm["level"] == "warning"
+    assert alarm["acknowledged"] is True
+
+
+def test_state_redacts_acknowledged_by(client) -> None:
+    """/api/v1/state must not leak acknowledged_by via active_alarms."""
+    from cryodaq.web import server
+
+    server._state.active_alarms = {
+        "T1_high": {"level": "warning", "acknowledged_by": "SECRET_OPERATOR"}
+    }
+    resp = client.get("/api/v1/state")
+    assert resp.status_code == 200
+    assert "SECRET_OPERATOR" not in resp.text
+    alarm = resp.json()["active_alarms"]["T1_high"]
+    assert "acknowledged_by" not in alarm
+    assert alarm["level"] == "warning"
+
+
 def test_docs_available(client) -> None:
     """Swagger UI is served (FastAPI default)."""
     resp = client.get("/docs")

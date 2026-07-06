@@ -261,3 +261,38 @@ def test_deadline_arithmetic_contract() -> None:
 def test_default_timeout_is_five_seconds() -> None:
     drv = _driver(enabled=True)
     assert drv._wdog_timeout_s == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# (i) config parse is strict-bool: a quoted YAML string must fail closed
+# ---------------------------------------------------------------------------
+
+
+def _load_keithley_driver(tmp_path, enabled_literal: str):
+    from cryodaq.engine import _load_drivers
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text(
+        "keithley:\n"
+        "  watchdog:\n"
+        f"    enabled: {enabled_literal}\n"
+        "instruments:\n"
+        "  - type: keithley_2604b\n"
+        "    name: k2604\n"
+        "    resource: USB0::FAKE\n",
+        encoding="utf-8",
+    )
+    return _load_drivers(cfg, mock=True)[0].driver
+
+
+@pytest.mark.parametrize("literal", ['"false"', '"true"', '"0"'])
+def test_config_wdog_enabled_requires_real_bool(tmp_path, literal) -> None:
+    """A quoted/truthy-string ``enabled`` must fail closed (watchdog OFF)."""
+    drv = _load_keithley_driver(tmp_path, literal)
+    assert drv._wdog_enabled is False
+
+
+def test_config_wdog_enabled_true_bool_arms(tmp_path) -> None:
+    """Only the literal YAML boolean ``true`` enables the watchdog."""
+    drv = _load_keithley_driver(tmp_path, "true")
+    assert drv._wdog_enabled is True

@@ -210,6 +210,56 @@ def test_history_clamps_hostile_request(writer_with_data) -> None:
         assert len(points) <= _HISTORY_MAX_ROWS
 
 
+def test_mixed_rate_channels_each_get_their_limit(tmp_path: Path) -> None:
+    """A fast channel must not crowd out a slow one's rows (mixed rates are
+    normal: vacuum vs thermometry). 10 old rows on "quiet" + 100 newer rows
+    on "noisy", limit_per_channel=10 -> BOTH channels return their latest 10.
+    """
+    os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    writer = SQLiteWriter(tmp_path)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(writer.start_immediate())
+    try:
+        base_ts = float(int(time.time()) - 7200)
+        readings: list[Reading] = []
+        # 10 OLD rows on "quiet" (earliest timestamps).
+        for i in range(10):
+            readings.append(
+                Reading(
+                    timestamp=datetime.fromtimestamp(base_ts + i, tz=UTC),
+                    instrument_id="VSP63D",
+                    channel="quiet",
+                    value=float(i),
+                    unit="mbar",
+                    status=ChannelStatus.OK,
+                )
+            )
+        # 100 NEWER rows on "noisy" (all after the quiet rows).
+        for i in range(100):
+            readings.append(
+                Reading(
+                    timestamp=datetime.fromtimestamp(base_ts + 100 + i, tz=UTC),
+                    instrument_id="LS218_1",
+                    channel="noisy",
+                    value=float(i),
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            )
+        loop.run_until_complete(writer.write_immediate(readings))
+
+        data = writer._read_readings_history(channels=["quiet", "noisy"], limit_per_channel=10)
+        assert len(data.get("quiet", [])) == 10, (
+            f"quiet channel crowded out: got {len(data.get('quiet', []))} rows"
+        )
+        assert len(data.get("noisy", [])) == 10, (
+            f"noisy channel wrong count: got {len(data.get('noisy', []))} rows"
+        )
+    finally:
+        loop.run_until_complete(writer.stop())
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_async_read_readings_history(writer_with_data) -> None:
     """Async wrapper must return the same data as the sync implementation."""

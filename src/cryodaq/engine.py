@@ -1781,7 +1781,10 @@ def _load_drivers(
                 name,
                 resource,
                 mock=mock,
-                watchdog_enabled=bool(wdog_cfg.get("enabled", False)),
+                # Strict-bool, fail-closed: a quoted YAML string ("false") is
+                # truthy in Python and would arm this bench-blocked safety path
+                # on a config typo. Only the literal boolean True enables it.
+                watchdog_enabled=wdog_cfg.get("enabled", False) is True,
                 watchdog_timeout_s=float(wdog_cfg.get("timeout_s", 5.0)),
             )
         elif itype == "thyracont_vsp63d":

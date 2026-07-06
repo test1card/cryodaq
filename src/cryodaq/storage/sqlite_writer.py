@@ -760,34 +760,40 @@ class SQLiteWriter:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.row_factory = sqlite3.Row
                 try:
-                    query = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
-                    params: list[Any] = []
+                    base = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
+                    time_clause = ""
+                    time_params: list[Any] = []
                     if from_ts is not None:
-                        query += " AND timestamp >= ?"
-                        params.append(from_ts)
+                        time_clause += " AND timestamp >= ?"
+                        time_params.append(from_ts)
                     if to_ts is not None:
-                        query += " AND timestamp <= ?"
-                        params.append(to_ts)
-                    col_count = len(channels) if channels else _HISTORY_MAX_CHANNELS
+                        time_clause += " AND timestamp <= ?"
+                        time_params.append(to_ts)
+
+                    def _collect(query: str, params: list[Any]) -> None:
+                        for row in conn.execute(query, params).fetchall():
+                            ch = row["channel"]
+                            if ch not in result:
+                                result[ch] = []
+                            result[ch].append((float(row["timestamp"]), float(row["value"])))
+
                     if channels:
-                        placeholders = ",".join("?" for _ in channels)
-                        query += f" AND channel IN ({placeholders})"
-                        params.extend(channels)
-                    # Push LIMIT into SQL so we never fetchall() the whole file:
-                    # newest-first + LIMIT bounds the fetch to at most the rows
-                    # that could survive per-channel truncation. Balanced DAQ
-                    # sampling (all channels written per scan) makes this exact;
-                    # per-file rows are re-sorted ASC and truncated below.
-                    # ponytail: assumes roughly balanced per-channel sampling; a
-                    # pathologically noisy single channel could crowd the LIMIT —
-                    # switch to a per-channel query only if that ever bites.
-                    query += " ORDER BY timestamp DESC LIMIT ?"
-                    params.append(limit_per_channel * col_count)
-                    for row in conn.execute(query, params).fetchall():
-                        ch = row["channel"]
-                        if ch not in result:
-                            result[ch] = []
-                        result[ch].append((float(row["timestamp"]), float(row["value"])))
+                        # Per-channel bounded query: each channel gets its own
+                        # newest-first LIMIT, so a fast channel (e.g. thermometry)
+                        # can't crowd out a slow one (e.g. vacuum) — mixed sampling
+                        # rates are normal. Rows are re-sorted ASC and merged below.
+                        for ch in channels:
+                            _collect(
+                                base + time_clause + " AND channel = ? ORDER BY timestamp DESC LIMIT ?",
+                                [*time_params, ch, limit_per_channel],
+                            )
+                    else:
+                        # No channel filter: bound the total fetch as before so we
+                        # never fetchall() the whole file.
+                        _collect(
+                            base + time_clause + " ORDER BY timestamp DESC LIMIT ?",
+                            [*time_params, limit_per_channel * _HISTORY_MAX_CHANNELS],
+                        )
                 finally:
                     conn.close()
             except Exception:

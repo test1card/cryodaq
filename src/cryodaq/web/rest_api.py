@@ -111,6 +111,23 @@ def _readings_with_unit(unit: str) -> list[dict[str, Any]]:
     return [r for r in server._state.last_readings.values() if r.get("unit") == unit]
 
 
+_REDACT_KEYS = frozenset({"acknowledged_by"})
+
+
+def _redact(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
+    """Recursively strip operator-identity keys from a plain dict/list payload.
+
+    ``/state`` and ``/alarms`` return engine dicts verbatim (no Pydantic model),
+    so active alarms would otherwise leak ``acknowledged_by`` — the operator who
+    acknowledged an alarm — over the unauthenticated facade.
+    """
+    if isinstance(obj, dict):
+        return {k: _redact(v, keys) for k, v in obj.items() if k not in keys}
+    if isinstance(obj, list):
+        return [_redact(v, keys) for v in obj]
+    return obj
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — all GET, all read-only, all field-whitelisted
 # ---------------------------------------------------------------------------
@@ -119,7 +136,7 @@ def _readings_with_unit(unit: str) -> list[dict[str, Any]]:
 @router.get("/state")
 async def get_state() -> dict[str, Any]:
     """System status snapshot (uptime, instruments, safety, alarm counts)."""
-    return server._state.status_json()
+    return _redact(server._state.status_json())
 
 
 @router.get("/readings", response_model=list[ReadingOut])
@@ -153,7 +170,7 @@ async def get_alarms() -> dict[str, Any]:
     try:
         result = await server._async_engine_command({"cmd": "alarm_v2_status"})
         if result.get("ok"):
-            return {"ok": True, "active": result.get("active", {})}
+            return {"ok": True, "active": _redact(result.get("active", {}))}
     except Exception:
         server.logger.warning("api/v1 alarms fetch failed")
     return {"ok": False, "active": {}}
