@@ -216,6 +216,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/housekeeping.py`
 - `src/cryodaq/core/interlock.py` — threshold detection, delegates actions to SafetyManager
 - `src/cryodaq/core/operator_log.py`
+- `src/cryodaq/core/path_jail.py` — resolve_within(): confinement путей внутри базовой директории (ME-6, calibration import/export)
 - `src/cryodaq/core/phase_labels.py` — canonical Russian phase labels (shared)
 - `src/cryodaq/core/physical_alarms_config.py` — загрузка `config/physical_alarms.yaml` (tunables для CooldownAlarm и VacuumGuard)
 - `src/cryodaq/core/rate_estimator.py` — rolling dT/dt estimator with min_points gate

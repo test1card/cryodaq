@@ -86,9 +86,15 @@ async def test_calibration_curve_export_import(
     assert payload["curve_id"] == original_curve_id
 
     imported_store = CalibrationStore(tmp_path / "imported")
+    # ME-6: imports are confined to the store's exports dir, so the operator
+    # drops the file to import inside that dir and references it by name.
+    imported_store._exports_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    _curve_json = json_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+    drop_target = imported_store._exports_dir / "sensor-002.json"
+    drop_target.write_text(_curve_json, encoding="utf-8")  # noqa: ASYNC240
     imported = _run_calibration_command(
         "calibration_curve_import",
-        {"path": exported["json_path"]},
+        {"path": "sensor-002.json"},
         calibration_store=imported_store,
         experiment_manager=experiment_manager,
         drivers_by_name={},
