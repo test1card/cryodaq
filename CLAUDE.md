@@ -341,6 +341,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/shell/overlays/archive_panel.py` — experiment archive overlay (Phase II.2)
 - `src/cryodaq/gui/shell/overlays/calibration_panel.py` — three-mode calibration overlay (Phase II.7)
 - `src/cryodaq/gui/shell/overlays/conductivity_panel.py` — thermal conductivity overlay (Phase II.5)
+- `src/cryodaq/gui/shell/overlays/cooldown_baseline_card.py` — карточка «История охлаждений» + verdict badge (эталонное охлаждение, cooldown baseline)
 - `src/cryodaq/gui/shell/overlays/instruments_panel.py` — instruments + sensor diagnostics overlay (Phase II.8)
 - `src/cryodaq/gui/shell/overlays/keithley_panel.py` — dual-channel Keithley 2604B operator overlay (Phase II.6)
 - `src/cryodaq/gui/shell/overlays/knowledge_base_panel.py` — RAG knowledge base + embedded Гемма chat
