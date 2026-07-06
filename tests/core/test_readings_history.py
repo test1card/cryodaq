@@ -162,6 +162,54 @@ def test_read_readings_history_sorted_asc(writer_with_data) -> None:
         assert timestamps == sorted(timestamps), f"Channel {ch} not sorted ASC"
 
 
+def test_history_limit_floored_to_one(writer_with_data) -> None:
+    """limit_per_channel <= 0 must floor to 1, not fall through to the full set.
+
+    Regression guard for the ``result[-0:]`` Python quirk: a zero limit used to
+    slice to the whole list and return every row (unbounded), the opposite of a
+    limit. Fail-closed: a non-positive limit returns the single latest point.
+    """
+    writer, base_ts = writer_with_data
+    data = writer._read_readings_history(limit_per_channel=0)
+    assert len(data["Т1 Камера"]) == 1, (
+        f"limit_per_channel=0 must floor to 1 latest point, got {len(data['Т1 Камера'])}"
+    )
+    # The one returned point must be the newest (row 99).
+    assert abs(data["Т1 Камера"][0][1] - (4.2 + 99 * 0.01)) < 1e-5
+
+
+def test_history_channel_list_capped(writer_with_data) -> None:
+    """A channel list longer than the cap is truncated; channels past the cap drop.
+
+    Trust-boundary clamp: readings_history is reachable from unauthenticated
+    loopback ZMQ, so an over-long channel list must be bounded. A real channel
+    placed past the 64-channel cap must NOT come back.
+    """
+    from cryodaq.storage.sqlite_writer import _HISTORY_MAX_CHANNELS
+
+    writer, base_ts = writer_with_data
+    # 64 filler names, then a real channel at index 64 (just past the cap).
+    channels = [f"fake_{i}" for i in range(_HISTORY_MAX_CHANNELS)] + ["Т1 Камера"]
+    data = writer._read_readings_history(channels=channels)
+    assert "Т1 Камера" not in data, (
+        "channel past the cap must be dropped by the channel-list clamp"
+    )
+
+
+def test_history_clamps_hostile_request(writer_with_data) -> None:
+    """limit=10_000_000 + 500 channels returns clamped, bounded counts, no error."""
+    from cryodaq.storage.sqlite_writer import _HISTORY_MAX_ROWS
+
+    writer, base_ts = writer_with_data
+    channels = ["Т1 Камера", "Т2 Экран", "P Камера"] + [f"fake_{i}" for i in range(497)]
+    data = writer._read_readings_history(channels=channels, limit_per_channel=10_000_000)
+    # Real channels within the first 64 entries still return their (small) data.
+    assert len(data["Т1 Камера"]) == 100
+    # No channel exceeds the row cap.
+    for ch, points in data.items():
+        assert len(points) <= _HISTORY_MAX_ROWS
+
+
 @pytest.mark.asyncio
 async def test_async_read_readings_history(writer_with_data) -> None:
     """Async wrapper must return the same data as the sync implementation."""
