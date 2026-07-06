@@ -459,3 +459,27 @@ async def test_rate_limit_faults_on_critical_channel():
         )
     finally:
         await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
+# CR-2 third call site — interlock stop_source must honor emergency_off() bool.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_interlock_stop_source_faults_when_off_unconfirmed():
+    """stop_source interlock: emergency_off() returning False (OFF not
+    confirmed) must escalate to FAULT_LATCHED, not fall through to SAFE_OFF."""
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=False)  # output NOT confirmed off
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _get_to_running(mgr, broker)
+        await mgr.on_interlock_trip(
+            "overheat_soft", "Т5 Радиатор", 320.0, action="stop_source"
+        )
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"unconfirmed OFF on interlock stop must latch FAULT, got {mgr.state}"
+        )
+    finally:
+        await mgr.stop()

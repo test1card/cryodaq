@@ -1151,7 +1151,7 @@ class SafetyManager:
             async with self._cmd_lock:
                 if self._keithley is not None:
                     try:
-                        await self._keithley.emergency_off()
+                        ok = await self._keithley.emergency_off()
                     except Exception as exc:
                         logger.error(
                             "stop_source interlock: emergency_off failed: %s — "
@@ -1164,6 +1164,17 @@ class SafetyManager:
                         # serialize behind the lock until _fault returns.
                         await self._fault(
                             f"{reason} (emergency_off failed: {exc})",
+                            channel=channel,
+                            value=value,
+                        )
+                        return
+                    # CR-2 contract: emergency_off never raises and returns
+                    # True iff all channels verified OFF. An unconfirmed OFF
+                    # (False) must NOT soft-stop to SAFE_OFF — fail closed and
+                    # latch FAULT, same as the other emergency_off call sites.
+                    if not ok:
+                        await self._fault(
+                            f"{reason} (emergency_off could not confirm OFF)",
                             channel=channel,
                             value=value,
                         )
