@@ -65,6 +65,15 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
+# Audit C.2 / Codex D6: socket-level size caps on the unauthenticated
+# loopback command/data path. libzmq (ZMQ_MAXMSGSIZE) drops an oversize
+# frame before it is allocated in user space — this is the trust-boundary
+# guard, not the post-recv len() check. Commands are small JSON; data
+# frames are single msgpack Readings. Both caps are deliberately generous
+# vs. real traffic so legitimate payloads are never clipped.
+MAX_CMD_MSG_SIZE = 256 * 1024  # 256 KiB — commands are tiny JSON objects
+MAX_DATA_MSG_SIZE = 2 * 1024 * 1024  # 2 MiB — one msgpack Reading, generous
+
 # IV.3 Finding 7: per-command tiered handler timeout.
 # A flat 2 s envelope was wrong for stateful transitions —
 # experiment_finalize / abort / create and calibration curve
@@ -185,8 +194,25 @@ def _pack_reading(reading: Reading) -> bytes:
 
 
 def _unpack_reading(payload: bytes) -> Reading:
-    """Десериализовать Reading из msgpack."""
-    data = msgpack.unpackb(payload, raw=False)
+    """Десериализовать Reading из msgpack.
+
+    Defence in depth over the SUB socket's ``ZMQ_MAXMSGSIZE`` cap: reject an
+    oversize frame up front (guards paths that don't come through the capped
+    socket), and bound each decoded element so a crafted frame can't drive a
+    huge allocation during unpacking. msgpack 1.x has no ``max_buffer_size``
+    on ``unpackb`` — the per-type ``max_*_len`` caps are the equivalent, and
+    they raise ``ValueError`` when exceeded.
+    """
+    if len(payload) > MAX_DATA_MSG_SIZE:
+        raise ValueError(f"msgpack frame too large: {len(payload)} > {MAX_DATA_MSG_SIZE}")
+    data = msgpack.unpackb(
+        payload,
+        raw=False,
+        max_str_len=MAX_DATA_MSG_SIZE,
+        max_bin_len=MAX_DATA_MSG_SIZE,
+        max_array_len=MAX_DATA_MSG_SIZE,
+        max_map_len=MAX_DATA_MSG_SIZE,
+    )
     return Reading(
         timestamp=datetime.fromtimestamp(data["ts"], tz=UTC),
         instrument_id=data.get("iid", ""),
@@ -337,6 +363,9 @@ class ZMQSubscriber:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.SUB)
         self._socket.setsockopt(zmq.LINGER, 0)
+        # Audit C.2 / Codex D6: drop oversize inbound frames at the socket
+        # level, before libzmq allocates them (set before connect()).
+        self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_DATA_MSG_SIZE)
         self._socket.setsockopt(zmq.RECONNECT_IVL, 500)
         self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)
         self._socket.setsockopt(zmq.RCVTIMEO, 3000)
@@ -589,6 +618,10 @@ class ZMQCommandServer:
         self._socket = self._ctx.socket(zmq.REP)
         # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
         self._socket.setsockopt(zmq.LINGER, 0)
+        # Audit C.2 / Codex D6: cap inbound command frames at the socket
+        # level so libzmq drops an oversize command before allocation
+        # (set before bind()).
+        self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)
         # IV.6: TCP_KEEPALIVE previously added on the idle-reap
         # hypothesis (commit f5f9039). Reverted — the actual fix is
         # an ephemeral per-command REQ socket on the GUI subprocess
