@@ -191,3 +191,110 @@ def test_docs_available(client) -> None:
     """Swagger UI is served (FastAPI default)."""
     resp = client.get("/docs")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# P4-1: write-auth token infrastructure (require_write_token dependency)
+#
+# The dependency is exercised through a throwaway app so no production probe
+# surface exists (write endpoints arrive in P4-2). Config is loaded from a
+# per-test tmp dir by monkeypatching rest_api.get_config_dir.
+# ---------------------------------------------------------------------------
+
+_TOKEN = "s3cr3t-operator-token-xyz-987654321"
+
+
+def _make_write_app():
+    """Throwaway app: one write route behind require_write_token, one read."""
+    from fastapi import Depends, FastAPI
+
+    from cryodaq.web.rest_api import require_write_token
+
+    app = FastAPI()
+
+    @app.post("/_probe", dependencies=[Depends(require_write_token)])
+    async def _probe() -> dict[str, bool]:  # pragma: no cover - trivial
+        return {"ok": True}
+
+    @app.get("/_read")
+    async def _read() -> dict[str, bool]:  # pragma: no cover - trivial
+        return {"ok": True}
+
+    return app
+
+
+def _write_local_config(config_dir, token: str) -> None:
+    (config_dir / "web.local.yaml").write_text(
+        f'web:\n  api_token: "{token}"\n', encoding="utf-8"
+    )
+
+
+@pytest.fixture()
+def write_client(monkeypatch, tmp_path):
+    """TestClient over the throwaway write app with config dir = tmp_path."""
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
+    with TestClient(_make_write_app()) as c:
+        yield c, tmp_path
+
+
+def test_no_token_configured_returns_403(write_client) -> None:
+    """Fail-closed: no web.local.yaml ⇒ every write route returns 403."""
+    client, _tmp = write_client  # no config written
+    resp = client.post("/_probe", headers={"Authorization": f"Bearer {_TOKEN}"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "API token не настроен"
+
+
+def test_missing_auth_header_returns_401(write_client) -> None:
+    """Token configured but no Authorization header ⇒ 401."""
+    client, tmp = write_client
+    _write_local_config(tmp, _TOKEN)
+    resp = client.post("/_probe")
+    assert resp.status_code == 401
+
+
+def test_wrong_token_returns_401(write_client) -> None:
+    """Token configured, wrong bearer ⇒ 401."""
+    client, tmp = write_client
+    _write_local_config(tmp, _TOKEN)
+    resp = client.post("/_probe", headers={"Authorization": "Bearer nope-wrong"})
+    assert resp.status_code == 401
+
+
+def test_correct_token_passes(write_client) -> None:
+    """Correct bearer ⇒ dependency passes, route runs."""
+    client, tmp = write_client
+    _write_local_config(tmp, _TOKEN)
+    resp = client.post("/_probe", headers={"Authorization": f"Bearer {_TOKEN}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_reads_never_require_token(write_client) -> None:
+    """GET routes never touch the dependency — no token, still 200."""
+    client, tmp = write_client
+    _write_local_config(tmp, _TOKEN)  # even with a token configured
+    resp = client.get("/_read")
+    assert resp.status_code == 200
+
+
+def test_token_absent_from_logs(write_client, caplog) -> None:
+    """The token value must never reach the logs (SecretStr + no-log path)."""
+    import logging
+
+    client, tmp = write_client
+    _write_local_config(tmp, _TOKEN)
+    with caplog.at_level(logging.DEBUG):
+        # both an authenticated hit and a rejected one
+        client.post("/_probe", headers={"Authorization": f"Bearer {_TOKEN}"})
+        client.post("/_probe", headers={"Authorization": "Bearer wrong"})
+    assert _TOKEN not in caplog.text
+
+
+def test_secret_str_masks_token_repr() -> None:
+    """The loaded token is a SecretStr — repr/str never expose the value."""
+    from cryodaq.notifications._secrets import SecretStr
+
+    s = SecretStr(_TOKEN)
+    assert _TOKEN not in repr(s)
+    assert _TOKEN not in str(s)

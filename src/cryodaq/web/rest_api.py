@@ -19,12 +19,17 @@ Loopback-only, unauthenticated by design (SSH tunnel for LAN); see the
 
 from __future__ import annotations
 
+import hmac
 from typing import Any
 
-from fastapi import APIRouter, Request
+import yaml
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
+
+from cryodaq.notifications._secrets import SecretStr
+from cryodaq.paths import get_config_dir
 
 # Imported as a module (not names) so handlers read live state and the patched
 # _async_engine_command used by tests, and to keep the import non-circular:
@@ -36,6 +41,58 @@ from cryodaq.web import server
 MAX_BODY_BYTES = 1 * 1024 * 1024
 
 router = APIRouter(prefix="/api/v1", tags=["read-only"])
+
+
+# ---------------------------------------------------------------------------
+# Write-auth token (P4-1) — fail-closed Bearer check for FUTURE write routes
+#
+# The token lives ONLY in config/web.local.yaml (gitignored, never the tracked
+# yaml) under web.api_token, mirroring the *.local.yaml override pattern the
+# engine uses and the SecretStr wrapping the Telegram token uses. GET routes
+# never depend on this; reads stay open on loopback.
+# ---------------------------------------------------------------------------
+
+
+def _load_api_token() -> SecretStr | None:
+    """Return the configured write-API token, or None if unset/unreadable.
+
+    None ⇒ fail closed (403). Read fresh per call: write traffic is
+    operator-rate, so re-reading the small local yaml is cheap and lets the
+    operator drop in a token without restarting the web process.
+    """
+    path = get_config_dir() / "web.local.yaml"
+    if not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        web = raw.get("web") or {}
+        token = web.get("api_token")
+    except Exception:
+        return None  # malformed config ⇒ fail closed
+    if not token:
+        return None
+    return SecretStr(str(token))
+
+
+async def require_write_token(authorization: str | None = Header(default=None)) -> None:
+    """FastAPI dependency guarding write routes.
+
+    - No token configured  ⇒ 403 «API token не настроен» (fail-closed default).
+    - Missing/wrong bearer  ⇒ 401 (constant-time compare via hmac.compare_digest).
+
+    Never logs or echoes the token; the SecretStr wrapper keeps it out of
+    reprs/tracebacks and the error bodies carry no secret material.
+    """
+    token = _load_api_token()
+    if token is None:
+        raise HTTPException(status_code=403, detail="API token не настроен")
+    presented = ""
+    if authorization and authorization.startswith("Bearer "):
+        presented = authorization[len("Bearer ") :]
+    # Compare bytes: str compare_digest raises TypeError on non-ASCII input,
+    # which an attacker could send in the header to force a 500.
+    if not hmac.compare_digest(presented.encode(), token.get_secret_value().encode()):
+        raise HTTPException(status_code=401, detail="Неверный API token")
 
 
 # ---------------------------------------------------------------------------
