@@ -8,8 +8,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import statistics
 from collections import deque
+
+logger = logging.getLogger(__name__)
 
 
 class RateEstimator:
@@ -36,10 +40,16 @@ class RateEstimator:
         window_s: float = 120.0,
         min_points: int = 60,
         min_span_s: float | None = None,
+        clock_jump_poll_factor: float = 4.0,
     ) -> None:
         self._window_s = window_s
         self._min_points = min_points
         self._min_span_s = min_span_s
+        # C-5 clock guard: forward jump > factor x established poll period
+        # triggers a reset. 4.0 is the ratified doctrine value; exposed as a
+        # calibration knob (real poll cadence jitters) rather than a YAML
+        # config value — it is a fixed safety constant, not deployment data.
+        self._clock_jump_poll_factor = clock_jump_poll_factor
         # Safety cap: 2× window at 10 Hz + 100 margin.
         # Prevents unbounded growth if trim lags; actual usage is window_s × sample_rate.
         self._maxlen: int = max(500, int(window_s * 20) + 100)
@@ -51,6 +61,23 @@ class RateEstimator:
     def push(self, channel: str, timestamp: float, value: float) -> None:
         """Добавить точку. Автоматически удаляет точки старше окна."""
         buf = self._buffers.setdefault(channel, deque(maxlen=self._maxlen))
+        if buf and self._is_clock_jump(buf, timestamp):
+            # C-5 reset-not-drop: an NTP step (backward, or forward > 4x poll)
+            # corrupts measurement-time ordering. Dropping the sample would
+            # blind the 5 K/min protection until maxlen eviction (~forever
+            # after a permanent step). Clearing re-anchors on the current
+            # sample, bounding blindness to the min_span_s refill window.
+            gap = timestamp - buf[-1][0]
+            logger.warning(
+                "Clock jump on channel %s: gap %+.1f s exceeds guard "
+                "(backward or > %.0fx poll) — resetting rate buffer (%d samples), "
+                "re-anchoring; dT/dt protection re-arms after refill",
+                channel,
+                gap,
+                self._clock_jump_poll_factor,
+                len(buf),
+            )
+            buf.clear()
         buf.append((timestamp, value))
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:
@@ -59,6 +86,28 @@ class RateEstimator:
         short = channel.split(" ", 1)[0] if " " in channel else channel
         if short != channel:
             self._short_to_full[short] = channel
+
+    def _is_clock_jump(self, buf: deque[tuple[float, float]], timestamp: float) -> bool:
+        """True if `timestamp` is a clock jump relative to the channel buffer.
+
+        Backward gap (< 0) is always a jump. Forward gap is a jump only if it
+        exceeds ``clock_jump_poll_factor`` x the buffer's established poll
+        period, estimated as the median of recent inter-sample gaps. The
+        median is used (not config) because RateEstimator has no poll-cadence
+        knowledge and different instruments poll at different rates; the median
+        is per-channel, robust to occasional missed polls, and needs no
+        plumbing. With < 2 samples the cadence is unknown, so only backward
+        jumps are caught until enough gaps accumulate.
+        """
+        gap = timestamp - buf[-1][0]
+        if gap < 0.0:
+            return True
+        if len(buf) < 2:
+            return False
+        # ponytail: median over the window-bounded buffer (O(n), n <= ~window/poll).
+        gaps = [buf[i + 1][0] - buf[i][0] for i in range(len(buf) - 1)]
+        period = statistics.median(gaps)
+        return period > 0.0 and gap > self._clock_jump_poll_factor * period
 
     def resolve_channel(self, channel: str) -> str:
         """Resolve short channel ID to full runtime name."""

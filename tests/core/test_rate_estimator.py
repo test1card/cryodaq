@@ -143,24 +143,23 @@ def test_rate_custom_window_insufficient() -> None:
     """Недостаточно точек в кастомном окне → None.
 
     Total points >= min_points (60) so the global buffer is populated, but
-    only the RECENT 30 points fall within the custom 60s window. This
-    isolates the custom-window in-window filtering: get_rate_custom_window
-    must return None because the 60s window contains < min_points points,
-    not because the buffer as a whole is too small.
+    only the recent points fall within the custom 60s window. This isolates
+    the custom-window in-window filtering: get_rate_custom_window must return
+    None because the 60s window contains < min_points points, not because the
+    buffer as a whole is too small.
+
+    Sampling is continuous at 1.5s so the C-5 clock guard never fires (no gap
+    > 4x poll): 100 points span 148.5s, a 60s window holds only ~40 of them.
     """
     est = RateEstimator(window_s=600.0, min_points=60)
     t0 = 1_000_000.0
 
-    # Old batch: 60 points far outside the 60s custom window (200s ago)
-    for i in range(60):
-        est.push("T1", t0 + i, 4.2 + i * 0.01)
+    # 100 continuous points at 1.5s spacing → 148.5s span, all inside the 600s
+    # buffer window; the recent 60s custom window contains only ~40 points.
+    for i in range(100):
+        est.push("T1", t0 + i * 1.5, 4.2 + i * 0.01)
 
-    # Recent batch: only 30 points within the 60s custom window
-    t1 = t0 + 200.0  # 200s gap → old batch is 200-260s ago, outside 60s window
-    for i in range(30):
-        est.push("T1", t1 + i, 100.0 + i * 0.01)
-
-    # Buffer has 90 total points (>= 60), but only 30 are in the 60s window
+    # Buffer has 100 total points (>= 60), but < 60 are in the 60s window
     assert est.buffer_size("T1") >= 60, "Pre-condition: buffer must have >= 60 total points"
     assert est.get_rate_custom_window("T1", window_s=60.0) is None, (
         "get_rate_custom_window must return None when < min_points points are in the window, "
