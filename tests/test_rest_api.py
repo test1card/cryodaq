@@ -131,9 +131,12 @@ def test_oversize_body_returns_413_before_engine(client) -> None:
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
-@pytest.mark.parametrize("path", ["/api/v1/state", "/api/v1/experiment", "/api/v1/log"])
+@pytest.mark.parametrize(
+    "path", ["/api/v1/state", "/api/v1/experiment", "/api/v1/readings", "/api/v1/alarms"]
+)
 def test_write_verbs_are_rejected(client, method: str, path: str) -> None:
-    """The facade is read-only: no mutating verb is allowed on any path."""
+    """Read-only GET paths reject every mutating verb (405). The only write
+    verbs on /api/v1 are the two allowlisted POSTs (see P4-2 block below)."""
     resp = client.request(method, path)
     assert resp.status_code == 405
 
@@ -298,3 +301,210 @@ def test_secret_str_masks_token_repr() -> None:
     s = SecretStr(_TOKEN)
     assert _TOKEN not in repr(s)
     assert _TOKEN not in str(s)
+
+
+# ---------------------------------------------------------------------------
+# P4-2: allowlisted write endpoints (POST /log, POST /alarms/{id}/ack)
+#
+# Each forwards ONE existing engine command through the same
+# server._async_engine_command path the reads use, behind require_write_token.
+# The operator-identity field is server-set (never client-supplied): no
+# impersonation. The write surface is closed — no other mutating route exists.
+# ---------------------------------------------------------------------------
+
+_REST_IDENTITY = "REST API"
+
+
+@pytest.fixture()
+def auth_client(monkeypatch, tmp_path):
+    """Production app with a configured write token (config dir = tmp_path)."""
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
+    (tmp_path / "web.local.yaml").write_text(
+        f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8"
+    )
+    with patch("cryodaq.web.server._zmq_to_ws_bridge"):
+        app = create_app()
+        with TestClient(app) as c:
+            yield c
+
+
+_AUTH = {"Authorization": f"Bearer {_TOKEN}"}
+
+
+# --- POST /api/v1/log -------------------------------------------------------
+
+
+def test_post_log_forwards_log_entry_command(auth_client) -> None:
+    """POST /log forwards cmd=log_entry with the operator's message."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True, "entry": {"id": 1, "message": cmd["message"]}}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = auth_client.post(
+            "/api/v1/log", headers=_AUTH, json={"message": "проверка насоса"}
+        )
+
+    assert resp.status_code == 200
+    assert captured["cmd"] == "log_entry"
+    assert captured["message"] == "проверка насоса"
+
+
+def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
+    """The author forwarded to the engine is the REST identity, never client
+    input — and a client-supplied author key is rejected (422), not honored."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True, "entry": {"id": 1}}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        ok = auth_client.post(
+            "/api/v1/log", headers=_AUTH, json={"message": "hi"}
+        )
+        spoof = auth_client.post(
+            "/api/v1/log",
+            headers=_AUTH,
+            json={"message": "hi", "author": "victim"},
+        )
+
+    assert ok.status_code == 200
+    assert captured["author"] == _REST_IDENTITY
+    assert spoof.status_code == 422  # extra field forbidden — no impersonation
+
+
+def test_post_log_extra_field_rejected(auth_client) -> None:
+    """Unknown keys → 422 (strict request model)."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post(
+            "/api/v1/log", headers=_AUTH, json={"message": "x", "bogus": 1}
+        )
+    assert resp.status_code == 422
+
+
+def test_post_log_empty_message_rejected(auth_client) -> None:
+    """Empty message → 422 before any engine call."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": ""})
+    assert resp.status_code == 422
+
+
+def test_post_log_without_token_is_401(auth_client) -> None:
+    """No Authorization header → 401, engine never called."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post("/api/v1/log", json={"message": "x"})
+    assert resp.status_code == 401
+
+
+def test_post_log_wrong_token_is_401(auth_client) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post(
+            "/api/v1/log",
+            headers={"Authorization": "Bearer nope"},
+            json={"message": "x"},
+        )
+    assert resp.status_code == 401
+
+
+def test_post_log_no_token_configured_is_403(monkeypatch, tmp_path) -> None:
+    """No web.local.yaml ⇒ fail-closed 403 for writes."""
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
+    with patch("cryodaq.web.server._zmq_to_ws_bridge"):
+        app = create_app()
+        with TestClient(app) as c:
+            resp = c.post("/api/v1/log", headers=_AUTH, json={"message": "x"})
+    assert resp.status_code == 403
+
+
+# --- POST /api/v1/alarms/{alarm_id}/ack ------------------------------------
+
+
+def test_post_ack_forwards_alarm_v2_ack_command(auth_client) -> None:
+    """POST /alarms/{id}/ack forwards cmd=alarm_v2_ack for that alarm."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True, "alarm_name": cmd["alarm_name"], "event_emitted": True}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+
+    assert resp.status_code == 200
+    assert captured["cmd"] == "alarm_v2_ack"
+    assert captured["alarm_name"] == "T1_high"
+
+
+def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
+    """acknowledged_by (operator) is the REST identity, never client input;
+    a client-supplied operator key is rejected (422)."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        ok = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+        spoof = auth_client.post(
+            "/api/v1/alarms/T1_high/ack", headers=_AUTH, json={"operator": "victim"}
+        )
+
+    assert ok.status_code == 200
+    assert captured["operator"] == _REST_IDENTITY
+    assert spoof.status_code == 422
+
+
+def test_post_ack_without_token_is_401(auth_client) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post("/api/v1/alarms/T1_high/ack")
+    assert resp.status_code == 401
+
+
+# --- Swagger + allowlist closure -------------------------------------------
+
+
+def test_write_endpoints_declare_bearer_security(auth_client) -> None:
+    """/docs (OpenAPI) shows the bearer scheme on the write endpoints."""
+    schema = auth_client.get("/openapi.json").json()
+    assert "HTTPBearer" in schema["components"]["securitySchemes"]
+    for path in ("/api/v1/log", "/api/v1/alarms/{alarm_id}/ack"):
+        security = schema["paths"][path]["post"].get("security", [])
+        assert any("HTTPBearer" in req for req in security), path
+
+
+def test_api_v1_write_surface_is_closed() -> None:
+    """Only the two allowlisted POSTs carry a mutating verb on the facade.
+
+    Grep-style closure guard: iterate every route the rest_api router
+    registers and assert no other write-method path exists (no generic
+    command proxy, no accidental exposure of source/setpoint/calibration/
+    experiment-lifecycle commands)."""
+    from cryodaq.web import rest_api
+
+    write_routes = set()
+    for route in rest_api.router.routes:
+        path = getattr(route, "path", "")
+        methods = getattr(route, "methods", None) or set()
+        for verb in methods & {"POST", "PUT", "PATCH", "DELETE"}:
+            write_routes.add((path, verb))
+    assert write_routes == {
+        ("/api/v1/log", "POST"),
+        ("/api/v1/alarms/{alarm_id}/ack", "POST"),
+    }
+
+
+def test_post_to_unlisted_api_path_is_not_a_command() -> None:
+    """POST to a non-allowlisted /api/v1 path never reaches an engine command
+    (405 on a GET-only route, 404 on an unknown path) — never 200."""
+    with patch("cryodaq.web.server._zmq_to_ws_bridge"):
+        app = create_app()
+        with TestClient(app) as c, patch(
+            "cryodaq.web.server._async_engine_command", side_effect=AssertionError
+        ):
+            assert c.post("/api/v1/experiment").status_code == 405
+            assert c.post("/api/v1/state").status_code == 405
+            assert c.post("/api/v1/experiment/note").status_code == 404

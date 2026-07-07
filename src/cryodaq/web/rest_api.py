@@ -23,9 +23,10 @@ import hmac
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from cryodaq.notifications._secrets import SecretStr
@@ -74,7 +75,18 @@ def _load_api_token() -> SecretStr | None:
     return SecretStr(str(token))
 
 
-async def require_write_token(authorization: str | None = Header(default=None)) -> None:
+# HTTPBearer (auto_error=False) so a missing/malformed header returns None and
+# we own the 401 — AND so the scheme shows up in the OpenAPI/Swagger security
+# section (the lock icon) on every route that Depends on require_write_token.
+_bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="web.api_token из config/web.local.yaml",
+)
+
+
+async def require_write_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
+) -> None:
     """FastAPI dependency guarding write routes.
 
     - No token configured  ⇒ 403 «API token не настроен» (fail-closed default).
@@ -86,9 +98,7 @@ async def require_write_token(authorization: str | None = Header(default=None)) 
     token = _load_api_token()
     if token is None:
         raise HTTPException(status_code=403, detail="API token не настроен")
-    presented = ""
-    if authorization and authorization.startswith("Bearer "):
-        presented = authorization[len("Bearer ") :]
+    presented = credentials.credentials if credentials else ""
     # Compare bytes: str compare_digest raises TypeError on non-ASCII input,
     # which an attacker could send in the header to force a 500.
     if not hmac.compare_digest(presented.encode(), token.get_secret_value().encode()):
@@ -256,3 +266,77 @@ async def get_log(limit: int = 10) -> list[dict[str, Any]]:
     except Exception:
         server.logger.warning("api/v1 log fetch failed")
     return []
+
+
+# ---------------------------------------------------------------------------
+# Write endpoints (P4-2) — each forwards ONE existing engine command behind
+# require_write_token. No generic command proxy (that would be an open
+# surface); no new engine logic; the operator-identity field is server-set,
+# never client-supplied. Source control / setpoints / calibration /
+# experiment lifecycle / config mutation are NOT reachable from here.
+# ---------------------------------------------------------------------------
+
+# Server-set identity for every REST-originated write. A client cannot supply
+# it: the request models forbid the identity keys (extra="forbid" → 422), and
+# the handlers overwrite them unconditionally. No impersonation.
+_REST_IDENTITY = "REST API"
+
+
+class LogAppendIn(BaseModel):
+    """Operator-log append body. ``author``/``source`` are NOT accepted —
+    extra="forbid" makes any such key a 422 (no author impersonation)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1)
+    tags: list[str] | None = None
+
+
+class AlarmAckIn(BaseModel):
+    """Alarm-ack body. ``operator`` (→ acknowledged_by) is NOT accepted —
+    extra="forbid" makes it a 422. ``reason`` is the only client input."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = ""
+
+
+async def _forward_write(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward one write command through the same path the reads use.
+
+    On a transport/engine failure surface 502 (not a silent degrade — a write
+    that did not land must not look like success)."""
+    try:
+        return await server._async_engine_command(cmd)
+    except Exception as exc:  # noqa: BLE001 — map any transport failure to 502
+        server.logger.warning("api/v1 write %s failed", cmd.get("cmd"))
+        raise HTTPException(status_code=502, detail="Ошибка движка") from exc
+
+
+@router.post("/log", dependencies=[Depends(require_write_token)])
+async def post_log(payload: LogAppendIn) -> dict[str, Any]:
+    """Добавить запись в операторский журнал (author = «REST API»)."""
+    cmd: dict[str, Any] = {
+        "cmd": "log_entry",
+        "message": payload.message,
+        "author": _REST_IDENTITY,
+        "source": "rest",
+    }
+    if payload.tags is not None:
+        cmd["tags"] = payload.tags
+    return await _forward_write(cmd)
+
+
+@router.post("/alarms/{alarm_id}/ack", dependencies=[Depends(require_write_token)])
+async def post_alarm_ack(
+    alarm_id: str, payload: AlarmAckIn | None = None
+) -> dict[str, Any]:
+    """Квитировать аларм (acknowledged_by = «REST API»)."""
+    return await _forward_write(
+        {
+            "cmd": "alarm_v2_ack",
+            "alarm_name": alarm_id,
+            "operator": _REST_IDENTITY,
+            "reason": payload.reason if payload else "",
+        }
+    )
