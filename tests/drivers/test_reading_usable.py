@@ -53,3 +53,8 @@ def test_infinite_ok_not_usable(value: float) -> None:
 def test_non_ok_status_not_usable_even_if_finite(status: ChannelStatus) -> None:
     # Discrimination is by status, never by float value.
     assert _reading(1.0, status).is_usable() is False
+
+
+def test_non_numeric_value_not_usable() -> None:
+    # Defensive GUI paths may hand a junk value; fail closed, never raise.
+    assert _reading("garbage", ChannelStatus.OK).is_usable() is False
