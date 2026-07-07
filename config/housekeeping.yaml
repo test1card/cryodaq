@@ -25,8 +25,22 @@ retention:
   delete_compressed_after_days: 90
   dry_run: false
 
+# Cold rotation moves daily SQLite files older than age_days into zstd Parquet
+# and unlinks the .db. It ships fully built + wired (engine schedules run_once
+# at schedule_time) but DISABLED by default: enabling it deletes hot .db files,
+# and any historical reader still scanning only data_*.db goes blind over the
+# rotated days. The export read side (CSV/XLSX/HDF5 + report readings) already
+# routes through ArchiveReader.query_rows (hot+cold union). Do NOT set enabled:
+# true until EVERY historical reader is archive-aware. Remaining before enable:
+#   - reporting/data.py::_load_operator_log        (audit trail over rotated days)
+#   - engine readings_history handler / sqlite_writer (GUI history + stats)
+#   - analytics/calibration_fitter.py::_extract_pairs
+#   - storage/replay.py::play_all + replay_engine/sources.py::DirectoryReplay
+#   - storage/parquet_archive.py bulk export
+# Thread each through ArchiveReader.query_rows (preserve NaN-доктрина decode),
+# then flip enabled: true and bench-verify GUI history over a rotated day.
 cold_rotation:
-  enabled: true
+  enabled: false
   archive_dir: data/archive
   age_days: 30
   schedule_time: "03:00"

@@ -120,8 +120,9 @@ print('Found:', dev.serial_number if dev else None)
 
 **Host-side P=const режим:** текущая реализация держит `P = const`
 программным циклом на хосте. Плановый Phase 3 — TSP-watchdog
-(`tsp/p_const.lua` — black-box, пока **не подгружается**); требует
-hardware verification.
+(`tsp/cryodaq_wdog.lua`, загружается драйвером `keithley_2604b.py`, но
+активная TSP-side safety-регуляция ещё **не введена в строй** — go-live
+требует hardware verification).
 
 **Disconnect требует emergency_off first** — автоматизировано в
 engine, но при ручном вытаскивании USB-кабеля лучше сначала
