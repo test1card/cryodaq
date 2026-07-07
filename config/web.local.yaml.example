@@ -1,0 +1,13 @@
+# Локальная конфигурация web-панели — СКОПИРУЙТЕ в web.local.yaml
+# и укажите токен для будущих write-эндпоинтов REST API.
+#
+# Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
+#
+# Токен читается ТОЛЬКО из web.local.yaml (никогда из tracked yaml).
+# Пока токен не задан — все write-эндпоинты отвечают 403 (fail-closed).
+# GET-эндпоинты токен НЕ требуют (loopback trust model, SSH-туннель для LAN).
+
+web:
+  # Bearer-токен для write-запросов: `Authorization: Bearer <api_token>`.
+  # Сгенерируйте случайную строку, например: python -c "import secrets; print(secrets.token_urlsafe(32))"
+  api_token: "ВСТАВЬТЕ_СЛУЧАЙНЫЙ_ТОКЕН"

@@ -342,10 +342,12 @@ def create_app() -> FastAPI:
 
     # Read-only REST facade + Swagger. Imported here (not at module top) to
     # keep the server<->rest_api import non-circular.
-    from cryodaq.web.rest_api import BodySizeLimitMiddleware
+    from cryodaq.web.rest_api import BodySizeLimitMiddleware, WriteAuthMiddleware
     from cryodaq.web.rest_api import router as rest_router
 
     application.add_middleware(BodySizeLimitMiddleware)
+    # Auth before body parsing on every mutating /api/v1 request (H1).
+    application.add_middleware(WriteAuthMiddleware)
     application.include_router(rest_router)
 
     # Статические файлы
