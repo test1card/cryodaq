@@ -558,3 +558,110 @@ async def test_sqlite_replay_uppercase_status_masks(tmp_path):
     assert len(received) == 1
     assert received[0].status is ChannelStatus.SENSOR_ERROR, "uppercase status must reconstruct"
     assert math.isnan(received[0].value), "non-OK status must mask finite value as NaN"
+
+
+# ---------------------------------------------------------------------------
+# F28: DirectoryReplay is archive-aware — rotated (cold) days replay too
+# ---------------------------------------------------------------------------
+
+
+def _write_day_via_writer(data_dir: Path, readings: list) -> None:
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    w = SQLiteWriter(data_dir)
+    w._write_batch(readings)
+    if w._conn is not None:
+        w._conn.close()
+    w._conn = None
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_includes_rotated_day(tmp_path):
+    """A day rotated to Parquet (SQLite deleted) still replays, in day order,
+    sharing the one monotonic time origin with the surviving hot day."""
+    pytest.importorskip("pyarrow")
+    from datetime import UTC, datetime, timedelta
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    recent_day = today - timedelta(days=1)
+
+    def rdg(ch, val, ts, status=ChannelStatus.OK):
+        return Reading(timestamp=ts, instrument_id="ls218s", channel=ch, value=val, unit="K", status=status)
+
+    _write_day_via_writer(
+        data_dir,
+        [rdg("Т12", 200.0, old_day.replace(hour=12)), rdg("Т12", 180.0, old_day.replace(hour=13))],
+    )
+    _write_day_via_writer(data_dir, [rdg("Т11", 90.0, recent_day.replace(hour=12))])
+
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=today)
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    replay = DirectoryReplay(data_dir, speed=0.0, loop=False, archive_dir=archive_dir)
+    received: list = []
+
+    async def cb(r) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    assert len(received) == 3, f"cold + hot rows must all replay, got {len(received)}"
+    assert sorted(r.value for r in received) == pytest.approx([90.0, 180.0, 200.0])
+    assert {"Т12", "Т11"} <= {r.channel for r in received}
+
+    # One monotonic origin across the union: timestamps ascend, first ~now.
+    ts_list = [r.timestamp.timestamp() for r in received]
+    assert ts_list == sorted(ts_list), "timestamps must stay monotonic across cold+hot"
+    now_ts = datetime.now(tz=UTC).timestamp()
+    assert abs(min(ts_list) - now_ts) < 120, "earliest replayed row must be shifted to ~now"
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_cold_day_masks_sentinel(tmp_path):
+    """A sentinel/error row in a cold (rotated) day republishes as NaN."""
+    pytest.importorskip("pyarrow")
+    import math
+    from datetime import UTC, datetime, timedelta
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+    from cryodaq.storage.sentinel import SENTINEL
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+
+    def rdg(val, ts, status):
+        return Reading(timestamp=ts, instrument_id="ls218s", channel="Т12", value=val, unit="K", status=status)
+
+    _write_day_via_writer(
+        data_dir,
+        [
+            rdg(200.0, old_day.replace(hour=12), ChannelStatus.OK),
+            rdg(float("nan"), old_day.replace(hour=13), ChannelStatus.SENSOR_ERROR),
+        ],
+    )
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=today)
+
+    replay = DirectoryReplay(data_dir, speed=0.0, loop=False, archive_dir=archive_dir)
+    received: list = []
+
+    async def cb(r) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    vals = [r.value for r in received]
+    assert 200.0 in vals, "usable reading must survive"
+    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
+    bad = [r for r in received if r.status is ChannelStatus.SENSOR_ERROR]
+    assert bad and all(math.isnan(r.value) for r in bad), "cold sentinel row must present as NaN"
