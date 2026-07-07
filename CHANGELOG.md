@@ -7,6 +7,94 @@
 
 ---
 
+## [0.61.0] — 2026-07-07 — final sweep: cold-storage контур, ME-16 чистка, доктрина-гейты
+
+Финальная волна roadmap-прогона: удалён осиротевший v1-виджетный слой
+(ME-16, −6634 LOC), достроен и подключён полный контур холодного хранения
+(rotation + ArchiveReader, поставляется выключенным до завершения
+read-side миграции), cooldown-fingerprint обогащён вакуумом, GUI-фиды
+steady-state приведены к NaN-доктрине.
+
+### Added
+
+- **Cold-storage контур собран как единое целое.** `ColdRotationService`
+  подключён к engine: планировщик раз в сутки в `schedule_time` (03:00)
+  вызывает `run_once()`; gate строго fail-closed
+  (`build_cold_rotation_service`, `enabled is True`). Читающая сторона:
+  новый `ArchiveReader.query_rows(start, end, channels, instrument_ids)` —
+  полные строки, union горячего SQLite и холодного Parquet, end-exclusive,
+  значение декодировано по NaN-доктрине. CSV/XLSX экспортёры переведены на
+  него без изменения call-sites (a9352e9); HDF5-экспорт перестроен на
+  per-day модель поверх архива + `hdf5_export_days` (60df63c); чтение
+  показаний для отчётов (`reporting/data.py::_load_readings`) — через тот же
+  слой (9cf7ab7).
+- **`ultimate_vacuum` в cooldown-fingerprint.** `CooldownService` получил
+  reader-handle; на завершении охлаждения серия давления канала
+  `cooldown_baseline.pressure_channel` редуцируется в
+  `ultimate_vacuum_mbar` — поле, которое UI уже умел показывать. Плюс
+  engine-событие `cooldown_end` в EventBus (15acf02).
+
+### Changed
+
+- **Cold rotation поставляется ВЫКЛЮЧЕННОЙ по умолчанию.**
+  `cold_rotation.enabled: false` + встроенный в `config/housekeeping.yaml`
+  чек-лист читателей, которых осталось перевести на архивный слой
+  (operator-log, readings_history, calibration_fitter, replay, bulk parquet
+  export). Правило sweep-отчёта: «rotation вместе с read-side или ничего» —
+  включение при слепых читателях молча прятало бы данные старше 30 дней
+  (e75baf4).
+- **GUI-фиды steady_state уважают NaN-доктрину.** Три точки
+  `SteadyStatePredictor.add_point` (analytics_widgets ×2,
+  conductivity_panel) гейтуются `reading.is_usable()` — конечное значение с
+  error-статусом больше не смещает фит (15acf02).
+
+### Fixed
+
+- **`Reading.is_usable()` не падает на нечисловом значении.** Junk-значение
+  из defensive GUI-путей → `False` (не годно, fail-closed), а не
+  `TypeError` из `math.isfinite` (62aec85).
+- Устаревшая ссылка на удалённый `tsp/p_const.lua` в `docs/instruments.md`
+  → `tsp/cryodaq_wdog.lua` (e75baf4).
+
+### Removed
+
+- **ME-16: осиротевший v1-виджетный слой.** 9 модулей `gui/widgets/*`
+  (overview_panel, shift_handover, analytics_panel, vacuum_trend_panel,
+  temp_panel, pressure_panel, connection_settings, experiment_dialogs,
+  preflight_dialog), draft `tsp/p_const.lua`, 8 тест-файлов; всего
+  −6634 LOC. Живой shell-v2 не задет: полный GUI-набор зелёный, launch-verify
+  пройден (f64486d).
+- Мёртвая переменная `cycle_starts` в `tools/replay_alarm_history.py`
+  (15acf02).
+
+### Known Issues
+
+- Cold rotation выключена до завершения read-side миграции — чек-лист в
+  `config/housekeeping.yaml` (план: F28-волна).
+- TSP watchdog go-live и Windows frozen-build smoke — ручные гейты
+  (bench / Windows-машина).
+
+### Test baseline
+
+- 3556 passed, 2 skipped, 1 deselected (v0.60.0: 3588/2; −32 net — с ME-16
+  удалены 8 легаси-тест-файлов, добавлены тесты rotation/report/usable).
+
+### Tags
+
+- `v0.61.0` — merge-коммит `feat/final-sweep` в master.
+
+### Selected commits in this release
+
+- f64486d — ME-16: удаление v1-виджетного слоя
+- 15acf02 — cooldown-событие, вакуум-обогащение, доктрина-гейты
+- a9352e9 — cold rotation + ArchiveReader.query_rows одним юнитом
+- 60df63c — HDF5 через архивный слой
+- 9cf7ab7 — отчёты читают через архивный слой
+- e75baf4 — rotation default-OFF + чек-лист включения
+- 62aec85 — is_usable() junk-tolerance
+
+---
+
 ## [0.60.0] — 2026-07-07 — harden-loopback: write-auth, allowlisted write endpoints, REP trust-model
 
 Замыкание периметра REST/IPC: read-only фасад дополнен строго allowlisted
