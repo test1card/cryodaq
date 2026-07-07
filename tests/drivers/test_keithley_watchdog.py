@@ -19,13 +19,19 @@ class _RecordingTransport:
     driver issues on connect/poll. ``fail_on`` marks a substring whose write
     raises, to exercise the upload-failure path."""
 
-    def __init__(self, *, fail_on: str | None = None) -> None:
+    def __init__(
+        self, *, fail_on: str | None = None, query_raises_on: str | None = None
+    ) -> None:
         self.writes: list[str] = []
         self.queries: list[str] = []
         # Combined chronological log of ("query"|"write", cmd) so tests can
         # assert cross-kind ordering (e.g. latch read BEFORE script upload).
         self.calls: list[tuple[str, str]] = []
         self._fail_on = fail_on
+        # Substring whose *query* raises a transport error (I/O timeout), to
+        # exercise the "latch state UNKNOWN" path distinct from an unparseable
+        # (but successful) response.
+        self._query_raises_on = query_raises_on
         self._opened = False
         self.wdog_tripped_raw = "0"
 
@@ -36,6 +42,8 @@ class _RecordingTransport:
         self._opened = False
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
+        if self._query_raises_on is not None and self._query_raises_on in cmd:
+            raise RuntimeError("simulated transport failure")
         self.queries.append(cmd)
         self.calls.append(("query", cmd))
         c = cmd.lower()
@@ -190,6 +198,26 @@ async def test_flag_off_default_is_byte_identical() -> None:
     await drv.disconnect()
 
     assert _wdog_writes(off) == []
+
+
+async def test_off_and_default_command_streams_byte_identical() -> None:
+    """True byte-identity: a driver built with ``watchdog_mode='off'`` and one
+    built with NO watchdog kwargs must issue the exact same chronological
+    command stream (writes AND queries, in order) across connect + poll +
+    disconnect — proves the feature is inert, not merely wdog-write-free."""
+    d_off = _mode_driver("off")
+    d_default = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    t_off = _RecordingTransport()
+    t_default = _RecordingTransport()
+    d_off._transport = t_off
+    d_default._transport = t_default
+    for d in (d_off, d_default):
+        await d.connect()
+        await d.read_channels()
+        await d.disconnect()
+
+    assert t_off.calls  # non-empty: the bus was actually exercised
+    assert t_off.calls == t_default.calls
 
 
 async def test_flag_on_off_streams_differ_only_by_wdog() -> None:
@@ -416,6 +444,61 @@ async def test_latch_read_before_upload_best_effort_too() -> None:
     await drv.connect()
     assert drv._connected is True
     assert drv._wdog_armed is True
+
+
+async def test_latch_read_transport_fail_required_raises_and_closes(caplog) -> None:
+    """HIGH: a TRANSPORT failure on the pre-upload latch read (state UNKNOWN,
+    not "no latch") must abort connect in required mode AND close the transport.
+    The script must NOT be uploaded — a re-upload would run
+    ``cryodaq_wdog_tripped = 0`` and erase a possible past firmware kill."""
+    drv = _mode_driver("required")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_tripped")
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        with pytest.raises(Exception):
+            await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
+    assert t._opened is False  # transport closed on fail-closed abort
+    # Latch preserved: no script upload wrote the reset.
+    assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
+    assert "cryodaq_wdog_run()" not in t.writes
+
+
+async def test_latch_read_transport_fail_best_effort_degrades(caplog) -> None:
+    """HIGH: a TRANSPORT failure on the latch read in best_effort logs CRITICAL
+    (latch state unknown, watchdog NOT armed to avoid erasing it), leaves
+    _wdog_armed False, uploads NOTHING, and connect still succeeds host-only."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_tripped")
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    # No arming happened — latch preserved for the next connect.
+    assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
+    assert "cryodaq_wdog_run()" not in t.writes
+    crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert crits
+    msg = " ".join(r.getMessage() for r in crits).lower()
+    assert "unknown" in msg
+    # A poll after must not pet a watchdog that was never armed.
+    await drv.read_channels()
+    assert "cryodaq_wdog_pet()" not in t.writes
+
+
+async def test_latch_read_unparseable_response_is_untripped() -> None:
+    """A SUCCESSFUL query returning an unparseable value (fresh instrument
+    prints ``nil``) is genuinely "no latch to read" → arm proceeds normally."""
+    drv = _mode_driver("required")
+    t = _RecordingTransport()
+    t.wdog_tripped_raw = "nil"
+    drv._transport = t
+    await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is True
+    assert "cryodaq_wdog_run()" in t.writes
 
 
 async def test_mode_required_happy_arms() -> None:

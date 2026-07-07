@@ -90,17 +90,20 @@ instruments:
 #                 byte-identical command stream (zero firmware dependency)
 #   best_effort   arm on connect; on arm failure log CRITICAL and continue
 #                 host-only (fail-OPEN on the watchdog layer)
-#   required      arm on connect; on arm failure OR a read-back latched trip
-#                 connect() raises → instrument unavailable → SAFE_OFF held
-#                 (fail-CLOSED)
+#   required      arm on connect; connect() raises ONLY when the backstop
+#                 cannot be established (arm failure, incl. an unreadable latch)
+#                 → instrument unavailable → SAFE_OFF held (fail-CLOSED). A
+#                 read-back latched past-trip is logged CRITICAL and proceeds —
+#                 it never blocks (arming clears the latch; outputs are already
+#                 force-OFF'd on connect).
 #
 # Legacy alias: ``enabled: true`` maps to best_effort, ``enabled: false`` to
 # off (mode wins if both are present).
 #
 # CAVEAT: the firmware run-mechanism (trigger.timer, non-blocking FIFO) is
 # still bench-unverified — see tsp/cryodaq_wdog.lua. ``required`` gates only on
-# host-observable arm success and latched-trip read-back, NOT on proven
-# firmware timer behaviour.
+# host-observable arm success (incl. a readable latch), NOT on proven firmware
+# timer behaviour.
 keithley:
   watchdog:
     mode: "off"   # quote: bare off/on are YAML booleans

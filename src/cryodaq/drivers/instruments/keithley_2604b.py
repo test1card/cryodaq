@@ -475,11 +475,38 @@ class Keithley2604B(InstrumentDriver):
         a failure and does not raise."""
         if not self._wdog_enabled or self.mock:
             return
-        # DELTA 1: read the latch before the upload clears it.
+        # DELTA 1: read the latch before the upload clears it. Two failure
+        # cases must NOT be conflated:
+        #   (a) query SUCCEEDS but the value is unparseable — a fresh instrument
+        #       has no cryodaq_wdog_tripped global and prints "nil" →
+        #       float("nil") raises ValueError → genuinely "no latch" → proceed.
+        #   (b) query FAILS (transport timeout / I/O error) — the latch state is
+        #       UNKNOWN. Proceeding re-uploads the script, which re-runs
+        #       ``cryodaq_wdog_tripped = 0`` and silently destroys evidence of a
+        #       past firmware kill. This follows ARM-FAILURE semantics per mode.
         try:
             raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+        except Exception as exc:
+            self._wdog_armed = False
+            if self._wdog_mode is WatchdogMode.REQUIRED:
+                log.critical(
+                    "%s: TSP watchdog latch read FAILED and mode=required — "
+                    "refusing to connect (fail-closed): %s",
+                    self.name,
+                    exc,
+                )
+                raise
+            log.critical(
+                "%s: TSP watchdog latch read FAILED — latch state UNKNOWN; NOT "
+                "arming the watchdog to avoid erasing a possible past firmware "
+                "kill (degraded, host-only): %s",
+                self.name,
+                exc,
+            )
+            return
+        try:
             latched = float(raw.strip()) > 0.5
-        except Exception:
+        except ValueError:
             latched = False  # nil / unparseable on a fresh instrument
         if latched:
             log.critical(
