@@ -480,6 +480,20 @@ class InterlockEngine:
         if matching:
             if reading.is_usable():
                 self._nonusable_windows.pop(reading.channel, None)
+            elif math.isinf(reading.value) and any(
+                record.condition.is_triggered(reading.value) for record in matching
+            ):
+                # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
+                # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
+                # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
+                # That is direct evidence of the guarded hazard — fall through to
+                # the normal threshold-trip loop (is_triggered trips at once), do
+                # NOT wait out the non-usable debounce. NaN (is_triggered False
+                # both ways) and finite-value+error-status carry no direction and
+                # keep the debounce path below. -inf on a '>' interlock (or +inf on
+                # a '<' interlock) is the SAFE side → also debounce. Reset the
+                # window so a prior blip series does not linger past this trip.
+                self._nonusable_windows.pop(reading.channel, None)
             else:
                 await self._handle_nonusable(reading, matching[0].condition)
                 return
@@ -545,13 +559,18 @@ class InterlockEngine:
                     exc,
                 )
 
-        # Персистентность → эскалация (ровно один раз на окно).
+        # Персистентность → эскалация. S1 fail-closed: окно помечается
+        # escalated ТОЛЬКО когда handler подтвердил латч fault (вернул True).
+        # Если SafetyManager отклонил эскалацию (не в RUNNING — например
+        # RUN_PERMITTED во время start_source или сразу после stop), окно
+        # остаётся не-escalated и КАЖДОЕ последующее непригодное показание
+        # повторяет попытку; первое же показание после перехода в RUNNING
+        # латчит fault. Без этого мёртвый канал молча утекал бы навсегда.
         if (
             not window.escalated
             and window.count >= self._nonusable_min_samples
             and span_s >= self._nonusable_min_duration_s
         ):
-            window.escalated = True
             logger.critical(
                 "Interlock-канал '%s' непригоден ≥%.0f с и ≥%d показаний подряд — "
                 "эскалация в SafetyManager (блокировка '%s').",
@@ -560,11 +579,15 @@ class InterlockEngine:
                 self._nonusable_min_samples,
                 condition.name,
             )
+            # No handler wired (standalone/test): nothing can latch a fault, so
+            # mark escalated to avoid re-logging every subsequent sample.
+            escalated = True
             if self._dead_channel_handler is not None:
                 try:
                     result = self._dead_channel_handler(condition, reading)
                     if asyncio.iscoroutine(result):
-                        await result
+                        result = await result
+                    escalated = bool(result)
                 except Exception as exc:
                     logger.critical(
                         "dead_channel_handler failed for interlock '%s' channel '%s': %s",
@@ -573,6 +596,9 @@ class InterlockEngine:
                         exc,
                         exc_info=True,
                     )
+                    # Handler raised → no confirmed latch → retry next sample.
+                    escalated = False
+            window.escalated = escalated
 
     async def _trip(
         self,

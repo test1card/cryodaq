@@ -1011,7 +1011,13 @@ class SafetyManager:
                 reading = await self._queue.get()
                 now = time.monotonic()
                 self._latest[reading.channel] = (now, reading.value, reading.status.value)
-                if reading.unit == "K":
+                if reading.unit == "K" and reading.is_usable():
+                    # S3: gate the rate estimator on the doctrine predicate. A
+                    # NaN/±inf or error-status reading poisons the OLS buffer —
+                    # _ols_slope_per_min() returns None until the bad point ages
+                    # out of the 120 s window, silently blinding the 5 K/min
+                    # protection. Non-usable readings are already caught by the
+                    # status/NaN checks in _run_checks; they must not enter dT/dt.
                     # F23: use measurement timestamp, not queue dequeue time.
                     # Under backlog, monotonic() clusters; reading.timestamp reflects
                     # actual instrument measurement time, giving correct dT/dt.
@@ -1230,7 +1236,7 @@ class SafetyManager:
         channel: str,
         *,
         value: float = float("nan"),
-    ) -> None:
+    ) -> bool:
         """Escalation for a PERSISTENTLY non-usable interlock channel (P2-5).
 
         Called by InterlockEngine once a channel it protects has been
@@ -1244,7 +1250,22 @@ class SafetyManager:
         - outside RUNNING: log only, never fault — a stale/dead sensor while
           idle must not block readiness recovery paths (preconditions already
           gate readiness on channel health).
+
+        Returns
+        -------
+        bool
+            ``True`` iff a fault is now latched (this call latched it, or the
+            state was already FAULT_LATCHED). ``False`` iff escalation was
+            declined because the state is not RUNNING. S1 fail-closed contract:
+            InterlockEngine marks the debounce window ``escalated`` ONLY on
+            ``True``. A ``False`` leaves the window un-escalated so the next
+            non-usable sample retries — the first sample after RUNNING begins
+            then faults, instead of the dead channel leaking through forever.
         """
+        if self._state == SafetyState.FAULT_LATCHED:
+            # Already latched (possibly by this very escalation on a prior
+            # sample) — the window is correctly escalated, do not retry.
+            return True
         if self._state != SafetyState.RUNNING:
             logger.critical(
                 "Интерлок-канал %s устойчиво непригоден, но состояние %s "
@@ -1252,13 +1273,14 @@ class SafetyManager:
                 channel,
                 self._state.value,
             )
-            return
+            return False
         await self._fault(
             f"Интерлок-канал {channel} ('{interlock_name}'): показания устойчиво "
             f"непригодны при активном источнике",
             channel=channel,
             value=value,
         )
+        return True
 
     async def on_persistence_failure(self, reason: str) -> None:
         """Called by SQLiteWriter when persistent storage fails (disk full etc).

@@ -61,23 +61,39 @@ class RateEstimator:
     def push(self, channel: str, timestamp: float, value: float) -> None:
         """Добавить точку. Автоматически удаляет точки старше окна."""
         buf = self._buffers.setdefault(channel, deque(maxlen=self._maxlen))
-        if buf and self._is_clock_jump(buf, timestamp):
-            # C-5 reset-not-drop: an NTP step (backward, or forward > 4x poll)
-            # corrupts measurement-time ordering. Dropping the sample would
-            # blind the 5 K/min protection until maxlen eviction (~forever
-            # after a permanent step). Clearing re-anchors on the current
-            # sample, bounding blindness to the min_span_s refill window.
-            gap = timestamp - buf[-1][0]
-            logger.warning(
-                "Clock jump on channel %s: gap %+.1f s exceeds guard "
-                "(backward or > %.0fx poll) — resetting rate buffer (%d samples), "
-                "re-anchoring; dT/dt protection re-arms after refill",
-                channel,
-                gap,
-                self._clock_jump_poll_factor,
-                len(buf),
-            )
-            buf.clear()
+        if buf:
+            decision = self._clock_jump_decision(buf, timestamp)
+            if decision == "drop":
+                # S4: benign sub-tolerance backward gap (per-channel jitter /
+                # sub-second reordering). Resetting on every such gap would
+                # reset-storm the buffer below min_points — rate None = no
+                # protection, silently. Drop just this one out-of-order sample;
+                # the buffer (and forward-sample growth) is preserved.
+                logger.debug(
+                    "Backward jitter on channel %s: gap %+.3f s within tolerance "
+                    "— dropping single out-of-order sample (buffer %d kept)",
+                    channel,
+                    timestamp - buf[-1][0],
+                    len(buf),
+                )
+                return
+            if decision == "reset":
+                # C-5 reset-not-drop: an NTP step (backward beyond tolerance, or
+                # forward > 4x poll) corrupts measurement-time ordering. Dropping
+                # the sample would blind the 5 K/min protection until maxlen
+                # eviction (~forever after a permanent step). Clearing re-anchors
+                # on the current sample, bounding blindness to the min_span_s
+                # refill window.
+                logger.warning(
+                    "Clock jump on channel %s: gap %+.1f s exceeds guard "
+                    "(backward step or > %.0fx poll) — resetting rate buffer "
+                    "(%d samples), re-anchoring; dT/dt protection re-arms after refill",
+                    channel,
+                    timestamp - buf[-1][0],
+                    self._clock_jump_poll_factor,
+                    len(buf),
+                )
+                buf.clear()
         buf.append((timestamp, value))
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:
@@ -87,27 +103,42 @@ class RateEstimator:
         if short != channel:
             self._short_to_full[short] = channel
 
-    def _is_clock_jump(self, buf: deque[tuple[float, float]], timestamp: float) -> bool:
-        """True if `timestamp` is a clock jump relative to the channel buffer.
+    def _clock_jump_decision(self, buf: deque[tuple[float, float]], timestamp: float) -> str:
+        """Classify `timestamp` against the channel buffer: ok | drop | reset.
 
-        Backward gap (< 0) is always a jump. Forward gap is a jump only if it
-        exceeds ``clock_jump_poll_factor`` x the buffer's established poll
-        period, estimated as the median of recent inter-sample gaps. The
-        median is used (not config) because RateEstimator has no poll-cadence
-        knowledge and different instruments poll at different rates; the median
-        is per-channel, robust to occasional missed polls, and needs no
-        plumbing. With < 2 samples the cadence is unknown, so only backward
-        jumps are caught until enough gaps accumulate.
+        Forward gap is a ``reset`` only if it exceeds ``clock_jump_poll_factor``
+        x the buffer's established poll period (median of recent inter-sample
+        gaps), else ``ok``. The median is used (not config) because
+        RateEstimator has no poll-cadence knowledge and different instruments
+        poll at different rates; it is per-channel, robust to occasional missed
+        polls, and needs no plumbing.
+
+        Backward gap: magnitude ≤ ``max(1.0 s, 0.5 x median poll period)`` →
+        ``drop`` (benign jitter / sub-second reordering — drop the one sample,
+        keep the buffer). Beyond that tolerance → ``reset`` (a real NTP step).
+
+        # ponytail: the tolerance is a fixed heuristic — 1 s floor covers
+        # sub-second reordering, half-a-poll covers ordinary cadence jitter.
+        # Ceiling: a slow (>2 s) monotonic backward *drift* would be dropped
+        # sample-by-sample rather than reset; upgrade to a drift accumulator
+        # only if a deployment shows sustained backward drift within tolerance.
         """
         gap = timestamp - buf[-1][0]
-        if gap < 0.0:
-            return True
-        if len(buf) < 2:
-            return False
-        # ponytail: median over the window-bounded buffer (O(n), n <= ~window/poll).
-        gaps = [buf[i + 1][0] - buf[i][0] for i in range(len(buf) - 1)]
-        period = statistics.median(gaps)
-        return period > 0.0 and gap > self._clock_jump_poll_factor * period
+        if len(buf) >= 2:
+            # ponytail: median over the window-bounded buffer (O(n), n <= ~window/poll).
+            gaps = [buf[i + 1][0] - buf[i][0] for i in range(len(buf) - 1)]
+            period = statistics.median(gaps)
+        else:
+            period = 0.0
+        if gap >= 0.0:
+            if period > 0.0 and gap > self._clock_jump_poll_factor * period:
+                return "reset"
+            return "ok"
+        # Backward gap.
+        tolerance = max(1.0, 0.5 * period)
+        if -gap <= tolerance:
+            return "drop"
+        return "reset"
 
     def resolve_channel(self, channel: str) -> str:
         """Resolve short channel ID to full runtime name."""

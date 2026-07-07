@@ -2075,12 +2075,15 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc_info=True,
                 )
 
-    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> None:
+    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> bool:
         # P2-5: a persistently non-usable reading on an interlock-protected
         # channel. SafetyManager gates the fault on RUNNING (sole authority);
         # this handler only forwards. Failures escalate to a guaranteed fault.
+        # S1: return True iff a fault is now latched — the InterlockEngine marks
+        # the debounce window escalated ONLY on True, so a declined escalation
+        # (not RUNNING) is retried on the next non-usable sample (fail-closed).
         try:
-            await safety_manager.on_interlock_dead_channel(
+            return await safety_manager.on_interlock_dead_channel(
                 condition.name,
                 reading.channel,
                 value=float(reading.value) if reading.value is not None else float("nan"),
@@ -2100,6 +2103,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     source="interlock",
                     channel=reading.channel,
                 )
+                return True
             except Exception as exc2:
                 logger.critical(
                     "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
@@ -2107,6 +2111,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc2,
                     exc_info=True,
                 )
+                return False
 
     interlock_engine = InterlockEngine(
         broker,

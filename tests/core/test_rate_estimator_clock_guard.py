@@ -97,3 +97,37 @@ def test_reset_is_per_channel():
     est.push("A", T0 - 50.0, 4.0)  # backward step on A only
     assert est.buffer_size("A") == 1, "channel A must reset"
     assert est.buffer_size("B") == 16, "channel B must stay intact"
+
+
+# ---------------------------------------------------------------------------
+# S4 (HIGH): benign sub-tolerance backward jitter must DROP the single sample,
+# not reset-storm the buffer below min_points (which silently disables the
+# 5 K/min protection). A genuine NTP step still resets.
+# ---------------------------------------------------------------------------
+
+
+def test_small_backward_jitter_drops_sample_keeps_buffer():
+    """Repeated ~0.2 s backward jitter/reordering on a 2 s cadence must not reset
+    the buffer. The offending sample is dropped; the buffer keeps growing from
+    the forward samples and the rate stays available."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    est.push(CH, T0, 4.0)
+    for i in range(1, 40):
+        t_forward = T0 + POLL_S * i
+        est.push(CH, t_forward, 4.0 + RATE_PER_SEC * (t_forward - T0))
+        # a backward-jittered duplicate 0.2 s before the last accepted sample
+        t_back = t_forward - 0.2
+        est.push(CH, t_back, 4.0 + RATE_PER_SEC * (t_back - T0))
+    assert est.buffer_size(CH) >= 30, (
+        f"sub-tolerance backward jitter must not reset the buffer, got {est.buffer_size(CH)}"
+    )
+    rate = est.get_rate(CH)
+    assert rate is not None and rate > 5.0, "rate must stay available through jitter"
+
+
+def test_large_backward_step_still_resets():
+    """A genuine NTP step (backward beyond the jitter tolerance) still resets."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    _fill(est, 16)
+    est.push(CH, T0 - 60.0, 4.0)  # -60 s step, far beyond tolerance
+    assert est.buffer_size(CH) == 1, "a -60 s step must still reset (NTP step)"

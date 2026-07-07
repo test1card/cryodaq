@@ -462,6 +462,53 @@ async def test_rate_limit_faults_on_critical_channel():
 
 
 # ---------------------------------------------------------------------------
+# S3 (HIGH) — SafetyManager's own rate estimator must NOT ingest non-usable
+# readings; a NaN in the OLS buffer blinds the 5 K/min protection.
+# ---------------------------------------------------------------------------
+
+
+async def test_nonusable_reading_not_pushed_to_rate_estimator():
+    """A NaN/SENSOR_ERROR K reading must never enter the rate-estimator buffer.
+    If it did, _ols_slope_per_min() returns None until the bad point ages out of
+    the 120 s window — the 5 K/min protection goes silently blind. The push must
+    be gated on Reading.is_usable().
+    """
+    mgr, broker = await _make_manager(stale=60.0)
+    mgr._config.critical_channels = [re.compile("Т1.*")]
+    mgr._config.max_dT_dt_K_per_min = 5.0
+    try:
+        crit = "Т1 Криостат верх"
+        base = datetime.now(UTC) - timedelta(seconds=90)
+        # 40 usable rising samples ...
+        ts = await _publish_rising(broker, crit, start=4.0, step=1.0, count=40, base=base)
+        # ... one NaN + SENSOR_ERROR injected mid-stream (would poison OLS) ...
+        await broker.publish(
+            Reading(
+                timestamp=ts,
+                instrument_id="test",
+                channel=crit,
+                value=float("nan"),
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            )
+        )
+        await asyncio.sleep(0.02)
+        # ... then more usable rising samples.
+        await _publish_rising(
+            broker, crit, start=44.0, step=1.0, count=40, base=ts + timedelta(seconds=0.5)
+        )
+        await asyncio.sleep(0.05)
+
+        rate = mgr._rate_estimator.get_rate(crit)
+        assert rate is not None, (
+            "rate must stay computable — a NaN in the OLS buffer would make it return None"
+        )
+        assert rate > 5.0, "the steep ramp must still be detectable through the NaN"
+    finally:
+        await mgr.stop()
+
+
+# ---------------------------------------------------------------------------
 # CR-2 third call site — interlock stop_source must honor emergency_off() bool.
 # ---------------------------------------------------------------------------
 
