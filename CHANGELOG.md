@@ -7,6 +7,87 @@
 
 ---
 
+## [0.60.0] — 2026-07-07 — harden-loopback: write-auth, allowlisted write endpoints, REP trust-model
+
+Замыкание периметра REST/IPC: read-only фасад дополнен строго allowlisted
+authenticated write-поверхностью (ровно два endpoint’а), token-зависимость
+fail-closed по умолчанию, auth-before-parse middleware, guard на
+system-reserved теги и wildcard-bind. REP trust-model для single-operator lab
+задокументирован как by-design (D7.2 accepted), с перечнем компенсирующих
+контролей. Волна прошла внешнее ревью и phase-gate.
+
+### Added
+
+- **Write-auth token-зависимость для REST-фасада.** `require_write_token`
+  FastAPI-dependency: токен живёт только в gitignored `config/web.local.yaml`
+  (`web.api_token`), обёрнут в SecretStr; нет токена — каждый write-route отвечает
+  403 (fail-closed default), неверный/отсутствующий bearer — 401, сравнение
+  `hmac.compare_digest` по байтам (str-compare падал бы на non-ASCII — forced-500
+  вектор). Reads dependency не трогают. Config читается свежим per-request, чтобы
+  оператор мог положить токен без рестарта (f0176c3).
+- **Allowlisted authenticated write-endpoint’ы — log append + alarm ack.**
+  `POST /api/v1/log` и `/api/v1/alarms/{id}/ack` форвардят существующие
+  engine-команды `log_entry` и `alarm_v2_ack` тем же путём, что reads, за
+  bearer-token dependency (native HTTPBearer — Swagger рисует схему ровно на двух
+  write-op’ах). Identity double-enforced: request-модели запрещают `author`/`operator`
+  ключи (422), handler’ы перезаписывают на «REST API». Write-поверхность закрыта
+  структурным тестом по router’у. Experiment-note endpoint снят — backing
+  engine-команды нет и не добавлялась; transport-failure на write → 502; source
+  control, setpoint’ы, калибровка и lifecycle эксперимента через REST недостижимы
+  (5a6ba22).
+
+### Changed
+
+- **auth предшествует парсингу тела + reserved-tag guard + wildcard-bind reject.**
+  `WriteAuthMiddleware` гоняет bearer-check до routing/body-parse для каждого
+  mutating-глагола под `/api/v1` — неаутентифицированный клиент больше не доходит до
+  JSON-парсера (было: невалидный JSON → 422 до auth); route-dependency остаётся как
+  defense-in-depth и для OpenAPI-схемы. Mutating-глаголы на unlisted-путях теперь 403
+  вместо 405 (auth-before-route не течёт существованием route). `POST /log` отбивает
+  девять system-reserved тегов (`safety_fault`, `alarm`, `phase_transition`, `ai`, …
+  — набор из реальных downstream-consumer’ов) с 422. `zmq_bridge` отказывает
+  wildcard-bind (`0.0.0.0` / `*` / `::`) на общем bind-chokepoint (9ac4a36).
+
+### Fixed
+
+- **REP trust-model задокументирован + pin-тесты dispatch-reject.** Module-docstring
+  получает trust-model секцию: unauthenticated loopback REP — by-design для
+  single-operator lab (D7.2 accepted), с перечнем компенсирующих контролей (loopback
+  bind, size-caps, bounded msgpack, SafetyManager как единственная authority, tiered
+  timeout’ы) и правилом SSH-туннеля для LAN. Проверено, что unknown-команды уже
+  отбивались (engine dispatch else-ветка + bridge shape-reject) — кода не добавлено,
+  три pin-теста фиксируют dispatch-контракт (b97fd41).
+
+### Known Issues
+
+- **REST write-поверхность — ровно два endpoint’а** (`log` append, alarm `ack`).
+  Source control, setpoint’ы, OFF-пути, калибровка и lifecycle эксперимента через
+  REST недостижимы by design; расширение поверхности — отдельное решение.
+- **Lock-token намеренно не реализован.** Single-operator lab: критерий запрещает всё,
+  что может отказать оператору; write-auth защищает от случайного/сетевого клиента, не
+  от конкурирующих операторов.
+- **Loopback trust-model без изменений** (D7.2 accepted): unauthenticated REP на
+  loopback остаётся by-design, задокументирован в docstring `zmq_bridge`; компенсирующие
+  контроли перечислены там же.
+
+### Test baseline
+
+- Полный `pytest -q` — зелёный: 3588 passed. ruff clean.
+
+### Tags
+
+- `v0.60.0` → см. merge-коммит на master.
+
+### Selected commits in this release
+
+- f0176c3 — write-auth token-зависимость (fail-closed default)
+- 5a6ba22 — allowlisted authenticated write-endpoint’ы (log / ack)
+- 9ac4a36 — auth-before-parse middleware + reserved-tag + wildcard-bind reject
+- b97fd41 — REP trust-model docstring + dispatch-reject pin-тесты
+
+---
+
+---
 ## [0.59.0] — 2026-07-07 — NaN-доктрина: статус как дискриминатор от Reading до экспорта
 
 Сквозная доктрина обращения с non-finite значениями: один канонический предикат
