@@ -524,3 +524,37 @@ async def test_sqlite_replay_masks_nonfinite(tmp_path):
     assert 290.0 in vals, "usable reading must survive"
     assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
     assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_replay_uppercase_status_masks(tmp_path):
+    """A legacy uppercase non-OK status ("SENSOR_ERROR") with a finite value must
+    case-fold back to its ChannelStatus and republish as NaN, not escape as OK."""
+    import math
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    db = tmp_path / "data_2026-01-01.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE readings "
+        "(timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO readings VALUES (?,?,?,?,?,?)",
+        (time.time(), "Т12", 123.0, "K", "SENSOR_ERROR", "test"),
+    )
+    conn.commit()
+    conn.close()
+
+    received: list[Reading] = []
+
+    async def cb(r: Reading) -> None:
+        received.append(r)
+
+    src = SQLiteReplay(db, speed=1000.0, loop=False)
+    await src.run(cb, base_offset=0.0)
+
+    assert len(received) == 1
+    assert received[0].status is ChannelStatus.SENSOR_ERROR, "uppercase status must reconstruct"
+    assert math.isnan(received[0].value), "non-OK status must mask finite value as NaN"

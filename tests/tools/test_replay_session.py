@@ -116,6 +116,21 @@ def test_sentinel_error_row_replays_as_nan(tmp_path):
     assert value != SENTINEL, "raw sentinel must never surface downstream"
 
 
+def test_uppercase_nonok_status_reconstructs_and_masks(tmp_path):
+    """A legacy uppercase non-OK status ("SENSOR_ERROR") with a finite value must
+    case-fold back to its ChannelStatus and mask the value as NaN — not escape
+    as OK with the finite reading intact."""
+    import math
+
+    db = tmp_path / "session.db"
+    _seed_db(db, [(1_700_000_000.0, "ls218s", "Т5", 123.0, "K", "SENSOR_ERROR")])
+    items = list(replay_session._iter_rows(db, channels=None, start_offset_s=0.0, duration_s=None))
+    assert len(items) == 1
+    reading = items[0][1]
+    assert reading.status is ChannelStatus.SENSOR_ERROR, "uppercase status must reconstruct"
+    assert math.isnan(reading.value), "non-OK status must mask finite value as NaN"
+
+
 def test_invalid_status_falls_back_to_ok(tmp_path):
     db = tmp_path / "session.db"
     rows = [(1_700_000_000.0, "X", "T1", 1.0, "K", "garbage_status_value")]

@@ -131,3 +131,55 @@ def test_large_backward_step_still_resets():
     _fill(est, 16)
     est.push(CH, T0 - 60.0, 4.0)  # -60 s step, far beyond tolerance
     assert est.buffer_size(CH) == 1, "a -60 s step must still reset (NTP step)"
+
+
+# ---------------------------------------------------------------------------
+# R1 drift accumulator: a *sustained* stream of within-tolerance backward
+# samples would be dropped forever, starving the rate silently. The Nth
+# consecutive drop (N=5) must instead RESET+re-anchor, bounding blindness to
+# the refill window. Any accepted sample zeroes the counter.
+# ---------------------------------------------------------------------------
+
+
+def test_sustained_backward_drift_resets_after_5_drops():
+    """5 consecutive within-tolerance backward samples trip the drift
+    accumulator: buffer resets, re-anchors on the current sample, then refills
+    normally."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    last = _fill(est, 16)  # armed; period 2 s -> backward tolerance 1.0 s
+    assert est.get_rate(CH) is not None
+
+    # Five within-tolerance backward samples (each < anchor, |gap| <= 1 s).
+    # Drops do not move the anchor, so all five measure against `last`.
+    for k in range(1, 6):
+        est.push(CH, last - 0.1 * k, 4.0)
+    assert est.buffer_size(CH) == 1, "5th consecutive drop must reset + re-anchor"
+
+    # Refills normally after the re-anchor.
+    anchor = last - 0.5
+    for i in range(1, 20):
+        t = anchor + POLL_S * i
+        est.push(CH, t, 4.0 + RATE_PER_SEC * (t - anchor))
+    assert est.get_rate(CH) is not None, "rate must recover after drift reset"
+
+
+def test_four_drops_then_normal_sample_resets_counter():
+    """4 within-tolerance backward drops then a normal forward sample: the
+    drop counter resets, so no buffer reset occurs and the counter is cleared
+    (4 more drops still do not reset)."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    last = _fill(est, 16)
+
+    for k in range(1, 5):  # 4 consecutive within-tolerance backward drops
+        est.push(CH, last - 0.1 * k, 4.0)
+    assert est.buffer_size(CH) == 16, "4 drops must not reset the buffer"
+
+    # A normal forward sample is accepted and zeroes the drop counter.
+    nxt = last + POLL_S
+    est.push(CH, nxt, 4.0 + RATE_PER_SEC * (nxt - T0))
+    assert est.buffer_size(CH) == 17, "normal sample must be accepted"
+
+    # Counter was zeroed: 4 more within-tolerance backward drops still no reset.
+    for k in range(1, 5):
+        est.push(CH, nxt - 0.1 * k, 4.0)
+    assert est.buffer_size(CH) == 17, "counter reset -> next 4 drops must not reset"

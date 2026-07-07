@@ -82,7 +82,10 @@ def _iter_rows(
             if channels is not None and channel not in channels:
                 continue
             try:
-                status = ChannelStatus(str(row["status"]))
+                # Case-fold: canonical status values are lowercase, but a legacy
+                # uppercase non-OK status (e.g. "SENSOR_ERROR") must still
+                # reconstruct so decode() masks it, not fall back to OK.
+                status = ChannelStatus(str(row["status"]).lower())
             except ValueError:
                 status = ChannelStatus.OK
             reading = Reading(

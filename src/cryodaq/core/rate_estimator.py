@@ -53,8 +53,14 @@ class RateEstimator:
         # Safety cap: 2× window at 10 Hz + 100 margin.
         # Prevents unbounded growth if trim lags; actual usage is window_s × sample_rate.
         self._maxlen: int = max(500, int(window_s * 20) + 100)
+        # R1 drift accumulator: Nth consecutive within-tolerance backward drop
+        # resets instead of dropping forever (see push / _drift_reset_count).
+        self._drift_reset_count = 5
         # channel → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
+        # channel → count of consecutive dropped (within-tolerance backward)
+        # samples since the last accepted sample.
+        self._consec_drops: dict[str, int] = {}
         # short prefix → full channel name (e.g. "Т12" → "Т12 Теплообменник 2")
         self._short_to_full: dict[str, str] = {}
 
@@ -69,15 +75,36 @@ class RateEstimator:
                 # reset-storm the buffer below min_points — rate None = no
                 # protection, silently. Drop just this one out-of-order sample;
                 # the buffer (and forward-sample growth) is preserved.
-                logger.debug(
-                    "Backward jitter on channel %s: gap %+.3f s within tolerance "
-                    "— dropping single out-of-order sample (buffer %d kept)",
+                drops = self._consec_drops.get(channel, 0) + 1
+                if drops < self._drift_reset_count:
+                    self._consec_drops[channel] = drops
+                    logger.debug(
+                        "Backward jitter on channel %s: gap %+.3f s within tolerance "
+                        "— dropping single out-of-order sample (buffer %d kept, %d/%d)",
+                        channel,
+                        timestamp - buf[-1][0],
+                        len(buf),
+                        drops,
+                        self._drift_reset_count,
+                    )
+                    return
+                # R1: Nth consecutive within-tolerance backward drop = sustained
+                # backward measurement-time drift, not one-off jitter. Dropping
+                # forever would leave the rate silently stale/None while
+                # SafetyManager skips None. Reset+re-anchor to bound blindness to
+                # the min_span_s refill window (falls through to append below).
+                logger.warning(
+                    "Sustained backward drift on channel %s: %d consecutive "
+                    "within-tolerance backward samples (last gap %+.3f s) — "
+                    "resetting rate buffer (%d samples), re-anchoring; dT/dt "
+                    "protection re-arms after refill",
                     channel,
+                    drops,
                     timestamp - buf[-1][0],
                     len(buf),
                 )
-                return
-            if decision == "reset":
+                buf.clear()
+            elif decision == "reset":
                 # C-5 reset-not-drop: an NTP step (backward beyond tolerance, or
                 # forward > 4x poll) corrupts measurement-time ordering. Dropping
                 # the sample would blind the 5 K/min protection until maxlen
@@ -95,6 +122,9 @@ class RateEstimator:
                 )
                 buf.clear()
         buf.append((timestamp, value))
+        # Any accepted sample (ok / reset re-anchor / drift re-anchor) ends the
+        # consecutive-drop streak.
+        self._consec_drops[channel] = 0
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:
             buf.popleft()
@@ -119,9 +149,9 @@ class RateEstimator:
 
         # ponytail: the tolerance is a fixed heuristic — 1 s floor covers
         # sub-second reordering, half-a-poll covers ordinary cadence jitter.
-        # Ceiling: a slow (>2 s) monotonic backward *drift* would be dropped
-        # sample-by-sample rather than reset; upgrade to a drift accumulator
-        # only if a deployment shows sustained backward drift within tolerance.
+        # A slow monotonic backward *drift* within tolerance would be dropped
+        # sample-by-sample; the R1 drift accumulator in push() bounds that by
+        # resetting after `_drift_reset_count` consecutive drops.
         """
         gap = timestamp - buf[-1][0]
         if len(buf) >= 2:
