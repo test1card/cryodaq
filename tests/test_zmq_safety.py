@@ -92,3 +92,47 @@ async def test_run_handler_without_handler_rejects():
     srv = ZMQCommandServer(handler=None)
     reply = await srv._run_handler({"cmd": "anything"})
     assert reply == {"ok": False, "error": "no handler"}
+
+
+# ---------------------------------------------------------------------------
+# L1: wildcard-bind guard. The trust model treats the loopback bind as a
+# compensating control for the unauthenticated hardware-control surface. A
+# wildcard bind (0.0.0.0 / * / ::) would expose it to the LAN, so it is
+# refused at bind time; loopback and specific-interface binds are unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["tcp://0.0.0.0:5560", "tcp://*:5560", "tcp://[::]:5560"],
+)
+async def test_command_server_rejects_wildcard_bind(address: str):
+    srv = ZMQCommandServer(address)
+    with pytest.raises(ValueError, match="wildcard"):
+        await srv.start()
+    await srv.stop()
+
+
+async def test_publisher_rejects_wildcard_bind():
+    import asyncio
+
+    from cryodaq.core.zmq_bridge import ZMQPublisher
+
+    pub = ZMQPublisher("tcp://0.0.0.0:5561")
+    with pytest.raises(ValueError, match="wildcard"):
+        await pub.start(asyncio.Queue())
+    await pub.stop()
+
+
+@pytest.mark.parametrize(
+    "address", ["tcp://127.0.0.1:5562", "tcp://[::1]:5562", "tcp://192.168.1.5:5562"]
+)
+def test_reject_wildcard_bind_allows_specific_hosts(address: str):
+    # Pure guard: loopback / specific-interface addresses pass unchanged.
+    zmq_bridge._reject_wildcard_bind(address)
+
+
+async def test_loopback_command_server_binds_fine():
+    srv = ZMQCommandServer("tcp://127.0.0.1:0")
+    await srv.start()
+    await srv.stop()

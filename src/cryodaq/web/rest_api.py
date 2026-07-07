@@ -1,20 +1,30 @@
-"""Read-only REST facade for CryoDAQ (``/api/v1``) with Swagger docs.
+"""REST facade for CryoDAQ (``/api/v1``) with Swagger docs.
 
-A thin, GET-only layer over the SAME cache/command path the dashboard uses
-(``server._state.last_readings``, ``server._query_history``, existing read
-commands). It adds nothing that mutates engine state — there are no write
-verbs here by construction.
+A thin layer over the SAME cache/command path the dashboard uses
+(``server._state.last_readings``, ``server._query_history``, existing
+commands). Read endpoints are open on loopback and unauthenticated by design.
+There are exactly TWO write endpoints — both authenticated and allowlisted:
+operator-log append (``POST /log``) and alarm acknowledgement
+(``POST /alarms/{id}/ack``). The write token lives in local config
+(``config/web.local.yaml`` → ``web.api_token``); no other route mutates
+engine state.
 
 Security payload (do not remove):
 - **Field whitelist.** Every response goes through a Pydantic ``response_model``
   that declares ONLY safe fields. The model *is* the redaction: fields it does
   not declare (operator, sample, notes, config_snapshot, artifact paths,
   operator-log authors) are dropped before serialization.
+- **Auth before body parsing.** ``WriteAuthMiddleware`` runs the token check on
+  every mutating ``/api/v1`` request *before* routing — so an unauthenticated
+  client can never reach the JSON body parser (FastAPI otherwise resolves the
+  body model in the same dependency pass as the route-level guard, 422-ing
+  malformed JSON before auth runs). The route dependency stays as
+  defense-in-depth.
 - **Request-size limit.** ``BodySizeLimitMiddleware`` rejects oversize bodies
   with 413 before the request is routed — i.e. before any engine call.
 
-Loopback-only, unauthenticated by design (SSH tunnel for LAN); see the
-``server`` module docstring.
+Loopback-only for reads (SSH tunnel for LAN); see the ``server`` module
+docstring.
 """
 
 from __future__ import annotations
@@ -84,25 +94,53 @@ _bearer_scheme = HTTPBearer(
 )
 
 
-async def require_write_token(
-    credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
-) -> None:
-    """FastAPI dependency guarding write routes.
+# Auth error bodies, keyed by the status _check_bearer returns. Carry no
+# secret material.
+_AUTH_ERROR_DETAIL = {
+    403: "API token не настроен",
+    401: "Неверный API token",
+}
 
-    - No token configured  ⇒ 403 «API token не настроен» (fail-closed default).
-    - Missing/wrong bearer  ⇒ 401 (constant-time compare via hmac.compare_digest).
 
-    Never logs or echoes the token; the SecretStr wrapper keeps it out of
-    reprs/tracebacks and the error bodies carry no secret material.
+def _check_bearer(auth_header: str | None) -> int | None:
+    """Shared bearer check for both the middleware and the route dependency.
+
+    Returns the HTTP status to reject with, or None if the request is allowed:
+    - No token configured  ⇒ 403 (fail-closed default).
+    - Missing/wrong bearer ⇒ 401 (constant-time compare via hmac.compare_digest).
+
+    ``auth_header`` is the raw ``Authorization`` header value (or None). Never
+    logs or echoes the token; the SecretStr wrapper keeps it out of
+    reprs/tracebacks.
     """
     token = _load_api_token()
     if token is None:
-        raise HTTPException(status_code=403, detail="API token не настроен")
-    presented = credentials.credentials if credentials else ""
+        return 403
+    presented = ""
+    if auth_header:
+        scheme, _, param = auth_header.partition(" ")
+        if scheme.lower() == "bearer":
+            presented = param
     # Compare bytes: str compare_digest raises TypeError on non-ASCII input,
     # which an attacker could send in the header to force a 500.
     if not hmac.compare_digest(presented.encode(), token.get_secret_value().encode()):
-        raise HTTPException(status_code=401, detail="Неверный API token")
+        return 401
+    return None
+
+
+async def require_write_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
+) -> None:
+    """FastAPI dependency guarding write routes (defense-in-depth behind
+    ``WriteAuthMiddleware`` — the middleware runs the same check before the
+    body parser). Kept as a dependency so the bearer scheme shows in OpenAPI.
+    """
+    # Reconstruct the header form for the shared check. HTTPBearer already
+    # parsed/validated it; this just re-normalizes for _check_bearer.
+    header = f"{credentials.scheme} {credentials.credentials}" if credentials else None
+    status = _check_bearer(header)
+    if status is not None:
+        raise HTTPException(status_code=status, detail=_AUTH_ERROR_DETAIL[status])
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +209,31 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
                     return JSONResponse({"detail": "Request body too large"}, status_code=413)
             except ValueError:
                 return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+        return await call_next(request)
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class WriteAuthMiddleware(BaseHTTPMiddleware):
+    """Run the write-token check BEFORE routing/body parsing.
+
+    FastAPI resolves a route's body model in the same dependency pass as its
+    ``require_write_token`` dependency, so malformed JSON on a write route
+    would 422 *before* the token check — leaving an unauthenticated parser
+    path. This middleware closes that: any mutating request under ``/api/v1``
+    is auth-checked here, before the router runs. The route-level dependency
+    stays as defense-in-depth (and to surface the bearer scheme in OpenAPI).
+    GET/HEAD/OPTIONS and non-``/api/v1`` paths are untouched.
+    """
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        if request.method not in _SAFE_METHODS and request.url.path.startswith("/api/v1"):
+            status = _check_bearer(request.headers.get("authorization"))
+            if status is not None:
+                return JSONResponse(
+                    {"detail": _AUTH_ERROR_DETAIL[status]}, status_code=status
+                )
         return await call_next(request)
 
 
@@ -281,6 +344,30 @@ async def get_log(limit: int = 10) -> list[dict[str, Any]]:
 # the handlers overwrite them unconditionally. No impersonation.
 _REST_IDENTITY = "REST API"
 
+# Operator-log tags that downstream consumers treat as semantic SYSTEM
+# categories, not free-form labels. A REST caller must not forge them
+# (audit/event-stream impersonation). Sources (grep the literals):
+#   - agents/assistant/live/context_builder.py — alarm / phase / phase_transition
+#     / experiment / calibration / ai / auto classification buckets
+#   - core/event_logger.py — auto + event_type tags on every logged event
+#   - engine.py::_safety_fault_log_callback — safety_fault
+#   - gui/widgets/shift_handover.py::_SHIFT_EVENT_TAGS — phase / experiment /
+#     safety_fault / alarm_ack
+#   - agents/assistant/live/output_router.py — ai
+_RESERVED_TAGS = frozenset(
+    {
+        "ai",
+        "auto",
+        "alarm",
+        "alarm_ack",
+        "safety_fault",
+        "phase",
+        "phase_transition",
+        "experiment",
+        "calibration",
+    }
+)
+
 
 class LogAppendIn(BaseModel):
     """Operator-log append body. ``author``/``source`` are NOT accepted —
@@ -323,6 +410,15 @@ async def post_log(payload: LogAppendIn) -> dict[str, Any]:
         "source": "rest",
     }
     if payload.tags is not None:
+        # Reject reserved system tags (impersonation guard) — genuinely
+        # free-form tags pass through unchanged. Compare stripped, matching
+        # how the engine normalizes tags (operator_log.normalize_operator_log_tags).
+        reserved = _RESERVED_TAGS.intersection(t.strip() for t in payload.tags)
+        if reserved:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Зарезервированные системные теги недопустимы: {', '.join(sorted(reserved))}",
+            )
         cmd["tags"] = payload.tags
     return await _forward_write(cmd)
 

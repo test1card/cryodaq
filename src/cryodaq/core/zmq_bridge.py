@@ -15,10 +15,13 @@ ceremony without changing the trust boundary.
 
 The accepted risk is bounded by these compensating controls:
 
-- **Loopback-only bind.** PUB/REP default to ``tcp://127.0.0.1:*``
-  (``DEFAULT_PUB_ADDR`` / ``DEFAULT_CMD_ADDR``) — never ``0.0.0.0``. The
-  kernel refuses any off-host connection, so the unauthenticated surface
-  is not reachable from the LAN.
+- **Loopback-only bind, wildcard-bind rejected.** PUB/REP default to
+  ``tcp://127.0.0.1:*`` (``DEFAULT_PUB_ADDR`` / ``DEFAULT_CMD_ADDR``), and
+  ``_bind_with_retry`` calls ``_reject_wildcard_bind`` to raise ``ValueError``
+  on any ``0.0.0.0`` / ``*`` / ``::`` address — the loopback bind is enforced,
+  not merely the default. The kernel then refuses any off-host connection, so
+  the unauthenticated surface is not reachable from the LAN. Specific-interface
+  binds are still allowed for the SSH-tunnel-to-loopback deployment rule.
 - **Socket-level size caps.** ``ZMQ_MAXMSGSIZE`` (``MAX_CMD_MSG_SIZE`` /
   ``MAX_DATA_MSG_SIZE``) makes libzmq drop an oversize frame before it is
   allocated in user space (audit C.2 / Codex D6).
@@ -32,7 +35,12 @@ The accepted risk is bounded by these compensating controls:
   an action; it never overrides the safety FSM. SAFE_OFF stays the
   default and any run still requires continuous proof of health.
 - **Tiered handler timeouts.** ``_timeout_for`` bounds wall-clock time per
-  command so a wedged handler cannot stall the REP state machine.
+  command via ``asyncio.wait_for``. Caveat: ``wait_for`` can only cancel at an
+  ``await`` point — it cannot preempt a *synchronous* blocking handler before
+  its first await, so a handler that blocks the event loop is not bounded by
+  this timeout. The engine keeps its command handlers async/non-blocking for
+  this reason; the timeout bounds cooperative handlers, not CPU/IO-blocking
+  ones.
 - **Defensive dispatch.** Malformed shapes (non-dict payloads) are rejected
   in ``ZMQCommandServer._run_handler``; unknown command names fall through
   to the engine handler's ``{"ok": False, "error": "unknown command: ..."}``
@@ -176,12 +184,39 @@ _BIND_INITIAL_DELAY_S = 0.5
 _BIND_MAX_DELAY_S = 10.0
 
 
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "*", "::"})
+
+
+def _reject_wildcard_bind(address: str) -> None:
+    """Refuse a wildcard bind (``0.0.0.0`` / ``*`` / ``::``).
+
+    The trust model (module docstring) treats the loopback bind as a
+    compensating control for the unauthenticated hardware-control surface.
+    A wildcard bind would expose that surface to the LAN. LAN access MUST go
+    through an SSH tunnel to 127.0.0.1 — never bind a wildcard. Loopback and
+    specific-interface addresses are unaffected.
+    """
+    host = address
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    # Strip the :PORT suffix and any IPv6 brackets: tcp://[::]:5555 → ::
+    host = host.rsplit(":", 1)[0].strip("[]")
+    if host in _WILDCARD_BIND_HOSTS:
+        raise ValueError(
+            f"refusing wildcard bind {address!r}: the ZMQ command/data surface "
+            "is unauthenticated — bind loopback (127.0.0.1) and reach it over an "
+            "SSH tunnel, never expose it to the LAN via 0.0.0.0/*/::"
+        )
+
+
 def _bind_with_retry(socket: Any, address: str) -> None:
     """Bind a ZMQ socket, retrying on EADDRINUSE with exponential backoff.
 
     Caller MUST set ``zmq.LINGER = 0`` on the socket BEFORE calling this
     helper, otherwise close() will hold the address even after retry succeeds.
     """
+    # Fail fast on a wildcard bind before touching the socket or the retry loop.
+    _reject_wildcard_bind(address)
     delay = _BIND_INITIAL_DELAY_S
     for attempt in range(_BIND_MAX_ATTEMPTS):
         try:

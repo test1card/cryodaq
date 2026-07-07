@@ -135,10 +135,13 @@ def test_oversize_body_returns_413_before_engine(client) -> None:
     "path", ["/api/v1/state", "/api/v1/experiment", "/api/v1/readings", "/api/v1/alarms"]
 )
 def test_write_verbs_are_rejected(client, method: str, path: str) -> None:
-    """Read-only GET paths reject every mutating verb (405). The only write
-    verbs on /api/v1 are the two allowlisted POSTs (see P4-2 block below)."""
+    """Mutating verbs on read-only GET paths never mutate. Auth runs before
+    routing (WriteAuthMiddleware), so with no token configured the write-auth
+    gate fail-closes (403) before the router would report 405 — either way the
+    request is refused. The only real write verbs are the two allowlisted
+    POSTs (see P4-2 block below)."""
     resp = client.request(method, path)
-    assert resp.status_code == 405
+    assert resp.status_code == 403
 
 
 def test_state_endpoint_shape(client) -> None:
@@ -497,14 +500,121 @@ def test_api_v1_write_surface_is_closed() -> None:
     }
 
 
-def test_post_to_unlisted_api_path_is_not_a_command() -> None:
-    """POST to a non-allowlisted /api/v1 path never reaches an engine command
-    (405 on a GET-only route, 404 on an unknown path) — never 200."""
+def test_post_to_unlisted_api_path_is_not_a_command(monkeypatch, tmp_path) -> None:
+    """POST to a non-allowlisted /api/v1 path never reaches an engine command.
+
+    With no token configured the write-auth middleware fail-closes (403)
+    before the router runs — never 200, engine never touched."""
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
     with patch("cryodaq.web.server._zmq_to_ws_bridge"):
         app = create_app()
         with TestClient(app) as c, patch(
             "cryodaq.web.server._async_engine_command", side_effect=AssertionError
         ):
-            assert c.post("/api/v1/experiment").status_code == 405
-            assert c.post("/api/v1/state").status_code == 405
-            assert c.post("/api/v1/experiment/note").status_code == 404
+            assert c.post("/api/v1/experiment").status_code == 403
+            assert c.post("/api/v1/state").status_code == 403
+            assert c.post("/api/v1/experiment/note").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# H1: auth runs BEFORE body parsing (WriteAuthMiddleware)
+#
+# FastAPI resolves body models in the same dependency pass as
+# require_write_token, so invalid JSON on a write route would 422 before the
+# route dependency runs — an unauthenticated parser path. The middleware moves
+# the token check ahead of routing/parsing. The route dependency stays as
+# defense-in-depth.
+# ---------------------------------------------------------------------------
+
+
+def _no_token_app(monkeypatch, tmp_path):
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
+    return create_app()
+
+
+_BAD_JSON = {"content": "{", "headers": {"Content-Type": "application/json"}}
+
+
+def test_invalid_json_without_token_is_403_not_422(monkeypatch, tmp_path) -> None:
+    """Invalid JSON + no token ⇒ 403 (fail-closed), not 422 — the parser is
+    never reached by an unauthenticated client."""
+    with patch("cryodaq.web.server._zmq_to_ws_bridge"), patch(
+        "cryodaq.web.server._async_engine_command", side_effect=AssertionError
+    ):
+        app = _no_token_app(monkeypatch, tmp_path)
+        with TestClient(app) as c:
+            resp = c.post("/api/v1/log", content="{",
+                          headers={"Content-Type": "application/json"})
+    assert resp.status_code == 403
+
+
+def test_invalid_json_wrong_token_is_401_not_422(monkeypatch, tmp_path) -> None:
+    """Invalid JSON + wrong bearer ⇒ 401, not 422 — auth precedes the parser."""
+    monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
+    (tmp_path / "web.local.yaml").write_text(
+        f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8"
+    )
+    with patch("cryodaq.web.server._zmq_to_ws_bridge"), patch(
+        "cryodaq.web.server._async_engine_command", side_effect=AssertionError
+    ):
+        app = create_app()
+        with TestClient(app) as c:
+            resp = c.post("/api/v1/log", content="{",
+                          headers={"Content-Type": "application/json",
+                                   "Authorization": "Bearer wrong"})
+    assert resp.status_code == 401
+
+
+def test_valid_auth_then_invalid_json_is_422(auth_client) -> None:
+    """With valid auth the parser DOES run and rejects malformed JSON (422) —
+    proving auth precedes, not replaces, body validation."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post(
+            "/api/v1/log", content="{",
+            headers={**_AUTH, "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 422
+
+
+def test_get_routes_bypass_write_auth_middleware(auth_client) -> None:
+    """The write-auth middleware never touches GET routes (reads stay open on
+    loopback even with a token configured)."""
+    assert auth_client.get("/api/v1/state").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# M1: reserved-tag impersonation guard on POST /api/v1/log
+#
+# Certain tags are semantic system categories downstream (context_builder /
+# event_logger / shift_handover / safety-fault log). A REST caller must not
+# forge them; genuinely free-form tags still pass through.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reserved", ["safety_fault", "phase_transition", "alarm", "ai"])
+def test_post_log_rejects_reserved_tag(auth_client, reserved: str) -> None:
+    """A reserved (system-semantic) tag ⇒ 422 naming the tag, engine untouched."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post(
+            "/api/v1/log", headers=_AUTH,
+            json={"message": "ok", "tags": [reserved]},
+        )
+    assert resp.status_code == 422
+    assert reserved in resp.json()["detail"]
+
+
+def test_post_log_freeform_tags_pass_through(auth_client) -> None:
+    """Genuinely free-form tags are forwarded verbatim to the engine command."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True, "entry": {"id": 1}}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = auth_client.post(
+            "/api/v1/log", headers=_AUTH,
+            json={"message": "ok", "tags": ["насос", "проверка"]},
+        )
+    assert resp.status_code == 200
+    assert captured["tags"] == ["насос", "проверка"]
