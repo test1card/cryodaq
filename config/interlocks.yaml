@@ -47,3 +47,14 @@ interlocks:
 
   # undercool_shield (Т5 < 50 K) — УДАЛЁН: ложное срабатывание при штатном cooldown.
   # Физическое обоснование: см. alarm_tz_physics_v3.md §4.2 "Undercool false alarm".
+
+# ─── NaN-доктрина P2-5: дебаунс непригодных показаний на interlock-каналах ───
+# Непригодное показание (NaN / error-status) на защищённом интерлоком канале:
+#   • транзиент (одиночный blip) → CRITICAL-лог + alarm-v2, БЕЗ trip;
+#   • персистентность (≥ min_samples подряд И ≥ min_duration_s) при активном
+#     источнике (safety-состояние RUNNING) → эскалация в SafetyManager (FAULT).
+# Обоснование: Т1–Т10 защищены ТОЛЬКО интерлоками (critical_channels — лишь
+# Т11/Т12). Устойчиво мёртвый датчик на нагреваемой зоне — fail-open без этого.
+nonusable_escalation:
+  min_duration_s: 10.0   # минимальная длительность серии непригодных показаний
+  min_samples: 5         # минимум непригодных показаний подряд

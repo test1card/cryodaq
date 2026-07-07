@@ -46,12 +46,12 @@ def _populate_db(
         conn.execute(
             "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, "ls218", reference_channel, krdg_val, "K", "OK"),
+            (ts, "ls218", reference_channel, krdg_val, "K", "ok"),
         )
         conn.execute(
             "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts + 0.1, "ls218", srdg_channel, srdg_val, "sensor_unit", "OK"),
+            (ts + 0.1, "ls218", srdg_channel, srdg_val, "sensor_unit", "ok"),
         )
 
     conn.commit()
@@ -109,19 +109,19 @@ def test_extract_filters_ovl(tmp_path) -> None:
         "value REAL, unit TEXT, status TEXT)"
     )
     # Normal pair
-    conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'OK')")
+    conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'ok')")
     conn.execute(
-        "INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')"
+        "INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')"
     )
     # OVL pair (inf KRDG)
-    conn.execute("INSERT INTO readings VALUES (3, 101.0, 'ls', 'ref', 1e308, 'K', 'OK')")
+    conn.execute("INSERT INTO readings VALUES (3, 101.0, 'ls', 'ref', 1e308, 'K', 'ok')")
     conn.execute(
-        "INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')"
+        "INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')"
     )
     # Zero SRDG
-    conn.execute("INSERT INTO readings VALUES (5, 102.0, 'ls', 'ref', 77.0, 'K', 'OK')")
+    conn.execute("INSERT INTO readings VALUES (5, 102.0, 'ls', 'ref', 77.0, 'K', 'ok')")
     conn.execute(
-        "INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'OK')"
+        "INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'ok')"
     )
     conn.commit()
     conn.close()
@@ -140,14 +140,14 @@ def test_time_alignment_filter(tmp_path) -> None:
         "value REAL, unit TEXT, status TEXT)"
     )
     # Aligned pair (0.5s delta)
-    conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'OK')")
+    conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'ok')")
     conn.execute(
-        "INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'OK')"
+        "INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')"
     )
     # Misaligned pair (5s delta)
-    conn.execute("INSERT INTO readings VALUES (3, 110.0, 'ls', 'ref', 78.0, 'K', 'OK')")
+    conn.execute("INSERT INTO readings VALUES (3, 110.0, 'ls', 'ref', 78.0, 'K', 'ok')")
     conn.execute(
-        "INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'OK')"
+        "INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')"
     )
     conn.commit()
     conn.close()
@@ -296,16 +296,16 @@ def test_coverage_empty_regions(tmp_path) -> None:
     # Points at T=4K and T=300K, nothing in between
     for i in range(20):
         ts = 1000.0 + i
-        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 4.0, 'K', 'OK')", (ts,))
+        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 4.0, 'K', 'ok')", (ts,))
         conn.execute(
-            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 80.0, 'sensor_unit', 'OK')",
+            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 80.0, 'sensor_unit', 'ok')",
             (ts + 0.1,),
         )
     for i in range(20):
         ts = 1020.0 + i
-        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 300.0, 'K', 'OK')", (ts,))
+        conn.execute("INSERT INTO readings VALUES (NULL, ?, 'ls', 'ref', 300.0, 'K', 'ok')", (ts,))
         conn.execute(
-            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 5.0, 'sensor_unit', 'OK')",
+            "INSERT INTO readings VALUES (NULL, ?, 'ls', 'tgt_raw', 5.0, 'sensor_unit', 'ok')",
             (ts + 0.1,),
         )
     conn.commit()
@@ -432,3 +432,39 @@ def test_fit_logs_warning_when_all_metric_points_fail(
         r for r in caplog.records if r.levelno >= logging.WARNING and "NaN" in r.message
     ]
     assert warnings, "Expected a WARNING when all metric points fail to evaluate"
+
+
+# ------------------------------------------------------------------
+# NaN-доктрина: extract drops error-status rows even with in-range values
+# ------------------------------------------------------------------
+
+
+def test_extract_pairs_drops_error_status(tmp_path) -> None:
+    """A non-OK status is the discriminator: an error-status reading with an
+    otherwise in-range value must never become a calibration pair. Decode at
+    the ingest boundary maps it to NaN, and the existing finite-filter drops it.
+    """
+    db_path = tmp_path / "data_2026-03-17.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE readings (id INTEGER PRIMARY KEY, "
+        "timestamp REAL, instrument_id TEXT, channel TEXT, "
+        "value REAL, unit TEXT, status TEXT)"
+    )
+    # Pair A — both OK, in range → survives.
+    conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'ok')")
+    conn.execute("INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')")
+    # Pair B — SRDG errored (in-range value 90.0) → decode→NaN → dropped.
+    conn.execute("INSERT INTO readings VALUES (3, 200.0, 'ls', 'ref', 77.0, 'K', 'ok')")
+    conn.execute(
+        "INSERT INTO readings VALUES (4, 200.1, 'ls', 'tgt_raw', 90.0, 'sensor_unit', 'sensor_error')"
+    )
+    # Pair C — KRDG errored (in-range value 78.0) → decode→NaN → dropped.
+    conn.execute("INSERT INTO readings VALUES (5, 300.0, 'ls', 'ref', 78.0, 'K', 'sensor_error')")
+    conn.execute("INSERT INTO readings VALUES (6, 300.1, 'ls', 'tgt_raw', 95.0, 'sensor_unit', 'ok')")
+    conn.commit()
+    conn.close()
+
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 301.0, "ref", "tgt")
+    assert len(pairs) == 1, "only the both-OK pair may survive"
+    assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.1)

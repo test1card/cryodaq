@@ -20,7 +20,6 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Callable
 from datetime import UTC, datetime
 
 # Windows: pyzmq требует SelectorEventLoop (не Proactor)
@@ -1886,24 +1885,6 @@ async def _watchdog(
         return
 
 
-def _push_if_finite(push: Callable[..., None], *args: Any) -> bool:
-    """Forward a live reading into a rolling estimator, dropping non-finite samples.
-
-    HI-2/ME-15: drivers emit value=NaN on SENSOR_ERROR/TIMEOUT and the
-    scheduler still publishes those readings. One NaN inside an OLS window
-    makes the slope undefined (rate_estimator returns None), blinding the
-    estimator for up to the whole window length (~120 s / ~1 h). The last
-    positional argument is the reading value; NaN/±inf samples are dropped
-    (not forwarded) so they never enter the rolling window.
-
-    Returns True when the sample was forwarded to ``push``.
-    """
-    if not math.isfinite(args[-1]):
-        return False
-    push(*args)
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Основной цикл
 # ---------------------------------------------------------------------------
@@ -2094,10 +2075,49 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc_info=True,
                 )
 
+    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> bool:
+        # P2-5: a persistently non-usable reading on an interlock-protected
+        # channel. SafetyManager gates the fault on RUNNING (sole authority);
+        # this handler only forwards. Failures escalate to a guaranteed fault.
+        # S1: return True iff a fault is now latched — the InterlockEngine marks
+        # the debounce window escalated ONLY on True, so a declined escalation
+        # (not RUNNING) is retried on the next non-usable sample (fail-closed).
+        try:
+            return await safety_manager.on_interlock_dead_channel(
+                condition.name,
+                reading.channel,
+                value=float(reading.value) if reading.value is not None else float("nan"),
+            )
+        except Exception as exc:
+            logger.critical(
+                "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
+                "escalating to guaranteed fault.",
+                condition.name,
+                reading.channel,
+                exc,
+                exc_info=True,
+            )
+            try:
+                await safety_manager.latch_fault(
+                    reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
+                    source="interlock",
+                    channel=reading.channel,
+                )
+                return True
+            except Exception as exc2:
+                logger.critical(
+                    "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
+                    condition.name,
+                    exc2,
+                    exc_info=True,
+                )
+                return False
+
     interlock_engine = InterlockEngine(
         broker,
         actions=interlock_actions,
         trip_handler=_interlock_trip_handler,
+        dead_channel_handler=_interlock_dead_channel_handler,
     )
     interlock_engine.load_config(interlocks_cfg)
 
@@ -2149,6 +2169,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
     )
     alarm_v2_state_mgr = AlarmStateManager()
+    # P2-5: interlock non-usable readings emit alarm-v2 events via the same
+    # AlarmStateManager the sensor-diagnostics engine uses (built after the
+    # InterlockEngine, so wired here by setter).
+    interlock_engine.set_alarm_publisher(alarm_v2_state_mgr)
     if _alarm_v2_configs:
         logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
     else:
@@ -2294,13 +2318,15 @@ async def _run_engine(*, mock: bool = False) -> None:
             while True:
                 reading: Reading = await queue.get()
                 _alarm_v2_state_tracker.update(reading)
-                # HI-2: drop NaN/inf so a flapping sensor can't poison the OLS window
-                _push_if_finite(
-                    _alarm_v2_rate.push,
-                    reading.channel,
-                    reading.timestamp.timestamp(),
-                    reading.value,
-                )
+                # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
+                # конечно; не годное показание (flapping sensor: NaN/inf или
+                # статус ошибки) не отравляет OLS-окно rate-оценщика.
+                if reading.is_usable():
+                    _alarm_v2_rate.push(
+                        reading.channel,
+                        reading.timestamp.timestamp(),
+                        reading.value,
+                    )
         except asyncio.CancelledError:
             return
 
@@ -2371,13 +2397,14 @@ async def _run_engine(*, mock: bool = False) -> None:
         try:
             while True:
                 reading: Reading = await queue.get()
-                # HI-2: drop NaN/inf so error readings don't poison diagnostics buffers
-                _push_if_finite(
-                    sensor_diag.push,
-                    reading.channel,
-                    reading.timestamp.timestamp(),
-                    reading.value,
-                )
+                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно;
+                # не годное показание не отравляет буферы диагностики.
+                if reading.is_usable():
+                    sensor_diag.push(
+                        reading.channel,
+                        reading.timestamp.timestamp(),
+                        reading.value,
+                    )
         except asyncio.CancelledError:
             return
 
@@ -2440,9 +2467,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                         continue
                 elif not pressure_channel and reading.unit != "mbar":
                     continue
-                # HI-2/ME-15: VacuumTrendPredictor.push only rejects P <= 0,
-                # so NaN would slip through — drop non-finite here.
-                _push_if_finite(vacuum_trend.push, reading.timestamp.timestamp(), reading.value)
+                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно.
+                # push сохраняет свою доменную защиту P <= 0 (log₁₀ не определён).
+                if reading.is_usable():
+                    vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
         except asyncio.CancelledError:
             return
 

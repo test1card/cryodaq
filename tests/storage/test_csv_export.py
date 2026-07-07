@@ -8,6 +8,7 @@ from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.csv_export import CSVExporter
+from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -194,3 +195,32 @@ async def test_csv_selects_utc_day_for_early_local_hours(tmp_path: Path) -> None
     assert count == 1, f"early-hours UTC day file dropped: got {count}"
     assert len(rows) == 1
     assert rows[0]["channel"] == "CH1"
+
+
+# ---------------------------------------------------------------------------
+# NaN-доктрина: sentinel/error rows carry status but never a real value
+# ---------------------------------------------------------------------------
+
+
+def test_csv_masks_sentinel_value(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    ts_good = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    ts_bad = datetime(2026, 3, 14, 12, 0, 30, tzinfo=UTC)
+    _populate_db(
+        data_dir,
+        [
+            _reading("CH1", 4.5, ts=ts_good, status=ChannelStatus.OK),
+            _reading("CH1", float("nan"), ts=ts_bad, status=ChannelStatus.SENSOR_ERROR),
+        ],
+    )
+
+    output_path = tmp_path / "masked.csv"
+    CSVExporter(data_dir).export(output_path)
+
+    _, rows = _read_csv(output_path)
+    by_status = {r["status"]: r for r in rows}
+    bad = by_status["sensor_error"]
+    assert str(SENTINEL) not in bad["value"], "sentinel leaked into CSV value"
+    assert bad["value"].strip().lower() not in {"inf", "-inf", "nan"}
+    assert bad["value"] == "", "non-usable value must be blank, status preserved"
+    assert by_status["ok"]["value"] not in ("", None)

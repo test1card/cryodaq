@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.replay import ReplaySource
+from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -205,3 +207,35 @@ async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
     assert 0 < count < n, (
         f"stop() while parked in sleep must limit emitted count; got count={count} (n={n})"
     )
+
+
+# ---------------------------------------------------------------------------
+# NaN-доктрина: a replayed sentinel/error row publishes NaN, never the sentinel
+# ---------------------------------------------------------------------------
+
+
+async def test_replay_masks_sentinel_value(tmp_path: Path) -> None:
+    readings = [
+        _reading("CH1", 4.5, ts=_fixed_ts(10, 0, 0)),
+        Reading(
+            timestamp=_fixed_ts(10, 0, 1),
+            instrument_id="ls218s",
+            channel="CH1",
+            value=float("nan"),
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+    ]
+    db_path = _make_db(tmp_path, readings)
+
+    broker = DataBroker()
+    queue = await broker.subscribe("test_sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    count = await replay.play(db_path)
+
+    received = [queue.get_nowait() for _ in range(count)]
+    values = [r.value for r in received]
+    assert SENTINEL not in values, "sentinel republished to broker"
+    assert not any(math.isinf(v) for v in values), "inf republished to broker"
+    bad = [r.value for r in received if r.status is ChannelStatus.SENSOR_ERROR]
+    assert bad and all(math.isnan(v) for v in bad), "error row must republish as NaN"

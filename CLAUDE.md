@@ -415,6 +415,7 @@ Phase I.1.
 
 **Storage**
 
+- `src/cryodaq/storage/sentinel.py` — sentinel encode/decode для non-finite readings (NaN-доктрина: status = дискриминатор)
 - `src/cryodaq/storage/sqlite_writer.py` — WAL-mode SQLite, daily rotation, persistence-first
 - `src/cryodaq/storage/parquet_archive.py` — Parquet export/read для архива экспериментов (pyarrow теперь базовая зависимость, IV.4 F1)
 - `src/cryodaq/storage/csv_export.py` — экспорт данных из SQLite в CSV

@@ -87,3 +87,52 @@ def test_api_log_clamps_oversized_limit(monkeypatch) -> None:
     assert captured["cmd"]["limit"] == server._LOG_MAX_LIMIT, (
         "limit not clamped to _LOG_MAX_LIMIT"
     )
+
+
+def test_query_history_masks_sentinel(tmp_path, monkeypatch) -> None:
+    """NaN-доктрина: a stored sentinel/error row must surface as null, never as
+    a real number, in the dashboard/REST history feed."""
+    import math
+    import os
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.sentinel import SENTINEL
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    now = datetime.now(UTC)
+    writer = SQLiteWriter(tmp_path)
+    writer._write_batch(
+        [
+            Reading(
+                timestamp=now - timedelta(seconds=10),
+                instrument_id="ls218s",
+                channel="CH1",
+                value=4.5,
+                unit="K",
+                status=ChannelStatus.OK,
+            ),
+            Reading(
+                timestamp=now - timedelta(seconds=5),
+                instrument_id="ls218s",
+                channel="CH1",
+                value=float("nan"),
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            ),
+        ]
+    )
+    if writer._conn is not None:
+        writer._conn.close()
+    writer._conn = None
+
+    monkeypatch.setattr(server, "_DATA_DIR", tmp_path)
+    result = server._query_history(60)
+
+    vs = [pt["v"] for pt in result["CH1"]]
+    assert 4.5 in vs, "usable reading must be served"
+    assert None in vs, "non-usable reading must be served as null"
+    assert SENTINEL not in vs, "sentinel leaked into history feed"
+    assert not any(isinstance(v, float) and not math.isfinite(v) for v in vs), (
+        "non-finite number leaked into history feed"
+    )

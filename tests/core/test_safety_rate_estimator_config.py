@@ -94,8 +94,10 @@ def test_rate_estimator_min_span_gate_pure():
         est.push(ch, T0 + 1.0 * i, float(i))
     assert est.get_rate(ch) is None, "20 points / 19 s span must be gated by min_span_s"
 
-    # Extend to a 30 s span → value
-    est.push(ch, T0 + 30.0, 30.0)
+    # Extend to a 30 s span at the same 1 s spacing (no gap > 4x poll, so the
+    # C-5 clock guard stays inert) → value
+    for i in range(20, 31):
+        est.push(ch, T0 + 1.0 * i, float(i))
     assert est.get_rate(ch) is not None, "span >= min_span_s must open the gate"
 
     # min_points floor still applies: fresh channel, 3 points over 40 s → None

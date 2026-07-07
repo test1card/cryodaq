@@ -198,8 +198,16 @@ class PressurePlot(QWidget):
         self._last_times = list(times)
         self._last_values = list(values)
         fallback = self._compute_and_apply_y_range()
-        clamped_values = [v if v > 0 else fallback for v in self._last_values]
-        self._curve.setData(x=self._last_times, y=clamped_values)
+        # NaN-доктрина: a non-finite (NaN / ±inf) sample is "no reading" and must
+        # render as a GAP, not the positive fallback — otherwise a bad sample
+        # draws a plausible low-pressure line. Only non-positive *finite* values
+        # (0 / negative) are clamped so log-Y can plot them. connect="finite"
+        # tells pyqtgraph to break the line across the NaN slots.
+        clamped_values = [
+            v if v > 0 else (math.nan if not math.isfinite(v) else fallback)
+            for v in self._last_values
+        ]
+        self._curve.setData(x=self._last_times, y=clamped_values, connect="finite")
         if not self._forward_looking:
             self._apply_window(get_time_window_controller().get_window())
 

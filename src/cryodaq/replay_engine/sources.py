@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -76,9 +77,13 @@ class SQLiteReplay:
                         await asyncio.sleep(delta / self._speed)
                 prev_ts = ts_posix
                 try:
-                    status = ChannelStatus(status_str)
+                    # Case-fold: canonical status values are lowercase, but a
+                    # legacy uppercase non-OK status (e.g. "SENSOR_ERROR") must
+                    # still reconstruct so decode() masks it, not fall back to OK.
+                    status = ChannelStatus(str(status_str).lower())
                 except ValueError:
                     status = ChannelStatus.OK
+                value = decode(value, status.value)
                 reading = Reading(
                     timestamp=datetime.fromtimestamp(ts_posix + _base_offset, tz=UTC),
                     instrument_id=inst_id,

@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import decode
 from tools._zmq_helpers import DEFAULT_PUB_ADDR, publish_reading, publisher_socket
 
 logger = logging.getLogger("replay_session")
@@ -81,14 +82,19 @@ def _iter_rows(
             if channels is not None and channel not in channels:
                 continue
             try:
-                status = ChannelStatus(str(row["status"]))
+                # Case-fold: canonical status values are lowercase, but a legacy
+                # uppercase non-OK status (e.g. "SENSOR_ERROR") must still
+                # reconstruct so decode() masks it, not fall back to OK.
+                status = ChannelStatus(str(row["status"]).lower())
             except ValueError:
                 status = ChannelStatus.OK
             reading = Reading(
                 timestamp=datetime.fromtimestamp(ts, tz=UTC),
                 instrument_id=str(row["instrument_id"] or ""),
                 channel=channel,
-                value=float(row["value"]),
+                # NaN-доктрина: decode against the resolved status so a stored
+                # (SENTINEL, non-OK) row surfaces as NaN, never the raw sentinel.
+                value=decode(float(row["value"]), status.value),
                 unit=str(row["unit"] or ""),
                 status=status,
             )

@@ -133,9 +133,16 @@ class VacuumTrendPredictor:
 
     def push(self, timestamp: float, pressure_mbar: float) -> None:
         """Add a pressure reading. Rejects P <= 0 (log₁₀ undefined) and
-        non-finite values (NaN/inf). A NaN would pass the `<= 0` guard
-        (NaN comparisons are False), then log10(NaN) poisons the buffer and
-        kills predictions until it ages out (ME-14 / D-C14)."""
+        non-finite values (NaN/inf).
+
+        NaN-доктрина: validity is decided at the Reading boundary (engine
+        _vacuum_trend_feed gates on reading.is_usable()). push() is a
+        status-less float API, so both guards stay locally: `P <= 0` is the
+        MORE-restrictive log₁₀ DOMAIN guard (stays regardless of doctrine);
+        the finite check is fail-closed defense-in-depth for any caller that
+        bypasses the boundary — a NaN would pass the `<= 0` guard (NaN
+        comparisons are False), then log10(NaN) poisons the buffer and kills
+        predictions until it ages out (ME-14 / D-C14)."""
         if not math.isfinite(pressure_mbar) or pressure_mbar <= 0:
             return
         log_p = math.log10(pressure_mbar)

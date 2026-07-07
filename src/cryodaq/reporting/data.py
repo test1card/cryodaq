@@ -9,9 +9,27 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_archived_value(raw: Any) -> float:
+    """Parse an archived CSV value cell → float, blank/unparseable → NaN.
+
+    NaN-доктрина: a blank masked cell means "no reading", not a zero-valued
+    measurement. Legacy archived CSVs lack a status column, so the blank cell
+    itself is the only signal — decode it to NaN (renderers treat NaN as
+    no-reading) rather than 0.0.
+    """
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return float("nan")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +114,7 @@ class ReportDataExtractor:
                             timestamp=self._parse_time(row.get("timestamp")),
                             instrument_id=str(row.get("instrument_id") or ""),
                             channel=str(row.get("channel") or ""),
-                            value=float(row.get("value") or 0.0),
+                            value=_parse_archived_value(row.get("value")),
                             unit=str(row.get("unit") or ""),
                             status=str(row.get("status") or ""),
                         )
@@ -149,7 +167,7 @@ class ReportDataExtractor:
                             timestamp=_parse_timestamp(row["timestamp"]),
                             instrument_id=str(row["instrument_id"] or ""),
                             channel=str(row["channel"] or ""),
-                            value=float(row["value"]),
+                            value=decode(float(row["value"]), str(row["status"] or "")),
                             unit=str(row["unit"] or ""),
                             status=str(row["status"] or ""),
                         )

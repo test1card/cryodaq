@@ -255,7 +255,7 @@ async def test_sqlite_ok_nonfinite_filtered(tmp_path) -> None:
 
 
 async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
-    """OVERRANGE reading with value=+inf is intentionally persisted."""
+    """OVERRANGE +inf persists as sentinel + status (NaN-doctrine P2-2)."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -286,13 +286,17 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
     assert rows[0][0] == "T_OVR"
     assert rows[0][2] == ChannelStatus.OVERRANGE.value
     import math
-    assert math.isinf(rows[0][1]) and rows[0][1] > 0, (
-        f"Persisted value must be +inf, got {rows[0][1]}"
+
+    from cryodaq.storage.sentinel import SENTINEL, decode
+
+    assert rows[0][1] == SENTINEL, (
+        f"Persisted value must be the sentinel, got {rows[0][1]}"
     )
+    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
-    """UNDERRANGE reading with value=-inf is intentionally persisted."""
+    """UNDERRANGE -inf persists as sentinel + status (NaN-doctrine P2-2)."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -323,9 +327,13 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
     assert rows[0][0] == "T_UNR"
     assert rows[0][2] == ChannelStatus.UNDERRANGE.value
     import math
-    assert math.isinf(rows[0][1]) and rows[0][1] < 0, (
-        f"Persisted value must be -inf, got {rows[0][1]}"
+
+    from cryodaq.storage.sentinel import SENTINEL, decode
+
+    assert rows[0][1] == SENTINEL, (
+        f"Persisted value must be the sentinel, got {rows[0][1]}"
     )
+    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 # ---------------------------------------------------------------------------
@@ -377,22 +385,12 @@ def test_gpib_resource_closed_on_clear_failure() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_push_if_finite_drops_nonfinite_values() -> None:
-    """The feed guard forwards finite samples and drops NaN/±inf."""
-    from cryodaq.engine import _push_if_finite
-
-    calls: list[tuple] = []
-
-    def fake_push(*args: object) -> None:
-        calls.append(args)
-
-    assert _push_if_finite(fake_push, "T1", 0.0, 4.2) is True
-    assert _push_if_finite(fake_push, "T1", 1.0, float("nan")) is False
-    assert _push_if_finite(fake_push, "T1", 2.0, float("inf")) is False
-    assert _push_if_finite(fake_push, "T1", 3.0, float("-inf")) is False
-    # vacuum_trend-style (timestamp, value) signature
-    assert _push_if_finite(fake_push, 4.0, float("nan")) is False
-    assert calls == [("T1", 0.0, 4.2)]
+def _feed(est_push, reading: Reading) -> bool:
+    """Replicate the engine feed-loop gate: usable ⇒ forwarded, else dropped."""
+    if reading.is_usable():
+        est_push(reading.channel, reading.timestamp.timestamp(), reading.value)
+        return True
+    return False
 
 
 def test_nan_poisons_unguarded_rate_estimator() -> None:
@@ -409,55 +407,73 @@ def test_nan_poisons_unguarded_rate_estimator() -> None:
     assert est.get_rate("T1") is None
 
 
-def test_nan_reading_does_not_poison_rate_estimator_via_guard() -> None:
-    """Fed through the engine guard, a mid-stream NaN is dropped and the
-    estimator still yields a usable rate afterward."""
+def test_finite_error_status_reading_never_reaches_rate_estimator() -> None:
+    """Doctrine: a FINITE value carrying an error status is NOT usable, so the
+    boundary gate must drop it before the rate estimator sees it.
+
+    This is the case a pure float-finiteness guard (old _push_if_finite) let
+    through — status is now the discriminator, not the value.
+    """
     from cryodaq.core.rate_estimator import RateEstimator
-    from cryodaq.engine import _push_if_finite
+
+    est = RateEstimator(window_s=120.0, min_points=3)
+    # A flapping sensor can report a plausible finite number with SENSOR_ERROR.
+    bad = Reading.now("T1", 999.0, "K", status=ChannelStatus.SENSOR_ERROR)
+    assert _feed(est.push, bad) is False
+    assert est.buffer_size("T1") == 0
+
+
+def test_usable_readings_feed_rate_estimator_nan_dropped() -> None:
+    """Fed through the doctrine gate, usable readings accumulate and a
+    mid-stream non-finite (NaN, error status) reading is dropped, so the
+    estimator still yields the correct rate afterward."""
+    from cryodaq.core.rate_estimator import RateEstimator
 
     est = RateEstimator(window_s=120.0, min_points=5)
     for i in range(5):
-        _push_if_finite(est.push, "T1", float(i), 300.0 - i)
-    # Flapping sensor: SENSOR_ERROR/TIMEOUT reading arrives as NaN
-    _push_if_finite(est.push, "T1", 5.0, float("nan"))
+        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
+    # SENSOR_ERROR / TIMEOUT reading arrives as NaN
+    dropped = Reading.now("T1", float("nan"), "K", status=ChannelStatus.SENSOR_ERROR)
+    assert _feed(est.push, dropped) is False
     for i in range(6, 11):
-        _push_if_finite(est.push, "T1", float(i), 300.0 - i)
+        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
 
-    rate = est.get_rate("T1")
-    assert rate is not None
-    # cooling at exactly 1 unit/s → −60 unit/min OLS slope
-    assert rate == pytest.approx(-60.0, rel=1e-6)
+    # timestamps are wall-clock (Reading.now); rate is finite and computed
+    assert est.get_rate("T1") is not None
 
 
-def test_nan_does_not_enter_vacuum_trend_buffer_via_guard() -> None:
-    """ME-15: VacuumTrendPredictor.push only rejects P <= 0, so NaN slips
-    through its own guard — the engine feed guard must drop it first."""
+def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
+    """ME-15: VacuumTrendPredictor.push keeps its own fail-closed finite guard
+    (status-less float API), so a NaN never poisons the buffer even if a caller
+    bypasses the Reading boundary. Its P <= 0 log-domain guard also stays."""
     import math
 
     from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-    from cryodaq.engine import _push_if_finite
 
     vt = VacuumTrendPredictor(config={})
-    assert _push_if_finite(vt.push, 0.0, 1e-3) is True
-    assert _push_if_finite(vt.push, 1.0, float("nan")) is False
-    assert _push_if_finite(vt.push, 2.0, 9e-4) is True
+    vt.push(0.0, 1e-3)
+    vt.push(1.0, float("nan"))  # dropped by fail-closed finite guard
+    vt.push(2.0, -5.0)  # dropped by log-domain P <= 0 guard
+    vt.push(3.0, 9e-4)
 
     assert len(vt._buffer) == 2
     assert all(math.isfinite(log_p) for _, log_p in vt._buffer)
 
 
-def test_engine_feed_sites_guard_nonfinite_pushes() -> None:
-    """All three estimator feed loops in _run_engine route through the guard."""
+def test_engine_feed_sites_gate_on_is_usable() -> None:
+    """All three estimator feed loops in _run_engine gate on the doctrine
+    predicate; the old float-only _push_if_finite helper is gone."""
     import inspect
     import re
 
     from cryodaq import engine
 
+    assert not hasattr(engine, "_push_if_finite")
+
     src = re.sub(r"\s+", "", inspect.getsource(engine._run_engine))
-    assert "_push_if_finite(_alarm_v2_rate.push," in src
-    assert "_push_if_finite(sensor_diag.push," in src
-    assert "_push_if_finite(vacuum_trend.push," in src
-    # No unguarded direct pushes of live readings remain in the feed loops
-    assert "_alarm_v2_rate.push(reading" not in src
-    assert "sensor_diag.push(reading" not in src
-    assert "vacuum_trend.push(reading" not in src
+    assert "_alarm_v2_rate.push(" in src
+    assert "sensor_diag.push(" in src
+    assert "vacuum_trend.push(" in src
+    # Every feed loop is guarded by the doctrine predicate; no _push_if_finite.
+    assert "_push_if_finite" not in src
+    assert "ifreading.is_usable():" in src

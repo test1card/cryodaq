@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,9 @@ import pyarrow.parquet as pq  # noqa: E402
 from cryodaq.storage.parquet_archive import (  # noqa: E402
     ParquetExportResult,
     export_experiment_readings_to_parquet,
+    read_experiment_parquet,
 )
+from cryodaq.storage.sentinel import SENTINEL  # noqa: E402
 
 
 def _create_test_db(db_path: Path, readings: list[tuple]) -> None:
@@ -92,8 +95,10 @@ def test_export_preserves_timestamps(tmp_path: Path) -> None:
     assert abs(ts_val.timestamp() - base_ts) < 0.001
 
 
-def test_export_handles_overrange_inf(tmp_path: Path) -> None:
-    """±inf from OVERRANGE/UNDERRANGE persists through parquet."""
+def test_export_masks_nonfinite(tmp_path: Path) -> None:
+    """NaN-доктрина: non-finite values (legacy ±inf / sentinel) are masked to NaN
+    in the exported parquet — the row survives (status discriminates) but the
+    value column never carries a non-physical number downstream."""
     day = datetime(2026, 4, 14, tzinfo=UTC)
     base_ts = day.timestamp()
     db_path = tmp_path / f"data_{day.date().isoformat()}.db"
@@ -102,6 +107,7 @@ def test_export_handles_overrange_inf(tmp_path: Path) -> None:
         [
             (base_ts, "ls218s", "Т7", float("inf"), "K", "overrange"),
             (base_ts + 1, "ls218s", "Т8", float("-inf"), "K", "underrange"),
+            (base_ts + 2, "ls218s", "Т9", SENTINEL, "K", "sensor_error"),
         ],
     )
 
@@ -114,11 +120,52 @@ def test_export_handles_overrange_inf(tmp_path: Path) -> None:
         output_path=output,
     )
 
-    assert result.rows_written == 2
+    assert result.rows_written == 3, "rows persist — status is the discriminator"
     table = pq.read_table(str(output))
     values = table.column("value").to_pylist()
-    assert values[0] == float("inf")
-    assert values[1] == float("-inf")
+    assert all(math.isnan(v) for v in values), f"non-finite leaked into parquet: {values}"
+    # status column still distinguishes the error kinds
+    assert table.column("status").to_pylist() == ["overrange", "underrange", "sensor_error"]
+
+
+def test_read_experiment_parquet_masks_legacy_inf(tmp_path: Path) -> None:
+    """The reader masks legacy raw-inf parquet rows (files written pre-doctrine)."""
+    day = datetime(2026, 4, 14, tzinfo=UTC)
+    base_ts = day.timestamp()
+    schema = pa.schema(
+        [
+            ("timestamp", pa.timestamp("us", tz="UTC")),
+            ("instrument_id", pa.string()),
+            ("channel", pa.string()),
+            ("value", pa.float64()),
+            ("unit", pa.string()),
+            ("status", pa.string()),
+            ("experiment_id", pa.string()),
+        ]
+    )
+    table = pa.table(
+        {
+            "timestamp": pa.array(
+                [datetime.fromtimestamp(base_ts + i, tz=UTC) for i in range(2)],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "instrument_id": pa.array(["ls218s", "ls218s"]),
+            "channel": pa.array(["Т1", "Т1"]),
+            "value": pa.array([77.0, float("inf")], type=pa.float64()),
+            "unit": pa.array(["K", "K"]),
+            "status": pa.array(["ok", "overrange"]),
+            "experiment_id": pa.array(["e", "e"]),
+        },
+        schema=schema,
+    )
+    parquet_path = tmp_path / "legacy.parquet"
+    pq.write_table(table, str(parquet_path))
+
+    result = read_experiment_parquet(parquet_path)
+    vals = [v for _, v in result["Т1"]]
+    assert 77.0 in vals
+    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals)
+    assert any(math.isnan(v) for v in vals), "legacy inf must mask to NaN on read"
 
 
 def test_export_respects_time_range(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -113,11 +114,14 @@ class ReplaySource:
             except ValueError:
                 status = ChannelStatus.OK
 
+            # NaN-доктрина: mask sentinel / error / legacy ±inf back to NaN so the
+            # republished Reading reproduces the original non-finite value, never
+            # the stored sentinel, on the broker / GUI plots.
             reading = Reading(
                 timestamp=datetime.fromtimestamp(ts_posix, tz=UTC),
                 instrument_id=inst_id,
                 channel=channel,
-                value=value,
+                value=decode(value, status_str),
                 unit=unit,
                 status=status,
                 metadata={"source": "replay"},

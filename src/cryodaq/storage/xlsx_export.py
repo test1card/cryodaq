@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from collections import defaultdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -134,9 +136,12 @@ class XLSXExporter:
             cell.font = bold
 
         # Сводка по времени: ts_str → {channel: value}
+        # NaN-доктрина: decode at the read boundary — a sentinel / error / legacy
+        # ±inf row surfaces as NaN and is left as an empty cell below, never as a
+        # non-physical number in the operator's spreadsheet.
         by_time: dict[str, dict[str, float]] = defaultdict(dict)
         for r in all_rows:
-            by_time[r["timestamp"]][r["channel"]] = r["value"]
+            by_time[r["timestamp"]][r["channel"]] = decode(r["value"], r["status"])
 
         row_num = 2
         for ts_str in sorted(by_time.keys(), key=_ts_sort_key):
@@ -161,7 +166,7 @@ class XLSXExporter:
             channel_values = by_time[ts_str]
             for col, ch in enumerate(unique_channels, 2):
                 v = channel_values.get(ch)
-                if v is not None:
+                if v is not None and math.isfinite(v):
                     # Write the full float value (no pre-rounding): vacuum
                     # pressures span 1e-3..1e-9 mbar and were collapsed to 0.000
                     # by round(v, 3) + "0.000" format. "General" lets Excel pick
@@ -265,7 +270,7 @@ class XLSXExporter:
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         try:
-            query = "SELECT timestamp, channel, value FROM readings"
+            query = "SELECT timestamp, channel, value, status FROM readings"
             conditions: list[str] = []
             params: list[Any] = []
 

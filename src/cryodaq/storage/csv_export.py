@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -189,12 +191,16 @@ class CSVExporter:
             count = 0
             for row in cursor:
                 ts = _parse_timestamp(row["timestamp"])
+                # NaN-доктрина: mask sentinel / error / legacy ±inf — the value
+                # column is left blank for an unusable row; the status column
+                # (written verbatim below) carries the discriminator.
+                value = decode(row["value"], row["status"])
                 writer.writerow(
                     [
                         ts.isoformat(),
                         row["instrument_id"],
                         row["channel"],
-                        row["value"],
+                        value if math.isfinite(value) else "",
                         row["unit"],
                         row["status"],
                     ]

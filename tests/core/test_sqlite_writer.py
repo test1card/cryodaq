@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import multiprocessing
 import sqlite3
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import SENTINEL, decode
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -336,8 +338,13 @@ async def test_write_batch_midnight_crossing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_overrange_reading_persists(tmp_path: Path) -> None:
-    """B-2.1: OVERRANGE readings with value=inf must be persisted."""
+async def test_overrange_reading_persists_as_sentinel(tmp_path: Path) -> None:
+    """P2-2: OVERRANGE (value=inf) persists as the finite sentinel + status.
+
+    NaN-доктрина: a non-finite reading is stored as SENTINEL paired with its
+    non-OK status, and decodes back to NaN for presentation. The status column
+    (not the float value) discriminates overrange from underrange.
+    """
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -357,12 +364,13 @@ async def test_overrange_reading_persists(tmp_path: Path) -> None:
     rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т7 Детектор'").fetchall()
     conn.close()
     assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-    assert rows[0][0] == float("inf")
+    assert rows[0][0] == SENTINEL, f"non-finite value must persist as sentinel, got {rows[0][0]}"
     assert rows[0][1] == "overrange"
+    assert math.isnan(decode(rows[0][0], rows[0][1])), "sentinel+overrange must decode to NaN"
 
 
 async def test_garbage_nan_ok_still_dropped(tmp_path: Path) -> None:
-    """B-2.1: NaN with status=OK must still be dropped (garbage)."""
+    """P2-2: NaN with status=OK is a doctrine violation (garbage) — dropped."""
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -384,8 +392,42 @@ async def test_garbage_nan_ok_still_dropped(tmp_path: Path) -> None:
     assert len(rows) == 0, "NaN with status=OK should have been dropped"
 
 
-async def test_sensor_error_nan_dropped_not_raised(tmp_path: Path) -> None:
-    """B-2 BLOCKING fix: SENSOR_ERROR NaN must be dropped, not raise IntegrityError."""
+async def test_writer_rejects_sentinel_valued_row_with_ok_status(tmp_path: Path) -> None:
+    """P2-2 contract (a): a sentinel-valued row with a NON-error status is
+    rejected — a sentinel must never masquerade as a real measurement.
+
+    Fail-closed: the poison row is dropped (CRITICAL-logged), never persisted.
+    """
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    good = Reading.now(
+        channel="Т2 Экран", value=77.0, unit="K", instrument_id="ls218s", status=ChannelStatus.OK
+    )
+    poison = Reading.now(
+        channel="Т1 Криостат верх",
+        value=SENTINEL,  # sentinel value...
+        unit="K",
+        instrument_id="ls218s",
+        status=ChannelStatus.OK,  # ...paired with a non-error status
+    )
+    await writer.write_immediate([good, poison])  # must NOT raise; drops poison only
+
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
+    assert db_files
+    conn = sqlite3.connect(str(db_files[0]))
+    poison_rows = conn.execute(
+        "SELECT * FROM readings WHERE channel='Т1 Криостат верх'"
+    ).fetchall()
+    good_rows = conn.execute("SELECT * FROM readings WHERE channel='Т2 Экран'").fetchall()
+    conn.close()
+    assert len(poison_rows) == 0, "sentinel+OK row must be rejected"
+    assert len(good_rows) == 1, "a valid row in the same batch must still persist"
+
+
+async def test_sensor_error_nan_persists_as_sentinel(tmp_path: Path) -> None:
+    """P2-2: SENSOR_ERROR NaN persists as sentinel+status (invariant: if the
+    DataBroker has a reading, SQLite has it), and round-trips to NaN."""
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -399,16 +441,20 @@ async def test_sensor_error_nan_dropped_not_raised(tmp_path: Path) -> None:
     await writer.write_immediate([r])  # must NOT raise
 
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
-    if not db_files:
-        return
+    assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute("SELECT * FROM readings WHERE channel='Т3 Радиатор 1'").fetchall()
+    rows = conn.execute(
+        "SELECT value, status FROM readings WHERE channel='Т3 Радиатор 1'"
+    ).fetchall()
     conn.close()
-    assert len(rows) == 0
+    assert len(rows) == 1, "SENSOR_ERROR NaN must persist (not be dropped)"
+    assert rows[0][0] == SENTINEL
+    assert rows[0][1] == "sensor_error"
+    assert math.isnan(decode(rows[0][0], rows[0][1]))
 
 
-async def test_timeout_nan_dropped_not_raised(tmp_path: Path) -> None:
-    """B-2 BLOCKING fix: TIMEOUT NaN must be dropped, not raise IntegrityError."""
+async def test_timeout_nan_persists_as_sentinel(tmp_path: Path) -> None:
+    """P2-2: TIMEOUT NaN persists as sentinel+status and round-trips to NaN."""
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -422,16 +468,20 @@ async def test_timeout_nan_dropped_not_raised(tmp_path: Path) -> None:
     await writer.write_immediate([r])  # must NOT raise
 
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
-    if not db_files:
-        return
+    assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute("SELECT * FROM readings WHERE channel='Т4 Радиатор 2'").fetchall()
+    rows = conn.execute(
+        "SELECT value, status FROM readings WHERE channel='Т4 Радиатор 2'"
+    ).fetchall()
     conn.close()
-    assert len(rows) == 0
+    assert len(rows) == 1
+    assert rows[0][0] == SENTINEL
+    assert rows[0][1] == "timeout"
+    assert math.isnan(decode(rows[0][0], rows[0][1]))
 
 
-async def test_underrange_negative_inf_persists(tmp_path: Path) -> None:
-    """B-2: UNDERRANGE with -inf must persist (symmetric to OVERRANGE)."""
+async def test_underrange_negative_inf_persists_as_sentinel(tmp_path: Path) -> None:
+    """P2-2: UNDERRANGE (-inf) persists as sentinel; status distinguishes it."""
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -452,8 +502,35 @@ async def test_underrange_negative_inf_persists(tmp_path: Path) -> None:
     ).fetchall()
     conn.close()
     assert len(rows) == 1
-    assert rows[0][0] == float("-inf")
+    assert rows[0][0] == SENTINEL
     assert rows[0][1] == "underrange"
+    assert math.isnan(decode(rows[0][0], rows[0][1]))
+
+
+async def test_finite_value_with_error_status_persists_literally(tmp_path: Path) -> None:
+    """P2-2: a FINITE value carrying an error status keeps its finite value in
+    the DB (forensics), but decodes to NaN because status is the discriminator."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    r = Reading.now(
+        channel="Т6 Экран",
+        value=4.3,
+        unit="K",
+        instrument_id="lakeshore_218s",
+        status=ChannelStatus.SENSOR_ERROR,
+    )
+    await writer.write_immediate([r])
+
+    db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
+    assert db_files
+    conn = sqlite3.connect(str(db_files[0]))
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т6 Экран'").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert abs(rows[0][0] - 4.3) < 1e-9, "finite value stored as-is"
+    assert rows[0][1] == "sensor_error"
+    assert math.isnan(decode(rows[0][0], rows[0][1])), "error status masks to NaN"
 
 
 def test_sqlite_writer_raises_when_wal_unavailable(tmp_path: Path, monkeypatch) -> None:

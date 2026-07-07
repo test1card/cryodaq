@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cryodaq.drivers.base import ChannelStatus
 from cryodaq.replay.curve_transforms import (
     add_noise,
     compress_time,
@@ -16,6 +17,24 @@ from cryodaq.replay.curve_transforms import (
     raise_floor,
     write_curve_json,
 )
+
+
+def test_curve_to_sqlite_writes_lowercase_ok_status(tmp_path: Path) -> None:
+    """Writer must store the canonical lowercase ``"ok"`` (ChannelStatus.OK.value).
+
+    Uppercase ``"OK"`` is masked to NaN by the case-sensitive sentinel decode,
+    so legitimate generated replay rows must carry lowercase status.
+    """
+    db = tmp_path / "curve.db"
+    curve = {"t_hours": [0.0, 1.0], "T_cold": [300.0, 200.0], "T_warm": [290.0, 190.0]}
+    curve_to_sqlite(curve, db)
+    conn = sqlite3.connect(str(db))
+    try:
+        statuses = {r[0] for r in conn.execute("SELECT DISTINCT status FROM readings")}
+    finally:
+        conn.close()
+    assert statuses == {ChannelStatus.OK.value}
+    assert statuses == {"ok"}
 
 # ---------------------------------------------------------------------------
 # Shared fixture curve (~100 points, valid cooldown shape)

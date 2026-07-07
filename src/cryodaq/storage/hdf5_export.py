@@ -29,6 +29,7 @@ from typing import Any
 
 import h5py
 
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -134,8 +135,11 @@ class HDF5Exporter:
                 row["status"],
             )
             ts = _parse_timestamp(ts_str).timestamp()
+            status_str = status if status is not None else ""
+            # NaN-доктрина: mask sentinel / error / legacy ±inf to NaN in the value
+            # dataset; the status dataset (D-C15) keeps the discriminator verbatim.
             data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(
-                ts, value, status if status is not None else ""
+                ts, decode(value, status_str), status_str
             )
 
         # Запись в HDF5

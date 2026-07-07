@@ -22,6 +22,7 @@ from typing import Any
 
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
 logger = logging.getLogger(__name__)
 
@@ -330,49 +331,62 @@ class SQLiteWriter:
             conn = self._ensure_connection(day)
             self._write_day_batch(conn, day_readings)
 
-    # Status values where a non-finite value IS the sensor state (not garbage).
-    # Only inf-valued statuses are persisted — SQLite accepts ±inf in a REAL
-    # column but rejects NaN (SQLite treats NaN as NULL, violating NOT NULL).
-    #
-    # OVERRANGE  → +inf (LakeShore +OVL)  — stored as REAL, no issue.
-    # UNDERRANGE → -inf or finite float    — stored as REAL, no issue.
-    # SENSOR_ERROR → NaN (driver sentinel) — NOT persistable, dropped.
-    # TIMEOUT    → NaN (driver sentinel)   — NOT persistable, dropped.
-    #
-    # Full post-mortem evidence for NaN-valued sensor states requires
-    # schema migration (nullable value column) or sentinel substitution.
-    # Deferred to Phase 3 item B.1.2.
-    _STATE_CARRYING_STATUSES = {
-        ChannelStatus.OVERRANGE,  # +OVL → +inf (stored as REAL)
-        ChannelStatus.UNDERRANGE,  # -OVL → -inf or finite (stored as REAL)
-    }
-
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:
-        """Write a single day's readings to the given connection."""
+        """Write a single day's readings to the given connection.
+
+        NaN-доктрина (P2-2): a non-finite value paired with a non-OK status is
+        persisted as the finite ``sentinel.SENTINEL`` value carrying that status,
+        so the invariant «if the DataBroker has a reading, SQLite has it» holds
+        even for error states (SQLite cannot store NaN — it maps NaN to NULL,
+        violating NOT NULL). The status column, not the float value, is the
+        discriminator; readers reconstruct NaN via :func:`sentinel.decode`.
+
+        Two rows are refused (never persisted):
+        - value=None                                → dropped (no value at all).
+        - non-finite value WITH status OK           → garbage (value/status
+          disagree — impossible under the doctrine).
+        - sentinel value WITH a non-error status    → contract (a): a sentinel
+          must never masquerade as a real measurement. Fail-closed: CRITICAL log
+          + drop.
+        """
         rows = []
         skipped = 0
         for r in batch:
             if r.value is None:
                 skipped += 1
                 continue
-            if isinstance(r.value, float) and not math.isfinite(r.value):
-                # Non-finite value: persist if status says this IS the sensor state
-                if r.status not in self._STATE_CARRYING_STATUSES:
-                    skipped += 1
-                    continue
+            nonfinite = isinstance(r.value, float) and not math.isfinite(r.value)
+            if not nonfinite and is_sentinel(r.value) and r.status is ChannelStatus.OK:
+                # Contract (a): sentinel value + non-error status can never be a
+                # real measurement — refuse it fail-closed.
+                logger.critical(
+                    "Отвергнута строка readings: sentinel-значение (%r) со статусом OK "
+                    "на канале %s (%s) — sentinel не может выдавать себя за измерение",
+                    r.value,
+                    r.channel,
+                    r.instrument_id or "unknown",
+                )
+                skipped += 1
+                continue
+            if nonfinite and r.status is ChannelStatus.OK:
+                # Non-finite value with an OK status: value/status disagree
+                # (garbage). Drop — the doctrine never produces this pairing.
+                skipped += 1
+                continue
+            stored_value, stored_status = encode(r.value, r.status)
             rows.append(
                 (
                     r.timestamp.timestamp(),
                     r.instrument_id or "unknown",
                     r.channel,
-                    r.value,
+                    stored_value,
                     r.unit,
-                    r.status.value,
+                    stored_status,
                 )
             )
         if skipped:
             logger.warning(
-                "Пропущено %d readings с value=None/NaN (из батча %d)",
+                "Пропущено %d readings (value=None / non-finite+OK / sentinel+OK) из батча %d",
                 skipped,
                 len(batch),
             )
@@ -760,7 +774,7 @@ class SQLiteWriter:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.row_factory = sqlite3.Row
                 try:
-                    base = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
+                    base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
                     time_clause = ""
                     time_params: list[Any] = []
                     if from_ts is not None:
@@ -775,7 +789,12 @@ class SQLiteWriter:
                             ch = row["channel"]
                             if ch not in result:
                                 result[ch] = []
-                            result[ch].append((float(row["timestamp"]), float(row["value"])))
+                            # NaN-доктрина: mask sentinel / error / legacy ±inf at
+                            # the read boundary — the GUI-reconnect history feed
+                            # must not surface a non-physical number.
+                            result[ch].append(
+                                (float(row["timestamp"]), decode(float(row["value"]), row["status"]))
+                            )
 
                     if channels:
                         # Per-channel bounded query: each channel gets its own
