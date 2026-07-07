@@ -217,6 +217,25 @@ def test_non_positive_values_guarded(app):
         )
 
 
+def test_nan_renders_as_gap_not_fallback(app):
+    """NaN-доктрина: a non-usable (NaN) pressure sample must render as a GAP,
+    never as the fallback positive pressure — otherwise a bad sample draws a
+    plausible low-pressure line. The curve data must carry NaN at that slot."""
+    import math as _math
+
+    plot = PressurePlot()
+    # Middle sample is NaN (non-usable); the two finite samples sit ~1e-6.
+    plot.set_series([1.0, 2.0, 3.0], [1.0e-6, float("nan"), 1.2e-6])
+    xs, ys = plot._curve.getData()
+    assert xs is not None and ys is not None
+    assert len(ys) == 3
+    # log-Y mode: getData() returns log10(y); log10(NaN) is NaN. The gap must
+    # survive as NaN — the fallback (a finite positive) must NOT replace it.
+    assert any(_math.isnan(v) for v in ys), (
+        f"NaN sample must remain a gap, got {list(ys)}"
+    )
+
+
 def test_set_title_updates(app):
     plot = PressurePlot(title="A")
     plot.set_title("B")

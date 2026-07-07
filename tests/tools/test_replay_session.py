@@ -100,6 +100,22 @@ def test_duration_caps_window(tmp_path):
     assert items[1][0] == pytest.approx(1.0)
 
 
+def test_sentinel_error_row_replays_as_nan(tmp_path):
+    """NaN-доктрина: a stored (SENTINEL, sensor_error) row must replay as NaN,
+    never as the raw -8.888e88 sentinel."""
+    import math
+
+    from cryodaq.storage.sentinel import SENTINEL
+
+    db = tmp_path / "session.db"
+    _seed_db(db, [(1_700_000_000.0, "ls218s", "Т5", SENTINEL, "K", "sensor_error")])
+    items = list(replay_session._iter_rows(db, channels=None, start_offset_s=0.0, duration_s=None))
+    assert len(items) == 1
+    value = items[0][1].value
+    assert math.isnan(value), "sentinel+error row must decode to NaN"
+    assert value != SENTINEL, "raw sentinel must never surface downstream"
+
+
 def test_invalid_status_falls_back_to_ok(tmp_path):
     db = tmp_path / "session.db"
     rows = [(1_700_000_000.0, "X", "T1", 1.0, "K", "garbage_status_value")]

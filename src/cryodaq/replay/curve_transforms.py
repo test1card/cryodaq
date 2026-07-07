@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from cryodaq.drivers.base import ChannelStatus
+
 # ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
@@ -197,8 +199,8 @@ def curve_to_sqlite(
         rows: list[tuple] = []
         for t_h, tc, tw in zip(t_hours, T_cold, T_warm):
             ts = base_timestamp + t_h * 3600.0
-            rows.append((ts, "replay", cold_channel, float(tc), "K", "OK"))
-            rows.append((ts, "replay", warm_channel, float(tw), "K", "OK"))
+            rows.append((ts, "replay", cold_channel, float(tc), "K", ChannelStatus.OK.value))
+            rows.append((ts, "replay", warm_channel, float(tw), "K", ChannelStatus.OK.value))
         conn.executemany(
             "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",

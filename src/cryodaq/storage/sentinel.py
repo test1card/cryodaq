@@ -61,6 +61,6 @@ def decode(value: float, status: str) -> float:
     value passes through. Callers present ``NaN`` as "no reading", never as a
     number.
     """
-    if status != ChannelStatus.OK.value or is_sentinel(value) or not math.isfinite(value):
+    if status.lower() != ChannelStatus.OK.value or is_sentinel(value) or not math.isfinite(value):
         return math.nan
     return float(value)

@@ -32,6 +32,24 @@ def _create_db(db_path: Path, rows: list[tuple]) -> None:
     conn.close()
 
 
+def test_archived_blank_value_decodes_to_nan(tmp_path: Path) -> None:
+    """NaN-доктрина: a blank masked cell in an archived CSV must read as NaN,
+    not 0.0 — a blank means "no reading", not a zero-valued measurement."""
+    csv_path = tmp_path / "measured_values.csv"
+    csv_path.write_text(
+        "timestamp,instrument_id,channel,value,unit,status\n"
+        "2026-04-14T00:00:00Z,ls218s,Т1,,K,\n"
+        "2026-04-14T00:00:01Z,ls218s,Т1,77.0,K,ok\n",
+        encoding="utf-8",
+    )
+    metadata = {"result_tables": [{"table_id": "measured_values", "path": str(csv_path)}]}
+    extractor = ReportDataExtractor(tmp_path)
+    rows = extractor._load_archived_readings(metadata)
+    assert len(rows) == 2
+    assert math.isnan(rows[0].value), "blank cell must be NaN, not 0.0"
+    assert rows[1].value == 77.0, "finite value must survive"
+
+
 def test_load_readings_masks_nonfinite(tmp_path: Path) -> None:
     day = datetime(2026, 4, 14, tzinfo=UTC)
     base_ts = day.timestamp()

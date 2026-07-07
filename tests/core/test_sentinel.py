@@ -54,6 +54,13 @@ def test_finite_value_with_error_status_still_presents_nan() -> None:
     assert math.isnan(decode(4.2, "sensor_error"))
 
 
+def test_decode_status_is_case_insensitive() -> None:
+    # Defense: a legacy/foreign row with uppercase "OK" must decode like "ok"
+    # for a finite value — case-sensitivity must never over-mask usable data.
+    assert decode(4.2, "OK") == 4.2
+    assert decode(4.2, "OK") == decode(4.2, "ok")
+
+
 def test_is_sentinel() -> None:
     assert is_sentinel(SENTINEL)
     assert not is_sentinel(4.2)
