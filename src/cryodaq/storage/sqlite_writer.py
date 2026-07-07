@@ -22,7 +22,7 @@ from typing import Any
 
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.storage.sentinel import encode, is_sentinel
+from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
 logger = logging.getLogger(__name__)
 
@@ -774,7 +774,7 @@ class SQLiteWriter:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.row_factory = sqlite3.Row
                 try:
-                    base = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
+                    base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
                     time_clause = ""
                     time_params: list[Any] = []
                     if from_ts is not None:
@@ -789,7 +789,12 @@ class SQLiteWriter:
                             ch = row["channel"]
                             if ch not in result:
                                 result[ch] = []
-                            result[ch].append((float(row["timestamp"]), float(row["value"])))
+                            # NaN-доктрина: mask sentinel / error / legacy ±inf at
+                            # the read boundary — the GUI-reconnect history feed
+                            # must not surface a non-physical number.
+                            result[ch].append(
+                                (float(row["timestamp"]), decode(float(row["value"]), row["status"]))
+                            )
 
                     if channels:
                         # Per-channel bounded query: each channel gets its own

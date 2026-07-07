@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
 from cryodaq.storage.archive_reader import ArchiveReader  # noqa: E402
+from cryodaq.storage.sentinel import SENTINEL  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -395,3 +397,52 @@ def test_query_no_channels_filter_returns_all(tmp_path: Path) -> None:
     assert "Т1" in result
     assert "Т2" in result
     assert "Т3" in result
+
+
+# ---------------------------------------------------------------------------
+# NaN-доктрина: sentinel / legacy raw-inf rows mask to NaN on read (both sources)
+# ---------------------------------------------------------------------------
+
+
+def test_query_sqlite_masks_nonfinite(tmp_path: Path) -> None:
+    day = datetime(2026, 4, 14, tzinfo=UTC)
+    base_ts = day.timestamp()
+    db_path = tmp_path / f"data_{day.date().isoformat()}.db"
+    _create_sqlite_db(
+        db_path,
+        [
+            (base_ts, "ls218s", "Т1", 77.0, "K", "ok"),
+            (base_ts + 1, "ls218s", "Т1", SENTINEL, "K", "sensor_error"),
+            (base_ts + 2, "ls218s", "Т1", float("inf"), "K", "overrange"),  # legacy raw inf
+        ],
+    )
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "arch")
+    out: dict[str, list[tuple[float, float]]] = {}
+    reader._query_sqlite(db_path, base_ts, base_ts + 10, None, out)
+
+    vals = [v for _, v in out["Т1"]]
+    assert 77.0 in vals, "usable reading must survive"
+    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
+    assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"
+
+
+def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
+    day = datetime(2026, 4, 14, tzinfo=UTC)
+    base_ts = day.timestamp()
+    parquet_path = tmp_path / "arch" / "cold.parquet"
+    _create_parquet(
+        parquet_path,
+        [
+            (base_ts, "ls218s", "Т1", 77.0, "K", "ok"),
+            (base_ts + 1, "ls218s", "Т1", SENTINEL, "K", "sensor_error"),
+            (base_ts + 2, "ls218s", "Т1", float("inf"), "K", "overrange"),
+        ],
+    )
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "arch")
+    out: dict[str, list[tuple[float, float]]] = {}
+    reader._query_parquet("cold.parquet", base_ts, base_ts + 10, None, out)
+
+    vals = [v for _, v in out["Т1"]]
+    assert 77.0 in vals, "usable reading must survive"
+    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
+    assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"

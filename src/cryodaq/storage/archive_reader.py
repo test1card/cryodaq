@@ -12,6 +12,8 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage.sentinel import decode
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,20 +105,23 @@ class ArchiveReader:
                 if channels is not None:
                     placeholders = ",".join("?" * len(channels))
                     cursor = conn.execute(
-                        f"SELECT timestamp, channel, value FROM readings "
+                        f"SELECT timestamp, channel, value, status FROM readings "
                         f"WHERE timestamp >= ? AND timestamp <= ? "
                         f"AND channel IN ({placeholders}) ORDER BY timestamp",
                         (from_epoch, to_epoch, *channels),
                     )
                 else:
                     cursor = conn.execute(
-                        "SELECT timestamp, channel, value FROM readings "
+                        "SELECT timestamp, channel, value, status FROM readings "
                         "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
                         (from_epoch, to_epoch),
                     )
                 for row in cursor:
                     ch = row["channel"]
-                    out.setdefault(ch, []).append((float(row["timestamp"]), float(row["value"])))
+                    # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
+                    out.setdefault(ch, []).append(
+                        (float(row["timestamp"]), decode(float(row["value"]), row["status"]))
+                    )
             finally:
                 conn.close()
         except Exception:
@@ -139,19 +144,21 @@ class ArchiveReader:
 
             table = pq.read_table(
                 str(parquet_path),
-                columns=["timestamp", "channel", "value"],
+                columns=["timestamp", "channel", "value", "status"],
             )
             ts_us = table.column("timestamp").cast("int64").to_pylist()
             ch_list = table.column("channel").to_pylist()
             val_list = table.column("value").to_pylist()
+            status_list = table.column("status").to_pylist()
 
-            for ts_int, ch, val in zip(ts_us, ch_list, val_list):
+            for ts_int, ch, val, status in zip(ts_us, ch_list, val_list, status_list):
                 epoch = ts_int / 1_000_000.0
                 if epoch < from_epoch or epoch > to_epoch:
                     continue
                 if channels is not None and ch not in channels:
                     continue
-                out.setdefault(ch, []).append((epoch, float(val)))
+                # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
+                out.setdefault(ch, []).append((epoch, decode(float(val), status)))
         except Exception:
             logger.exception("Failed to read Parquet %s — partial result", archive_rel)
 

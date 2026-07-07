@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import h5py
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.hdf5_export import HDF5Exporter
+from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -263,3 +265,35 @@ async def test_hdf5_sanitize_name_collision(tmp_path: Path) -> None:
         # Both channels must be represented as distinct groups
         ch_groups = [k for k in inst if isinstance(inst[k], h5py.Group)]
         assert len(ch_groups) == 2, f"collision dropped a channel: {ch_groups}"
+
+
+# ---------------------------------------------------------------------------
+# NaN-доктрина: sentinel/error values are masked in the value dataset
+# ---------------------------------------------------------------------------
+
+
+async def test_hdf5_masks_sentinel_value(tmp_path: Path) -> None:
+    db_path = _populate_db(
+        tmp_path,
+        [
+            _reading("CH1", 4.5, ts=datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)),
+            _reading(
+                "CH1",
+                float("nan"),
+                ts=datetime(2026, 3, 14, 12, 0, 30, tzinfo=UTC),
+                status=ChannelStatus.SENSOR_ERROR,
+            ),
+        ],
+    )
+    output_path = tmp_path / "masked.h5"
+    HDF5Exporter().export(db_path, output_path)
+
+    with h5py.File(str(output_path), "r") as hf:
+        ch = hf["ls218s"]["CH1"]
+        values = list(ch["value"][:])
+        statuses = [s.decode() if isinstance(s, bytes) else s for s in ch["status"][:]]
+    assert SENTINEL not in values, "sentinel leaked into HDF5 value dataset"
+    assert not any(math.isinf(v) for v in values), "inf leaked into HDF5"
+    assert 4.5 in values, "usable reading must survive"
+    assert any(math.isnan(v) for v in values), "non-usable reading must be masked to NaN"
+    assert "sensor_error" in statuses, "status column must be preserved for forensics"

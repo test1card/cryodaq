@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import openpyxl
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 from cryodaq.storage.xlsx_export import XLSXExporter
 
@@ -294,3 +296,32 @@ async def test_xlsx_selects_utc_day_for_early_local_hours(tmp_path: Path) -> Non
     output_path = tmp_path / "early.xlsx"
     count = XLSXExporter(data_dir).export(output_path, start=start, end=end)
     assert count == 1, f"early-hours UTC day file dropped: got {count}"
+
+
+# ---------------------------------------------------------------------------
+# NaN-доктрина: a stored sentinel/error reading must never surface as a number
+# ---------------------------------------------------------------------------
+
+
+def test_xlsx_masks_sentinel_row(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    ts_good = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    ts_bad = datetime(2026, 3, 14, 12, 0, 30, tzinfo=UTC)
+    _populate_db(
+        data_dir,
+        [
+            _reading("CH1", 4.5, ts=ts_good, status=ChannelStatus.OK),
+            _reading("CH1", float("nan"), ts=ts_bad, status=ChannelStatus.SENSOR_ERROR),
+        ],
+    )
+
+    output_path = tmp_path / "masked.xlsx"
+    XLSXExporter(data_dir).export(output_path)
+
+    ws = openpyxl.load_workbook(str(output_path))["Данные"]
+    values = [c.value for row in ws.iter_rows(min_row=2) for c in row[1:]]
+    assert SENTINEL not in values, "sentinel leaked into XLSX"
+    assert not any(isinstance(v, float) and not math.isfinite(v) for v in values), (
+        "non-finite number leaked into XLSX"
+    )
+    assert 4.5 in values, "usable reading must still be exported"

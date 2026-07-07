@@ -29,6 +29,7 @@ except Exception:
     _VERSION = "dev"
 import json
 import logging
+import math
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
+from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +279,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT timestamp, channel, value, unit FROM readings "
+                "SELECT timestamp, channel, value, unit, status FROM readings "
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
                 (cutoff_epoch,),
             ).fetchall()
@@ -288,10 +290,13 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
                 conn.close()
         for row in rows:
             ch = row["channel"]
+            # NaN-доктрина: mask sentinel / error / legacy ±inf to null — an
+            # unusable reading must never reach the dashboard/REST feed as a number.
+            v = decode(row["value"], row["status"])
             result.setdefault(ch, []).append(
                 {
                     "t": datetime.fromtimestamp(row["timestamp"], tz=UTC).isoformat(),
-                    "v": row["value"],
+                    "v": v if math.isfinite(v) else None,
                     "u": row["unit"],
                 }
             )

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage.sentinel import decode
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK_SIZE = 100_000
@@ -119,7 +121,10 @@ def export_experiment_readings_to_parquet(
                         timestamps.append(datetime.fromtimestamp(ts_epoch, tz=UTC))
                         instrument_ids.append(row["instrument_id"])
                         channels.append(row["channel"])
-                        values.append(float(row["value"]))
+                        # NaN-доктрина: mask sentinel / error / legacy ±inf to NaN.
+                        # The status column below preserves the discriminator; the
+                        # archived value column never carries a non-physical number.
+                        values.append(decode(float(row["value"]), row["status"]))
                         units.append(row["unit"])
                         statuses.append(row["status"])
                         exp_ids.append(experiment_id)
@@ -191,6 +196,7 @@ def read_experiment_parquet(
         ts_us = ts_col.cast(pa.int64())
         ch_array = table.column("channel").to_pylist()
         val_array = table.column("value").to_pylist()
+        status_array = table.column("status").to_pylist()
 
         channel_set = set(channels) if channels else None
         result: dict[str, list[tuple[float, float]]] = {}
@@ -199,7 +205,8 @@ def read_experiment_parquet(
             if channel_set is not None and ch not in channel_set:
                 continue
             epoch = float(ts_us[i].as_py()) / 1_000_000.0
-            result.setdefault(ch, []).append((epoch, val_array[i]))
+            # NaN-доктрина: mask legacy raw-inf / sentinel parquet rows on read.
+            result.setdefault(ch, []).append((epoch, decode(float(val_array[i]), status_array[i])))
 
         return result
 

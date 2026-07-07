@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -255,6 +257,47 @@ def test_mixed_rate_channels_each_get_their_limit(tmp_path: Path) -> None:
         assert len(data.get("noisy", [])) == 10, (
             f"noisy channel wrong count: got {len(data.get('noisy', []))} rows"
         )
+    finally:
+        loop.run_until_complete(writer.stop())
+        loop.close()
+
+
+def test_read_readings_history_masks_sentinel(tmp_path: Path) -> None:
+    """NaN-доктрина: a persisted sentinel/error row reads back as NaN, never as
+    the raw sentinel — the GUI-reconnect history feed must not show a number."""
+    os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    writer = SQLiteWriter(tmp_path)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(writer.start_immediate())
+    try:
+        base_ts = float(int(time.time()) - 60)
+        loop.run_until_complete(
+            writer.write_immediate(
+                [
+                    Reading(
+                        timestamp=datetime.fromtimestamp(base_ts, tz=UTC),
+                        instrument_id="ls218s",
+                        channel="CH1",
+                        value=4.5,
+                        unit="K",
+                        status=ChannelStatus.OK,
+                    ),
+                    Reading(
+                        timestamp=datetime.fromtimestamp(base_ts + 1, tz=UTC),
+                        instrument_id="ls218s",
+                        channel="CH1",
+                        value=float("nan"),
+                        unit="K",
+                        status=ChannelStatus.SENSOR_ERROR,
+                    ),
+                ]
+            )
+        )
+        data = writer._read_readings_history(channels=["CH1"])
+        vals = [v for _, v in data["CH1"]]
+        assert 4.5 in vals, "usable reading must survive"
+        assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
+        assert any(math.isnan(v) for v in vals), "sentinel row must read back as NaN"
     finally:
         loop.run_until_complete(writer.stop())
         loop.close()
