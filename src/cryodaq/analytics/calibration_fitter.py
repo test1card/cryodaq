@@ -6,13 +6,14 @@ import logging
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from cryodaq.analytics.calibration import CalibrationCurve, CalibrationSample, CalibrationStore
+from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,10 @@ class CalibrationFitter:
         """
         srdg_channel = f"{target_channel}_raw"
 
-        # Collect readings from all day-partitioned DB files
+        # Collect readings from all day-partitioned DB files (hot path). This is
+        # the fast, common case — live calibration runs on recent acquisition
+        # that has not been rotated yet. Kept as a pure timestamp filter (not
+        # day-of-filename gated) so recording clock skew never drops a pair.
         krdg_data: list[tuple[float, float]] = []  # (timestamp, value)
         srdg_data: list[tuple[float, float]] = []
 
@@ -84,8 +88,34 @@ class CalibrationFitter:
             except Exception:
                 logger.warning("Failed to read %s", db_path, exc_info=True)
 
+        # Cold path: a day older than the F17 rotation threshold has had its
+        # daily SQLite file rotated to Parquet and deleted, so the glob above
+        # goes blind on it — a fit over old data would silently return fewer
+        # pairs. Read those rotated days back from the archive. Point the reader
+        # at an empty hot dir so it returns cold rows only (the hot rows are
+        # already gathered above → no double count). query_rows is end-EXCLUSIVE
+        # vs the `<=` inclusive scan above, so nudge the upper bound by 1 µs;
+        # values arrive already NaN-decoded, matching the hot decode-at-ingest.
+        archive_dir = data_dir / "archive"
+        if archive_dir.exists():
+            reader = ArchiveReader(archive_dir / "__no_hot__", archive_dir)
+            start_dt = datetime.fromtimestamp(start_ts, tz=UTC)
+            end_dt = datetime.fromtimestamp(end_ts, tz=UTC) + timedelta(microseconds=1)
+            for ts, _inst, channel, value, _unit, _status in reader.query_rows(
+                start_dt, end_dt, [reference_channel, srdg_channel]
+            ):
+                if channel == reference_channel:
+                    krdg_data.append((float(ts), value))
+                elif channel == srdg_channel:
+                    srdg_data.append((float(ts), value))
+
         if not krdg_data or not srdg_data:
             return []
+
+        # Sort by timestamp: hot files are already ordered, but cold rows may
+        # predate them. searchsorted below requires krdg_ts strictly ascending.
+        krdg_data.sort(key=lambda p: p[0])
+        srdg_data.sort(key=lambda p: p[0])
 
         # Time-align: for each SRDG point, find nearest KRDG
         krdg_ts = np.array([t for t, _ in krdg_data])

@@ -7,6 +7,81 @@
 
 ---
 
+## [0.63.0] — 2026-07-08 — Known Limitations закрыты: cold rotation ВКЛЮЧЕНА, полный read-side
+
+Закрытие списка Known Limitations v0.60.0. Все исторические читатели переведены
+на архивный слой (hot SQLite ∪ cold Parquet через ArchiveReader), после чего
+холодная ротация впервые включена по умолчанию: диск перестаёт расти
+неограниченно на многомесячных циклах, а данные старше 30 дней остаются видны
+везде — в GUI-истории, журнале оператора, отчётах, экспорте, replay и
+калибровке. Волна прошла batch-ревью (2 HIGH + 3 MEDIUM найдены и закрыты) и
+два re-check (второй нашёл и закрыл ещё 1 HIGH в самом фиксе).
+
+### Added
+
+- **F28: replay читает ротированные дни** (e649bde) — оба пути
+  (`storage/replay.py::play_all`, `replay_engine` DirectoryReplay) объединяют
+  горячие daily-DB с архивными днями, один глобальный time-origin сохраняет
+  монотонность; overlap-дни (восстановленный hot DB для архивного дня) идут
+  через union+dedup `query_rows` (c339abd).
+- **GUI-история и живой журнал оператора видят архив**: `readings_history`
+  (f95c2aa; union и для запросов без нижней границы — c339abd) и `log_get`
+  (c339abd) — ротированные аудит-записи не исчезают из панели журнала.
+  Отчёты: `ArchiveReader.query_operator_log` (eb48bae).
+- **Калибровка и bulk-экспорт через архив** (eb48bae) — фит по данным старше
+  30 дней не теряет пары; parquet-экспорт читает ротированные дни
+  (`experiment_id` null, новое поле `archived_days`).
+- **Предупреждение при старте**: `leak_rate.enabled` при
+  `chamber.volume_l == 0.0` → громкий WARNING с указанием
+  `instruments.local.yaml` (fail-closed ValueError при finalize сохранён)
+  (f95c2aa).
+- **`docs/lab_verification_checklist.md`** — одностраничный turnkey-протокол
+  лабораторного дня: SQLite-гейт, H5/ZMQ v0.39.0, калибровка LakeShore,
+  стендовый прогон TSP watchdog (только dummy load), Windows smoke (6805883).
+
+### Changed
+
+- **`cold_rotation.enabled: true`** (7046609) — ротация живая, ежедневно в
+  `schedule_time`; единственный kill-switch — этот флаг. Малформатный
+  `schedule_time` больше не убивает планировщик молча: валидация при старте,
+  ERROR + fallback «03:00».
+- **Ротация идемпотентна при сбое unlink** (c339abd, ccdae3a): index
+  пишется до удаления (данные никогда не удаляются раньше записи архива);
+  застрявший .db дочищается следующим проходом ТОЛЬКО при точном совпадении
+  `source_md5` и отсутствии -wal/-shm; любое несовпадение (восстановленный /
+  backdated / legacy-запись) — warn-keep, overlap-union держит оба источника
+  видимыми.
+- **`query_rows` overlap-union** (7046609) — восстановленный hot DB для
+  архивного дня больше не затеняется архивом (union + точный dedup).
+- **Deprecated `WindowsSelectorEventLoopPolicy` удалён** (f95c2aa, c339abd) —
+  selector-loop форсируется в точках создания loop (engine, launcher,
+  replay-CLI); инвариант pyzmq-needs-Selector на Windows сохранён.
+- **PDF-деградация громкая** (6805883): нет soffice / таймаут / нет PDF на
+  выходе → WARNING/ERROR с последствием и способом лечения; операторская
+  поверхность прежняя («PDF: нет» в архиве).
+
+### Test baseline
+
+- 3608 passed, 2 skipped, 1 deselected (v0.62.0: 3575/2; +33 — архивные
+  читатели, overlap, sweep, журнал).
+
+### Tags
+
+- `v0.63.0` — merge-коммит `feat/phase7-limitations` в master.
+
+### Selected commits in this release
+
+- e649bde — F28 replay через архив
+- f95c2aa — readings_history + boot warning + loop-policy
+- eb48bae — operator_log / калибровка / bulk-экспорт через архив
+- 7046609 — rotation ON + overlap-union + schedule guard
+- 6805883 — громкая PDF-деградация + lab checklist
+- c339abd — 5 findings batch-ревью (живой журнал, replay-CLI loop, unbounded
+  history, replay overlap, retry sweep)
+- ccdae3a — sweep удаляет только байт-идентичный оригинал (source_md5)
+
+---
+
 ## [0.62.0] — 2026-07-07 — TSP watchdog: operator-selected mode (off | best_effort | required)
 
 Phase 5 распаркована без стенда: бинарный `watchdog.enabled` заменён на

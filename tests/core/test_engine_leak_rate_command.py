@@ -44,6 +44,34 @@ async def _dispatch(
 # ---------------------------------------------------------------------------
 
 
+def test_leak_rate_volume_warning_fires_on_zero_volume() -> None:
+    """enabled=true + volume_l=0.0 must surface a boot warning (finalize would
+    otherwise fail-closed hours later at experiment end)."""
+    from cryodaq.engine import _leak_rate_volume_warning
+
+    msg = _leak_rate_volume_warning({"leak_rate": {"enabled": True}, "volume_l": 0.0})
+    assert msg is not None
+    assert "volume_l" in msg
+
+
+def test_leak_rate_volume_warning_silent_when_volume_set() -> None:
+    from cryodaq.engine import _leak_rate_volume_warning
+
+    assert (
+        _leak_rate_volume_warning({"leak_rate": {"enabled": True}, "volume_l": 50.0})
+        is None
+    )
+
+
+def test_leak_rate_volume_warning_silent_when_disabled() -> None:
+    from cryodaq.engine import _leak_rate_volume_warning
+
+    assert (
+        _leak_rate_volume_warning({"leak_rate": {"enabled": False}, "volume_l": 0.0})
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_leak_rate_start_command_handler() -> None:
     """leak_rate_start returns ok=True and arms the estimator."""

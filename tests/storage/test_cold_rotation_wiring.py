@@ -23,6 +23,7 @@ from cryodaq.storage.archive_reader import ArchiveReader  # noqa: E402
 from cryodaq.storage.cold_rotation import (  # noqa: E402
     ColdRotationService,
     build_cold_rotation_service,
+    normalize_schedule_time,
     seconds_until_next,
 )
 from cryodaq.storage.csv_export import CSVExporter  # noqa: E402
@@ -251,3 +252,69 @@ def test_query_rows_masks_sentinel_from_parquet(tmp_path: Path) -> None:
     assert SENTINEL not in vals, "raw sentinel leaked out of query_rows"
     assert sum(1 for v in vals if math.isnan(v)) == 1, "sentinel row must present as NaN"
     assert 70.0 in vals, "usable reading must survive"
+
+
+# ---------------------------------------------------------------------------
+# Backdated-write shadowing: a hot DB reappearing for an already-rotated day
+# must NOT be silently hidden by the archive (operator-data criterion).
+# ---------------------------------------------------------------------------
+
+
+def test_query_rows_unions_backdated_hot_over_archived_day(tmp_path: Path) -> None:
+    """Restored/backdated hot DB for a rotated day must surface, deduped.
+
+    Rotation archives + deletes the hot .db. If an operator later restores or
+    backdates a daily DB for that same day, query_rows unions both sources: the
+    extra restored row surfaces, and an exact (ts, instrument, channel) duplicate
+    collapses to one rather than doubling.
+    """
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = TODAY - timedelta(days=40)
+    dup_ts = old_day.replace(hour=12)
+    new_ts = old_day.replace(hour=13)
+    db_name = f"data_{old_day.date().isoformat()}.db"
+
+    # Seed + rotate → archived, hot .db deleted.
+    _write_day(data_dir, old_day, [_reading("Т1", 70.0, dup_ts, ChannelStatus.OK)])
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    asyncio.run(svc.run_once(now=TODAY))
+    assert not (data_dir / db_name).exists(), "rotation must delete the hot DB"
+
+    # Backdated restore for the same day: archived row again + one restored-only row.
+    _write_day(
+        data_dir,
+        old_day,
+        [
+            _reading("Т1", 70.0, dup_ts, ChannelStatus.OK),  # exact duplicate
+            _reading("Т1", 71.5, new_ts, ChannelStatus.OK),  # restored-only
+        ],
+    )
+    assert (data_dir / db_name).exists(), "backdated hot DB now overlaps the archive"
+
+    reader = ArchiveReader(data_dir, archive_dir)
+    rows = reader.query_rows(old_day, TODAY, None, None)
+    vals = [v for _ts, _inst, _ch, v, _u, _s in rows]
+    assert 71.5 in vals, "backdated restored row must not be shadowed by the archive"
+    assert vals.count(70.0) == 1, "exact (ts, instrument, channel) duplicate must dedup to one"
+    assert len(rows) == 2, f"expected union-deduped 2 rows, got {rows}"
+
+
+# ---------------------------------------------------------------------------
+# Scheduler guard: a malformed schedule_time must fail safe at build time,
+# never raise out of the scheduler's out-of-try seconds_until_next call.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_schedule_time_valid_passthrough() -> None:
+    assert normalize_schedule_time("03:00") == "03:00"
+    assert normalize_schedule_time("23:59") == "23:59"
+
+
+@pytest.mark.parametrize("bad", ["oops", "25:00", "3am", "", "12:60"])
+def test_normalize_schedule_time_malformed_falls_back(bad: str) -> None:
+    """Malformed schedule → fall back to 03:00, never raise, and stay schedulable."""
+    resolved = normalize_schedule_time(bad)
+    assert resolved == "03:00"
+    # The fallback must itself be a valid, schedulable time.
+    seconds_until_next(resolved, datetime(2026, 4, 29, tzinfo=UTC))

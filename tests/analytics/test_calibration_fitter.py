@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -437,6 +438,56 @@ def test_fit_logs_warning_when_all_metric_points_fail(
 # ------------------------------------------------------------------
 # NaN-доктрина: extract drops error-status rows even with in-range values
 # ------------------------------------------------------------------
+
+
+def test_extract_pairs_reads_rotated_cold_day(tmp_path) -> None:
+    """A calibration fit over data older than the cold-rotation threshold must
+    still find its pairs. Once F17 rotates a daily SQLite file to Parquet and
+    deletes it, a direct glob goes blind — extract_pairs has to union hot+cold.
+    """
+    import asyncio
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    day = datetime(2026, 4, 14, tzinfo=UTC)
+    base_ts = day.timestamp()
+
+    def _reading(channel: str, value: float, ts: float) -> Reading:
+        return Reading(
+            timestamp=datetime.fromtimestamp(ts, tz=UTC),
+            instrument_id="ls218",
+            channel=channel,
+            value=value,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+
+    async def _seed_and_rotate() -> None:
+        writer = SQLiteWriter(tmp_path)
+        batch = []
+        for i in range(20):
+            ts = base_ts + i
+            srdg_val = 5.0 + i * 0.5
+            krdg_val = _synthetic_dt670(srdg_val)
+            batch.append(_reading("Т1", krdg_val, ts))
+            batch.append(_reading("Т2_raw", srdg_val, ts + 0.1))
+        writer._write_batch(batch)
+        await writer.stop()
+        service = ColdRotationService(
+            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
+        )
+        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+        assert results, "old day must have rotated to Parquet"
+
+    asyncio.run(_seed_and_rotate())
+    assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
+
+    pairs = CalibrationFitter.extract_pairs(
+        tmp_path, base_ts, base_ts + 100, "Т1", "Т2"
+    )
+    assert len(pairs) == 20, f"rotated cold-day calibration pairs lost: {len(pairs)}"
 
 
 def test_extract_pairs_drops_error_status(tmp_path) -> None:

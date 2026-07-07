@@ -227,6 +227,65 @@ def test_export_missing_day_handled(tmp_path: Path) -> None:
     assert "2026-04-14" in result.skipped_days
 
 
+def test_export_reads_rotated_cold_day(tmp_path: Path) -> None:
+    """A rotated day's data lives in cold Parquet, not a daily DB. The bulk
+    exporter must read it from the archive instead of dropping the day into
+    skipped_days. Cold rows carry no experiment_id → null, reported separately.
+    """
+    import asyncio
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+
+    async def _seed_and_rotate() -> None:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_batch(
+            [
+                Reading(
+                    timestamp=day + timedelta(seconds=i),
+                    instrument_id="ls218s",
+                    channel="Т1",
+                    value=77.0 + i,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+                for i in range(5)
+            ]
+        )
+        await writer.stop()
+        service = ColdRotationService(
+            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
+        )
+        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+        assert results, "old day must have rotated to Parquet"
+
+    asyncio.run(_seed_and_rotate())
+    assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
+
+    output = tmp_path / "out" / "readings.parquet"
+    result = export_experiment_readings_to_parquet(
+        experiment_id="exp-cold",
+        start_time=day.replace(hour=0, minute=0, second=0),
+        end_time=day.replace(hour=23, minute=59, second=59),
+        sqlite_root=tmp_path,
+        output_path=output,
+    )
+
+    assert result.rows_written == 5, "rotated cold-day rows must be exported, not skipped"
+    assert "2026-04-14" not in result.skipped_days, "day has data in cold archive"
+    assert "2026-04-14" in result.archived_days, "cold-sourced day must be reported"
+
+    table = pq.read_table(str(output))
+    assert table.num_rows == 5
+    exp_ids = table.column("experiment_id").to_pylist()
+    assert exp_ids == [None] * 5, f"cold rows carry no experiment_id: {exp_ids}"
+    channels = table.column("channel").to_pylist()
+    assert channels == ["Т1"] * 5
+
+
 def test_export_experiment_id_column(tmp_path: Path) -> None:
     """Every row has experiment_id column populated."""
     day = datetime(2026, 4, 14, tzinfo=UTC)

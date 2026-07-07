@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -239,3 +239,171 @@ async def test_replay_masks_sentinel_value(tmp_path: Path) -> None:
     assert not any(math.isinf(v) for v in values), "inf republished to broker"
     bad = [r.value for r in received if r.status is ChannelStatus.SENSOR_ERROR]
     assert bad and all(math.isnan(v) for v in bad), "error row must republish as NaN"
+
+
+# ---------------------------------------------------------------------------
+# F28: play_directory is archive-aware — days rotated to Parquet still replay
+# ---------------------------------------------------------------------------
+
+_ARCHIVE_TODAY = datetime(2026, 4, 29, tzinfo=UTC)
+
+
+def _write_day(data_dir: Path, readings: list[Reading]) -> None:
+    """Persist readings for their day via the real SQLiteWriter."""
+    writer = SQLiteWriter(data_dir)
+    writer._write_batch(readings)
+    if writer._conn is not None:
+        writer._conn.close()
+    writer._conn = None
+
+
+async def test_play_directory_replays_rotated_day(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = _ARCHIVE_TODAY - timedelta(days=40)
+    recent_day = _ARCHIVE_TODAY - timedelta(days=1)
+
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
+            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
+        ],
+    )
+    _write_day(data_dir, [_reading("Т11", 90.0, ts=recent_day.replace(hour=12))])
+
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=_ARCHIVE_TODAY)
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists(), (
+        "old day must have been rotated + deleted"
+    )
+
+    broker = DataBroker()
+    queue = await broker.subscribe("sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    count = await replay.play_directory(data_dir, archive_dir=archive_dir)
+
+    assert count == 3, f"rotated + hot rows must all replay, got {count}"
+    received = [queue.get_nowait() for _ in range(queue.qsize())]
+    vals = sorted(r.value for r in received)
+    assert vals == pytest.approx([90.0, 180.0, 200.0])
+    assert {"Т12", "Т11"} <= {r.channel for r in received}
+
+
+async def test_play_directory_cold_day_masks_sentinel(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = _ARCHIVE_TODAY - timedelta(days=40)
+
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
+            Reading(
+                timestamp=old_day.replace(hour=13),
+                instrument_id="ls218s",
+                channel="Т12",
+                value=float("nan"),
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            ),
+        ],
+    )
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=_ARCHIVE_TODAY)
+
+    broker = DataBroker()
+    queue = await broker.subscribe("sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    await replay.play_directory(data_dir, archive_dir=archive_dir)
+
+    received = [queue.get_nowait() for _ in range(queue.qsize())]
+    vals = [r.value for r in received]
+    assert 200.0 in vals, "usable rotated reading must survive"
+    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
+    bad = [r for r in received if r.status is ChannelStatus.SENSOR_ERROR]
+    assert bad and all(math.isnan(r.value) for r in bad), "cold sentinel row must present as NaN"
+
+
+async def test_play_directory_no_archive_unchanged(tmp_path: Path) -> None:
+    """No archive present → byte-identical to the hot-only original."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _make_db(
+        data_dir,
+        [
+            _reading("CH1", 1.0, ts=datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)),
+            _reading("CH2", 2.0, ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
+        ],
+    )
+    _make_db(data_dir, [_reading("CH1", 3.0, ts=datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC))])
+
+    broker = DataBroker()
+    queue = await broker.subscribe("sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    # No archive_dir passed → defaults to data_dir/archive, which is absent.
+    count = await replay.play_directory(data_dir)
+
+    assert count == 3
+    assert queue.qsize() == 3
+    vals = sorted(r.value for r in [queue.get_nowait() for _ in range(3)])
+    assert vals == pytest.approx([1.0, 2.0, 3.0])
+
+
+async def test_play_directory_overlap_day_unions_hot_and_cold(tmp_path: Path) -> None:
+    """F4: a day present in BOTH the archive and a restored hot .db replays the
+    union+dedup, not hot-only.
+
+    After rotation the hot DB is deleted; a manual restore / backdated import can
+    recreate a hot DB for that archived day. The old code computed
+    cold_days = archived − hot, so an overlap day fell through to the hot-only
+    `play` path and the archived rows vanished — diverging from query_rows'
+    union+dedup contract (archive_reader.py).
+    """
+    pytest.importorskip("pyarrow")
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = _ARCHIVE_TODAY - timedelta(days=40)
+
+    # Archive two rows for old_day, then rotate (hot DB deleted).
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
+            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
+        ],
+    )
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=_ARCHIVE_TODAY)
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    # Restore a hot DB for the SAME archived day: one exact-duplicate row (hour13)
+    # + one genuinely new row (hour14). Union must dedup the dup, keep the extra.
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
+            _reading("Т12", 150.0, ts=old_day.replace(hour=14)),
+        ],
+    )
+    assert (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    broker = DataBroker()
+    queue = await broker.subscribe("sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    count = await replay.play_directory(data_dir, archive_dir=archive_dir)
+
+    received = [queue.get_nowait() for _ in range(queue.qsize())]
+    vals = sorted(r.value for r in received)
+    # Archived-only 200.0 present (RED discriminator), restored 150.0 present,
+    # shared 180.0 exactly once (dedup) → 3 rows total.
+    assert vals == pytest.approx([150.0, 180.0, 200.0]), f"union/dedup wrong: {vals}"
+    assert count == 3 and len(received) == 3

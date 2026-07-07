@@ -10,16 +10,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.archive_reader import ArchiveReader, _day_from_db_name
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Normalize to UTC-aware so day boundaries and user bounds are comparable."""
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 class ReplaySource:
@@ -78,28 +84,48 @@ class ReplaySource:
         if not db_path.exists():  # noqa: ASYNC240
             raise FileNotFoundError(f"Файл БД не найден: {db_path}")
 
-        rows = self._load_rows(db_path, start=start, end=end, channels=channels)
-        if not rows:
+        encoded = self._load_rows(db_path, start=start, end=end, channels=channels)
+        if not encoded:
             logger.info("Нет данных для воспроизведения в %s", db_path.name)
             return 0
 
         logger.info(
             "Начало воспроизведения: %s, записей=%d, скорость=%.1fx",
             db_path.name,
-            len(rows),
+            len(encoded),
             self._speed,
         )
 
+        # NaN-доктрина: decode sentinel / error / legacy ±inf back to NaN here so
+        # the republished Reading reproduces the original non-finite value, never
+        # the stored sentinel, on the broker / GUI plots.
+        rows = [
+            (ts_posix, inst_id, channel, decode(value, status_str), unit, status_str)
+            for ts_posix, channel, value, unit, status_str, inst_id in encoded
+        ]
+        count = await self._replay_rows(rows)
+        logger.info("Воспроизведение завершено: %d записей", count)
+        return count
+
+    async def _replay_rows(
+        self,
+        rows: list[tuple[float, str, str, float, str, str]],
+    ) -> int:
+        """Publish already-decoded rows to the broker with speed pacing.
+
+        Shared publish path for both the hot SQLite (:meth:`play`) and cold
+        archive (:meth:`_play_archived_day`) sources. Each ``row`` is
+        ``(ts_posix, instrument_id, channel, value, unit, status_str)`` with
+        ``value`` already decoded — the caller must NOT decode twice.
+        """
         self._running = True
         count = 0
         prev_ts: float | None = None
 
-        for row in rows:
+        for ts_posix, inst_id, channel, value, unit, status_str in rows:
             if not self._running:
                 logger.info("Воспроизведение остановлено оператором")
                 break
-
-            ts_posix, channel, value, unit, status_str, inst_id = row
 
             # Пауза с учётом скорости
             if prev_ts is not None and self._speed > 0.0:
@@ -108,20 +134,16 @@ class ReplaySource:
                     await asyncio.sleep(delta / self._speed)
             prev_ts = ts_posix
 
-            # Восстановить Reading
             try:
                 status = ChannelStatus(status_str)
             except ValueError:
                 status = ChannelStatus.OK
 
-            # NaN-доктрина: mask sentinel / error / legacy ±inf back to NaN so the
-            # republished Reading reproduces the original non-finite value, never
-            # the stored sentinel, on the broker / GUI plots.
             reading = Reading(
                 timestamp=datetime.fromtimestamp(ts_posix, tz=UTC),
                 instrument_id=inst_id,
                 channel=channel,
-                value=decode(value, status_str),
+                value=value,
                 unit=unit,
                 status=status,
                 metadata={"source": "replay"},
@@ -132,7 +154,6 @@ class ReplaySource:
             self._total_replayed += 1
 
         self._running = False
-        logger.info("Воспроизведение завершено: %d записей", count)
         return count
 
     async def play_directory(
@@ -142,10 +163,16 @@ class ReplaySource:
         start: datetime | None = None,
         end: datetime | None = None,
         channels: list[str] | None = None,
+        archive_dir: Path | None = None,
     ) -> int:
         """Воспроизвести все daily-файлы из директории (в хронологическом порядке).
 
-        Параметры идентичны :meth:`play`, но обрабатываются все файлы.
+        Параметры идентичны :meth:`play`, но обрабатываются все дни: и живые
+        SQLite-файлы, и дни, вытесненные cold-rotation в Parquet-архив (их
+        `data_*.db` уже удалён, поэтому glob их не видит). `archive_dir` по
+        умолчанию — ``<data_dir>/archive`` (как в config/housekeeping.yaml);
+        когда архив отсутствует/пуст, поведение байт-в-байт совпадает с
+        hot-only оригиналом.
 
         Возвращает
         ----------
@@ -155,10 +182,99 @@ class ReplaySource:
             raise FileNotFoundError(f"Директория не найдена: {data_dir}")
 
         db_files = sorted(data_dir.glob("data_*.db"))  # noqa: ASYNC240
+        adir = archive_dir if archive_dir is not None else data_dir / "archive"
+        reader = ArchiveReader(data_dir, adir)
+        archived = self._archived_days(reader)
+        hot_days = {_day_from_db_name(p.name) for p in db_files}
+        cold_days = archived - hot_days  # pure-cold: only in the Parquet archive
+        # Overlap: a day present in BOTH a hot .db and the archive (restored /
+        # backdated import). Routing it through the hot-only `play` would drop
+        # the archived rows — query_rows already unions+dedups both sources, so
+        # replay must go through the cold path to match that contract (F4).
+        overlap_days = archived & hot_days
+
+        if not cold_days and not overlap_days:
+            # Hot-only fast path — byte-identical to the pre-archive behavior.
+            total = 0
+            for db_path in db_files:
+                total += await self.play(db_path, start=start, end=end, channels=channels)
+            return total
+
+        # Merge hot files and cold days, replay in chronological day order.
+        # ISO day keys and `data_YYYY-MM-DD.db` filenames sort identically, so a
+        # plain lexical sort keeps both in true chronological order.
+        items: list[tuple[str, str, object]] = []
+        for p in db_files:
+            day = _day_from_db_name(p.name)
+            if day in overlap_days:
+                # query_rows unions this day's hot .db + Parquet and dedups.
+                items.append((day, "cold", day))
+            else:
+                items.append((day or p.name, "hot", p))
+        for day_iso in cold_days:
+            items.append((day_iso, "cold", day_iso))
+        items.sort(key=lambda it: it[0])
+
         total = 0
-        for db_path in db_files:
-            total += await self.play(db_path, start=start, end=end, channels=channels)
+        for _key, kind, ref in items:
+            if kind == "hot":
+                total += await self.play(ref, start=start, end=end, channels=channels)  # type: ignore[arg-type]
+            else:
+                total += await self._play_archived_day(
+                    reader, ref, start=start, end=end, channels=channels  # type: ignore[arg-type]
+                )
         return total
+
+    @staticmethod
+    def _archived_days(reader: ArchiveReader) -> set[str]:
+        """Set of ``YYYY-MM-DD`` days present in the Parquet archive index.
+
+        Reuses ArchiveReader's own index loader rather than re-parsing
+        index.json. Returns an empty set when no archive/index exists.
+        """
+        index = reader._load_index()
+        days = {_day_from_db_name(entry["original_name"]) for entry in index.get("files", [])}
+        days.discard(None)
+        return days  # type: ignore[return-value]
+
+    async def _play_archived_day(
+        self,
+        reader: ArchiveReader,
+        day_iso: str,
+        *,
+        start: datetime | None,
+        end: datetime | None,
+        channels: list[str] | None,
+    ) -> int:
+        """Replay one cold (Parquet-archived) day through the same publish path."""
+        day = date.fromisoformat(day_iso)
+        day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+        day_end = day_start + timedelta(days=1)
+        # Intersect the day span with the user's [start, end) filter (end-exclusive,
+        # matching query_rows and _load_rows).
+        q_start = day_start if start is None else max(day_start, _as_utc(start))
+        q_end = day_end if end is None else min(day_end, _as_utc(end))
+        if q_start >= q_end:
+            return 0
+
+        full = await asyncio.to_thread(reader.query_rows, q_start, q_end, channels, None)
+        if not full:
+            return 0
+
+        logger.info(
+            "Начало воспроизведения архива: %s, записей=%d, скорость=%.1fx",
+            day_iso,
+            len(full),
+            self._speed,
+        )
+        # query_rows already decoded value per NaN-доктрина — do NOT decode again.
+        rows = [
+            (_parse_timestamp(ts).timestamp(), inst, channel, value, unit, status)
+            for ts, inst, channel, value, unit, status in full
+        ]
+        count = await self._replay_rows(rows)
+        logger.info("Воспроизведение архива завершено: %d записей", count)
+        return count
 
     def stop(self) -> None:
         """Запросить остановку воспроизведения."""

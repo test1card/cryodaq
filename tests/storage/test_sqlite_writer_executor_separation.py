@@ -101,3 +101,87 @@ def test_get_operator_log_not_blocked_by_slow_write(tmp_path: Path):
         f"get_operator_log took {read_elapsed:.2f}s while a 2s write was "
         "in flight — read/write executors look shared again."
     )
+
+
+def test_get_operator_log_includes_rotated_cold_days(tmp_path: Path):
+    """F2: the live operator journal (log_get → get_operator_log) must include
+    rotated audit days, not just hot data_*.db.
+
+    Reports already union cold operator_log via ArchiveReader.query_operator_log,
+    but the live path scanned hot files only — after cold rotation the rotated
+    day's audit entry silently vanished from the operator-facing journal. Pin
+    that get_operator_log unions the cold archive while preserving the DESC
+    ordering + limit + experiment_id contract the GUI panel relies on.
+    """
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    old_day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+    recent_day = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
+
+    async def _seed_and_rotate():
+        writer = SQLiteWriter(data_dir=tmp_path)
+        writer._write_batch(
+            [
+                Reading(
+                    timestamp=old_day,
+                    instrument_id="ls",
+                    channel="T",
+                    value=1.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+        writer._write_operator_log_entry(
+            timestamp=old_day,
+            experiment_id="exp-1",
+            author="op",
+            source="gui",
+            message="old rotated note",
+            tags=("cooldown",),
+        )
+        writer._write_operator_log_entry(
+            timestamp=recent_day,
+            experiment_id="exp-1",
+            author="op",
+            source="gui",
+            message="recent hot note",
+            tags=(),
+        )
+        await writer.stop()
+        service = ColdRotationService(
+            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
+        )
+        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+        assert results, "old day must rotate to Parquet"
+
+    asyncio.run(_seed_and_rotate())
+    assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
+
+    async def _get(**kwargs):
+        writer = SQLiteWriter(data_dir=tmp_path)
+        await writer.start_immediate()
+        try:
+            return await writer.get_operator_log(**kwargs)
+        finally:
+            await writer.stop()
+
+    entries = asyncio.run(_get(limit=100))
+    messages = [e.message for e in entries]
+    assert "old rotated note" in messages, "rotated cold audit entry missing from live journal"
+    # Ordering contract: newest-first (timestamp DESC), hot + cold interleaved.
+    assert messages == ["recent hot note", "old rotated note"], f"order wrong: {messages}"
+
+    # Limit contract still applied across the hot+cold union (newest kept).
+    limited = asyncio.run(_get(limit=1))
+    assert [e.message for e in limited] == ["recent hot note"]
+
+    # experiment_id filter still applied to cold rows.
+    filtered = asyncio.run(_get(experiment_id="nope", limit=100))
+    assert filtered == []

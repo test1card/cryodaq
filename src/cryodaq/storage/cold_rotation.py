@@ -71,6 +71,25 @@ def seconds_until_next(schedule_time: str, now: datetime) -> float:
     return (target - now).total_seconds()
 
 
+def normalize_schedule_time(raw: str) -> str:
+    """Return *raw* if it is a valid ``HH:MM``, else fall back to ``"03:00"``.
+
+    The engine's scheduler evaluates ``seconds_until_next`` outside its per-pass
+    ``try``, so a malformed ``schedule_time`` would raise once and kill the
+    rotation task silently at 3am. Validate loudly here at build time and fall
+    back to a sane hour so rotation still runs — the operator sees the ERROR.
+    """
+    try:
+        seconds_until_next(raw, datetime.now(UTC))
+        return raw
+    except (ValueError, TypeError):
+        logger.error(
+            "ColdRotation: schedule_time %r некорректен (ожидается HH:MM) — откат на 03:00",
+            raw,
+        )
+        return "03:00"
+
+
 def build_cold_rotation_service(
     cold_cfg: dict,
     *,
@@ -177,6 +196,12 @@ class ColdRotationService:
                 result = await self._rotate_file(db_path, today=today)
                 if result is not None:
                     results.append(result)
+
+            # Retry deletion of any hot DB archived+indexed on a prior pass whose
+            # unlink failed (e.g. a transient Windows file lock). Deletion-only:
+            # never re-copies, and _find_candidates already skips indexed days so
+            # they would otherwise linger forever (F5).
+            await asyncio.to_thread(self._sweep_stranded)
 
             return results
 
@@ -359,9 +384,14 @@ class ColdRotationService:
                 archive_path.unlink(missing_ok=True)
                 return None
 
-        # Step 4: Update index
+        # Step 4: Update index. Record the source .db's own MD5 alongside the
+        # Parquet checksum: the sweep uses it to prove a stranded hot DB is
+        # byte-identical to what was archived before it dares delete it. Nothing
+        # touches db_path between here and the Step-5 unlink, so this hash is
+        # exactly what would be deleted.
         size_archive = archive_path.stat().st_size
         checksum = self._md5_hex(archive_path)
+        source_md5 = self._md5_hex(db_path)
         rotated_at = datetime.now(UTC)
         try:
             self._update_index(
@@ -371,6 +401,7 @@ class ColdRotationService:
                 size_original=size_original,
                 size_archive=size_archive,
                 checksum=checksum,
+                source_md5=source_md5,
                 rotated_at=rotated_at,
                 operator_log_rel=operator_log_rel,
                 operator_log_rows=operator_log_rows_count,
@@ -388,9 +419,22 @@ class ColdRotationService:
         # Step 5: Delete SQLite + sidecars. Safe now: readings and operator_log
         # are preserved in Parquet, and source_data was verified empty at entry
         # (Step 0), so no table with rows is destroyed.
+        #
+        # A failed unlink (e.g. a Windows file lock) must NOT abort the pass or
+        # re-copy: the day is already indexed (Step 4), so _sweep_stranded on
+        # the next pass retries the deletion only. Until then the lingering hot
+        # .db and its Parquet both exist for the day — ArchiveReader.query_rows
+        # unions and dedups them (F4), so no row is hidden or double-counted.
         for suffix in ("", "-wal", "-shm"):
             sidecar = db_path.parent / (db_path.name + suffix)
-            sidecar.unlink(missing_ok=True)
+            try:
+                sidecar.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not delete %s after archiving (kept, retry next pass): %s",
+                    sidecar.name,
+                    exc,
+                )
 
         logger.info(
             "Rotated %s → %s (%d rows, %.1f MB → %.1f MB)",
@@ -570,6 +614,109 @@ class ColdRotationService:
     # Index management
     # ------------------------------------------------------------------
 
+    def _sweep_stranded(self) -> None:
+        """Retry deleting hot DBs already archived+indexed but still on disk.
+
+        Rotation writes index.json BEFORE unlinking the hot SQLite (the correct
+        fail-safe: never delete data before the archive is recorded). If that
+        unlink fails — e.g. a Windows file lock — the day stays indexed and
+        _find_candidates skips it forever, so the hot .db would linger undeleted.
+        Sweep those strays each pass and retry the deletion only, after verifying
+        both the archive Parquet and its index entry exist. Until a retry
+        succeeds ArchiveReader.query_rows unions the lingering .db with its
+        Parquet (F4), so no row is hidden or double-counted. One locked file
+        never aborts the sweep or the rotation pass.
+        """
+        try:
+            idx = self._read_index()
+        except RuntimeError:
+            return  # corrupt index already logged in _read_index; do not touch files
+        for entry in idx.get("files", []):
+            name = entry.get("original_name")
+            archive_rel = entry.get("archive_path")
+            if not name or not archive_rel:
+                continue
+            db_path = self._data_dir / name
+            if not db_path.exists():
+                continue
+            # Never delete the hot copy unless its Parquet is actually present.
+            if not (self._archive_dir / archive_rel).exists():
+                logger.warning(
+                    "Stranded hot DB %s is indexed but Parquet %s is missing — "
+                    "NOT deleting (archive incomplete)",
+                    name,
+                    archive_rel,
+                )
+                continue
+            # Hash-gated delete: reclaim ONLY the genuine stranded original.
+            # Parquet+index existence proves an archive exists — NOT that this
+            # hot DB's contents are contained in it. A restored/backdated day may
+            # carry new operator rows absent from the Parquet; deleting it would
+            # silently destroy them. Delete only when the DB is byte-identical to
+            # what was archived and has no uncommitted WAL/SHM sidecar.
+            day = name.removeprefix("data_").removesuffix(".db")
+            source_md5 = entry.get("source_md5")
+            if source_md5 is None:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): legacy index entry has no "
+                    "source_md5 — KEEPING, cannot prove byte-identity to the "
+                    "archive. The overlap union keeps both sources visible; "
+                    "operator decides.",
+                    name,
+                    day,
+                )
+                continue
+            try:
+                current_md5 = self._md5_hex(db_path)
+            except OSError as exc:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): cannot hash — KEEPING: %s",
+                    name,
+                    day,
+                    exc,
+                )
+                continue
+            if current_md5 != source_md5:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): current contents differ from "
+                    "what was archived (restored/backdated/modified) — KEEPING to "
+                    "avoid data loss. The overlap union keeps both sources "
+                    "visible; operator decides.",
+                    name,
+                    day,
+                )
+                continue
+            sidecar_blocks = False
+            for suffix in ("-wal", "-shm"):
+                side = db_path.parent / (db_path.name + suffix)
+                try:
+                    if side.exists() and side.stat().st_size > 0:
+                        sidecar_blocks = True
+                        break
+                except OSError:
+                    sidecar_blocks = True
+                    break
+            if sidecar_blocks:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): a non-empty WAL/SHM sidecar is "
+                    "present — KEEPING, uncommitted data may not be in the "
+                    "archive. The overlap union keeps both sources visible; "
+                    "operator decides.",
+                    name,
+                    day,
+                )
+                continue
+            for suffix in ("", "-wal", "-shm"):
+                sidecar = db_path.parent / (db_path.name + suffix)
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "Retry deleting stranded %s failed (retry next pass): %s",
+                        sidecar.name,
+                        exc,
+                    )
+
     def _index_path(self) -> Path:
         return self._archive_dir / "index.json"
 
@@ -602,6 +749,7 @@ class ColdRotationService:
         size_archive: int,
         checksum: str,
         rotated_at: datetime,
+        source_md5: str | None = None,
         operator_log_rel: str | None = None,
         operator_log_rows: int = 0,
     ) -> None:
@@ -616,6 +764,8 @@ class ColdRotationService:
             "size_bytes_archive": size_archive,
             "checksum_md5": checksum,
         }
+        if source_md5 is not None:
+            entry["source_md5"] = source_md5
         if operator_log_rel is not None:
             entry["operator_log_path"] = operator_log_rel
             entry["operator_log_rows"] = operator_log_rows

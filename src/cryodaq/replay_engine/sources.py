@@ -13,10 +13,11 @@ import json
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.archive_reader import ArchiveReader, _day_from_db_name
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
@@ -179,6 +180,7 @@ class DirectoryReplay:
         speed: float = 10.0,
         loop: bool = False,
         channel_map: dict[str, str] | None = None,
+        archive_dir: Path | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._speed = speed
@@ -186,6 +188,11 @@ class DirectoryReplay:
         self._channel_map = channel_map or None
         self._running = False
         self._current: SQLiteReplay | None = None
+        # Cold rotation deletes rotated daily DBs, so days living only in the
+        # Parquet archive would be skipped by the glob. archive_dir defaults to
+        # <data_dir>/archive (config/housekeeping.yaml); absent/empty → the run
+        # loop is byte-identical to the hot-only original.
+        self._archive_dir = archive_dir if archive_dir is not None else data_dir / "archive"
 
     def stop(self) -> None:
         self._running = False
@@ -194,42 +201,145 @@ class DirectoryReplay:
 
     async def run(self, publish_cb: PublishCallback) -> None:
         db_files = sorted(self._data_dir.glob("data_*.db"))
-        if not db_files:
-            logger.warning("DirectoryReplay: no data_*.db files in %s", self._data_dir)
+        reader = ArchiveReader(self._data_dir, self._archive_dir)
+        archived = _archived_days(reader)
+        hot_days = {_day_from_db_name(p.name) for p in db_files}
+        cold_days = archived - hot_days  # pure-cold: only in the Parquet archive
+        # Overlap: a day present in BOTH a hot .db and the archive (restored /
+        # backdated import). The hot-only SQLiteReplay path would drop the
+        # archived rows; query_rows already unions+dedups both sources, so route
+        # the overlap day through the cold path to match that contract (F4).
+        overlap_days = archived & hot_days
+
+        if not cold_days and not overlap_days:
+            # Hot-only fast path — byte-identical to the pre-archive behavior.
+            if not db_files:
+                logger.warning("DirectoryReplay: no data_*.db files in %s", self._data_dir)
+                return
+            # Compute one time origin from the first row of the first non-empty
+            # file so timestamps stay monotonic across all files. Walking past
+            # empty files defends against half-rotated empty .db at the start
+            # of the sort order, which would otherwise leave the offset at 0.0
+            # and emit raw historical timestamps for every file (Defect-1
+            # regression for multi-file sessions).
+            first_rows: list = []
+            for _db in db_files:
+                # H6: offload SQLite load to a thread.
+                first_rows = await asyncio.to_thread(_load_db_rows, _db)
+                if first_rows:
+                    break
+            if not first_rows:
+                logger.warning(
+                    "DirectoryReplay: all data_*.db files in %s are empty",
+                    self._data_dir,
+                )
+                return
+            global_base_offset = datetime.now(tz=UTC).timestamp() - first_rows[0][0]
+            self._running = True
+            while self._running:
+                for db_path in db_files:
+                    if not self._running:
+                        return
+                    self._current = SQLiteReplay(
+                        db_path,
+                        speed=self._speed,
+                        channel_map=self._channel_map,
+                    )
+                    await self._current.run(publish_cb, base_offset=global_base_offset)
+                if not self._loop:
+                    break
+            self._running = False
             return
-        # Compute one time origin from the first row of the first non-empty
-        # file so timestamps stay monotonic across all files. Walking past
-        # empty files defends against half-rotated empty .db at the start
-        # of the sort order, which would otherwise leave the offset at 0.0
-        # and emit raw historical timestamps for every file (Defect-1
-        # regression for multi-file sessions).
-        first_rows: list = []
-        for _db in db_files:
-            # H6: offload SQLite load to a thread.
-            first_rows = await asyncio.to_thread(_load_db_rows, _db)
-            if first_rows:
+
+        # Merged hot + cold path. Union hot files with cold-only days in
+        # chronological day order (ISO day keys and data_YYYY-MM-DD.db filenames
+        # sort identically). Hot files keep the exact SQLiteReplay path; cold
+        # days get an equivalent row source over the Parquet archive.
+        items: list[tuple[str, str, object]] = []
+        for p in db_files:
+            day = _day_from_db_name(p.name)
+            if day in overlap_days:
+                # query_rows unions this day's hot .db + Parquet and dedups.
+                items.append((day, "cold", day))
+            else:
+                items.append((day or p.name, "hot", p))
+        for day_iso in cold_days:
+            items.append((day_iso, "cold", day_iso))
+        items.sort(key=lambda it: it[0])
+
+        # Defect-1: one global time origin from the first row of the first
+        # non-empty source (hot OR cold). ponytail: this re-reads that source in
+        # the replay loop below (same as the hot-only path already did for its
+        # first file); fine for daily-sized sources.
+        global_base_offset: float | None = None
+        for _key, kind, ref in items:
+            if kind == "hot":
+                probe = await asyncio.to_thread(_load_db_rows, ref)
+            else:
+                probe = await asyncio.to_thread(_load_cold_day_rows, reader, ref)
+            if probe:
+                global_base_offset = datetime.now(tz=UTC).timestamp() - probe[0][0]
                 break
-        if not first_rows:
+        if global_base_offset is None:
             logger.warning(
-                "DirectoryReplay: all data_*.db files in %s are empty",
+                "DirectoryReplay: all hot + cold sources in %s are empty",
                 self._data_dir,
             )
             return
-        global_base_offset = datetime.now(tz=UTC).timestamp() - first_rows[0][0]
+
         self._running = True
         while self._running:
-            for db_path in db_files:
+            for _key, kind, ref in items:
                 if not self._running:
                     return
-                self._current = SQLiteReplay(
-                    db_path,
-                    speed=self._speed,
-                    channel_map=self._channel_map,
-                )
-                await self._current.run(publish_cb, base_offset=global_base_offset)
+                if kind == "hot":
+                    self._current = SQLiteReplay(
+                        ref,  # type: ignore[arg-type]
+                        speed=self._speed,
+                        channel_map=self._channel_map,
+                    )
+                    await self._current.run(publish_cb, base_offset=global_base_offset)
+                else:
+                    self._current = None
+                    await self._run_cold_day(reader, ref, publish_cb, global_base_offset)  # type: ignore[arg-type]
             if not self._loop:
                 break
         self._running = False
+
+    async def _run_cold_day(
+        self,
+        reader: ArchiveReader,
+        day_iso: str,
+        publish_cb: PublishCallback,
+        base_offset: float,
+    ) -> None:
+        """Replay one cold (Parquet-archived) day, mirroring SQLiteReplay.run."""
+        rows = await asyncio.to_thread(_load_cold_day_rows, reader, day_iso)
+        prev_ts: float | None = None
+        for ts_posix, channel, value, unit, status_str, inst_id in rows:
+            if not self._running:
+                return
+            if prev_ts is not None and self._speed > 0.0:
+                delta = ts_posix - prev_ts
+                if delta > 0:
+                    await asyncio.sleep(delta / self._speed)
+            prev_ts = ts_posix
+            try:
+                status = ChannelStatus(str(status_str).lower())
+            except ValueError:
+                status = ChannelStatus.OK
+            ch = channel if self._channel_map is None else self._channel_map.get(channel, channel)
+            # query_rows already decoded value per NaN-доктрина — do NOT decode again.
+            reading = Reading(
+                timestamp=datetime.fromtimestamp(ts_posix + base_offset, tz=UTC),
+                instrument_id=inst_id,
+                channel=ch,
+                value=value,
+                unit=unit,
+                status=status,
+                metadata={"source": "replay"},
+            )
+            await publish_cb(reading)
 
 
 def resolve_source(
@@ -271,6 +381,36 @@ def resolve_source(
             warm_channel=warm_channel,
         )
     raise ValueError(f"Unsupported source path: {path} (expected .db, .json, or directory)")
+
+
+def _archived_days(reader: ArchiveReader) -> set[str]:
+    """Set of ``YYYY-MM-DD`` days present in the Parquet archive index.
+
+    Reuses ArchiveReader's own index loader rather than re-parsing index.json.
+    Returns an empty set when no archive/index exists.
+    """
+    index = reader._load_index()
+    days = {_day_from_db_name(entry["original_name"]) for entry in index.get("files", [])}
+    days.discard(None)
+    return days  # type: ignore[return-value]
+
+
+def _load_cold_day_rows(
+    reader: ArchiveReader, day_iso: str
+) -> list[tuple[float, str, float, str, str, str]]:
+    """Cold-archive rows for one day in ``_load_db_rows`` tuple shape.
+
+    Value is already decoded by query_rows (NaN-доктрина). Shape matches
+    ``_load_db_rows``: ``(ts_posix, channel, value, unit, status, instrument_id)``.
+    """
+    day = date.fromisoformat(day_iso)
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    full = reader.query_rows(day_start, day_end, None)
+    return [
+        (_parse_timestamp(ts).timestamp(), channel, value, unit, status, inst)
+        for ts, inst, channel, value, unit, status in full
+    ]
 
 
 def _load_db_rows(

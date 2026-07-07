@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ class ParquetExportResult:
     file_size_bytes: int
     duration_s: float
     skipped_days: list[str] = field(default_factory=list)
+    # Days whose rows came from cold Parquet (F17 rotated) instead of a daily
+    # SQLite file. Cold rows carry no experiment_id, so their exported
+    # experiment_id column is null — surfaced here so the caller can say so.
+    archived_days: list[str] = field(default_factory=list)
 
 
 def export_experiment_readings_to_parquet(
@@ -75,9 +80,15 @@ def export_experiment_readings_to_parquet(
 
     total_rows = 0
     skipped_days: list[str] = []
+    archived_days: list[str] = []
 
     start_epoch = start_time.timestamp()
     end_epoch = end_time.timestamp()
+
+    # A day whose SQLite file was rotated to cold Parquet (F17) has no daily DB;
+    # its data lives only in the archive. Reuse ArchiveReader to read it back so
+    # such days are exported, not silently dropped into skipped_days.
+    reader = ArchiveReader(sqlite_root, sqlite_root / "archive")
 
     # Iterate daily DB files covering the range
     current_day = start_time.date()
@@ -89,7 +100,22 @@ def export_experiment_readings_to_parquet(
             db_path = sqlite_root / f"data_{day_str}.db"
 
             if not db_path.exists():
-                skipped_days.append(day_str)
+                cold_rows = _write_cold_day(
+                    reader,
+                    writer,
+                    schema,
+                    pa,
+                    current_day,
+                    start_time,
+                    end_time,
+                    chunk_size,
+                )
+                if cold_rows:
+                    total_rows += cold_rows
+                    archived_days.append(day_str)
+                else:
+                    # No daily DB and nothing in cold storage → genuinely no data.
+                    skipped_days.append(day_str)
                 current_day += timedelta(days=1)
                 continue
 
@@ -168,7 +194,61 @@ def export_experiment_readings_to_parquet(
         file_size_bytes=file_size,
         duration_s=duration,
         skipped_days=skipped_days,
+        archived_days=archived_days,
     )
+
+
+def _write_cold_day(
+    reader: ArchiveReader,
+    writer,
+    schema,
+    pa,
+    day,
+    start_time: datetime,
+    end_time: datetime,
+    chunk_size: int,
+) -> int:
+    """Stream a rotated day's cold-Parquet rows into the export writer.
+
+    Returns the number of rows written (0 if the day has no cold data). Cold
+    rows carry no experiment_id, so the exported column is null for them.
+    query_rows is end-EXCLUSIVE and already NaN-decodes values; the window is
+    clamped to this single day so a multi-day range never double-counts. The
+    upper bound is nudged by 1 µs to keep the caller-visible `<= end_time`
+    inclusivity of the hot-path SQL this mirrors.
+    """
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    day_end_exclusive = day_start + timedelta(days=1)
+    win_start = max(start_time, day_start)
+    win_end = min(end_time + timedelta(microseconds=1), day_end_exclusive)
+
+    rows = reader.query_rows(win_start, win_end, None)
+    if not rows:
+        return 0
+
+    written = 0
+    for offset in range(0, len(rows), chunk_size):
+        chunk = rows[offset : offset + chunk_size]
+        batch = pa.table(
+            {
+                "timestamp": pa.array(
+                    [datetime.fromtimestamp(float(r[0]), tz=UTC) for r in chunk],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                "instrument_id": pa.array([r[1] for r in chunk]),
+                "channel": pa.array([r[2] for r in chunk]),
+                # value is already NaN-decoded by query_rows — do not decode again.
+                "value": pa.array([r[3] for r in chunk], type=pa.float64()),
+                "unit": pa.array([r[4] for r in chunk]),
+                "status": pa.array([r[5] for r in chunk]),
+                # Cold rotation stores no experiment context → null column.
+                "experiment_id": pa.array([None] * len(chunk), type=pa.string()),
+            },
+            schema=schema,
+        )
+        writer.write_table(batch)
+        written += len(chunk)
+    return written
 
 
 def read_experiment_parquet(

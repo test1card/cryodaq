@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from cryodaq.reporting.sections import SECTION_REGISTRY
 # thread cannot be killed mid-call — eventually exhausting the thread pool.
 # On timeout the report degrades to docx-only, exactly like a missing soffice.
 _SOFFICE_TIMEOUT_S = 120
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,8 +272,20 @@ class ReportGenerator:
         return tuple(ordered)
 
     def _try_convert_pdf(self, source_docx_path: Path, target_pdf_path: Path) -> Path | None:
+        """Best-effort DOCX→PDF via LibreOffice; None on any degradation.
+
+        Every degradation path (missing soffice, timeout, failed conversion)
+        is logged LOUD naming the consequence and the remedy. The absence is
+        also surfaced to the operator: ``generate()`` returns ``pdf_path=None``,
+        the engine report dict carries ``pdf_path: null``, and the archive
+        panel renders "PDF: нет" (gui/shell/overlays/archive_panel.py).
+        """
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         if not soffice:
+            logger.warning(
+                "ReportGenerator: soffice/LibreOffice не найден — PDF не создан, "
+                "доступен только DOCX. Для PDF-конвертации установите LibreOffice."
+            )
             return None
         output_dir = source_docx_path.parent
         try:
@@ -289,16 +304,20 @@ class ReportGenerator:
                 timeout=_SOFFICE_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:
-            import logging
-
-            logging.getLogger(__name__).error(
-                "ReportGenerator: soffice PDF conversion timed out after %ds — "
-                "report degrades to docx-only",
+            logger.error(
+                "ReportGenerator: конвертация soffice в PDF превысила таймаут %d с — "
+                "PDF не создан, доступен только DOCX. Проверьте зависшие процессы "
+                "soffice / установку LibreOffice.",
                 _SOFFICE_TIMEOUT_S,
             )
             return None
         produced = output_dir / f"{source_docx_path.stem}.pdf"
         if not produced.exists():
+            logger.error(
+                "ReportGenerator: soffice завершился, но PDF (%s) не создан — "
+                "доступен только DOCX. Проверьте установку LibreOffice.",
+                produced.name,
+            )
             return None
         if produced != target_pdf_path:
             if target_pdf_path.exists():
