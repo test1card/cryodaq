@@ -4,26 +4,18 @@ from __future__ import annotations
 
 import logging
 import math
-import sqlite3
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
 
 _XLSX_MAX_ROWS = 1_048_576
-
-
-def _utc_day(dt: datetime | None) -> date | None:
-    """Return the UTC calendar day for a datetime (naive treated as UTC)."""
-    if dt is None:
-        return None
-    aware = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-    return aware.date()
 
 
 def _ts_sort_key(raw: object) -> float:
@@ -56,15 +48,20 @@ class XLSXExporter:
         )
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, archive_dir: Path | None = None) -> None:
         """Инициализировать экспортёр.
 
         Параметры
         ----------
         data_dir:
             Директория с daily-файлами SQLite (data_YYYY-MM-DD.db).
+        archive_dir:
+            Директория холодного хранилища (Parquet + index.json). None →
+            ``data_dir / "archive"``. Дни, вытесненные ротацией в Parquet,
+            читаются оттуда, иначе экспорт слепнет на вытесненных днях.
         """
         self._data_dir = data_dir
+        self._archive_dir = archive_dir if archive_dir is not None else data_dir / "archive"
 
     def export(
         self,
@@ -101,11 +98,6 @@ class XLSXExporter:
             logger.error("openpyxl не установлен: pip install openpyxl")
             return 0
 
-        db_files = self._find_db_files(start, end)
-        if not db_files:
-            logger.warning("Не найдено файлов БД для указанного диапазона")
-            return 0
-
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb = openpyxl.Workbook()
 
@@ -115,10 +107,13 @@ class XLSXExporter:
         ws_data = wb.active
         ws_data.title = "Данные"
 
-        # Собрать все строки, чтобы определить уникальные каналы
-        all_rows: list[dict[str, Any]] = []
-        for db_path in db_files:
-            all_rows.extend(self._query_db(db_path, start, end, channels))
+        # Read across hot SQLite + cold Parquet: rotated days live only in the
+        # archive, so a plain SQLite scan would drop them silently.
+        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
+        all_rows: list[dict[str, Any]] = [
+            {"timestamp": raw_ts, "channel": channel, "value": value, "status": status}
+            for raw_ts, _instrument_id, channel, value, _unit, status in rows
+        ]
 
         if not all_rows:
             wb.save(str(output_path))
@@ -220,76 +215,3 @@ class XLSXExporter:
             len(unique_channels),
         )
         return data_row_count
-
-    # ------------------------------------------------------------------
-    # Внутренние методы
-    # ------------------------------------------------------------------
-
-    def _find_db_files(
-        self,
-        start: datetime | None,
-        end: datetime | None,
-    ) -> list[Path]:
-        """Найти daily-файлы SQLite, покрывающие указанный диапазон."""
-        if not self._data_dir.exists():
-            return []
-
-        all_files = sorted(self._data_dir.glob("data_*.db"))
-        if start is None and end is None:
-            return all_files
-
-        # Daily files are named by UTC day; normalize the caller-supplied
-        # range to UTC before deriving the day (mirrors ArchiveReader.query),
-        # otherwise early-hours rows in another tz drop the correct day file.
-        start_day = _utc_day(start)
-        end_day = _utc_day(end)
-
-        result: list[Path] = []
-        for path in all_files:
-            date_str = path.stem.replace("data_", "")
-            try:
-                file_date = date.fromisoformat(date_str)
-            except ValueError:
-                continue
-            if start_day is not None and file_date < start_day:
-                continue
-            if end_day is not None and file_date > end_day:
-                continue
-            result.append(path)
-
-        return result
-
-    def _query_db(
-        self,
-        db_path: Path,
-        start: datetime | None,
-        end: datetime | None,
-        channels: list[str] | None,
-    ) -> list[dict[str, Any]]:
-        """Запросить строки readings из одного файла БД."""
-        conn = sqlite3.connect(str(db_path), timeout=10)
-        conn.row_factory = sqlite3.Row
-        try:
-            query = "SELECT timestamp, channel, value, status FROM readings"
-            conditions: list[str] = []
-            params: list[Any] = []
-
-            if start is not None:
-                conditions.append("timestamp >= ?")
-                params.append(start.timestamp())
-            if end is not None:
-                conditions.append("timestamp < ?")
-                params.append(end.timestamp())
-            if channels:
-                placeholders = ",".join("?" * len(channels))
-                conditions.append(f"channel IN ({placeholders})")
-                params.extend(channels)
-
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY timestamp;"
-
-            rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()

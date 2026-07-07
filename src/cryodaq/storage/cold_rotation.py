@@ -58,6 +58,50 @@ _OPERATOR_LOG_SCHEMA = pa.schema(
 _CHUNK_SIZE = 100_000
 
 
+def seconds_until_next(schedule_time: str, now: datetime) -> float:
+    """Seconds from *now* until the next daily ``HH:MM`` occurrence.
+
+    Used by the engine to run rotation once per day at the configured quiet
+    hour. If today's slot has already passed, returns the delay to tomorrow's.
+    """
+    hour_str, minute_str = schedule_time.split(":")
+    target = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def build_cold_rotation_service(
+    cold_cfg: dict,
+    *,
+    data_dir: Path,
+    project_root: Path,
+) -> ColdRotationService | None:
+    """Construct a ColdRotationService from the ``cold_rotation`` config block.
+
+    Fail-closed: returns ``None`` unless ``enabled`` is the strict boolean
+    ``True``. Any other value (missing, ``"true"`` string, ``1``, ``False``)
+    leaves rotation off — a config typo must never silently arm file deletion.
+
+    ``archive_dir`` from config is resolved relative to *project_root* (matching
+    ``config/housekeeping.yaml``'s ``data/archive``); an absolute path is used
+    verbatim.
+    """
+    if cold_cfg.get("enabled") is not True:
+        return None
+    archive_cfg = str(cold_cfg.get("archive_dir", "data/archive"))
+    archive_dir = Path(archive_cfg)
+    if not archive_dir.is_absolute():
+        archive_dir = project_root / archive_dir
+    return ColdRotationService(
+        data_dir=data_dir,
+        archive_dir=archive_dir,
+        age_days=int(cold_cfg.get("age_days", 30)),
+        enabled=True,
+        zstd_level=int(cold_cfg.get("zstd_compression_level", 3)),
+    )
+
+
 @dataclass
 class RotationResult:
     """Outcome of a single successful SQLite → Parquet rotation."""
@@ -254,9 +298,7 @@ class ColdRotationService:
         try:
             self._write_parquet(archive_path, rows)
         except Exception:
-            logger.exception(
-                "Failed to write Parquet for %s — leaving SQLite intact", db_path.name
-            )
+            logger.exception("Failed to write Parquet for %s — leaving SQLite intact", db_path.name)
             # Clean up any partial Parquet file
             archive_path.unlink(missing_ok=True)
             return None
@@ -291,17 +333,14 @@ class ColdRotationService:
             operator_log_rows = self._read_operator_log_rows(db_path)
         except Exception:
             logger.exception(
-                "Failed to read operator_log from %s — leaving SQLite intact, "
-                "cleaning up Parquet",
+                "Failed to read operator_log from %s — leaving SQLite intact, cleaning up Parquet",
                 db_path.name,
             )
             archive_path.unlink(missing_ok=True)
             return None
 
         if operator_log_rows:
-            operator_log_rel = (
-                f"year={day.year}/month={day.month:02d}/{db_path.stem}.operator_log.parquet"
-            )
+            operator_log_rel = f"year={day.year}/month={day.month:02d}/{db_path.stem}.operator_log.parquet"
             operator_log_path = self._archive_dir / operator_log_rel
             operator_log_rows_count = len(operator_log_rows)
             try:
@@ -309,13 +348,11 @@ class ColdRotationService:
                 actual_ol = pq.read_metadata(str(operator_log_path)).num_rows
                 if actual_ol != operator_log_rows_count:
                     raise RuntimeError(
-                        f"operator_log row count mismatch: expected "
-                        f"{operator_log_rows_count}, got {actual_ol}"
+                        f"operator_log row count mismatch: expected {operator_log_rows_count}, got {actual_ol}"
                     )
             except Exception:
                 logger.exception(
-                    "Failed to preserve operator_log for %s — leaving SQLite intact, "
-                    "cleaning up Parquet",
+                    "Failed to preserve operator_log for %s — leaving SQLite intact, cleaning up Parquet",
                     db_path.name,
                 )
                 operator_log_path.unlink(missing_ok=True)
@@ -377,16 +414,13 @@ class ColdRotationService:
     # SQLite read
     # ------------------------------------------------------------------
 
-    def _read_all_rows(
-        self, db_path: Path
-    ) -> list[tuple[float, str, str, float, str, str]]:
+    def _read_all_rows(self, db_path: Path) -> list[tuple[float, str, str, float, str, str]]:
         """Return all rows from readings table as list of tuples."""
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             cursor = conn.execute(
-                "SELECT timestamp, instrument_id, channel, value, unit, status "
-                "FROM readings ORDER BY timestamp"
+                "SELECT timestamp, instrument_id, channel, value, unit, status FROM readings ORDER BY timestamp"
             )
             return [
                 (
@@ -410,9 +444,7 @@ class ColdRotationService:
         ).fetchone()
         return row is not None
 
-    def _read_operator_log_rows(
-        self, db_path: Path
-    ) -> list[tuple[float, str | None, str, str, str, str]]:
+    def _read_operator_log_rows(self, db_path: Path) -> list[tuple[float, str | None, str, str, str, str]]:
         """Return all operator_log rows as tuples (empty if table absent)."""
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.row_factory = sqlite3.Row
@@ -420,8 +452,7 @@ class ColdRotationService:
             if not self._table_exists(conn, "operator_log"):
                 return []
             cursor = conn.execute(
-                "SELECT timestamp, experiment_id, author, source, message, tags "
-                "FROM operator_log ORDER BY timestamp"
+                "SELECT timestamp, experiment_id, author, source, message, tags FROM operator_log ORDER BY timestamp"
             )
             return [
                 (
@@ -452,9 +483,7 @@ class ColdRotationService:
     # Parquet write
     # ------------------------------------------------------------------
 
-    def _write_parquet(
-        self, archive_path: Path, rows: list[tuple[float, str, str, float, str, str]]
-    ) -> None:
+    def _write_parquet(self, archive_path: Path, rows: list[tuple[float, str, str, float, str, str]]) -> None:
         """Stream rows to Parquet in chunks with Zstd compression."""
         writer = pq.ParquetWriter(
             str(archive_path),
