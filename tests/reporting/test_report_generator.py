@@ -261,6 +261,7 @@ async def test_report_generation_graceful_without_pdf_tooling(
     manager: ExperimentManager,
     tmp_path: Path,
     monkeypatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     exp_id = manager.start_experiment(
         name="No PDF",
@@ -273,11 +274,19 @@ async def test_report_generation_graceful_without_pdf_tooling(
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     monkeypatch.setattr("cryodaq.reporting.generator.shutil.which", lambda _name: None)
-    result = ReportGenerator(tmp_path).generate(exp_id)
+    with caplog.at_level("WARNING", logger="cryodaq.reporting.generator"):
+        result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
     assert result.docx_path.name == "report_editable.docx"
     assert result.pdf_path is None
+    # Degradation must be LOUD: a WARNING naming the consequence + the remedy.
+    assert any(
+        rec.levelname == "WARNING"
+        and "PDF не создан" in rec.message
+        and "LibreOffice" in rec.message
+        for rec in caplog.records
+    ), "missing-soffice degradation must log a WARNING naming PDF loss + LibreOffice remedy"
 
 
 async def test_report_generation_can_use_archived_measured_values_without_live_db(
