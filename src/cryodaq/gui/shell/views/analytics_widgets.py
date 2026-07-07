@@ -860,6 +860,10 @@ class CooldownPredictionWidget(QWidget):
         """
         if reading is None:
             return
+        # NaN-доктрина (A3): status — дискриминатор годности, не float-конечность.
+        # Не годное показание (ошибка статуса / NaN / ±inf) не питает предиктор.
+        if not reading.is_usable():
+            return
         ts = reading.timestamp.timestamp()
         val = float(reading.value)
         self._raw_cold_buffer.append((ts, val))
@@ -1062,6 +1066,9 @@ class RThermalLiveWidget(QWidget):
             self._curve.setData(x=xs, y=ys)
 
             # Feed only new history points into the predictor.
+            # NaN-доктрина (A3): buffer replay — только (ts, float), без Reading
+            # со статусом; годность уже отфильтрована выше по потоку. Гейтить
+            # нечем, оставляем float-питание как есть.
             for ts, val in history:
                 if ts > self._last_r_ts:
                     self._ss_predictor.add_point("R_thermal", ts, val)
@@ -1881,6 +1888,9 @@ class TemperatureSteadyStateWidget(QWidget):
             short_id = ch_id.split(" ", 1)[0] if " " in ch_id else ch_id
             key = self._key_for_short_id(short_id)
             if key is None:
+                continue
+            # NaN-доктрина (A3): не годное показание не питает предиктор.
+            if not reading.is_usable():
                 continue
             try:
                 value = float(reading.value)

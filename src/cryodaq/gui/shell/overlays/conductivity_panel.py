@@ -890,7 +890,9 @@ class ConductivityPanel(QWidget):
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
         ts = reading.timestamp.timestamp()
-        if ch_id is not None and reading.unit == "K":
+        # NaN-доктрина (A3): статус — дискриминатор годности; не годное
+        # температурное показание не питает SteadyStatePredictor.
+        if ch_id is not None and reading.unit == "K" and reading.is_usable():
             # Hide the empty-state overlay only when a real temperature
             # reading lands — a power-only reading has nothing to plot,
             # so the overlay must stay up until temps arrive. Codex II.5

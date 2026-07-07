@@ -3069,6 +3069,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                     broker=broker,
                     config=_cd_cfg,
                     model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
+                    # A1: cooldown-end push event on the engine EventBus.
+                    event_bus=event_bus,
+                    # A2: read-only history reader for ultimate_vacuum enrichment.
+                    reader=writer,
                 )
                 logger.info("CooldownService создан")
                 # v0.55.4 A2: hand the cooldown_service-owned
