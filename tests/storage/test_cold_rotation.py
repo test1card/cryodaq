@@ -720,3 +720,166 @@ def test_failed_unlink_strands_then_swept_next_pass(
     asyncio.run(service.run_once(now=today))
     assert not (data_dir / old_name).exists(), "sweep must delete the stranded hot DB next pass"
     assert len(reader.query_rows(None, None, None)) == 5, "post-sweep must still be 5 rows"
+
+
+# ---------------------------------------------------------------------------
+# Safety: sweep must NOT delete a stranded hot DB whose contents changed
+# (restored / backdated day carrying operator rows not in the Parquet)
+# ---------------------------------------------------------------------------
+
+
+def test_modified_stranded_hot_db_survives_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stranded hot DB whose bytes differ from what was archived (a restored
+    or backdated day with NEW rows) must survive the sweep, not be silently
+    destroyed. Parquet+index existence proves an archive exists, NOT that the
+    current hot DB's contents are contained in it.
+
+    Pass 1 strands the hot DB (locked unlink). Before pass 2 an operator adds a
+    new reading row (the restore/backdate case). The sweep must KEEP the file,
+    log a WARNING naming the day, and query_rows must still surface the new row
+    via the overlap union.
+    """
+    pytest.importorskip("pyarrow")
+    import asyncio
+    import logging
+    import pathlib
+
+    from cryodaq.storage.archive_reader import ArchiveReader
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    old_ts = datetime(old_day.year, old_day.month, old_day.day, tzinfo=UTC).timestamp()
+    _create_db(data_dir / old_name, rows=5, base_ts=old_ts)
+
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+
+    real_unlink = pathlib.Path.unlink
+    lock = {"active": True}
+
+    def flaky_unlink(self, *args, **kwargs):
+        if lock["active"] and self.name.startswith(old_name):
+            raise PermissionError("simulated Windows file lock")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", flaky_unlink)
+
+    reader = ArchiveReader(data_dir, archive_dir)
+
+    # Pass 1: archive + index; unlink fails, hot DB stranded.
+    results = asyncio.run(service.run_once(now=today))
+    assert results, "rotation must still report success despite the failed unlink"
+    assert (data_dir / old_name).exists()
+
+    # Operator restores / backdates: a NEW reading row lands in the stranded DB,
+    # NOT present in the archived Parquet.
+    new_ts = old_ts + 10_000
+    conn = sqlite3.connect(str(data_dir / old_name))
+    conn.execute(
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (new_ts, "ls218s", "Т1", 4.2, "K", "ok"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Pass 2: lock released, but the DB no longer matches what was archived.
+    lock["active"] = False
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(service.run_once(now=today))
+
+    assert (data_dir / old_name).exists(), "modified stranded DB must NOT be deleted (data loss)"
+    assert any(
+        old_name in rec.getMessage() and "KEEP" in rec.getMessage().upper()
+        for rec in caplog.records
+    ), "sweep must warn that the modified stranded DB is kept"
+    # The new row survives and is visible via the overlap union (5 archived + 1 new).
+    rows = reader.query_rows(None, None, None)
+    assert len(rows) == 6, f"union must surface the new restored row: {len(rows)} rows"
+    assert any(r[0] == new_ts for r in rows), "the new restored row must be returned"
+
+
+# ---------------------------------------------------------------------------
+# Legacy index entries without source_md5 → sweep keeps the file (warn), never
+# deletes on an unprovable byte-identity.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_index_entry_without_source_md5_is_kept(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An index entry predating the source_md5 field cannot prove the hot DB is
+    byte-identical to the archive, so the sweep must KEEP it, not delete it."""
+    pytest.importorskip("pyarrow")
+    import asyncio
+    import logging
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    old_ts = datetime(old_day.year, old_day.month, old_day.day, tzinfo=UTC).timestamp()
+    _create_db(data_dir / old_name, rows=5, base_ts=old_ts)
+
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+
+    # Rotate normally (hot DB deleted). Then simulate a legacy index by dropping
+    # source_md5 and re-materialising the hot DB so the sweep has a candidate.
+    asyncio.run(service.run_once(now=today))
+    index_path = archive_dir / "index.json"
+    idx = json.loads(index_path.read_text(encoding="utf-8"))
+    for entry in idx["files"]:
+        entry.pop("source_md5", None)
+    index_path.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
+    _create_db(data_dir / old_name, rows=5, base_ts=old_ts)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(service.run_once(now=today))
+
+    assert (data_dir / old_name).exists(), "legacy entry (no source_md5) → keep, never delete"
+    assert any(old_name in rec.getMessage() for rec in caplog.records)
+
+
+def test_rotation_records_source_md5(tmp_path: Path) -> None:
+    """New index entries carry source_md5 = MD5 of the archived source .db."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_name = _old_db_name(40, today)
+    db_path = data_dir / old_name
+
+    import hashlib as _hashlib
+
+    def _md5(path: Path) -> str:
+        h = _hashlib.md5()
+        with path.open("rb") as fh:
+            for block in iter(lambda: fh.read(65_536), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    _create_db(db_path, rows=30)
+    expected_source_md5 = _md5(db_path)
+
+    service = ColdRotationService(
+        data_dir=data_dir, archive_dir=archive_dir, age_days=30, enabled=True
+    )
+    results = asyncio.run(service.run_once(now=today))
+    assert len(results) == 1
+
+    idx = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    entry = idx["files"][0]
+    assert entry.get("source_md5") == expected_source_md5
+    assert len(entry["source_md5"]) == 32

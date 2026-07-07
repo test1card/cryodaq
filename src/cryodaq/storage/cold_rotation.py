@@ -384,9 +384,14 @@ class ColdRotationService:
                 archive_path.unlink(missing_ok=True)
                 return None
 
-        # Step 4: Update index
+        # Step 4: Update index. Record the source .db's own MD5 alongside the
+        # Parquet checksum: the sweep uses it to prove a stranded hot DB is
+        # byte-identical to what was archived before it dares delete it. Nothing
+        # touches db_path between here and the Step-5 unlink, so this hash is
+        # exactly what would be deleted.
         size_archive = archive_path.stat().st_size
         checksum = self._md5_hex(archive_path)
+        source_md5 = self._md5_hex(db_path)
         rotated_at = datetime.now(UTC)
         try:
             self._update_index(
@@ -396,6 +401,7 @@ class ColdRotationService:
                 size_original=size_original,
                 size_archive=size_archive,
                 checksum=checksum,
+                source_md5=source_md5,
                 rotated_at=rotated_at,
                 operator_log_rel=operator_log_rel,
                 operator_log_rows=operator_log_rows_count,
@@ -642,6 +648,64 @@ class ColdRotationService:
                     archive_rel,
                 )
                 continue
+            # Hash-gated delete: reclaim ONLY the genuine stranded original.
+            # Parquet+index existence proves an archive exists — NOT that this
+            # hot DB's contents are contained in it. A restored/backdated day may
+            # carry new operator rows absent from the Parquet; deleting it would
+            # silently destroy them. Delete only when the DB is byte-identical to
+            # what was archived and has no uncommitted WAL/SHM sidecar.
+            day = name.removeprefix("data_").removesuffix(".db")
+            source_md5 = entry.get("source_md5")
+            if source_md5 is None:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): legacy index entry has no "
+                    "source_md5 — KEEPING, cannot prove byte-identity to the "
+                    "archive. The overlap union keeps both sources visible; "
+                    "operator decides.",
+                    name,
+                    day,
+                )
+                continue
+            try:
+                current_md5 = self._md5_hex(db_path)
+            except OSError as exc:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): cannot hash — KEEPING: %s",
+                    name,
+                    day,
+                    exc,
+                )
+                continue
+            if current_md5 != source_md5:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): current contents differ from "
+                    "what was archived (restored/backdated/modified) — KEEPING to "
+                    "avoid data loss. The overlap union keeps both sources "
+                    "visible; operator decides.",
+                    name,
+                    day,
+                )
+                continue
+            sidecar_blocks = False
+            for suffix in ("-wal", "-shm"):
+                side = db_path.parent / (db_path.name + suffix)
+                try:
+                    if side.exists() and side.stat().st_size > 0:
+                        sidecar_blocks = True
+                        break
+                except OSError:
+                    sidecar_blocks = True
+                    break
+            if sidecar_blocks:
+                logger.warning(
+                    "Stranded hot DB %s (day %s): a non-empty WAL/SHM sidecar is "
+                    "present — KEEPING, uncommitted data may not be in the "
+                    "archive. The overlap union keeps both sources visible; "
+                    "operator decides.",
+                    name,
+                    day,
+                )
+                continue
             for suffix in ("", "-wal", "-shm"):
                 sidecar = db_path.parent / (db_path.name + suffix)
                 try:
@@ -685,6 +749,7 @@ class ColdRotationService:
         size_archive: int,
         checksum: str,
         rotated_at: datetime,
+        source_md5: str | None = None,
         operator_log_rel: str | None = None,
         operator_log_rows: int = 0,
     ) -> None:
@@ -699,6 +764,8 @@ class ColdRotationService:
             "size_bytes_archive": size_archive,
             "checksum_md5": checksum,
         }
+        if source_md5 is not None:
+            entry["source_md5"] = source_md5
         if operator_log_rel is not None:
             entry["operator_log_path"] = operator_log_rel
             entry["operator_log_rows"] = operator_log_rows
