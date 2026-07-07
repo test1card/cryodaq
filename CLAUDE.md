@@ -444,7 +444,7 @@ Phase I.1.
 **Web**
 
 - `src/cryodaq/web/server.py`
-- `src/cryodaq/web/rest_api.py` — read-only REST facade (`/api/v1`) with Swagger docs
+- `src/cryodaq/web/rest_api.py` — REST facade (`/api/v1`): read-only GET surface + exactly two authenticated write endpoints (`POST /log` append, `POST /alarms/{id}/ack`) behind `require_write_token` (token in gitignored `config/web.local.yaml`); Swagger docs
 
 **Design System**
 
@@ -564,7 +564,6 @@ Phase I.1.
 ## Известные ограничения
 
 - Best-effort PDF generation по-прежнему зависит от внешнего `soffice` / `LibreOffice`; отсутствие этого инструмента является ограничением окружения, а не code regression.
-- `WindowsSelectorEventLoopPolicy` продолжает давать известные Python 3.14+ deprecation warnings.
 - Supported deployment: `pip install -e .` из корня репозитория. Wheel-install не self-contained — config/, plugins/, data/ находятся вне пакета. Используйте CRYODAQ_ROOT для нестандартных layout.
 
 ## graphify

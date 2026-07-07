@@ -213,7 +213,6 @@ Housekeeping:
 - Runtime apply калибровки доступен через global on/off и per-channel policy; отсутствие curve, assignment или сбой вычисления нужно трактовать как консервативный fallback к `KRDG` с явным логированием.
 - Поведение на живом LakeShore требует отдельной lab verification и не считается автоматически подтверждённым одним только unit/mock coverage.
 - PDF-артефакт остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
-- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ## 11. Smoke-test commands
 

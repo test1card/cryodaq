@@ -545,7 +545,6 @@ restart engine. Алиасы для T1-T10/T13-T24 **давать вредно**
 ## 11. Известные ограничения
 
 - PDF-конвертация остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
-- На новых версиях Python возможны deprecation warnings вокруг `WindowsSelectorEventLoopPolicy`.
 - **Replay engine — обнаружение конфликта портов (loopback only):** детектор занятости портов
   проверяет только `127.0.0.1` и `0.0.0.0`. Если real engine и replay engine привязаны к разным
   сетевым интерфейсам, коллизия не будет обнаружена заранее — вы получите штатные ошибки ZMQ
