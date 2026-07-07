@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cryodaq.storage.sentinel import decode
+from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -149,34 +149,29 @@ class ReportDataExtractor:
         return paths
 
     def _load_readings(self, start_time: datetime, end_time: datetime) -> list[HistoricalReading]:
-        rows: list[HistoricalReading] = []
-        for db_path in self._db_paths(start_time, end_time):
-            conn = sqlite3.connect(str(db_path), timeout=10)
-            conn.row_factory = sqlite3.Row
-            try:
-                query = (
-                    "SELECT timestamp, instrument_id, channel, value, unit, status "
-                    "FROM readings WHERE timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp"
-                )
-                for row in conn.execute(
-                    query, (start_time.timestamp(), end_time.timestamp())
-                ).fetchall():
-                    rows.append(
-                        HistoricalReading(
-                            timestamp=_parse_timestamp(row["timestamp"]),
-                            instrument_id=str(row["instrument_id"] or ""),
-                            channel=str(row["channel"] or ""),
-                            value=decode(float(row["value"]), str(row["status"] or "")),
-                            unit=str(row["unit"] or ""),
-                            status=str(row["status"] or ""),
-                        )
-                    )
-            except sqlite3.OperationalError:
-                logger.info("readings table not found in %s", db_path.name)
-            finally:
-                conn.close()
-        return rows
+        # Route through ArchiveReader: once cold rotation (F17) deletes an aged
+        # daily SQLite file, its readings live only in Parquet, so a direct hot
+        # scan would silently lose them when regenerating an old report.
+        # query_rows unions hot SQLite + cold Parquet and already decodes the
+        # NaN-доктрина sentinel (do NOT decode again here). archive_dir default
+        # matches the CSV/XLSX exporters and cold_rotation (data_dir/"archive").
+        # Semantics mirror those exporters: start inclusive, end exclusive (the
+        # old direct scan was end-inclusive; no real report lands a reading on
+        # the exact end microsecond), all channels, sorted by timestamp.
+        rows = ArchiveReader(self._data_dir, self._data_dir / "archive").query_rows(
+            start_time, end_time, None
+        )
+        return [
+            HistoricalReading(
+                timestamp=_parse_timestamp(raw_ts),
+                instrument_id=str(instrument_id or ""),
+                channel=str(channel or ""),
+                value=value,
+                unit=str(unit or ""),
+                status=str(status or ""),
+            )
+            for raw_ts, instrument_id, channel, value, unit, status in rows
+        ]
 
     def _load_operator_log(
         self,
