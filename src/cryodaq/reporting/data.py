@@ -3,9 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -137,17 +136,6 @@ class ReportDataExtractor:
         fallback = artifact_root / "archive" / "tables" / f"{table_id}.csv"
         return fallback if fallback.exists() else None
 
-    def _db_paths(self, start_time: datetime, end_time: datetime) -> list[Path]:
-        paths: list[Path] = []
-        day = start_time.date()
-        end_day = end_time.date()
-        while day <= end_day:
-            path = self._data_dir / f"data_{day.isoformat()}.db"
-            if path.exists():
-                paths.append(path)
-            day = day + timedelta(days=1)
-        return paths
-
     def _load_readings(self, start_time: datetime, end_time: datetime) -> list[HistoricalReading]:
         # Route through ArchiveReader: once cold rotation (F17) deletes an aged
         # daily SQLite file, its readings live only in Parquet, so a direct hot
@@ -179,35 +167,30 @@ class ReportDataExtractor:
         end_time: datetime,
         experiment_id: str | None,
     ) -> list[OperatorLogRecord]:
+        # Route through ArchiveReader so a report over a >age_days-old experiment
+        # still shows its operator journal: cold rotation (F17/CR-3) archives
+        # operator_log to a companion Parquet and deletes the daily SQLite, so a
+        # direct hot scan would go blind. query_operator_log unions hot + cold and
+        # applies the inclusive time range; the experiment_id filter and tags
+        # decode stay here so hot and cold rows behave identically.
+        reader = ArchiveReader(self._data_dir, self._data_dir / "archive")
         rows: list[OperatorLogRecord] = []
-        for db_path in self._db_paths(start_time, end_time):
-            conn = sqlite3.connect(str(db_path), timeout=10)
-            conn.row_factory = sqlite3.Row
-            try:
-                query = (
-                    "SELECT timestamp, experiment_id, author, source, message, tags "
-                    "FROM operator_log WHERE timestamp >= ? AND timestamp <= ?"
+        for raw_ts, exp_id, author, source, message, tags in reader.query_operator_log(
+            start_time, end_time
+        ):
+            # Mirrors the old SQL `experiment_id = ? OR experiment_id IS NULL`.
+            if experiment_id and not (exp_id == experiment_id or exp_id is None):
+                continue
+            rows.append(
+                OperatorLogRecord(
+                    timestamp=_parse_timestamp(raw_ts),
+                    experiment_id=exp_id,
+                    author=str(author or ""),
+                    source=str(source or ""),
+                    message=str(message or ""),
+                    tags=tuple(json.loads(tags or "[]")),
                 )
-                params: list[Any] = [start_time.timestamp(), end_time.timestamp()]
-                if experiment_id:
-                    query += " AND (experiment_id = ? OR experiment_id IS NULL)"
-                    params.append(experiment_id)
-                query += " ORDER BY timestamp"
-                for row in conn.execute(query, params).fetchall():
-                    rows.append(
-                        OperatorLogRecord(
-                            timestamp=_parse_timestamp(row["timestamp"]),
-                            experiment_id=row["experiment_id"],
-                            author=str(row["author"] or ""),
-                            source=str(row["source"] or ""),
-                            message=str(row["message"] or ""),
-                            tags=tuple(json.loads(row["tags"] or "[]")),
-                        )
-                    )
-            except sqlite3.OperationalError:
-                logger.info("operator_log table not found in %s", db_path.name)
-            finally:
-                conn.close()
+            )
         return rows
 
     @staticmethod

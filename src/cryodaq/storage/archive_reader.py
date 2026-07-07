@@ -40,6 +40,11 @@ def _day_from_db_name(name: str) -> str | None:
 # decoded (NaN-доктрина); status is the raw discriminator string.
 FullRow = tuple[object, str, str, float, str, str]
 
+# Raw operator_log row: (timestamp, experiment_id, author, source, message, tags).
+# timestamp is a raw epoch float, tags a raw JSON string; the caller applies the
+# experiment_id filter and decodes tags (CR-3 cold-read boundary).
+OperatorLogRow = tuple[object, str | None, str, str, str, str]
+
 
 class ArchiveReader:
     """Read channel data spanning SQLite (recent) + Parquet (cold archive).
@@ -174,9 +179,166 @@ class ArchiveReader:
         out.sort(key=lambda r: _ts_sort_key(r[0]))
         return out
 
+    def query_operator_log(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> list[OperatorLogRow]:
+        """operator_log rows across hot SQLite + cold Parquet (CR-3 audit trail).
+
+        Cold rotation (F17) archives the per-day ``operator_log`` table to a
+        companion Parquet before deleting the daily SQLite file. Nothing read it
+        back until now — an old report would show a blank operator journal. This
+        unions hot ``operator_log`` with those archived Parquets.
+
+        Returns raw ``(timestamp, experiment_id, author, source, message, tags)``
+        tuples sorted by timestamp: ``timestamp`` is the lossless raw epoch float
+        (both sources store it that way), ``tags`` is the raw JSON string. The
+        caller applies experiment_id filtering / tags decoding so hot and cold
+        rows behave identically. Time range is inclusive on both ends.
+        """
+        from_epoch = from_day = None
+        to_epoch = to_day = None
+        if start is not None:
+            s = start.astimezone(UTC) if start.tzinfo else start.replace(tzinfo=UTC)
+            from_epoch, from_day = s.timestamp(), s.date()
+        if end is not None:
+            e = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
+            to_epoch, to_day = e.timestamp(), e.date()
+
+        index = self._load_index()
+        # day → ("parquet", operator_log_rel) | ("sqlite", db_path). A rotated
+        # day's SQLite is gone, so its operator_log lives only in the companion
+        # Parquet — and only if that day carried operator_log rows at all
+        # (entries without operator_log_path simply had none).
+        sources: dict[str, tuple[str, str]] = {}
+        rotated: set[str] = set()
+        for entry in index.get("files", []):
+            day = _day_from_db_name(entry["original_name"])
+            if day is None:
+                continue
+            rotated.add(day)
+            ol_rel = entry.get("operator_log_path")
+            if ol_rel:
+                sources[day] = ("parquet", ol_rel)
+        if self._data_dir.exists():
+            for db_path in self._data_dir.glob("data_????-??-??.db"):
+                day = _day_from_db_name(db_path.name)
+                if day is None or day in rotated:
+                    continue
+                sources[day] = ("sqlite", str(db_path))
+
+        out: list[OperatorLogRow] = []
+        for day_iso in sorted(sources):
+            day = date.fromisoformat(day_iso)
+            if from_day is not None and day < from_day:
+                continue
+            if to_day is not None and day > to_day:
+                continue
+            kind, ref = sources[day_iso]
+            if kind == "parquet":
+                self._read_parquet_operator_log(ref, from_epoch, to_epoch, out)
+            else:
+                self._read_sqlite_operator_log(Path(ref), from_epoch, to_epoch, out)
+
+        out.sort(key=lambda r: _ts_sort_key(r[0]))
+        return out
+
     # ------------------------------------------------------------------
     # Source readers
     # ------------------------------------------------------------------
+
+    def _read_sqlite_operator_log(
+        self,
+        db_path: Path,
+        from_epoch: float | None,
+        to_epoch: float | None,
+        out: list[OperatorLogRow],
+    ) -> None:
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='operator_log'"
+                ).fetchone()
+                if exists is None:
+                    return
+                query = (
+                    "SELECT timestamp, experiment_id, author, source, message, tags "
+                    "FROM operator_log"
+                )
+                cond: list[str] = []
+                params: list[object] = []
+                if from_epoch is not None:
+                    cond.append("timestamp >= ?")
+                    params.append(from_epoch)
+                if to_epoch is not None:
+                    cond.append("timestamp <= ?")  # inclusive: mirrors reporting's old SQL
+                    params.append(to_epoch)
+                if cond:
+                    query += " WHERE " + " AND ".join(cond)
+                query += " ORDER BY timestamp"
+                for row in conn.execute(query, params):
+                    out.append(
+                        (
+                            row["timestamp"],
+                            row["experiment_id"],
+                            str(row["author"] or ""),
+                            str(row["source"] or ""),
+                            str(row["message"] or ""),
+                            str(row["tags"] or "[]"),
+                        )
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("Failed to read operator_log from SQLite %s — partial result", db_path.name)
+
+    def _read_parquet_operator_log(
+        self,
+        archive_rel: str,
+        from_epoch: float | None,
+        to_epoch: float | None,
+        out: list[OperatorLogRow],
+    ) -> None:
+        parquet_path = self._archive_dir / archive_rel
+        if not parquet_path.exists():
+            logger.warning("Archived operator_log Parquet missing: %s — skipping", archive_rel)
+            return
+        try:
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(
+                str(parquet_path),
+                columns=["timestamp", "experiment_id", "author", "source", "message", "tags"],
+            )
+            # CR-3 schema keeps timestamp as a raw epoch float (lossless audit).
+            ts_list = table.column("timestamp").to_pylist()
+            exp_list = table.column("experiment_id").to_pylist()
+            author_list = table.column("author").to_pylist()
+            source_list = table.column("source").to_pylist()
+            message_list = table.column("message").to_pylist()
+            tags_list = table.column("tags").to_pylist()
+            for ts, exp, author, source, message, tags in zip(
+                ts_list, exp_list, author_list, source_list, message_list, tags_list
+            ):
+                if from_epoch is not None and ts < from_epoch:
+                    continue
+                if to_epoch is not None and ts > to_epoch:  # inclusive both ends
+                    continue
+                out.append(
+                    (
+                        ts,
+                        exp,
+                        str(author or ""),
+                        str(source or ""),
+                        str(message or ""),
+                        str(tags if tags is not None else "[]"),
+                    )
+                )
+        except Exception:
+            logger.exception("Failed to read operator_log Parquet %s — partial result", archive_rel)
 
     def _read_sqlite_rows(
         self,

@@ -14,8 +14,11 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
+from cryodaq.drivers.base import ChannelStatus, Reading  # noqa: E402
 from cryodaq.storage.archive_reader import ArchiveReader  # noqa: E402
+from cryodaq.storage.cold_rotation import ColdRotationService  # noqa: E402
 from cryodaq.storage.sentinel import SENTINEL  # noqa: E402
+from cryodaq.storage.sqlite_writer import SQLiteWriter  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -424,6 +427,143 @@ def test_query_sqlite_masks_nonfinite(tmp_path: Path) -> None:
     assert 77.0 in vals, "usable reading must survive"
     assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
     assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"
+
+
+def test_query_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
+    """operator_log rows survive cold rotation and reach query_operator_log.
+
+    CR-3 preserves the operator_log audit trail as a companion Parquet when a
+    daily SQLite file is rotated and deleted. This pins that query_operator_log
+    reads it back — otherwise the archived audit trail is write-only.
+    """
+    import asyncio
+    import json
+
+    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+
+    async def _seed_and_rotate() -> ColdRotationService:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_batch(
+            [
+                Reading(
+                    timestamp=day,
+                    instrument_id="ls218s",
+                    channel="T_STAGE",
+                    value=4.3,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+        writer._write_operator_log_entry(
+            timestamp=day,
+            experiment_id="exp-1",
+            author="operator",
+            source="gui",
+            message="cooldown start",
+            tags=("cooldown", "note"),
+        )
+        await writer.stop()
+        service = ColdRotationService(
+            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
+        )
+        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+        assert results, "old day must have rotated to Parquet"
+        return service
+
+    asyncio.run(_seed_and_rotate())
+    assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
+
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
+    rows = reader.query_operator_log(
+        day.replace(hour=0, minute=0), day.replace(hour=23, minute=59)
+    )
+    assert len(rows) == 1, "rotated cold operator_log entry must be readable"
+    ts, exp_id, author, source, message, tags = rows[0]
+    assert exp_id == "exp-1"
+    assert author == "operator"
+    assert source == "gui"
+    assert message == "cooldown start"
+    assert json.loads(tags) == ["cooldown", "note"]
+
+
+def test_query_operator_log_unions_hot_and_cold(tmp_path: Path) -> None:
+    """A hot day and a rotated cold day both surface, time-ordered."""
+    import asyncio
+
+    cold_day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+    hot_day = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
+
+    async def _seed() -> None:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_operator_log_entry(
+            timestamp=cold_day,
+            experiment_id=None,
+            author="op",
+            source="gui",
+            message="cold entry",
+            tags=(),
+        )
+        writer._write_batch(
+            [
+                Reading(
+                    timestamp=cold_day,
+                    instrument_id="ls",
+                    channel="T",
+                    value=1.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+        writer._write_operator_log_entry(
+            timestamp=hot_day,
+            experiment_id="exp-2",
+            author="op",
+            source="gui",
+            message="hot entry",
+            tags=(),
+        )
+        await writer.stop()
+        service = ColdRotationService(
+            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
+        )
+        # cold_day is >30d before "now"; hot_day is within 30d → stays hot.
+        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+        assert results
+
+    asyncio.run(_seed())
+    assert not (tmp_path / "data_2026-04-14.db").exists()
+    assert (tmp_path / "data_2026-05-30.db").exists()
+
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
+    rows = reader.query_operator_log(cold_day.replace(hour=0), hot_day.replace(hour=23))
+    messages = [r[4] for r in rows]
+    assert messages == ["cold entry", "hot entry"], f"union/order wrong: {messages}"
+
+
+def test_query_operator_log_no_archive_dir(tmp_path: Path) -> None:
+    """No archive dir → hot-only, no crash (behaviour parity pin)."""
+    import asyncio
+
+    day = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
+
+    async def _seed() -> None:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_operator_log_entry(
+            timestamp=day,
+            experiment_id="exp-3",
+            author="op",
+            source="gui",
+            message="hot only",
+            tags=(),
+        )
+        await writer.stop()
+
+    asyncio.run(_seed())
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
+    rows = reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
+    assert [r[4] for r in rows] == ["hot only"]
 
 
 def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
