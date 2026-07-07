@@ -1224,6 +1224,42 @@ class SafetyManager:
             value=value,
         )
 
+    async def on_interlock_dead_channel(
+        self,
+        interlock_name: str,
+        channel: str,
+        *,
+        value: float = float("nan"),
+    ) -> None:
+        """Escalation for a PERSISTENTLY non-usable interlock channel (P2-5).
+
+        Called by InterlockEngine once a channel it protects has been
+        non-usable (NaN / error-status) for ``nonusable_escalation`` long
+        enough. SafetyManager is the sole authority for the RUNNING gate:
+
+        - state == RUNNING (actively sourcing): latch FAULT_LATCHED +
+          emergency_off. Т1–Т10 are protected ONLY by interlocks
+          (critical_channels covers just Т11/Т12), so a heated, sourcing zone
+          with a persistently dead sensor is fail-open without this.
+        - outside RUNNING: log only, never fault — a stale/dead sensor while
+          idle must not block readiness recovery paths (preconditions already
+          gate readiness on channel health).
+        """
+        if self._state != SafetyState.RUNNING:
+            logger.critical(
+                "Интерлок-канал %s устойчиво непригоден, но состояние %s "
+                "(источник неактивен) — fault не латчится (P2-5).",
+                channel,
+                self._state.value,
+            )
+            return
+        await self._fault(
+            f"Интерлок-канал {channel} ('{interlock_name}'): показания устойчиво "
+            f"непригодны при активном источнике",
+            channel=channel,
+            value=value,
+        )
+
     async def on_persistence_failure(self, reason: str) -> None:
         """Called by SQLiteWriter when persistent storage fails (disk full etc).
 

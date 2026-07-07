@@ -2075,10 +2075,44 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc_info=True,
                 )
 
+    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> None:
+        # P2-5: a persistently non-usable reading on an interlock-protected
+        # channel. SafetyManager gates the fault on RUNNING (sole authority);
+        # this handler only forwards. Failures escalate to a guaranteed fault.
+        try:
+            await safety_manager.on_interlock_dead_channel(
+                condition.name,
+                reading.channel,
+                value=float(reading.value) if reading.value is not None else float("nan"),
+            )
+        except Exception as exc:
+            logger.critical(
+                "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
+                "escalating to guaranteed fault.",
+                condition.name,
+                reading.channel,
+                exc,
+                exc_info=True,
+            )
+            try:
+                await safety_manager.latch_fault(
+                    reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
+                    source="interlock",
+                    channel=reading.channel,
+                )
+            except Exception as exc2:
+                logger.critical(
+                    "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
+                    condition.name,
+                    exc2,
+                    exc_info=True,
+                )
+
     interlock_engine = InterlockEngine(
         broker,
         actions=interlock_actions,
         trip_handler=_interlock_trip_handler,
+        dead_channel_handler=_interlock_dead_channel_handler,
     )
     interlock_engine.load_config(interlocks_cfg)
 
@@ -2130,6 +2164,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
     )
     alarm_v2_state_mgr = AlarmStateManager()
+    # P2-5: interlock non-usable readings emit alarm-v2 events via the same
+    # AlarmStateManager the sensor-diagnostics engine uses (built after the
+    # InterlockEngine, so wired here by setter).
+    interlock_engine.set_alarm_publisher(alarm_v2_state_mgr)
     if _alarm_v2_configs:
         logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
     else:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -42,6 +43,12 @@ _MAX_EVENTS = 1000
 
 # Имя подписки InterlockEngine в DataBroker
 _SUBSCRIPTION_NAME = "interlock_engine"
+
+# NaN-доктрина P2-5: дебаунс непригодных показаний (NaN / error-status) на
+# interlock-каналах. Пороги по умолчанию — переопределяются в interlocks.yaml
+# (секция nonusable_escalation), читаются fail-closed (строгие типы).
+_DEFAULT_NONUSABLE_MIN_DURATION_S = 10.0
+_DEFAULT_NONUSABLE_MIN_SAMPLES = 5
 
 
 class InterlockState(Enum):
@@ -140,6 +147,23 @@ class _InterlockRecord:
     trip_count: int = 0
 
 
+@dataclass
+class _NonUsableWindow:
+    """Окно дебаунса непригодных показаний одного interlock-канала (P2-5).
+
+    ``first_ts`` — время измерения ПЕРВОГО непригодного показания в текущей
+    серии подряд (используется measurement-time, не wall-clock — как F23:
+    корректно под backlog и детерминированно в тестах). ``count`` — число
+    непригодных показаний подряд (сбрасывается годным показанием).
+    ``escalated`` — эскалация в SafetyManager уже выполнена для этого окна
+    (не дублируем на каждом последующем непригодном показании).
+    """
+
+    first_ts: datetime
+    count: int = 0
+    escalated: bool = False
+
+
 class InterlockEngine:
     """Движок блокировок: мониторинг показаний и защитные действия.
 
@@ -170,6 +194,8 @@ class InterlockEngine:
         actions: dict[str, Callable[[], Any]],
         *,
         trip_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
+        alarm_publisher: Any | None = None,
+        dead_channel_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
     ) -> None:
         """Initialize.
 
@@ -186,14 +212,42 @@ class InterlockEngine:
             Codex I.1) so the action name, condition name, channel, and value
             survive the trip path instead of being collapsed by zero-arg
             callbacks.
+        alarm_publisher:
+            Optional object exposing ``publish_diagnostic_alarm(channel_id,
+            severity, age_seconds)`` (AlarmStateManager). Used by P2-5 to emit
+            an alarm-v2 event when a non-usable reading lands on an
+            interlock-protected channel. May be set later via
+            :meth:`set_alarm_publisher`.
+        dead_channel_handler:
+            Optional async/sync callback ``(InterlockCondition, Reading)`` fired
+            by P2-5 when a channel is PERSISTENTLY non-usable (see
+            ``nonusable_escalation`` config). SafetyManager wiring routes this to
+            ``on_interlock_dead_channel`` which gates the fault on RUNNING —
+            SafetyManager remains the sole authority.
         """
         self._broker = broker
         self._actions = actions
         self._trip_handler = trip_handler
+        self._alarm_publisher = alarm_publisher
+        self._dead_channel_handler = dead_channel_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[Reading] | None = None
         self._task: asyncio.Task[None] | None = None
+
+        # P2-5 debounce state: per-channel non-usable window + thresholds.
+        self._nonusable_windows: dict[str, _NonUsableWindow] = {}
+        self._nonusable_min_duration_s = _DEFAULT_NONUSABLE_MIN_DURATION_S
+        self._nonusable_min_samples = _DEFAULT_NONUSABLE_MIN_SAMPLES
+
+    def set_alarm_publisher(self, alarm_publisher: Any) -> None:
+        """Register the alarm-v2 publisher after construction (engine wiring).
+
+        The AlarmStateManager is built after InterlockEngine in engine startup,
+        so this setter lets the engine wire the P2-5 alarm-v2 surface without
+        reordering construction.
+        """
+        self._alarm_publisher = alarm_publisher
 
     # ------------------------------------------------------------------
     # Загрузка конфигурации
@@ -271,11 +325,44 @@ class InterlockEngine:
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
 
+        self._load_nonusable_escalation(raw, config_path)
+
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",
             config_path,
             loaded,
         )
+
+    def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
+        """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.
+
+        Absent → keep defaults (10 s / 5 samples). Present but malformed →
+        raise ``InterlockConfigError`` (strict types, positive finite values).
+        """
+        block = raw.get("nonusable_escalation")
+        if block is None:
+            return
+        if not isinstance(block, dict):
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: 'nonusable_escalation' must be a "
+                f"mapping, got {type(block).__name__}"
+            )
+        try:
+            min_duration_s = float(block.get("min_duration_s", _DEFAULT_NONUSABLE_MIN_DURATION_S))
+            min_samples = int(block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES))
+        except (ValueError, TypeError) as exc:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not math.isfinite(min_duration_s) or min_duration_s <= 0 or min_samples <= 0:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: nonusable_escalation requires "
+                f"positive finite min_duration_s and positive min_samples "
+                f"(got min_duration_s={min_duration_s}, min_samples={min_samples})"
+            )
+        self._nonusable_min_duration_s = min_duration_s
+        self._nonusable_min_samples = min_samples
 
     def add_condition(self, condition: InterlockCondition) -> None:
         """Добавить блокировку программно.
@@ -375,16 +462,30 @@ class InterlockEngine:
 
     async def _process_reading(self, reading: Reading) -> None:
         """Проверить показание против всех подходящих ARMED-блокировок."""
-        for record in self._interlocks.values():
+        # ARMED-блокировки, чей шаблон совпал с каналом показания.
+        matching = [
+            record
+            for record in self._interlocks.values()
+            if record.state == InterlockState.ARMED
+            and record.condition.matches_channel(reading.channel)
+        ]
+
+        # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
+        # interlock-защищённом канале. Пороговое сравнение с NaN всегда даёт
+        # False (IEEE-754), поэтому без этой ветки блокировка молча слепнет на
+        # мёртвом датчике (fail-open на нагреваемой зоне — Т1–Т10 защищены
+        # ТОЛЬКО интерлоками). Годное показание сбрасывает дебаунс; непригодное
+        # обрабатывается и НЕ идёт в пороговое сравнение (иначе ±inf ложно
+        # сработало бы как реальное превышение).
+        if matching:
+            if reading.is_usable():
+                self._nonusable_windows.pop(reading.channel, None)
+            else:
+                await self._handle_nonusable(reading, matching[0].condition)
+                return
+
+        for record in matching:
             condition = record.condition
-
-            # Проверяем только ARMED-блокировки
-            if record.state != InterlockState.ARMED:
-                continue
-
-            # Проверяем совпадение канала с шаблоном
-            if not condition.matches_channel(reading.channel):
-                continue
 
             # Проверяем условие срабатывания
             if condition.is_triggered(reading.value):
@@ -402,6 +503,76 @@ class InterlockEngine:
                     < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
+
+    async def _handle_nonusable(self, reading: Reading, condition: InterlockCondition) -> None:
+        """Обработать непригодное показание на interlock-защищённом канале (P2-5).
+
+        Транзиент (одиночный blip): громкий CRITICAL-лог + alarm-v2, БЕЗ trip —
+        оператор не должен терять эксперимент из-за мгновенного сбоя датчика.
+        Персистентность (≥ min_samples подряд И ≥ min_duration_s по времени
+        измерения) → эскалация в SafetyManager (``dead_channel_handler``),
+        который сам решает, латчить ли fault (только в состоянии RUNNING).
+        """
+        window = self._nonusable_windows.get(reading.channel)
+        if window is None:
+            window = _NonUsableWindow(first_ts=reading.timestamp)
+            self._nonusable_windows[reading.channel] = window
+        window.count += 1
+        span_s = (reading.timestamp - window.first_ts).total_seconds()
+
+        # Транзиент: громкий лог + alarm-v2 (защитное действие НЕ выполняется).
+        logger.critical(
+            "!!! НЕПРИГОДНОЕ ПОКАЗАНИЕ НА INTERLOCK-КАНАЛЕ !!! "
+            "Канал: '%s' | Статус: %s | Значение: %.4g | Блокировка: '%s' | "
+            "Непригодных подряд: %d | Длительность серии: %.1f с. "
+            "Транзиент — защитное действие НЕ выполнено.",
+            reading.channel,
+            reading.status.value,
+            reading.value,
+            condition.name,
+            window.count,
+            span_s,
+        )
+        if self._alarm_publisher is not None:
+            try:
+                self._alarm_publisher.publish_diagnostic_alarm(
+                    reading.channel, "critical", span_s
+                )
+            except Exception as exc:
+                logger.error(
+                    "Interlock: alarm-v2 publish failed for '%s': %s",
+                    reading.channel,
+                    exc,
+                )
+
+        # Персистентность → эскалация (ровно один раз на окно).
+        if (
+            not window.escalated
+            and window.count >= self._nonusable_min_samples
+            and span_s >= self._nonusable_min_duration_s
+        ):
+            window.escalated = True
+            logger.critical(
+                "Interlock-канал '%s' непригоден ≥%.0f с и ≥%d показаний подряд — "
+                "эскалация в SafetyManager (блокировка '%s').",
+                reading.channel,
+                self._nonusable_min_duration_s,
+                self._nonusable_min_samples,
+                condition.name,
+            )
+            if self._dead_channel_handler is not None:
+                try:
+                    result = self._dead_channel_handler(condition, reading)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:
+                    logger.critical(
+                        "dead_channel_handler failed for interlock '%s' channel '%s': %s",
+                        condition.name,
+                        reading.channel,
+                        exc,
+                        exc_info=True,
+                    )
 
     async def _trip(
         self,
