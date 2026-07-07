@@ -122,3 +122,20 @@ docs/handoffs-archive/
 docs/legacy-inventory/
 # Large binaries (e.g. Yandex award decks) — preserved on disk, not tracked.
 *.pptx
+# Point-in-time research/audit/phase artifacts (kept on disk, out of git).
+docs/audits/
+docs/phase-ui-1/
+docs/changelog/
+docs/superpowers/
+docs/REPO_AUDIT_REPORT.md
+# Session/agent working artifacts.
+scratchpad/
+.agents/
+.claude/skills/
+AGENTS.md
+skills-lock.json
+release_notes.py
+uv.lock
+scripts/dev/
+# Large equipment-manual binaries (local RAG corpus data).
+data/knowledge/equipment_manuals/*.pdf

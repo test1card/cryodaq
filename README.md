@@ -9,14 +9,14 @@ auto-generated DOCX reports, role-based Telegram alerts, sensor anomaly detectio
 with an alarm pipeline, plugin analytics, a local AI assistant with a knowledge
 base (RAG) and operator-query answering, historical-data replay mode,
 interferometric length metrology (Etalon MultiLine), and a regression test suite
-(3248 test functions across 303 files).
+(3461 test functions across 355 files).
 
 Built for ASC LPI (the Millimetron project).
 
 ## Status
 
-- **Latest release:** v0.60.0 (2026-07-07)
-- **Tests:** 3248 test functions across 303 files
+- **Latest release:** v0.63.0 (2026-07-08)
+- **Tests:** 3461 test functions across 355 files
 - **Production status:** stable; the LabVIEW VI is fully replaced
 
 ## Architecture
@@ -51,7 +51,7 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
 
 ## Implemented workflows
 
-Fully functional in v0.60.0:
+Fully functional in v0.63.0:
 
 - **Knowledge base (RAG):** local semantic search over the experiment archive,
   vault notes, the operator log, and the `data/knowledge/` corpus
@@ -96,13 +96,15 @@ Fully functional in v0.60.0:
 - **Plugin architecture:** ABC isolation; a failing callback marks the plugin
   degraded without crashing the engine.
 - **Housekeeping:** adaptive throttle + retention + compression.
-- **Cold-storage rotation (F17, not yet wired):** `ColdRotationService` can
-  rotate daily SQLite files older than 30 days into Parquet/Zstd, and
-  `ArchiveReader` can read both hot and cold sources by UTC day. Both modules
-  ship and are tested, but neither is wired into the engine runtime yet — no
-  automatic rotation runs and no read path uses `ArchiveReader` (see Known
-  Limitations). Old daily SQLite files currently accumulate; disk usage is
-  covered by `disk_monitor`.
+- **Cold-storage rotation (F17):** enabled by default
+  (`cold_rotation.enabled: true`). `ColdRotationService` is wired into the
+  engine and runs daily at `schedule_time` (03:00): daily SQLite files older
+  than 30 days rotate into Parquet/Zstd. Every reader goes through
+  `ArchiveReader` (hot SQLite ∪ cold Parquet) — GUI history, live operator
+  journal, reports, CSV/XLSX/HDF5/Parquet exports, replay, and calibration all
+  see rotated days. The only kill-switch is `cold_rotation.enabled`; rotation
+  is idempotent and the stranded-DB sweep deletes only a byte-identical
+  original (`source_md5`).
 - **Leak-rate estimation (F13):** `LeakRateEstimator` — a rolling window, OLS
   regression without numpy, history in `data/leak_rate_history.json`. Commands:
   `leak_rate_start` / `leak_rate_stop` (ZMQ). Requires `chamber.volume_l` in
@@ -198,7 +200,7 @@ cryodaq-rag-search               # semantic search over the knowledge base
 
 ## Configuration
 
-Active configuration files as of v0.60.0:
+Active configuration files as of v0.63.0:
 
 - `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels,
   `chamber.volume_l` for the F13 leak rate
@@ -245,10 +247,14 @@ Guaranteed artifact: `report_editable.docx`. Optional: `report_raw.pdf`
 
 ## Keithley TSP
 
-`tsp/p_const.lua` — a draft TSP supervisor for P=const feedback.
-**Not loaded onto the instrument.** P=const runs host-side in
-`keithley_2604b.py`. The TSP supervisor is planned for Phase 3 (requires
-on-hardware verification).
+`tsp/cryodaq_wdog.lua` — the TSP dead-man watchdog, a firmware backstop under
+the host SafetyManager. P=const still runs host-side in `keithley_2604b.py`.
+The watchdog is operator-selectable via `config/instruments.yaml` →
+`keithley.watchdog.mode`: `off` (default — script not loaded, host is the sole
+authority), `best_effort` (arm on connect, fall back to host-only on arm
+failure), `required` (fail-closed — a failed arm makes `connect()` raise so
+`SAFE_OFF` holds). The current mechanism covers stall-recovery only; the
+autonomous firmware run-mechanism (`trigger.timer`) remains bench-unverified.
 
 ## Project structure
 
@@ -271,8 +277,8 @@ src/cryodaq/
   tools/         # CLI utilities (cooldown_cli)
   utils/         # shared helpers
   web/           # FastAPI monitoring
-tsp/             # Keithley TSP scripts (draft, not loaded)
-tests/           # 3248 test functions across 303 files
+tsp/             # Keithley TSP watchdog (cryodaq_wdog.lua; loaded per watchdog.mode)
+tests/           # 3461 test functions across 355 files
 config/          # YAML configuration
 ```
 
@@ -359,26 +365,26 @@ trail for post-hoc review.
 
 ## Known limitations
 
-As of v0.60.0:
+As of v0.63.0. The lab-only checks below are collected as a turnkey protocol in
+`docs/lab_verification_checklist.md`.
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
   range `[3.7.0, 3.51.3)` (F25). Backport-safe: 3.44.6, 3.50.7 (pass without the
   variable). Workaround: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (prints a warning). On
-  the lab Ubuntu PC, check `sqlite3 --version`.
+  the lab Ubuntu PC, check `sqlite3 --version` (see the checklist).
 - **Lab Ubuntu PC verification:** the H5 ZMQ fix from v0.39.0 was verified only on
-  macOS. Physical access to the lab PC is pending.
+  macOS. Physical access to the lab PC is pending (see the checklist).
 - **PDF reports:** best-effort. The guaranteed artifact is DOCX.
 - **Runtime calibration policy:** global on/off + per-channel KRDG/SRDG+curve. A
   conservative fallback to KRDG when a curve / SRDG is missing or a computation
   fails. Real LakeShore behavior requires lab verification.
-- **Deprecation warnings:** `asyncio.WindowsSelectorEventLoopPolicy` on newer
-  Python versions.
 - **Leak rate (F13):** `chamber.volume_l` must be set in
   `config/instruments.local.yaml` before the first measurement; `finalize()`
   raises `ValueError` when `volume_l == 0.0`.
-- **ArchiveReader replay (F28):** `ArchiveReader` exists but is not wired into the
-  engine replay path. Replay queries for data older than 30 days do not yet cover
-  the Parquet archive. Planned in F28.
+- **TSP watchdog firmware run-mechanism:** the autonomous firmware dead-man
+  (`trigger.timer`) is bench-unverified. The current watchdog covers
+  stall-recovery only; `required` mode gates on host-observable arm success, not
+  proven firmware-timer behaviour.
 
 ## License
 
