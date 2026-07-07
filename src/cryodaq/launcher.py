@@ -24,10 +24,6 @@ import webbrowser
 from pathlib import Path
 from typing import IO
 
-# Windows: pyzmq требует SelectorEventLoop
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -324,7 +320,14 @@ class LauncherWindow(QMainWindow):
         self.setMinimumSize(1360, 860)
 
         # --- Asyncio ---
-        self._loop = asyncio.new_event_loop()
+        # pyzmq requires a SelectorEventLoop on Windows (not the default
+        # Proactor). Build it explicitly instead of the deprecated
+        # WindowsSelectorEventLoopPolicy (policy system deprecated in Python
+        # 3.14+). On other platforms the selector loop is already the default.
+        if sys.platform == "win32":
+            self._loop = asyncio.SelectorEventLoop()
+        else:
+            self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
         self._async_timer = QTimer(self)

@@ -744,8 +744,6 @@ class SQLiteWriter:
 
         result: dict[str, list[tuple[float, float]]] = {}
         db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
-        if not db_files:
-            return result
 
         # Filter DB files by date range if possible
         if from_ts is not None:
@@ -817,6 +815,49 @@ class SQLiteWriter:
                     conn.close()
             except Exception:
                 logger.warning("Ошибка чтения истории из %s", db_path)
+
+        # Cold path: a window reaching before the oldest hot day would silently
+        # miss days already rotated to Parquet. Union those cold rows in from the
+        # archive. ArchiveReader.query already decodes (NaN-доктрина) and returns
+        # the same {ch: [(ts, value)]} shape → no double-decode; the per-channel
+        # limit clamp below then applies to the union (newest-first), preserving
+        # the readings_history contract. Bound the cold read strictly before the
+        # oldest hot day so hot days are never read twice (rotation deletes a
+        # day's .db, so the archive holds only pre-oldest-hot days).
+        # ponytail: cold read is unbounded per request (query has no LIMIT) —
+        # bounded only by the date window; add a cold LIMIT only if a deep-history
+        # request is ever shown to strain memory.
+        archive_index = self._data_dir / "archive" / "index.json"
+        if from_ts is not None and archive_index.exists():
+            hot_days: list[date] = []
+            for db_path in db_files:
+                try:
+                    hot_days.append(date.fromisoformat(db_path.stem.removeprefix("data_")))
+                except ValueError:
+                    continue
+            oldest_hot = min(hot_days) if hot_days else None
+            from_day_req = datetime.fromtimestamp(from_ts, tz=UTC).date()
+            if oldest_hot is None or from_day_req < oldest_hot:
+                if oldest_hot is not None:
+                    boundary = datetime(
+                        oldest_hot.year, oldest_hot.month, oldest_hot.day, tzinfo=UTC
+                    ).timestamp()
+                    cold_to = boundary - 1e-6
+                    if to_ts is not None and to_ts < cold_to:
+                        cold_to = to_ts
+                else:
+                    cold_to = to_ts if to_ts is not None else datetime.now(UTC).timestamp()
+                if cold_to >= from_ts:
+                    # Local import breaks the archive_reader → sqlite_writer cycle.
+                    from cryodaq.storage.archive_reader import ArchiveReader
+
+                    cold = ArchiveReader(self._data_dir, archive_index.parent).query(
+                        channels,
+                        datetime.fromtimestamp(from_ts, tz=UTC),
+                        datetime.fromtimestamp(cold_to, tz=UTC),
+                    )
+                    for ch, pts in cold.items():
+                        result.setdefault(ch, []).extend(pts)
 
         # Sort ASC and truncate to limit_per_channel (keep latest). Rows arrive
         # newest-first and possibly interleaved across daily DB files.

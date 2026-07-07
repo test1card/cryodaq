@@ -21,10 +21,6 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
-
-# Windows: pyzmq требует SelectorEventLoop (не Proactor)
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from pathlib import Path
 from typing import Any
 
@@ -377,6 +373,24 @@ async def _handle_assistant_query_command(
     except Exception as exc:  # noqa: BLE001
         logger.error("assistant.query error: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
+
+
+def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
+    """Boot-time config check for leak-rate estimation.
+
+    With ``leak_rate.enabled: true`` but ``chamber.volume_l: 0.0``, finalize()
+    raises ValueError at experiment end (fail-closed — kept). Surface it at boot
+    so the operator fixes ``chamber.volume_l`` now, not hours later at finalize.
+    Returns the operator warning, or None when the config is fine.
+    """
+    leak_cfg = chamber_cfg.get("leak_rate", {}) or {}
+    if leak_cfg.get("enabled") and float(chamber_cfg.get("volume_l", 0.0) or 0.0) == 0.0:
+        return (
+            "config: leak_rate.enabled=true, но chamber.volume_l=0.0 — оценка "
+            "утечки завершится ошибкой при финализации эксперимента. Задайте "
+            "chamber.volume_l в config/instruments.local.yaml."
+        )
+    return None
 
 
 async def _handle_leak_rate_command(
@@ -2177,6 +2191,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         sample_window_s=float(_leak_cfg.get("default_sample_window_s", 300.0)),
         data_dir=_DATA_DIR,
     )
+    _leak_warn = _leak_rate_volume_warning(_chamber_cfg)
+    if _leak_warn:
+        logger.warning(_leak_warn)
 
     # --- Alarm Engine v2 ---
     _alarms_v3_cfg = _CONFIG_DIR / "alarms_v3.yaml"
@@ -3994,7 +4011,16 @@ def main() -> None:
         if mock:
             logger.info("Режим MOCK: реальные приборы не используются")
         try:
-            asyncio.run(_run_engine(mock=mock))
+            if sys.platform == "win32":
+                # pyzmq requires a SelectorEventLoop on Windows (the default
+                # Proactor loop lacks the socket support pyzmq needs). Force it
+                # via Runner(loop_factory=...) rather than the deprecated
+                # WindowsSelectorEventLoopPolicy (the policy system is deprecated
+                # in Python 3.14+ and warns on import).
+                with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                    runner.run(_run_engine(mock=mock))
+            else:
+                asyncio.run(_run_engine(mock=mock))
         except KeyboardInterrupt:
             logger.info("Прервано оператором (Ctrl+C)")
         except yaml.YAMLError as exc:
