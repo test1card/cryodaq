@@ -401,17 +401,8 @@ main window (`gui/main_window.py`) was also retired in II.13 — the
 Phase I.1.
 
 - `src/cryodaq/gui/tray_status.py` — system-tray status indicator
-- `src/cryodaq/gui/widgets/analytics_panel.py` — R_thermal + прогноз охлаждения
 - `src/cryodaq/gui/widgets/channel_editor.py` — редактор каналов (видимость, имена)
-- `src/cryodaq/gui/widgets/common.py` — shared helpers / mixins (retained — consumed by remaining widgets listed below)
-- `src/cryodaq/gui/widgets/connection_settings.py` — диалог настройки подключения приборов
-- `src/cryodaq/gui/widgets/experiment_dialogs.py` — диалоги старта/завершения эксперимента (legacy)
-- `src/cryodaq/gui/widgets/overview_panel.py` — двухколоночный: графики + карточки
-- `src/cryodaq/gui/widgets/preflight_dialog.py` — предполётная проверка перед экспериментом
-- `src/cryodaq/gui/widgets/pressure_panel.py` — панель давления (вакуумметр)
-- `src/cryodaq/gui/widgets/shift_handover.py` — смены (ShiftBar, ShiftStartDialog, ShiftEndDialog)
-- `src/cryodaq/gui/widgets/temp_panel.py` — панель отображения температурных каналов (24 канала)
-- `src/cryodaq/gui/widgets/vacuum_trend_panel.py` — прогноз вакуума
+- `src/cryodaq/gui/widgets/common.py` — shared helpers / mixins (retained — consumed by channel_editor and the shared/* widgets)
 
 **Storage**
 
@@ -465,8 +456,8 @@ Phase I.1.
 
 **TSP**
 
-- `tsp/p_const.lua` — draft TSP supervisor for Phase 3 hardware watchdog
-  upload (currently NOT loaded — keithley_2604b.py runs P=const host-side)
+- `tsp/cryodaq_wdog.lua` — Keithley TSP watchdog script; uploaded by
+  `drivers/instruments/keithley_2604b.py` via `get_tsp_dir()`
 
 ## Конфигурационные файлы
 
