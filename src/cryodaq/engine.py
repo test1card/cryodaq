@@ -83,6 +83,7 @@ from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.storage.cold_rotation import (
     build_cold_rotation_service,
+    normalize_schedule_time,
     seconds_until_next,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -2358,7 +2359,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         data_dir=_DATA_DIR,
         project_root=get_project_root(),
     )
-    cold_rotation_schedule = str(cold_cfg.get("schedule_time", "03:00"))
+    # Validate the schedule at build time: seconds_until_next() runs outside the
+    # scheduler's per-pass try, so a malformed HH:MM would raise once and kill
+    # rotation silently. normalize_schedule_time falls back to 03:00 + ERROR log.
+    cold_rotation_schedule = normalize_schedule_time(str(cold_cfg.get("schedule_time", "03:00")))
 
     async def _cold_rotation_scheduler() -> None:
         """Run rotation once per day at cold_rotation.schedule_time."""

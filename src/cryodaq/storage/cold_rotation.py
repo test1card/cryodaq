@@ -71,6 +71,25 @@ def seconds_until_next(schedule_time: str, now: datetime) -> float:
     return (target - now).total_seconds()
 
 
+def normalize_schedule_time(raw: str) -> str:
+    """Return *raw* if it is a valid ``HH:MM``, else fall back to ``"03:00"``.
+
+    The engine's scheduler evaluates ``seconds_until_next`` outside its per-pass
+    ``try``, so a malformed ``schedule_time`` would raise once and kill the
+    rotation task silently at 3am. Validate loudly here at build time and fall
+    back to a sane hour so rotation still runs — the operator sees the ERROR.
+    """
+    try:
+        seconds_until_next(raw, datetime.now(UTC))
+        return raw
+    except (ValueError, TypeError):
+        logger.error(
+            "ColdRotation: schedule_time %r некорректен (ожидается HH:MM) — откат на 03:00",
+            raw,
+        )
+        return "03:00"
+
+
 def build_cold_rotation_service(
     cold_cfg: dict,
     *,

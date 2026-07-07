@@ -147,19 +147,24 @@ class ArchiveReader:
             to_epoch, to_day = e.timestamp(), e.date()
 
         index = self._load_index()
-        # day → ("parquet", archive_rel) | ("sqlite", db_path). Archive wins:
-        # after rotation the SQLite file is deleted, so the Parquet is canonical.
-        sources: dict[str, tuple[str, str]] = {}
+        # day → [("parquet", archive_rel), ...] | [("sqlite", db_path)]. Normally
+        # a rotated day has only its Parquet (the hot .db was deleted). But if a
+        # hot daily DB reappears for an already-archived day (manual restore /
+        # backdated import), BOTH exist — union them so no on-disk data an
+        # operator can see is silently shadowed. Exact (ts, instrument, channel)
+        # duplicates are deduped below; genuinely new restored rows survive.
+        sources: dict[str, list[tuple[str, str]]] = {}
         for entry in index.get("files", []):
             day = _day_from_db_name(entry["original_name"])
             if day is not None:
-                sources[day] = ("parquet", entry["archive_path"])
+                sources.setdefault(day, []).append(("parquet", entry["archive_path"]))
         if self._data_dir.exists():
             for db_path in self._data_dir.glob("data_????-??-??.db"):
                 day = _day_from_db_name(db_path.name)
                 if day is not None:
-                    sources.setdefault(day, ("sqlite", str(db_path)))
+                    sources.setdefault(day, []).append(("sqlite", str(db_path)))
 
+        overlap = any(len(srcs) > 1 for srcs in sources.values())
         out: list[FullRow] = []
         for day_iso in sorted(sources):
             day = date.fromisoformat(day_iso)
@@ -170,11 +175,25 @@ class ArchiveReader:
                 continue
             if to_day is not None and day > to_day:
                 continue
-            kind, ref = sources[day_iso]
-            if kind == "parquet":
-                self._read_parquet_rows(ref, from_epoch, to_epoch, channel_set, instrument_set, out)
-            else:
-                self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, out)
+            # Parquet source(s) read first → archived wins on an exact-key clash.
+            for kind, ref in sources[day_iso]:
+                if kind == "parquet":
+                    self._read_parquet_rows(ref, from_epoch, to_epoch, channel_set, instrument_set, out)
+                else:
+                    self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, out)
+
+        if overlap:
+            # Only pay dedup cost when a day actually had >1 source; the common
+            # no-overlap path is untouched. Keep first occurrence per key.
+            seen: set[tuple[object, str, str]] = set()
+            deduped: list[FullRow] = []
+            for row in out:
+                key = (row[0], row[1], row[2])
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(row)
+            out = deduped
 
         out.sort(key=lambda r: _ts_sort_key(r[0]))
         return out
