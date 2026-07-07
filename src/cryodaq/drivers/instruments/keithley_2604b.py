@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
@@ -48,6 +49,25 @@ _IV_FIELDS = (
 _WDOG_SCRIPT: str | None = None
 
 
+class WatchdogMode(StrEnum):
+    """Operator-selected TSP watchdog behaviour (config: keithley.watchdog.mode).
+
+    - ``off``: no firmware watchdog; host SafetyManager is the sole authority.
+      Zero ``cryodaq_wdog`` writes — the command stream is byte-identical.
+    - ``best_effort``: arm on connect; on arm failure log CRITICAL and continue
+      host-only (fail-OPEN on the watchdog layer). == legacy ``enabled: true``.
+    - ``required``: fail-CLOSED — an arm failure makes connect() raise, so the
+      instrument stays unavailable and the SafetyManager holds SAFE_OFF. A
+      read-back latched trip is NOT a failure: it is logged CRITICAL and armed
+      over (outputs were already forced OFF; raising would only lock the
+      operator out).
+    """
+
+    OFF = "off"
+    BEST_EFFORT = "best_effort"
+    REQUIRED = "required"
+
+
 def _load_wdog_script() -> str:
     global _WDOG_SCRIPT
     if _WDOG_SCRIPT is None:
@@ -73,7 +93,8 @@ class Keithley2604B(InstrumentDriver):
         resource_str: str,
         *,
         mock: bool = False,
-        watchdog_enabled: bool = False,
+        watchdog_mode: str | WatchdogMode | None = None,
+        watchdog_enabled: bool | None = None,
         watchdog_timeout_s: float = 5.0,
     ) -> None:
         super().__init__(name, mock=mock)
@@ -81,7 +102,18 @@ class Keithley2604B(InstrumentDriver):
         self._transport = USBTMCTransport(mock=mock)
         self._instrument_id = ""
         # TSP dead-man watchdog plumbing (default OFF → byte-identical stream).
-        self._wdog_enabled = bool(watchdog_enabled)
+        # Explicit mode wins; else the deprecated ``watchdog_enabled`` alias
+        # maps True→best_effort / False→off; else default off. Unknown mode
+        # string raises ValueError (fail-closed config).
+        if watchdog_mode is not None:
+            self._wdog_mode = WatchdogMode(watchdog_mode)
+        elif watchdog_enabled is not None:
+            self._wdog_mode = (
+                WatchdogMode.BEST_EFFORT if watchdog_enabled else WatchdogMode.OFF
+            )
+        else:
+            self._wdog_mode = WatchdogMode.OFF
+        self._wdog_enabled = self._wdog_mode is not WatchdogMode.OFF
         self._wdog_timeout_s = float(watchdog_timeout_s)
         self._wdog_armed = False
         self._channels: dict[SmuChannel, ChannelRuntime] = {
@@ -133,7 +165,15 @@ class Keithley2604B(InstrumentDriver):
             await self._transport.close()
             raise
         self._connected = True
-        await self._wdog_arm()
+        try:
+            await self._wdog_arm()
+        except Exception:
+            # required-mode fail-CLOSED: an arm failure aborts connect
+            # (a latched past-trip does NOT raise — see _wdog_arm).
+            # best_effort never raises here.
+            self._connected = False
+            await self._transport.close()
+            raise
 
     async def disconnect(self) -> None:
         if not self._connected:
@@ -417,12 +457,36 @@ class Keithley2604B(InstrumentDriver):
     # command stream is byte-identical to the pre-watchdog driver.
 
     async def _wdog_arm(self) -> None:
-        """Upload + arm the firmware watchdog. NON-fatal on failure: connect
-        still succeeds, _wdog_armed stays False, and a CRITICAL log flags the
-        degraded run (SafetyManager remains the sole host-side authority — the
-        firmware backstop is simply absent)."""
+        """Upload + arm the firmware watchdog.
+
+        Latch read FIRST (before upload): re-uploading the script re-runs
+        ``cryodaq_wdog_tripped = 0`` and would wipe a past kill before it can
+        be seen. A fresh instrument has no such global → prints ``nil`` →
+        unparseable → treated as untripped. A latched past-trip is logged
+        CRITICAL and we PROCEED (in every armed mode): the outputs were already
+        force-OFF'd on connect and arming clears the latch, so raising would
+        only lock the operator out (escape = power-cycle) — never blocks.
+
+        best_effort: NON-fatal on arm failure — connect still succeeds,
+        _wdog_armed stays False, CRITICAL flags the degraded run.
+
+        required: fail-CLOSED — an arm FAILURE (the backstop cannot be
+        established) re-raises so connect() aborts. A pre-existing latch is NOT
+        a failure and does not raise."""
         if not self._wdog_enabled or self.mock:
             return
+        # DELTA 1: read the latch before the upload clears it.
+        try:
+            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+            latched = float(raw.strip()) > 0.5
+        except Exception:
+            latched = False  # nil / unparseable on a fresh instrument
+        if latched:
+            log.critical(
+                "%s: TSP watchdog read back a LATCHED trip from a PAST firmware "
+                "kill — re-arming (outputs already forced OFF on connect)",
+                self.name,
+            )
         try:
             await self._transport.write(_load_wdog_script())
             await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
@@ -431,6 +495,14 @@ class Keithley2604B(InstrumentDriver):
             log.info("%s: TSP watchdog armed (timeout=%.1fs)", self.name, self._wdog_timeout_s)
         except Exception as exc:
             self._wdog_armed = False
+            if self._wdog_mode is WatchdogMode.REQUIRED:
+                log.critical(
+                    "%s: TSP watchdog arm FAILED and mode=required — refusing to "
+                    "connect (fail-closed): %s",
+                    self.name,
+                    exc,
+                )
+                raise
             log.critical(
                 "%s: TSP watchdog upload/arm FAILED — running WITHOUT firmware "
                 "backstop (degraded): %s",

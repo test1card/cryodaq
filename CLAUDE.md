@@ -140,8 +140,11 @@ SafetyBroker (dedicated, overflow=FAULT)
      Rate limit: dT/dt > 5 K/min -> FAULT (5 K/min is the configurable
      default in safety.yaml, not a hard-coded invariant)
      Recovery: acknowledge + precondition re-check + cooldown
-     Safety regulation is host-side only (no Keithley TSP watchdog yet —
-     planned for Phase 3, requires hardware verification).
+     Safety regulation is host-side; the Keithley TSP watchdog is an
+     operator-selectable firmware backstop (keithley.watchdog.mode:
+     off | best_effort | required, default off). The current mechanism
+     covers stall-recovery only (deadline checked inside pet); the
+     autonomous run-mechanism (trigger.timer) remains bench-unverified.
      Crash-recovery guard: Keithley2604B.connect() forces OUTPUT_OFF on
      both SMU channels before assuming control (best-effort: if force-OFF
      fails, logs CRITICAL and continues — not guaranteed).
