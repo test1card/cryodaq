@@ -85,6 +85,10 @@ from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.reporting.generator import ReportGenerator
+from cryodaq.storage.cold_rotation import (
+    build_cold_rotation_service,
+    seconds_until_next,
+)
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
@@ -2303,6 +2307,33 @@ async def _run_engine(*, mock: bool = False) -> None:
         config=housekeeping_raw.get("retention", {}),
     )
 
+    # Cold rotation: aged daily SQLite → Parquet cold storage, once per day at
+    # the configured quiet hour. Fail-closed on a strict `enabled: true`; the
+    # matching read side (ArchiveReader) is already threaded into the CSV/XLSX
+    # exporters so rotated days stay visible to date-range exports.
+    cold_cfg = housekeeping_raw.get("cold_rotation", {}) or {}
+    cold_rotation_service = build_cold_rotation_service(
+        cold_cfg,
+        data_dir=_DATA_DIR,
+        project_root=get_project_root(),
+    )
+    cold_rotation_schedule = str(cold_cfg.get("schedule_time", "03:00"))
+
+    async def _cold_rotation_scheduler() -> None:
+        """Run rotation once per day at cold_rotation.schedule_time."""
+        assert cold_rotation_service is not None
+        while True:
+            await asyncio.sleep(seconds_until_next(cold_rotation_schedule, datetime.now(UTC)))
+            try:
+                rotated = await cold_rotation_service.run_once()
+                if rotated:
+                    logger.info(
+                        "ColdRotation: вытеснено %d суточных файлов в холодное хранилище",
+                        len(rotated),
+                    )
+            except Exception:
+                logger.exception("ColdRotation: проход ротации завершился ошибкой")
+
     async def _track_runtime_signals() -> None:
         queue = await broker.subscribe("adaptive_throttle_runtime", maxsize=2000)
         try:
@@ -3069,6 +3100,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                     broker=broker,
                     config=_cd_cfg,
                     model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
+                    # A1: cooldown-end push event on the engine EventBus.
+                    event_bus=event_bus,
+                    # A2: read-only history reader for ultimate_vacuum enrichment.
+                    reader=writer,
                 )
                 logger.info("CooldownService создан")
                 # v0.55.4 A2: hand the cooldown_service-owned
@@ -3573,6 +3608,20 @@ async def _run_engine(*, mock: bool = False) -> None:
     leak_rate_feed_task = asyncio.create_task(_leak_rate_feed(), name="leak_rate_feed")
     await housekeeping_service.start()
 
+    cold_rotation_task: asyncio.Task | None = None
+    if cold_rotation_service is not None:
+        cold_rotation_task = asyncio.create_task(
+            _cold_rotation_scheduler(), name="cold_rotation_scheduler"
+        )
+        logger.info(
+            "ColdRotationService запущен: archive=%s, age_days=%d, schedule=%s",
+            cold_rotation_service._archive_dir,
+            cold_rotation_service._age_days,
+            cold_rotation_schedule,
+        )
+    else:
+        logger.info("ColdRotationService отключён (cold_rotation.enabled != true)")
+
     # Watchdog
     watchdog_task = asyncio.create_task(
         _watchdog(broker, scheduler, writer, start_ts),
@@ -3737,6 +3786,14 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await housekeeping_service.stop()
     logger.info("HousekeepingService остановлен")
+
+    if cold_rotation_task is not None:
+        cold_rotation_task.cancel()
+        try:
+            await cold_rotation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("ColdRotationService остановлен")
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))

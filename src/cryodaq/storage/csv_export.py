@@ -9,22 +9,13 @@ from __future__ import annotations
 import csv
 import logging
 import math
-import sqlite3
-from datetime import UTC, date, datetime
+from datetime import datetime
 from pathlib import Path
 
-from cryodaq.storage.sentinel import decode
+from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
-
-
-def _utc_day(dt: datetime | None) -> date | None:
-    """Return the UTC calendar day for a datetime (naive treated as UTC)."""
-    if dt is None:
-        return None
-    aware = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-    return aware.date()
 
 
 class CSVExporter:
@@ -40,15 +31,21 @@ class CSVExporter:
         )
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, archive_dir: Path | None = None) -> None:
         """Инициализировать экспортёр.
 
         Параметры
         ----------
         data_dir:
             Директория с daily-файлами SQLite (data_YYYY-MM-DD.db).
+        archive_dir:
+            Директория холодного хранилища (Parquet + index.json). None →
+            ``data_dir / "archive"`` (совпадает с cold_rotation.archive_dir).
+            Дни, вытесненные ротацией в Parquet, читаются оттуда — иначе экспорт
+            слепнет на вытесненных днях.
         """
         self._data_dir = data_dir
+        self._archive_dir = archive_dir if archive_dir is not None else data_dir / "archive"
 
     def export(
         self,
@@ -78,10 +75,10 @@ class CSVExporter:
         ----------
         int:  Количество экспортированных строк.
         """
-        db_files = self._find_db_files(start, end)
-        if not db_files:
-            logger.warning("Не найдено файлов БД для указанного диапазона")
-            return 0
+        # Read across hot SQLite + cold Parquet: rotated days live only in the
+        # archive, so a plain SQLite scan would silently drop them. query_rows
+        # already decodes the NaN-доктрина sentinel and keeps end exclusive.
+        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, instrument_ids)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
@@ -90,123 +87,21 @@ class CSVExporter:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
 
-            for db_path in db_files:
-                total += self._export_from_db(
-                    db_path,
-                    writer,
-                    start=start,
-                    end=end,
-                    channels=channels,
-                    instrument_ids=instrument_ids,
-                )
-
-        logger.info(
-            "CSV-экспорт завершён: %s (%d записей из %d файлов БД)",
-            output_path,
-            total,
-            len(db_files),
-        )
-        return total
-
-    # ------------------------------------------------------------------
-    # Внутренние методы
-    # ------------------------------------------------------------------
-
-    def _find_db_files(
-        self,
-        start: datetime | None,
-        end: datetime | None,
-    ) -> list[Path]:
-        """Найти daily-файлы SQLite, покрывающие указанный диапазон."""
-        if not self._data_dir.exists():
-            return []
-
-        all_files = sorted(self._data_dir.glob("data_*.db"))
-        if start is None and end is None:
-            return all_files
-
-        # Daily files are named by UTC day; normalize the caller-supplied
-        # range to UTC before deriving the day (mirrors ArchiveReader.query),
-        # otherwise early-hours rows in another tz drop the correct day file.
-        start_day = _utc_day(start)
-        end_day = _utc_day(end)
-
-        result: list[Path] = []
-        for path in all_files:
-            # Извлечь дату из имени файла: data_2026-03-14.db
-            stem = path.stem  # data_2026-03-14
-            date_str = stem.replace("data_", "")
-            try:
-                file_date = date.fromisoformat(date_str)
-            except ValueError:
-                continue
-
-            if start_day is not None and file_date < start_day:
-                continue
-            if end_day is not None and file_date > end_day:
-                continue
-            result.append(path)
-
-        return result
-
-    def _export_from_db(
-        self,
-        db_path: Path,
-        writer: csv.writer,
-        *,
-        start: datetime | None,
-        end: datetime | None,
-        channels: list[str] | None,
-        instrument_ids: list[str] | None,
-    ) -> int:
-        """Экспортировать записи из одного файла БД."""
-        conn = sqlite3.connect(str(db_path), timeout=10)
-        conn.row_factory = sqlite3.Row
-
-        try:
-            query = "SELECT timestamp, instrument_id, channel, value, unit, status FROM readings"
-            conditions: list[str] = []
-            params: list[str | float] = []
-
-            if start is not None:
-                conditions.append("timestamp >= ?")
-                params.append(start.timestamp())
-            if end is not None:
-                conditions.append("timestamp < ?")
-                params.append(end.timestamp())
-            if channels:
-                placeholders = ",".join("?" * len(channels))
-                conditions.append(f"channel IN ({placeholders})")
-                params.extend(channels)
-            if instrument_ids:
-                placeholders = ",".join("?" * len(instrument_ids))
-                conditions.append(f"instrument_id IN ({placeholders})")
-                params.extend(instrument_ids)
-
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY timestamp;"
-
-            cursor = conn.execute(query, params)
-            count = 0
-            for row in cursor:
-                ts = _parse_timestamp(row["timestamp"])
-                # NaN-доктрина: mask sentinel / error / legacy ±inf — the value
-                # column is left blank for an unusable row; the status column
-                # (written verbatim below) carries the discriminator.
-                value = decode(row["value"], row["status"])
+            for raw_ts, instrument_id, channel, value, unit, status in rows:
+                ts = _parse_timestamp(raw_ts)
+                # The value is already decoded; a non-finite (masked) reading is
+                # left blank — the status column carries the discriminator.
                 writer.writerow(
                     [
                         ts.isoformat(),
-                        row["instrument_id"],
-                        row["channel"],
+                        instrument_id,
+                        channel,
                         value if math.isfinite(value) else "",
-                        row["unit"],
-                        row["status"],
+                        unit,
+                        status,
                     ]
                 )
-                count += 1
+                total += 1
 
-            return count
-        finally:
-            conn.close()
+        logger.info("CSV-экспорт завершён: %s (%d записей)", output_path, total)
+        return total

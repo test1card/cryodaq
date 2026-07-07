@@ -49,8 +49,14 @@ class Reading:
         множества до OK совпадает с прежней float-проверкой, но делает
         дискриминатором именно статус. Downstream-код не должен различать
         показания по float-значению — только через этот предикат.
+
+        Не числовое значение (junk из defensive GUI-путей) — не годно (False),
+        а не исключение: годность падает закрыто на safety-пути.
         """
-        return self.status is ChannelStatus.OK and math.isfinite(self.value)
+        try:
+            return self.status is ChannelStatus.OK and math.isfinite(self.value)
+        except TypeError:
+            return False
 
     @staticmethod
     def now(

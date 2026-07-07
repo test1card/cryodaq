@@ -1017,17 +1017,22 @@ class ArchivePanel(QWidget):
             return
         out_root = Path(directory)
 
+        from datetime import date
+
         from cryodaq.paths import get_data_dir
-        from cryodaq.storage.hdf5_export import HDF5Exporter
+        from cryodaq.storage.hdf5_export import HDF5Exporter, hdf5_export_days
 
         data_dir = get_data_dir()
+        archive_dir = data_dir / "archive"
 
         def runner() -> int:
-            exporter = HDF5Exporter()
+            # Enumerate hot ∪ cold days so rotated (Parquet) days export too —
+            # a plain data_*.db glob goes blind over rotated history.
+            exporter = HDF5Exporter(data_dir, archive_dir)
             total = 0
-            for db_file in sorted(data_dir.glob("data_*.db")):
-                out = out_root / db_file.name.replace(".db", ".h5")
-                total += exporter.export(db_file, out)
+            for day_iso in hdf5_export_days(data_dir, archive_dir):
+                out = out_root / f"data_{day_iso}.h5"
+                total += exporter.export(date.fromisoformat(day_iso), out)
             return total
 
         self._start_export_worker("hdf5", runner, unit="записей")

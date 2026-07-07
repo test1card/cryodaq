@@ -56,6 +56,7 @@ cooldown_baseline:
   # Additive and opt-in — when disabled the cooldown-end tap is a no-op.
   enabled: false
   base_threshold_K: 5.0                     # T_cold at/below this = "at base"
+  pressure_channel: "VSP63D_1/pressure"     # A2: vacuum channel read at cooldown end for ultimate_vacuum
   thresholds:
     time_to_base_frac: 0.30                 # >+30% time-to-base vs golden -> degraded
     vacuum_decades: 1.0                     # >=1 decade worse ultimate vacuum -> degraded

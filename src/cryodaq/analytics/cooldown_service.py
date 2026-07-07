@@ -11,11 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from cryodaq.core.event_bus import EventBus
 
 from cryodaq.analytics.base_plugin import DerivedMetric
 from cryodaq.analytics.cooldown_predictor import (
@@ -184,10 +188,19 @@ class CooldownService:
         broker: DataBroker,
         config: dict[str, Any],
         model_dir: Path,
+        *,
+        event_bus: EventBus | None = None,
+        reader: Any | None = None,
     ) -> None:
         self._broker = broker
         self._config = config
         self._model_dir = model_dir
+        # A1: engine EventBus for the cooldown-end push event (optional so
+        # unit tests and headless paths can omit it).
+        self._event_bus = event_bus
+        # A2: read-only history reader (SQLiteWriter.read_readings_history)
+        # for off-hot-path ultimate_vacuum enrichment at cooldown end.
+        self._reader = reader
 
         self._channel_cold: str = config.get("channel_cold", "")
         self._channel_warm: str = config.get("channel_warm", "")
@@ -610,18 +623,83 @@ class CooldownService:
         # Task 8a: persist a cooldown fingerprint BEFORE clearing the buffer.
         # Flag-guarded, off hot-path, and never allowed to break cooldown-end
         # handling — the helper swallows and logs every error.
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            self._persist_cooldown_fingerprint,
-            t_hours,
-            T_cold,
+        # A2: enrich with ultimate_vacuum from the history reader (also
+        # best-effort — any failure degrades to pressures=None).
+        cfg = self._load_baseline_config()
+        fingerprint_id: str | None = None
+        if cfg.get("enabled", False):
+            pressures = await self._read_cooldown_pressures(cfg)
+            loop = asyncio.get_running_loop()
+            fp = await loop.run_in_executor(
+                None,
+                self._persist_cooldown_fingerprint,
+                t_hours,
+                T_cold,
+                pressures,
+                cfg,
+            )
+            if fp is not None:
+                fingerprint_id = fp.fingerprint_id
+
+        # A1: publish an engine-level cooldown-end event on the EventBus so
+        # downstream consumers (event log, assistant, a future GUI badge
+        # bridge) learn of completion without polling. Fires regardless of
+        # the fingerprint feature flag; must never break cooldown end.
+        await self._publish_cooldown_end_event(
+            duration_h, float(T_cold[-1]), fingerprint_id
         )
 
         # Reset for next cycle
         self._buffer.clear()
         self._cooldown_wall_start = None
         self._detector.reset()
+
+    async def _read_cooldown_pressures(self, cfg: dict[str, Any]) -> list[float] | None:
+        """Best-effort: fetch the cooldown-window vacuum series. None on failure.
+
+        Off the hot path (cooldown end is rare), so a full-window read via the
+        reader's own executor is fine. Any error → None so the fingerprint tap
+        simply stores a null ultimate_vacuum, as before A2.
+        """
+        reader = self._reader
+        if reader is None:
+            return None
+        channel = str(cfg.get("pressure_channel", "VSP63D_1/pressure"))
+        try:
+            hist = await reader.read_readings_history(
+                channels=[channel],
+                from_ts=self._detector.cooldown_start_ts,
+                to_ts=self._last_reading_ts,
+                limit_per_channel=100_000,
+            )
+            series = hist.get(channel) or []
+            return [v for _, v in series] if series else None
+        except Exception as exc:  # noqa: BLE001 — read must never break cooldown end
+            logger.error("Ошибка чтения давления для fingerprint: %s", exc)
+            return None
+
+    async def _publish_cooldown_end_event(
+        self, duration_h: float, T_cold_final: float, fingerprint_id: str | None
+    ) -> None:
+        """Publish a ``cooldown_end`` EngineEvent. Never raises."""
+        if self._event_bus is None:
+            return
+        try:
+            from cryodaq.core.event_bus import EngineEvent
+
+            await self._event_bus.publish(
+                EngineEvent(
+                    event_type="cooldown_end",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "duration_h": duration_h,
+                        "T_cold_final": T_cold_final,
+                        "fingerprint_id": fingerprint_id,
+                    },
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — event publish must never break cooldown end
+            logger.error("Ошибка публикации события cooldown_end: %s", exc)
 
     def _load_baseline_config(self) -> dict[str, Any]:
         """Load the ``cooldown_baseline`` block from plugins.yaml once.
@@ -646,19 +724,24 @@ class CooldownService:
         self._baseline_cfg = cfg
         return cfg
 
-    def _persist_cooldown_fingerprint(self, t_hours: Any, T_cold: Any) -> None:
+    def _persist_cooldown_fingerprint(
+        self,
+        t_hours: Any,
+        T_cold: Any,
+        pressures: Any = None,
+        cfg: dict[str, Any] | None = None,
+    ) -> Any:
         """Best-effort: build + persist a cooldown fingerprint. Never raises.
 
-        Vacuum enrichment (ultimate_vacuum) is left null here: the service has
-        no SQLite reader handle, and wiring one requires touching engine
-        construction (out of scope for this backend task). ``build_fingerprint``
-        accepts a ``pressures`` series, so the capability is available for a
-        later off-hot-path enrichment.
+        Returns the saved ``CooldownFingerprint`` (for the cooldown-end event
+        payload), or ``None`` if disabled or on any error. ``pressures`` is the
+        cold-window vacuum series wired via the history reader (A2); ``None``
+        stores a null ultimate_vacuum, as before.
         """
         try:
-            cfg = self._load_baseline_config()
+            cfg = cfg if cfg is not None else self._load_baseline_config()
             if not cfg.get("enabled", False):
-                return
+                return None
 
             from cryodaq.analytics.cooldown_fingerprint import (
                 build_fingerprint,
@@ -671,10 +754,12 @@ class CooldownService:
                 list(T_cold),
                 cooldown_start_ts=self._detector.cooldown_start_ts or 0.0,
                 base_threshold_K=float(cfg.get("base_threshold_K", 5.0)),
-                pressures=None,
+                pressures=pressures,
             )
             history_dir = get_data_dir() / "cooldown_history"
             save_fingerprint(fp, history_dir)
             logger.info("Cooldown fingerprint сохранён: %s", fp.fingerprint_id)
+            return fp
         except Exception as exc:  # noqa: BLE001 — tap must never break cooldown end
             logger.error("Ошибка сохранения cooldown fingerprint: %s", exc)
+            return None

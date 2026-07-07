@@ -47,7 +47,6 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.widgets.overview_panel import OverviewPanel  # noqa: F401 — removed in B.7
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
@@ -145,9 +144,8 @@ class MainWindowV2(QMainWindow):
     def _build_ui(self) -> None:
         # Eager: dashboard (always visible) and AlarmPanel (feeds watch
         # bar count). All other overlays are lazy via _OVERLAY_FACTORIES.
-        # Phase UI-1 v2 (B.1): new dashboard skeleton replaces legacy
-        # OverviewPanel. Old class still imported above for now — removed
-        # entirely in B.7 after all dashboard sub-blocks are complete.
+        # DashboardView is the home surface (5-zone dashboard). The
+        # _overview_panel attribute name is retained for call-site stability.
         self._overview_panel = DashboardView(self._channel_mgr)
         self._alarm_panel = AlarmPanel()
         # Lazy panel slots — populated on first overlay open
