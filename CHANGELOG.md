@@ -7,6 +7,74 @@
 
 ---
 
+## [0.62.0] — 2026-07-07 — TSP watchdog: operator-selected mode (off | best_effort | required)
+
+Phase 5 распаркована без стенда: бинарный `watchdog.enabled` заменён на
+выбираемый оператором режим прошивочного dead-man бэкстопа Keithley 2604B.
+Host-side семантика каждого режима полностью реализована и покрыта
+тестами; дефолт `off` байт-идентичен прежнему поведению. Волна прошла
+внешнее ревью (1 HIGH найден и закрыт с re-check PASS).
+
+### Added
+
+- **`keithley.watchdog.mode` в `config/instruments.yaml`** (4857e79):
+  - `off` (по умолчанию) — TSP-скрипт не загружается, host SafetyManager —
+    единственный авторитет; байт-идентичность потока команд закреплена
+    тестом полного хронологического сравнения.
+  - `best_effort` — взвести бэкстоп на connect; при неудаче взвода —
+    CRITICAL и продолжение host-only (fail-open на слое watchdog);
+    == легаси `enabled: true`.
+  - `required` — fail-closed: невозможность установить бэкстоп (ошибка
+    взвода, включая нечитаемую защёлку) → `connect()` бросает → прибор
+    недоступен → SAFE_OFF держится. Защёлкнутый trip из прошлого — громко
+    (CRITICAL), но НЕ блокирует: выходы уже принудительно выключены
+    crash-recovery guard'ом, а отказ в connect запер бы оператора до
+    power-cycle прибора.
+  - Легаси-алиас: `enabled: true`→`best_effort`, `false`→`off`; явный
+    `mode` выигрывает; неизвестная строка режима валит загрузку конфига.
+- **Latch-протокол**: защёлка trip читается ДО загрузки скрипта (загрузка
+  перевыполняет `tripped = 0` и стёрла бы её); `nil` от свежего прибора =
+  «защёлки нет»; ошибка транспорта на чтении защёлки = ошибка взвода
+  (required → raise; best_effort → CRITICAL и БЕЗ загрузки — улика
+  сохраняется; d08f675, закрытие HIGH внешнего ревью).
+- Engine предупреждает, когда `timeout_s < 2 × интервал опроса`
+  (спурьёзный trip — pet едет на polling-цикле).
+
+### Changed
+
+- **`tsp/cryodaq_wdog.lua` переписан неблокирующим** (4857e79):
+  `cryodaq_wdog_run()` только взводит и возвращается — цикл занял бы
+  single-threaded TSP FIFO и заморозил бы прибор на timeout_s; дедлайн
+  проверяется внутри `cryodaq_wdog_pet()` (проверка ДО обновления
+  last_pet: опоздавший pet убивает выходы и защёлкивает trip, а не
+  прощает себя). Честное покрытие задокументировано (docs/instruments.md,
+  CLAUDE.md): armed-режимы дают stall-recovery kill + latch + reconcile
+  SafetyManager; полную смерть хоста прикрывает crash-recovery force-OFF
+  на следующем connect; автономный dead-man (trigger.timer) — единственный
+  оставшийся bench-verified апгрейд.
+
+### Known Issues
+
+- Прошивочный run-механизм не проверен на стенде; `required` гейтит на
+  host-наблюдаемых взводе и защёлке. Bench-план: docs (lab checklist,
+  Phase 7).
+
+### Test baseline
+
+- 3575 passed, 2 skipped, 1 deselected (v0.61.0: 3556/2; +19 —
+  watchdog-mode и latch-протокол).
+
+### Tags
+
+- `v0.62.0` — merge-коммит `feat/tsp-watchdog-mode` в master.
+
+### Selected commits in this release
+
+- 4857e79 — operator-selected watchdog mode + неблокирующий lua
+- d08f675 — latch-read failure → arm-failure семантика (HIGH re-check PASS)
+
+---
+
 ## [0.61.0] — 2026-07-07 — final sweep: cold-storage контур, ME-16 чистка, доктрина-гейты
 
 Финальная волна roadmap-прогона: удалён осиротевший v1-виджетный слой
