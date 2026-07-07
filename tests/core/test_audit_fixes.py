@@ -255,7 +255,7 @@ async def test_sqlite_ok_nonfinite_filtered(tmp_path) -> None:
 
 
 async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
-    """OVERRANGE reading with value=+inf is intentionally persisted."""
+    """OVERRANGE +inf persists as sentinel + status (NaN-doctrine P2-2)."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -286,13 +286,17 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
     assert rows[0][0] == "T_OVR"
     assert rows[0][2] == ChannelStatus.OVERRANGE.value
     import math
-    assert math.isinf(rows[0][1]) and rows[0][1] > 0, (
-        f"Persisted value must be +inf, got {rows[0][1]}"
+
+    from cryodaq.storage.sentinel import SENTINEL, decode
+
+    assert rows[0][1] == SENTINEL, (
+        f"Persisted value must be the sentinel, got {rows[0][1]}"
     )
+    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
-    """UNDERRANGE reading with value=-inf is intentionally persisted."""
+    """UNDERRANGE -inf persists as sentinel + status (NaN-doctrine P2-2)."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -323,9 +327,13 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
     assert rows[0][0] == "T_UNR"
     assert rows[0][2] == ChannelStatus.UNDERRANGE.value
     import math
-    assert math.isinf(rows[0][1]) and rows[0][1] < 0, (
-        f"Persisted value must be -inf, got {rows[0][1]}"
+
+    from cryodaq.storage.sentinel import SENTINEL, decode
+
+    assert rows[0][1] == SENTINEL, (
+        f"Persisted value must be the sentinel, got {rows[0][1]}"
     )
+    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 # ---------------------------------------------------------------------------
