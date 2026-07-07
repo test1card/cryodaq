@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,7 @@ class ReportDataExtractor:
                             timestamp=_parse_timestamp(row["timestamp"]),
                             instrument_id=str(row["instrument_id"] or ""),
                             channel=str(row["channel"] or ""),
-                            value=float(row["value"]),
+                            value=decode(float(row["value"]), str(row["status"] or "")),
                             unit=str(row["unit"] or ""),
                             status=str(row["status"] or ""),
                         )

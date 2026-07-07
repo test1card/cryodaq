@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class SQLiteReplay:
                     status = ChannelStatus(status_str)
                 except ValueError:
                     status = ChannelStatus.OK
+                value = decode(value, status.value)
                 reading = Reading(
                     timestamp=datetime.fromtimestamp(ts_posix + _base_offset, tz=UTC),
                     instrument_id=inst_id,

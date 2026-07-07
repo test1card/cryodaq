@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from cryodaq.storage.sentinel import decode
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_EXPERIMENTS = """
@@ -1581,7 +1583,7 @@ class ExperimentManager:
                                 ),
                                 "instrument_id": str(row["instrument_id"] or ""),
                                 "channel": str(row["channel"] or ""),
-                                "value": float(row["value"]),
+                                "value": decode(float(row["value"]), str(row["status"] or "")),
                                 "unit": str(row["unit"] or ""),
                                 "status": str(row["status"] or ""),
                             }

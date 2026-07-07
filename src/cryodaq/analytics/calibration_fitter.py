@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from cryodaq.analytics.calibration import CalibrationCurve, CalibrationSample, CalibrationStore
+from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
 
@@ -63,20 +64,22 @@ class CalibrationFitter:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.execute("PRAGMA journal_mode=WAL")
                 cursor = conn.execute(
-                    "SELECT timestamp, value FROM readings "
+                    "SELECT timestamp, value, status FROM readings "
                     "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp",
                     (reference_channel, start_ts, end_ts),
                 )
-                krdg_data.extend(cursor.fetchall())
+                # NaN-доктрина: decode at ingest — a non-OK status / sentinel
+                # becomes NaN and the finite-filter below drops it.
+                krdg_data.extend((ts, decode(v, s)) for ts, v, s in cursor.fetchall())
 
                 cursor = conn.execute(
-                    "SELECT timestamp, value FROM readings "
+                    "SELECT timestamp, value, status FROM readings "
                     "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp",
                     (srdg_channel, start_ts, end_ts),
                 )
-                srdg_data.extend(cursor.fetchall())
+                srdg_data.extend((ts, decode(v, s)) for ts, v, s in cursor.fetchall())
                 conn.close()
             except Exception:
                 logger.warning("Failed to read %s", db_path, exc_info=True)
