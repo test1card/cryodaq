@@ -654,10 +654,13 @@ class SensorDiagnosticsEngine:
         correlation: float | None,
         T_current: float,
     ) -> int:
-        # NaN current reading → cannot be scored healthy (D-C19). A NaN
-        # slips through the disconnected(>350)/shorted(<=0) comparisons
-        # (all comparisons with NaN are False) and would otherwise reach
-        # the insufficient-data branch below and return 100.
+        # NaN current reading → cannot be scored healthy (D-C19). NaN-доктрина:
+        # validity is decided at the Reading boundary (engine _sensor_diag_feed
+        # gates on reading.is_usable()). push() here is a status-less float API,
+        # so this stays as fail-closed defense-in-depth for any direct/GUI caller
+        # that bypasses the boundary: a NaN slips through the disconnected(>350)/
+        # shorted(<=0) comparisons (all comparisons with NaN are False) and would
+        # otherwise reach the insufficient-data branch below and return 100.
         if not math.isfinite(T_current):
             return 0
 

@@ -129,6 +129,10 @@ def _ols_slope_per_min(points: list[tuple[float, float]]) -> float | None:
     num = sum((t - t_mean) * (v - v_mean) for t, v in zip(ts, vs))
     den = sum((t - t_mean) ** 2 for t in ts)
 
+    # DOMAIN guard, not a validity guard: den==0 → all timestamps equal
+    # (undefined slope); isnan(num/den) → numeric propagation. Validity of
+    # readings is decided upstream at the Reading boundary (NaN-доктрина);
+    # this stays as the OLS division-domain floor.
     if den == 0.0 or math.isnan(den) or math.isnan(num):
         return None
 
