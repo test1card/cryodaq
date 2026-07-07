@@ -52,3 +52,43 @@ def test_unpack_reading_rejects_oversize_payload():
     assert len(oversize) > zmq_bridge.MAX_DATA_MSG_SIZE
     with pytest.raises(ValueError):
         zmq_bridge._unpack_reading(oversize)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-boundary rejects (P4-3). The REP surface is unauthenticated, so a
+# malformed or unknown command must produce a clean ``ok: False`` reply — never
+# a silent drop and never an exception that wedges the REP state machine. The
+# unknown-*name* reject lives in the engine handler (engine.py: "unknown
+# command: ..."); these pin the bridge-side guarantees that surround it.
+# ---------------------------------------------------------------------------
+
+
+async def test_run_handler_rejects_non_dict_payload():
+    """A valid-JSON but wrong-shape payload (scalar/list) is refused in-bridge
+    with a clean error dict rather than raising on ``cmd.get(...)``."""
+    srv = ZMQCommandServer(handler=lambda cmd: {"ok": True})
+    for bad in (42, "just a string", [1, 2, 3]):
+        reply = await srv._run_handler(bad)
+        assert reply["ok"] is False
+        assert "invalid payload" in reply["error"]
+
+
+async def test_run_handler_forwards_unknown_command_reject():
+    """An unknown command name is forwarded to the handler and its
+    ``ok: False`` reject is round-tripped unchanged — not swallowed."""
+
+    def engine_like(cmd: dict) -> dict:
+        # Mirrors engine.py _handle_gui_command fall-through.
+        return {"ok": False, "error": f"unknown command: {cmd.get('cmd', '')}"}
+
+    srv = ZMQCommandServer(handler=engine_like)
+    reply = await srv._run_handler({"cmd": "nonexistent_command"})
+    assert reply["ok"] is False
+    assert "unknown command" in reply["error"]
+
+
+async def test_run_handler_without_handler_rejects():
+    """No handler wired ⇒ a command still gets a clean error, not a crash."""
+    srv = ZMQCommandServer(handler=None)
+    reply = await srv._run_handler({"cmd": "anything"})
+    assert reply == {"ok": False, "error": "no handler"}

@@ -3,6 +3,45 @@
 ZMQPublisher — PUB-сокет в engine, сериализует Reading через msgpack.
 ZMQSubscriber — SUB-сокет в GUI-процессе, десериализует и вызывает callback.
 ZMQCommandServer — REP-сокет в engine, принимает JSON-команды от GUI.
+
+Модель доверия (trust model)
+----------------------------
+The REP command socket accepts hardware-control commands **without
+authentication**. This is BY-DESIGN, not an oversight — an accepted risk
+under the single-operator-lab threat model (D7.2 accepted). CryoDAQ runs
+on one operator PC; anyone with a shell on that host already owns the
+instruments regardless of any REP-level auth, so a token here would add
+ceremony without changing the trust boundary.
+
+The accepted risk is bounded by these compensating controls:
+
+- **Loopback-only bind.** PUB/REP default to ``tcp://127.0.0.1:*``
+  (``DEFAULT_PUB_ADDR`` / ``DEFAULT_CMD_ADDR``) — never ``0.0.0.0``. The
+  kernel refuses any off-host connection, so the unauthenticated surface
+  is not reachable from the LAN.
+- **Socket-level size caps.** ``ZMQ_MAXMSGSIZE`` (``MAX_CMD_MSG_SIZE`` /
+  ``MAX_DATA_MSG_SIZE``) makes libzmq drop an oversize frame before it is
+  allocated in user space (audit C.2 / Codex D6).
+- **Bounded msgpack decode.** ``_unpack_reading`` re-checks the frame size
+  and bounds every decoded element (``max_*_len``) so a crafted frame
+  cannot drive a huge allocation.
+- **Finite-clean command decode.** ``_decode_command`` rejects
+  NaN/Infinity/overflow literals so a non-finite setpoint can never slip
+  past the downstream limit guards.
+- **SafetyManager is the sole on/off authority.** A REP command *requests*
+  an action; it never overrides the safety FSM. SAFE_OFF stays the
+  default and any run still requires continuous proof of health.
+- **Tiered handler timeouts.** ``_timeout_for`` bounds wall-clock time per
+  command so a wedged handler cannot stall the REP state machine.
+- **Defensive dispatch.** Malformed shapes (non-dict payloads) are rejected
+  in ``ZMQCommandServer._run_handler``; unknown command names fall through
+  to the engine handler's ``{"ok": False, "error": "unknown command: ..."}``
+  reply — an unknown command is refused, never silently ignored or crashed.
+
+**LAN exposure MUST go through an SSH tunnel** (forward 127.0.0.1 on the
+remote to 127.0.0.1 on the engine host). Never bind these sockets to
+``0.0.0.0`` — that would expose the unauthenticated hardware-control
+surface to the network and void the trust model above.
 """
 
 from __future__ import annotations
