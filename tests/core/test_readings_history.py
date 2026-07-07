@@ -400,6 +400,89 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
         loop.close()
 
 
+def test_read_readings_history_unbounded_unions_cold_archive(tmp_path: Path) -> None:
+    """F3: an unbounded (from_ts=None) request must also union cold archive rows.
+
+    The cold branch was gated on ``from_ts is not None``, so a full-range /
+    unbounded-past request read hot-only and silently dropped rotated days.
+    from_ts=None means unbounded past → it ALWAYS reaches archived days.
+    """
+    pytest.importorskip("pyarrow")
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    writer = SQLiteWriter(tmp_path)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(writer.start_immediate())
+    try:
+        now = datetime.now(UTC)
+        hot_ts = now.timestamp() - 60
+        loop.run_until_complete(
+            writer.write_immediate(
+                [
+                    Reading(
+                        timestamp=datetime.fromtimestamp(hot_ts, tz=UTC),
+                        instrument_id="LS218_1",
+                        channel="Т1",
+                        value=10.0,
+                        unit="K",
+                        status=ChannelStatus.OK,
+                    )
+                ]
+            )
+        )
+        cold_day = now - timedelta(days=3)
+        cold_ts = cold_day.timestamp()
+        archive_dir = tmp_path / "archive"
+        rel = (
+            f"year={cold_day:%Y}/month={cold_day:%m}/"
+            f"data_{cold_day.date().isoformat()}.db.parquet"
+        )
+        ppath = archive_dir / rel
+        ppath.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.table(
+            {
+                "timestamp": pa.array(
+                    [datetime.fromtimestamp(cold_ts, tz=UTC)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                "instrument_id": pa.array(["LS218_1"]),
+                "channel": pa.array(["Т1"]),
+                "value": pa.array([5.0], type=pa.float64()),
+                "unit": pa.array(["K"]),
+                "status": pa.array(["ok"]),
+            }
+        )
+        pq.write_table(table, str(ppath))
+        (archive_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "files": [
+                        {
+                            "original_name": f"data_{cold_day.date().isoformat()}.db",
+                            "archive_path": rel,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # from_ts unset (None) → unbounded past. Must still union the cold row.
+        data = writer._read_readings_history(to_ts=now.timestamp())
+        vals = [v for _, v in data["Т1"]]
+        assert 5.0 in vals, "unbounded request must union the cold archived row"
+        assert 10.0 in vals, "hot row must remain"
+        assert data["Т1"][0][1] == 5.0, "ASC order: cold (older) first"
+        assert data["Т1"][-1][1] == 10.0
+    finally:
+        loop.run_until_complete(writer.stop())
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_async_read_readings_history(writer_with_data) -> None:
     """Async wrapper must return the same data as the sync implementation."""

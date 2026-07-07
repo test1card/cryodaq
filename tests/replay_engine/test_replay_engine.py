@@ -665,3 +665,56 @@ async def test_directory_replay_cold_day_masks_sentinel(tmp_path):
     assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
     bad = [r for r in received if r.status is ChannelStatus.SENSOR_ERROR]
     assert bad and all(math.isnan(r.value) for r in bad), "cold sentinel row must present as NaN"
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_overlap_day_unions_hot_and_cold(tmp_path):
+    """F4: a day in BOTH the archive and a restored hot .db replays union+dedup.
+
+    Old code did cold_days = archived − hot, so an overlap day (restored /
+    backdated hot DB for an archived day) fell to the hot-only SQLiteReplay path
+    and the archived rows vanished. query_rows already unions+dedups both
+    sources; the overlap day must route through it.
+    """
+    pytest.importorskip("pyarrow")
+    from datetime import UTC, datetime, timedelta
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+
+    def rdg(ch, val, ts, status=ChannelStatus.OK):
+        return Reading(timestamp=ts, instrument_id="ls218s", channel=ch, value=val, unit="K", status=status)
+
+    _write_day_via_writer(
+        data_dir,
+        [rdg("Т12", 200.0, old_day.replace(hour=12)), rdg("Т12", 180.0, old_day.replace(hour=13))],
+    )
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=today)
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    # Restore a hot DB for the SAME archived day: exact-dup hour13 + new hour14.
+    _write_day_via_writer(
+        data_dir,
+        [rdg("Т12", 180.0, old_day.replace(hour=13)), rdg("Т12", 150.0, old_day.replace(hour=14))],
+    )
+    assert (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    replay = DirectoryReplay(data_dir, speed=0.0, loop=False, archive_dir=archive_dir)
+    received: list = []
+
+    async def cb(r) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    vals = sorted(r.value for r in received)
+    # Archived-only 200.0 present (RED discriminator), restored 150.0 present,
+    # shared 180.0 exactly once (dedup) → 3 rows total.
+    assert vals == pytest.approx([150.0, 180.0, 200.0]), f"union/dedup wrong: {vals}"
+    assert len(received) == 3

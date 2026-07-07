@@ -202,10 +202,16 @@ class DirectoryReplay:
     async def run(self, publish_cb: PublishCallback) -> None:
         db_files = sorted(self._data_dir.glob("data_*.db"))
         reader = ArchiveReader(self._data_dir, self._archive_dir)
+        archived = _archived_days(reader)
         hot_days = {_day_from_db_name(p.name) for p in db_files}
-        cold_days = _archived_days(reader) - hot_days
+        cold_days = archived - hot_days  # pure-cold: only in the Parquet archive
+        # Overlap: a day present in BOTH a hot .db and the archive (restored /
+        # backdated import). The hot-only SQLiteReplay path would drop the
+        # archived rows; query_rows already unions+dedups both sources, so route
+        # the overlap day through the cold path to match that contract (F4).
+        overlap_days = archived & hot_days
 
-        if not cold_days:
+        if not cold_days and not overlap_days:
             # Hot-only fast path — byte-identical to the pre-archive behavior.
             if not db_files:
                 logger.warning("DirectoryReplay: no data_*.db files in %s", self._data_dir)
@@ -252,7 +258,11 @@ class DirectoryReplay:
         items: list[tuple[str, str, object]] = []
         for p in db_files:
             day = _day_from_db_name(p.name)
-            items.append((day or p.name, "hot", p))
+            if day in overlap_days:
+                # query_rows unions this day's hot .db + Parquet and dedups.
+                items.append((day, "cold", day))
+            else:
+                items.append((day or p.name, "hot", p))
         for day_iso in cold_days:
             items.append((day_iso, "cold", day_iso))
         items.sort(key=lambda it: it[0])

@@ -184,23 +184,33 @@ class ReplaySource:
         db_files = sorted(data_dir.glob("data_*.db"))  # noqa: ASYNC240
         adir = archive_dir if archive_dir is not None else data_dir / "archive"
         reader = ArchiveReader(data_dir, adir)
+        archived = self._archived_days(reader)
         hot_days = {_day_from_db_name(p.name) for p in db_files}
-        cold_days = self._archived_days(reader) - hot_days
+        cold_days = archived - hot_days  # pure-cold: only in the Parquet archive
+        # Overlap: a day present in BOTH a hot .db and the archive (restored /
+        # backdated import). Routing it through the hot-only `play` would drop
+        # the archived rows — query_rows already unions+dedups both sources, so
+        # replay must go through the cold path to match that contract (F4).
+        overlap_days = archived & hot_days
 
-        if not cold_days:
+        if not cold_days and not overlap_days:
             # Hot-only fast path — byte-identical to the pre-archive behavior.
             total = 0
             for db_path in db_files:
                 total += await self.play(db_path, start=start, end=end, channels=channels)
             return total
 
-        # Merge hot files and cold-only days, replay in chronological day order.
+        # Merge hot files and cold days, replay in chronological day order.
         # ISO day keys and `data_YYYY-MM-DD.db` filenames sort identically, so a
         # plain lexical sort keeps both in true chronological order.
         items: list[tuple[str, str, object]] = []
         for p in db_files:
             day = _day_from_db_name(p.name)
-            items.append((day or p.name, "hot", p))
+            if day in overlap_days:
+                # query_rows unions this day's hot .db + Parquet and dedups.
+                items.append((day, "cold", day))
+            else:
+                items.append((day or p.name, "hot", p))
         for day_iso in cold_days:
             items.append((day_iso, "cold", day_iso))
         items.sort(key=lambda it: it[0])

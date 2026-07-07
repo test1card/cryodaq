@@ -23,3 +23,13 @@ def test_engine_import_emits_no_deprecation_warning() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         importlib.import_module("cryodaq.engine")
+
+
+def test_replay_engine_main_import_emits_no_deprecation_warning() -> None:
+    # The replay-engine CLI now mirrors engine.main()'s win32 SelectorEventLoop
+    # construction (pyzmq needs it — the replay server opens ZMQ sockets). Pin
+    # that its import path stays free of import-time deprecation warnings too.
+    sys.modules.pop("cryodaq.replay_engine.__main__", None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        importlib.import_module("cryodaq.replay_engine.__main__")

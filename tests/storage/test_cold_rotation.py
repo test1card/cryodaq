@@ -657,3 +657,66 @@ def test_daemon_start_stop(tmp_path: Path) -> None:
         assert service._task is None
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# F5: a failed Step-5 unlink must not strand the hot DB forever
+# ---------------------------------------------------------------------------
+
+
+def test_failed_unlink_strands_then_swept_next_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: index-before-unlink is the correct fail-safe, but a failed unlink
+    (e.g. a Windows file lock) must not abort the pass or strand the hot DB.
+
+    While the hot DB lingers next to its Parquet, query_rows unions+dedups both
+    (F4) so no row is lost or doubled. The next pass sweeps the stray and deletes
+    it — the day is already indexed, so _find_candidates alone never would.
+    """
+    pytest.importorskip("pyarrow")
+    import asyncio
+    import pathlib
+
+    from cryodaq.storage.archive_reader import ArchiveReader
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    old_ts = datetime(old_day.year, old_day.month, old_day.day, tzinfo=UTC).timestamp()
+    _create_db(data_dir / old_name, rows=5, base_ts=old_ts)
+
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+
+    # Simulate a lock held on the hot DB (and its sidecars) during pass 1.
+    real_unlink = pathlib.Path.unlink
+    lock = {"active": True}
+
+    def flaky_unlink(self, *args, **kwargs):
+        if lock["active"] and self.name.startswith(old_name):
+            raise PermissionError("simulated Windows file lock")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", flaky_unlink)
+
+    reader = ArchiveReader(data_dir, archive_dir)
+
+    # Pass 1: rotation archives + indexes, but the unlink fails and is caught.
+    results = asyncio.run(service.run_once(now=today))
+    assert results, "rotation must still report success despite the failed unlink"
+    assert (data_dir / old_name).exists(), "locked hot DB must survive, not vanish"
+    idx = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    assert any(e["original_name"] == old_name for e in idx["files"]), "day must be indexed"
+    # Both copies exist → union+dedup yields exactly the original 5 rows.
+    assert len(reader.query_rows(None, None, None)) == 5, "interim union must be 5 rows (no loss/dup)"
+
+    # Pass 2: lock released → sweep deletes the stranded hot DB. _find_candidates
+    # skips the already-indexed day, so only the sweep can reclaim it.
+    lock["active"] = False
+    asyncio.run(service.run_once(now=today))
+    assert not (data_dir / old_name).exists(), "sweep must delete the stranded hot DB next pass"
+    assert len(reader.query_rows(None, None, None)) == 5, "post-sweep must still be 5 rows"

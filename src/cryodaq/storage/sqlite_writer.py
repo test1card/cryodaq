@@ -585,6 +585,47 @@ class SQLiteWriter:
             finally:
                 conn.close()
 
+        # Cold union (F2): a rotated day's operator_log lives only in the archive
+        # Parquet — its hot .db was deleted. The hot scan above therefore drops
+        # every rotated audit entry from the live operator journal, even though
+        # reports already union the same rows via ArchiveReader.query_operator_log.
+        # Thread the live path through the same reader. No archive index → skip
+        # entirely so hot-only deployments stay byte-identical.
+        archive_index = self._data_dir / "archive" / "index.json"
+        if archive_index.exists():
+            from cryodaq.storage.archive_reader import ArchiveReader
+
+            # query_operator_log unions hot+cold; a hot day is scanned above, so
+            # keep only cold-archived days (no hot .db) to avoid double-counting.
+            hot_days = {
+                p.stem.removeprefix("data_") for p in self._data_dir.glob("data_????-??-??.db")
+            }
+            reader = ArchiveReader(self._data_dir, archive_index.parent)
+            for raw_ts, raw_exp, author, source, message, raw_tags in reader.query_operator_log(
+                start_time, end_time
+            ):
+                entry_ts = _parse_timestamp(raw_ts)
+                utc_day = (
+                    entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=UTC)
+                ).astimezone(UTC).date().isoformat()
+                if utc_day in hot_days:
+                    continue
+                if experiment_id is not None and raw_exp != experiment_id:
+                    continue
+                rows.append(
+                    OperatorLogEntry(
+                        # Archived rows carry no rowid; the GUI panel keys on
+                        # timestamp, not id (see operator_log_panel._sort_entries).
+                        id=0,
+                        timestamp=entry_ts,
+                        experiment_id=raw_exp,
+                        author=str(author or ""),
+                        source=str(source or ""),
+                        message=str(message or ""),
+                        tags=tuple(json.loads(raw_tags or "[]")),
+                    )
+                )
+
         rows.sort(key=lambda item: item.timestamp, reverse=True)
         return rows[: max(limit, 0)]
 
@@ -828,7 +869,11 @@ class SQLiteWriter:
         # bounded only by the date window; add a cold LIMIT only if a deep-history
         # request is ever shown to strain memory.
         archive_index = self._data_dir / "archive" / "index.json"
-        if from_ts is not None and archive_index.exists():
+        if archive_index.exists():
+            # Local import breaks the archive_reader → sqlite_writer cycle.
+            from cryodaq.storage.archive_reader import ArchiveReader
+
+            reader = ArchiveReader(self._data_dir, archive_index.parent)
             hot_days: list[date] = []
             for db_path in db_files:
                 try:
@@ -836,8 +881,13 @@ class SQLiteWriter:
                 except ValueError:
                     continue
             oldest_hot = min(hot_days) if hot_days else None
-            from_day_req = datetime.fromtimestamp(from_ts, tz=UTC).date()
-            if oldest_hot is None or from_day_req < oldest_hot:
+            # from_ts=None means unbounded past → the request ALWAYS reaches
+            # archived days, so ALWAYS union when the index exists (a bounded
+            # start only reaches cold days when it predates the oldest hot day).
+            from_day_req = (
+                datetime.fromtimestamp(from_ts, tz=UTC).date() if from_ts is not None else None
+            )
+            if from_day_req is None or oldest_hot is None or from_day_req < oldest_hot:
                 if oldest_hot is not None:
                     boundary = datetime(
                         oldest_hot.year, oldest_hot.month, oldest_hot.day, tzinfo=UTC
@@ -847,13 +897,30 @@ class SQLiteWriter:
                         cold_to = to_ts
                 else:
                     cold_to = to_ts if to_ts is not None else datetime.now(UTC).timestamp()
-                if cold_to >= from_ts:
-                    # Local import breaks the archive_reader → sqlite_writer cycle.
-                    from cryodaq.storage.archive_reader import ArchiveReader
-
-                    cold = ArchiveReader(self._data_dir, archive_index.parent).query(
+                # Lower bound: from_ts when bounded; else the earliest archived
+                # day, so an unbounded request does not sweep years of empty days.
+                if from_ts is not None:
+                    cold_from = from_ts
+                else:
+                    index = reader._load_index()
+                    archived_days: list[date] = []
+                    for entry in index.get("files", []):
+                        name = str(entry.get("original_name", ""))
+                        try:
+                            archived_days.append(date.fromisoformat(name.removeprefix("data_")[:10]))
+                        except ValueError:
+                            continue
+                    if archived_days:
+                        earliest = min(archived_days)
+                        cold_from = datetime(
+                            earliest.year, earliest.month, earliest.day, tzinfo=UTC
+                        ).timestamp()
+                    else:
+                        cold_from = None
+                if cold_from is not None and cold_to >= cold_from:
+                    cold = reader.query(
                         channels,
-                        datetime.fromtimestamp(from_ts, tz=UTC),
+                        datetime.fromtimestamp(cold_from, tz=UTC),
                         datetime.fromtimestamp(cold_to, tz=UTC),
                     )
                     for ch, pts in cold.items():

@@ -113,7 +113,17 @@ def main() -> None:
 
     lock_fd = _acquire_engine_lock()
     try:
-        asyncio.run(_run(args))
+        if sys.platform == "win32":
+            # pyzmq requires a SelectorEventLoop on Windows (the default
+            # Proactor loop lacks the socket support pyzmq needs). Force it
+            # via Runner(loop_factory=...) rather than the deprecated
+            # WindowsSelectorEventLoopPolicy (the policy system is deprecated
+            # in Python 3.14+ and warns on import). Same invariant as
+            # cryodaq.engine.main() — the replay server opens ZMQ sockets too.
+            with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                runner.run(_run(args))
+        else:
+            asyncio.run(_run(args))
     except KeyboardInterrupt:
         pass
     finally:

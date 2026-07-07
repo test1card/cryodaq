@@ -197,6 +197,12 @@ class ColdRotationService:
                 if result is not None:
                     results.append(result)
 
+            # Retry deletion of any hot DB archived+indexed on a prior pass whose
+            # unlink failed (e.g. a transient Windows file lock). Deletion-only:
+            # never re-copies, and _find_candidates already skips indexed days so
+            # they would otherwise linger forever (F5).
+            await asyncio.to_thread(self._sweep_stranded)
+
             return results
 
     async def start(self) -> None:
@@ -407,9 +413,22 @@ class ColdRotationService:
         # Step 5: Delete SQLite + sidecars. Safe now: readings and operator_log
         # are preserved in Parquet, and source_data was verified empty at entry
         # (Step 0), so no table with rows is destroyed.
+        #
+        # A failed unlink (e.g. a Windows file lock) must NOT abort the pass or
+        # re-copy: the day is already indexed (Step 4), so _sweep_stranded on
+        # the next pass retries the deletion only. Until then the lingering hot
+        # .db and its Parquet both exist for the day — ArchiveReader.query_rows
+        # unions and dedups them (F4), so no row is hidden or double-counted.
         for suffix in ("", "-wal", "-shm"):
             sidecar = db_path.parent / (db_path.name + suffix)
-            sidecar.unlink(missing_ok=True)
+            try:
+                sidecar.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not delete %s after archiving (kept, retry next pass): %s",
+                    sidecar.name,
+                    exc,
+                )
 
         logger.info(
             "Rotated %s → %s (%d rows, %.1f MB → %.1f MB)",
@@ -588,6 +607,51 @@ class ColdRotationService:
     # ------------------------------------------------------------------
     # Index management
     # ------------------------------------------------------------------
+
+    def _sweep_stranded(self) -> None:
+        """Retry deleting hot DBs already archived+indexed but still on disk.
+
+        Rotation writes index.json BEFORE unlinking the hot SQLite (the correct
+        fail-safe: never delete data before the archive is recorded). If that
+        unlink fails — e.g. a Windows file lock — the day stays indexed and
+        _find_candidates skips it forever, so the hot .db would linger undeleted.
+        Sweep those strays each pass and retry the deletion only, after verifying
+        both the archive Parquet and its index entry exist. Until a retry
+        succeeds ArchiveReader.query_rows unions the lingering .db with its
+        Parquet (F4), so no row is hidden or double-counted. One locked file
+        never aborts the sweep or the rotation pass.
+        """
+        try:
+            idx = self._read_index()
+        except RuntimeError:
+            return  # corrupt index already logged in _read_index; do not touch files
+        for entry in idx.get("files", []):
+            name = entry.get("original_name")
+            archive_rel = entry.get("archive_path")
+            if not name or not archive_rel:
+                continue
+            db_path = self._data_dir / name
+            if not db_path.exists():
+                continue
+            # Never delete the hot copy unless its Parquet is actually present.
+            if not (self._archive_dir / archive_rel).exists():
+                logger.warning(
+                    "Stranded hot DB %s is indexed but Parquet %s is missing — "
+                    "NOT deleting (archive incomplete)",
+                    name,
+                    archive_rel,
+                )
+                continue
+            for suffix in ("", "-wal", "-shm"):
+                sidecar = db_path.parent / (db_path.name + suffix)
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "Retry deleting stranded %s failed (retry next pass): %s",
+                        sidecar.name,
+                        exc,
+                    )
 
     def _index_path(self) -> Path:
         return self._archive_dir / "index.json"

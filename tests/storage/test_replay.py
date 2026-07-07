@@ -354,3 +354,56 @@ async def test_play_directory_no_archive_unchanged(tmp_path: Path) -> None:
     assert queue.qsize() == 3
     vals = sorted(r.value for r in [queue.get_nowait() for _ in range(3)])
     assert vals == pytest.approx([1.0, 2.0, 3.0])
+
+
+async def test_play_directory_overlap_day_unions_hot_and_cold(tmp_path: Path) -> None:
+    """F4: a day present in BOTH the archive and a restored hot .db replays the
+    union+dedup, not hot-only.
+
+    After rotation the hot DB is deleted; a manual restore / backdated import can
+    recreate a hot DB for that archived day. The old code computed
+    cold_days = archived − hot, so an overlap day fell through to the hot-only
+    `play` path and the archived rows vanished — diverging from query_rows'
+    union+dedup contract (archive_reader.py).
+    """
+    pytest.importorskip("pyarrow")
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = _ARCHIVE_TODAY - timedelta(days=40)
+
+    # Archive two rows for old_day, then rotate (hot DB deleted).
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
+            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
+        ],
+    )
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    await svc.run_once(now=_ARCHIVE_TODAY)
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    # Restore a hot DB for the SAME archived day: one exact-duplicate row (hour13)
+    # + one genuinely new row (hour14). Union must dedup the dup, keep the extra.
+    _write_day(
+        data_dir,
+        [
+            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
+            _reading("Т12", 150.0, ts=old_day.replace(hour=14)),
+        ],
+    )
+    assert (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    broker = DataBroker()
+    queue = await broker.subscribe("sub", maxsize=100)
+    replay = ReplaySource(broker, speed=0.0)
+    count = await replay.play_directory(data_dir, archive_dir=archive_dir)
+
+    received = [queue.get_nowait() for _ in range(queue.qsize())]
+    vals = sorted(r.value for r in received)
+    # Archived-only 200.0 present (RED discriminator), restored 150.0 present,
+    # shared 180.0 exactly once (dedup) → 3 rows total.
+    assert vals == pytest.approx([150.0, 180.0, 200.0]), f"union/dedup wrong: {vals}"
+    assert count == 3 and len(received) == 3
