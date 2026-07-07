@@ -7,6 +7,130 @@
 
 ---
 
+## [0.59.0] — 2026-07-07 — NaN-доктрина: статус как дискриминатор от Reading до экспорта
+
+Сквозная доктрина обращения с non-finite значениями: один канонический предикат
+`Reading.is_usable()` решает валидность по `status`, а не по float; sentinel-persistence
+устраняет молчаливую потерю error-строк; каждый reader декодирует хранимые пары
+`(value, status)` на read-boundary, так что sentinel или legacy `±inf` не всплывёт
+числом. Плюс retrofit validity-guard’ов на rate/diagnostics/vacuum-путях, debounced
+NaN-эскалация на интерлоках и reset-not-drop guard на rate-clock. Волны фиксов прошли
+внешнее ревью и phase-gate re-check.
+
+### Added
+
+- **Канонический предикат `Reading.is_usable()` на границе Reading.** usable ⟺
+  `status == OK` и значение finite — `status` дискриминатор на каждом слое, никогда
+  float. OK-класс ровно `{OK}`: драйверы паруют каждый не-OK статус с non-finite
+  sentinel, так что предикат совпадает со старыми float-guard’ами, добавляя
+  defense-in-depth. Переведены ingest-edge’и: cooldown `_consume_loop` (был
+  без guard — NaN отравлял детектор), sensor-diag и vacuum-trend (были
+  `_push_if_finite` float-проверки). Non-usable readings по-прежнему обновляют
+  staleness (liveness ≠ validity) (51044b8).
+- **Sentinel-persistence для non-finite readings + writer-контракт.** Non-finite
+  с error-статусом раньше молча дропались (sqlite3 маппит NaN в NULL против NOT NULL)
+  — persistence-first инвариант был ложен для `SENSOR_ERROR`/`TIMEOUT`. Теперь все
+  non-finite пишутся как единый finite sentinel (`-8.888e88`, вне физдиапазона любого
+  канала, bit-exact через REAL), статус — дискриминатор. Контракт: sentinel-строка с
+  OK-статусом CRITICAL-логируется и дропается per-row. Новый `storage/sentinel.py`
+  даёт encode/decode; decode никогда не отдаёт non-usable строку числом
+  (fde6ef5, dd31f21).
+- **Декодирование sentinel-строк на всех read-boundary.** Десять read-boundary
+  (xlsx pivot, archive reader sqlite+parquet, web `_query_history`, parquet
+  export+read, csv, hdf5, replay, GUI history-feed) декодируют хранимые пары
+  `(value, status)` — sentinel или legacy raw `±inf` не всплывёт числом. Ячейки
+  таблиц пустеют, JSON → null, бинарные форматы несут NaN; колонка `status`
+  сохраняется как дискриминатор. Второй проход добрал reports, replay-engine,
+  calibration-fitter и experiment-readings; extraction калибровки теперь дропает
+  error-статус пару, чей value в диапазоне (старые range-check её принимали)
+  (4ad43ec, 876307e).
+- **Debounced-эскалация для устойчиво non-usable интерлок-readings.** Non-usable
+  reading (NaN / inf / error-статус — по `is_usable`, не по float) на
+  interlock-protected канале больше не проваливается молча: каждый сэмпл
+  CRITICAL-логируется + поднимает alarm-v2; ≥5 подряд на охвате ≥10 s (measurement
+  time, config `nonusable_escalation`, strict-typed fail-closed parse) эскалируют
+  через новый `SafetyManager.on_interlock_dead_channel`, который латчит FAULT только
+  в RUNNING — idle dead-sensor не блокирует recovery, активно греемая зона с dead-sensor
+  латчит FAULT. Т1–Т10 — interlock-only каналы; это закрывает их fail-open разрыв
+  (77e9aa0).
+
+### Changed
+
+- **Retrofit HI-2 / D-C19 / ME-15 validity-guard’ов под доктрину.** Feed
+  rate-estimator’а гейтится на `is_usable()` — finite value с error-статусом больше
+  не доходит до эстиматора; orphaned `_push_if_finite` удалён. `sensor_diagnostics`,
+  `vacuum_trend`, `rate_estimator` держат численно-нагруженные guard’ы (NaN
+  health-floor, log-domain `P≤0` + finite-floor, OLS-знаменатель) — status-less
+  float-API нужны локальные fail-closed floor’ы для прямых вызывающих; комментарии
+  привязывают каждый к доктрине, чтобы будущие проходы их не сняли (cd74a7d).
+
+### Fixed
+
+- **rate-estimator clock-jump guard — reset-not-drop.** Backward NTP-шаг оставлял
+  stale future-сэмплы в буфере (negative span → `min_span_s` gate возвращал None до
+  maxlen-eviction) — 5 K/min защита слепла практически навсегда после permanent-шага.
+  Теперь любой backward-gap, или forward-gap >4× медианного inter-sample периода
+  буфера канала, чистит буфер канала и якорится на текущем сэмпле: слепота ограничена
+  окном ~30 s (измерено в тесте). Measurement-time сохранён; per-channel; без нового
+  config (фактор — ратифицированная константа) (6e630e2).
+- **Закрытие phase-gate findings на escalation/rate-путях.** dead-channel эскалация
+  латчит `escalated`-флаг только если SafetyManager реально faulted (канал, умерший в
+  RUN_PERMITTED, больше не течёт escalated-окном, которое не faulted бы в RUNNING);
+  non-usable `±inf`, чьё направление удовлетворяет matching interlock-условию,
+  insta-trip’ает как до debounce (dangerous-side evidence), NaN и safe-side inf держат
+  debounce; собственный rate-estimator SafetyManager гейтит ingest на `is_usable()`;
+  backward-gap в пределах `max(1 s, 0.5× median poll)` дропает единичный сэмпл вместо
+  reset (benign jitter не голодает эстиматор ниже `min_points`, genuine NTP-шаги всё
+  ещё reset) (dd46122).
+- **Закрытие phase-gate findings на presentation-путях.** replay_session декодирует
+  строки до republish (raw sentinel доходил до PUB-порта); `curve_transforms` пишет
+  lowercase-статус через `enum.value`, decode case-fold’ит статус как defense;
+  pressure-plot рендерит NaN разрывом линии (`connect=finite`) вместо подстановки
+  positive log-Y fallback; blank-ячейки archived-CSV парсятся в NaN, не 0.0
+  (5b77ffd).
+- **Drift-accumulator на rate-clock drops + case-folded replay-статусы.** Пять подряд
+  within-tolerance backward-сэмплов эскалируют drop в buffer-reset (re-anchor +
+  WARNING) — устойчивый backward measurement-time drift больше не голодает 5 K/min
+  защиту молча; слепота ограничена refill-окном. Replay-пути case-fold’ят хранимые
+  статусы до enum-реконструкции, так что legacy uppercase не-OK статус не падает в OK
+  и escape masking (9d1e79b).
+
+### Known Issues
+
+- **Устойчивый backward measurement-time drift в пределах jitter-tolerance** сбрасывает
+  эстиматор после 5 подряд drops (ограниченный ~30 s re-arm). До этого порога отдельные
+  benign backward-jitter’ы дропаются пооднострочно — by design.
+- **Decode case-folded.** Статус нормализуется к lowercase на чтении; legacy uppercase
+  не-OK строки маскируются корректно, но канон хранимого статуса — lowercase
+  (production никогда не пишет uppercase OK).
+- **cold_rotation остаётся lossless by design.** Архивная копия не декодирует sentinel
+  — маскирование делают все parquet-reader’ы на чтении; legacy-строки миграции не
+  требуют (не-OK статус их маскирует).
+
+### Test baseline
+
+- Полный `pytest -q` — зелёный: 3541 passed, 2 skipped (+64 к 3477 в 0.58.0).
+  ruff clean.
+
+### Tags
+
+- `v0.59.0` → см. merge-коммит на master.
+
+### Selected commits in this release
+
+- 51044b8 — `Reading.is_usable()` доктрина-предикат
+- fde6ef5 — sentinel-persistence + writer-контракт
+- 4ad43ec, 876307e — decode на всех read-boundary
+- cd74a7d — retrofit HI-2 / D-C19 / ME-15 guard’ов
+- 77e9aa0 — debounced NaN-эскалация на интерлоках
+- 6e630e2 — rate-clock reset-not-drop guard
+- dd46122, 5b77ffd — phase-gate findings (escalation/rate + presentation)
+- 9d1e79b — drift-accumulator + case-folded replay-статусы
+- dd31f21 — align persistence-pin’ов под sentinel-доктрину
+
+---
+
+---
 ## [0.58.0] — 2026-07-07 — периметр мониторинга: read-only REST, IPC-caps, path jail, cooldown-baseline
 
 Пакет hardening-изменений по периферии: read-only REST-фасад для мониторинга,

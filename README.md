@@ -15,7 +15,7 @@ Built for ASC LPI (the Millimetron project).
 
 ## Status
 
-- **Latest release:** v0.58.0 (2026-07-07)
+- **Latest release:** v0.59.0 (2026-07-07)
 - **Tests:** 3248 test functions across 303 files
 - **Production status:** stable; the LabVIEW VI is fully replaced
 
@@ -51,7 +51,7 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
 
 ## Implemented workflows
 
-Fully functional in v0.58.0:
+Fully functional in v0.59.0:
 
 - **Knowledge base (RAG):** local semantic search over the experiment archive,
   vault notes, the operator log, and the `data/knowledge/` corpus
@@ -198,7 +198,7 @@ cryodaq-rag-search               # semantic search over the knowledge base
 
 ## Configuration
 
-Active configuration files as of v0.58.0:
+Active configuration files as of v0.59.0:
 
 - `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels,
   `chamber.volume_l` for the F13 leak rate
@@ -359,7 +359,7 @@ trail for post-hoc review.
 
 ## Known limitations
 
-As of v0.58.0:
+As of v0.59.0:
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
   range `[3.7.0, 3.51.3)` (F25). Backport-safe: 3.44.6, 3.50.7 (pass without the
