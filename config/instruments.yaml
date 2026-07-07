@@ -82,13 +82,31 @@ instruments:
     target_rate_hz: 1.0
 
 # Keithley 2604B TSP dead-man watchdog (firmware backstop below the host
-# SafetyManager). DEFAULT OFF — go-live is a separate bench-verified phase.
-# When enabled, the driver uploads tsp/cryodaq_wdog.lua on connect and pets
-# it on every poll; a missed deadline kills both SMU outputs in firmware and
-# latches a trip the host reconciles to FAULT.
+# SafetyManager). Operator-selected mode (default off):
+#
+#   mode          host behaviour on connect
+#   ------------  ------------------------------------------------------------
+#   off (default) no TSP script; host SafetyManager is the sole authority;
+#                 byte-identical command stream (zero firmware dependency)
+#   best_effort   arm on connect; on arm failure log CRITICAL and continue
+#                 host-only (fail-OPEN on the watchdog layer)
+#   required      arm on connect; connect() raises ONLY when the backstop
+#                 cannot be established (arm failure, incl. an unreadable latch)
+#                 → instrument unavailable → SAFE_OFF held (fail-CLOSED). A
+#                 read-back latched past-trip is logged CRITICAL and proceeds —
+#                 it never blocks (arming clears the latch; outputs are already
+#                 force-OFF'd on connect).
+#
+# Legacy alias: ``enabled: true`` maps to best_effort, ``enabled: false`` to
+# off (mode wins if both are present).
+#
+# CAVEAT: the firmware run-mechanism (trigger.timer, non-blocking FIFO) is
+# still bench-unverified — see tsp/cryodaq_wdog.lua. ``required`` gates only on
+# host-observable arm success (incl. a readable latch), NOT on proven firmware
+# timer behaviour.
 keithley:
   watchdog:
-    enabled: false
+    mode: "off"   # quote: bare off/on are YAML booleans
     timeout_s: 5.0
 
 chamber:

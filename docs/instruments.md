@@ -119,10 +119,37 @@ print('Found:', dev.serial_number if dev else None)
 в коде появилось `:SOUR:VOLT` или подобное, это баг.
 
 **Host-side P=const режим:** текущая реализация держит `P = const`
-программным циклом на хосте. Плановый Phase 3 — TSP-watchdog
-(`tsp/cryodaq_wdog.lua`, загружается драйвером `keithley_2604b.py`, но
-активная TSP-side safety-регуляция ещё **не введена в строй** — go-live
-требует hardware verification).
+программным циклом на хосте.
+
+**TSP dead-man watchdog (firmware backstop):** прошивочный бэкстоп
+под host SafetyManager, выбирается оператором через
+`config/instruments.yaml` → `keithley.watchdog.mode`:
+
+| mode | поведение на connect | покрытие |
+|------|----------------------|----------|
+| `off` (по умолчанию) | TSP-скрипт не загружается; host SafetyManager — единственный авторитет; байт-идентичный поток команд | только host |
+| `best_effort` | взвести на connect; при неудаче взвода — лог CRITICAL и продолжить host-only (fail-OPEN на слое watchdog) | stall-recovery + latch + reconcile |
+| `required` | взвести на connect; при неудаче взвода — `connect()` бросает исключение → прибор недоступен → держится SAFE_OFF (fail-CLOSED) | stall-recovery + latch + reconcile |
+
+Легаси-алиас: `enabled: true` → `best_effort`, `enabled: false` → `off`
+(при наличии обоих ключей выигрывает `mode`).
+
+Иерархия покрытия (честно):
+- `off` — защита только на хосте.
+- `best_effort` / `required` (текущий механизм) — бэкстоп на
+  **stall-recovery** (запоздавший pet убивает выходы + защёлкивает
+  trip для reconcile). Полную смерть хоста этот механизм **не**
+  покрывает: `cryodaq_wdog_run()` только взводит и возвращается (не
+  крутит цикл — иначе занял бы single-threaded FIFO), а дедлайн
+  проверяется внутри `cryodaq_wdog_pet()` на каждом polling-тике.
+- Полноценный dead-man (автономный цикл / trigger.timer, срабатывающий
+  без вызовов хоста) — единственный оставшийся **bench-verified**
+  апгрейд. До него host-death прикрыт crash-recovery force-OFF на
+  следующем connect (`keithley_2604b.py`).
+
+Механизм запуска в прошивке (trigger.timer, неблокирующий FIFO)
+**не проверен на стенде**; `required` гейтит только на host-наблюдаемых
+взводе и latched-trip, не на доказанном поведении firmware-таймера.
 
 **Disconnect требует emergency_off first** — автоматизировано в
 engine, но при ручном вытаскивании USB-кабеля лучше сначала

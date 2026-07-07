@@ -1780,15 +1780,39 @@ def _load_drivers(
             from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
             wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
+            # Operator-selected mode (off|best_effort|required) wins; else fall
+            # back to the legacy strict-bool ``enabled`` alias. An unknown mode
+            # string makes the driver raise ValueError → engine config load
+            # fails (fail-closed).
+            if "mode" in wdog_cfg:
+                wdog_mode = wdog_cfg["mode"]
+                wdog_enabled = None
+            else:
+                wdog_mode = None
+                # Strict-bool, fail-closed: a quoted YAML string ("false") is
+                # truthy in Python and would arm this safety path on a config
+                # typo. Only the literal boolean True enables it.
+                wdog_enabled = wdog_cfg.get("enabled", False) is True
+            wdog_timeout_s = float(wdog_cfg.get("timeout_s", 5.0))
+            # Spurious-trip guard: pets ride the poll loop, so a firmware
+            # deadline shorter than ~2 poll intervals risks a false trip on a
+            # single slow poll. Warn (do not fail, do not clamp) — the operator
+            # owns the trade-off.
+            _armed_mode = (wdog_mode not in (None, "off")) or bool(wdog_enabled)
+            if _armed_mode and wdog_timeout_s < 2.0 * poll_interval_s:
+                logger.warning(
+                    "Keithley watchdog timeout_s=%.2f is < 2×poll_interval_s=%.2f "
+                    "— a single slow poll may spurious-trip the firmware watchdog",
+                    wdog_timeout_s,
+                    poll_interval_s,
+                )
             driver = Keithley2604B(
                 name,
                 resource,
                 mock=mock,
-                # Strict-bool, fail-closed: a quoted YAML string ("false") is
-                # truthy in Python and would arm this bench-blocked safety path
-                # on a config typo. Only the literal boolean True enables it.
-                watchdog_enabled=wdog_cfg.get("enabled", False) is True,
-                watchdog_timeout_s=float(wdog_cfg.get("timeout_s", 5.0)),
+                watchdog_mode=wdog_mode,
+                watchdog_enabled=wdog_enabled,
+                watchdog_timeout_s=wdog_timeout_s,
             )
         elif itype == "thyracont_vsp63d":
             from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
