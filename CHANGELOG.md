@@ -7,6 +7,136 @@
 
 ---
 
+## [0.58.0] — 2026-07-07 — периметр мониторинга: read-only REST, IPC-caps, path jail, cooldown-baseline
+
+Пакет hardening-изменений по периферии: read-only REST-фасад для мониторинга,
+socket-level ограничения на ZMQ, confinement путей калибровки, плюс новый
+контур сравнения охлаждений с эталоном и inert-плумбинг аппаратного TSP-watchdog
+для Keithley (по умолчанию выключен, go-live отдельной bench-фазой). Замыкающий
+safety-фикс закрывает третий call-site класса CR-2. Волна прошла внешнее ревью;
+edge-фиксы вошли отдельными коммитами.
+
+### Added
+
+- **Read-only REST-фасад `/api/v1`** поверх существующего dashboard-кэша:
+  `state`, `readings`, `temperatures`, `pressure`, `history`, `alarms`,
+  `experiment`, `log` — только GET, Pydantic-модели ответов работают как
+  field-whitelist (operator / sample / notes / config_snapshot / пути
+  артефактов / авторы лога не уходят в сеть), middleware отбивает тело >1 MiB
+  до любого обращения к engine. Loopback-only posture без изменений; Swagger
+  `/docs` подключён к дэшборду (cb2c235).
+- **Per-cooldown fingerprint + сравнение с золотым эталоном (backend).**
+  `CooldownFingerprint` (длительность, `T_cold_final`, время до базы и до 50 K,
+  предельный вакуум), один JSON на охлаждение под `data/cooldown_history/`,
+  указатель `baseline.json` на эталонное охлаждение, log-space сравнение вакуума
+  с настраиваемыми порогами. Врезка в `_on_cooldown_end` до `_buffer.clear()`,
+  под флагом `cooldown_baseline.enabled` (default false), глотает все ошибки —
+  обработка конца охлаждения на ней сломаться не может (d2f9798).
+- **GUI-карточка «История охлаждений» с overlay эталона.** Таблица fingerprint’ов
+  в overlay `Архив` (дата / длительность / T_хол / до базы / вердикт), pin-as-эталон
+  через backend’овый `baseline.json`, delta к эталону; компактный verdict-badge
+  (НОРМА / ДЕГРАДАЦИЯ / НЕТ ДАННЫХ) в `Аналитика`, скрыт при выключенной фиче или
+  без закреплённого эталона (3ef27cb).
+- **Плумбинг Keithley TSP dead-man watchdog (inert, default-OFF).**
+  `tsp/cryodaq_wdog.lua` — чистый watchdog для обоих SMU-каналов: по пропущенному
+  deadline гасит оба выхода и латчит `cryodaq_wdog_tripped`. Драйвер получает
+  arm-on-connect / pet-on-poll / disarm-on-stop под флагом
+  `keithley.watchdog.enabled` (default false); при выключенном флаге поток команд
+  байт-в-байт идентичен прежнему (test-proven). SafetyManager сверяет firmware-trip
+  в `FAULT_LATCHED`, так что сработавший watchdog нельзя молча пере-взвести.
+  Аппаратного взаимодействия нет; go-live — отдельная bench-фаза (195f6f0).
+
+### Changed
+
+- **stop_source-интерлок латчит FAULT при неподтверждённом OFF.** Ветка
+  `stop_source` вызывала `emergency_off()`, но игнорировала возвращённый `bool`:
+  неподтверждённый OFF (`False`) всё равно мягко останавливал в `SAFE_OFF`.
+  Теперь `False` эскалирует в `_fault` (`FAULT_LATCHED`), зеркалируя два других
+  call-site класса CR-2 (e2cdf83).
+- **Socket-level size-caps на ZMQ REP/SUB + bounded msgpack.** `ZMQ_MAXMSGSIZE`
+  на командном REP-сокете (256 KiB) и data-SUB (2 MiB), выставлен до bind/connect
+  — libzmq отбрасывает oversize-кадры до аллокации. `_unpack_reading` получает
+  defensive `len()`-guard и per-type `max_*_len` (у msgpack 1.x нет
+  `max_buffer_size` на `unpackb`) (c8e6e1a).
+- **Пути импорта/экспорта калибровки confined в exports-каталог.** Новый
+  `core/path_jail.py` `resolve_within()`: realpath + commonpath + normcase,
+  отбивает `~`, absolute-outside-base, traversal и symlink-escape (смешанные
+  Windows-диски / UNC отбивает сам `commonpath` через `ValueError`). Все 5
+  operator-supplied path-параметров в командах калибровки резолвятся внутри
+  существующего exports-каталога CalibrationStore; escape возвращает
+  `{ok: false}` (669abd7).
+
+### Fixed
+
+- **Clamp `readings_history` по каналам/лимиту + LIMIT в SQL.** Клампы в
+  `_read_readings_history` — общем choke-point для ZMQ-обработчика и async-обёртки:
+  строк-на-канал ≤100k, список каналов ≤64, LIMIT протолкнут в per-file запрос,
+  чтобы unbounded `fetchall` не голодал engine. Non-positive limit floored к 1
+  (`limit=0` раньше резал `result[-0:]` — весь список) (cd2e3ae).
+- **Hardening edge’ей волны A по итогам внешнего ревью.** watchdog-enable требует
+  литеральный boolean `true` (quoted YAML `"false"`/`"true"`/`"0"` мог взвести
+  bench-blocked watchdog через `bool()`-truthiness — fail-closed parse);
+  `readings_history` запрашивает LIMIT per-channel (общий LIMIT давал быстрому
+  каналу голодить медленный до нуля строк); `/api/v1/state` и `/api/v1/alarms`
+  рекурсивно редактят `acknowledged_by` (plain-dict endpoint’ы обходили
+  field-whitelist и утекали identity оператора) (b132fab).
+- **strict-bool флаг `cooldown_baseline` + defer/throttle дисковых чтений.**
+  Quoted YAML `enabled: "false"` больше не включает карточку/badge (тот же
+  fail-closed parse); populate карточки отложен до первого `showEvent`, badge
+  пере-читает history-каталог не чаще раза в 5 s — убирает синхронный
+  fingerprint-globbing из конструкции shell и смены фаз (7d09dae).
+
+### Infrastructure
+
+- Регенерация `requirements-lock.txt` (pip-compile из pyproject): добавлены
+  недостающие pin’ы `lancedb`, `pypdf`, `tzdata`, `httpx`, найден stale
+  `pytest-timeout`, `pillow` исправлен на 11.3.0 (старый pin нарушал `<12`).
+  Новый stdlib-only `scripts/check_lock_drift.py` сравнивает PEP 503-нормализованные
+  top-level имена с lock и валит CI на drift (ubuntu + windows раннеры) (730a263).
+- Индекс модулей `CLAUDE.md` перестроен из docstring’ов (недоставало 80 живых
+  модулей: целые подсистемы `agents/`, `sinks/`, `replay/`, `replay_engine/`,
+  `utils/`, GUI `state`/`views`/`overlays`/`shared`); новый doc-lint тест требует,
+  чтобы каждый живой модуль был проиндексирован, а каждый индексированный путь
+  существовал (8d89f95, d4954ca).
+
+### Known Issues
+
+- **Windows frozen-build smoke для регенерированного lock — manual gate pending.**
+  Проверка RAG lancedb-import + parquet `tz=UTC` на замороженной Windows-сборке
+  ещё не прогнана; закрыть до следующего релиза.
+- **TSP-watchdog inert за `keithley.watchdog.enabled=false`.** Go-live bench-gated:
+  run-loop владеет однопоточным TSP-интерпретатором, pet’ы нельзя обслужить из
+  того же FIFO — нужна `trigger.timer` / background-script переработка
+  (задокументирована в header `tsp/cryodaq_wdog.lua`).
+- **Hardlink-escape на truncating csv / `.340` экспортах — принято.** Экспортный
+  каталог operator-controlled; риск ограничен доверенным периметром.
+
+### Test baseline
+
+- Полный `pytest -q` — зелёный: 3477 passed, 2 skipped (+84 к 3393 в 0.57.0).
+  ruff clean.
+
+### Tags
+
+- `v0.58.0` → см. merge-коммит на master.
+
+### Selected commits in this release
+
+- e2cdf83 — stop_source-интерлок fail-closed (CR-2 третий call-site)
+- c8e6e1a — ZMQ REP/SUB size-caps + bounded msgpack
+- cd2e3ae — clamp readings_history + LIMIT в SQL
+- cb2c235 — read-only REST `/api/v1` + Swagger
+- 669abd7 — path_jail confinement путей калибровки
+- 195f6f0 — Keithley TSP-watchdog плумбинг (inert, default-OFF)
+- d2f9798 — per-cooldown fingerprint + golden-baseline (backend)
+- 3ef27cb, 7d09dae — cooldown history card + strict-bool флаг
+- 730a263 — регенерация lock + CI drift-gate
+- b132fab — hardening edge’ей волны A (внешнее ревью)
+- 8d89f95, d4954ca — перестроенный индекс `CLAUDE.md` + doc-lint
+
+---
+
+---
 ## [Unreleased]
 
 ---
