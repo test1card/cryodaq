@@ -335,6 +335,14 @@ def create_app() -> FastAPI:
                     pass
         logger.info("Веб-сервер CryoDAQ остановлен")
 
+    # Read-only REST facade + Swagger. Imported here (not at module top) to
+    # keep the server<->rest_api import non-circular.
+    from cryodaq.web.rest_api import BodySizeLimitMiddleware
+    from cryodaq.web.rest_api import router as rest_router
+
+    application.add_middleware(BodySizeLimitMiddleware)
+    application.include_router(rest_router)
+
     # Статические файлы
     if _STATIC_DIR.exists():
         application.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -459,7 +467,8 @@ padding:10px 12px;margin-bottom:8px}
 </style>
 </head>
 <body>
-<div class="header"><h1>CryoDAQ Monitor</h1><span class="ver">v__VERSION__</span></div>
+<div class="header"><h1>CryoDAQ Monitor</h1>
+ <span class="ver"><a href="/docs" style="color:#58a6ff;text-decoration:none">API docs</a> · v__VERSION__</span></div>
 <div class="status-bar">
  <span class="item" id="safety">—</span>
  <span class="item" id="uptime">Аптайм: --:--:--</span>

@@ -208,13 +208,17 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/calibration_acquisition.py` — непрерывный сбор SRDG при калибровке
 - `src/cryodaq/core/channel_manager.py` — channel name/visibility singleton (get_channel_manager())
 - `src/cryodaq/core/channel_state.py` — per-channel state tracker for alarm evaluation (staleness, fault history)
+- `src/cryodaq/core/cooldown_alarm.py` — CooldownAlarm: predictor-based trajectory deviation alarm + measurement watchdog
 - `src/cryodaq/core/disk_monitor.py` — мониторинг свободного места на диске
+- `src/cryodaq/core/event_bus.py` — lightweight pub/sub event bus для engine events (не Reading-данные)
 - `src/cryodaq/core/event_logger.py` — автоматическое логирование системных событий
 - `src/cryodaq/core/experiment.py` — управление экспериментами, фазы (ExperimentPhase)
 - `src/cryodaq/core/housekeeping.py`
 - `src/cryodaq/core/interlock.py` — threshold detection, delegates actions to SafetyManager
 - `src/cryodaq/core/operator_log.py`
+- `src/cryodaq/core/path_jail.py` — resolve_within(): confinement путей внутри базовой директории (ME-6, calibration import/export)
 - `src/cryodaq/core/phase_labels.py` — canonical Russian phase labels (shared)
+- `src/cryodaq/core/physical_alarms_config.py` — загрузка `config/physical_alarms.yaml` (tunables для CooldownAlarm и VacuumGuard)
 - `src/cryodaq/core/rate_estimator.py` — rolling dT/dt estimator with min_points gate
 - `src/cryodaq/core/safety_broker.py` — dedicated safety channel (overflow=FAULT)
 - `src/cryodaq/core/safety_manager.py` — 6-state FSM, fail-on-silence, rate limiting
@@ -222,6 +226,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/core/sensor_diagnostics.py` — noise/drift/correlation health scoring (numpy exception)
 - `src/cryodaq/core/smu_channel.py` — SmuChannel enum + normalize helper for Keithley channel IDs
 - `src/cryodaq/core/user_preferences.py` — persistent user preferences for experiment-creation forms
+- `src/cryodaq/core/vacuum_guard.py` — VacuumGuard: pressure × reference-temperature alarm для холодного криостата
 - `src/cryodaq/core/zmq_bridge.py` — ZMQ PUB/SUB + REP/REQ command server
 - `src/cryodaq/core/zmq_subprocess.py` — subprocess isolation for ZMQ bridge
 
@@ -232,6 +237,9 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/analytics/calibration_fitter.py` — post-run pipeline (extract, downsample, breakpoints, fit)
 - `src/cryodaq/analytics/cooldown_predictor.py` — progress-variable ensemble cooldown ETA
 - `src/cryodaq/analytics/cooldown_service.py` — async cooldown orchestration
+- `src/cryodaq/analytics/cooldown_fingerprint.py` — per-cooldown fingerprint: compact metrics for one cooldown cycle
+- `src/cryodaq/analytics/cooldown_compare.py` — compare one cooldown fingerprint against the golden baseline
+- `src/cryodaq/analytics/leak_rate.py` — vacuum leak rate estimator (F13)
 - `src/cryodaq/analytics/plugin_loader.py` — hot-reload plugin pipeline (5s mtime polling)
 - `src/cryodaq/analytics/steady_state.py` — T∞ predictor via exponential decay fit
 - `src/cryodaq/analytics/vacuum_trend.py` — BIC-selected vacuum pump-down extrapolation
@@ -245,6 +253,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/drivers/instruments/etalon_multiline.py` — Etalon MultiLine (TCP/IP) интерферометрическая метрология длины; averaged/continuous + burst-захват вибрации в Parquet
 - `src/cryodaq/drivers/transport/gpib.py` — async GPIB transport via PyVISA
 - `src/cryodaq/drivers/transport/serial.py` — async serial transport via pyserial-asyncio
+- `src/cryodaq/drivers/transport/tcp.py` — async TCP transport для line-based ASCII протоколов (Etalon MultiLine)
 - `src/cryodaq/drivers/transport/usbtmc.py` — async USB-TMC transport via PyVISA
 
 **Уведомления**
@@ -253,7 +262,60 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/notifications/telegram_commands.py` — interactive command bot (/status /temps /pressure)
 - `src/cryodaq/notifications/escalation.py` — timed escalation service
 - `src/cryodaq/notifications/periodic_report.py` — scheduled Telegram reports with charts
+- `src/cryodaq/notifications/charts.py` — chart rendering для Telegram-уведомлений
+- `src/cryodaq/notifications/composition_photo_handler.py` — F27 composition photo handler для Telegram-бота
 - `src/cryodaq/notifications/_secrets.py` — SecretStr wrapper for token leak prevention
+
+**Агенты — Assistant (live observer)**
+
+- `src/cryodaq/agents/assistant/live/agent.py` — AssistantLiveAgent: local LLM agent observing engine events
+- `src/cryodaq/agents/assistant/live/context_builder.py` — context assembler для LLM prompts
+- `src/cryodaq/agents/assistant/live/output_router.py` — routing для LLM responses
+- `src/cryodaq/agents/assistant/live/prompts.py` — prompt templates
+
+**Агенты — Assistant (query, F30)**
+
+- `src/cryodaq/agents/assistant/query/agent.py` — AssistantQueryAgent: F30 Live Query Agent orchestrator
+- `src/cryodaq/agents/assistant/query/router.py` — dispatches QueryIntent to ServiceAdapters
+- `src/cryodaq/agents/assistant/query/intent_classifier.py` — intent classifier
+- `src/cryodaq/agents/assistant/query/chart_dispatcher.py` — fire-and-forget chart attachment для query responses
+- `src/cryodaq/agents/assistant/query/prompts.py` — prompt templates
+- `src/cryodaq/agents/assistant/query/ru_labels.py` — Russian display-name helpers
+- `src/cryodaq/agents/assistant/query/schemas.py` — dataclasses и enums
+- `src/cryodaq/agents/assistant/query/adapters/alarm_adapter.py` — wraps AlarmEngine
+- `src/cryodaq/agents/assistant/query/adapters/archive_adapter.py` — read-only experiment archive access
+- `src/cryodaq/agents/assistant/query/adapters/broker_snapshot.py` — latest-per-channel cache subscribing to DataBroker
+- `src/cryodaq/agents/assistant/query/adapters/composite_adapter.py` — parallel fetch of engine state для composite_status
+- `src/cryodaq/agents/assistant/query/adapters/cooldown_adapter.py` — wraps CooldownService.last_prediction()
+- `src/cryodaq/agents/assistant/query/adapters/experiment_adapter.py` — wraps ExperimentManager
+- `src/cryodaq/agents/assistant/query/adapters/rag_adapter.py` — semantic search over F32 RAG corpus
+- `src/cryodaq/agents/assistant/query/adapters/sqlite_adapter.py` — range stats queries
+- `src/cryodaq/agents/assistant/query/adapters/vacuum_adapter.py` — wraps VacuumTrendPredictor.get_prediction()
+
+**Агенты — Assistant (shared)**
+
+- `src/cryodaq/agents/assistant/shared/audit.py` — audit logger: persists every LLM call для post-hoc review
+- `src/cryodaq/agents/assistant/shared/ollama_client.py` — Ollama HTTP client для local LLM inference
+- `src/cryodaq/agents/assistant/shared/report_intro.py` — synchronous Гемма report intro generator для DOCX pipeline
+- `src/cryodaq/agents/assistant/shared/retention.py` — audit log retention (delete JSON older than retention_days)
+
+**Агенты — RAG (F32)**
+
+- `src/cryodaq/agents/rag/cli.py` — `cryodaq-rag-index` / `cryodaq-rag-search` CLI
+- `src/cryodaq/agents/rag/document_loader.py` — load + chunk corpus documents для embedding
+- `src/cryodaq/agents/rag/embeddings.py` — embeddings client
+- `src/cryodaq/agents/rag/indexer.py` — corpus → embeddings → LanceDB
+- `src/cryodaq/agents/rag/searcher.py` — query embedding → top-K LanceDB lookup
+- `src/cryodaq/agents/rag/source_labels.py` — pretty source labels для citations
+- `src/cryodaq/agents/rag/loaders/pdf_loader.py` — PDF ingestion для equipment manuals
+
+**Sinks (F31 export fan-out)**
+
+- `src/cryodaq/sinks/base.py` — Sink ABC + payload dataclasses
+- `src/cryodaq/sinks/registry.py` — SinkRegistry: load sinks from YAML, concurrent dispatch
+- `src/cryodaq/sinks/vault_sink.py` — write a Markdown note to a filesystem vault directory
+- `src/cryodaq/sinks/webhook_sink.py` — POST experiment payload to configured URL
+- `src/cryodaq/sinks/rag_index_sink.py` — rebuild RAG corpus on finalize (F32 Stage 2)
 
 **GUI — Shell (Phase I.1 chrome)**
 
@@ -264,6 +326,7 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/shell/overlay_container.py` — central content container (overlay host)
 - `src/cryodaq/gui/shell/new_experiment_dialog.py` — experiment creation dialog (B.8 rebuild)
 - `src/cryodaq/gui/shell/experiment_overlay.py` — experiment management overlay (B.8)
+- `src/cryodaq/gui/shell/composition_photos_widget.py` — F27 composition photos section для ExperimentOverlay
 
 **GUI — Overlay primitives (`shell/overlays/_design_system/`)**
 
@@ -272,9 +335,30 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 - `src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py` — sticky top bar with back navigation
 - `src/cryodaq/gui/shell/overlays/_design_system/_showcase.py` — standalone visual showcase for overlay primitives
 
+**GUI — Shell overlays (shell-v2 operator surfaces)**
+
+- `src/cryodaq/gui/shell/overlays/alarm_panel.py` — dual-engine alarm overlay (Phase II.4)
+- `src/cryodaq/gui/shell/overlays/archive_panel.py` — experiment archive overlay (Phase II.2)
+- `src/cryodaq/gui/shell/overlays/calibration_panel.py` — three-mode calibration overlay (Phase II.7)
+- `src/cryodaq/gui/shell/overlays/conductivity_panel.py` — thermal conductivity overlay (Phase II.5)
+- `src/cryodaq/gui/shell/overlays/cooldown_baseline_card.py` — карточка «История охлаждений» + verdict badge (эталонное охлаждение, cooldown baseline)
+- `src/cryodaq/gui/shell/overlays/instruments_panel.py` — instruments + sensor diagnostics overlay (Phase II.8)
+- `src/cryodaq/gui/shell/overlays/keithley_panel.py` — dual-channel Keithley 2604B operator overlay (Phase II.6)
+- `src/cryodaq/gui/shell/overlays/knowledge_base_panel.py` — RAG knowledge base + embedded Гемма chat
+- `src/cryodaq/gui/shell/overlays/multiline_panel.py` — Etalon MultiLine length measurement overlay
+- `src/cryodaq/gui/shell/overlays/multiline_channel_selector.py` — MultiLine channel selector dialog
+- `src/cryodaq/gui/shell/overlays/operator_log_panel.py` — operator journal overlay (Phase II.3)
+
+**GUI — Shell views**
+
+- `src/cryodaq/gui/shell/views/analytics_view.py` — analytics primary view, phase-aware dynamic layout (Phase III.C)
+- `src/cryodaq/gui/shell/views/analytics_widgets.py` — analytics widget registry keyed by YAML config ID
+- `src/cryodaq/gui/shell/views/assistant_insight_panel.py` — operator-facing assistant insight viewer
+
 **GUI — Dashboard (Phase I.1 content)**
 
 - `src/cryodaq/gui/dashboard/dashboard_view.py` — 5-zone dashboard container
+- `src/cryodaq/gui/dashboard/experiment_card.py` — dashboard-плитка активного эксперимента (одна открытая карточка)
 - `src/cryodaq/gui/dashboard/channel_buffer.py` — shared per-channel rolling history store
 - `src/cryodaq/gui/dashboard/dynamic_sensor_grid.py` — width-driven responsive grid of SensorCell widgets
 - `src/cryodaq/gui/dashboard/sensor_cell.py` — single-channel data cell (B.3)
@@ -292,6 +376,18 @@ Invariant: if DataBroker has a reading, it has already been written to SQLite.
 
 - `src/cryodaq/gui/theme.py` — foundation design tokens (colors, fonts, spacing) — 139 tokens, see design-system v1.0.1
 - `src/cryodaq/gui/zmq_client.py` — ZMQ bridge client for GUI (all ZMQ lives in a subprocess)
+
+**GUI — State / utils**
+
+- `src/cryodaq/gui/state/time_window.py` — global historical-window state singleton (one source of truth for history plots)
+- `src/cryodaq/gui/state/time_window_selector.py` — shared time-window selector (state package)
+- `src/cryodaq/gui/utils/plural.py` — Russian plural forms for UI strings
+
+**GUI — Shared widgets (`widgets/shared/`)**
+
+- `src/cryodaq/gui/widgets/shared/prediction_widget.py` — prediction plot: full history + forward horizon with band
+- `src/cryodaq/gui/widgets/shared/pressure_plot.py` — shared pressure plot, scientific-notation log-Y axis
+- `src/cryodaq/gui/widgets/shared/time_window_selector.py` — time-window selector button row widget
 
 **GUI — Ancillary widgets (non-overlay surfaces)**
 
@@ -325,6 +421,8 @@ Phase I.1.
 - `src/cryodaq/storage/hdf5_export.py` — экспорт данных из SQLite в HDF5
 - `src/cryodaq/storage/xlsx_export.py` — экспорт данных в Excel (.xlsx) через openpyxl
 - `src/cryodaq/storage/replay.py` — воспроизведение исторических данных из SQLite через DataBroker
+- `src/cryodaq/storage/archive_reader.py` — unified read layer across SQLite (recent) и Parquet (archived)
+- `src/cryodaq/storage/cold_rotation.py` — cold-storage rotation: SQLite daily → Parquet после age_days threshold
 
 **Reporting**
 
@@ -332,9 +430,26 @@ Phase I.1.
 - `src/cryodaq/reporting/generator.py`
 - `src/cryodaq/reporting/sections.py`
 
+**Replay (curve tooling)**
+
+- `src/cryodaq/replay/cli.py` — `cryodaq-replay-curve`: extract + transform reference curve for replay
+- `src/cryodaq/replay/curve_transforms.py` — pure-function curve transforms for replay mode
+
+**Replay engine**
+
+- `src/cryodaq/replay_engine/server.py` — ZMQ-compatible replacement for `cryodaq.engine` in replay mode
+- `src/cryodaq/replay_engine/sources.py` — source dispatch for the replay engine
+- `src/cryodaq/replay_engine/replay_experiment_stub.py` — minimal experiment manager for replay mode
+- `src/cryodaq/replay_engine/legacy_channel_maps.py` — channel rename mappings for historical recordings
+
+**Utils**
+
+- `src/cryodaq/utils/xml_safe.py` — XML 1.0 compatibility sanitizer for python-docx output
+
 **Web**
 
 - `src/cryodaq/web/server.py`
+- `src/cryodaq/web/rest_api.py` — read-only REST facade (`/api/v1`) with Swagger docs
 
 **Design System**
 
@@ -345,6 +460,7 @@ Phase I.1.
 **Tools**
 
 - `src/cryodaq/tools/cooldown_cli.py`
+- `src/cryodaq/tools/replay_alarm_history.py` — historical alarm replay harness (predictor-based validation)
 
 **TSP**
 

@@ -66,6 +66,7 @@ from cryodaq.core.housekeeping import (
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
     load_channel_landmarks,
     load_physical_alarms_config,
@@ -1204,30 +1205,40 @@ def _run_calibration_command(
         sensor_id = str(cmd.get("sensor_id", "")).strip()
         if not sensor_id:
             raise ValueError("sensor_id is required.")
-        json_path = calibration_store.export_curve_json(
-            sensor_id,
-            Path(str(cmd.get("json_path")).strip())
-            if str(cmd.get("json_path", "")).strip()
-            else None,
-        )
+
+        # ME-6: an operator-supplied path must resolve inside the exports dir.
+        # Empty -> None (store picks its own default location under base_dir).
+        exports_base = calibration_store._exports_dir
+
+        def _confine(key: str) -> Path | None:
+            raw = str(cmd.get(key, "")).strip()
+            if not raw:
+                return None
+            if exports_base is None:
+                raise ValueError("path outside allowed directory")
+            return resolve_within(exports_base, raw)
+
+        try:
+            json_target = _confine("json_path")
+            table_target = _confine("table_path")
+            cof_target = _confine("curve_cof_path")
+            curve_340_target = _confine("curve_340_path")
+        except ValueError:
+            return {"ok": False, "error": "path outside allowed directory"}
+
+        json_path = calibration_store.export_curve_json(sensor_id, json_target)
         table_path = calibration_store.export_curve_table(
             sensor_id,
-            path=Path(str(cmd.get("table_path")).strip())
-            if str(cmd.get("table_path", "")).strip()
-            else None,
+            path=table_target,
             points=int(cmd.get("points", 200)),
         )
         curve_cof_path = calibration_store.export_curve_cof(
             sensor_id,
-            path=Path(str(cmd.get("curve_cof_path")).strip())
-            if str(cmd.get("curve_cof_path", "")).strip()
-            else None,
+            path=cof_target,
         )
         curve_340_path = calibration_store.export_curve_340(
             sensor_id,
-            path=Path(str(cmd.get("curve_340_path")).strip())
-            if str(cmd.get("curve_340_path", "")).strip()
-            else None,
+            path=curve_340_target,
             points=int(cmd.get("points", 200)),
         )
         return {
@@ -1242,8 +1253,16 @@ def _run_calibration_command(
         raw_path = str(cmd.get("path", "")).strip()
         if not raw_path:
             raise ValueError("path is required.")
+        # ME-6: confine imports to the exports dir (parsers validate content).
+        exports_base = calibration_store._exports_dir
+        try:
+            if exports_base is None:
+                raise ValueError("path outside allowed directory")
+            import_target = resolve_within(exports_base, raw_path)
+        except ValueError:
+            return {"ok": False, "error": "path outside allowed directory"}
         curve = calibration_store.import_curve_file(
-            Path(raw_path),
+            import_target,
             sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
             channel_key=str(cmd.get("channel_key", "")).strip() or None,
             raw_unit=str(cmd.get("raw_unit", "sensor_unit")).strip() or "sensor_unit",
@@ -1757,7 +1776,17 @@ def _load_drivers(
         elif itype == "keithley_2604b":
             from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
-            driver = Keithley2604B(name, resource, mock=mock)
+            wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
+            driver = Keithley2604B(
+                name,
+                resource,
+                mock=mock,
+                # Strict-bool, fail-closed: a quoted YAML string ("false") is
+                # truthy in Python and would arm this bench-blocked safety path
+                # on a config typo. Only the literal boolean True enables it.
+                watchdog_enabled=wdog_cfg.get("enabled", False) is True,
+                watchdog_timeout_s=float(wdog_cfg.get("timeout_s", 5.0)),
+            )
         elif itype == "thyracont_vsp63d":
             from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
 

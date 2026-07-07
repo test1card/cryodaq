@@ -93,6 +93,14 @@ def _parse_timestamp(raw) -> datetime:
 
 _SQLITE_VERSION_CHECKED = False
 
+# readings_history trust-boundary clamps. The command is reachable from
+# unauthenticated loopback ZMQ, so a hostile/buggy client can request an
+# unbounded channel list + limit and starve the engine (semantic-DoS). Fail
+# closed: cap rows-per-channel and channel-list length, and push LIMIT into
+# SQL so the query never materialises more than can survive truncation.
+_HISTORY_MAX_ROWS = 100_000
+_HISTORY_MAX_CHANNELS = 64
+
 # Per SQLite official advisory (sqlite.org/wal.html), the WAL-reset corruption
 # fix is backported to these specific patch versions only. 3.44.7+ and 3.50.8+
 # do NOT have the backport; the fix landed in trunk at 3.51.3.
@@ -712,6 +720,14 @@ class SQLiteWriter:
         Returns {channel: [(unix_ts, value), ...]} sorted by time ASC.
         Scans all daily DB files that overlap [from_ts, to_ts].
         """
+        # Trust-boundary clamp (see module constants): bound rows-per-channel
+        # and channel-list length before touching the DB. Non-positive limits
+        # floor to 1 (a zero limit would otherwise slice result[-0:] = the whole
+        # list, i.e. unbounded — the opposite of a limit).
+        limit_per_channel = min(max(int(limit_per_channel), 1), _HISTORY_MAX_ROWS)
+        if channels:
+            channels = list(channels)[:_HISTORY_MAX_CHANNELS]
+
         result: dict[str, list[tuple[float, float]]] = {}
         db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
         if not db_files:
@@ -744,31 +760,49 @@ class SQLiteWriter:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.row_factory = sqlite3.Row
                 try:
-                    query = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
-                    params: list[Any] = []
+                    base = "SELECT timestamp, channel, value FROM readings WHERE 1=1"
+                    time_clause = ""
+                    time_params: list[Any] = []
                     if from_ts is not None:
-                        query += " AND timestamp >= ?"
-                        params.append(from_ts)
+                        time_clause += " AND timestamp >= ?"
+                        time_params.append(from_ts)
                     if to_ts is not None:
-                        query += " AND timestamp <= ?"
-                        params.append(to_ts)
+                        time_clause += " AND timestamp <= ?"
+                        time_params.append(to_ts)
+
+                    def _collect(query: str, params: list[Any]) -> None:
+                        for row in conn.execute(query, params).fetchall():
+                            ch = row["channel"]
+                            if ch not in result:
+                                result[ch] = []
+                            result[ch].append((float(row["timestamp"]), float(row["value"])))
+
                     if channels:
-                        placeholders = ",".join("?" for _ in channels)
-                        query += f" AND channel IN ({placeholders})"
-                        params.extend(channels)
-                    query += " ORDER BY timestamp ASC"
-                    for row in conn.execute(query, params).fetchall():
-                        ch = row["channel"]
-                        if ch not in result:
-                            result[ch] = []
-                        result[ch].append((float(row["timestamp"]), float(row["value"])))
+                        # Per-channel bounded query: each channel gets its own
+                        # newest-first LIMIT, so a fast channel (e.g. thermometry)
+                        # can't crowd out a slow one (e.g. vacuum) — mixed sampling
+                        # rates are normal. Rows are re-sorted ASC and merged below.
+                        for ch in channels:
+                            _collect(
+                                base + time_clause + " AND channel = ? ORDER BY timestamp DESC LIMIT ?",
+                                [*time_params, ch, limit_per_channel],
+                            )
+                    else:
+                        # No channel filter: bound the total fetch as before so we
+                        # never fetchall() the whole file.
+                        _collect(
+                            base + time_clause + " ORDER BY timestamp DESC LIMIT ?",
+                            [*time_params, limit_per_channel * _HISTORY_MAX_CHANNELS],
+                        )
                 finally:
                     conn.close()
             except Exception:
                 logger.warning("Ошибка чтения истории из %s", db_path)
 
-        # Truncate to limit_per_channel (keep latest)
+        # Sort ASC and truncate to limit_per_channel (keep latest). Rows arrive
+        # newest-first and possibly interleaved across daily DB files.
         for ch in result:
+            result[ch].sort(key=lambda p: p[0])
             if len(result[ch]) > limit_per_channel:
                 result[ch] = result[ch][-limit_per_channel:]
 

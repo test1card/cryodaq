@@ -49,6 +49,12 @@ jobs:
       - name: Lint
         run: ruff check src/ tests/
 
+      - name: Check requirements-lock drift
+        # The frozen Windows build installs transitive deps from
+        # requirements-lock.txt then `pip install -e . --no-deps`. Any
+        # top-level dep missing from the lock is absent from the bundle.
+        run: python scripts/check_lock_drift.py
+
       - name: Run app-palette tests (isolated)
         # test_app_palette mutates the *global* QApplication stylesheet. Run in
         # its own process so there are no leaked widgets from earlier tests to
