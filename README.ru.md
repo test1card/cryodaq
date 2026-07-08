@@ -91,8 +91,8 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
   через `interlock_acknowledge` ZMQ-команду без перезапуска.
 - **Fail-closed safety discipline:** Keithley output OFF проверяется readback'ом;
   неподтверждённый OFF становится fault или блокирующим RUN-предусловием, а не
-  ложным SAFE_OFF. VacuumGuard может опционально эскалировать в SafetyManager
-  через `vacuum_guard.escalate_to_safety`.
+  ложным SAFE_OFF. VacuumGuard по умолчанию эскалирует в SafetyManager через
+  `vacuum_guard.escalate_to_safety` (выставь `false` для attended/debug-прогонов).
 - **Оператор-лог:** SQLite-backed; доступ через GUI + ZMQ.
 - **Шаблоны экспериментов, lifecycle-метаданные, архивация артефактов:** каталог
   `data/experiments/<id>/` с `metadata.json`, `reports/`, опциональный Parquet-архив.
@@ -218,8 +218,8 @@ cryodaq-rag-search               # семантический поиск по б
 - `config/alarms_v3.yaml` — правила аларм-движка v2 (threshold/rate/composite/phase)
 - `config/interlocks.yaml` — условия interlocks + действия
 - `config/physical_alarms.yaml` — параметры физических защит холодного криостата
-  (CooldownAlarm, VacuumGuard, включая опциональную защёлку
-  `vacuum_guard.escalate_to_safety`)
+  (CooldownAlarm, VacuumGuard, включая защёлку `vacuum_guard.escalate_to_safety`
+  — включена по умолчанию)
 - `config/channels.yaml` — отображаемые имена, видимость, группировка
 - `config/notifications.yaml` — Telegram bot_token, chat_ids, escalation
 - `config/notifications.local.yaml.example` — шаблон локальных Telegram

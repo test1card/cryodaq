@@ -30,9 +30,10 @@
 
 Отдельно живут **physical alarms** (`config/physical_alarms.yaml`):
 `CooldownAlarm` и `VacuumGuard`. Это не entries в `alarms_v3.yaml`, а
-отдельные сервисы движка. `VacuumGuard` может дополнительно латчить
-SafetyManager через `vacuum.escalate_to_safety: true` (по умолчанию
-`false`, alarm-only).
+отдельные сервисы движка. `VacuumGuard` дополнительно латчит
+SafetyManager через `vacuum.escalate_to_safety` (по умолчанию `true` —
+эскалация включена для необслуживаемых/холодных прогонов; выставь
+`false` для attended/debug-прогонов, где достаточно alarm-only).
 
 Ещё есть **Alarm Engine v1** (`config/alarms.yaml`) — legacy path с
 несколькими старыми threshold-правилами (`enabled` по умолчанию `true`).

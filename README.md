@@ -91,8 +91,8 @@ Fully functional in v0.64.0:
   the `interlock_acknowledge` ZMQ command without a restart.
 - **Fail-closed safety discipline:** Keithley output OFF is readback-verified;
   unverified OFF becomes a fault or a blocking RUN precondition instead of a
-  false SAFE_OFF. VacuumGuard can optionally escalate to SafetyManager via
-  `vacuum_guard.escalate_to_safety`.
+  false SAFE_OFF. VacuumGuard escalates to SafetyManager by default via
+  `vacuum_guard.escalate_to_safety` (set `false` for attended/debug runs).
 - **Operator log:** SQLite-backed; accessed via the GUI + ZMQ.
 - **Experiment templates, lifecycle metadata, artifact archiving:** a
   `data/experiments/<id>/` directory with `metadata.json`, `reports/`, and an
@@ -220,8 +220,8 @@ Active configuration files as of v0.64.0:
 - `config/alarms_v3.yaml` — alarm-engine-v2 rules (threshold/rate/composite/phase)
 - `config/interlocks.yaml` — interlock conditions + actions
 - `config/physical_alarms.yaml` — tunables for the cold-cryostat physical
-  guards (CooldownAlarm, VacuumGuard, including the opt-in
-  `vacuum_guard.escalate_to_safety` latch)
+  guards (CooldownAlarm, VacuumGuard, including the
+  `vacuum_guard.escalate_to_safety` latch — on by default)
 - `config/channels.yaml` — display names, visibility, grouping
 - `config/notifications.yaml` — Telegram bot_token, chat_ids, escalation
 - `config/notifications.local.yaml.example` — template for local Telegram
