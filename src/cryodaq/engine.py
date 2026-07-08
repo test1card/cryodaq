@@ -586,6 +586,80 @@ def _handle_supervised_task_exit(
     return "restart"
 
 
+# ─────────────────────────── Audible faults (A3) ──────────────────────────
+# Safety faults and a dead sensor outside RUNNING used to be log-only — an
+# operator had to be staring at the log to notice. The helpers below reuse
+# the SAME alarm_fired/Telegram dispatch channel alarm-v2, cooldown-alarm,
+# vacuum-guard and the task supervisor already use (no new channel
+# invented), extracted as importable module-level functions so they are
+# unit-testable without bringing up the full engine (same rationale as
+# ``_drain_dispatch_tasks``).
+
+
+async def _dispatch_alarm_notification(
+    event_bus: EventBus,
+    alarm_dispatch_tasks: set[asyncio.Task[Any]],
+    *,
+    alarm_id: str,
+    level: str,
+    message: str,
+    experiment_id: str | None,
+    telegram_bot: Any | None = None,
+    channel: str = "",
+    value: float = 0.0,
+) -> None:
+    """Publish ``alarm_fired`` (sound/GUI) and, if a notifier is configured,
+    dispatch the same message to Telegram — fire-and-forget, tracked in
+    *alarm_dispatch_tasks* so it survives GC and drains cleanly on shutdown
+    (see ``_drain_dispatch_tasks``).
+    """
+    if telegram_bot is not None:
+        t = asyncio.create_task(
+            telegram_bot._send_to_all(f"⚠ [{level}] {alarm_id}\n{message}"),
+            name=f"{alarm_id}_tg",
+        )
+        alarm_dispatch_tasks.add(t)
+        t.add_done_callback(alarm_dispatch_tasks.discard)
+    await event_bus.publish(
+        EngineEvent(
+            event_type="alarm_fired",
+            timestamp=datetime.now(UTC),
+            payload={
+                "alarm_id": alarm_id,
+                "level": level,
+                "message": message,
+                "channels": [channel] if channel else [],
+                "values": [value] if channel else [],
+            },
+            experiment_id=experiment_id,
+        )
+    )
+
+
+def _should_dispatch_dead_channel_alarm(
+    key: str, escalated: bool, already_sent: set[str]
+) -> bool:
+    """Once-per-episode edge-trigger for the outside-RUNNING dead-channel alert.
+
+    ``on_interlock_dead_channel`` stays log-only outside RUNNING by design
+    (SafetyManager's decision, unchanged) and — also by design — is retried
+    on every subsequent non-usable sample so the fault still latches the
+    moment RUNNING begins (see interlock.py's ``_NonUsableWindow.escalated``
+    docstring). Dispatching sound on every one of those retries would beep
+    on every poll; fire at most once per continuous decline episode, and
+    clear once escalation succeeds (RUNNING began / fault latched — that
+    path gets its own CRITICAL alarm via ``_safety_fault_log_callback``) so
+    a later, distinct dead episode still alerts.
+    """
+    if escalated:
+        already_sent.discard(key)
+        return False
+    if key in already_sent:
+        return False
+    already_sent.add(key)
+    return True
+
+
 def _build_experiment_export(
     exp_info: dict[str, Any],
     metadata: dict[str, Any],
@@ -2147,6 +2221,25 @@ async def _run_engine(*, mock: bool = False) -> None:
         except Exception as exc:
             logger.error("Failed to publish safety fault operator_log entry: %s", exc)
 
+        # A3: audible + Telegram-if-configured — same alarm_fired/Telegram
+        # channel alarm-v2/cooldown-alarm/vacuum-guard already use. Own
+        # try/except so a notification failure can never surface as a
+        # safety-fault failure (this runs shielded on the _fault() path).
+        try:
+            await _dispatch_alarm_notification(
+                event_bus,
+                _alarm_dispatch_tasks,
+                alarm_id=f"safety_fault_{source}" if source else "safety_fault",
+                level="CRITICAL",
+                message=message,
+                experiment_id=experiment_manager.active_experiment_id,
+                telegram_bot=telegram_bot,
+                channel=channel,
+                value=value,
+            )
+        except Exception as exc:
+            logger.error("Failed to dispatch safety fault alarm/telegram: %s", exc)
+
     safety_manager._fault_log_callback = _safety_fault_log_callback
 
     # Calibration acquisition — continuous SRDG during calibration experiments
@@ -2233,6 +2326,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc_info=True,
                 )
 
+    # A3: once-per-episode bookkeeping for the outside-RUNNING dead-channel
+    # audible alert — see _should_dispatch_dead_channel_alarm.
+    _dead_channel_alarm_sent: set[str] = set()
+
     async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> bool:
         # P2-5: a persistently non-usable reading on an interlock-protected
         # channel. SafetyManager gates the fault on RUNNING (sole authority);
@@ -2241,7 +2338,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         # the debounce window escalated ONLY on True, so a declined escalation
         # (not RUNNING) is retried on the next non-usable sample (fail-closed).
         try:
-            return await safety_manager.on_interlock_dead_channel(
+            escalated = await safety_manager.on_interlock_dead_channel(
                 condition.name,
                 reading.channel,
                 value=float(reading.value) if reading.value is not None else float("nan"),
@@ -2270,6 +2367,37 @@ async def _run_engine(*, mock: bool = False) -> None:
                     exc_info=True,
                 )
                 return False
+
+        # A3: SafetyManager's log-only decision outside RUNNING is
+        # unchanged — but a dead sensor while idle should still be heard,
+        # not just log-grepped. Own try/except: a notification failure must
+        # never affect the safety decision above or the return value.
+        key = f"{condition.name}:{reading.channel}"
+        if _should_dispatch_dead_channel_alarm(key, escalated, _dead_channel_alarm_sent):
+            try:
+                await _dispatch_alarm_notification(
+                    event_bus,
+                    _alarm_dispatch_tasks,
+                    alarm_id=f"dead_channel_{reading.channel}",
+                    level="WARNING",
+                    message=(
+                        f"Интерлок-канал {reading.channel} ('{condition.name}') "
+                        "устойчиво непригоден, источник неактивен — fault не "
+                        "латчится, но требуется внимание оператора."
+                    ),
+                    experiment_id=experiment_manager.active_experiment_id,
+                    channel=reading.channel,
+                    value=(
+                        float(reading.value) if reading.value is not None else float("nan")
+                    ),
+                )
+            except Exception as exc:
+                logger.error(
+                    "Dead-channel audible dispatch failed for '%s': %s",
+                    reading.channel,
+                    exc,
+                )
+        return escalated
 
     interlock_engine = InterlockEngine(
         broker,
