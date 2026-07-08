@@ -395,17 +395,19 @@ class SafetyManager:
                         "error": f"Fault during start: {self._fault_reason}",
                     }
 
-            # F4 liveness: a soft interlock trip may have arrived while we were
+            # F4 liveness: a soft interlock trip OR an operator emergency_off
+            # (A10) may have raised the pending-abort flag while we were
             # awaiting start_source (which holds _cmd_lock through slow SCPI
             # I/O). If so, do NOT commit this source — revert the just-started
-            # output OFF and abort. The interlock handler (blocked on _cmd_lock
+            # output OFF and abort. The abort handler (blocked on _cmd_lock
             # behind us) then completes its own shutdown/bookkeeping. No await
             # sits between this check and the commit below, so the decision is
             # atomic.
             if self._interlock_trip_pending and self._keithley is not None:
                 logger.warning(
-                    "request_run(%s) aborted: interlock trip arrived during "
-                    "start — reverting output OFF, not committing source",
+                    "request_run(%s) aborted: abort signal (interlock trip or "
+                    "operator emergency_off) arrived during start — reverting "
+                    "output OFF, not committing source",
                     smu_channel,
                 )
                 try:
@@ -470,56 +472,80 @@ class SafetyManager:
             }
 
     async def emergency_off(self, *, channel: str | None = None) -> dict[str, Any]:
-        async with self._cmd_lock:
-            channels = self._resolve_channels(channel)
-            confirmed = await self._ensure_output_off(channel)
-            if not confirmed:
-                # FAIL CLOSED (CR-2). The driver could not confirm output OFF
-                # (write raised or readback still reports ON) — the SMU may
-                # still be sourcing. Reporting ok=True and dropping to
-                # SAFE_OFF would silently stop ALL stale/heartbeat/rate
-                # monitoring while power is live. Latch a fault instead —
-                # _fault() clears _active_sources, re-fires the shielded
-                # emergency_off (retry OUTPUT_OFF + verify) and publishes
-                # channel states. _fault is lock-free and idempotent, so
-                # calling it here under _cmd_lock is safe (same discipline
-                # as the stop_source failure path in _safe_off).
-                reason = "emergency_off could not confirm output OFF"
-                logger.critical(
-                    "%s (channels=%s) — latching fault (fail-closed)",
-                    reason,
-                    sorted(channels),
-                )
-                await self._fault(reason, channel=channel or "")
-                return {
-                    "ok": False,
-                    "state": self._state.value,
-                    "channels": sorted(channels),
-                    "active_channels": sorted(self._active_sources),
-                    "error": reason,
-                }
-            self._active_sources.difference_update(channels)
-            await self._publish_keithley_channel_states("emergency_off")
+        # A10 operator fast-abort: raise the F4 pending-abort flag BEFORE
+        # contending for _cmd_lock. An in-flight request_run holding the lock
+        # through slow start_source SCPI I/O then aborts at its next F4
+        # checkpoint (see request_run) instead of this operator emergency
+        # queuing behind that round-trip. Statements before ``async with`` run
+        # synchronously when the coroutine is first stepped — strictly before
+        # it awaits the lock. Same flag + semantics as the interlock
+        # stop_source path: the abort lands at the NEXT checkpoint, NOT
+        # mid-wire — an in-flight SCPI write completes first (blast radius ≈
+        # one round-trip, tens of ms). It does NOT preempt a write already on
+        # the wire. ponytail: reuse the single global flag — a confirmed
+        # emergency aborting any in-flight start is fail-safe.
+        self._interlock_trip_pending = True
+        try:
+            async with self._cmd_lock:
+                return await self._emergency_off_locked(channel)
+        finally:
+            # Clear once shutdown bookkeeping is done (every exit path). The
+            # flag's only job is to abort a request_run ALREADY holding the
+            # lock when we arrived; by here that request_run has passed its
+            # checkpoint.
+            self._interlock_trip_pending = False
 
-            if self._state == SafetyState.FAULT_LATCHED:
-                return {
-                    "ok": True,
-                    "state": self._state.value,
-                    "channels": sorted(channels),
-                    "active_channels": sorted(self._active_sources),
-                    "latched": True,
-                    "warning": "Outputs disabled but fault remains latched",
-                }
+    async def _emergency_off_locked(self, channel: str | None) -> dict[str, Any]:
+        """emergency_off body; MUST be called holding ``_cmd_lock``."""
+        channels = self._resolve_channels(channel)
+        confirmed = await self._ensure_output_off(channel)
+        if not confirmed:
+            # FAIL CLOSED (CR-2). The driver could not confirm output OFF
+            # (write raised or readback still reports ON) — the SMU may
+            # still be sourcing. Reporting ok=True and dropping to
+            # SAFE_OFF would silently stop ALL stale/heartbeat/rate
+            # monitoring while power is live. Latch a fault instead —
+            # _fault() clears _active_sources, re-fires the shielded
+            # emergency_off (retry OUTPUT_OFF + verify) and publishes
+            # channel states. _fault is lock-free and idempotent, so
+            # calling it here under _cmd_lock is safe (same discipline
+            # as the stop_source failure path in _safe_off).
+            reason = "emergency_off could not confirm output OFF"
+            logger.critical(
+                "%s (channels=%s) — latching fault (fail-closed)",
+                reason,
+                sorted(channels),
+            )
+            await self._fault(reason, channel=channel or "")
+            return {
+                "ok": False,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
+                "error": reason,
+            }
+        self._active_sources.difference_update(channels)
+        await self._publish_keithley_channel_states("emergency_off")
 
-            if not self._active_sources:
-                self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
-
+        if self._state == SafetyState.FAULT_LATCHED:
             return {
                 "ok": True,
                 "state": self._state.value,
                 "channels": sorted(channels),
                 "active_channels": sorted(self._active_sources),
+                "latched": True,
+                "warning": "Outputs disabled but fault remains latched",
             }
+
+        if not self._active_sources:
+            self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
+
+        return {
+            "ok": True,
+            "state": self._state.value,
+            "channels": sorted(channels),
+            "active_channels": sorted(self._active_sources),
+        }
 
     async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
         """Live-update P_target on an active channel. Validates against config limits.

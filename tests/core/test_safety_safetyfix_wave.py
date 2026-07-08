@@ -167,6 +167,48 @@ async def test_soft_interlock_trip_aborts_inflight_request_run():
 
 
 @pytest.mark.asyncio
+async def test_operator_emergency_off_aborts_inflight_request_run():
+    """A10: operator emergency_off must not queue behind a slow request_run
+    holding _cmd_lock through start_source I/O. Same pending-abort mechanism
+    as the soft interlock: the in-flight start aborts at its next F4
+    checkpoint instead of committing a source the operator is aborting.
+    """
+    k = _mock_keithley()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_start(*a, **kw):
+        started.set()
+        await release.wait()
+
+    k.start_source = AsyncMock(side_effect=slow_start)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        run_task = asyncio.create_task(mgr.request_run(0.5, 40.0, 1.0, channel="smua"))
+        await asyncio.wait_for(started.wait(), timeout=2.0)  # stalled holding _cmd_lock
+
+        # Operator confirms emergency OFF while the start is stalled mid-SCPI.
+        emo_task = asyncio.create_task(mgr.emergency_off(channel="smua"))
+        await asyncio.sleep(0.05)  # let emergency_off set the flag + block on the lock
+        release.set()
+
+        run_result = await asyncio.wait_for(run_task, timeout=2.0)
+        emo_result = await asyncio.wait_for(emo_task, timeout=2.0)
+
+        assert run_result["ok"] is False, (
+            "request_run must ABORT (not commit) when the operator emergency_off "
+            "arrives mid-start"
+        )
+        assert "smua" not in mgr._active_sources
+        assert mgr.state != SafetyState.RUNNING
+        assert emo_result["ok"] is True, emo_result
+        assert k.emergency_off.called, "outputs must be driven OFF"
+    finally:
+        release.set()
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
 async def test_hard_interlock_trip_latches_fault_and_aborts_inflight_run():
     k = _mock_keithley()
     started = asyncio.Event()
