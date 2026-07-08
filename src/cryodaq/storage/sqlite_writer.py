@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -154,6 +155,13 @@ def _check_sqlite_version() -> None:
         )
 
 
+# Locked-DB persistence-failure parity (roadmap A6). See _write_day_batch:
+# a sustained lock (not a few transient blips) must route into
+# _signal_persistence_failure like disk-full does.
+_LOCKED_FAILURE_THRESHOLD = 3
+_LOCKED_FAILURE_SPAN_S = 15.0
+
+
 class SQLiteWriter:
     """Асинхронный писатель показаний в SQLite.
 
@@ -195,6 +203,16 @@ class SQLiteWriter:
         self._disk_full = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._persistence_failure_callback: Callable[[str], Awaitable[None]] | None = None
+
+        # Locked-DB persistence-failure parity (roadmap A6). Consecutive
+        # "database is locked"/"database is busy" write_immediate failures
+        # are usually transient (WAL writer contention) and clear on retry —
+        # only a sustained lock (>= _LOCKED_FAILURE_THRESHOLD consecutive
+        # failures spanning >= _LOCKED_FAILURE_SPAN_S) routes into
+        # _signal_persistence_failure, same as disk-full. Any successful
+        # write resets the streak.
+        self._locked_failure_count = 0
+        self._locked_failure_first_ts: float | None = None
 
         _check_sqlite_version()
 
@@ -424,6 +442,9 @@ class SQLiteWriter:
                 rows,
             )
             conn.commit()
+            # A successful write resets the locked-DB streak (roadmap A6).
+            self._locked_failure_count = 0
+            self._locked_failure_first_ts = None
         except sqlite3.OperationalError as exc:
             # Disk-full graceful degradation (Phase 2a H.1).
             # Detect by exact PHRASES to avoid false positives like
@@ -451,6 +472,44 @@ class SQLiteWriter:
                 # write_immediate / scheduler and cause the historic tight
                 # CRITICAL-log loop. The flag + signalled callback are the
                 # signalling mechanism now.
+                return
+
+            # Locked-DB parity (roadmap A6): "database is locked"/"database
+            # is busy" is usually transient (WAL writer contention) and
+            # clears on retry. Only a sustained lock — >= _LOCKED_FAILURE_THRESHOLD
+            # CONSECUTIVE failures spanning >= _LOCKED_FAILURE_SPAN_S — is
+            # treated like disk-full. Both conditions must hold: a burst of
+            # quick failures or sporadic non-consecutive ones must not signal.
+            locked_phrases = ("database is locked", "database is busy")
+            if any(phrase in msg for phrase in locked_phrases):
+                now = time.monotonic()
+                if self._locked_failure_count == 0:
+                    self._locked_failure_first_ts = now
+                self._locked_failure_count += 1
+                span = now - self._locked_failure_first_ts
+                if (
+                    self._locked_failure_count >= _LOCKED_FAILURE_THRESHOLD
+                    and span >= _LOCKED_FAILURE_SPAN_S
+                ):
+                    logger.critical(
+                        "LOCKED DB: %d consecutive database is locked/busy "
+                        "failures spanning %.1fs. Triggering safety fault.",
+                        self._locked_failure_count,
+                        span,
+                    )
+                    self._signal_persistence_failure(f"database locked: {exc}")
+                else:
+                    # Below threshold: swallowed (no raise) but never silent —
+                    # the batch was lost and the log must say so.
+                    logger.warning(
+                        "Batch write failed, database locked/busy (%d/%d, %.1fs): %s",
+                        self._locked_failure_count,
+                        _LOCKED_FAILURE_THRESHOLD,
+                        span,
+                        exc,
+                    )
+                # Do NOT re-raise — same graceful-degradation rationale as
+                # disk-full above (avoid the historic tight CRITICAL-log loop).
                 return
             # Any other OperationalError keeps the existing semantics.
             raise
