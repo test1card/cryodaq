@@ -70,6 +70,13 @@ vacuum:
 
   severity: CRITICAL
 
+  # On FIRED, also latch a SafetyManager fault (source OFF + FAULT_LATCHED),
+  # not just the alarm. Default false = today's alarm-only behavior unchanged.
+  # Enable for unattended cold runs — no auto-clear on pressure recovery: the
+  # latch holds through FAULT_LATCHED → acknowledge → MANUAL_RECOVERY so a
+  # vacuum incident while cold always needs operator eyes.
+  escalate_to_safety: false
+
 # Channel landmarks — F-ChannelLandmarks (system-level, hardware-pinned).
 # Т11 / Т12 are physically bolted to GM-cooler stages and never migrate
 # between experiments. The query agent consults these aliases BEFORE

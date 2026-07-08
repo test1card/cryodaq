@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
@@ -94,18 +94,23 @@ class ArchiveReader:
         last_day = to_utc.date()
         while current_day <= last_day:
             db_name = f"data_{current_day.isoformat()}.db"
-            if db_name in archived_names:
-                self._query_parquet(
-                    archived_names[db_name],
-                    from_epoch,
-                    to_epoch,
-                    channel_set,
-                    result,
+            db_path = self._data_dir / db_name
+            is_archived = db_name in archived_names
+            hot_exists = db_path.exists()
+            if is_archived and hot_exists:
+                # Overlap day: a restored/backdated (or stranded pre-sweep) hot
+                # DB reappeared for an already-archived day. Union both, archived
+                # wins on an exact (channel, ts) clash — mirrors query_rows (F2)
+                # so history/journal reads no longer shadow rows exports see.
+                self._merge_overlap_day(
+                    archived_names[db_name], db_path, from_epoch, to_epoch, channel_set, result
                 )
-            else:
-                db_path = self._data_dir / db_name
-                if db_path.exists():
-                    self._query_sqlite(db_path, from_epoch, to_epoch, channel_set, result)
+            elif is_archived:
+                self._query_parquet(
+                    archived_names[db_name], from_epoch, to_epoch, channel_set, result
+                )
+            elif hot_exists:
+                self._query_sqlite(db_path, from_epoch, to_epoch, channel_set, result)
             current_day += timedelta(days=1)
 
         # Sort each channel's data by timestamp
@@ -226,27 +231,29 @@ class ArchiveReader:
             to_epoch, to_day = e.timestamp(), e.date()
 
         index = self._load_index()
-        # day → ("parquet", operator_log_rel) | ("sqlite", db_path). A rotated
-        # day's SQLite is gone, so its operator_log lives only in the companion
-        # Parquet — and only if that day carried operator_log rows at all
-        # (entries without operator_log_path simply had none).
-        sources: dict[str, tuple[str, str]] = {}
-        rotated: set[str] = set()
+        # day → [("parquet", operator_log_rel), ...] | [("sqlite", db_path)]. A
+        # rotated day's SQLite is normally gone, so its operator_log lives only
+        # in the companion Parquet — and only if that day carried operator_log
+        # rows at all (entries without operator_log_path simply had none). But if
+        # a hot daily DB reappears for an already-rotated day (restore / backdate
+        # / stranded pre-sweep), BOTH exist — union them (F2) so a restored
+        # journal entry is not shadowed on the audit path while exports see it.
+        # Parquet source(s) read first → archived wins on an exact-row clash.
+        sources: dict[str, list[tuple[str, str]]] = {}
         for entry in index.get("files", []):
             day = _day_from_db_name(entry["original_name"])
             if day is None:
                 continue
-            rotated.add(day)
             ol_rel = entry.get("operator_log_path")
             if ol_rel:
-                sources[day] = ("parquet", ol_rel)
+                sources.setdefault(day, []).append(("parquet", ol_rel))
         if self._data_dir.exists():
             for db_path in self._data_dir.glob("data_????-??-??.db"):
                 day = _day_from_db_name(db_path.name)
-                if day is None or day in rotated:
-                    continue
-                sources[day] = ("sqlite", str(db_path))
+                if day is not None:
+                    sources.setdefault(day, []).append(("sqlite", str(db_path)))
 
+        overlap = any(len(srcs) > 1 for srcs in sources.values())
         out: list[OperatorLogRow] = []
         for day_iso in sorted(sources):
             day = date.fromisoformat(day_iso)
@@ -254,11 +261,24 @@ class ArchiveReader:
                 continue
             if to_day is not None and day > to_day:
                 continue
-            kind, ref = sources[day_iso]
-            if kind == "parquet":
-                self._read_parquet_operator_log(ref, from_epoch, to_epoch, out)
-            else:
-                self._read_sqlite_operator_log(Path(ref), from_epoch, to_epoch, out)
+            for kind, ref in sources[day_iso]:
+                if kind == "parquet":
+                    self._read_parquet_operator_log(ref, from_epoch, to_epoch, out)
+                else:
+                    self._read_sqlite_operator_log(Path(ref), from_epoch, to_epoch, out)
+
+        if overlap:
+            # Only pay dedup cost when a day had >1 source. Exact-row duplicate
+            # (same ts/exp/author/source/message/tags) collapses to one; a
+            # restored-only entry differs and survives. Keep first occurrence.
+            seen: set[OperatorLogRow] = set()
+            deduped: list[OperatorLogRow] = []
+            for row in out:
+                if row in seen:
+                    continue
+                seen.add(row)
+                deduped.append(row)
+            out = deduped
 
         out.sort(key=lambda r: _ts_sort_key(r[0]))
         return out
@@ -449,6 +469,39 @@ class ArchiveReader:
                 out.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status)))
         except Exception:
             logger.exception("Failed to read Parquet %s — partial result", archive_rel)
+
+    def _merge_overlap_day(
+        self,
+        archive_rel: str,
+        db_path: Path,
+        from_epoch: float,
+        to_epoch: float,
+        channels: set[str] | None,
+        out: dict[str, list[tuple[float, float]]],
+    ) -> None:
+        """Union one archived Parquet day with a reappeared hot DB, deduped.
+
+        Archived rows read first and win on an exact (channel, ts) clash; a hot
+        row whose ts is not already present for that channel is appended, so a
+        restored/backdated reading surfaces instead of being shadowed. Called
+        only for a day that genuinely has both sources — pure-hot and pure-cold
+        days keep their byte-identical single-source fast path.
+        """
+        archived: dict[str, list[tuple[float, float]]] = {}
+        self._query_parquet(archive_rel, from_epoch, to_epoch, channels, archived)
+        hot: dict[str, list[tuple[float, float]]] = {}
+        self._query_sqlite(db_path, from_epoch, to_epoch, channels, hot)
+        for ch, rows in archived.items():
+            seen = {ts for ts, _ in rows}
+            merged = list(rows)
+            for ts, val in hot.get(ch, []):
+                if ts not in seen:
+                    merged.append((ts, val))
+                    seen.add(ts)
+            out.setdefault(ch, []).extend(merged)
+        for ch, rows in hot.items():
+            if ch not in archived:
+                out.setdefault(ch, []).extend(rows)
 
     def _query_sqlite(
         self,

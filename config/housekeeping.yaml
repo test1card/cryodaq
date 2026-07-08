@@ -18,6 +18,12 @@ adaptive_throttle:
     Pa: 1.0
   transition_holdoff_s: 30.0
 
+# Retention gzips aged daily DBs and later deletes the .gz. NOTE (F1): while
+# cold_rotation.enabled is true, retention does NOT compress daily readings DBs
+# — rotation owns their lifecycle (hot .db → zstd Parquet after age_days), and a
+# data_YYYY-MM-DD.db.gz is invisible to every reader. compress_after_days below
+# therefore only bites when rotation is off. The delete-compressed sweep still
+# runs to clean any legacy/leftover .gz by its own age.
 retention:
   enabled: true
   interval_s: 3600.0
@@ -33,6 +39,9 @@ retention:
 # stay fully visible. This flag is the single kill-switch: enabled: false stops
 # rotation and leaves all hot .db files in place. Recommended after the first
 # rotation: one bench check of GUI history across a rotated day.
+# Rotation also ingests legacy data_YYYY-MM-DD.db.gz files (daily DBs a prior
+# retention pass compressed before the F1 guard existed): it decompresses to a
+# temp file, archives through the normal Parquet path, then deletes the .gz.
 cold_rotation:
   enabled: true
   archive_dir: data/archive

@@ -11,7 +11,8 @@ from cryodaq.drivers.base import Reading
 def _mock_keithley():
     driver = MagicMock()
     driver.connected = True
-    driver.emergency_off = AsyncMock()
+    driver.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
+    driver.emergency_off = AsyncMock(return_value=True)
     driver.stop_source = AsyncMock()
     driver.start_source = AsyncMock()
     return driver

@@ -163,6 +163,63 @@ def test_sustained_backward_drift_resets_after_5_drops():
     assert est.get_rate(CH) is not None, "rate must recover after drift reset"
 
 
+# ---------------------------------------------------------------------------
+# F5 (MEDIUM): a forward-gap reset must NOT open a blind window below the
+# fail-on-silence stale timeout. A 8-10 s late measurement resets the buffer
+# just below the 10 s stale guard (config/safety.yaml), so get_rate() went None
+# for the whole ~30 s refill — a real dT/dt transient could hide there. The
+# reset must instead HOLD the last computed rate as stale-but-usable.
+# ---------------------------------------------------------------------------
+
+
+def test_forward_gap_holds_last_rate_over_refill_window():
+    """A steep ramp exceeding the limit with one 9 s forward gap stays caught:
+    the reset holds the last rate as stale-but-usable, not None."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    last = _fill(est, 16)  # armed, +100 K/min
+    before = est.get_rate(CH)
+    assert before is not None and before > 5.0
+
+    # 9 s forward gap (> 4 x 2 s) → reset to a single anchor.
+    est.push(CH, last + 9.0, 4.0 + RATE_PER_SEC * (last + 9.0 - T0))
+    assert est.buffer_size(CH) == 1, "forward gap resets the buffer"
+
+    held = est.get_rate(CH)
+    assert held is not None, (
+        "forward-gap reset must hold the last rate (stale-but-usable), not go "
+        "blind for the refill window below the stale-timeout guard"
+    )
+    assert held > 5.0, "held rate must still expose the >5 K/min violation"
+
+
+def test_forward_gap_held_rate_yields_to_fresh_once_refilled():
+    """Once the buffer refills past min_span the fresh (flat) rate wins — the
+    stale hold does not linger beyond the refill window."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    last = _fill(est, 16)  # steep ramp, rate > 5
+    assert est.get_rate(CH) > 5.0  # monitor loop polls it (populates last-rate)
+    est.push(CH, last + 9.0, 4.0)  # forward gap → reset + hold
+    assert est.get_rate(CH) > 5.0  # serving the held steep rate
+
+    anchor = last + 9.0
+    for i in range(1, 20):  # refill with a FLAT series
+        est.push(CH, anchor + POLL_S * i, 4.0)
+    fresh = est.get_rate(CH)
+    assert fresh is not None and abs(fresh) < 1.0, (
+        f"once refilled, the fresh flat rate must win, got {fresh}"
+    )
+
+
+def test_backward_reset_still_returns_none_during_refill():
+    """Regression: backward (NTP) resets keep their reset-to-None semantics —
+    only forward gaps hold the last rate."""
+    est = RateEstimator(window_s=120.0, min_points=8, min_span_s=30.0)
+    _fill(est, 16)
+    assert est.get_rate(CH) is not None
+    est.push(CH, T0 - 50.0, 4.0)  # backward NTP step
+    assert est.get_rate(CH) is None, "backward reset must not serve a stale rate"
+
+
 def test_four_drops_then_normal_sample_resets_counter():
     """4 within-tolerance backward drops then a normal forward sample: the
     drop counter resets, so no buffer reset occurs and the counter is cleared

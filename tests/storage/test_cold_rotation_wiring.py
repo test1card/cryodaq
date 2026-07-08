@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import gzip
+import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -298,6 +301,43 @@ def test_query_rows_unions_backdated_hot_over_archived_day(tmp_path: Path) -> No
     assert 71.5 in vals, "backdated restored row must not be shadowed by the archive"
     assert vals.count(70.0) == 1, "exact (ts, instrument, channel) duplicate must dedup to one"
     assert len(rows) == 2, f"expected union-deduped 2 rows, got {rows}"
+
+
+# ---------------------------------------------------------------------------
+# F1b: legacy .db.gz ingestion — a daily DB compressed by retention BEFORE the
+# rotation guard existed (real lab disks have these) must still be decompressed,
+# archived through the normal path, and the .gz deleted.
+# ---------------------------------------------------------------------------
+
+
+def test_cold_rotation_ingests_legacy_gz(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    old_day = TODAY - timedelta(days=41)
+
+    _write_day(data_dir, old_day, [_reading("Т1", 77.0, old_day.replace(hour=12), ChannelStatus.OK)])
+    db_path = data_dir / f"data_{old_day.date().isoformat()}.db"
+    gz_path = data_dir / (db_path.name + ".gz")
+    with db_path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    db_path.unlink()  # legacy state: only the .gz remains on disk
+
+    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    results = asyncio.run(svc.run_once(now=TODAY))
+
+    assert len(results) == 1, "legacy .gz must rotate like a plain .db"
+    assert not gz_path.exists(), ".gz must be deleted after archiving"
+    assert not (data_dir / f"{db_path.name}.tmp").exists()  # no temp leaks
+
+    idx = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    entry = idx["files"][0]
+    assert entry["original_name"] == db_path.name, "index records the canonical .db name"
+    assert "source_md5" in entry, "source_md5 (of decompressed db) must be recorded"
+
+    reader = ArchiveReader(data_dir, archive_dir)
+    rows = reader.query_rows(old_day, TODAY, None, None)
+    vals = [v for _ts, _inst, _ch, v, _u, _s in rows]
+    assert 77.0 in vals, "rotated legacy-gz rows must be queryable"
 
 
 # ---------------------------------------------------------------------------

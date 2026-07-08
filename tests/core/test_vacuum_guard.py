@@ -36,7 +36,10 @@ def _make_pressure_state(mbar: float, is_stale: bool = False) -> ChannelState:
     )
 
 
-def _make_vg(cfg_overrides: dict | None = None) -> tuple[VacuumGuard, MagicMock, MagicMock, MagicMock]:
+def _make_vg(
+    cfg_overrides: dict | None = None,
+    safety_manager: MagicMock | None = None,
+) -> tuple[VacuumGuard, MagicMock, MagicMock, MagicMock]:
     """Return (guard, state_tracker, alarm_state_mgr, event_bus)."""
     cfg = {
         "pressure_channel": "VSP63D_1/pressure",
@@ -56,8 +59,29 @@ def _make_vg(cfg_overrides: dict | None = None) -> tuple[VacuumGuard, MagicMock,
     event_bus = MagicMock()
     event_bus.publish = AsyncMock()
 
-    guard = VacuumGuard(cfg, tracker, alarm_mgr, event_bus)
+    guard = VacuumGuard(cfg, tracker, alarm_mgr, event_bus, safety_manager=safety_manager)
     return guard, tracker, alarm_mgr, event_bus
+
+
+async def _tick_arm(guard, tracker) -> None:
+    tracker.get.side_effect = lambda ch: (
+        _make_channel_state(250.0) if "Т12" in ch else _make_pressure_state(1e-5)
+    )
+    await guard.tick()
+
+
+async def _tick_fire(guard, tracker) -> None:
+    tracker.get.side_effect = lambda ch: (
+        _make_channel_state(250.0) if "Т12" in ch else _make_pressure_state(5e-2)
+    )
+    await guard.tick()
+
+
+async def _tick_recover(guard, tracker) -> None:
+    tracker.get.side_effect = lambda ch: (
+        _make_channel_state(250.0) if "Т12" in ch else _make_pressure_state(5e-4)
+    )
+    await guard.tick()
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +298,95 @@ async def test_alarm_message_contains_factual_data_only():
     assert "245" in event.message, (
         f"temperature value must appear in alarm message; got {event.message!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Opt-in SafetyManager escalation (external safety review, HIGH)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fired_no_safety_escalation_when_disabled():
+    """Default/disabled (engine passes no handle) → FIRED never touches safety.
+
+    The alarm path is unchanged: a CRITICAL alarm event still fires. This is
+    the byte-identical, alarm-only pin.
+    """
+    spy = MagicMock()
+    spy.latch_fault = AsyncMock()
+    # Escalation disabled == engine passes safety_manager=None. The spy is
+    # deliberately NOT wired into the guard; it must stay untouched.
+    guard, tracker, alarm_mgr, _ = _make_vg(safety_manager=None)
+    await _tick_arm(guard, tracker)
+    await _tick_fire(guard, tracker)
+    assert guard.state == VacuumState.FIRED
+    spy.latch_fault.assert_not_called()
+    # alarm behavior unchanged — CRITICAL event still delivered
+    event_arg = alarm_mgr.process.call_args[0][1]
+    assert event_arg is not None
+    assert event_arg.level == "CRITICAL"
+
+
+@pytest.mark.asyncio
+async def test_fired_escalates_to_safety_when_enabled():
+    """Enabled (handle wired) → FIRED edge latches a SafetyManager fault once."""
+    spy = MagicMock()
+    spy.latch_fault = AsyncMock()
+    guard, tracker, _, _ = _make_vg(safety_manager=spy)
+    await _tick_arm(guard, tracker)
+    await _tick_fire(guard, tracker)
+    assert guard.state == VacuumState.FIRED
+
+    spy.latch_fault.assert_awaited_once()
+    kwargs = spy.latch_fault.await_args.kwargs
+    reason = kwargs["reason"].lower()
+    assert "вакуум" in reason, f"reason must name vacuum loss; got {kwargs['reason']!r}"
+    assert kwargs["source"] == "vacuum_guard"
+    # both channel values named in the reason
+    assert "245" not in reason  # tick_fire uses T=250
+    assert "250" in reason, f"T_ref value must appear in reason; got {kwargs['reason']!r}"
+    assert "5" in reason  # pressure 5e-2
+    # operator opt-in named
+    assert "escalate_to_safety" in reason
+
+
+@pytest.mark.asyncio
+async def test_fired_does_not_re_escalate_while_fired():
+    """Escalation fires on the FIRED edge only, not on every tick while FIRED."""
+    spy = MagicMock()
+    spy.latch_fault = AsyncMock()
+    guard, tracker, _, _ = _make_vg(safety_manager=spy)
+    await _tick_arm(guard, tracker)
+    await _tick_fire(guard, tracker)   # edge → escalate
+    await _tick_fire(guard, tracker)   # still FIRED → no new edge
+    assert guard.state == VacuumState.FIRED
+    spy.latch_fault.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reescalates_after_recovery_and_retrip():
+    """Recovery (FIRED→ARMED) then re-trip (ARMED→FIRED) is a fresh edge."""
+    spy = MagicMock()
+    spy.latch_fault = AsyncMock()
+    guard, tracker, _, _ = _make_vg(safety_manager=spy)
+    await _tick_arm(guard, tracker)
+    await _tick_fire(guard, tracker)      # edge 1 → escalate
+    await _tick_recover(guard, tracker)   # FIRED → ARMED
+    assert guard.state == VacuumState.ARMED
+    await _tick_fire(guard, tracker)      # edge 2 → escalate again
+    assert guard.state == VacuumState.FIRED
+    assert spy.latch_fault.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_latch_fault_failure_is_non_fatal():
+    """A latch_fault exception must not break the tick loop or the alarm path."""
+    spy = MagicMock()
+    spy.latch_fault = AsyncMock(side_effect=RuntimeError("safety down"))
+    guard, tracker, alarm_mgr, _ = _make_vg(safety_manager=spy)
+    await _tick_arm(guard, tracker)
+    await _tick_fire(guard, tracker)   # escalation raises internally
+    assert guard.state == VacuumState.FIRED
+    event_arg = alarm_mgr.process.call_args[0][1]
+    assert event_arg is not None
+    assert event_arg.level == "CRITICAL"

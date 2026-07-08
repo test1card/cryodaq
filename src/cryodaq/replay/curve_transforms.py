@@ -6,13 +6,13 @@ a new triple of arrays. Input arrays are never mutated.
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from pathlib import Path
 
 import numpy as np
 
 from cryodaq.drivers.base import ChannelStatus
+from cryodaq.storage._sqlite import sqlite3
 
 # ---------------------------------------------------------------------------
 # Transforms

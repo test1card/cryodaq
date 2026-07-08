@@ -91,10 +91,10 @@ _REPLAY_LIST_SENTINEL = "__list__"
 def _print_replay_sources() -> None:
     """List available replay sources — curves and SQLite files — then return."""
     import json
-    import sqlite3
     from datetime import datetime
 
     from cryodaq.paths import get_data_dir
+    from cryodaq.storage._sqlite import sqlite3
 
     data_dir = get_data_dir()
     cooldown_dir = data_dir.parent / "cooldown_v5"

@@ -2,7 +2,18 @@
 # и отредактируйте адреса приборов для вашего стенда.
 #
 # Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
-# Если instruments.local.yaml существует — engine использует его вместо instruments.yaml.
+#
+# ⚠️  ЗАМЕНА, НЕ СЛИЯНИЕ. Если instruments.local.yaml существует, engine
+#     читает ТОЛЬКО его вместо instruments.yaml целиком (engine.py `_cfg`:
+#     `return local if local.exists() else base`). Блоки НЕ мержатся.
+#     Поэтому каждый top-level блок, который читает engine, должен быть
+#     перенесён сюда, иначе он молча пропадёт:
+#       - instruments        — список приборов (ниже)
+#       - keithley.watchdog  — прошивочный dead-man бэкстоп (иначе default off)
+#       - chamber            — объём камеры + leak_rate (иначе volume_l пропадёт
+#                              и оценка F13 leak rate отключится)
+#     Значения keithley/chamber ниже — копия base-дефолтов из instruments.yaml;
+#     правьте под стенд (volume_l ОБЯЗАТЕЛЬНО задать для leak rate).
 #
 # Адреса стенда АКЦ ФИАН (март 2026):
 #   LS218_1: GPIB0::12  |  LS218_2: GPIB0::11 (poll 2.0s)
@@ -74,3 +85,20 @@ instruments:
     poll_interval_s: 2.0
     connect_timeout_s: 5.0
     read_timeout_s: 10.0
+
+# ЗАМЕНА-семантика (см. шапку): блоки ниже перенесены из base instruments.yaml —
+# без них engine потеряет watchdog и chamber, т.к. local НЕ мержится с base.
+
+# Keithley 2604B TSP dead-man watchdog (прошивочный бэкстоп под host
+# SafetyManager). Режим по умолчанию off; полное описание режимов — в base
+# instruments.yaml (off | best_effort | required).
+keithley:
+  watchdog:
+    mode: "off"   # quote: bare off/on — YAML booleans
+    timeout_s: 5.0
+
+chamber:
+  volume_l: 0.0  # ОПЕРАТОР: задать реальный объём камеры в литрах (нужно для F13 leak rate)
+  leak_rate:
+    enabled: true
+    default_sample_window_s: 300.0

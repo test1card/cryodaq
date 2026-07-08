@@ -40,7 +40,7 @@ async def test_request_run_rejected_during_fault() -> None:
     async def slow_emergency_off(channel=None):
         fault_entered.set()
         await proceed.wait()  # yield point — event loop runs other tasks
-        await original_emergency_off(channel)
+        return await original_emergency_off(channel)
 
     k.emergency_off = slow_emergency_off
 
@@ -84,7 +84,7 @@ async def test_fault_sets_state_before_emergency_off() -> None:
     async def check_state_off(channel=None):
         nonlocal state_during_eoff
         state_during_eoff = sm.state
-        await original_emergency_off(channel)
+        return await original_emergency_off(channel)
 
     k.emergency_off = check_state_off
 

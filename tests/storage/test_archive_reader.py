@@ -566,6 +566,68 @@ def test_query_operator_log_no_archive_dir(tmp_path: Path) -> None:
     assert [r[4] for r in rows] == ["hot only"]
 
 
+# ---------------------------------------------------------------------------
+# F2: query() (archived-wins-else-hot) and query_operator_log() (skips hot for
+# rotated days) must, like query_rows(), UNION a restored/backdated hot DB with
+# the archive for an overlap day — else the restored rows are silently shadowed
+# on the history + journal paths while exports (query_rows) already see them.
+# ---------------------------------------------------------------------------
+
+
+def test_query_and_operator_log_union_restored_hot_over_archived_day(tmp_path: Path) -> None:
+    import asyncio
+
+    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+    dup_ts = day.replace(hour=12)
+    new_ts = day.replace(hour=13)
+    db_name = "data_2026-04-14.db"
+    archive_dir = tmp_path / "archive"
+
+    async def _seed_rotate() -> None:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_batch([Reading(dup_ts, "ls", "T", 1.0, "K", ChannelStatus.OK)])
+        writer._write_operator_log_entry(
+            timestamp=dup_ts, experiment_id=None, author="op", source="gui", message="orig", tags=()
+        )
+        await writer.stop()
+        svc = ColdRotationService(data_dir=tmp_path, archive_dir=archive_dir, age_days=30)
+        assert await svc.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
+
+    asyncio.run(_seed_rotate())
+    assert not (tmp_path / db_name).exists(), "rotation must delete the hot DB"
+
+    async def _restore_backdated() -> None:
+        writer = SQLiteWriter(tmp_path)
+        writer._write_batch(
+            [
+                Reading(dup_ts, "ls", "T", 1.0, "K", ChannelStatus.OK),  # exact duplicate
+                Reading(new_ts, "ls", "T", 2.5, "K", ChannelStatus.OK),  # restored-only
+            ]
+        )
+        writer._write_operator_log_entry(
+            timestamp=dup_ts, experiment_id=None, author="op", source="gui", message="orig", tags=()
+        )  # duplicate
+        writer._write_operator_log_entry(
+            timestamp=new_ts, experiment_id=None, author="op", source="gui", message="restored", tags=()
+        )  # restored-only
+        await writer.stop()
+
+    asyncio.run(_restore_backdated())
+    assert (tmp_path / db_name).exists(), "backdated hot DB now overlaps the archive"
+
+    reader = ArchiveReader(data_dir=tmp_path, archive_dir=archive_dir)
+
+    # query(): restored reading must surface; the exact-key duplicate dedups to one.
+    res = reader.query(["T"], day.replace(hour=0), day.replace(hour=23))
+    vals = sorted(v for _t, v in res["T"])
+    assert vals == [1.0, 2.5], f"query() must union restored hot over archive, got {vals}"
+
+    # query_operator_log(): restored journal entry must surface, duplicate deduped.
+    ol = reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
+    msgs = sorted(r[4] for r in ol)
+    assert msgs == ["orig", "restored"], f"operator_log must union+dedup, got {msgs}"
+
+
 def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
     day = datetime(2026, 4, 14, tzinfo=UTC)
     base_ts = day.timestamp()

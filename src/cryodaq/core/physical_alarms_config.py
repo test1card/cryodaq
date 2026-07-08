@@ -56,6 +56,9 @@ _VACUUM_DEFAULTS: dict[str, Any] = {
     "clear_pressure_mbar": 1.0e-3,
     "sustained_s": 30,
     "severity": "CRITICAL",
+    # Opt-in SafetyManager escalation on FIRED (default false = alarm-only).
+    # Strict bool: only YAML `true` enables — see fail-closed override below.
+    "escalate_to_safety": False,
 }
 
 
@@ -128,6 +131,12 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
 
     cooldown_cfg = _merge_with_defaults(cooldown_raw, _COOLDOWN_DEFAULTS)
     vacuum_cfg = _merge_with_defaults(vacuum_raw, _VACUUM_DEFAULTS)
+
+    # escalate_to_safety is fail-closed strict bool: only YAML `true` (a real
+    # bool) may arm the source-killing safety escalation. The generic merge
+    # coerces non-bool scalars (e.g. "true"/1/"yes") to True — unacceptable for
+    # a safety opt-in — so re-derive it strictly from the raw value here.
+    vacuum_cfg["escalate_to_safety"] = vacuum_raw.get("escalate_to_safety") is True
 
     return cooldown_cfg, vacuum_cfg
 

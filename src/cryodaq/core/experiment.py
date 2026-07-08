@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import shutil
-import sqlite3
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -17,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)

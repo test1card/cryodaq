@@ -1,5 +1,8 @@
 # Shift handover configuration
-# Opt-in: shift handover features are disabled if this file is absent or empty.
+#
+# НЕ читается кодом — зарезервировано. Ни один загрузчик в src/ не открывает
+# этот файл; shift handover работает через Гемма-команды (payload-дефолты
+# в самой команде, не из YAML). Файл сохранён как заготовка на будущее.
 
 periodic_interval_hours: 2
 periodic_missed_timeout_minutes: 15

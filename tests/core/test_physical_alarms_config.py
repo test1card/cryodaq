@@ -86,6 +86,35 @@ def test_yaml_parse_error_returns_defaults(tmp_path):
     assert vd == _VACUUM_DEFAULTS
 
 
+def test_escalate_to_safety_absent_defaults_false(tmp_path):
+    p = _write(tmp_path, """
+    vacuum:
+      enabled: true
+    """)
+    _, vd = load_physical_alarms_config(p)
+    assert vd["escalate_to_safety"] is False
+
+
+def test_escalate_to_safety_true_enables(tmp_path):
+    p = _write(tmp_path, """
+    vacuum:
+      escalate_to_safety: true
+    """)
+    _, vd = load_physical_alarms_config(p)
+    assert vd["escalate_to_safety"] is True
+
+
+@pytest.mark.parametrize("raw", ['"true"', '"yes"', "1", '"on"', '"false"'])
+def test_escalate_to_safety_strict_bool_rejects_non_bool(tmp_path, raw):
+    """Only YAML `true` enables — strings/ints must NOT (fail-closed)."""
+    p = _write(tmp_path, f"""
+    vacuum:
+      escalate_to_safety: {raw}
+    """)
+    _, vd = load_physical_alarms_config(p)
+    assert vd["escalate_to_safety"] is False
+
+
 def test_defaults_round_trip(tmp_path):
     """Defaults can survive a write-read cycle (values are YAML-serialisable)."""
     import yaml

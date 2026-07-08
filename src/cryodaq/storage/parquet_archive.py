@@ -9,12 +9,12 @@ pyarrow is OPTIONAL — functions degrade gracefully if not installed.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
 

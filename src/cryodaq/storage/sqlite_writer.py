@@ -12,9 +12,8 @@ import json
 import logging
 import math
 import os
-import sqlite3
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
@@ -22,6 +21,12 @@ from typing import Any
 
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage._sqlite import (
+    SQLITE_BACKPORT_SAFE,
+    SQLITE_BROKEN_RANGE,
+    sqlite3,
+    sqlite_version_info,
+)
 from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
 logger = logging.getLogger(__name__)
@@ -102,15 +107,8 @@ _SQLITE_VERSION_CHECKED = False
 _HISTORY_MAX_ROWS = 100_000
 _HISTORY_MAX_CHANNELS = 64
 
-# Per SQLite official advisory (sqlite.org/wal.html), the WAL-reset corruption
-# fix is backported to these specific patch versions only. 3.44.7+ and 3.50.8+
-# do NOT have the backport; the fix landed in trunk at 3.51.3.
-SQLITE_BACKPORT_SAFE: frozenset[tuple[int, int, int]] = frozenset(
-    [
-        (3, 44, 6),
-        (3, 50, 7),
-    ]
-)
+# Range and backport-safe set live in cryodaq.storage._sqlite (single source,
+# also used to pick the sqlite3 implementation). Imported above.
 
 
 def _check_sqlite_version() -> None:
@@ -130,8 +128,9 @@ def _check_sqlite_version() -> None:
     if _SQLITE_VERSION_CHECKED:
         return
     _SQLITE_VERSION_CHECKED = True
-    version = sqlite3.sqlite_version_info  # tuple, e.g. (3, 37, 2)
-    if (3, 7, 0) <= version < (3, 51, 3):
+    version = sqlite_version_info()  # chosen impl, e.g. (3, 37, 2)
+    lo, hi = SQLITE_BROKEN_RANGE
+    if lo <= version < hi:
         if version in SQLITE_BACKPORT_SAFE:
             return
         bypass = os.environ.get("CRYODAQ_ALLOW_BROKEN_SQLITE", "").strip()
@@ -250,12 +249,38 @@ class SQLiteWriter:
         if self._persistence_failure_callback is None or self._loop is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self._persistence_failure_callback(reason),
                 self._loop,
             )
         except Exception as exc:
             logger.error("Failed to schedule persistence_failure callback: %s", exc)
+            return
+        # The writer thread does not await this Future. Without a done-callback
+        # an exception raised inside the safety callback (e.g. the disk-full
+        # latch itself failing) would be swallowed silently. Log CRITICAL so
+        # the lost latch failure is at least visible in the record.
+        future.add_done_callback(self._log_persistence_callback_result)
+
+    @staticmethod
+    def _log_persistence_callback_result(future: Any) -> None:
+        """Surface an exception from the persistence-failure safety callback.
+
+        Runs on the engine event loop when the scheduled coroutine finishes.
+        Success is silent; a raised exception is logged CRITICAL because it
+        means the disk-full fault latch may not have fired.
+        """
+        try:
+            exc = future.exception()
+        except CancelledError:
+            return
+        if exc is not None:
+            logger.critical(
+                "Persistence-failure safety callback raised — disk-full fault "
+                "latch may NOT have fired: %s",
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def _ensure_connection(self, day: date) -> sqlite3.Connection:
         """Открыть/переоткрыть БД если сменился день."""
@@ -749,10 +774,14 @@ class SQLiteWriter:
             self._task = None
         # Shutdown executor FIRST — waits for any in-flight write_batch to finish.
         # Then close connection — no race with executor thread.
+        # shutdown(wait=True) blocks until the in-flight sqlite op returns; run it
+        # off the event loop via asyncio.to_thread so a busy write doesn't freeze
+        # the engine loop during shutdown. All callers await stop() (or drive it
+        # via run_until_complete), so a running loop is always present here.
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            await asyncio.to_thread(self._executor.shutdown, wait=True)
         if self._read_executor is not None:
-            self._read_executor.shutdown(wait=True)
+            await asyncio.to_thread(self._read_executor.shutdown, wait=True)
         if self._conn:
             self._conn.close()
             self._conn = None

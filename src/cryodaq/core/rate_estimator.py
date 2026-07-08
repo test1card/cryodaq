@@ -61,6 +61,17 @@ class RateEstimator:
         # channel → count of consecutive dropped (within-tolerance backward)
         # samples since the last accepted sample.
         self._consec_drops: dict[str, int] = {}
+        # F5: last computed rate per channel + a per-channel "serve stale"
+        # marker. A FORWARD-gap reset (a measurement 8-10 s late — just under
+        # the SafetyManager fail-on-silence stale_timeout_s, config/safety.yaml
+        # = 10 s) clears the buffer, so get_rate() would return None for the
+        # whole min_span_s refill window (~30 s). That blind window sits below
+        # the stale guard, letting a real dT/dt transient hide. Invariant: while
+        # refilling after a forward-gap reset, keep serving the last computed
+        # rate (stale-but-usable) so the dT/dt limit stays armed. Backward (NTP)
+        # resets keep their reset-to-None semantics.
+        self._last_rate: dict[str, float] = {}
+        self._serve_stale: dict[str, bool] = {}
         # short prefix → full channel name (e.g. "Т12" → "Т12 Теплообменник 2")
         self._short_to_full: dict[str, str] = {}
 
@@ -120,6 +131,14 @@ class RateEstimator:
                     self._clock_jump_poll_factor,
                     len(buf),
                 )
+                # F5: a FORWARD-gap reset (gap > 0: silence/late sample or a
+                # forward step) would blind the dT/dt limit for the whole refill
+                # window, below the fail-on-silence stale timeout. Keep serving
+                # the last computed rate until the buffer refills. Backward (NTP)
+                # resets do NOT set this — different failure mode, reset-to-None
+                # semantics preserved.
+                if timestamp - buf[-1][0] > 0.0:
+                    self._serve_stale[channel] = True
                 buf.clear()
         buf.append((timestamp, value))
         # Any accepted sample (ok / reset re-anchor / drift re-anchor) ends the
@@ -180,11 +199,27 @@ class RateEstimator:
         """Вернуть dX/dt в единицах [unit/мин]. None если недостаточно данных."""
         channel = self.resolve_channel(channel)
         buf = self._buffers.get(channel)
-        if not buf or len(buf) < self._min_points:
+        insufficient = (
+            not buf
+            or len(buf) < self._min_points
+            or (
+                self._min_span_s is not None
+                and buf[-1][0] - buf[0][0] < self._min_span_s
+            )
+        )
+        if insufficient:
+            # F5: during the post-forward-gap refill, serve the last computed
+            # rate (stale-but-usable) so the dT/dt limit stays armed instead of
+            # going blind below the stale-timeout guard. Cleared once fresh data
+            # refills the window (below).
+            if self._serve_stale.get(channel) and channel in self._last_rate:
+                return self._last_rate[channel]
             return None
-        if self._min_span_s is not None and buf[-1][0] - buf[0][0] < self._min_span_s:
-            return None
-        return _ols_slope_per_min(list(buf))
+        rate = _ols_slope_per_min(list(buf))
+        if rate is not None:
+            self._last_rate[channel] = rate
+            self._serve_stale[channel] = False
+        return rate
 
     def get_rate_custom_window(self, channel: str, window_s: float) -> float | None:
         """dX/dt с нестандартным окном (например vacuum_loss_early: 60 с).

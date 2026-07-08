@@ -51,7 +51,23 @@ class SafetyBroker:
         self._overflow_callback: Callable[[], Any] | None = None
 
     def subscribe(self, name: str, *, maxsize: int = 100) -> asyncio.Queue[Reading]:
-        """Зарегистрировать подписчика. Вызывать до freeze()."""
+        """Зарегистрировать подписчика. Вызывать до freeze().
+
+        ``maxsize`` must be strictly positive. ``asyncio.Queue(maxsize=0)``
+        (or negative) creates an UNBOUNDED queue whose ``full()`` never
+        returns True — that silently disables the overflow→FAULT contract
+        this broker exists to enforce. Fail-closed: reject a non-positive
+        maxsize with ValueError rather than run the safety channel with its
+        overflow semantics disabled. Because ``max_safety_backlog`` from
+        ``safety.yaml`` flows straight into this argument, this guard also
+        validates that config value at the point it reaches the queue.
+        """
+        if maxsize <= 0:
+            raise ValueError(
+                f"SafetyBroker.subscribe maxsize must be > 0 (got {maxsize}); "
+                "a non-positive maxsize makes the queue unbounded and disables "
+                "the overflow→FAULT safety contract."
+            )
         if self._frozen:
             raise RuntimeError("SafetyBroker заморожен — подписка невозможна")
         if name in self._subscribers:

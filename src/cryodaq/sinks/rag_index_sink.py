@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DB_PATH = "data/rag_index"
 _DEFAULT_TABLE = "cryodaq_corpus"
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
-_DEFAULT_EMBEDDING_MODEL = "multilingual-e5-small"
+# May 2026 stack default (matches rag.yaml.example + engine): qwen3-embedding
+# tops the MTEB multilingual leaderboard (Russian incl.), 1024-dim. Only used
+# when rag.yaml omits embedding_model; the deprecated multilingual-e5-small
+# (384d) is no longer the fallback.
+_DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 
 
 class RAGIndexSink(Sink):

@@ -30,7 +30,6 @@ except Exception:
 import json
 import logging
 import math
-import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)

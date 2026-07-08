@@ -30,6 +30,7 @@ pytestmark = pytest.mark.asyncio
 def _mock_keithley():
     k = MagicMock()
     k.connected = True
+    k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
     k.emergency_off = AsyncMock()
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()

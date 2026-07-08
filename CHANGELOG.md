@@ -7,6 +7,96 @@
 
 ---
 
+## [0.64.0] — 2026-07-08 — ночной excellence-прогон: fail-closed до конца, SQLite self-heal, жизненный цикл данных
+
+Итог ночного аудита всего репозитория (собственный проход + четыре
+независимых внешних ревью по осям: safety-ядро, asyncio, storage-целостность,
+config-когерентность). Три из четырёх ревью нашли реальные дефекты — все
+закрыты с RED→GREEN-пинами. Главные: цепочка verified-off в safety-ядре
+(две fail-open дыры), retention душил cold rotation (данные умирали, не
+дойдя до архива), SQLite-гейт самоисцеляется на Linux.
+
+### Added
+
+- **SQLite auto-fallback (`storage/_sqlite.py`)** (c44da12): реализация
+  sqlite3 выбирается один раз на импорте — безопасная stdlib, иначе
+  bundled `pysqlite3-binary` (базовая зависимость, маркер Linux-only).
+  F25-гейт проверяет ВЫБРАННУЮ реализацию: лабораторный Ubuntu и ubuntu-CI
+  проходят гейт из коробки, без обходного флага. Все 13 runtime-импортёров
+  берут sqlite3 из шима — все соединения с одной БД делят одну библиотеку.
+- **Опциональная эскалация VacuumGuard в SafetyManager** (70942bf):
+  `vacuum_guard.escalate_to_safety` (строгий bool, по умолчанию false =
+  прежнее alarm-only поведение). Включена — FIRED-фронт защёлкивает fault
+  (потеря вакуума на холодном криостате), восстановление через обычный
+  acknowledge-поток. Паттерн операторского выбора, как watchdog.mode.
+
+### Fixed
+
+- **Safety-ядро: дисциплина verified-off** (51ba06b, закрытие 2 CRITICAL +
+  1 HIGH + 2 MEDIUM внешнего ревью): stop_source() больше не глотает
+  неудачную верификацию OFF (OutputStateUnverifiedError → FAULT вместо
+  ложного SAFE_OFF над живым выходом); force-OFF при connect()
+  верифицируется readback'ом — неудача ставит блокирующее RUN-предусловие
+  (не отбирая у оператора управление), снимается верифицированным OFF;
+  _fault() проверяет boolean emergency_off() — неподтверждённый OFF виден
+  в публикуемом состоянии; interlock-трип не ждёт медленный request_run
+  за общим локом; forward-скачок часов не ослепляет dT/dt-защиту
+  (последний rate удерживается на время refill).
+- **Retention душил cold rotation** (1b163d1, HIGH storage-ревью): gzip
+  дневных БД на 14-й день делал их невидимыми для ротации 30-го дня и для
+  всех читателей; данные умирали, не дойдя до архива. Теперь retention не
+  трогает дневные БД при включённой ротации; ротация вдобавок поглощает
+  legacy `.db.gz` (спасение уже невидимых дней с лабораторного диска);
+  build-time WARNING о конфликте порогов. Плюс union hot∪cold на
+  overlap-днях для query() и query_operator_log() (как в query_rows).
+- **Чистота event loop + целостность SafetyBroker** (de3f689): ZMQ
+  bind-retry без time.sleep на лупе; maxsize=0 больше не отключает молча
+  overflow→FAULT-контракт safety-канала; сигнал persistence-failure не
+  теряет Future (CRITICAL при падении колбэка); executor shutdown и
+  YAML/metadata I/O — вне лупа.
+- **Config/docs дрейф** (6832635): instruments.local.yaml.example больше
+  не роняет блоки watchdog/chamber при копировании (replacement-семантика
+  задокументирована громко); shifts.yaml честно помечен reserved; RAG-sink
+  fallback выровнен на qwen3-embedding:0.6b; дубликат query: в agent.yaml
+  слит; мёртвый ключ warning_threshold удалён; чек-лист проверяет SQLite
+  через шим; web-extra объявляет pydantic/starlette.
+- CI: единственный красный тест (калибровка через writer.stop() на
+  CI-раннерах с in-range SQLite) — ubuntu лечится шимом по-настоящему,
+  Windows признаёт байпас явно (c44da12).
+
+### Infrastructure
+
+- Гигиена веток: 87 → ~17 локальных (merged удалены, 6 superseded,
+  чистые worktrees сняты; 8 dirty worktrees сохранены — возможна
+  незакоммиченная работа), remote 30 → 3.
+
+### Known Issues
+
+- При завершении engine в логе один ERROR «Unclosed client session»
+  (aiohttp-сессия не закрывается на shutdown-пути; замечено boot-smoke
+  прогоном mock-engine). Косметика exit-пути, данные/safety не затронуты;
+  фикс в следующем train.
+
+### Test baseline
+
+- см. финальный прогон (full_suite_v064) — batch tests/core+tests/drivers
+  1154 passed на safety-волне; поштучные волны 30-151 passed.
+
+### Tags
+
+- `v0.64.0` — merge-коммит `feat/sqlite-fallback` в master.
+
+### Selected commits in this release
+
+- c44da12 — SQLite auto-fallback + CI green
+- 70942bf — VacuumGuard escalate_to_safety (opt-in)
+- 6832635 — config/docs когерентность (C1-C8)
+- 1b163d1 — retention×rotation + legacy .gz спасение + overlap union
+- de3f689 — loop purity + broker guards + lifecycle wiring
+- 51ba06b — safety fail-closed волна (verified-off end to end)
+
+---
+
 ## [0.63.0] — 2026-07-08 — Known Limitations закрыты: cold rotation ВКЛЮЧЕНА, полный read-side
 
 Закрытие списка Known Limitations v0.60.0. Все исторические читатели переведены

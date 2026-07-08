@@ -287,3 +287,24 @@ async def test_exception_isolation_publish_batch() -> None:
     await broker.publish_batch(readings)
 
     assert q_good.qsize() == 5
+
+
+# ---------------------------------------------------------------------------
+# subscribe() rejects a non-positive maxsize (A3): maxsize=0 → unbounded queue
+# whose full() never fires, defeating the overflow policy (memory leak).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_maxsize", [0, -1, -1000])
+async def test_subscribe_rejects_nonpositive_maxsize(bad_maxsize: int) -> None:
+    broker = DataBroker()
+    with pytest.raises(ValueError, match="maxsize must be > 0"):
+        await broker.subscribe("greedy", maxsize=bad_maxsize)
+    # Rejection must not half-register the subscriber.
+    assert "greedy" not in broker.stats
+
+
+async def test_subscribe_accepts_positive_maxsize() -> None:
+    broker = DataBroker()
+    q = await broker.subscribe("ok", maxsize=1)
+    assert q.maxsize == 1

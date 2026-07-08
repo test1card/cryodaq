@@ -57,6 +57,12 @@ dependencies = [
     # tz="UTC" timestamps (parquet archive via pyarrow) raises
     # ZoneInfoNotFoundError without this. No-op where the OS provides tzdata.
     "tzdata>=2024.1",
+    # F25 SQLite WAL gate: on Linux the system SQLite is often in the
+    # March-2026 WAL-reset corruption range [3.7.0, 3.51.3). storage/_sqlite.py
+    # transparently falls back to this bundled modern SQLite so the gate passes
+    # out of the box. Linux-only marker: macOS ships no pysqlite3 wheels (the
+    # stdlib there is expected safe), and the marker prevents an install failure.
+    "pysqlite3-binary>=0.5.4; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -76,6 +82,10 @@ dev = [
 web = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
+    # rest_api.py imports these directly (today transitive via fastapi) —
+    # declared explicitly so the web extra states its real surface.
+    "pydantic>=2",
+    "starlette",
 ]
 # IV.4 Finding 1: archive extra retained as a no-op alias so any
 # deployment / CI script pinned to `pip install -e ".[archive]"` keeps

@@ -186,8 +186,10 @@ cryodaq-engine --mock # mock mode (simulated instruments)
 uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080  # optional web (loopback)
 ```
 
-The web dashboard has no authentication — bind it to `127.0.0.1` only; public
-access requires a reverse proxy with authorization (or an SSH tunnel).
+The web dashboard's GET surface has no authentication — bind it to `127.0.0.1`
+only; public access requires a reverse proxy with authorization (or an SSH
+tunnel). The two `/api/v1` write endpoints (`POST /log`, `POST /alarms/{id}/ack`)
+require a bearer token from the gitignored `config/web.local.yaml`.
 
 Helper CLIs:
 
@@ -214,7 +216,8 @@ Active configuration files as of v0.63.0:
 - `config/housekeeping.yaml` — throttle, retention, compression, `cold_rotation`
 - `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
 - `config/cooldown.yaml` — cooldown-predictor parameters
-- `config/shifts.yaml` — shift definitions (GUI)
+- `config/shifts.yaml` — reserved/unused (no code loader; shift handover runs
+  via the assistant's Gemma commands, not this file)
 - `config/agent.yaml` — the local AI assistant (Ollama model, triggers, rate limit)
 - `config/rag.yaml.example` — knowledge base / RAG (embedding model, corpus)
 - `config/sinks.yaml.example` — sinks (vault notes, webhook) on finalize
@@ -370,8 +373,12 @@ As of v0.63.0. The lab-only checks below are collected as a turnkey protocol in
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
   range `[3.7.0, 3.51.3)` (F25). Backport-safe: 3.44.6, 3.50.7 (pass without the
-  variable). Workaround: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (prints a warning). On
-  the lab Ubuntu PC, check `sqlite3 --version` (see the checklist).
+  variable). On Linux this self-heals: `storage/_sqlite.py` transparently falls
+  back to the bundled `pysqlite3-binary` (a base dependency) when the linked
+  SQLite is in-range, so the gate passes out of the box. Manual remediation
+  (`CRYODAQ_ALLOW_BROKEN_SQLITE=1`, or a Python linked against a safe SQLite) is
+  only needed if BOTH the stdlib and the fallback are unsafe/absent. macOS ships
+  no pysqlite3 wheels; its stdlib is expected safe.
 - **Lab Ubuntu PC verification:** the H5 ZMQ fix from v0.39.0 was verified only on
   macOS. Physical access to the lab PC is pending (see the checklist).
 - **PDF reports:** best-effort. The guaranteed artifact is DOCX.

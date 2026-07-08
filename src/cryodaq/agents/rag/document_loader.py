@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+
+from cryodaq.storage._sqlite import sqlite3
 
 logger = logging.getLogger(__name__)
 
