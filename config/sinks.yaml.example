@@ -20,3 +20,13 @@ sinks:
       url: "https://example.com/cryodaq/experiments"
       timeout_s: 10.0
       verify_ssl: true
+
+  # F32 Stage 2 — rebuild the RAG knowledge-base index after each finalize.
+  # Keys mirror SinkRegistry.load_config (registry.py). experiments_dir is
+  # required; vault_dir / sqlite_path are optional (omit to skip that walker).
+  rag_index:
+    enabled: false
+    rag_config_path: "config/rag.yaml"
+    experiments_dir: "data/experiments"
+    vault_dir: "~/CryoDAQ-Vault/experiments"  # optional
+    sqlite_path: "data/cryodaq.db"            # optional

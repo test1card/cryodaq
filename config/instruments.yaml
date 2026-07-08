@@ -114,4 +114,6 @@ chamber:
   leak_rate:
     enabled: true
     default_sample_window_s: 300.0
-    warning_threshold_mbar_l_per_s: 1.0e-4
+    # No live warning threshold exists: nothing reads a leak-rate threshold.
+    # finalize() enforces only the volume precondition (raises ValueError when
+    # chamber.volume_l <= 0 — see analytics/leak_rate.py).

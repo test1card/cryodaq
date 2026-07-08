@@ -214,6 +214,55 @@ async def test_housekeeping_compresses_old_unlinked_db(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# F1a: when cold rotation owns the daily-DB lifecycle, retention must NOT
+# compress daily readings DBs (compressing to .db.gz starves rotation — the
+# .gz was invisible to every reader and rotation only globbed .db).
+# ---------------------------------------------------------------------------
+
+
+async def test_retention_skips_daily_db_when_rotation_enabled(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+    old = data_dir / "data_2026-02-01.db"
+    old.write_text("db", encoding="utf-8")
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).timestamp()
+    os.utime(old, (old_ts, old_ts))
+
+    service = HousekeepingService(
+        data_dir,
+        artifacts,
+        config={"enabled": True, "compress_after_days": 14, "delete_compressed_after_days": 90},
+        skip_daily_db_compression=True,
+    )
+    actions = service.plan_actions(now=datetime.now(UTC))
+    assert all(a.action != "compress_db" for a in actions), "rotation owns daily-DB lifecycle"
+
+    await service.run_once(now=datetime.now(UTC))
+    assert old.exists(), "daily DB must stay a .db so rotation can ingest it"
+    assert not old.with_suffix(".db.gz").exists()
+
+
+def test_retention_compresses_daily_db_when_rotation_disabled(tmp_path: Path) -> None:
+    """Default (flag off): legacy compress behaviour preserved (pin)."""
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+    old = data_dir / "data_2026-02-01.db"
+    old.write_text("db", encoding="utf-8")
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).timestamp()
+    os.utime(old, (old_ts, old_ts))
+
+    service = HousekeepingService(
+        data_dir,
+        artifacts,
+        config={"enabled": True, "compress_after_days": 14, "delete_compressed_after_days": 90},
+    )
+    actions = service.plan_actions(now=datetime.now(UTC))
+    assert any(a.action == "compress_db" and a.source == old for a in actions)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2d C-1.2: fail-closed housekeeping loading
 # ---------------------------------------------------------------------------
 

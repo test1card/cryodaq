@@ -1,5 +1,6 @@
 # Локальная конфигурация web-панели — СКОПИРУЙТЕ в web.local.yaml
-# и укажите токен для будущих write-эндпоинтов REST API.
+# и укажите токен для write-эндпоинтов REST API
+# (POST /api/v1/log, POST /api/v1/alarms/{id}/ack).
 #
 # Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
 #

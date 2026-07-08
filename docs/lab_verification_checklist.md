@@ -21,11 +21,15 @@ WAL-reset **`[3.7.0, 3.51.3)`** (март-2026).
 **Команды.**
 
 ```bash
-# Авторитетная проверка — версия, слинкованная с ИНТЕРПРЕТАТОРОМ движка
-# (именно её читает _check_sqlite_version, не CLI sqlite3):
+# Авторитетная проверка — ВЫБРАННАЯ реализация sqlite3 (та, что реально
+# используется движком: stdlib или fallback pysqlite3). Гейт проверяет именно
+# её, а не сырой stdlib:
+.venv/bin/python -c "from cryodaq.storage._sqlite import sqlite_version_info; print(sqlite_version_info())"
+
+# Дополнительная диагностика — сырой stdlib sqlite3 (до возможного fallback):
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
 
-# CLI-версия как дополнительный ориентир:
+# CLI-версия как ещё один ориентир:
 sqlite3 --version
 ```
 

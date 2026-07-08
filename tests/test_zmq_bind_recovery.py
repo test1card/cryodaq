@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import zmq
@@ -20,7 +21,7 @@ def test_bind_with_retry_succeeds_on_first_try():
     sock = ctx.socket(zmq.PUB)
     sock.setsockopt(zmq.LINGER, 0)
     try:
-        zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0")
+        asyncio.run(zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0"))
     finally:
         sock.close(linger=0)
         ctx.term()
@@ -34,7 +35,7 @@ def test_bind_with_retry_raises_on_non_eaddrinuse():
     try:
         with pytest.raises(zmq.ZMQError):
             # An invalid endpoint produces a ZMQError that is NOT EADDRINUSE.
-            zmq_bridge._bind_with_retry(sock, "totally-bogus://nope")
+            asyncio.run(zmq_bridge._bind_with_retry(sock, "totally-bogus://nope"))
     finally:
         sock.close(linger=0)
         ctx.term()
@@ -44,20 +45,20 @@ def test_bind_with_retry_retries_on_eaddrinuse_then_succeeds():
     """_bind_with_retry must retry when EADDRINUSE and succeed on a later attempt.
 
     We fake a socket whose bind() raises EADDRINUSE twice then succeeds.
-    After return, bind() must have been called exactly 3 times and sleep
-    must have been called twice (once per failed attempt, not on success).
+    After return, bind() must have been called exactly 3 times and the
+    async backoff sleep must have been awaited twice (once per failed
+    attempt, not on success).
     """
     eaddrinuse = zmq.ZMQError(zmq.EADDRINUSE)
 
     fake_sock = MagicMock()
     fake_sock.bind.side_effect = [eaddrinuse, eaddrinuse, None]
 
-    with patch("cryodaq.core.zmq_bridge.time") as mock_time:
-        mock_time.sleep = MagicMock()
-        zmq_bridge._bind_with_retry(fake_sock, "tcp://127.0.0.1:5555")
+    with patch("cryodaq.core.zmq_bridge.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        asyncio.run(zmq_bridge._bind_with_retry(fake_sock, "tcp://127.0.0.1:5555"))
 
     assert fake_sock.bind.call_count == 3
-    assert mock_time.sleep.call_count == 2, "sleep must be called once per failed EADDRINUSE attempt, not on success"
+    assert mock_sleep.await_count == 2, "sleep must be awaited once per failed EADDRINUSE attempt, not on success"
 
 
 def test_bind_with_retry_raises_after_max_attempts():
@@ -67,9 +68,9 @@ def test_bind_with_retry_raises_after_max_attempts():
     fake_sock = MagicMock()
     fake_sock.bind.side_effect = eaddrinuse  # always fails
 
-    with patch("cryodaq.core.zmq_bridge.time"):
+    with patch("cryodaq.core.zmq_bridge.asyncio.sleep", new_callable=AsyncMock):
         with pytest.raises(zmq.ZMQError):
-            zmq_bridge._bind_with_retry(fake_sock, "tcp://127.0.0.1:5555")
+            asyncio.run(zmq_bridge._bind_with_retry(fake_sock, "tcp://127.0.0.1:5555"))
 
     assert fake_sock.bind.call_count == zmq_bridge._BIND_MAX_ATTEMPTS
 
@@ -108,7 +109,7 @@ def test_publisher_sets_linger_before_bind():
 
     sock = _TrackedSocket()
     sock.setsockopt(zmq.LINGER, 0)  # simulate what ZMQPublisher.start() does first
-    zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0")  # then bind
+    asyncio.run(zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0"))  # then bind
     call_log.append("bind_done")
 
     assert call_log[0] == "LINGER_0", "LINGER must be set before bind is called"
@@ -139,7 +140,7 @@ def test_command_server_sets_linger_before_bind():
 
     sock = _TrackedSocket()
     sock.setsockopt(zmq.LINGER, 0)  # simulate what ZMQCommandServer.start() does first
-    zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0")  # then bind
+    asyncio.run(zmq_bridge._bind_with_retry(sock, "tcp://127.0.0.1:0"))  # then bind
     call_log.append("bind_done")
 
     assert call_log[0] == "LINGER_0", "LINGER must be set before bind is called"

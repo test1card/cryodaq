@@ -82,6 +82,10 @@ dev = [
 web = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
+    # rest_api.py imports these directly (today transitive via fastapi) —
+    # declared explicitly so the web extra states its real surface.
+    "pydantic>=2",
+    "starlette",
 ]
 # IV.4 Finding 1: archive extra retained as a no-op alias so any
 # deployment / CI script pinned to `pip install -e ".[archive]"` keeps

@@ -186,8 +186,10 @@ cryodaq-engine --mock # mock mode (simulated instruments)
 uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080  # optional web (loopback)
 ```
 
-The web dashboard has no authentication — bind it to `127.0.0.1` only; public
-access requires a reverse proxy with authorization (or an SSH tunnel).
+The web dashboard's GET surface has no authentication — bind it to `127.0.0.1`
+only; public access requires a reverse proxy with authorization (or an SSH
+tunnel). The two `/api/v1` write endpoints (`POST /log`, `POST /alarms/{id}/ack`)
+require a bearer token from the gitignored `config/web.local.yaml`.
 
 Helper CLIs:
 
@@ -214,7 +216,8 @@ Active configuration files as of v0.63.0:
 - `config/housekeeping.yaml` — throttle, retention, compression, `cold_rotation`
 - `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
 - `config/cooldown.yaml` — cooldown-predictor parameters
-- `config/shifts.yaml` — shift definitions (GUI)
+- `config/shifts.yaml` — reserved/unused (no code loader; shift handover runs
+  via the assistant's Gemma commands, not this file)
 - `config/agent.yaml` — the local AI assistant (Ollama model, triggers, rate limit)
 - `config/rag.yaml.example` — knowledge base / RAG (embedding model, corpus)
 - `config/sinks.yaml.example` — sinks (vault notes, webhook) on finalize

@@ -481,7 +481,7 @@ Phase I.1.
 - `config/experiment_templates/*.yaml`
 - `config/housekeeping.yaml`
 - `config/plugins.yaml`
-- `config/shifts.yaml`
+- `config/shifts.yaml` — reserved/unused (нет загрузчика в src; shift handover идёт через Гемма-команды)
 - `config/*.local.yaml.example`
 
 ## Приборы
