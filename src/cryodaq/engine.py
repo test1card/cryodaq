@@ -2278,6 +2278,16 @@ async def _run_engine(*, mock: bool = False) -> None:
                 state_tracker=_alarm_v2_state_tracker,
                 alarm_state_mgr=alarm_v2_state_mgr,
                 event_bus=event_bus,
+                # Opt-in (external safety review, HIGH): wire SafetyManager so a
+                # FIRED vacuum guard latches a fault, not just an alarm. Strict
+                # bool, fail-closed like the wdog gate — pass the handle only on
+                # an explicit `escalate_to_safety: true`; default keeps None
+                # (alarm-only, byte-identical to prior behavior).
+                safety_manager=(
+                    safety_manager
+                    if _vacuum_cfg.get("escalate_to_safety") is True
+                    else None
+                ),
             )
         except Exception as exc:
             logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
