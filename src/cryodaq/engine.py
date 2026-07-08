@@ -20,6 +20,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -477,6 +478,112 @@ async def _drain_dispatch_tasks(
             )
             for t in tasks:
                 t.cancel()
+
+
+# ───────────────────────── Task supervision (A2) ──────────────────────────
+# Silent task death is the #1 overnight risk: a long-lived engine loop whose
+# coroutine raises dies without a trace, and monitoring/alarms go dark. The
+# helpers below extract the supervision policy so it is unit-testable without
+# bringing up the full engine (same rationale as ``_drain_dispatch_tasks``).
+
+_SUPERVISE_BACKOFF_BASE_S = 1.0  # first restart delay; doubles each crash
+_SUPERVISE_BACKOFF_MAX_S = 60.0  # cap so a hard-down task never spins hot
+_SAFETY_TASK_MAX_RESTARTS = 2  # safety_collect/safety_monitor: latch FAULT after this
+
+
+async def _alarm_v2_feed_loop(
+    queue: asyncio.Queue[Reading],
+    state_tracker: Any,
+    rate_estimator: Any,
+) -> None:
+    """Feed alarm-v2 channel_state + rate_estimator from a DataBroker queue.
+
+    A2(a): a single malformed reading raising inside ``state_tracker.update``
+    (or the rate push) must NOT kill the whole feed task — that silently
+    blinds alarm-v2 until restart. Guard per iteration: log and move on. The
+    outer ``CancelledError`` handler keeps clean-shutdown semantics intact.
+    """
+    try:
+        while True:
+            reading = await queue.get()
+            try:
+                state_tracker.update(reading)
+                # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
+                # конечно; не годное показание (flapping sensor: NaN/inf или
+                # статус ошибки) не отравляет OLS-окно rate-оценщика.
+                if reading.is_usable():
+                    rate_estimator.push(
+                        reading.channel,
+                        reading.timestamp.timestamp(),
+                        reading.value,
+                    )
+            except Exception:
+                logger.exception(
+                    "Alarm v2 feed: ошибка обработки показания %s",
+                    getattr(reading, "channel", "?"),
+                )
+    except asyncio.CancelledError:
+        return
+
+
+def _handle_supervised_task_exit(
+    *,
+    name: str,
+    task: asyncio.Task[Any],
+    stopping: bool,
+    restart_counts: dict[str, int],
+    logger_: logging.Logger,
+    on_alarm: Callable[[str, BaseException], None],
+    on_restart: Callable[[float], None],
+    on_fault_latch: Callable[[str, BaseException], None],
+    safety_critical: bool = False,
+) -> str:
+    """Decide + act on a supervised long-lived task's termination.
+
+    A2(b): the done-callback core. On UNEXPECTED death (not cancellation, not
+    a clean return, not during shutdown) it raises the operator alarm through
+    the existing alarm/event path and restarts with exponential backoff. For
+    the two safety tasks (``safety_critical``) it latches FAULT via SafetyManager
+    after ``_SAFETY_TASK_MAX_RESTARTS`` failed restarts instead of looping
+    forever. Side effects are injected so the policy is testable in isolation.
+
+    Returns one of ``"ignored" | "restart" | "fault_latch"``.
+    """
+    # Clean cancellation or engine shutdown: never restart, never alarm.
+    if task.cancelled() or stopping:
+        return "ignored"
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return "ignored"
+    if exc is None:
+        # Loop returned without error (e.g. a disabled subsystem returning
+        # early). Nothing died unexpectedly — leave it be.
+        return "ignored"
+
+    logger_.critical(
+        "Надзор: служебная задача %s аварийно завершилась — %r",
+        name,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    on_alarm(name, exc)  # operator-visible/audible alert via existing alarm path
+
+    count = restart_counts.get(name, 0) + 1
+    restart_counts[name] = count
+
+    if safety_critical and count > _SAFETY_TASK_MAX_RESTARTS:
+        logger_.critical(
+            "Надзор: %s не восстановилась за %d перезапуска — латч FAULT",
+            name,
+            _SAFETY_TASK_MAX_RESTARTS,
+        )
+        on_fault_latch(name, exc)
+        return "fault_latch"
+
+    delay = min(_SUPERVISE_BACKOFF_BASE_S * 2 ** (count - 1), _SUPERVISE_BACKOFF_MAX_S)
+    on_restart(delay)
+    return "restart"
 
 
 def _build_experiment_export(
@@ -2417,21 +2524,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     async def _alarm_v2_feed_readings() -> None:
         """Подписаться на DataBroker и кормить v2 channel_state + rate_estimator."""
         queue = await broker.subscribe("alarm_v2_state_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                _alarm_v2_state_tracker.update(reading)
-                # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
-                # конечно; не годное показание (flapping sensor: NaN/inf или
-                # статус ошибки) не отравляет OLS-окно rate-оценщика.
-                if reading.is_usable():
-                    _alarm_v2_rate.push(
-                        reading.channel,
-                        reading.timestamp.timestamp(),
-                        reading.value,
-                    )
-        except asyncio.CancelledError:
-            return
+        # A2(a): loop body extracted to the importable, per-reading-guarded
+        # _alarm_v2_feed_loop so a single bad reading can't kill the feed.
+        await _alarm_v2_feed_loop(queue, _alarm_v2_state_tracker, _alarm_v2_rate)
 
     # Strong-ref set for fire-and-forget Telegram dispatch tasks.
     # Without this the loop only weak-refs tasks and GC can drop a pending
@@ -2445,7 +2540,13 @@ async def _run_engine(*, mock: bool = False) -> None:
             await asyncio.sleep(poll_s)
             if not _alarm_v2_configs:
                 continue
-            current_phase = _alarm_v2_phase.get_current_phase()
+            # A2(a): guard the once-per-tick phase lookup — a raise here (it sits
+            # outside the per-alarm try below) would kill the whole tick task.
+            try:
+                current_phase = _alarm_v2_phase.get_current_phase()
+            except Exception as exc:
+                logger.error("Alarm v2 tick: ошибка получения фазы: %s", exc)
+                continue
             for alarm_cfg in _alarm_v2_configs:
                 try:
                     # Phase-filter -> evaluate -> process. Shared with tests via
@@ -3521,6 +3622,140 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Запуск всех подсистем ---
     await safety_manager.start()
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
+
+    # ─────────────────── Надзор за долгоживущими задачами (A2) ────────────────
+    # Каждая долгоживущая задача движка регистрируется здесь. Если её корутина
+    # неожиданно падает, done-callback пишет CRITICAL, поднимает оператору
+    # тревогу по штатному каналу событий и перезапускает задачу с экспоненц.
+    # выдержкой. safety_collect/safety_monitor создаёт SafetyManager; движок
+    # надзирает за ними снаружи и после _SAFETY_TASK_MAX_RESTARTS неудачных
+    # перезапусков латчит FAULT вместо бесконечного цикла.
+    _engine_stopping = False
+    _supervised_tasks: dict[str, asyncio.Task[Any]] = {}
+    _supervise_restarts: dict[str, int] = {}
+
+    def _dispatch_supervisor_alarm(task_name: str, exc: BaseException) -> None:
+        # Штатный путь тревоги: то же событие alarm_fired, что и у alarm-v2 —
+        # GUI/оператор получают его через event_bus (звук/панель), новый канал
+        # не изобретаем.
+        ev = asyncio.create_task(
+            event_bus.publish(
+                EngineEvent(
+                    event_type="alarm_fired",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "alarm_id": f"task_supervisor_{task_name}",
+                        "level": "CRITICAL",
+                        "message": (
+                            f"Служебная задача {task_name} аварийно завершилась: {exc!r}"
+                        ),
+                        "channels": [],
+                        "values": [],
+                    },
+                    experiment_id=experiment_manager.active_experiment_id,
+                )
+            ),
+            name=f"supervisor_alarm_{task_name}",
+        )
+        _alarm_dispatch_tasks.add(ev)
+        ev.add_done_callback(_alarm_dispatch_tasks.discard)
+
+    def _dispatch_safety_fault_latch(task_name: str, exc: BaseException) -> None:
+        ft = asyncio.create_task(
+            safety_manager.latch_fault(
+                reason=(
+                    f"Задача мониторинга безопасности {task_name} аварийно "
+                    f"завершилась и не восстановилась: {exc!r}"
+                ),
+                source=task_name,
+            ),
+            name=f"{task_name}_fault_latch",
+        )
+        _alarm_dispatch_tasks.add(ft)
+        ft.add_done_callback(_alarm_dispatch_tasks.discard)
+
+    def _register_supervision(
+        name: str,
+        task: asyncio.Task[Any],
+        factory: Callable[[], Any],
+        *,
+        safety_critical: bool = False,
+        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> asyncio.Task[Any]:
+        _supervised_tasks[name] = task
+        if on_spawn is not None:
+            on_spawn(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            _handle_supervised_task_exit(
+                name=name,
+                task=t,
+                stopping=_engine_stopping,
+                restart_counts=_supervise_restarts,
+                logger_=logger,
+                on_alarm=_dispatch_supervisor_alarm,
+                on_restart=lambda delay: asyncio.get_running_loop().call_later(
+                    delay,
+                    lambda: _spawn_supervised(
+                        name, factory, safety_critical=safety_critical, on_spawn=on_spawn
+                    ),
+                ),
+                on_fault_latch=_dispatch_safety_fault_latch,
+                safety_critical=safety_critical,
+            )
+
+        task.add_done_callback(_done)
+        return task
+
+    def _spawn_supervised(
+        name: str,
+        factory: Callable[[], Any],
+        *,
+        safety_critical: bool = False,
+        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> asyncio.Task[Any]:
+        if _engine_stopping:
+            return _supervised_tasks[name]
+        task = asyncio.create_task(factory(), name=name)
+        return _register_supervision(
+            name, task, factory, safety_critical=safety_critical, on_spawn=on_spawn
+        )
+
+    # safety_collect/safety_monitor уже созданы SafetyManager.start(); надзираем
+    # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
+    # ту же петлю и синхронизирует ссылку в SafetyManager, чтобы stop() и sweep
+    # завершения видели живую задачу.
+    for _sname, _sattr in (("safety_collect", "_collect_task"), ("safety_monitor", "_monitor_task")):
+        _stask = getattr(safety_manager, _sattr, None)
+        if _stask is not None:
+            _loop_fn = getattr(safety_manager, f"_{_sname.split('_', 1)[1]}_loop")
+            _register_supervision(
+                _sname,
+                _stask,
+                _loop_fn,
+                safety_critical=True,
+                on_spawn=(lambda attr: lambda t: setattr(safety_manager, attr, t))(_sattr),
+            )
+
+    def _loop_exception_backstop(
+        _loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+    ) -> None:
+        # Последний рубеж: всё, что ускользнуло от надзора (fire-and-forget
+        # задачи, баги в самом loop), логируем CRITICAL, а не роняем молча.
+        exc = context.get("exception")
+        _tname = ""
+        fut = context.get("future") or context.get("task")
+        if isinstance(fut, asyncio.Task):
+            _tname = fut.get_name()
+        logger.critical(
+            "Необработанное исключение в event loop: %s | task=%s | %r",
+            context.get("message", ""),
+            _tname or "-",
+            exc,
+        )
+
+    asyncio.get_running_loop().set_exception_handler(_loop_exception_backstop)
+
     # writer уже запущен через start_immediate() выше
     await zmq_pub.start(zmq_queue)
     await cmd_server.start()
@@ -3543,16 +3778,16 @@ async def _run_engine(*, mock: bool = False) -> None:
             gemma_agent = None
     periodic_report_tick_task: asyncio.Task | None = None
     if _gemma_config is not None and _gemma_config.periodic_report_enabled:
-        periodic_report_tick_task = asyncio.create_task(
-            _periodic_report_tick(_gemma_config, event_bus, experiment_manager),
-            name="periodic_report_tick",
+        periodic_report_tick_task = _spawn_supervised(
+            "periodic_report_tick",
+            lambda: _periodic_report_tick(_gemma_config, event_bus, experiment_manager),
         )
     await scheduler.start()
-    throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
-    alarm_v2_feed_task = asyncio.create_task(_alarm_v2_feed_readings(), name="alarm_v2_feed")
+    throttle_task = _spawn_supervised("adaptive_throttle_runtime", _track_runtime_signals)
+    alarm_v2_feed_task = _spawn_supervised("alarm_v2_feed", _alarm_v2_feed_readings)
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
-        alarm_v2_tick_task = asyncio.create_task(_alarm_v2_tick(), name="alarm_v2_tick")
+        alarm_v2_tick_task = _spawn_supervised("alarm_v2_tick", _alarm_v2_tick)
 
     async def _cooldown_alarm_tick_loop() -> None:
         """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
@@ -3654,19 +3889,15 @@ async def _run_engine(*, mock: bool = False) -> None:
     cooldown_alarm_task: asyncio.Task | None = None
     vacuum_guard_task: asyncio.Task | None = None
     if _cooldown_alarm is not None:
-        cooldown_alarm_task = asyncio.create_task(
-            _cooldown_alarm_tick_loop(), name="cooldown_alarm_tick"
-        )
+        cooldown_alarm_task = _spawn_supervised("cooldown_alarm_tick", _cooldown_alarm_tick_loop)
     if _vacuum_guard is not None:
-        vacuum_guard_task = asyncio.create_task(
-            _vacuum_guard_tick_loop(), name="vacuum_guard_tick"
-        )
+        vacuum_guard_task = _spawn_supervised("vacuum_guard_tick", _vacuum_guard_tick_loop)
 
     sd_feed_task: asyncio.Task | None = None
     sd_tick_task: asyncio.Task | None = None
     if sensor_diag is not None:
-        sd_feed_task = asyncio.create_task(_sensor_diag_feed(), name="sensor_diag_feed")
-        sd_tick_task = asyncio.create_task(_sensor_diag_tick(), name="sensor_diag_tick")
+        sd_feed_task = _spawn_supervised("sensor_diag_feed", _sensor_diag_feed)
+        sd_tick_task = _spawn_supervised("sensor_diag_tick", _sensor_diag_tick)
         # v0.55.5 — anchor the cold-start grace at the moment the feed
         # and tick tasks are actually live. Doing this here (rather than
         # in the constructor) avoids counting the engine bootstrap
@@ -3675,16 +3906,14 @@ async def _run_engine(*, mock: bool = False) -> None:
     vt_feed_task: asyncio.Task | None = None
     vt_tick_task: asyncio.Task | None = None
     if vacuum_trend is not None:
-        vt_feed_task = asyncio.create_task(_vacuum_trend_feed(), name="vacuum_trend_feed")
-        vt_tick_task = asyncio.create_task(_vacuum_trend_tick(), name="vacuum_trend_tick")
-    leak_rate_feed_task = asyncio.create_task(_leak_rate_feed(), name="leak_rate_feed")
+        vt_feed_task = _spawn_supervised("vacuum_trend_feed", _vacuum_trend_feed)
+        vt_tick_task = _spawn_supervised("vacuum_trend_tick", _vacuum_trend_tick)
+    leak_rate_feed_task = _spawn_supervised("leak_rate_feed", _leak_rate_feed)
     await housekeeping_service.start()
 
     cold_rotation_task: asyncio.Task | None = None
     if cold_rotation_service is not None:
-        cold_rotation_task = asyncio.create_task(
-            _cold_rotation_scheduler(), name="cold_rotation_scheduler"
-        )
+        cold_rotation_task = _spawn_supervised("cold_rotation_scheduler", _cold_rotation_scheduler)
         logger.info(
             "ColdRotationService запущен: archive=%s, age_days=%d, schedule=%s",
             cold_rotation_service._archive_dir,
@@ -3695,9 +3924,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.info("ColdRotationService отключён (cold_rotation.enabled != true)")
 
     # Watchdog
-    watchdog_task = asyncio.create_task(
-        _watchdog(broker, scheduler, writer, start_ts),
-        name="engine_watchdog",
+    watchdog_task = _spawn_supervised(
+        "engine_watchdog",
+        lambda: _watchdog(broker, scheduler, writer, start_ts),
     )
 
     # DiskMonitor — also wires the writer so disk-recovery can clear the
@@ -3733,6 +3962,10 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # --- Корректное завершение ---
     logger.info("═══ Завершение CryoDAQ Engine ═══")
+
+    # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
+    # только что отменённую задачу прямо во время завершения.
+    _engine_stopping = True
 
     # F31 H3: drain in-flight sink dispatches before downstream teardown.
     # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
@@ -3812,6 +4045,21 @@ async def _run_engine(*, mock: bool = False) -> None:
         await leak_rate_feed_task
     except asyncio.CancelledError:
         pass
+
+    # A2: подметаем перезапущенные надзором задачи — их именованные ссылки
+    # выше могут указывать на уже мёртвый оригинал, а живой перезапуск висит
+    # только в _supervised_tasks. safety_collect/safety_monitor исключаем:
+    # их снимает safety_manager.stop() последними (ссылки синхронизированы при
+    # перезапуске), чтобы мониторинг безопасности жил до конца завершения.
+    _stragglers = [
+        t
+        for name, t in _supervised_tasks.items()
+        if name not in ("safety_collect", "safety_monitor") and not t.done()
+    ]
+    for _t in _stragglers:
+        _t.cancel()
+    if _stragglers:
+        await asyncio.gather(*_stragglers, return_exceptions=True)
 
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
     await scheduler.stop()

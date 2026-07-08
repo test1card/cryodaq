@@ -471,9 +471,15 @@ def test_engine_feed_sites_gate_on_is_usable() -> None:
     assert not hasattr(engine, "_push_if_finite")
 
     src = re.sub(r"\s+", "", inspect.getsource(engine._run_engine))
-    assert "_alarm_v2_rate.push(" in src
     assert "sensor_diag.push(" in src
     assert "vacuum_trend.push(" in src
     # Every feed loop is guarded by the doctrine predicate; no _push_if_finite.
     assert "_push_if_finite" not in src
     assert "ifreading.is_usable():" in src
+
+    # A2: the alarm-v2 feed loop was extracted to _alarm_v2_feed_loop; the
+    # doctrine gate on the rate estimator moved with it and must remain.
+    feed_src = re.sub(r"\s+", "", inspect.getsource(engine._alarm_v2_feed_loop))
+    assert "rate_estimator.push(" in feed_src
+    assert "ifreading.is_usable():" in feed_src
+    assert "_push_if_finite" not in feed_src
