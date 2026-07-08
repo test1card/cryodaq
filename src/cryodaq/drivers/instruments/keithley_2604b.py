@@ -57,6 +57,29 @@ _IV_FIELDS = (
 # SafetyManager, gated on _wdog_enabled (default False). See tsp/cryodaq_wdog.lua.
 _WDOG_SCRIPT: str | None = None
 
+# Version stamp the driver was written against. Must equal CRYODAQ_WDOG_VERSION
+# in tsp/cryodaq_wdog.lua — the script is re-uploaded from repo tsp/ on every
+# arm, so the host reads this back post-upload and refuses to arm on mismatch
+# (catches a truncated or stale upload; firmware gets no CI).
+_WDOG_SCRIPT_VERSION = 2
+
+
+class _WatchdogArmError(RuntimeError):
+    """Firmware watchdog upload/arm integrity check failed — a version-stamp
+    mismatch (truncated/stale upload) or a bad post-run state readback (arm did
+    not take). Routed per-mode by ``_wdog_arm``: ``required`` re-raises so
+    connect fails closed; ``best_effort`` logs CRITICAL and continues host-only.
+    """
+
+
+def _parse_wdog_flag(raw: str) -> bool:
+    """Parse a firmware flag readback (``"1"``/``"0"``/``"nil"``) to bool.
+    Unparseable (fresh instrument prints ``nil``) → False."""
+    try:
+        return float(raw.strip()) > 0.5
+    except ValueError:
+        return False
+
 
 class WatchdogMode(StrEnum):
     """Operator-selected TSP watchdog behaviour (config: keithley.watchdog.mode).
@@ -580,10 +603,40 @@ class Keithley2604B(InstrumentDriver):
             )
         try:
             await self._transport.write(_load_wdog_script())
+            # DELTA A8a — version stamp: the script is re-uploaded every arm, so
+            # a truncated/stale upload passes the fire-and-forget writes silently.
+            # Read CRYODAQ_WDOG_VERSION back and refuse to arm on mismatch.
+            ver_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
+            try:
+                ver = int(float(ver_raw.strip()))
+            except ValueError:
+                ver = -1
+            if ver != _WDOG_SCRIPT_VERSION:
+                raise _WatchdogArmError(
+                    f"TSP watchdog version mismatch: firmware={ver_raw.strip()!r} "
+                    f"expected={_WDOG_SCRIPT_VERSION} (truncated or stale upload)"
+                )
             await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
             await self._transport.write("cryodaq_wdog_run()")
+            # DELTA A8b — state readback: _wdog_arm used to set _wdog_armed on
+            # faith after three fire-and-forget writes. Confirm the firmware
+            # actually armed (active==1) and did not boot latched (tripped==0);
+            # a failed/partial arm is caught here, not hidden until a trip that
+            # never fires.
+            active_raw = await self._transport.query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+            if not (_parse_wdog_flag(active_raw) and not _parse_wdog_flag(tripped_raw)):
+                raise _WatchdogArmError(
+                    f"TSP watchdog arm readback bad: active={active_raw.strip()!r} "
+                    f"tripped={tripped_raw.strip()!r} (expected active=1 tripped=0)"
+                )
             self._wdog_armed = True
-            log.info("%s: TSP watchdog armed (timeout=%.1fs)", self.name, self._wdog_timeout_s)
+            log.info(
+                "%s: TSP watchdog armed (timeout=%.1fs, fw v%d)",
+                self.name,
+                self._wdog_timeout_s,
+                ver,
+            )
         except Exception as exc:
             self._wdog_armed = False
             if self._wdog_mode is WatchdogMode.REQUIRED:

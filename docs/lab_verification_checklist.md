@@ -125,6 +125,36 @@ keithley:
     mode: best_effort     # arm on connect, fail-open на слое watchdog
 ```
 
+(В репозитории `config/instruments.yaml` по умолчанию уже стоит
+`mode: best_effort` — A1(a).)
+
+**Автопроверки (`-m smoke`) — гонять при КАЖДОЙ настройке железа и ПЕРЕД
+КАЖДЫМ ночным прогоном.** У прошивки нет CI; это её проверка целостности.
+Скрипт `tsp/cryodaq_wdog.lua` пере-заливается из репозитория на каждый arm,
+поэтому хост читает обратно:
+
+- **version stamp** — `CRYODAQ_WDOG_VERSION` после заливки; несовпадение
+  (обрезанная/устаревшая заливка) → arm отклоняется;
+- **arm-state** — `cryodaq_wdog_active == 1` и `cryodaq_wdog_tripped == 0`
+  после `cryodaq_wdog_run()`; иначе arm не состоялся;
+- **verified-OFF** — `emergency_off` читает обратно, что выходы OFF;
+- **trip-test** — arm, сталл дольше дедлайна, оба выхода умирают, latch поднят.
+
+```bash
+# без источника (version / arm-state / verified-OFF):
+CRYODAQ_KEITHLEY_RESOURCE="USB0::0x05E6::0x2604::04052028::INSTR" \
+  .venv/bin/pytest -m smoke tests/drivers/test_keithley_watchdog_smoke.py
+
+# trip-test С подачей — ТОЛЬКО dummy-нагрузка, безопасный низкий уровень:
+CRYODAQ_KEITHLEY_RESOURCE="USB0::0x05E6::0x2604::04052028::INSTR" \
+  CRYODAQ_SMOKE_ALLOW_SOURCE=1 \
+  .venv/bin/pytest -m smoke tests/drivers/test_keithley_watchdog_smoke.py
+```
+
+Без `CRYODAQ_KEITHLEY_RESOURCE` тесты пропускаются (skip), поэтому в CI они
+безопасны. Тест с подачей дополнительно закрыт `CRYODAQ_SMOKE_ALLOW_SOURCE=1`,
+чтобы не подать ток случайно.
+
 **Проход (armed-mode).**
 
 1. Поднять движок, источник на **безопасном низком уровне** на dummy-нагрузке.

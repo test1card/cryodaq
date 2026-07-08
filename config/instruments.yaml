@@ -106,7 +106,10 @@ instruments:
 # timer behaviour.
 keithley:
   watchdog:
-    mode: "off"   # quote: bare off/on are YAML booleans
+    # A1(a): best_effort — arm on connect, fail-OPEN on the watchdog layer (an
+    # arm failure logs CRITICAL and continues host-only; it NEVER blocks connect).
+    # Use "required" only for an opt-in fail-CLOSED bench; "off" disables entirely.
+    mode: "best_effort"   # quote: bare off/on are YAML booleans
     timeout_s: 5.0
 
 chamber:

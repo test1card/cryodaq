@@ -34,6 +34,12 @@ class _RecordingTransport:
         self._query_raises_on = query_raises_on
         self._opened = False
         self.wdog_tripped_raw = "0"
+        # Post-upload integrity readbacks (A8). Defaults model a healthy arm:
+        # version matches the driver constant, and cryodaq_wdog_run() has set
+        # active=1 / tripped=0. write() below mutates these to mirror the
+        # firmware state transitions so latch-then-arm tests stay realistic.
+        self.wdog_version_raw = "2"
+        self.wdog_active_raw = "0"
 
     async def open(self, resource: str) -> None:
         self._opened = True
@@ -49,6 +55,10 @@ class _RecordingTransport:
         c = cmd.lower()
         if "*idn?" in c:
             return "Keithley Instruments Inc., Model 2604B"
+        if "cryodaq_wdog_version" in c:
+            return self.wdog_version_raw
+        if "cryodaq_wdog_active" in c:
+            return self.wdog_active_raw
         if "cryodaq_wdog_tripped" in c:
             return self.wdog_tripped_raw
         if "source.output" in c:
@@ -62,6 +72,14 @@ class _RecordingTransport:
             raise RuntimeError("simulated upload failure")
         self.writes.append(cmd)
         self.calls.append(("write", cmd))
+        # Mirror firmware state transitions so the post-run readbacks (A8) see
+        # the same state a real 2604B would: run() clears the latch and arms;
+        # disarm() clears active.
+        if cmd == "cryodaq_wdog_run()":
+            self.wdog_active_raw = "1"
+            self.wdog_tripped_raw = "0"
+        elif cmd == "cryodaq_wdog_disarm()":
+            self.wdog_active_raw = "0"
 
 
 def _wdog_writes(transport: _RecordingTransport) -> list[str]:
@@ -571,6 +589,114 @@ def test_config_mode_invalid_fails_engine_load(tmp_path) -> None:
     """An unknown mode string must fail the engine config load (fail-closed)."""
     with pytest.raises(ValueError):
         _load_keithley_driver_mode(tmp_path, "bogus")
+
+
+# ---------------------------------------------------------------------------
+# (k) A8 integrity checks: version stamp + post-run state readback
+# ---------------------------------------------------------------------------
+
+
+async def test_version_stamp_readback_matches_and_arms() -> None:
+    """Happy path: firmware version equals the driver constant → arm proceeds
+    and the version query is issued AFTER the script upload."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()  # wdog_version_raw defaults to the matching "2"
+    drv._transport = t
+    await drv.connect()
+    assert drv._wdog_armed is True
+    upload_idx = next(
+        i for i, (kind, cmd) in enumerate(t.calls)
+        if kind == "write" and "function cryodaq_wdog_pet" in cmd
+    )
+    ver_idx = next(
+        i for i, (kind, cmd) in enumerate(t.calls)
+        if kind == "query" and "CRYODAQ_WDOG_VERSION" in cmd
+    )
+    assert upload_idx < ver_idx
+
+
+async def test_version_mismatch_best_effort_degrades(caplog) -> None:
+    """A wrong version stamp (truncated/stale upload) in best_effort logs
+    CRITICAL, leaves _wdog_armed False, and does NOT block connect."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_version_raw = "1"  # firmware is an older/partial script
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    # A poll after a refused arm must not pet a watchdog it never armed.
+    await drv.read_channels()
+    assert "cryodaq_wdog_pet()" not in t.writes
+
+
+async def test_version_mismatch_required_raises_and_closes() -> None:
+    """A wrong version stamp in required is fail-CLOSED: connect() aborts and
+    the transport is closed."""
+    drv = _mode_driver("required")
+    t = _RecordingTransport()
+    t.wdog_version_raw = "999"
+    drv._transport = t
+    with pytest.raises(Exception):
+        await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
+    assert t._opened is False
+
+
+async def test_version_unparseable_required_raises() -> None:
+    """A ``nil`` version (global missing → upload never defined it) must NOT be
+    treated as a match: required fails closed."""
+    drv = _mode_driver("required")
+    t = _RecordingTransport()
+    t.wdog_version_raw = "nil"
+    drv._transport = t
+    with pytest.raises(Exception):
+        await drv.connect()
+    assert drv._connected is False
+
+
+async def test_arm_state_readback_active_false_best_effort_degrades(caplog) -> None:
+    """Post-run readback shows the firmware did NOT arm (active=0): best_effort
+    refuses to set _wdog_armed and continues host-only."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    # Undo the write()-driven active=1 transition so the readback sees a failed
+    # arm even though run() was written (models a truncated function body).
+    original_write = t.write
+
+    async def _write_swallow_run(cmd: str) -> None:
+        await original_write(cmd)
+        if cmd == "cryodaq_wdog_run()":
+            t.wdog_active_raw = "0"
+
+    t.write = _write_swallow_run  # type: ignore[assignment]
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+async def test_arm_state_readback_active_false_required_raises() -> None:
+    """Post-run active=0 in required is fail-CLOSED."""
+    drv = _mode_driver("required")
+    t = _RecordingTransport()
+    original_write = t.write
+
+    async def _write_swallow_run(cmd: str) -> None:
+        await original_write(cmd)
+        if cmd == "cryodaq_wdog_run()":
+            t.wdog_active_raw = "0"
+
+    t.write = _write_swallow_run  # type: ignore[assignment]
+    with pytest.raises(Exception):
+        await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
 
 
 def test_config_short_timeout_warns(tmp_path, caplog) -> None:
