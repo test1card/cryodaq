@@ -1,6 +1,6 @@
 ---
 title: Testing Strategy
-keywords: testing, lint, token-lint, contrast-check, visual-regression, audit, codex, automation
+keywords: testing, lint, token-lint, contrast-check, visual-regression, audit, automation
 applies_to: how design-system compliance is verified automatically + manually
 status: canonical
 references: governance/token-naming.md, accessibility/contrast-matrix.md, accessibility/wcag-baseline.md
@@ -10,7 +10,7 @@ last_updated: 2026-04-17
 
 # Testing Strategy
 
-How we verify that CryoDAQ code actually follows the design system. The rules and patterns in this system are only useful if they're enforced. Enforcement comes from three layers: automated linting, Codex auditing, and manual review.
+How we verify that CryoDAQ code actually follows the design system. The rules and patterns in this system are only useful if they're enforced. Enforcement comes from three layers: automated linting, external audit, and manual review.
 
 ## Three enforcement layers
 
@@ -20,7 +20,7 @@ How we verify that CryoDAQ code actually follows the design system. The rules an
 │  Operator / architect / designer eyeballs            │
 │  Catches: design sensibility, UX flow, judgment      │
 ├──────────────────────────────────────────────────────┤
-│  Layer 2: Codex audit                                │
+│  Layer 2: External audit                                │
 │  LLM audit with design system in context             │
 │  Catches: rule references, consistency, violations   │
 ├──────────────────────────────────────────────────────┤
@@ -146,26 +146,24 @@ Given token A used as foreground on background B, verify pair passes AA per `acc
 
 Phase II: AST-based analysis of QSS stylesheets to detect foreground/background token pairs and cross-check against matrix.
 
-## Layer 2: Codex audit
+## Layer 2: External audit
 
-Codex CLI (or equivalent LLM agent) operates with the full design system in context. Runs after every design-system-relevant change:
+The external audit pass operates with the full design system in context. Runs after every design-system-relevant change:
 
-```bash
-codex audit --system "src/cryodaq/gui/shell/**/*.py" \
-            --context "docs/design-system/**/*.md" \
-            --checks rules,patterns,consistency
-```
+The reviewer is given the changed `src/cryodaq/gui/shell/**/*.py` files with
+`docs/design-system/**/*.md` as context and checks rules, patterns and
+cross-surface consistency.
 
-Codex specifically checks:
+The audit specifically checks:
 - Does this widget declare its DESIGN: RULE-X comments?
 - Do the comments match actual rule enforcement?
 - Does this panel follow the scaffolds from `patterns/page-scaffolds.md`?
 - Is cross-surface consistency maintained?
 - Are state-visualization conventions followed?
 
-Codex produces a report: violations, suggested fixes, rules referenced. Architect reviews and applies.
+The audit produces a report: violations, suggested fixes, rules referenced. Architect reviews and applies.
 
-Codex audit runs after CC (Claude Code) implements each block per the established workflow.
+The external audit runs after each implemented block per the established workflow.
 
 ## Layer 3: manual review
 
@@ -353,7 +351,7 @@ Per vladimir-voice principle (errors as data, not occasions for apology): test f
 
 6. **No CI integration.** Tests pass locally; not run in pipeline. Add CI gate that blocks merges on test failure.
 
-7. **Codex audit as the only check.** LLM audits miss rule details sometimes; pair with lint to catch mechanical issues.
+7. **External audit as the only check.** Audits miss rule details sometimes; pair with lint to catch mechanical issues.
 
 ## Related governance
 
@@ -364,4 +362,4 @@ Per vladimir-voice principle (errors as data, not occasions for apology): test f
 
 ## Changelog
 
-- 2026-04-17: Initial version. Three enforcement layers (lint / Codex / manual). Test categories (visual regression / token-usage / rule-compliance / accessibility / contrast). Tooling + CI integration. Failure-as-data principle applied.
+- 2026-04-17: Initial version. Three enforcement layers (lint / audit / manual). Test categories (visual regression / token-usage / rule-compliance / accessibility / contrast). Tooling + CI integration. Failure-as-data principle applied.

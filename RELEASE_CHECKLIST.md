@@ -11,6 +11,9 @@
 - [ ] `git status --short` просмотрен до начала финальной проверки
 - [ ] Нет незакоммиченных изменений в рабочем дереве
 - [ ] Все тесты проходят
+- [ ] `version` в `pyproject.toml` поднят до номера релиза **до** создания
+      tag (иначе `importlib.metadata` и web-панель сообщают старую версию —
+      именно так v0.61–v0.64 уехали с metadata 0.60.0)
 
 ## 2. Установка и packaging path
 
@@ -45,20 +48,22 @@ python -m pytest tests/reporting -q
 
 ## 4. GUI smoke checks
 
-- [ ] `MainWindow` поднимается без расхождения с текущей документацией
-- [ ] GUI содержит ровно 10 вкладок:
-- [ ] `Обзор`
+- [ ] `MainWindowV2` (shell: TopWatchBar + ToolRail + BottomStatusBar) поднимается без расхождения с текущей документацией
+- [ ] ToolRail содержит поверхности (порядок соответствует `gui/shell/tool_rail.py`):
+- [ ] `Дашборд` (home)
+- [ ] `Новый эксперимент`
 - [ ] `Эксперимент`
-- [ ] `Keithley 2604B`
+- [ ] `Источник мощности`
 - [ ] `Аналитика`
 - [ ] `Теплопроводность` (включает автоизмерение)
-- [ ] `Алармы`
+- [ ] `MultiLine`
+- [ ] `Тревоги`
 - [ ] `Служебный лог`
-- [ ] `Архив`
-- [ ] `Калибровка`
+- [ ] `База знаний`
 - [ ] `Приборы`
-- [ ] `Обзор` показывает summary/status widgets без старого layout drift
-- [ ] `Keithley 2604B` не показывает ложный `ON` без backend truth
+- [ ] Меню `Ещё`: `Архив`, `Калибровка`, `Настройки`, `Открыть Web-панель`, `Перезапустить Engine`
+- [ ] `Дашборд` показывает summary/status widgets без старого layout drift
+- [ ] `Источник мощности` не показывает ложный `ON` без backend truth
 - [ ] `Служебный лог` позволяет добавить запись и честно показывает empty state
 - [ ] `Архив` не падает на missing report или partial artifacts
 - [ ] `Калибровка` читает LakeShore channels из конфигурации и не показывает ложный applied state без подтверждённого backend runtime status
@@ -136,20 +141,20 @@ python -m pytest tests/reporting -q
 Проверить:
 
 - [ ] `README.md`
-- [ ] `CLAUDE.md`
 - [ ] `CHANGELOG.md`
+- [ ] `PROJECT_STATUS.md`
 - [ ] `docs/operator_manual.md`
 - [ ] `docs/deployment.md`
 - [ ] `docs/architecture.md`
 
 Сверить:
 
-- [ ] состав и названия 10 вкладок
+- [ ] состав и названия поверхностей ToolRail и меню `Ещё`
 - [ ] поведение tray icon и ограничения
 - [ ] пути experiment/report/archive
 - [ ] формулировки ограничений калибровки
 - [ ] формулировка PDF best-effort
-- [ ] TSP скрипты: `tsp/p_const.lua` (runtime), `tsp/p_const_single.lua` (legacy/fallback)
+- [ ] TSP скрипт: `tsp/cryodaq_wdog.lua` (firmware watchdog backstop; P=const регулируется host-side)
 - [ ] инструкции установки/тестирования и packaging
 
 ## 12. Известные caveat'ы RC

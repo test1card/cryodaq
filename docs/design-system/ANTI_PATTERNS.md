@@ -543,7 +543,7 @@ When adding a new anti-pattern:
 **Fix:** <correct alternative with code example if applicable>
 ```
 
-One heading per case. Keep descriptions terse. Target: Claude/Codex can grep `case: modal-card` and find this file fast.
+One heading per case. Keep descriptions terse. Target: a reviewer can grep `case: modal-card` and find this file fast.
 
 ## Changelog
 

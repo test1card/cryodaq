@@ -36,7 +36,7 @@ Enforce in code via `# DESIGN: RULE-DATA-XXX` comment marker.
 
 **Rationale:** Animated number-counting (common in dashboard marketing UIs) is lying in a lab context. Operator seeing "4.27 K" during the animation might record or act on that value — but it was never actually measured. Only 4.21 and 4.30 existed as real measurements. Interpolation invents data that didn't exist.
 
-Operator trust: once an operator sees Claude's UI animate numbers, they permanently doubt every reading is real vs animated.
+Operator trust: once an operator sees the UI animate numbers, they permanently doubt every reading is real vs animated.
 
 **Applies to:** SensorCell, Keithley value displays, pressure readout, all numeric live data
 

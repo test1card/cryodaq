@@ -91,7 +91,7 @@ design-system/
     ├── token-naming.md                 # closes RULE-GOV-001, naming conventions + prefix registry
     ├── deprecation-policy.md           # closes RULE-GOV-003, lifecycle + STONE_* case
     ├── versioning.md                   # SemVer 2.0.0 with design-system breaking definitions
-    ├── testing-strategy.md             # 3 enforcement layers (lint / Codex / manual) + tooling
+    ├── testing-strategy.md             # 3 enforcement layers (lint / review / manual) + tooling
     ├── performance-budget.md           # 60 FPS / 16ms / ≤2Hz / 100ms input budget
     └── contribution.md                 # proposal process, 6 types, review gates
 ```
@@ -184,18 +184,9 @@ Batch 6 — accessibility + governance:
 62. **Design system stays flat tokens through v1.x** — three-layer (primitive→semantic→component) is v2.0 target per UXPM recommendation, not current.
 63. **STONE_* deprecated in v1.0.0, removed in v2.0.0** — ~15 call sites being migrated at each panel's next refactor.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
-65. **Architect is singular approval gate for v1.x** — Claude drafts + Codex audits + Vladimir approves + Claude Code implements. No self-approval.
+65. **Architect is singular approval gate for v1.x** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
 66. **ACCENT ≠ STATUS_OK — Phase III.A decoupling** — per `adr/002-accent-status-decoupling.md`. Primary buttons, mode badges, progress chunks, active tab indicators use ACCENT (UI activation). STATUS_OK reserved for safety / health / channel-OK indicators. `SELECTION_BG` + `FOCUS_RING` added as neutral interaction tokens. Per-theme ACCENT recalibrated to warm-neutral (11 themes; `default_cool` indigo preserved as historical baseline).
 
 ## Status
 
 **Design system v1.0.1 — complete.** All 67 files, 79 rules, 139 tokens, 6 batches.
-
-## Deployment to repo
-
-This archive should be committed to `docs/design-system/` in the CryoDAQ repo via single Codex commit. After commit:
-
-1. Update `CLAUDE.md` to reference `docs/design-system/README.md` as authoritative design-language source.
-2. Phase I.1 ModalCard code should be retrofitted with `# DESIGN: RULE-XXX` enforcement markers per rules defined here.
-3. Every Phase II spec prompt for Codex should include: "BEFORE coding, read: docs/design-system/README.md, docs/design-system/rules/<relevant>.md, docs/design-system/components/<relevant>.md per task."
-4. Governance follow-up: add `DESTRUCTIVE_PRESSED` token to theme.py (currently `#a53838` placeholder in button.md Variant 3).

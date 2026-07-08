@@ -25,7 +25,9 @@ cd cryodaq
 
 С IV.4 F1 `pyarrow` входит в базовые зависимости, extra `[archive]`
 сохранён как no-op alias для обратной совместимости со старыми
-install-строками:
+install-строками. На Linux базовая установка также подтягивает
+`pysqlite3-binary`: если системный SQLite попадает в опасный WAL-диапазон,
+runtime автоматически выбирает bundled SQLite через `cryodaq.storage._sqlite`.
 
 ```powershell
 pip install -e ".[dev,web]"
@@ -54,6 +56,10 @@ pip install -e ".[web]"
 
 Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
 
+Windows helper `install.bat` проверяет Python 3.12+, выполняет
+`pip install -e ".[dev,web,archive]"` (обратимо совместимый alias) и вызывает
+`create_shortcut.py` для ярлыка на рабочем столе.
+
 ### Bootstrap predictor model
 
 При развёртывании CryoDAQ на новой машине модель предиктора охлаждения
@@ -80,23 +86,27 @@ cp cooldown_v5/predictor_model.json data/cooldown_model/
 ```powershell
 Copy-Item config\instruments.local.yaml.example config\instruments.local.yaml
 Copy-Item config\notifications.local.yaml.example config\notifications.local.yaml
+Copy-Item config\web.local.yaml.example config\web.local.yaml
 ```
 
 Проверьте и заполните:
 
 - `config/instruments.local.yaml`
 - `config/notifications.local.yaml`
+- `config/web.local.yaml` — нужен только для write-действий web dashboard;
+  сгенерируйте случайный `web.api_token`
 
 Также в репозитории уже используются:
 
 - `config/alarms.yaml`
 - `config/interlocks.yaml`
 - `config/housekeeping.yaml`
+- `config/safety.yaml`
 - `config/experiment_templates/*.yaml`
 
 ## 5. Что настроить в instruments.local.yaml
 
-Актуальный стек первой RC-версии:
+Актуальный стек:
 
 - три `LakeShore 218S`
 - `Keithley 2604B`
@@ -108,6 +118,9 @@ Copy-Item config\notifications.local.yaml.example config\notifications.local.yam
 - допустимы разные shapes channel config, но конфигурация должна оставаться валидным YAML
 - Keithley runtime использует dual-channel model (`smua`, `smub`)
 - Любые старые инструкции про отключение или скрытие `smub` считать устаревшими
+- TSP watchdog выбирается в `keithley.watchdog.mode`: `"off"`,
+  `"best_effort"` или `"required"`; значение должно быть строкой, потому что
+  bare `off/on` в YAML превращаются в boolean
 
 ## 6. Запуск
 
@@ -124,6 +137,15 @@ cryodaq-gui
 cryodaq
 ```
 
+Скрипты из корня репозитория запускают тот же launcher:
+
+```text
+.\start.bat       # Windows
+./start.sh        # Linux / macOS
+.\start_mock.bat  # Windows mock mode, CRYODAQ_MOCK=1
+./start_mock.sh   # Linux / macOS mock mode, CRYODAQ_MOCK=1
+```
+
 Mock mode:
 
 ```powershell
@@ -136,8 +158,15 @@ Optional web dashboard:
 uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
 ```
 
-Дашборд не имеет аутентификации — биндите только loopback (`127.0.0.1`).
-Публичный доступ возможен только через reverse proxy с авторизацией (или SSH-туннель).
+GET-эндпоинты web dashboard остаются read-only и работают по loopback-модели
+доверия — биндите только `127.0.0.1`. Публичный доступ возможен только через
+reverse proxy с авторизацией или SSH-туннель.
+
+Write-действия web dashboard ограничены двумя REST routes:
+`POST /api/v1/log` и `POST /api/v1/alarms/{id}/ack`. Они требуют
+`Authorization: Bearer <token>`; токен читается из gitignored
+`config/web.local.yaml` (`web.api_token`). Пока токен не задан, write routes
+отвечают 403. Неверный или отсутствующий bearer-токен даёт 401.
 
 Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
 (или полного dev/test install path `.[dev,web]`).
@@ -146,26 +175,27 @@ uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
 
 Проверьте минимум следующее:
 
-- `Обзор` получает свежие данные
-- вкладка `Источник мощности` открывается и показывает каналы A/B
-- вкладка `Алармы` не содержит unexpected active alarms
-- вкладка `Служебный лог` может загрузить записи
-- вкладка `Архив` открывается без ошибок
-- вкладка `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
+- ToolRail slot `Дашборд` получает свежие данные
+- ToolRail slot `Источник мощности` открывается и показывает каналы A/B
+- ToolRail slot `Тревоги` не содержит unexpected active alarms
+- ToolRail slot `Служебный лог` может загрузить записи
+- ToolRail: `Ещё` → `Архив` открывается без ошибок
+- ToolRail: `Ещё` → `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
+- ToolRail slot `База знаний` открывается; при пустом индексе показывает управляемое empty/error state
 - tray icon, если системный трей доступен, не показывает healthy без backend truth
 
-Текущая GUI-компоновка содержит 10 вкладок:
+Текущая GUI-компоновка — MainWindowV2 shell, не вкладки:
 
-- `Обзор`
-- `Эксперимент`
-- `Источник мощности`
-- `Аналитика`
-- `Теплопроводность` (включает автоизмерение)
-- `Алармы`
-- `Служебный лог`
-- `Архив`
-- `Калибровка`
-- `Приборы`
+- TopWatchBar
+- ToolRail
+- OverlayContainer с дашбордом и полноэкранными surfaces
+- BottomStatusBar
+
+Порядок основных ToolRail slots: `Дашборд`, `Новый эксперимент`,
+`Эксперимент`, `Источник мощности`, `Аналитика`, `Теплопроводность`,
+`MultiLine`, `Тревоги`, `Служебный лог`, `База знаний`, `Приборы`.
+Меню `Ещё`: `Архив`, `Калибровка`, `Настройки`, `Открыть Web-панель`,
+`Перезапустить Engine`.
 
 ## 8. Данные и артефакты
 
@@ -178,15 +208,24 @@ uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
 Основные runtime-файлы:
 
 - daily SQLite databases: `data/data_YYYY-MM-DD.db`
+- cold archive: `data/archive/` (zstd Parquet + `index.json`)
 - experiment artifacts: `data/experiments/<experiment_id>/`
 - calibration sessions: `data/calibration/sessions/<session_id>/`
 - calibration curves: `data/calibration/curves/<sensor_id>/<curve_id>/`
 
 Housekeeping:
 
-- compresses only unlinked old daily DBs
+- while `cold_rotation.enabled: true`, daily DB lifecycle belongs to cold
+  rotation: old `data/data_YYYY-MM-DD.db` files move to zstd Parquet under
+  `data/archive`
+- retention compresses only when cold rotation is off; legacy `.db.gz` files
+  are ingested by rotation before deletion
 - does not delete experiment-linked DBs
 - does not delete experiment artifact folders
+
+Read paths are hot ∪ cold: GUI history, archive views, CSV/XLSX/HDF5 export,
+reports, operator log and replay continue to see days already rotated out of
+hot SQLite.
 
 ## 9. Отчёты и архив
 
@@ -208,7 +247,7 @@ Housekeeping:
 
 Генерация PDF не является обязательным критерием развёртывания.
 
-## 10. Известные caveat'ы RC
+## 10. Известные caveat'ы
 
 - Runtime apply калибровки доступен через global on/off и per-channel policy; отсутствие curve, assignment или сбой вычисления нужно трактовать как консервативный fallback к `KRDG` с явным логированием.
 - Поведение на живом LakeShore требует отдельной lab verification и не считается автоматически подтверждённым одним только unit/mock coverage.
@@ -233,26 +272,30 @@ python -m pytest tests/reporting -q
 
 CryoDAQ uses SQLite WAL mode with multiple concurrent connections (writer +
 history readers + reporting + web dashboard). Due to a WAL-reset race
-condition documented at https://www.sqlite.org/wal.html, production
-deployments **must** run SQLite >= 3.51.3.
+condition documented at https://www.sqlite.org/wal.html, the runtime must use
+a safe SQLite implementation.
 
-### Ubuntu 22.04
+### Linux
 
-Ubuntu 22.04 ships `libsqlite3-0 3.37.2`, which is inside the affected range.
-Options, in order of preference:
+On Linux, `pyproject.toml` includes `pysqlite3-binary>=0.5.4` as a base
+dependency. `cryodaq.storage._sqlite` selects the implementation once at
+import time:
 
-1. **Recommended.** Build SQLite from source under `/opt/sqlite-3.51.3/` and
-   preload it: `LD_PRELOAD=/opt/sqlite-3.51.3/lib/libsqlite3.so cryodaq`.
-2. Bundle a custom `libsqlite3` in the PyInstaller frozen build (see
-   `build_scripts/cryodaq.spec`).
-3. (Fallback) Set `CRYODAQ_SQLITE_SYNC=FULL` to reduce the race window at the
-   cost of write throughput.
+- safe stdlib SQLite → use stdlib
+- unsafe stdlib SQLite + safe `pysqlite3` → use bundled `pysqlite3`
+- both unsafe/absent → `SQLiteWriter` hard-fails at startup unless the operator
+  explicitly sets `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
 
-The engine emits a WARNING on startup if it detects an affected version.
+Do not mix direct `import sqlite3` connections with CryoDAQ storage code on the
+same DB. All runtime readers/writers must go through `cryodaq.storage._sqlite`.
+`CRYODAQ_SQLITE_SYNC=FULL` remains an emergency throughput tradeoff, not the
+normal deployment path.
 
-### Ubuntu 24.04 / Windows 11
+### Windows 11 / macOS
 
-SQLite >= 3.51.3 is available natively. No action required.
+No `pysqlite3-binary` dependency is installed by default. The stdlib SQLite is
+used; if a future platform build falls into the unsafe range, the same
+`SQLiteWriter` gate refuses startup.
 
 ## Reproducible builds via lockfile
 

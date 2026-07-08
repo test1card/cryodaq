@@ -261,7 +261,7 @@ STONE_900 = FOREGROUND       # alias
 
 These are **deprecated** but not yet removed. See `governance/deprecation-policy.md` for removal schedule.
 
-Rule: **no new code uses STONE_***. Existing call sites migrate to canonical names during the panel's next modification. Codex audit flags any new STONE_* reference.
+Rule: **no new code uses STONE_***. Existing call sites migrate to canonical names during the panel's next modification. External audit flags any new STONE_* reference.
 
 ## ALL_CAPS naming convention
 
@@ -379,7 +379,7 @@ Minimum requirements for adding a new token (reviewed per `governance/contributi
 4. **Location:** added to `theme.py` in appropriate category section
 5. **Documentation:** added to relevant `tokens/*.md` file (colors.md, spacing.md, etc.)
 6. **Tests:** token-lint doesn't fail on its introduction
-7. **Cross-check:** no existing token does the job (often a Codex-audit question)
+7. **Cross-check:** no existing token does the job (often an audit question)
 
 ## Closes: RULE-GOV-001
 

@@ -29,7 +29,7 @@ Default state. The artifact is supported, recommended, and referenced in current
 
 A replacement exists. The artifact still works but is flagged:
 - Documentation marks it `@deprecated`
-- Runtime warning emitted when used (Codex audit flags; potential Python `DeprecationWarning`)
+- Runtime warning emitted when used (external audit flags; potential Python `DeprecationWarning`)
 - Changelog notes the deprecation with a version reference
 - Migration path to the replacement is documented
 
@@ -162,7 +162,7 @@ During the deprecation window, the artifact MUST:
 
 It MAY:
 - Emit `DeprecationWarning` (Python)
-- Be flagged by Codex audit as a code smell
+- Be flagged by external audit as a code smell
 - Appear dimmed / crossed-out in generated API docs
 
 It MUST NOT:
@@ -192,7 +192,7 @@ STONE_* was the pre-Phase-0 palette. All sites should migrate to the forest-gree
 | `STONE_600` | `MUTED_FOREGROUND` |
 | `STONE_400` | (no direct replacement; use MUTED_FOREGROUND for text, BORDER for boundaries) |
 
-Codex audit flags any remaining `STONE_*` reference. Replace during the panel's next visual refactor; do not do drive-by-replace unrelated to panel changes.
+External audit flags any remaining `STONE_*` reference. Replace during the panel's next visual refactor; do not do drive-by-replace unrelated to panel changes.
 ```
 
 ## STONE_* specific lifecycle

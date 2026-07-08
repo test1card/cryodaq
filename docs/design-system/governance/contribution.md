@@ -14,8 +14,8 @@ How changes enter the design system. CryoDAQ's design system is a shared contrac
 ## Who contributes
 
 - **Vladimir (architect)** — primary author; all proposals ultimately approved by him
-- **Claude / Claude Code** — drafts proposals, writes code, executes governance checks
-- **Codex CLI** — audits proposals for consistency with existing system
+- **Implementation tooling** — drafts proposals, writes code, executes governance checks
+- **External audit** — reviews proposals for consistency with existing system
 - **Lab operators** — produce pain points, feedback, and validation signals that drive proposals
 
 For CryoDAQ v1.x, the architect role is singular. If the system scales to multiple contributors (unlikely near-term), the process adapts to multi-reviewer but the gates stay the same.
@@ -40,7 +40,7 @@ Review gates:
 - [ ] Contrast matrix updated if color
 - [ ] Corresponding `tokens/*.md` updated
 - [ ] Font / spacing / icon-size lint still passes
-- [ ] Codex audit approves
+- [ ] External audit approves
 
 ### B. New rule
 
@@ -51,7 +51,7 @@ Minimum submission:
 2. **Rationale:** what harm does this prevent? What existing violations are observed?
 3. **Prohibition + examples:** what's not allowed, in what contexts, with code / visual examples
 4. **Permissions + examples:** what IS allowed (escape hatches)
-5. **Enforcement:** is this automated-lintable? Codex-auditable? Manual-only?
+5. **Enforcement:** is this automated-lintable? audit-detectable? Manual-only?
 6. **Retrofit impact:** how many existing call sites violate this rule currently? (If > 5, include migration plan.)
 
 Review gates:
@@ -59,7 +59,7 @@ Review gates:
 - [ ] Clear examples of compliance and violation
 - [ ] Enforcement mechanism described
 - [ ] Migration plan if retrofit needed
-- [ ] Codex audit can evaluate it
+- [ ] External audit can evaluate it
 
 ### C. New component
 
@@ -104,7 +104,7 @@ Requirements:
 3. **Replacement** (exact pointer)
 4. **Migration guide** (step-by-step for call sites)
 5. **Version timing** (deprecated_in, removed_in per `governance/deprecation-policy.md`)
-6. **Codex audit check** to flag new uses of deprecated artifact
+6. **External audit check** to flag new uses of deprecated artifact
 
 ### F. Bug fix / typo / clarification
 
@@ -141,8 +141,8 @@ Closes: proposal-token-028
 
 ## Review cycle
 
-1. **Draft proposal** (Claude + architect collaboration)
-2. **Codex audit** — mechanical consistency check
+1. **Draft proposal** (tooling + architect collaboration)
+2. **External audit** — mechanical consistency check
 3. **Architect review** — final judgment
 4. **Merge to main** with version bump per `governance/versioning.md`
 5. **Changelog entry** in CHANGELOG.md
@@ -166,11 +166,11 @@ Common reasons a proposal is rejected or sent back for rework:
 5. **Breaks consistency.** Adopts convention from outside the system (web, iOS) that doesn't match CryoDAQ. Either adopt the local convention or argue for system-wide change.
 6. **Retrofit impact too large without migration plan.** Proposing a rule that 30 panels violate, with no plan to fix them. Either reduce scope or bundle migration.
 
-## Architect vs Claude division
+## Architect vs tooling division
 
 For each contribution type:
 
-| Type | Claude can draft | Architect approves | Claude Code implements |
+| Type | Tooling can draft | Architect approves | Tooling implements |
 |---|---|---|---|
 | Typo fix | ✓ | — (trivial) | ✓ |
 | New token | ✓ | ✓ | ✓ |
@@ -180,7 +180,7 @@ For each contribution type:
 | Deprecation | ✓ (proposal) | ✓ | ✓ (retrofits) |
 | Major version bump | — | ✓ (decides) | ✓ (executes) |
 
-Claude never approves its own proposals; architect gates.
+Tooling never approves its own proposals; architect gates.
 
 ## Governance exception
 
@@ -235,7 +235,7 @@ Currently internal-only.
 
 5. **Proposals without examples.** Pure prose "we need a new token for X". Include real code / layout / screenshot context.
 
-6. **Claude self-approving.** Claude drafts, implements, ships without architect review. Skip the governance gate → drift. Architect always gates.
+6. **Self-approval.** Drafting, implementing and shipping without architect review. Skip the governance gate → drift. Architect always gates.
 
 7. **Silently dropping rejected proposals.** No record of what was considered and why rejected. Future proposals re-tread the same ground. Log rejections too.
 
@@ -250,4 +250,4 @@ Currently internal-only.
 
 ## Changelog
 
-- 2026-04-17: Initial version. Six contribution types. Per-type review gates. Architect approval as singular gate for v1.x. Rejection reasons. Division of labor (Claude draft / architect approve / CC implement). Governance exception process. Revert path.
+- 2026-04-17: Initial version. Six contribution types. Per-type review gates. Architect approval as singular gate for v1.x. Rejection reasons. Division of labor (draft / architect approve / implement). Governance exception process. Revert path.

@@ -132,7 +132,7 @@ Traditional semver assumes a software API. For a design system — which is spec
 - A widget built to v1.x spec no longer matches v2.x spec without modification
 - A theme.py import fails because a token was removed
 - An existing panel's style fails a new lint rule it previously passed
-- A previously-compliant Codex audit now flags a violation
+- A previously-compliant audit now flags a violation
 
 ### Not breaking (despite feeling like change)
 
