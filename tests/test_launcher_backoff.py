@@ -36,12 +36,12 @@ def _make_launcher_mock(
     return w
 
 
-def test_handle_engine_exit_config_error_shows_modal_no_restart():
-    """Exit code ENGINE_CONFIG_ERROR_EXIT_CODE must block restart and show modal.
+def test_handle_engine_exit_config_error_shows_banner_no_restart():
+    """Exit code ENGINE_CONFIG_ERROR_EXIT_CODE must block restart and alarm/banner.
 
     This proves the exit-code branch runs the REAL production logic:
-    _restart_giving_up must be set, _show_config_error_modal called,
-    and QTimer.singleShot must NOT be called.
+    _restart_giving_up must be set, the audible/visible engine-down banner is
+    shown, and QTimer.singleShot must NOT be called (no auto-restart).
     """
     from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
     from cryodaq.launcher import LauncherWindow
@@ -52,24 +52,34 @@ def test_handle_engine_exit_config_error_shows_modal_no_restart():
         LauncherWindow._handle_engine_exit(w)
 
     assert w._restart_giving_up is True, "_restart_giving_up must be latched on config error"
-    w._show_config_error_modal.assert_called_once()
+    w._show_engine_down_banner.assert_called_once()
     mock_qtimer.singleShot.assert_not_called()
     assert w._restart_attempts == 0, "restart_attempts must not increment on config error"
 
 
-def test_handle_engine_exit_crash_loop_gives_up_after_max_attempts():
-    """After _max_restart_attempts crashes, must give up and show crash-loop modal."""
+def test_handle_engine_exit_retries_forever_never_gives_up():
+    """A4: past the last backoff slot the launcher must KEEP retrying, capped at 120s.
+
+    No max-attempts surrender — a silently dead overnight acquisition is the
+    hazard being designed out. Must schedule a 120s timer, never latch
+    _restart_giving_up, and keep the alarm/banner up.
+    """
     from cryodaq.launcher import LauncherWindow
 
-    max_att = 5
-    w = _make_launcher_mock(returncode=1, restart_attempts=max_att, max_restart_attempts=max_att)
+    # 50 prior crashes — way past the old max of 5.
+    w = _make_launcher_mock(returncode=1, restart_attempts=50)
 
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
-        LauncherWindow._handle_engine_exit(w)
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
 
-    assert w._restart_giving_up is True
-    w._show_crash_loop_modal.assert_called_once()
-    mock_qtimer.singleShot.assert_not_called()
+    assert w._restart_giving_up is False, "must NEVER give up on ordinary crashes"
+    mock_qtimer.singleShot.assert_called_once()
+    # Backoff caps at the last slot (120s).
+    assert mock_qtimer.singleShot.call_args[0][0] == 120 * 1000
+    w._show_engine_down_banner.assert_called_once()
+    assert w._restart_pending is True
 
 
 def test_handle_engine_exit_schedules_backoff_timer_on_normal_crash():

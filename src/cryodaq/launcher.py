@@ -290,15 +290,20 @@ class LauncherWindow(QMainWindow):
         self._engine_stderr_logger: logging.Logger | None = None
         self._engine_stderr_thread: threading.Thread | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
-        # Phase 2b H.3: exponential backoff for engine restart attempts.
-        # Without this, a corrupted YAML or persistent EADDRINUSE produces
-        # a tight 3s restart loop. Reset after a 5-min healthy run.
+        # A4: exponential backoff for engine restart attempts. Retry FOREVER —
+        # a dead overnight acquisition with nobody told is worse than any
+        # restart storm. Backoff caps at the last slot (120s) and never gives
+        # up. Reset after a 5-min healthy run. Only exit code 2 (config error)
+        # latches no-auto-restart.
         self._restart_attempts: int = 0
         self._last_restart_time: float = 0.0
-        self._max_restart_attempts: int = 5
         self._restart_backoff_s: list[int] = [3, 10, 30, 60, 120]
-        self._restart_giving_up: bool = False  # latched after max attempts
+        self._restart_giving_up: bool = False  # latched only on config-error exit
         self._config_error_modal_shown: bool = False
+        # A4: persistent non-modal "engine down" banner + repeating audible
+        # alarm. Built lazily; None until first use / in tray-only mode.
+        self._engine_down_banner: QLabel | None = None
+        self._alarm_timer: QTimer | None = None
         # Guards against multiple QTimer.singleShot restarts piling up while
         # _check_engine_health keeps firing every 3s during the backoff
         # window. Set when we schedule a restart, cleared when _start_engine
@@ -648,6 +653,14 @@ class LauncherWindow(QMainWindow):
 
     def _restart_engine(self) -> None:
         """Restart engine AND bridge for clean ZMQ connections."""
+        # A4: manual restart is the operator's recovery lever — clear the
+        # config-error latch, reset backoff, and silence the alarm/banner so
+        # a fixed config (or a manual retry) starts from a clean slate.
+        self._restart_giving_up = False
+        self._restart_attempts = 0
+        self._config_error_modal_shown = False
+        self._restart_pending = False
+        self._clear_engine_down_banner()
         self._data_timer.stop()
         self._health_timer.stop()
         self._bridge.shutdown()
@@ -677,6 +690,16 @@ class LauncherWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # A4: persistent NON-MODAL banner shown while the engine is down and
+        # retrying. Never blocks the operator — the restart button stays live.
+        self._engine_down_banner = QLabel()
+        self._engine_down_banner.setWordWrap(True)
+        self._engine_down_banner.setStyleSheet(
+            "background-color: #FF4136; color: #ffffff; font-weight: bold; padding: 8px 12px;"
+        )
+        self._engine_down_banner.hide()
+        root.addWidget(self._engine_down_banner)
 
         # --- Верхняя панель статуса engine ---
         # Phase UI-1 v2: this top bar is hidden because shell v2's
@@ -1218,10 +1241,13 @@ class LauncherWindow(QMainWindow):
     def _handle_engine_exit(self) -> None:
         """Inspect exit code and decide whether to restart with backoff.
 
-        Phase 2b H.3:
-        - Exit code 2 (ENGINE_CONFIG_ERROR_EXIT_CODE) → block, modal, no restart
-        - Other crash → exponential backoff up to _max_restart_attempts
-        - Once max reached → block, modal, no further attempts
+        A4:
+        - Exit code 2 (ENGINE_CONFIG_ERROR_EXIT_CODE) → no auto-restart, but
+          raise the audible alarm + persistent non-modal banner. Operator
+          recovers manually via the always-live «Перезапустить Engine» button.
+        - Any other crash → exponential backoff capped at 120s, retry FOREVER.
+          Never surrender: unattended acquisition dying silently is the real
+          hazard. Alarm + banner stay up the whole time the engine is down.
 
         Idempotent — guarded by _restart_pending so the 3s health timer can't
         burn through every backoff slot in 15 seconds.
@@ -1247,28 +1273,20 @@ class LauncherWindow(QMainWindow):
             self._close_engine_stderr_stream()
             if not self._config_error_modal_shown:
                 self._config_error_modal_shown = True
-                self._show_config_error_modal()
-            return
-
-        if self._restart_attempts >= self._max_restart_attempts:
-            logger.critical(
-                "Engine crashed %d times in succession (last code=%s). Surrendering auto-restart.",
-                self._restart_attempts,
-                returncode,
+            self._show_engine_down_banner(
+                "ОШИБКА КОНФИГУРАЦИИ: Engine не запускается. Автоперезапуск отключён.\n"
+                "Исправьте config/*.yaml (см. logs/engine.log), затем нажмите "
+                "«Перезапустить Engine»."
             )
-            self._restart_giving_up = True
-            self._engine_proc = None
-            self._close_engine_stderr_stream()
-            self._show_crash_loop_modal()
             return
 
+        # Retry forever: backoff caps at the last slot (120s), no give-up.
         backoff_idx = min(self._restart_attempts, len(self._restart_backoff_s) - 1)
         delay_s = self._restart_backoff_s[backoff_idx]
         logger.warning(
-            "Engine crashed (code=%s). Restart attempt %d/%d in %ds.",
+            "Engine crashed (code=%s). Restart attempt %d in %ds (retrying forever).",
             returncode,
             self._restart_attempts + 1,
-            self._max_restart_attempts,
             delay_s,
         )
         self._restart_attempts += 1
@@ -1276,14 +1294,15 @@ class LauncherWindow(QMainWindow):
         self._engine_proc = None
         self._close_engine_stderr_stream()
 
-        if not self._tray_only:
-            self._engine_label.setText(
-                f"Engine: рестарт через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})"  # noqa: E501
-            )
+        self._show_engine_down_banner(
+            f"Engine остановлен — перезапуск через {delay_s} с "
+            f"(попытка {self._restart_attempts}). Запись данных приостановлена."
+        )
         if self._tray.isVisible():
             self._tray.showMessage(
                 "CryoDAQ",
-                f"Engine перезапуск через {delay_s}с (попытка {self._restart_attempts}/{self._max_restart_attempts})",  # noqa: E501
+                f"Engine остановлен — перезапуск через {delay_s}с "
+                f"(попытка {self._restart_attempts})",
                 QSystemTrayIcon.MessageIcon.Warning,
                 3000,
             )
@@ -1296,29 +1315,38 @@ class LauncherWindow(QMainWindow):
 
         QTimer.singleShot(delay_s * 1000, _do_restart)
 
-    def _show_config_error_modal(self) -> None:
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setWindowTitle("Ошибка конфигурации")
-        msg.setText(
-            "Engine не смог запуститься из-за ошибки в конфигурационном файле.\n\n"
-            "Проверьте config/*.yaml. Подробности в logs/engine.log.\n\n"
-            "Автоматический перезапуск отключён."
-        )
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
+    def _start_engine_down_alarm(self) -> None:
+        """Begin a repeating audible alarm while the engine is down.
 
-    def _show_crash_loop_modal(self) -> None:
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setWindowTitle("Engine постоянно падает")
-        msg.setText(
-            f"Engine упал {self._max_restart_attempts} раз подряд. "
-            "Автоматический перезапуск прекращён.\n\n"
-            "Проверьте logs/engine.log и перезапустите launcher вручную."
-        )
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
+        Uses QApplication.beep() on a 2s timer — the codebase has no sound
+        asset pipeline, and the system bell needs no bundled file and works
+        headless. ponytail: system bell, swap for a WAV via QSoundEffect if
+        a louder/branded alarm is ever required.
+        """
+        if self._alarm_timer is None:
+            self._alarm_timer = QTimer(self)
+            self._alarm_timer.setInterval(2000)
+            self._alarm_timer.timeout.connect(QApplication.beep)
+        if not self._alarm_timer.isActive():
+            QApplication.beep()  # sound immediately, don't wait 2s
+            self._alarm_timer.start()
+
+    def _stop_engine_down_alarm(self) -> None:
+        if self._alarm_timer is not None:
+            self._alarm_timer.stop()
+
+    def _show_engine_down_banner(self, text: str) -> None:
+        """Raise the audible alarm and show the persistent non-modal banner."""
+        self._start_engine_down_alarm()
+        if self._engine_down_banner is not None:
+            self._engine_down_banner.setText(text)
+            self._engine_down_banner.show()
+
+    def _clear_engine_down_banner(self) -> None:
+        """Silence the alarm and hide the banner (engine recovered)."""
+        self._stop_engine_down_alarm()
+        if self._engine_down_banner is not None:
+            self._engine_down_banner.hide()
 
     def _check_engine_health(self) -> None:
         """Проверить состояние engine, перезапустить при падении."""
@@ -1328,6 +1356,8 @@ class LauncherWindow(QMainWindow):
             if not self._tray_only:
                 self._engine_indicator.setStyleSheet("color: #2ECC40;")
                 self._engine_label.setText("Engine: работает")
+            # A4: engine is back — silence alarm and hide the down-banner.
+            self._clear_engine_down_banner()
             # Reset the backoff counter after a healthy run window.
             if self._restart_attempts > 0 and time.monotonic() - self._last_restart_time > 300.0:
                 logger.info(
