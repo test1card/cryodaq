@@ -13,7 +13,7 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
@@ -249,12 +249,38 @@ class SQLiteWriter:
         if self._persistence_failure_callback is None or self._loop is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self._persistence_failure_callback(reason),
                 self._loop,
             )
         except Exception as exc:
             logger.error("Failed to schedule persistence_failure callback: %s", exc)
+            return
+        # The writer thread does not await this Future. Without a done-callback
+        # an exception raised inside the safety callback (e.g. the disk-full
+        # latch itself failing) would be swallowed silently. Log CRITICAL so
+        # the lost latch failure is at least visible in the record.
+        future.add_done_callback(self._log_persistence_callback_result)
+
+    @staticmethod
+    def _log_persistence_callback_result(future: Any) -> None:
+        """Surface an exception from the persistence-failure safety callback.
+
+        Runs on the engine event loop when the scheduled coroutine finishes.
+        Success is silent; a raised exception is logged CRITICAL because it
+        means the disk-full fault latch may not have fired.
+        """
+        try:
+            exc = future.exception()
+        except CancelledError:
+            return
+        if exc is not None:
+            logger.critical(
+                "Persistence-failure safety callback raised — disk-full fault "
+                "latch may NOT have fired: %s",
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def _ensure_connection(self, day: date) -> sqlite3.Connection:
         """Открыть/переоткрыть БД если сменился день."""
@@ -748,10 +774,14 @@ class SQLiteWriter:
             self._task = None
         # Shutdown executor FIRST — waits for any in-flight write_batch to finish.
         # Then close connection — no race with executor thread.
+        # shutdown(wait=True) blocks until the in-flight sqlite op returns; run it
+        # off the event loop via asyncio.to_thread so a busy write doesn't freeze
+        # the engine loop during shutdown. All callers await stop() (or drive it
+        # via run_until_complete), so a running loop is always present here.
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            await asyncio.to_thread(self._executor.shutdown, wait=True)
         if self._read_executor is not None:
-            self._read_executor.shutdown(wait=True)
+            await asyncio.to_thread(self._read_executor.shutdown, wait=True)
         if self._conn:
             self._conn.close()
             self._conn = None

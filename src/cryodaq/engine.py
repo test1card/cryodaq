@@ -693,7 +693,10 @@ async def _handle_multiline_set_channels_command(
 
     persist_warning: str | None = None
     try:
-        _persist_multiline_channels_to_local_yaml(
+        # Offload the synchronous YAML read+write off the engine event loop —
+        # no blocking I/O on the loop (repo invariant).
+        await asyncio.to_thread(
+            _persist_multiline_channels_to_local_yaml,
             config_dir=config_dir,
             instrument_name=name,
             channels=applied,
@@ -1373,7 +1376,12 @@ async def _run_cooldown_history_command(
         if entry.status != "COMPLETED":
             continue
         try:
-            payload = _json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+            # Offload the per-file metadata read off the engine loop (no
+            # blocking I/O on the loop). json parse of a small file stays inline.
+            raw_meta = await asyncio.to_thread(
+                entry.metadata_path.read_text, encoding="utf-8"
+            )
+            payload = _json.loads(raw_meta)
         except Exception:
             continue
         phases: list[dict] = payload.get("phases", [])
@@ -2357,6 +2365,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         _DATA_DIR,
         experiment_manager.data_dir / "experiments",
         config=housekeeping_raw.get("retention", {}),
+        # F1a: while rotation is enabled, retention must not gzip daily readings
+        # DBs — rotation owns their lifecycle, and a .db.gz is invisible to
+        # every reader (the day-14 gzip starved the day-30 rotation).
+        skip_daily_db_compression=(
+            (housekeeping_raw.get("cold_rotation", {}) or {}).get("enabled") is True
+        ),
     )
 
     # Cold rotation: aged daily SQLite → Parquet cold storage, once per day at
@@ -2368,6 +2382,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         cold_cfg,
         data_dir=_DATA_DIR,
         project_root=get_project_root(),
+        # F1c: warns when retention compression is configured to fire before
+        # rotation's age_days (starvation hazard; moot for daily DBs with F1a).
+        retention_cfg=housekeeping_raw.get("retention", {}),
     )
     # Validate the schedule at build time: seconds_until_next() runs outside the
     # scheduler's per-pass try, so a malformed HH:MM would raise once and kill

@@ -59,7 +59,6 @@ import errno
 import json
 import logging
 import math
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -209,8 +208,14 @@ def _reject_wildcard_bind(address: str) -> None:
         )
 
 
-def _bind_with_retry(socket: Any, address: str) -> None:
+async def _bind_with_retry(socket: Any, address: str) -> None:
     """Bind a ZMQ socket, retrying on EADDRINUSE with exponential backoff.
+
+    Async so the EADDRINUSE backoff yields to the event loop instead of
+    freezing it: bind() runs on async start paths, and a synchronous
+    ``time.sleep`` here would stall the whole engine loop for the entire
+    backoff (up to ~55 s worst case) on a port collision. ``asyncio.sleep``
+    keeps the loop live while the port frees up.
 
     Caller MUST set ``zmq.LINGER = 0`` on the socket BEFORE calling this
     helper, otherwise close() will hold the address even after retry succeeds.
@@ -248,7 +253,7 @@ def _bind_with_retry(socket: Any, address: str) -> None:
                 attempt + 1,
                 _BIND_MAX_ATTEMPTS,
             )
-            time.sleep(delay)
+            await asyncio.sleep(delay)
             delay = min(delay * 2, _BIND_MAX_DELAY_S)
 
 
@@ -346,7 +351,7 @@ class ZMQPublisher:
         # reverted on the command path (REQ + REP); retained on the
         # SUB drain path in zmq_subprocess.sub_drain_loop as an
         # orthogonal safeguard for long between-experiment pauses.
-        _bind_with_retry(self._socket, self._address)
+        await _bind_with_retry(self._socket, self._address)
         self._running = True
         self._task = asyncio.create_task(self._publish_loop(queue), name="zmq_publisher")
         logger.info("ZMQPublisher запущен: %s", self._address)
@@ -701,7 +706,7 @@ class ZMQCommandServer:
         # an ephemeral per-command REQ socket on the GUI subprocess
         # side (zmq_subprocess.cmd_forward_loop). With a fresh TCP
         # connection per command, loopback kernel reaping is moot.
-        _bind_with_retry(self._socket, self._address)
+        await _bind_with_retry(self._socket, self._address)
         self._running = True
         self._shutdown_requested = False
         self._start_serve_task()

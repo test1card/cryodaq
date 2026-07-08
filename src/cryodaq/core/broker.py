@@ -62,7 +62,21 @@ class DataBroker:
         policy: OverflowPolicy = OverflowPolicy.DROP_OLDEST,
         filter_fn: Callable[[Reading], bool] | None = None,
     ) -> asyncio.Queue[Reading]:
-        """Создать подписку. Возвращает очередь для чтения."""
+        """Создать подписку. Возвращает очередь для чтения.
+
+        ``maxsize`` must be strictly positive. A large buffer is legitimate
+        here (subscribers pick their own depth), but ``maxsize=0`` (or
+        negative) means an UNBOUNDED queue: ``full()`` never returns True,
+        so the DROP_OLDEST / DROP_NEWEST overflow policy never fires and the
+        queue grows without limit — the exact memory leak this module's
+        contract forbids. Reject it rather than silently treat 0 as infinite.
+        """
+        if maxsize <= 0:
+            raise ValueError(
+                f"DataBroker.subscribe maxsize must be > 0 (got {maxsize}); "
+                "a non-positive maxsize makes the queue unbounded and defeats "
+                "the overflow policy (unbounded memory growth)."
+            )
         async with self._lock:
             if name in self._subscribers:
                 raise ValueError(f"Подписчик '{name}' уже зарегистрирован")
