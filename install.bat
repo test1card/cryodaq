@@ -27,11 +27,28 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-echo  Устанавливаю зависимости...
-pip install -e ".[dev,web,archive]" >nul 2>&1
+REM Установка из requirements-lock.txt + `-e . --no-deps` (не голый extras-install):
+REM так два ПК, установленные с разницей в месяц, получают побитово одинаковые
+REM зависимости (см. docs/deployment.md, "Reproducible builds via lockfile").
+if not exist requirements-lock.txt (
+    echo  ОШИБКА: requirements-lock.txt не найден рядом с install.bat.
+    pause
+    exit /b 1
+)
+
+echo  Устанавливаю зависимости из requirements-lock.txt...
+pip install -r requirements-lock.txt >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo  ОШИБКА: pip install завершился с ошибкой.
-    echo  Попробуйте: pip install -e ".[dev,web,archive]"
+    echo  Попробуйте: pip install -r requirements-lock.txt
+    pause
+    exit /b 1
+)
+
+pip install -e . --no-deps >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo  ОШИБКА: pip install -e . завершился с ошибкой.
+    echo  Попробуйте: pip install -e . --no-deps
     pause
     exit /b 1
 )

@@ -56,9 +56,10 @@ pip install -e ".[web]"
 
 Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
 
-Windows helper `install.bat` проверяет Python 3.12+, выполняет
-`pip install -e ".[dev,web,archive]"` (обратимо совместимый alias) и вызывает
-`create_shortcut.py` для ярлыка на рабочем столе.
+Windows helper `install.bat` проверяет Python 3.12+, устанавливает зависимости
+из `requirements-lock.txt`, затем выполняет `pip install -e . --no-deps` (см.
+раздел "Reproducible builds via lockfile" ниже) и вызывает `create_shortcut.py`
+для ярлыка на рабочем столе.
 
 ### Bootstrap predictor model
 
@@ -291,11 +292,25 @@ same DB. All runtime readers/writers must go through `cryodaq.storage._sqlite`.
 `CRYODAQ_SQLITE_SYNC=FULL` remains an emergency throughput tradeoff, not the
 normal deployment path.
 
-### Windows 11 / macOS
+### Windows 11
 
 No `pysqlite3-binary` dependency is installed by default. The stdlib SQLite is
 used; if a future platform build falls into the unsafe range, the same
 `SQLiteWriter` gate refuses startup.
+
+### macOS — dev-only, not a lab runtime target
+
+CryoDAQ's supported lab platforms are Windows 10/11 and Linux (see Section 1).
+macOS is dev-only: the engine never runs near real hardware on Darwin, so it is
+deliberately absent from both the deployment requirements and the CI matrix
+(`ubuntu-latest` + `windows-latest` only — no `macos-latest` leg).
+
+The `pysqlite3-binary` WAL-reset remedy above is Linux-only by design: macOS
+ships no `pysqlite3` wheels, so the fallback package is simply not installed
+there (`sys_platform == 'linux'` marker in `pyproject.toml`; see the rationale
+in `src/cryodaq/storage/_sqlite.py:22-27`). On macOS the stdlib SQLite is used
+as-is and assumed safe — acceptable only because macOS is a dev sandbox, not
+where the WAL-concurrency hazard actually gets exercised against lab hardware.
 
 ## Reproducible builds via lockfile
 
