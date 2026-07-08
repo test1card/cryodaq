@@ -57,6 +57,12 @@ dependencies = [
     # tz="UTC" timestamps (parquet archive via pyarrow) raises
     # ZoneInfoNotFoundError without this. No-op where the OS provides tzdata.
     "tzdata>=2024.1",
+    # F25 SQLite WAL gate: on Linux the system SQLite is often in the
+    # March-2026 WAL-reset corruption range [3.7.0, 3.51.3). storage/_sqlite.py
+    # transparently falls back to this bundled modern SQLite so the gate passes
+    # out of the box. Linux-only marker: macOS ships no pysqlite3 wheels (the
+    # stdlib there is expected safe), and the marker prevents an install failure.
+    "pysqlite3-binary>=0.5.4; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

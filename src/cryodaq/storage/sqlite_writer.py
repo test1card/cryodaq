@@ -12,7 +12,6 @@ import json
 import logging
 import math
 import os
-import sqlite3
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -22,6 +21,12 @@ from typing import Any
 
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage._sqlite import (
+    SQLITE_BACKPORT_SAFE,
+    SQLITE_BROKEN_RANGE,
+    sqlite3,
+    sqlite_version_info,
+)
 from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
 logger = logging.getLogger(__name__)
@@ -102,15 +107,8 @@ _SQLITE_VERSION_CHECKED = False
 _HISTORY_MAX_ROWS = 100_000
 _HISTORY_MAX_CHANNELS = 64
 
-# Per SQLite official advisory (sqlite.org/wal.html), the WAL-reset corruption
-# fix is backported to these specific patch versions only. 3.44.7+ and 3.50.8+
-# do NOT have the backport; the fix landed in trunk at 3.51.3.
-SQLITE_BACKPORT_SAFE: frozenset[tuple[int, int, int]] = frozenset(
-    [
-        (3, 44, 6),
-        (3, 50, 7),
-    ]
-)
+# Range and backport-safe set live in cryodaq.storage._sqlite (single source,
+# also used to pick the sqlite3 implementation). Imported above.
 
 
 def _check_sqlite_version() -> None:
@@ -130,8 +128,9 @@ def _check_sqlite_version() -> None:
     if _SQLITE_VERSION_CHECKED:
         return
     _SQLITE_VERSION_CHECKED = True
-    version = sqlite3.sqlite_version_info  # tuple, e.g. (3, 37, 2)
-    if (3, 7, 0) <= version < (3, 51, 3):
+    version = sqlite_version_info()  # chosen impl, e.g. (3, 37, 2)
+    lo, hi = SQLITE_BROKEN_RANGE
+    if lo <= version < hi:
         if version in SQLITE_BACKPORT_SAFE:
             return
         bypass = os.environ.get("CRYODAQ_ALLOW_BROKEN_SQLITE", "").strip()

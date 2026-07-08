@@ -15,7 +15,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -24,6 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from cryodaq.core.atomic_write import atomic_write_text
+from cryodaq.storage._sqlite import sqlite3
 
 logger = logging.getLogger(__name__)
 

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 

@@ -370,8 +370,12 @@ As of v0.63.0. The lab-only checks below are collected as a turnkey protocol in
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
   range `[3.7.0, 3.51.3)` (F25). Backport-safe: 3.44.6, 3.50.7 (pass without the
-  variable). Workaround: `CRYODAQ_ALLOW_BROKEN_SQLITE=1` (prints a warning). On
-  the lab Ubuntu PC, check `sqlite3 --version` (see the checklist).
+  variable). On Linux this self-heals: `storage/_sqlite.py` transparently falls
+  back to the bundled `pysqlite3-binary` (a base dependency) when the linked
+  SQLite is in-range, so the gate passes out of the box. Manual remediation
+  (`CRYODAQ_ALLOW_BROKEN_SQLITE=1`, or a Python linked against a safe SQLite) is
+  only needed if BOTH the stdlib and the fallback are unsafe/absent. macOS ships
+  no pysqlite3 wheels; its stdlib is expected safe.
 - **Lab Ubuntu PC verification:** the H5 ZMQ fix from v0.39.0 was verified only on
   macOS. Physical access to the lab PC is pending (see the checklist).
 - **PDF reports:** best-effort. The guaranteed artifact is DOCX.

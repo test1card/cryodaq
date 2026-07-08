@@ -440,11 +440,19 @@ def test_fit_logs_warning_when_all_metric_points_fail(
 # ------------------------------------------------------------------
 
 
-def test_extract_pairs_reads_rotated_cold_day(tmp_path) -> None:
+def test_extract_pairs_reads_rotated_cold_day(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A calibration fit over data older than the cold-rotation threshold must
     still find its pairs. Once F17 rotates a daily SQLite file to Parquet and
     deletes it, a direct glob goes blind — extract_pairs has to union hot+cold.
     """
+    # CI runners link an in-range SQLite (ubuntu 3.45.1 / windows 3.50.4); this
+    # test drives the real SQLiteWriter.stop() path which runs the F25 gate.
+    # On Linux the pysqlite3 fallback makes the gate pass for real; Windows has
+    # no wheels, so acknowledge the bypass explicitly (the gate itself is
+    # pinned by tests/core/test_f23_f24_f25_misc.py).
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     import asyncio
 
     from cryodaq.drivers.base import ChannelStatus, Reading

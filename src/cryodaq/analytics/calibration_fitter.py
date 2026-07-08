@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from cryodaq.analytics.calibration import CalibrationCurve, CalibrationSample, CalibrationStore
+from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
 
