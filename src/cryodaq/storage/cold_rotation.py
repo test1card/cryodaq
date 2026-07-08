@@ -12,9 +12,13 @@ Archive index:  <archive_dir>/index.json
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -95,6 +99,7 @@ def build_cold_rotation_service(
     *,
     data_dir: Path,
     project_root: Path,
+    retention_cfg: dict | None = None,
 ) -> ColdRotationService | None:
     """Construct a ColdRotationService from the ``cold_rotation`` config block.
 
@@ -105,6 +110,9 @@ def build_cold_rotation_service(
     ``archive_dir`` from config is resolved relative to *project_root* (matching
     ``config/housekeeping.yaml``'s ``data/archive``); an absolute path is used
     verbatim.
+
+    ``retention_cfg`` is the ``retention`` block; when supplied it is only used
+    to emit the F1c config-sanity WARNING below (no effect on the service).
     """
     if cold_cfg.get("enabled") is not True:
         return None
@@ -112,10 +120,32 @@ def build_cold_rotation_service(
     archive_dir = Path(archive_cfg)
     if not archive_dir.is_absolute():
         archive_dir = project_root / archive_dir
+    age_days = int(cold_cfg.get("age_days", 30))
+
+    # F1c config sanity (belt-and-suspenders): if retention compression is ALSO
+    # enabled and would gzip a daily DB (compress_after_days) at or before
+    # rotation's age_days, warn about the starvation hazard — a .db.gz is
+    # invisible to every reader and, historically, rotation only globbed .db.
+    # The F1a guard (skip_daily_db_compression wired from cold_rotation.enabled)
+    # makes this moot for daily readings DBs; this only flags the raw config
+    # overlap in case the wiring is ever removed.
+    if retention_cfg and bool(retention_cfg.get("enabled", False)):
+        compress_after = int(retention_cfg.get("compress_after_days", 14))
+        if compress_after <= age_days:
+            logger.warning(
+                "housekeeping: retention.compress_after_days=%d <= cold_rotation.age_days=%d — "
+                "raw config would gzip daily DBs to invisible .db.gz before rotation ingests "
+                "them (starvation hazard). Moot while the F1a daily-DB compression guard is "
+                "wired (retention skips daily DBs when rotation is enabled); warning flags the "
+                "config overlap only.",
+                compress_after,
+                age_days,
+            )
+
     return ColdRotationService(
         data_dir=data_dir,
         archive_dir=archive_dir,
-        age_days=int(cold_cfg.get("age_days", 30)),
+        age_days=age_days,
         enabled=True,
         zstd_level=int(cold_cfg.get("zstd_compression_level", 3)),
     )
@@ -251,6 +281,7 @@ class ColdRotationService:
         rotated = self._load_rotated_names()
 
         candidates: list[Path] = []
+        seen_canonical: set[str] = set()
         for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
             if self._is_active_db(db_path, today):
                 continue
@@ -263,6 +294,24 @@ class ColdRotationService:
                 continue
             if day < cutoff:
                 candidates.append(db_path)
+                seen_canonical.add(db_path.name)
+
+        # Legacy compressed daily DBs: retention gzipped these to
+        # data_YYYY-MM-DD.db.gz before the rotation guard existed, and real lab
+        # disks carry them. Ingest them too — no reader ever read a .gz, so
+        # without this they die at retention's delete age never having reached
+        # cold storage. Rotation decompresses to a temp file (see _rotate_file_sync).
+        for gz_path in sorted(self._data_dir.glob("data_????-??-??.db.gz")):
+            canonical = gz_path.name.removesuffix(".gz")  # data_YYYY-MM-DD.db
+            if canonical in rotated or canonical in seen_canonical:
+                continue
+            try:
+                day = date.fromisoformat(canonical.removeprefix("data_").removesuffix(".db"))
+            except ValueError:
+                logger.warning("Unexpected gz filename format: %s — skipping", gz_path.name)
+                continue
+            if day < cutoff:
+                candidates.append(gz_path)
         return candidates
 
     async def _rotate_file(self, db_path: Path, today: date) -> RotationResult | None:
@@ -280,18 +329,79 @@ class ColdRotationService:
         return await asyncio.to_thread(self._rotate_file_sync, db_path, today)
 
     def _rotate_file_sync(self, db_path: Path, today: date) -> RotationResult | None:
-        """Synchronous worker called via asyncio.to_thread."""
+        """Synchronous worker called via asyncio.to_thread.
+
+        Dispatches on the candidate kind. A plain ``data_YYYY-MM-DD.db`` reads
+        and deletes in place. A legacy ``data_YYYY-MM-DD.db.gz`` (retention
+        compressed it before the F1a guard existed) is decompressed to a temp
+        file first; everything downstream — readings, operator_log, and the
+        recorded ``source_md5`` — comes from the DECOMPRESSED database, and on
+        success both the temp file and the original ``.gz`` are deleted.
+        """
+        if db_path.name.endswith(".db.gz"):
+            canonical_name = db_path.name.removesuffix(".gz")
+            tmp_fd, tmp_name = tempfile.mkstemp(suffix=".db", dir=str(db_path.parent))
+            os.close(tmp_fd)
+            tmp_path = Path(tmp_name)
+            try:
+                with gzip.open(db_path, "rb") as src, tmp_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except Exception:
+                logger.exception("Failed to decompress legacy %s — skipping rotation", db_path.name)
+                tmp_path.unlink(missing_ok=True)
+                return None
+            try:
+                return self._rotate_readings_sync(
+                    read_db=tmp_path,
+                    canonical_name=canonical_name,
+                    result_path=db_path,
+                    today=today,
+                    unlink_targets=(db_path,),
+                )
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        return self._rotate_readings_sync(
+            read_db=db_path,
+            canonical_name=db_path.name,
+            result_path=db_path,
+            today=today,
+            unlink_targets=tuple(
+                db_path.parent / (db_path.name + suffix) for suffix in ("", "-wal", "-shm")
+            ),
+        )
+
+    def _rotate_readings_sync(
+        self,
+        *,
+        read_db: Path,
+        canonical_name: str,
+        result_path: Path,
+        today: date,
+        unlink_targets: tuple[Path, ...],
+    ) -> RotationResult | None:
+        """Archive one decompressed readings DB to Parquet + index it.
+
+        ``read_db`` is the SQLite file actually read (a temp copy for a legacy
+        .gz); ``canonical_name`` is the ``data_YYYY-MM-DD.db`` name that drives
+        archive paths and the index ``original_name``; ``result_path`` is
+        reported as ``RotationResult.db_path``; ``unlink_targets`` are removed in
+        Step 5 on success. ``source_md5`` is taken from ``read_db`` — the
+        DECOMPRESSED contents — so the sweep's byte-identity check compares like
+        with like.
+        """
+        stem = canonical_name.removesuffix(".db")
         # Derive archive path from DB filename date
         try:
-            day = date.fromisoformat(db_path.stem.removeprefix("data_"))
+            day = date.fromisoformat(stem.removeprefix("data_"))
         except ValueError:
-            logger.error("Cannot parse date from DB filename: %s", db_path.name)
+            logger.error("Cannot parse date from DB filename: %s", canonical_name)
             return None
 
-        archive_rel = f"year={day.year}/month={day.month:02d}/{db_path.stem}.parquet"
+        archive_rel = f"year={day.year}/month={day.month:02d}/{stem}.parquet"
         archive_path = self._archive_dir / archive_rel
 
-        size_original = db_path.stat().st_size
+        size_original = read_db.stat().st_size
 
         # Step 0 (CR-3 follow-up): source_data has no cold-storage export yet.
         # If this day carries source_data rows, do NOT rotate at all. Rotating
@@ -301,19 +411,19 @@ class ColdRotationService:
         # the live DB with the cold Parquet. Skip cleanly (nothing written,
         # nothing indexed, file stays a candidate); revisit when source_data
         # gains a cold-export path.
-        if self._table_has_rows(db_path, "source_data"):
+        if self._table_has_rows(read_db, "source_data"):
             logger.warning(
                 "source_data in %s has rows and no cold export exists — "
                 "skipping rotation entirely (SQLite kept, not indexed)",
-                db_path.name,
+                canonical_name,
             )
             return None
 
         # Step 1: Read all rows from SQLite
         try:
-            rows = self._read_all_rows(db_path)
+            rows = self._read_all_rows(read_db)
         except Exception:
-            logger.exception("Failed to read SQLite %s — skipping rotation", db_path.name)
+            logger.exception("Failed to read SQLite %s — skipping rotation", canonical_name)
             return None
 
         expected_rows = len(rows)
@@ -323,7 +433,7 @@ class ColdRotationService:
         try:
             self._write_parquet(archive_path, rows)
         except Exception:
-            logger.exception("Failed to write Parquet for %s — leaving SQLite intact", db_path.name)
+            logger.exception("Failed to write Parquet for %s — leaving SQLite intact", canonical_name)
             # Clean up any partial Parquet file
             archive_path.unlink(missing_ok=True)
             return None
@@ -334,7 +444,7 @@ class ColdRotationService:
         except Exception:
             logger.exception(
                 "Cannot verify Parquet row count for %s — leaving SQLite intact",
-                db_path.name,
+                canonical_name,
             )
             archive_path.unlink(missing_ok=True)
             return None
@@ -342,7 +452,7 @@ class ColdRotationService:
         if actual_rows != expected_rows:
             logger.error(
                 "Row count mismatch for %s: expected %d, got %d — leaving SQLite intact",
-                db_path.name,
+                canonical_name,
                 expected_rows,
                 actual_rows,
             )
@@ -355,17 +465,17 @@ class ColdRotationService:
         operator_log_rel: str | None = None
         operator_log_rows_count = 0
         try:
-            operator_log_rows = self._read_operator_log_rows(db_path)
+            operator_log_rows = self._read_operator_log_rows(read_db)
         except Exception:
             logger.exception(
                 "Failed to read operator_log from %s — leaving SQLite intact, cleaning up Parquet",
-                db_path.name,
+                canonical_name,
             )
             archive_path.unlink(missing_ok=True)
             return None
 
         if operator_log_rows:
-            operator_log_rel = f"year={day.year}/month={day.month:02d}/{db_path.stem}.operator_log.parquet"
+            operator_log_rel = f"year={day.year}/month={day.month:02d}/{stem}.operator_log.parquet"
             operator_log_path = self._archive_dir / operator_log_rel
             operator_log_rows_count = len(operator_log_rows)
             try:
@@ -378,7 +488,7 @@ class ColdRotationService:
             except Exception:
                 logger.exception(
                     "Failed to preserve operator_log for %s — leaving SQLite intact, cleaning up Parquet",
-                    db_path.name,
+                    canonical_name,
                 )
                 operator_log_path.unlink(missing_ok=True)
                 archive_path.unlink(missing_ok=True)
@@ -387,15 +497,16 @@ class ColdRotationService:
         # Step 4: Update index. Record the source .db's own MD5 alongside the
         # Parquet checksum: the sweep uses it to prove a stranded hot DB is
         # byte-identical to what was archived before it dares delete it. Nothing
-        # touches db_path between here and the Step-5 unlink, so this hash is
-        # exactly what would be deleted.
+        # touches read_db between here and the Step-5 unlink, so this hash is
+        # exactly what would be deleted (for a legacy .gz it is the decompressed
+        # temp copy — the same bytes a future reader would decompress).
         size_archive = archive_path.stat().st_size
         checksum = self._md5_hex(archive_path)
-        source_md5 = self._md5_hex(db_path)
+        source_md5 = self._md5_hex(read_db)
         rotated_at = datetime.now(UTC)
         try:
             self._update_index(
-                db_path=db_path,
+                original_name=canonical_name,
                 archive_rel=archive_rel,
                 row_count=expected_rows,
                 size_original=size_original,
@@ -409,7 +520,7 @@ class ColdRotationService:
         except Exception:
             logger.exception(
                 "Failed to update index for %s — leaving SQLite intact, cleaning up Parquet",
-                db_path.name,
+                canonical_name,
             )
             archive_path.unlink(missing_ok=True)
             if operator_log_rel is not None:
@@ -425,20 +536,21 @@ class ColdRotationService:
         # the next pass retries the deletion only. Until then the lingering hot
         # .db and its Parquet both exist for the day — ArchiveReader.query_rows
         # unions and dedups them (F4), so no row is hidden or double-counted.
-        for suffix in ("", "-wal", "-shm"):
-            sidecar = db_path.parent / (db_path.name + suffix)
+        # For a legacy .gz candidate unlink_targets is just the .gz (its temp
+        # copy is cleaned by the caller's finally).
+        for target in unlink_targets:
             try:
-                sidecar.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning(
                     "Could not delete %s after archiving (kept, retry next pass): %s",
-                    sidecar.name,
+                    target.name,
                     exc,
                 )
 
         logger.info(
             "Rotated %s → %s (%d rows, %.1f MB → %.1f MB)",
-            db_path.name,
+            canonical_name,
             archive_rel,
             expected_rows,
             size_original / 1e6,
@@ -446,7 +558,7 @@ class ColdRotationService:
         )
 
         return RotationResult(
-            db_path=db_path,
+            db_path=result_path,
             archive_path=archive_path,
             rows=expected_rows,
             size_original=size_original,
@@ -742,7 +854,7 @@ class ColdRotationService:
     def _update_index(
         self,
         *,
-        db_path: Path,
+        original_name: str,
         archive_rel: str,
         row_count: int,
         size_original: int,
@@ -756,7 +868,7 @@ class ColdRotationService:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         idx = self._read_index()
         entry = {
-            "original_name": db_path.name,
+            "original_name": original_name,
             "archive_path": archive_rel,
             "rotated_at": rotated_at.isoformat(),
             "row_count": row_count,

@@ -349,6 +349,7 @@ class HousekeepingService:
         experiment_artifacts_dir: Path,
         *,
         config: dict[str, Any] | None = None,
+        skip_daily_db_compression: bool = False,
     ) -> None:
         cfg = config or {}
         self._data_dir = data_dir
@@ -358,6 +359,13 @@ class HousekeepingService:
         self._compress_after_days = int(cfg.get("compress_after_days", 14))
         self._delete_after_days = int(cfg.get("delete_compressed_after_days", 90))
         self._dry_run = bool(cfg.get("dry_run", False))
+        # F1: when cold rotation is enabled it owns the daily-DB lifecycle
+        # (hot .db → zstd Parquet after age_days). Retention must then NOT gzip
+        # daily readings DBs: a data_YYYY-MM-DD.db.gz is invisible to every
+        # reader AND rotation historically globbed only .db, so a compressed
+        # day died without ever reaching cold storage. Wired at build time from
+        # cold_rotation.enabled; default False keeps legacy compress behaviour.
+        self._skip_daily_db_compression = bool(skip_daily_db_compression)
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -398,14 +406,18 @@ class HousekeepingService:
         protected_db_names = self._linked_db_names()
         actions: list[HousekeepingAction] = []
 
-        for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
-            if db_path.name in protected_db_names:
-                continue
-            age_days = (current - datetime.fromtimestamp(db_path.stat().st_mtime, tz=UTC)).days
-            if age_days >= self._compress_after_days:
-                target = db_path.with_suffix(db_path.suffix + ".gz")
-                if not target.exists():
-                    actions.append(HousekeepingAction("compress_db", db_path, target))
+        # F1a: skip daily-DB compression entirely when cold rotation owns the
+        # lifecycle — otherwise the .gz starves rotation. The delete-compressed
+        # sweep below still runs (cleans legacy .gz by its own age).
+        if not self._skip_daily_db_compression:
+            for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
+                if db_path.name in protected_db_names:
+                    continue
+                age_days = (current - datetime.fromtimestamp(db_path.stat().st_mtime, tz=UTC)).days
+                if age_days >= self._compress_after_days:
+                    target = db_path.with_suffix(db_path.suffix + ".gz")
+                    if not target.exists():
+                        actions.append(HousekeepingAction("compress_db", db_path, target))
 
         for gz_path in sorted(self._data_dir.glob("data_????-??-??.db.gz")):
             original_name = gz_path.name.removesuffix(".gz")
