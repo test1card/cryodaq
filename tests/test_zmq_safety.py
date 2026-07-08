@@ -1,4 +1,4 @@
-"""Socket-level size caps on the ZMQ command/data path (audit C.2 / Codex D6).
+"""Socket-level size caps on the ZMQ command/data path (audit C.2 / D6).
 
 The REP command socket and the SUB data socket serve unauthenticated
 loopback traffic. An oversize frame must be rejected by libzmq

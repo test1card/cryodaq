@@ -48,7 +48,7 @@ def test_parse_intent_extracts_target_source_kind_vault_note() -> None:
 
 
 def test_parse_intent_rejects_non_canonical_vault_alias() -> None:
-    """v0.55.14 (Codex audit SCOPE 6 finding 6.4) — the legacy "vault"
+    """v0.55.14 (audit SCOPE 6 finding 6.4) — the legacy "vault"
     string is NOT in the canonical allow-list; it collapses to None so
     the WHERE clause matches nothing rather than silently."""
     intent = _parse_intent(_knowledge_json(source_kind="vault"))

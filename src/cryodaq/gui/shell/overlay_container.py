@@ -4,7 +4,7 @@ Phase UI-1 v2 Block A. The dashboard is the existing OverviewPanel for
 now (Block B will rewrite the dashboard internals). Overlays are the
 existing detail panels hosted as full-takeover stack pages.
 
-v0.55.15 (Codex audit SCOPE 5 finding 5.6) — added ``unregister`` and
+v0.55.15 (audit SCOPE 5 finding 5.6) — added ``unregister`` and
 ``clear_all`` so overlays can be released on shutdown / re-init
 instead of accumulating ``_pages`` entries forever. Existing
 ``register()`` now also schedules ``deleteLater()`` on the displaced

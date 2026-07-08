@@ -191,7 +191,7 @@ def zmq_bridge_main(
             useful for stateful recovery on a shared socket, which the
             ephemeral model has eliminated. TCP_KEEPALIVE dropped from
             the command path (reverting the f5f9039 partial fix) —
-            Codex revised analysis confirmed idle-reap was not the
+            revised analysis confirmed idle-reap was not the
             actual cause; keepalive is a no-op here and clutters
             debugging of the real socket state.
             """

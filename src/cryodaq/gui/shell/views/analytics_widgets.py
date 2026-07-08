@@ -1638,7 +1638,7 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             "cmd": "readings_history",
             "from_ts": start_ts,
             "to_ts": to_ts,
-            # 50k samples covers ~7h at 0.5s polling cadence (Codex P2: 5k was 42 min)
+            # 50k samples covers ~7h at 0.5s polling cadence (P2: 5k was 42 min)
             "limit_per_channel": 50000,
         }
         self._stats_worker = ZmqCommandWorker(cmd, parent=self)

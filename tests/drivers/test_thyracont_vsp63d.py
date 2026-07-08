@@ -196,12 +196,12 @@ async def test_parse_v1_response_very_high_pressure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 12. V1 probe rejects bad checksum when validate_checksum=True (Codex-05)
+# 12. V1 probe rejects bad checksum when validate_checksum=True (case 05)
 # ---------------------------------------------------------------------------
 
 
 async def test_v1_probe_rejects_checksum_mismatch() -> None:
-    """Codex-05: V1 probe must fail when prefix matches but checksum is wrong.
+    """case 05: V1 probe must fail when prefix matches but checksum is wrong.
 
     validate_checksum=True (default) — probe must not accept a response that
     passes the prefix check but fails XOR checksum (reproduces VSP206 masquerade

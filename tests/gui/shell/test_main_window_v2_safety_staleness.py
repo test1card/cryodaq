@@ -1,5 +1,5 @@
 """Regression: the bottom-bar safety strip must NOT show a stale runtime state
-after the engine dies. CLAUDE.md invariant — the GUI is not the source of truth
+after the engine dies. runtime invariant — the GUI is not the source of truth
 for runtime state; a stale green "running" while the engine is gone is dangerous.
 """
 

@@ -292,7 +292,7 @@ def test_nonfinite_setpoint_default_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Codex amend — rate alarm validation
+# amend — rate alarm validation
 # Mirrors alarm_v2._eval_rate L362-365: cfg["threshold"] for rate_above/rate_below
 # ---------------------------------------------------------------------------
 
@@ -364,7 +364,7 @@ def test_rate_alarm_wellformed_loads(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Codex amend — additional_condition validation
+# amend — additional_condition validation
 # Mirrors alarm_v2._eval_rate L376-378: calls _eval_condition(add_cond)
 # which hard-reads cond["threshold"] for above/below/rate_above/rate_below/etc.
 # ---------------------------------------------------------------------------
@@ -410,7 +410,7 @@ def test_rate_alarm_additional_condition_wellformed_loads(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Codex amend — composite sub-condition validation
+# amend — composite sub-condition validation
 # Mirrors alarm_v2._eval_condition L284-330: hard-reads cond["threshold"] for
 # any_below (L286), any_above (L293), above (L305/307), below (L314),
 # rate_above (L322), rate_below (L330).

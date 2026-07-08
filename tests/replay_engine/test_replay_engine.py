@@ -416,7 +416,7 @@ async def test_replay_engine_cooldown_history_unavailable(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# DirectoryReplay base_offset edge cases (Stage 4c, Codex P2-B fix)
+# DirectoryReplay base_offset edge cases (Stage 4c, P2-B fix)
 # ---------------------------------------------------------------------------
 
 

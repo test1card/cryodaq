@@ -116,7 +116,7 @@ class BottomStatusBar(QWidget):
             color = theme.TEXT_MUTED
         # DESIGN: invariant #3 — safety state displayed lowercase as-is
         # (matches engine FSM ID; operator learns these from logs).
-        # CLAUDE.md absolute rule: FSM states displayed lowercase.
+        # runtime display rule: FSM states displayed lowercase.
         self._safety_label.setText(f"● {s}")
         self._safety_label.setStyleSheet(f"color: {color}; font-weight: bold;")
 

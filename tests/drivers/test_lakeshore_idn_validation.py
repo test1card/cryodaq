@@ -1,4 +1,4 @@
-"""Verify LakeShore 218S IDN validation + retry (Phase 2c Codex F.1)."""
+"""Verify LakeShore 218S IDN validation + retry (Phase 2c F.1)."""
 
 from __future__ import annotations
 

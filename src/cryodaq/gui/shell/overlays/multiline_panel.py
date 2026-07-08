@@ -198,7 +198,7 @@ class _Chip(QLabel):
 class MultiLinePanel(QWidget):
     """Etalon MultiLine measurement overlay.
 
-    v0.55.15 (Codex audit SCOPE 5 finding 5.1) — accepts an optional
+    v0.55.15 (audit SCOPE 5 finding 5.1) — accepts an optional
     ``instrument_id`` so a deployment with multiple Etalon MultiLine
     instruments (e.g. ``MultiLine_1`` and ``MultiLine_2``) routes each
     instrument's readings into its own panel. Default ``None`` keeps
@@ -450,7 +450,7 @@ class MultiLinePanel(QWidget):
         was_connected = self._connected
         self._connected = bool(connected)
         self._chip.set_state("ok" if self._connected else "off")
-        # v0.55.15 (Codex audit SCOPE 5 finding 5.2) — when the engine
+        # v0.55.15 (audit SCOPE 5 finding 5.2) — when the engine
         # transitions from connected → disconnected, mark every value
         # cell as stale instead of leaving the last reading frozen on
         # screen. Operators previously had to read the chip badge to
@@ -464,7 +464,7 @@ class MultiLinePanel(QWidget):
         return self._instrument_id
 
     def channel_belongs_to_panel(self, channel: str) -> bool:
-        """v0.55.15 (Codex audit SCOPE 5 finding 5.1) — instrument_id
+        """v0.55.15 (audit SCOPE 5 finding 5.1) — instrument_id
         scoping. When ``instrument_id`` is set, only channels prefixed
         with ``"{instrument_id}/"`` are accepted; otherwise fall back
         to the legacy ``"MultiLine" in channel`` substring match for

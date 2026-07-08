@@ -209,7 +209,7 @@ class InterlockEngine:
             Optional async/sync callback receiving the full ``InterlockCondition``
             and ``Reading`` context. Called from ``_trip`` ALONGSIDE the
             actions-dict callable. Used by SafetyManager wiring (Phase 2a
-            Codex I.1) so the action name, condition name, channel, and value
+            I.1) so the action name, condition name, channel, and value
             survive the trip path instead of being collapsed by zero-arg
             callbacks.
         alarm_publisher:
@@ -685,7 +685,7 @@ class InterlockEngine:
                 exc_info=True,
             )
 
-        # Phase 2a Codex I.1: notify the optional trip_handler with FULL
+        # Phase 2a I.1: notify the optional trip_handler with FULL
         # context. SafetyManager uses this to differentiate "stop_source"
         # (soft stop, no fault latch) from "emergency_off" (full latch).
         # The handler is called even if the actions-dict callable above

@@ -895,7 +895,7 @@ class ConductivityPanel(QWidget):
         if ch_id is not None and reading.unit == "K" and reading.is_usable():
             # Hide the empty-state overlay only when a real temperature
             # reading lands — a power-only reading has nothing to plot,
-            # so the overlay must stay up until temps arrive. Codex II.5
+            # so the overlay must stay up until temps arrive. II.5
             # residual fix. setVisible(False) is idempotent so we skip
             # the isVisible() pre-check (which is offscreen-Qt flaky).
             self._empty_label.setVisible(False)

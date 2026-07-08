@@ -74,7 +74,7 @@ class ThyracontVSP63D(InstrumentDriver):
         baudrate: int = 9600,
         address: str = "001",
         mock: bool = False,
-        # Phase 2c Codex F.2: default flipped from False to True. Thyracont
+        # Phase 2c F.2: default flipped from False to True. Thyracont
         # protocol carries an explicit CS field; on noisy RS-232 lines a
         # silent corruption could otherwise produce an incorrect pressure
         # reading. Operators with known-bad firmware can opt back out via

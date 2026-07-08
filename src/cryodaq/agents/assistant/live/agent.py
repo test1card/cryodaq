@@ -255,7 +255,7 @@ class _EventDedup:
 def _event_dedup_id(event: EngineEvent) -> str | None:
     """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
 
-    Cycle-2 fix for Codex finding on commit 53981a1: the previous
+    Cycle-2 fix from commit 53981a1: the previous
     implementation derived the bucket from ``time.monotonic() // window_s``,
     which let an alarm at ``t=29.9 s`` and a re-fire at ``t=30.1 s`` produce
     different bucket ids (0 then 1) and pass through despite being 0.2 s

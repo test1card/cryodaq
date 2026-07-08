@@ -17,7 +17,7 @@ EXCLUDE_DIRS = {
     "logs",            # 44M runtime logs
     "artifacts",       # 19M run artifacts / handoffs
     "graphify-out", "graphify-out.stale-pre-merge",  # generated knowledge graph
-    "agentswarm",      # AI agent session logs (md/json), not product code
+    "agentswarm",      # session logs (md/json), not product code
     ".omc", ".pytest_cache", ".mypy_cache", ".ruff_cache", "cooldown_v5",
     "yandex", "tsp", "vault", "Vault",
     ".swarm", ".scratch", ".claude", ".github_backup", ".idea", ".vscode",

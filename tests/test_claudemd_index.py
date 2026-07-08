@@ -11,8 +11,18 @@ Two invariants, checked against the "### Индекс модулей" section on
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src" / "cryodaq"
+
+# CLAUDE.md — нетрекаемый dev-документ (repo hygiene 2026-07-08): в свежем
+# clone (CI) файла нет, линт индекса имеет смысл только там, где он лежит.
+if not (REPO_ROOT / "CLAUDE.md").exists():
+    pytest.skip(
+        "CLAUDE.md отсутствует (untracked dev doc) — doc-lint пропущен",
+        allow_module_level=True,
+    )
 
 
 def _index_section() -> str:

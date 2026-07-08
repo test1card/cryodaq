@@ -1,6 +1,6 @@
 """Verify adaptive-throttle reads critical channels from alarms_v3.yaml.
 
-Phase 2b Codex H.1.
+Phase 2b H.1.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def test_all_interlocks_protected_regardless_of_action(tmp_path):
 
 
 def test_phase_alarms_nested_schema(tmp_path):
-    """Phase 2b Codex Block D P1: phase_alarms is nested phase→alarm_id→alarm.
+    """Phase 2b Block D P1: phase_alarms is nested phase→alarm_id→alarm.
 
     The previous loader treated phase_alarms as a flat alarm_id→alarm dict
     and silently dropped every entry.
@@ -186,7 +186,7 @@ def test_phase_alarms_nested_schema(tmp_path):
 
 
 def test_additional_condition_walked(tmp_path):
-    """Phase 2b Codex Block D P2: additional_condition carries channel refs
+    """Phase 2b Block D P2: additional_condition carries channel refs
     too. The recursive walker must enter it."""
     config = tmp_path / "alarms_v3.yaml"
     config.write_text(

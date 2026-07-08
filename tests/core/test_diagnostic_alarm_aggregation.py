@@ -142,7 +142,7 @@ def test_escalation_cooldown_disabled_by_default() -> None:
 
 
 def test_critical_always_notifies_regardless_of_cooldown() -> None:
-    """Codex finding: critical escalation must never be suppressed by cooldown.
+    """finding: critical escalation must never be suppressed by cooldown.
 
     Even when warning was recently notified (within cooldown window), the subsequent
     critical notification must always appear in new_events.

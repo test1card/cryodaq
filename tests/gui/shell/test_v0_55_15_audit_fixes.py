@@ -1,6 +1,6 @@
 """v0.55.15 — regression guards for the GUI lifecycle audit-fix release.
 
-Covers Codex audit SCOPE 5 fixes:
+Covers audit SCOPE 5 fixes:
 - 5.1 — MultiLine instrument-id scoping prevents cross-instance leak
 - 5.2 — set_connected(False) clears stale display values
 - 5.4 — AssistantChatPanel worker list bounded across many queries
@@ -62,7 +62,7 @@ def test_multiline_panel_default_accepts_any_multiline_channel(qapp) -> None:
 def test_multiline_panel_with_instrument_id_rejects_other_instances(qapp) -> None:
     panel = MultiLinePanel(instrument_id="MultiLine_1")
     assert panel.channel_belongs_to_panel("MultiLine_1/length_ch1") is True
-    # The Codex regression: substring match would have accepted this
+    # Regression: substring match would have accepted this
     # too. With instrument_id the panel rejects it.
     assert panel.channel_belongs_to_panel("MultiLine_2/length_ch1") is False
 
@@ -245,7 +245,7 @@ def test_multiline_channel_state_window_tracks_min_max() -> None:
 
 
 def test_chat_panel_worker_list_does_not_grow_unbounded(qapp) -> None:
-    """v0.55.15 (Codex audit SCOPE 5 finding 5.4) — call the real send_query()
+    """v0.55.15 (audit SCOPE 5 finding 5.4) — call the real send_query()
     with a QObject-based fake worker so the Qt signal system delivers the
     finished signal and self.sender() returns the actual fake instance.
 

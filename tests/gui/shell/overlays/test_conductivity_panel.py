@@ -655,7 +655,7 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
     """Safety-relevant: if engine connection drops while auto-sweep is
     stabilizing, the Stop button MUST remain enabled so the operator
     can abort the sweep and send keithley_stop. Start must stay
-    disabled (no new sweeps on dead link). Codex II.5 residual fix.
+    disabled (no new sweeps on dead link). II.5 residual fix.
 
     Fix: use button click (not private _on_auto_start), capture every
     dispatched command, then click Stop after disconnect and assert the
@@ -726,7 +726,7 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
 def test_empty_state_not_hidden_by_power_only_reading(app):
     """Power reading before any temperature arrives must NOT hide the
     empty-state overlay — plot has no data yet, so the hint should
-    remain up. Codex II.5 residual fix.
+    remain up. II.5 residual fix.
     """
     from datetime import UTC, datetime
 

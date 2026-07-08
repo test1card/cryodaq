@@ -24,7 +24,7 @@ The accepted risk is bounded by these compensating controls:
   binds are still allowed for the SSH-tunnel-to-loopback deployment rule.
 - **Socket-level size caps.** ``ZMQ_MAXMSGSIZE`` (``MAX_CMD_MSG_SIZE`` /
   ``MAX_DATA_MSG_SIZE``) makes libzmq drop an oversize frame before it is
-  allocated in user space (audit C.2 / Codex D6).
+  allocated in user space (audit C.2 / D6).
 - **Bounded msgpack decode.** ``_unpack_reading`` re-checks the frame size
   and bounds every decoded element (``max_*_len``) so a crafted frame
   cannot drive a huge allocation.
@@ -111,7 +111,7 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
-# Audit C.2 / Codex D6: socket-level size caps on the unauthenticated
+# Audit C.2 / D6: socket-level size caps on the unauthenticated
 # loopback command/data path. libzmq (ZMQ_MAXMSGSIZE) drops an oversize
 # frame before it is allocated in user space — this is the trust-boundary
 # guard, not the post-recv len() check. Commands are small JSON; data
@@ -345,7 +345,7 @@ class ZMQPublisher:
         # 5555 occupied for 240s after a SIGKILL'd engine.
         self._socket.setsockopt(zmq.LINGER, 0)
         # IV.6: TCP_KEEPALIVE previously added here on the idle-reap
-        # hypothesis (commit f5f9039). Codex revised analysis disproved
+        # hypothesis (commit f5f9039). revised analysis disproved
         # that — Ubuntu 120 s deterministic failure with default
         # tcp_keepalive_time=7200 s rules out kernel reaping. Keepalive
         # reverted on the command path (REQ + REP); retained on the
@@ -442,7 +442,7 @@ class ZMQSubscriber:
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.SUB)
         self._socket.setsockopt(zmq.LINGER, 0)
-        # Audit C.2 / Codex D6: drop oversize inbound frames at the socket
+        # Audit C.2 / D6: drop oversize inbound frames at the socket
         # level, before libzmq allocates them (set before connect()).
         self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_DATA_MSG_SIZE)
         self._socket.setsockopt(zmq.RECONNECT_IVL, 500)
@@ -697,7 +697,7 @@ class ZMQCommandServer:
         self._socket = self._ctx.socket(zmq.REP)
         # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
         self._socket.setsockopt(zmq.LINGER, 0)
-        # Audit C.2 / Codex D6: cap inbound command frames at the socket
+        # Audit C.2 / D6: cap inbound command frames at the socket
         # level so libzmq drops an oversize command before allocation
         # (set before bind()).
         self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)

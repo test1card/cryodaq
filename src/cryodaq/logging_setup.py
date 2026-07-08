@@ -42,7 +42,6 @@ _ENV_VAR = "CRYODAQ_LOG_LEVEL"
 #
 # We match BOTH. Bare form requires 8+ digit ID + 30+ char secret to keep
 # false-positive rate near zero on unrelated colon-delimited strings.
-# (Codex Phase 2b Block A P1.)
 _TELEGRAM_TOKEN_RE = re.compile(r"(?:bot)?\d{6,}:[A-Za-z0-9_-]{20,}")
 _BARE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])\d{8,}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
 
@@ -117,7 +116,7 @@ def setup_logging(
     root = logging.getLogger()
     for h in list(root.handlers):
         # Close before removing to release file descriptors / streams.
-        # Without this, repeated setup_logging() calls leak FDs (Codex P2).
+        # Without this, repeated setup_logging() calls leak FDs.
         try:
             h.close()
         except Exception:

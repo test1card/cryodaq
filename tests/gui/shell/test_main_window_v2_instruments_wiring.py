@@ -116,7 +116,7 @@ def test_keithley_reading_creates_card():
 
 
 def test_analytics_reading_does_not_create_card():
-    """II.8 Codex fix: analytics/* readings must not create instrument
+    """II.8: analytics/* readings must not create instrument
     cards. _extract_instrument_id drops analytics prefix before the "/"
     split."""
     _app()

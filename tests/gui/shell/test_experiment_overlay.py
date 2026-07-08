@@ -405,7 +405,7 @@ def test_set_connected_idempotent(app):
 
 
 def test_save_result_respects_connection_gate(app):
-    """II.9 Codex fix: _on_save_result must not re-enable the save
+    """II.9: _on_save_result must not re-enable the save
     button if the host disconnected while the save was in flight."""
     overlay = ExperimentOverlay()
     overlay.set_experiment(
@@ -425,7 +425,7 @@ def test_save_result_respects_connection_gate(app):
 
 
 def test_finalize_result_respects_connection_gate(app):
-    """II.9 Codex fix: _on_finalize_result must not re-enable the
+    """II.9: _on_finalize_result must not re-enable the
     finalize button if the host disconnected mid-command."""
     overlay = ExperimentOverlay()
     overlay.set_experiment(

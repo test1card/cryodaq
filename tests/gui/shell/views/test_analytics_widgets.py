@@ -307,7 +307,7 @@ def test_temperature_overview_window_change_applies_xrange(app):
 
 
 def test_pressure_current_selector_survives_set_series(app):
-    """Regression (Codex v0.52.8 FAIL): PressurePlot.set_series() reapplies
+    """Regression (v0.52.8 FAIL): PressurePlot.set_series() reapplies
     global controller window. Local selector window must be re-applied after
     each set_series call so the operator's choice is not overridden."""
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:

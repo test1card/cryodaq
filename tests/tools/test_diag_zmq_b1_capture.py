@@ -160,11 +160,11 @@ def test_run_capture_writes_jsonl(tmp_path, monkeypatch):
 # --------------------------------------------------------------------
 # R1 repair — _validate_bridge_startup bounded-backoff tests
 #
-# These cover test cases 1-3 from Codex-01 Stream A synthesis. Cases
+# These cover test cases 1-3 from the Stream A synthesis. Cases
 # 4-6 (real ipc:// loop, tcp:// fallback loop, delayed-REP harness)
 # require a live engine + ZMQ context and are deferred to manual
 # hardware verification per architect guidance — see
-# docs/decisions/2026-04-24-d1-d4a-execution.md residual section.
+# CHANGELOG.md.
 # --------------------------------------------------------------------
 
 

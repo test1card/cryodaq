@@ -1,6 +1,6 @@
-"""Verify interlock action differentiation (Phase 2a Codex I.1).
+"""Verify interlock action differentiation (Phase 2a I.1).
 
-Codex finding: ``stop_source`` and ``emergency_off`` interlocks both
+finding: ``stop_source`` and ``emergency_off`` interlocks both
 collapsed into a full latched fault path because the original engine.py
 wrappers discarded the action name. After Phase 2a, the InterlockEngine's
 new ``trip_handler`` callback delivers the full ``(condition, reading)``

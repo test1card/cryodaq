@@ -1,7 +1,7 @@
 """II.6 post-review: verify MainWindowV2 pushes connection + safety state
 into the Keithley overlay.
 
-Codex external review flagged that the shell never invoked
+The regression showed that the shell never invoked
 ``KeithleyPanel.set_connected`` or ``set_safety_ready`` after the II.6
 rewrite — so in production the overlay showed permanent «Нет связи»
 and controls stayed disabled. These tests exercise the host wiring

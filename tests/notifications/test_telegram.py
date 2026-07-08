@@ -237,7 +237,7 @@ def _make_bot(**kwargs):
     alarm_engine.get_active_alarms.return_value = {}
     alarm_engine.get_state.return_value = {}
     alarm_engine.get_events.return_value = []
-    # Phase 2b Codex K.1: TelegramCommandBot now refuses empty allowlist
+    # Phase 2b K.1: TelegramCommandBot now refuses empty allowlist
     # when commands are enabled. Pass a default test chat id unless the
     # caller overrides it.
     kwargs.setdefault("allowed_chat_ids", [1234])
@@ -319,7 +319,7 @@ async def test_cmd_log_empty_text_returns_error() -> None:
 
 
 async def test_cmd_phase_advances() -> None:
-    """Phase 2c Codex I.2: legacy 'cooling' alias canonicalises to the
+    """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
     ExperimentPhase enum value 'cooldown' before being dispatched."""
     handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)

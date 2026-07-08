@@ -85,7 +85,7 @@ def test_setup_logging_idempotent(tmp_path, monkeypatch):
 
 
 def test_bare_token_without_bot_prefix_redacted():
-    """Codex P1: bare token (no 'bot' URL prefix) must also be redacted.
+    """P1: bare token (no 'bot' URL prefix) must also be redacted.
 
     Operators sometimes accidentally log the raw token via
     ``logger.info("token: %s", token_str)`` or via a config dump.

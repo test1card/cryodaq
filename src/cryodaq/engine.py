@@ -732,7 +732,7 @@ def _persist_multiline_channels_to_local_yaml(
     Updates the matching ``etalon_multiline`` entry's ``channels``
     field and writes back.
 
-    Codex audit cycle 1 amend (smoke hotfix): the original helper
+    The original helper
     appended a minimal stub when the local file lacked the MultiLine
     entry, which would have lost base-only fields like host/port/mode
     on engine restart. The merged build below copies the full base
@@ -795,7 +795,7 @@ def _persist_multiline_channels_to_local_yaml(
             }
         )
 
-    # Codex audit cycle 2 amend: engine loads instruments.local.yaml
+    # Engine loads instruments.local.yaml
     # WHOLESALE (the _cfg() helper at engine startup picks local over
     # base if local exists). Top-level keys outside `instruments` —
     # e.g. `chamber` (leak-rate config) — must therefore be copied from
@@ -1988,7 +1988,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     safety_manager.load_config(safety_cfg)
 
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
-    # Phase 2b Codex H.1: merge legacy alarms.yaml/interlocks.yaml protection
+    # Merge legacy alarms.yaml/interlocks.yaml protection
     # patterns with the modern alarms_v3.yaml critical channels. Without this
     # the throttle thins critical channels even though alarms_v3 marks them
     # CRITICAL.
@@ -2033,7 +2033,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             source="machine",
             tags=("safety_fault", channel) if channel else ("safety_fault",),
         )
-        # Codex followup: publish to broker so live consumers (GUI, web)
+        # Publish to broker so live consumers (GUI, web)
         # see safety faults without waiting for SQLite refresh.
         try:
             await _publish_operator_log_entry(broker, entry)
@@ -2072,7 +2072,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.warning("Файл тревог не найден: %s", alarms_cfg)
 
     # Interlock Engine — действия делегируются SafetyManager.
-    # Phase 2a Codex I.1: the actions-dict callables are kept as no-ops for
+    # The actions-dict callables are kept as no-ops for
     # backwards compatibility with InterlockEngine's required interface, but
     # the REAL safety routing happens via trip_handler which receives the
     # full (condition, reading) context. Without this the action name and
@@ -2086,7 +2086,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     }
 
     async def _interlock_trip_handler(condition: Any, reading: Any) -> None:
-        # SAFETY (Phase 2a Codex P1): the actions-dict callables are no-ops,
+        # SAFETY: the actions-dict callables are no-ops,
         # so this handler is the SOLE path that triggers a SafetyManager
         # response. If anything raises here, InterlockEngine._trip will
         # log-and-swallow → fail-open. We catch ourselves and escalate to
@@ -2110,7 +2110,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             )
             try:
                 # v0.55.12 — public latch_fault() replaces the private
-                # _fault() call (Codex audit SCOPE 1.1 follow-up).
+                # _fault() call.
                 await safety_manager.latch_fault(
                     reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
                     source="interlock",
@@ -2271,7 +2271,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             alarm_state_mgr=alarm_v2_state_mgr,
             event_bus=event_bus,
             # v0.55.12 — wire SafetyManager so CooldownAlarm CRITICAL
-            # latches the safety FSM (Codex audit SCOPE 1 finding 1.1).
+            # latches the safety FSM.
             safety_manager=safety_manager,
         )
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
@@ -2793,7 +2793,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
                     # only gives faster client feedback and frees the REP loop earlier. There is
                     # no safe way to terminate a Python thread mid-call, so Option C
-                    # ("actually interrupt") is not available. See Codex commit-7 review.
+                    # ("actually interrupt") is not available.
                     try:
                         result = await asyncio.wait_for(
                             experiment_call,
@@ -2891,8 +2891,8 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
                     # v0.55.12 — feed every phase transition into the
                     # CooldownAlarm so it can disarm itself when the
-                    # operator advances away from cooldown (Codex audit
-                    # SCOPE 1 finding 1.2) and clear its cold-start flag
+                    # operator advances away from cooldown and clear
+                    # its cold-start flag
                     # on a fresh cooldown entry (finding 1.5). Runs
                     # BEFORE the auto-arm path so a phase=cooldown call
                     # always sees a cleared flag.
@@ -3226,7 +3226,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                     tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
                 )
                 allowed_ids = [int(x) for x in allowed_raw]
-                # Phase 2b Codex K.1 — TelegramCommandBot raises on empty list,
+                # TelegramCommandBot raises on empty list,
                 # so refuse to enable cleanly here with a config-error log
                 # rather than letting the constructor surface an exception
                 # mid-startup.
@@ -3346,7 +3346,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
         from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
 
-        # v0.55.14 (Codex audit SCOPE 6 finding 6.8) — config-resolution
+        # v0.55.14 — config-resolution
         # priority: rag.local.yaml → rag.yaml → rag.yaml.example.
         # The v0.55.7 ship report claimed an example fallback existed
         # but the code didn't implement it; now it does. The example

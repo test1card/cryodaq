@@ -750,7 +750,7 @@ class ExperimentOverlay(QWidget):
         self._update_worker.start()
 
     def _on_save_result(self, result: dict) -> None:
-        # II.9 Codex fix: restore state through the gate rather than
+        # II.9: restore state through the gate rather than
         # hardcoding True — if the host flipped to disconnected while
         # the save was in flight, this completion callback must not
         # re-enable a command button.
@@ -906,7 +906,7 @@ class ExperimentOverlay(QWidget):
         worker.start()
 
     def _on_finalize_result(self, result: dict) -> None:
-        # II.9 Codex fix: restore state through the gate rather than
+        # II.9: restore state through the gate rather than
         # hardcoding True — completion callbacks must not re-enable
         # command buttons if the host is currently disconnected.
         self._apply_connection_gate()

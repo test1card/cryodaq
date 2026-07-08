@@ -363,7 +363,7 @@ def test_cmd_forward_no_req_relaxed_no_tcp_keepalive(_sockets):
     """_new_req_socket must NOT set REQ_RELAXED, REQ_CORRELATE, or any
     TCP_KEEPALIVE* option on the command-path REQ socket.
 
-    IV.6 removed these on Codex's revised analysis:
+    IV.6 removed these on revised analysis:
     - REQ_RELAXED / REQ_CORRELATE were only useful for stateful
       recovery on a shared socket, which ephemeral has eliminated.
     - TCP_KEEPALIVE was added on the idle-reap hypothesis (f5f9039)

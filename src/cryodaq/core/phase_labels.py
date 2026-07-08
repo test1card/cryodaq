@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from cryodaq.core.experiment import ExperimentPhase
 
-# Full Russian labels — canonical set (per Codex B.5 alignment).
+# Full Russian labels — canonical set (per B.5 alignment).
 PHASE_LABELS_RU: dict[str, str] = {
     ExperimentPhase.PREPARATION.value: "\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430",  # noqa: E501
     ExperimentPhase.VACUUM.value: "\u041e\u0442\u043a\u0430\u0447\u043a\u0430",

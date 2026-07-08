@@ -73,7 +73,7 @@ class CooldownAlarm:
         # divergence to the curve-fit predictor.
         self._steady_state_predictor = steady_state_predictor
         # v0.55.12 — public SafetyManager handle for CRITICAL escalation
-        # via latch_fault() (Codex audit SCOPE 1 finding 1.1). Optional
+        # via latch_fault() (audit SCOPE 1 finding 1.1). Optional
         # so unit tests that don't care about the safety wiring can
         # construct the alarm without a SafetyManager mock.
         self._safety_manager = safety_manager
@@ -108,7 +108,7 @@ class CooldownAlarm:
         model_path_str = cfg.get("predictor_model_path", "data/cooldown_model/predictor_model.json")
         self._model_dir = Path(model_path_str).parent
 
-        # v0.55.12 — cold-start auto-detect (Codex audit SCOPE 1 finding 1.5).
+        # v0.55.12 — cold-start auto-detect (audit SCOPE 1 finding 1.5).
         # On engine restart with the cryostat already cold, auto_arm fires,
         # arm() succeeds, and the very first tick triggers AUTO_DISARMED
         # before the quasi-steady gate runs — leaving the alarm in a
@@ -132,7 +132,7 @@ class CooldownAlarm:
         # disarm() / phase-away transition. Captured at tick() start;
         # any in-flight tick that returns to a yield point with a stale
         # generation aborts before publishing CRITICAL or escalating to
-        # SafetyManager (Codex audit SCOPE 1 finding 1.3).
+        # SafetyManager (audit SCOPE 1 finding 1.3).
         self._cycle_generation: int = 0
 
         # Circular buffer of (wall_time, eta_h) for slip computation
@@ -213,7 +213,7 @@ class CooldownAlarm:
 
     def arm(self) -> bool:
         """Load predictor model and start monitoring. Returns False if model absent."""
-        # v0.55.12 — cold-start gate (Codex audit SCOPE 1 finding 1.5).
+        # v0.55.12 — cold-start gate (audit SCOPE 1 finding 1.5).
         # Skip arm() entirely when the cryostat is already at base T;
         # otherwise the very first tick runs auto_disarm and lands the
         # alarm in terminal AUTO_DISARMED with watchdog default off.
@@ -286,7 +286,7 @@ class CooldownAlarm:
         # v0.55.12 — bump cycle generation FIRST so any in-flight tick
         # that returns to a yield-point sees the stale cycle and aborts
         # before publishing CRITICAL or escalating to SafetyManager
-        # (Codex audit SCOPE 1 finding 1.3).
+        # (audit SCOPE 1 finding 1.3).
         self._cycle_generation += 1
         self._state = CooldownState.DISARMED
         self._sustained_count = 0
@@ -305,7 +305,7 @@ class CooldownAlarm:
     def notify_phase_change(self, new_phase: str) -> None:
         """v0.55.12 — engine wires this to ``experiment_advance_phase``.
 
-        Two responsibilities (Codex audit SCOPE 1 findings 1.2 + 1.5):
+        Two responsibilities (audit SCOPE 1 findings 1.2 + 1.5):
 
         - When the operator advances *into* the cooldown phase, clear
           ``cold_start_skipped`` so the auto-arm gate re-evaluates
@@ -337,7 +337,7 @@ class CooldownAlarm:
         """Evaluate trajectory. Called every eval_interval_s by engine."""
         # v0.55.12 — capture cycle generation; re-checked before any
         # destructive emit (alarm-state publish, latch_fault) to detect
-        # mid-tick disarm/phase-change. Codex audit SCOPE 1 finding 1.3.
+        # mid-tick disarm/phase-change. audit SCOPE 1 finding 1.3.
         cycle = self._cycle_generation
 
         # Handle finalize notification — single flag, safe in asyncio single-thread
@@ -515,7 +515,7 @@ class CooldownAlarm:
                 self._state = CooldownState.WATCHING
                 await self._publish_state_event()
 
-        # v0.55.12 — cycle re-check before destructive emit (Codex audit
+        # v0.55.12 — cycle re-check before destructive emit (audit
         # SCOPE 1 finding 1.3). If disarm() or notify_phase_change() ran
         # while we were awaiting the publish above, the captured cycle is
         # now stale and we must NOT publish a CRITICAL on a now-DISARMED
@@ -533,7 +533,7 @@ class CooldownAlarm:
         )
 
         # v0.55.12 — escalate CRITICAL to SafetyManager via the public
-        # latch_fault() entry point (Codex audit SCOPE 1 finding 1.1).
+        # latch_fault() entry point (audit SCOPE 1 finding 1.1).
         # Gated on the FIRED-edge so we fire the safety latch once per
         # cycle, not on every WATCHING tick after the alarm clears or
         # repeats.
