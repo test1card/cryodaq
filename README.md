@@ -15,7 +15,7 @@ Built for ASC LPI (the Millimetron project).
 
 ## Status
 
-- **Latest release:** v0.64.0 (2026-07-08)
+- **Latest release:** v0.64.1 (2026-07-08)
 - **Tests:** 3500 test functions across 324 files
 - **Production status:** stable; the LabVIEW VI is fully replaced
 
