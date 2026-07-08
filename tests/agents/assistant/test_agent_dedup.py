@@ -5,7 +5,7 @@ Targets the ``_EventDedup`` class and ``_event_dedup_id`` helper used by
 rolling window. Slice handler logic is intentionally NOT exercised here —
 only the pre-invocation gate.
 
-Cycle 2 (Codex finding on commit 53981a1): the dedup id no longer carries
+Cycle 2 (commit 53981a1): the dedup id no longer carries
 a bucket suffix. Rolling-window timestamp logic lives entirely in
 ``_EventDedup``; the id is just ``alarm:<alarm_id>``.
 """

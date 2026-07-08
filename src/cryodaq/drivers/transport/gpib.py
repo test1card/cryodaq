@@ -104,7 +104,7 @@ class GPIBTransport:
 
         Called at engine shutdown AND from the scheduler's Level-3 recovery
         path. Held under ``_rm_lock`` so concurrent ``_get_rm()`` calls on
-        healthy buses do not race with the close-and-clear (Codex Phase 2b
+        healthy buses do not race with the close-and-clear (Phase 2b
         Block B P1).
         """
         with cls._rm_lock:

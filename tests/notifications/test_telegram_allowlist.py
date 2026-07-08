@@ -1,4 +1,4 @@
-"""Verify Telegram command bot default-deny on empty allowlist (Phase 2b Codex K.1)."""
+"""Verify Telegram command bot default-deny on empty allowlist (Phase 2b K.1)."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def test_non_empty_allowlist_ok():
 
 @pytest.mark.asyncio
 async def test_handle_message_defense_in_depth_blocks_unknown_chat(caplog):
-    """Codex Phase 2b Block C P1: _handle_message must re-check the
+    """Phase 2b Block C P1: _handle_message must re-check the
     allowlist, not rely on _fetch_updates having filtered upstream.
     Defense-in-depth against future direct callers (and tests).
     """

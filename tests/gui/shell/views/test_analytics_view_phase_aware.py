@@ -304,7 +304,7 @@ def test_setter_on_widget_without_method_does_not_raise(app):
 
 
 def test_phase_swap_does_not_duplicate_samples_in_preserved_widget(app):
-    """Regression guard (III.C Codex fix): the preserved append-style
+    """Regression guard (III.C): the preserved append-style
     pressure_current widget must NOT receive a cached-data replay when
     the layout preserves it across a phase swap — otherwise the series
     would duplicate on every phase transition."""

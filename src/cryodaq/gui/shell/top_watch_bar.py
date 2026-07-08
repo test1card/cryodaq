@@ -146,7 +146,7 @@ class TopWatchBar(QWidget):
         self._stale_timer.start()
 
         # One in-flight worker per poll stream — skip tick if previous
-        # request still running (Codex Finding 2, Block A.9).
+        # request still running (Finding 2, Block A.9).
         self._experiment_worker = None
         self._alarm_worker = None
 

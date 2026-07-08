@@ -578,7 +578,7 @@ def test_acknowledge_nonexistent_returns_none():
 
 
 def test_acknowledge_is_idempotent():
-    """A.9 Codex: double-ack must not duplicate history entries."""
+    """A.9: double-ack must not duplicate history entries."""
     mgr = AlarmStateManager()
     event = AlarmEvent(
         alarm_id="test_alarm",
@@ -664,12 +664,12 @@ def test_acknowledge_no_event_on_unknown_or_reack():
 
 
 # ---------------------------------------------------------------------------
-# Codex-04 regression: cooldown_stall composite — threshold, not threshold_expr
+# case 04 regression: cooldown_stall composite — threshold, not threshold_expr
 # ---------------------------------------------------------------------------
 
 
 def test_cooldown_stall_config_evaluates_without_threshold_keyerror(caplog) -> None:
-    """Codex-04: composite cooldown_stall must not KeyError on 'above' condition.
+    """case 04: composite cooldown_stall must not KeyError on 'above' condition.
 
     threshold_expr is not implemented; alarms_v3.yaml uses static threshold: 150.
     Т12=200 K > 150, rate≈0 K/мин → both AND conditions true → alarm fires.
@@ -836,7 +836,7 @@ def test_severity_upgrade_message_updated() -> None:
 
 
 def test_hysteresis_deadband_non_triggering_channel_does_not_keep_active() -> None:
-    """Codex finding: non-triggering channel in deadband must not keep alarm active.
+    """finding: non-triggering channel in deadband must not keep alarm active.
 
     Multi-channel alarm: T1 triggered (value was > threshold), T2 never triggered.
     After T1 clears below deadband, T2 in deadband must NOT return keep-active event.

@@ -184,7 +184,7 @@ def test_multiple_channels_independent_state() -> None:
 def test_no_data_status_does_not_clear_existing_alarm() -> None:
     """When a channel's buffer goes empty (no_data), the active alarm is kept — not cleared.
 
-    Regression guard for Codex HIGH finding (iter 1): update() must purge stale
+    Regression guard for HIGH finding (iter 1): update() must purge stale
     _diagnostics entries so the no_data branch in _update_anomaly_tracking is
     actually reached when a buffer empties.
     """

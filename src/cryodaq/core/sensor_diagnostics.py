@@ -51,7 +51,7 @@ _DERIVED_CHANNEL_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # Patterns for physical sensors — actual measurements with noise/drift
-# physics. Accepts both Cyrillic Т (canonical, per CLAUDE.md) and Latin T
+# physics. Accepts both Cyrillic Т (canonical, runtime convention) and Latin T
 # (used in some test fixtures and legacy configs).
 _PHYSICAL_SENSOR_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[ТT]\d+(\b|\s|/|$)"),  # T-prefixed cryo channels

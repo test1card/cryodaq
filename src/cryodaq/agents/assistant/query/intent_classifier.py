@@ -122,7 +122,7 @@ def _build_channel_hint(channel_manager: ChannelManager | None) -> str:
 _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 
 
-# v0.55.14 (Codex audit SCOPE 6 finding 6.4) — allow-list of canonical
+# v0.55.14 (audit SCOPE 6 finding 6.4) — allow-list of canonical
 # corpus kinds emitted by ``cryodaq.agents.rag.document_loader``. Any
 # value outside this set (including comma-separated multi-hints, list /
 # dict shapes, or arbitrary strings) collapses to ``None`` so the

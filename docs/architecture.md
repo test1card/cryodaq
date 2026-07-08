@@ -1,7 +1,7 @@
 # CryoDAQ Architecture
 
-**Version:** v0.43.0
-**Date:** 2026-04-30
+**Version:** v0.64.0
+**Date:** 2026-07-08
 
 ---
 
@@ -17,8 +17,8 @@ desktop client — connected by ZeroMQ. A third optional process serves a
 FastAPI monitoring dashboard. All three share the same Python package
 (`cryodaq`) and are started as separate entry points.
 
-Per-subsystem implementation details are maintained in vault notes at
-`~/Vault/CryoDAQ/10 Subsystems/`. This document is intentionally high-level.
+This document is intentionally high-level; per-subsystem details live in
+module docstrings and the design system (`docs/design-system/`).
 
 ---
 
@@ -30,7 +30,8 @@ The engine owns all instruments, data, and safety logic. The GUI has no
 direct instrument access and is NOT the source of truth for any runtime
 state. Key responsibilities:
 
-- Drive instrument drivers (LakeShore 218S, Keithley 2604B, Thyracont VSP63D)
+- Drive instrument drivers (LakeShore 218S, Keithley 2604B, Thyracont VSP63D,
+  Etalon MultiLine)
 - Persistence-first ordering: write to SQLite before publishing to brokers
 - Run SafetyManager FSM (6 states)
 - Evaluate alarm rules (alarm_v2) and interlock conditions
@@ -41,14 +42,18 @@ state. Key responsibilities:
 ### cryodaq-gui (Qt desktop client)
 
 Connects to the engine via ZMQ subprocess bridge. Restartable without
-stopping data acquisition. Primary surface: `MainWindowV2` (5-zone
-dashboard + overlay system). Legacy `MainWindow` (10-tab) remains as
-permanent fallback. Phase III complete as of v0.40.0.
+stopping data acquisition. Sole surface: `MainWindowV2` — shell chrome
+(TopWatchBar + ToolRail + BottomStatusBar) around a 5-zone dashboard and
+an overlay system. The legacy 10-tab `MainWindow` was retired in
+Phase II.13; there is no v1 fallback.
 
 ### cryodaq.web.server (optional FastAPI)
 
-Monitoring dashboard on `:8080`. Read-only view of current engine state.
-Requires `.[web]` install extra.
+Monitoring dashboard on `:8080` (loopback bind only; LAN access via SSH
+tunnel). REST facade `/api/v1`: read-only GET surface plus exactly two
+authenticated write endpoints (`POST /log`, `POST /alarms/{id}/ack`) behind
+a write token in gitignored `config/web.local.yaml`. Requires `.[web]`
+install extra.
 
 ---
 
@@ -71,27 +76,27 @@ ZMQ IPC:
 
 ## Subsystem map
 
-Subsystems in `src/cryodaq/core/` (unless noted). Vault notes listed as
-authoritative per-subsystem references.
+Subsystems in `src/cryodaq/core/` (unless noted).
 
-| Subsystem | Key modules | Vault note |
-|---|---|---|
-| Safety FSM | `safety_manager.py`, `safety_broker.py` | `Safety FSM.md` |
-| Alarm engine v2 | `alarm_v2.py`, `alarm_config.py`, `alarm_providers.py` | `Alarm engine v2.md` |
-| Interlock | `interlock.py` | `Interlock engine.md` |
-| Sensor diagnostics | `sensor_diagnostics.py` | `Sensor diagnostics alarm.md` |
-| Scheduler | `scheduler.py` | — |
-| Data broker | `broker.py` | — |
-| ZMQ bridge | `zmq_bridge.py`, `zmq_subprocess.py` | `ZMQ bridge.md` |
-| Experiment manager | `experiment.py` | `Experiment manager.md` |
-| Storage | `storage/sqlite_writer.py`, `storage/parquet_archive.py`, `storage/cold_rotation.py`, `storage/archive_reader.py` | `Persistence-first.md` |
-| Reporting | `reporting/generator.py` | `Reporting.md` |
-| Calibration | `analytics/calibration.py`, `analytics/calibration_fitter.py`, `core/calibration_acquisition.py` | `Calibration v2.md` |
-| Cooldown predictor | `analytics/cooldown_predictor.py`, `analytics/cooldown_service.py` | `Cooldown predictor.md` |
-| Plugin architecture | `analytics/base_plugin.py`, `analytics/plugin_loader.py` | `Plugin architecture.md` |
-| Drivers | `drivers/instruments/`, `drivers/transport/` | `Keithley 2604B.md`, `LakeShore 218S.md`, `Thyracont VSP63D.md` |
-| GUI shell | `gui/shell/main_window_v2.py`, `gui/dashboard/` | — |
-| Web dashboard | `web/server.py` | `Web dashboard.md` |
+| Subsystem | Key modules |
+|---|---|
+| Safety FSM | `safety_manager.py`, `safety_broker.py` |
+| Alarm engine v2 | `alarm_v2.py`, `alarm_config.py`, `alarm_providers.py` |
+| Physical alarms | `vacuum_guard.py`, `cooldown_alarm.py`, `physical_alarms_config.py` |
+| Interlock | `interlock.py` |
+| Sensor diagnostics | `sensor_diagnostics.py` |
+| Scheduler | `scheduler.py` |
+| Data broker | `broker.py` |
+| ZMQ bridge | `zmq_bridge.py`, `zmq_subprocess.py` |
+| Experiment manager | `experiment.py` |
+| Storage | `storage/_sqlite.py`, `storage/sqlite_writer.py`, `storage/parquet_archive.py`, `storage/cold_rotation.py`, `storage/archive_reader.py` |
+| Reporting | `reporting/generator.py` |
+| Calibration | `analytics/calibration.py`, `analytics/calibration_fitter.py`, `core/calibration_acquisition.py` |
+| Cooldown predictor | `analytics/cooldown_predictor.py`, `analytics/cooldown_service.py` |
+| Plugin architecture | `analytics/base_plugin.py`, `analytics/plugin_loader.py` |
+| Drivers | `drivers/instruments/`, `drivers/transport/` |
+| GUI shell | `gui/shell/main_window_v2.py`, `gui/dashboard/` |
+| Web dashboard | `web/server.py`, `web/rest_api.py` |
 
 ---
 
@@ -120,6 +125,10 @@ SAFE_OFF → READY → RUN_PERMITTED → RUNNING → FAULT_LATCHED → MANUAL_RE
 - `RUNNING` is the only state where stale-data fault fires; outside RUNNING,
   stale data blocks readiness via preconditions.
 - Rate limit: `dT/dt > 5 K/min` → FAULT (configurable in `safety.yaml`).
+- Verified-off discipline (v0.64.0): an OFF command whose readback cannot
+  confirm the output actually turned off raises → `FAULT_LATCHED`; the system
+  never reports `SAFE_OFF` over a possibly-live output, and RUN is blocked
+  while the output state is unverified.
 
 ---
 
@@ -133,14 +142,18 @@ Config files in `config/`:
 | `safety.yaml` | FSM timeouts, rate limits, drain timeout |
 | `alarms.yaml` | Legacy alarm definitions |
 | `alarms_v3.yaml` | v2 alarm engine rules |
+| `physical_alarms.yaml` | VacuumGuard + CooldownAlarm tunables |
 | `interlocks.yaml` | Interlock conditions + actions |
 | `channels.yaml` | Display names, visibility, groupings |
 | `notifications.yaml` | Telegram credentials + escalation |
-| `housekeeping.yaml` | Throttle, retention, compression |
+| `housekeeping.yaml` | Throttle, retention, cold rotation |
 | `plugins.yaml` | sensor_diagnostics + vacuum_trend config |
 | `cooldown.yaml` | Cooldown predictor parameters |
-| `shifts.yaml` | Shift definitions (GUI only) |
+| `analytics_layout.yaml` | Analytics view widget layout |
+| `agent.yaml` | Local-assistant runtime settings |
+| `shifts.yaml` | Reserved/unused (no loader in src) |
 | `experiment_templates/*.yaml` | Experiment type templates |
+| `web.local.yaml` | Web write token (gitignored) |
 
 `*.local.yaml` overrides base files. Local configs are gitignored and intended
 for machine-specific deployment settings (COM ports, GPIB addresses, tokens).
@@ -149,7 +162,8 @@ for machine-specific deployment settings (COM ports, GPIB addresses, tokens).
 
 ## Test architecture
 
-~1 970 tests under `tests/`. Structure mirrors `src/cryodaq/`:
+~3 600 tests under `tests/` (per-release baseline in `CHANGELOG.md`).
+Structure mirrors `src/cryodaq/`:
 
 ```
 tests/
@@ -185,5 +199,8 @@ the GUI can restart without disrupting acquisition. The engine never trusts
 the GUI as a safety authority.
 
 **Out of scope:** real-time DAQ at microsecond cadence, hardware PID loops
-running on Python (TSP supervisor on Keithley is planned for Phase 3 but
-not yet loaded), multi-station federation.
+running on Python, multi-station federation. Safety regulation is host-side;
+the Keithley TSP firmware watchdog (`tsp/cryodaq_wdog.lua`) is an
+operator-selectable backstop (`keithley.watchdog.mode: off | best_effort |
+required`, default off) — its autonomous dead-man mechanism remains
+bench-unverified.

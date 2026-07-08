@@ -214,7 +214,7 @@ def test_trigger_chip_unknown_uses_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Placeholder lifetime (Codex CRITICAL fix verification)
+# Placeholder lifetime (CRITICAL fix verification)
 # ---------------------------------------------------------------------------
 
 

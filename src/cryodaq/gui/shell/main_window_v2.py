@@ -163,7 +163,7 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
-        # v0.55.15 (Codex audit SCOPE 5 finding 5.7) — MultiLine readings
+        # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
         # opened after readings start arriving still gets a populated
         # table on the very first refresh, instead of needing a fresh
@@ -310,7 +310,7 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
-            # v0.55.15 (Codex audit SCOPE 5 finding 5.7) — replay every
+            # v0.55.15 (audit SCOPE 5 finding 5.7) — replay every
             # cached MultiLine reading so the panel's table populates
             # immediately rather than waiting for the next engine cycle.
             for ch, reading in self._multiline_snapshot.items():
@@ -445,7 +445,7 @@ class MainWindowV2(QMainWindow):
         # is intentionally pre-MultiLinePanel to avoid wasted slot calls
         # on every \u0422* reading. The panel itself also filters internally,
         # but doing it here keeps the dispatch hot path tight.
-        # v0.55.15 (Codex audit SCOPE 5 finding 5.1) — record into the
+        # v0.55.15 (audit SCOPE 5 finding 5.1) — record into the
         # replay cache so a panel opened later sees the recent history,
         # then forward to the live panel via its public scoping helper.
         if "MultiLine" in channel:
@@ -497,7 +497,7 @@ class MainWindowV2(QMainWindow):
             self._push_analytics("set_pressure_reading", reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
-            # eager sinks — no need to call again here (Codex B.5.5 F3)
+            # eager sinks — no need to call again here (B.5.5 F3)
             # B.8: the v2 AnalyticsView exposes set_cooldown /
             # set_r_thermal setters instead of a generic on_reading sink.
             # The shell adapts specific analytics channels into the typed
@@ -679,7 +679,7 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Engine потерян")
             # Engine data flow lost — the last-known safety state is no longer
             # trustworthy. The GUI must not present a stale runtime state as
-            # current (CLAUDE.md: GUI is not the source of truth for runtime
+            # current (runtime invariant: GUI is not the source of truth for runtime
             # state); a stale green "running" while the engine is gone is
             # dangerous. Blank the safety strip and force the Keithley overlay
             # to not-ready. Idempotent: only acts on the transition.

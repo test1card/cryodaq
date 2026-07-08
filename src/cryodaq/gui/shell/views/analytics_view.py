@@ -346,7 +346,7 @@ class AnalyticsView(QWidget):
         Replaying into preserved (already-active-in-prior-layout)
         widgets would duplicate samples in append-style consumers like
         :class:`TemperatureOverviewWidget` and
-        :class:`PressureCurrentWidget`. Phase III.C Codex fix.
+        :class:`PressureCurrentWidget`. Phase III.C fix.
         """
         if not widgets:
             return

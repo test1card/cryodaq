@@ -145,7 +145,7 @@ CryoDAQ safety state names are lowercase identifiers in the codebase, matching t
 
 Display as-is in BottomStatusBar — «Safety: fault_latched». Operators learn these from logs and become fluent; translating them creates lookup friction («Was that "blocked" or "latched" last time?»).
 
-Per CryoDAQ absolute rule (CLAUDE.md) and `cryodaq-primitives/bottom-status-bar.md`.
+Per CryoDAQ absolute rule and `cryodaq-primitives/bottom-status-bar.md`.
 
 Note: in destructive action dialogs or operator-facing descriptions, translation is sometimes helpful:
 

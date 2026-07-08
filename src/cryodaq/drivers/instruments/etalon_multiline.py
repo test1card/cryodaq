@@ -270,7 +270,7 @@ class MultiLineDriver(InstrumentDriver):
         # handshake mirrors `disconnect()` so partial-state cleanup is
         # consistent.
         #
-        # Codex audit cycle 1 amend (smoke hotfix): originally we
+        # audit cycle 1 amend (smoke hotfix): originally we
         # swallowed asyncio.TimeoutError silently and proceeded to
         # spawn a new listener — which could race a still-unwinding old
         # task for the read-stream buffer. Now: if the cancel doesn't
@@ -349,7 +349,7 @@ class MultiLineDriver(InstrumentDriver):
             read_timeout_s=self._read_timeout_s,
         )
         await self._transport.open()
-        # v0.55.13 (Codex audit SCOPE 4 finding 4.6) — partial-failure
+        # v0.55.13 (audit SCOPE 4 finding 4.6) — partial-failure
         # cleanup. Before this fix the verify-query exception was logged
         # and `_connected` was set true with the transport left open,
         # so a half-broken transport masqueraded as a healthy connection.
@@ -428,7 +428,7 @@ class MultiLineDriver(InstrumentDriver):
 
         readings: list[Reading] = []
         try:
-            # v0.55.13 (Codex audit SCOPE 4 finding 4.4) — moved the
+            # v0.55.13 (audit SCOPE 4 finding 4.4) — moved the
             # "driver not connected" check INTO the try block so the
             # scheduler-side recovery path that already absorbs
             # TCPTransportError also handles the disconnected case.

@@ -6,17 +6,17 @@ Data acquisition, control, and analysis stack for a cryogenics laboratory.
 Replaces a 3-year-old LabVIEW VI that drove the instruments and sent email alerts.
 Adds: scripted FSM campaigns, automated calibration with multi-format export,
 auto-generated DOCX reports, role-based Telegram alerts, sensor anomaly detection
-with an alarm pipeline, plugin analytics, a local AI assistant with a knowledge
-base (RAG) and operator-query answering, historical-data replay mode,
+with an alarm pipeline, plugin analytics, a local operator-query layer with a
+knowledge base (RAG), historical-data replay mode,
 interferometric length metrology (Etalon MultiLine), and a regression test suite
-(3461 test functions across 355 files).
+(3500 test functions across 324 files).
 
 Built for ASC LPI (the Millimetron project).
 
 ## Status
 
-- **Latest release:** v0.63.0 (2026-07-08)
-- **Tests:** 3461 test functions across 355 files
+- **Latest release:** v0.64.1 (2026-07-08)
+- **Tests:** 3500 test functions across 324 files
 - **Production status:** stable; the LabVIEW VI is fully replaced
 
 ## Architecture
@@ -51,20 +51,20 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
 
 ## Implemented workflows
 
-Fully functional in v0.63.0:
+Fully functional in v0.64.0:
 
 - **Knowledge base (RAG):** local semantic search over the experiment archive,
   vault notes, the operator log, and the `data/knowledge/` corpus
   (`equipment_manuals` — instrument PDFs via pypdf; `procedures` — Markdown;
-  `reference` — operator manual / README / CHANGELOG). The `agents.rag` module:
-  loader → LanceDB indexer → top-K searcher; embeddings `qwen3-embedding:0.6b`
+  `reference` — operator manual / README / CHANGELOG). The RAG module:
+  loader -> LanceDB indexer -> top-K searcher; embeddings `qwen3-embedding:0.6b`
   (1024-dim) via Ollama. CLI `cryodaq-rag-index` / `cryodaq-rag-search`,
   ZMQ `rag.rebuild_index` / `rag.rebuild_status`, and an "Update index" button in
   the KnowledgeBasePanel. Bootstraps on engine start when the index is empty.
-- **AI assistant with query answering:** a local agent (Ollama, no external
-  APIs) classifies operator intent (IntentClassifier), routes the query
+- **Local operator-query service:** a local Ollama service (no external APIs)
+  classifies operator intent (IntentClassifier), routes the query
   (QueryRouter), and answers from live data (BrokerSnapshot) and the knowledge
-  base (KNOWLEDGE_QUERY). Read-only; full audit trail for every LLM call.
+  base (KNOWLEDGE_QUERY). Read-only; full audit trail for every model call.
 - **Historical-data replay:** replays records through the DataBroker; a predictor
   runs on top of the replay stream with a decoupled clock for accelerated
   playback; `cryodaq-replay-curve` for curve transforms; a legacy channel map
@@ -89,6 +89,10 @@ Fully functional in v0.63.0:
 - **Interlocks:** 3 hard-protection rules (cryostat / compressor / detector). A
   trip → `emergency_off` + transition to TRIPPED. The operator acknowledges via
   the `interlock_acknowledge` ZMQ command without a restart.
+- **Fail-closed safety discipline:** Keithley output OFF is readback-verified;
+  unverified OFF becomes a fault or a blocking RUN precondition instead of a
+  false SAFE_OFF. VacuumGuard can optionally escalate to SafetyManager via
+  `vacuum_guard.escalate_to_safety`.
 - **Operator log:** SQLite-backed; accessed via the GUI + ZMQ.
 - **Experiment templates, lifecycle metadata, artifact archiving:** a
   `data/experiments/<id>/` directory with `metadata.json`, `reports/`, and an
@@ -105,6 +109,9 @@ Fully functional in v0.63.0:
   see rotated days. The only kill-switch is `cold_rotation.enabled`; rotation
   is idempotent and the stranded-DB sweep deletes only a byte-identical
   original (`source_md5`).
+- **SQLite self-heal on Linux:** all runtime DB connections go through
+  `storage/_sqlite.py`; if the stdlib SQLite is in the unsafe WAL-reset range,
+  the shim falls back to the bundled Linux `pysqlite3-binary`.
 - **Leak-rate estimation (F13):** `LeakRateEstimator` — a rolling window, OLS
   regression without numpy, history in `data/leak_rate_history.json`. Commands:
   `leak_rate_start` / `leak_rate_stop` (ZMQ). Requires `chamber.volume_l` in
@@ -135,7 +142,7 @@ Overlay panels (from the ToolRail):
   steady-state temperature forecast (T∞ via an exponential fit).
 - Archive — past experiments + reports + Parquet exports
 - Calibration — the capture / fit / export workflow
-- Knowledge base — RAG search + an embedded chat with the AI assistant
+- Knowledge base — RAG search + embedded operator chat
 - MultiLine — interferometric metrology + "Vibration capture" (burst)
 - Operator log
 - Other overlays via ToolRail icons
@@ -202,25 +209,37 @@ cryodaq-rag-search               # semantic search over the knowledge base
 
 ## Configuration
 
-Active configuration files as of v0.63.0:
+Active configuration files as of v0.64.0:
 
 - `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels,
   `chamber.volume_l` for the F13 leak rate
-- `config/instruments.local.yaml` — machine-specific overrides (gitignored)
+- `config/instruments.local.yaml.example` — template for machine-specific
+  instrument overrides (`instruments.local.yaml` is gitignored)
 - `config/safety.yaml` — FSM timeouts, rate limits, drain timeout
 - `config/alarms.yaml` — legacy alarm definitions
 - `config/alarms_v3.yaml` — alarm-engine-v2 rules (threshold/rate/composite/phase)
 - `config/interlocks.yaml` — interlock conditions + actions
+- `config/physical_alarms.yaml` — tunables for the cold-cryostat physical
+  guards (CooldownAlarm, VacuumGuard, including the opt-in
+  `vacuum_guard.escalate_to_safety` latch)
 - `config/channels.yaml` — display names, visibility, grouping
 - `config/notifications.yaml` — Telegram bot_token, chat_ids, escalation
+- `config/notifications.local.yaml.example` — template for local Telegram
+  credentials (`notifications.local.yaml` is gitignored)
 - `config/housekeeping.yaml` — throttle, retention, compression, `cold_rotation`
 - `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
 - `config/cooldown.yaml` — cooldown-predictor parameters
+- `config/analytics_layout.yaml` — phase-aware analytics widget layout
 - `config/shifts.yaml` — reserved/unused (no code loader; shift handover runs
-  via the assistant's Gemma commands, not this file)
-- `config/agent.yaml` — the local AI assistant (Ollama model, triggers, rate limit)
+  via the operator-query command surface, not this file)
+- `config/agent.yaml` — local operator-query service (Ollama model, triggers, rate limit)
 - `config/rag.yaml.example` — knowledge base / RAG (embedding model, corpus)
+- `config/rag_categories.yaml` — KnowledgeBasePanel sidebar query presets
 - `config/sinks.yaml.example` — sinks (vault notes, webhook) on finalize
+- `config/web.local.yaml.example` — template for the FastAPI write-token
+  (`web.local.yaml` is gitignored)
+- `config/themes/*.yaml` — bundled GUI theme packs; selected via gitignored
+  `config/settings.local.yaml`
 - `config/experiment_templates/*.yaml` — experiment-type templates
 
 `*.local.yaml` files override the base files for machine-specific settings.
@@ -263,7 +282,7 @@ autonomous firmware run-mechanism (`trigger.timer`) remains bench-unverified.
 
 ```text
 src/cryodaq/
-  agents/        # local AI assistant (live + query) + RAG knowledge base
+  agents/        # local query service + RAG knowledge base
   analytics/     # calibration fitter, cooldown predictor, plugins, vacuum trend,
                  # leak_rate estimator (F13)
   core/          # safety FSM, scheduler, broker, alarms v2, interlocks,
@@ -281,7 +300,7 @@ src/cryodaq/
   utils/         # shared helpers
   web/           # FastAPI monitoring
 tsp/             # Keithley TSP watchdog (cryodaq_wdog.lua; loaded per watchdog.mode)
-tests/           # 3461 test functions across 355 files
+tests/           # 3500 test functions across 324 files
 config/          # YAML configuration
 ```
 
@@ -298,13 +317,14 @@ python -m pytest tests/reporting -q
 
 Run after `pip install -e ".[dev,web]"`. GUI tests require `PySide6` +
 `pyqtgraph`. Some storage tests require `CRYODAQ_ALLOW_BROKEN_SQLITE=1` on
-machines with SQLite < 3.51.3 (except the backport-safe versions 3.44.6 and
-3.50.7).
+machines whose selected SQLite falls in `[3.7.0, 3.51.3)`, except the
+backport-safe versions 3.44.6 and 3.50.7.
 
-## Local AI assistant
+## Local Operator-Query Service
 
-CryoDAQ runs a local AI agent (current brand: Gemma, default model gemma4:e4b
-via Ollama; downgraded to gemma4:e2b on low-VRAM dev machines). No external APIs.
+CryoDAQ runs a local text-generation service (current brand: Gemma, default
+model gemma4:e4b via Ollama; downgraded to gemma4:e2b on low-VRAM dev
+machines). No external APIs.
 
 ### What it does
 
@@ -331,11 +351,11 @@ in the "Knowledge base" overlay and via the Telegram bot.
 ### Configuration
 
 See `config/agent.yaml`. Key parameters:
-- `agent.enabled`: enable/disable the agent
+- `agent.enabled`: enable/disable the service
 - `agent.brand_name`: the operator-facing name (can change when migrating to
   another model)
 - `agent.ollama.default_model`: the Ollama model
-- `agent.triggers.*`: which events activate the agent
+- `agent.triggers.*`: which events activate the service
 - `agent.rate_limit`: limits (60 calls/hour by default)
 
 ### Migrating to another model
@@ -352,23 +372,23 @@ See `config/agent.yaml`. Key parameters:
 3. Restart the engine
 4. Smoke test: trigger an alarm in mock mode
 
-No code changes. See `docs/architecture/assistant-v2-vision.md`
-§1.6 for details.
+No code changes.
 
 ### Architecture
 
-See `docs/architecture/assistant-v2-vision.md` — the full architectural
-picture, including planned Phases 1–3 (periodic reports, sinks, archive query).
+Two lanes: a live observer (subscribes to engine events, emits summaries) and a
+query router (classifies operator intent, routes to read-only adapters). See
+`docs/architecture.md` for the system architecture.
 
 ### Audit log
 
-Every LLM call is recorded in `data/agents/assistant/audit/<YYYY-MM-DD>/`.
+Every model call is recorded under `data/agents/.../audit/<YYYY-MM-DD>/`.
 Full context, prompt, response, tokens, latency, output targets. A verifiable
 trail for post-hoc review.
 
 ## Known limitations
 
-As of v0.63.0. The lab-only checks below are collected as a turnkey protocol in
+As of v0.64.0. The lab-only checks below are collected as a turnkey protocol in
 `docs/lab_verification_checklist.md`.
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
@@ -381,6 +401,9 @@ As of v0.63.0. The lab-only checks below are collected as a turnkey protocol in
   no pysqlite3 wheels; its stdlib is expected safe.
 - **Lab Ubuntu PC verification:** the H5 ZMQ fix from v0.39.0 was verified only on
   macOS. Physical access to the lab PC is pending (see the checklist).
+- **Engine shutdown warning:** one `Unclosed client session` ERROR can appear at
+  engine shutdown because an `aiohttp` session is not closed on that exit path.
+  This is cosmetic on shutdown; data and safety state are not affected.
 - **PDF reports:** best-effort. The guaranteed artifact is DOCX.
 - **Runtime calibration policy:** global on/off + per-channel KRDG/SRDG+curve. A
   conservative fallback to KRDG when a curve / SRDG is missing or a computation

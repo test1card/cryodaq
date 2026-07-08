@@ -1,4 +1,4 @@
-"""Verify Thyracont validate_checksum default (Phase 2c Codex F.2)."""
+"""Verify Thyracont validate_checksum default (Phase 2c F.2)."""
 
 from __future__ import annotations
 

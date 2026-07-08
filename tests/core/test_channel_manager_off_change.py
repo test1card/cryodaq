@@ -1,4 +1,4 @@
-"""Tests for ChannelManager.off_change() (B.3, closes Codex B.2 Finding 2)."""
+"""Tests for ChannelManager.off_change() (B.3, closes B.2 Finding 2)."""
 
 from __future__ import annotations
 

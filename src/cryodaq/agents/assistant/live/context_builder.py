@@ -362,7 +362,7 @@ def _is_cryo_channel(channel: str) -> bool:
 def _is_pressure_channel(channel: str) -> bool:
     """Heuristic: name-based pressure-channel detection.
 
-    Cycle-2 fix for Codex finding on commit 53981a1: relying on numeric
+    Cycle-2 fix from commit 53981a1: relying on numeric
     magnitude alone meant ``P_main = 1e-3`` rendered as ``"0.00"`` and
     ``5e-3`` as ``"0.01"``. Pressure channels in this codebase are named
     via ``MV…`` / ``V<N>`` (Thyracont VSP63D), ``P_…`` (engine adapters),

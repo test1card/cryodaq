@@ -158,7 +158,7 @@ class Keithley2604B(InstrumentDriver):
             # SAFETY (Phase 2a G.1): force outputs off on every connect.
             # The previous engine process may have crashed mid-experiment
             # while sourcing — Keithley holds the last programmed voltage
-            # indefinitely with no TSP-side watchdog (see CLAUDE.md). This
+            # indefinitely with no TSP-side watchdog . This
             # guarantees a known-safe state every time we assume control.
             # connect() must NOT abort on a force-off failure (refusing connect
             # strips the operator of all control — Phase 2a G.1 rationale). F2:
@@ -449,7 +449,7 @@ class Keithley2604B(InstrumentDriver):
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
                 all_confirmed = False
-            # SAFETY (Phase 2a Codex G.1): readback-verify each channel.
+            # SAFETY (Phase 2a G.1): readback-verify each channel.
             # emergency_off is the most critical path — silent failure here
             # is unacceptable. _verify_output_off logs CRITICAL on mismatch.
             # Wrap in try because the caller is already in an emergency path

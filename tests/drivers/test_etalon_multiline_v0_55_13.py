@@ -1,6 +1,6 @@
 """v0.55.13 — regression guards for the MultiLine driver audit-fix release.
 
-Covers Codex audit SCOPE 4 follow-ups:
+Covers audit SCOPE 4 follow-ups:
 - 4.1 — channel validation (out-of-range / dup / non-int) + boundary
 - 4.3 — all 10 error flags map to SENSOR_ERROR (parameterised)
 - 4.4 — read_channels() returns [] on disconnected transport (does NOT raise)
@@ -138,7 +138,7 @@ def test_status_from_errors_all_zero_is_ok() -> None:
 def test_read_channels_returns_empty_when_disconnected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v0.55.13 (Codex audit SCOPE 4 finding 4.4) — calling
+    """v0.55.13 (audit SCOPE 4 finding 4.4) — calling
     read_channels() on a driver whose transport is None must NOT raise
     TCPTransportError. It must absorb that into the existing
     catch-and-return-[] degradation path so the scheduler tick stays
@@ -166,7 +166,7 @@ def test_read_channels_returns_empty_when_disconnected(
 def test_connect_re_raises_and_clears_transport_on_verify_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v0.55.13 (Codex audit SCOPE 4 finding 4.6) — if the verify
+    """v0.55.13 (audit SCOPE 4 finding 4.6) — if the verify
     `isconnected` query raises TCPTransportError, the driver must
     close the half-open transport, clear its handle, and re-raise so
     the caller knows the connection is unusable. Before the fix the

@@ -64,7 +64,7 @@ Thin chrome strip at the bottom of every screen. Shows system-level status: engi
 
 1. **Height = BOTTOM_BAR_HEIGHT (28).** Smaller than TopWatchBar because lower priority. (RULE-SPACE-007 exception for chrome)
 2. **Padding-left aligns with TOOL_RAIL_WIDTH.** Content starts past the rail.
-3. **Safety state lowercase.** Display «safe_off», «fault_latched» — matches engine's internal representation. (Per CryoDAQ absolute rule from CLAUDE.md)
+3. **Safety state lowercase.** Display «safe_off», «fault_latched» — matches engine's internal representation. (CryoDAQ absolute rule)
 4. **Instant fault state rendering.** (RULE-INTER-006)
 5. **Stale indicator when heartbeat late.** If ZMQ heartbeat > stale_timeout, mark as stale — critical operator info.
 6. **Text is sentence case with colon separator.** «Engine: connected» not «ENGINE: CONNECTED» or «engine connected». Status labels are data readouts, not category headers.

@@ -8,7 +8,7 @@ operator-visible records (experiment metadata, calibration index, etc.).
 Plain ``Path.write_text`` is fine for log lines or where a partial write
 would be detected by downstream parsers.
 
-See DEEP_AUDIT_CC.md D.3 (and Codex D.4).
+See DEEP_AUDIT_CC.md D.3 (and D.4).
 """
 
 from __future__ import annotations

@@ -59,7 +59,7 @@ def load_protected_channel_patterns(*config_paths: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Phase 2b Codex H.1: alarms_v3.yaml integration
+# Phase 2b H.1: alarms_v3.yaml integration
 # --------------------------------------------------------------------------
 #
 # The legacy ``load_protected_channel_patterns`` only knows the old top-level
@@ -97,7 +97,7 @@ def _extract_channel_refs(node: Any) -> list[str]:
 
     - top-level ``channel`` / ``channels`` / ``channel_group``
     - composite ``conditions: [{channel/channels/channel_group: ...}, ...]``
-    - rate ``additional_condition: {channel: ..., ...}`` (Phase 2b Codex P2)
+    - rate ``additional_condition: {channel: ..., ...}`` (Phase 2b P2)
     - any future nested form added to alarms_v3 schema
     """
     refs: list[str] = []
@@ -176,7 +176,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
             refs.extend(_extract_channel_refs(alarm))
 
     # Critical/high alarms in phase_alarms (nested: phase → alarm_id → alarm).
-    # Codex Phase 2b Block D P1: previous code treated phase_alarms as flat
+    # Phase 2b Block D P1: previous code treated phase_alarms as flat
     # and silently skipped every entry.
     phase_alarms = data.get("phase_alarms") or {}
     if isinstance(phase_alarms, dict):

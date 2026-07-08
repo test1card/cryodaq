@@ -1,6 +1,6 @@
 """v0.55.16 — regression guards for the audit-polish hotfix release.
 
-Covers Codex audit follow-ups not addressed in earlier hotfixes:
+Covers audit follow-ups not addressed in earlier hotfixes:
 - 3.6 — archive_detail format prompt no longer leaks English ("Cooldown:"
   → "Захолаживание:") and raw phase identifiers are localised via
   `phase_display_name`.
@@ -34,7 +34,7 @@ def test_archive_detail_prompt_has_no_english_label() -> None:
     """v0.55.16 — the archive-detail format prompt must use Russian
     section labels. Previously the cooldown summary header was the
     English string "Cooldown:" which leaked into operator-facing
-    output (Codex audit SCOPE 3 finding 3.6)."""
+    output (audit SCOPE 3 finding 3.6)."""
     assert "Cooldown:" not in FORMAT_ARCHIVE_DETAIL_USER
     assert "Захолаживание:" in FORMAT_ARCHIVE_DETAIL_USER
 
@@ -158,7 +158,7 @@ class _ExperimentManager:
 
 
 def test_get_detail_handles_malformed_metadata_json(tmp_path: Path) -> None:
-    """v0.55.16 (Codex audit SCOPE 3 finding 3.7) — corrupted JSON in
+    """v0.55.16 (audit SCOPE 3 finding 3.7) — corrupted JSON in
     metadata.json must NOT crash the adapter; phases collapse to []
     and cooldown_metrics to None, while the rest of the detail
     (sample, operator, status, dates) still renders."""

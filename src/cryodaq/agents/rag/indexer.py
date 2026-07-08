@@ -56,7 +56,7 @@ def _swap_table_atomically(
     rows: list[dict[str, Any]],
     schema: pa.Schema,
 ) -> Any:
-    """v0.55.14 (Codex audit SCOPE 2 finding 2.3) — crash-safe rebuild.
+    """v0.55.14 (audit SCOPE 2 finding 2.3) — crash-safe rebuild.
 
     Writes the freshly embedded corpus into a staging table first, then
     swaps the canonical name via ``db.rename_table`` (atomic at the
@@ -135,7 +135,7 @@ async def build_index(
     Embedding dimension mismatches are logged and zero-vector-substituted
     so a single bad chunk does not abort the whole build.
 
-    v0.55.14 (Codex audit SCOPE 6 finding 6.6) — synchronous filesystem
+    v0.55.14 (audit SCOPE 6 finding 6.6) — synchronous filesystem
     walks and LanceDB writes are offloaded via :func:`asyncio.to_thread`
     so the engine event loop does not stall while ``RAGIndexSink`` runs
     a finalize-time rebuild on a corpus of any size.

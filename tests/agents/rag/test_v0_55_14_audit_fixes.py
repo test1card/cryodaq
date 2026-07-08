@@ -1,6 +1,6 @@
 """v0.55.14 — regression guards for the RAG-fixes hotfix release.
 
-Covers Codex audit SCOPE 2 + SCOPE 6 follow-ups:
+Covers audit SCOPE 2 + SCOPE 6 follow-ups:
 - 2.3 — LanceDB rebuild crash-safety via staging+swap
 - 2.4 — document_loader defensive parsing of malformed metadata
 - 2.7 — chunker handles a large document with embedded code blocks

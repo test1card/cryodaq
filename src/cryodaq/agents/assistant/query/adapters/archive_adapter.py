@@ -64,7 +64,7 @@ class ArchiveAdapter:
             # ExperimentManager.list_archive_entries() scans the filesystem
             # and reads every metadata.json synchronously. Offload to a
             # thread so the Telegram / GUI query event loop stays responsive
-            # for large archives. Cycle-2 fix for Codex finding on dc5350b.
+            # for large archives. Cycle-2 fix from dc5350b.
             entries = await asyncio.to_thread(
                 self._em.list_archive_entries,
                 start_date=start_date,

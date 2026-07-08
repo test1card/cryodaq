@@ -302,7 +302,7 @@ class LauncherWindow(QMainWindow):
         # Guards against multiple QTimer.singleShot restarts piling up while
         # _check_engine_health keeps firing every 3s during the backoff
         # window. Set when we schedule a restart, cleared when _start_engine
-        # actually runs. (Codex Phase 2b Block A P1.)
+        # actually runs.
         self._restart_pending: bool = False
         self._shutdown_requested: bool = False
         self._replay_engine_failed: bool = False
@@ -1224,7 +1224,7 @@ class LauncherWindow(QMainWindow):
         - Once max reached → block, modal, no further attempts
 
         Idempotent — guarded by _restart_pending so the 3s health timer can't
-        burn through every backoff slot in 15 seconds (Codex Phase 2b P1).
+        burn through every backoff slot in 15 seconds.
         """
         if self._restart_pending:
             return

@@ -1,6 +1,6 @@
 """v0.55.12 — regression guards for the cooldown-alarm safety hotfix.
 
-Covers Codex audit SCOPE 1 fixes:
+Covers audit SCOPE 1 fixes:
 - 1.1 — CooldownAlarm CRITICAL escalates via SafetyManager.latch_fault
 - 1.2 — phase change away from cooldown disarms the alarm
 - 1.3 — tick() race aborts on disarm/phase-change mid-flight

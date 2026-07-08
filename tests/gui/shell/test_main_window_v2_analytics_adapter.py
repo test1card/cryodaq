@@ -1,6 +1,6 @@
 """Regression tests for the B.8 analytics channel adapter in MainWindowV2.
 
-Covers the post-Codex fix: the v2 AnalyticsView exposes setters
+Covers the post-fix: the v2 AnalyticsView exposes setters
 (`set_cooldown`, `set_r_thermal`, `set_fault`) instead of the legacy
 `on_reading` sink, so the shell must translate specific `analytics/*`
 channels into typed snapshots before pushing them at the panel. Any

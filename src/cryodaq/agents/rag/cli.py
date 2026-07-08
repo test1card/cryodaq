@@ -21,7 +21,7 @@ from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 
 
 def _resolve_rag_config_path(override: Path | None) -> tuple[Path | None, str]:
-    """v0.55.14 (Codex audit SCOPE 2 finding 2.5) — resolve the RAG
+    """v0.55.14 (audit SCOPE 2 finding 2.5) — resolve the RAG
     config file for the CLI.
 
     Priority order:
@@ -72,7 +72,7 @@ def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
 
 
 def _add_config_flag(parser: argparse.ArgumentParser) -> None:
-    """v0.55.14 (Codex audit SCOPE 2 finding 2.5) — explicit --config flag."""
+    """v0.55.14 (audit SCOPE 2 finding 2.5) — explicit --config flag."""
     parser.add_argument(
         "--config",
         type=Path,
@@ -158,7 +158,7 @@ def index_main() -> None:
             )
         )
     except OllamaModelMissingError as exc:
-        # v0.55.14 (Codex audit SCOPE 2 finding 2.2) — friendly message
+        # v0.55.14 (audit SCOPE 2 finding 2.2) — friendly message
         # instead of a bare traceback when the embedding model isn't
         # installed in the local Ollama instance.
         print(

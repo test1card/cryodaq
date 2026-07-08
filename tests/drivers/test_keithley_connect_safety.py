@@ -39,7 +39,7 @@ async def test_connect_forces_output_off_non_mock():
     assert any("smub.source.levelv = 0" in w for w in writes)
     assert k._connected is True
 
-    # Ordering check (Codex Phase 2a P2): levelv=0 must come BEFORE OUTPUT_OFF
+    # Ordering check (Phase 2a P2): levelv=0 must come BEFORE OUTPUT_OFF
     # for each channel — flipping output without first dropping the level can
     # produce a brief glitch on some Keithley firmware revisions.
     def _idx(needle: str) -> int:
@@ -176,7 +176,7 @@ async def test_emergency_off_handles_query_exception(caplog):
 
     await k.emergency_off()  # must not raise
 
-    # CRITICAL log MUST be emitted (Codex Phase 2a P2 — was missing).
+    # CRITICAL log MUST be emitted (Phase 2a P2 — was missing).
     relevant = [
         r
         for r in caplog.records

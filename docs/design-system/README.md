@@ -11,7 +11,7 @@ status: canonical
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
-This document is written for LLM consumers (Claude Code, Codex CLI) and human developers. Every rule has a unique ID, grep-friendly keywords, and concrete code examples.
+This document is written for both automated tooling and human developers. Every rule has a unique ID, grep-friendly keywords, and concrete code examples.
 
 ## Design philosophy
 
@@ -231,10 +231,7 @@ From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
 
 ## Related project docs
 
-- `docs/phase-ui-1/ui_refactor_context.md` — UI refactor pain points (P1-P7) and preserve features (K1-K7)
-- `docs/phase-ui-1/phase_ui_v2_roadmap.md` — Phase I/II/III execution plan
-- `docs/legacy-inventory/*.md` — pre-refactor widget inventory (for Phase II reference)
-- `CLAUDE.md` — project overview, build commands, key rules
+- `docs/architecture.md` — process model, subsystem map, key invariants
 - `src/cryodaq/gui/theme.py` — runtime token constant table (authoritative source for VALUES; this document is authoritative source for USAGE)
 
 ## Changelog

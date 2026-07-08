@@ -110,7 +110,7 @@ def load_experiment_metadata(experiments_dir: Path) -> list[DocumentChunk]:
 
         phases = metadata.get("phases", []) or []
         if phases:
-            # v0.55.14 (Codex audit SCOPE 2 finding 2.4) — defensive
+            # v0.55.14 (audit SCOPE 2 finding 2.4) — defensive
             # parsing: silently drop non-dict phase entries instead of
             # crashing on `.get()` against a string / list / None.
             valid_phases = [p for p in phases if isinstance(p, dict)]
@@ -214,7 +214,7 @@ def load_operator_log_entries(sqlite_path: Path) -> list[DocumentChunk]:
     try:
         for row in cursor:
             log_id, ts, msg, author, exp_id, tags = row
-            # v0.55.14 (Codex audit SCOPE 2 finding 2.4) — coerce msg
+            # v0.55.14 (audit SCOPE 2 finding 2.4) — coerce msg
             # to str before strip(); a non-text BLOB or None passed
             # through the SQLite read would otherwise crash the loader.
             text = str(msg or "").strip()

@@ -19,7 +19,7 @@ Usage::
     # Custom address:
     .venv/bin/python tools/diag_zmq_direct_req.py --addr tcp://127.0.0.1:5556
 
-Ref: docs/decisions/2026-04-27-d3-h5-experiment.md
+Ref: CHANGELOG.md
 """
 
 from __future__ import annotations

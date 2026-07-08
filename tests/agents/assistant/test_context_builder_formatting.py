@@ -35,7 +35,7 @@ def test_pressure_rendered_as_two_decimal_places_scientific():
 
 
 def test_pressure_mid_magnitude_still_scientific():
-    """Cycle-2 fix for Codex finding on commit 53981a1: a pressure value
+    """Cycle-2 fix from commit 53981a1: a pressure value
     that lands between the magnitude bands (1e-3 ≤ |v| ≤ 1e6) used to
     collapse to ``"0.00"``. Channel-name detection now wins over the
     magnitude fallback."""

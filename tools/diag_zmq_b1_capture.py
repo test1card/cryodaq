@@ -92,7 +92,7 @@ def _validate_bridge_startup(
     the engine's ipc:// REP socket had not finished binding), retry
     the probe up to ``attempts`` times with ``backoff_s`` between
     attempts. Any OK reply passes. See
-    ``docs/decisions/2026-04-24-b2b4fb5-investigation.md`` for the
+    CHANGELOG.md for the
     empirical background.
 
     Subprocess-spawn failure is still a single-shot check — no point

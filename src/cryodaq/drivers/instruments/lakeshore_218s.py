@@ -54,7 +54,7 @@ class LakeShore218S(InstrumentDriver):
         await self._transport.open(self._resource_str)
 
         if not self.mock:
-            # Phase 2c Codex F.1: validate IDN with retry-after-clear fallback.
+            # Phase 2c F.1: validate IDN with retry-after-clear fallback.
             # The previous fallback (log a warning and proceed) allowed silent
             # mis-routing to a wrong GPIB address — KRDG? would still produce
             # numbers, just from the wrong instrument.

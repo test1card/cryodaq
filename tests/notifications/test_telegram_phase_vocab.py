@@ -1,4 +1,4 @@
-"""Verify /phase vocabulary matches ExperimentPhase enum (Phase 2c Codex I.2)."""
+"""Verify /phase vocabulary matches ExperimentPhase enum (Phase 2c I.2)."""
 
 from __future__ import annotations
 

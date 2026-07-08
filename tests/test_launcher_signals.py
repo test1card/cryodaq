@@ -1,4 +1,4 @@
-"""Tests for launcher SIGTERM/SIGINT handler — Codex-03 CRITICAL.
+"""Tests for launcher SIGTERM/SIGINT handler — case 03 CRITICAL.
 
 Covers 6 cases per spec:
   1. SIGTERM/SIGINT registration in main() — structural

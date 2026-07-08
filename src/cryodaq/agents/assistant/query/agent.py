@@ -592,7 +592,7 @@ class AssistantQueryAgent:
         if result.phases:
             phase_lines = []
             for p in result.phases:
-                # v0.55.16 (Codex audit SCOPE 3 finding 3.6) — defensive
+                # v0.55.16 (audit SCOPE 3 finding 3.6) — defensive
                 # filter against non-dict phase rows (already filtered
                 # at the loader, but format prompt should not crash if
                 # legacy data slips through) + localise raw English
@@ -706,7 +706,7 @@ class AssistantQueryAgent:
     def _kind_label(kind: str) -> str:
         # Localised labels keep the format prompt's "Источники:" block
         # readable without exposing internal corpus-kind identifiers.
-        # v0.55.14 (Codex audit SCOPE 6 finding 6.4 follow-up) — keys
+        # v0.55.14 (audit SCOPE 6 finding 6.4 follow-up) — keys
         # match the canonical names emitted by document_loader.py
         # (vault_note, not vault); the legacy "vault" alias is kept so
         # an old index does not regress to the raw identifier.

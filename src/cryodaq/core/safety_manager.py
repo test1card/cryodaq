@@ -375,7 +375,7 @@ class SafetyManager:
                         "error": str(exc),
                     }
 
-                # CRITICAL safety reconciliation (Codex Phase 1 review P0-2):
+                # CRITICAL safety reconciliation (Phase 1 review P0-2):
                 # _fault() runs OUTSIDE _cmd_lock — a fail-on-silence /
                 # rate-limit / interlock fault can fire while we are awaiting
                 # start_source(). When that happens, _fault has already issued

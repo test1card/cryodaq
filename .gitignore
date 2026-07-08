@@ -33,20 +33,8 @@ export/
 config/*.local.yaml
 config/*.local.yaml.yaml
 
-# Claude Code — user-local state except skills which are shared
-# repo-level agent behavior contract. Architect decision 2026-04-23:
-# .claude/skills/ is versioned (auto-loading skills need to exist
-# for every agent in the team, not just the user who created them).
-# Other .claude/ paths (settings.local.json, hooks/, commands/,
-# session state) remain user-local until a future policy decision.
-#
-# Pattern note: use .claude/* (content level) not .claude/ (dir
-# level) so Git will descend into the directory and the negation
-# below can re-include the skills/ subtree. With .claude/ as a
-# whole-directory ignore, Git skips descent and !.claude/skills/
-# has no effect.
-.claude/*
-!.claude/skills/
+# Local dev-tooling state (repo hygiene 2026-07-08: fully user-local).
+.claude/
 
 # OS
 .DS_Store
@@ -139,3 +127,20 @@ uv.lock
 scripts/dev/
 # Large equipment-manual binaries (local RAG corpus data).
 data/knowledge/equipment_manuals/*.pdf
+
+# --- repo hygiene (2026-07-08): historical/process docs — kept on disk, out of git ---
+CLAUDE.md
+.graphifyignore
+COST_ESTIMATE_PODRYAD.md
+docs/ORCHESTRATION.md
+docs/CODEX_SELF_REVIEW_PLAYBOOK.md
+docs/codex-architecture-control-plane.md
+docs/SPEC_AUTHORING_TEMPLATE.md
+docs/architecture/assistant-v2-vision.md
+docs/bug_B1_zmq_idle_death_handoff.md
+docs/decisions/
+docs/design-system/AUDIT_REPORT_*.md
+docs/design-system/FINAL_REVIEW_REPORT.md
+docs/design-system/V101_REVIEW_REPORT.md
+docs/design-system/HANDOFF_THEMES_V2.md
+docs/design-system/THEME_FOLLOWUPS.md

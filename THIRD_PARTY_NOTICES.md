@@ -65,3 +65,23 @@ remain in resources/fonts/ until B.7 cleanup.
 
 10 SVG icons bundled in src/cryodaq/gui/resources/icons/ for ToolRail
 navigation.
+
+## QtAwesome / Phosphor icon runtime
+
+**Source:** https://github.com/spyder-ide/qtawesome
+**License:** MIT
+**Copyright:** QtAwesome contributors
+
+Declared as `qtawesome>=1.4,<2` in `pyproject.toml`. CryoDAQ uses it to
+render themed Phosphor icons at runtime.
+
+## pysqlite3-binary
+
+**Source:** https://github.com/coleifer/pysqlite3
+**License:** zlib/libpng License for the Python wrapper; bundled SQLite is
+public domain
+
+Declared as `pysqlite3-binary>=0.5.4; sys_platform == "linux"` in
+`pyproject.toml`. Used only on Linux by `src/cryodaq/storage/_sqlite.py`
+as the bundled SQLite fallback when the stdlib SQLite version is inside
+the WAL-reset corruption range.

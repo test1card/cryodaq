@@ -59,7 +59,7 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 - Un-deprecation (reverting deprecations) process
 - What cannot be deprecated (Cyrillic Т, SI units, WCAG AA commitment, persistence-first, TSP-not-SCPI)
 
-**Enforcement:** Codex audit flags new uses of deprecated artifacts; runtime `DeprecationWarning` on Python module access; governance review on deprecation proposals.
+**Enforcement:** external audit flags new uses of deprecated artifacts; runtime `DeprecationWarning` on Python module access; governance review on deprecation proposals.
 
 **Currently deprecated artifacts:** STONE_* token aliases (~15 legacy-panel call sites, being migrated).
 

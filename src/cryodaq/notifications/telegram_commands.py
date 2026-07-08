@@ -19,7 +19,7 @@ from cryodaq.agents.assistant.query.ru_labels import phase_display_name
 from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.broker import DataBroker
 
-# Phase 2c Codex I.2: derive the accepted phase vocabulary from the canonical
+# Phase 2c I.2: derive the accepted phase vocabulary from the canonical
 # ExperimentPhase enum. Previously this was a hand-maintained list that
 # drifted ("cooling"/"warming" instead of the enum's "cooldown"/"warmup",
 # missing "vacuum") so remote operators received bogus "unknown phase"
@@ -74,7 +74,7 @@ class TelegramCommandBot:
     broker:       DataBroker для подписки на данные.
     alarm_engine: AlarmEngine для запроса состояния тревог.
     bot_token:    Токен Telegram-бота (str или SecretStr).
-    allowed_chat_ids: Список разрешённых chat_id. Phase 2b Codex K.1:
+    allowed_chat_ids: Список разрешённых chat_id. Phase 2b K.1:
         пустой список + commands_enabled=True → ValueError при создании
         (default-deny — пустой ALLOW_ALL для safety-sensitive команд
         /phase / /log недопустим).
@@ -97,7 +97,7 @@ class TelegramCommandBot:
         photo_handler: Any | None = None,
         verify_ssl: bool = True,
     ) -> None:
-        # Phase 2b Codex K.1: default-deny — empty allowlist with commands
+        # Phase 2b K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
         # control surface). Refuse to construct in that state.
         if commands_enabled and not (allowed_chat_ids or []):
@@ -142,7 +142,7 @@ class TelegramCommandBot:
         return f"https://api.telegram.org/bot{self._bot_token.get_secret_value()}"
 
     def _is_chat_allowed(self, chat_id: int) -> bool:
-        """Default-deny chat permission check (Phase 2b Codex K.1)."""
+        """Default-deny chat permission check (Phase 2b K.1)."""
         return chat_id in self._allowed_ids
 
     async def start(self) -> None:
@@ -279,7 +279,7 @@ class TelegramCommandBot:
                     await self._handle_text(msg)
                 continue
 
-            # Security check (Phase 2b Codex K.1: default-deny on empty list).
+            # Security check (Phase 2b K.1: default-deny on empty list).
             if not self._is_chat_allowed(chat_id):
                 logger.warning("Отклонён запрос от chat_id=%s", chat_id)
                 continue
@@ -289,7 +289,7 @@ class TelegramCommandBot:
     async def _handle_message(self, msg: dict) -> None:
         """Обработать входящее сообщение с полным контекстом (текст + from + chat).
 
-        Defense-in-depth (Phase 2b Codex K.1): re-checks ``_is_chat_allowed``
+        Defense-in-depth (Phase 2b K.1): re-checks ``_is_chat_allowed``
         even though ``_fetch_updates`` already filters. Direct callers
         (tests, future code paths) must NOT bypass the allowlist.
         """
@@ -497,7 +497,7 @@ class TelegramCommandBot:
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
-        # Phase 2c Codex I.2: accept legacy aliases (cooling/warming) and
+        # Phase 2c I.2: accept legacy aliases (cooling/warming) and
         # canonicalise to ExperimentPhase enum values.
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)

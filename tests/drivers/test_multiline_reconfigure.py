@@ -341,7 +341,7 @@ def test_persist_overwrites_existing_local_entry(tmp_path: Path) -> None:
 
 
 def test_persist_carries_top_level_chamber_from_base_to_local(tmp_path: Path) -> None:
-    """Codex audit cycle 2 amend — engine reads instruments.local.yaml
+    """audit cycle 2 amend — engine reads instruments.local.yaml
     wholesale (top-level keys are NOT inherited from base). The persist
     helper must therefore copy ``chamber`` (and any other top-level
     keys) from base into local; otherwise a MultiLine channel-set
@@ -414,7 +414,7 @@ def test_persist_local_top_level_overrides_base(tmp_path: Path) -> None:
 
 
 def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Path) -> None:
-    """Codex audit cycle 1 amend — if instruments.local.yaml exists but
+    """audit cycle 1 amend — if instruments.local.yaml exists but
     only contains a Lakeshore entry (e.g. operator edited via
     connection_settings), persisting a MultiLine change must merge the
     base etalon_multiline entry's full config (host/port/mode) rather
@@ -474,7 +474,7 @@ def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Pat
 
 
 def test_reconfigure_continuous_refuses_spawn_on_listener_cancel_timeout() -> None:
-    """Codex audit cycle 1 amend — if the old listener doesn't cancel
+    """audit cycle 1 amend — if the old listener doesn't cancel
     within the 2s grace window, the driver must NOT spawn a new
     listener (would race the still-unwinding old task for the read
     stream)."""

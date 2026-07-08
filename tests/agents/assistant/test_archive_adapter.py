@@ -287,7 +287,7 @@ def test_alarm_history_returns_zero_counts_when_history_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Async offload — Cycle-2 fix for Codex finding on dc5350b
+# Async offload — Cycle-2 fix from dc5350b
 # ---------------------------------------------------------------------------
 
 

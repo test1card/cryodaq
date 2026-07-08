@@ -3,7 +3,7 @@ title: Настройка приборов
 audience: lab tech, operator on duty
 scope: физическое подключение + конфигурация приборов CryoDAQ
 status: canonical
-last_updated: 2026-04-17
+last_updated: 2026-07-08
 companion: docs/deployment.md, docs/safety-operator.md, config/instruments.yaml
 ---
 
@@ -12,7 +12,7 @@ companion: docs/deployment.md, docs/safety-operator.md, config/instruments.yaml
 Этот документ — для лаборанта, который разворачивает CryoDAQ на новом
 стенде или меняет железо на работающем. В основном это редактирование
 `config/instruments.yaml` и проверка связи через mock / live mode. Код
-drivers/ трогать не надо.
+`src/cryodaq/drivers/` трогать не надо.
 
 Схема стека с точки зрения оператора:
 
@@ -29,7 +29,7 @@ drivers/ трогать не надо.
               SQLite → DataBroker → GUI / алармы
 ```
 
-## Четыре поддерживаемых прибора
+## Пять поддерживаемых приборов
 
 Текущая конфигурация — в `config/instruments.yaml`. Если нужны
 машинно-зависимые параметры (COM-порт, GPIB-адрес не совпадает с
@@ -85,7 +85,7 @@ for res in rm.list_resources():
 
 **Интерфейс:** USB-TMC. Двухканальный source-measure unit — оба канала
 `smua` и `smub` активны одновременно (инвариант уровня кодовой базы;
-см. `CLAUDE.md` / design-system).
+см. `docs/architecture.md`).
 
 **Адрес на шаблоне:**
 
@@ -147,9 +147,10 @@ print('Found:', dev.serial_number if dev else None)
   апгрейд. До него host-death прикрыт crash-recovery force-OFF на
   следующем connect (`keithley_2604b.py`).
 
-Механизм запуска в прошивке (trigger.timer, неблокирующий FIFO)
-**не проверен на стенде**; `required` гейтит только на host-наблюдаемых
-взводе и latched-trip, не на доказанном поведении firmware-таймера.
+Автономный механизм прошивки (например, `trigger.timer`, срабатывающий
+без вызовов хоста) **ещё не реализован и не проверен на стенде**;
+`required` гейтит только на host-наблюдаемых взводе и latched-trip, не
+на доказанном поведении firmware-таймера.
 
 **Disconnect требует emergency_off first** — автоматизировано в
 engine, но при ручном вытаскивании USB-кабеля лучше сначала
@@ -186,7 +187,7 @@ ls -l /dev/ttyUSB* /dev/ttyS*
 значения удобно держать в `instruments.local.yaml`.
 
 Абсолютная интерферометрическая метрология длины (несколько каналов).
-Драйвер `drivers/instruments/etalon_multiline.py`. Режимы: **averaged**
+Драйвер `src/cryodaq/drivers/instruments/etalon_multiline.py`. Режимы: **averaged**
 (усреднённые отсчёты) и **continuous**; поддерживается burst-захват
 вибрации с записью в Parquet. Операторский workflow (в т.ч. «Захват
 вибрации») — в overlay «MultiLine»; подробности в
@@ -253,8 +254,9 @@ cryodaq-engine --mock
   или `KRDG? 1..8` — парсер драйвера заточен под строку-с-запятыми от
   `KRDG?`.
 - **Keithley: `connect()` форсит OUTPUT OFF** на обоих каналах
-  перед assume-control (best-effort; если force-off fails, логируется
-  CRITICAL, но продолжаем — crash-recovery guard).
+  перед assume-control и readback-verify. Если OFF не удалось
+  подтвердить, драйвер выставляет `output_state_unverified`, а
+  SafetyManager fail-closed блокирует RUN до успешного emergency-off.
 - **Thyracont VSP63D vs VSM77DL** — старые версии документации
   упоминают VSM77DL; код поддерживает оба (драйвер автодетектирует
   протокол). Имя в YAML пишем по фактической модели на стенде.
@@ -273,11 +275,12 @@ cryodaq-engine --mock
 4. Написать unit-тест в `tests/drivers/`.
 
 Этот флоу выходит за рамки «настройки прибора» — это уже dev-задача.
-См. `CLAUDE.md ### Драйверы` для module-index.
+См. `docs/architecture.md` (раздел «Subsystem map», строка Drivers) для
+карты драйверных модулей.
 
 ## См. также
 
-- `CLAUDE.md` — архитектурный контекст приборного стека и ключевые
+- `docs/architecture.md` — архитектурный контекст приборного стека и ключевые
   правила (persistence-first, TSP-not-SCPI, dual-channel Keithley).
 - `docs/safety-operator.md` — что делать при `fault_latched` из-за
   потери связи с прибором.

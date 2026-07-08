@@ -145,7 +145,7 @@ def test_extract_lakeshore_t17_to_ls218_3(app):
 
 
 def test_extract_analytics_channel_dropped(app):
-    """Codex II.8 fix: analytics/* readings must NOT create instrument cards
+    """II.8 fix: analytics/* readings must NOT create instrument cards
     (legacy v1 had a latent bug where startswith("analytics/") ran after the
     "/" split and was unreachable). Fixed by checking the analytics prefix
     before the slash split."""
@@ -360,7 +360,7 @@ def test_poll_skipped_when_disconnected(app):
 def test_poll_dispatches_get_sensor_diagnostics(app):
     panel = InstrumentsPanel()
     panel.set_connected(True)
-    # set_connected(True) now fires one immediate poll (II.8 Codex fix) —
+    # set_connected(True) now fires one immediate poll (II.8) —
     # verify that AND the 10 s timer is armed.
     assert _StubWorker.dispatched == [{"cmd": "get_sensor_diagnostics"}]
     panel._diag_poll_timer.stop()
@@ -414,7 +414,7 @@ def test_poll_result_populates_table(app):
 
 
 def test_set_connected_fires_immediate_poll(app):
-    """II.8 Codex fix: False → True transition must not leave the K2
+    """II.8: False → True transition must not leave the K2
     diagnostics table blank for up to 10 s."""
     panel = InstrumentsPanel()
     _StubWorker.dispatched = []
