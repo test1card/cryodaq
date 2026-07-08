@@ -136,6 +136,13 @@ class SafetyManager:
         # See DEEP_AUDIT_CC.md I.1.
         self._cmd_lock = asyncio.Lock()
 
+        # F4 liveness: set by a soft-interlock trip BEFORE it contends for
+        # _cmd_lock, so an in-flight request_run holding the lock through slow
+        # start_source I/O aborts its start instead of committing a source the
+        # interlock is about to shut down. ponytail: a single global flag (not
+        # per-channel) — a trip aborting any in-flight start is fail-safe.
+        self._interlock_trip_pending = False
+
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
         self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
@@ -387,6 +394,34 @@ class SafetyManager:
                         "channel": smu_channel,
                         "error": f"Fault during start: {self._fault_reason}",
                     }
+
+            # F4 liveness: a soft interlock trip may have arrived while we were
+            # awaiting start_source (which holds _cmd_lock through slow SCPI
+            # I/O). If so, do NOT commit this source — revert the just-started
+            # output OFF and abort. The interlock handler (blocked on _cmd_lock
+            # behind us) then completes its own shutdown/bookkeeping. No await
+            # sits between this check and the commit below, so the decision is
+            # atomic.
+            if self._interlock_trip_pending and self._keithley is not None:
+                logger.warning(
+                    "request_run(%s) aborted: interlock trip arrived during "
+                    "start — reverting output OFF, not committing source",
+                    smu_channel,
+                )
+                try:
+                    await self._keithley.emergency_off(smu_channel)
+                except Exception as exc:
+                    logger.critical(
+                        "request_run abort emergency_off(%s) failed: %s",
+                        smu_channel,
+                        exc,
+                    )
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "error": "Interlock trip during start — source not activated",
+                }
 
             self._active_sources.add(smu_channel)
             if self._state != SafetyState.RUNNING:
@@ -824,7 +859,11 @@ class SafetyManager:
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
 
         # 2. Now safe to do async cleanup — state already protects us.
-        self._active_sources.clear()
+        #    Re-entrancy is guarded by the FAULT_LATCHED early-return above (set
+        #    synchronously before any await), NOT by clearing _active_sources —
+        #    so the clear can be deferred until AFTER emergency_off and made
+        #    conditional on a CONFIRMED off (F3).
+        outputs_confirmed_off = True
 
         if self._keithley is not None:
             # Hardware shutdown must complete even if our caller is cancelled.
@@ -833,19 +872,36 @@ class SafetyManager:
             # task finishes before re-raising.
             shutdown_task = asyncio.create_task(self._keithley.emergency_off())
             try:
-                await asyncio.shield(shutdown_task)
+                outputs_confirmed_off = bool(await asyncio.shield(shutdown_task))
             except asyncio.CancelledError:
                 logger.critical(
                     "FAULT: _fault() cancelled but emergency_off is shielded; "
                     "waiting for hardware shutdown to complete"
                 )
                 try:
-                    await shutdown_task
+                    outputs_confirmed_off = bool(await shutdown_task)
                 except Exception as exc:
                     logger.critical("FAULT: shielded emergency_off failed: %s", exc)
+                    outputs_confirmed_off = False
                 raise
             except Exception as exc:
                 logger.critical("FAULT: emergency_off failed: %s", exc)
+                outputs_confirmed_off = False
+
+        # F3: only drop the sources whose OFF the driver CONFIRMED. On an
+        # unconfirmed OFF (emergency_off returned False, per the CR-2 driver
+        # contract, or raised) keep them in _active_sources so the published
+        # safety-state payload still shows them ON — the SMU may still be
+        # sourcing. The fault stays latched either way.
+        if outputs_confirmed_off:
+            self._active_sources.clear()
+        elif self._active_sources:
+            logger.critical(
+                "FAULT: emergency_off could NOT confirm outputs OFF — output "
+                "state UNVERIFIED on %s; keeping them tracked as active "
+                "(SMU may still be sourcing)",
+                sorted(self._active_sources),
+            )
 
         # 4. Post-mortem log emission — shielded — MUST happen after hardware
         #    shutdown but BEFORE optional broker publish. Previously this came
@@ -998,6 +1054,18 @@ class SafetyManager:
                 return False, "Keithley not connected"
             if not getattr(self._keithley, "connected", False):
                 return False, "Keithley connected=False"
+
+        # F2: a connected Keithley whose crash-recovery force-OFF could not be
+        # readback-verified may still be sourcing. Block RUN (only RUN — this is
+        # a precondition, so measurement/diagnostics/manual retry stay available)
+        # until a later verified OFF clears the flag. Fail-closed, no lockout.
+        if self._keithley is not None and getattr(
+            self._keithley, "output_state_unverified", False
+        ):
+            return False, (
+                "Keithley output state UNVERIFIED after connect (crash-recovery "
+                "force-OFF unconfirmed) — issue emergency off before RUN"
+            )
 
         if self._state == SafetyState.FAULT_LATCHED:
             return False, f"Active fault: {self._fault_reason}"
@@ -1176,46 +1244,60 @@ class SafetyManager:
         if action == "stop_source":
             logger.warning("INTERLOCK stop_source: %s", reason)
             # Soft stop: outputs off, no fault latch.
-            async with self._cmd_lock:
-                if self._keithley is not None:
-                    try:
-                        ok = await self._keithley.emergency_off()
-                    except Exception as exc:
-                        logger.error(
-                            "stop_source interlock: emergency_off failed: %s — "
-                            "escalating to full fault",
-                            exc,
-                        )
-                        # The lock is released when this `async with` block
-                        # exits via the `return` below. _fault itself is
-                        # unlocked, so it does not deadlock — but it WILL
-                        # serialize behind the lock until _fault returns.
-                        await self._fault(
-                            f"{reason} (emergency_off failed: {exc})",
-                            channel=channel,
-                            value=value,
-                        )
-                        return
-                    # CR-2 contract: emergency_off never raises and returns
-                    # True iff all channels verified OFF. An unconfirmed OFF
-                    # (False) must NOT soft-stop to SAFE_OFF — fail closed and
-                    # latch FAULT, same as the other emergency_off call sites.
-                    if not ok:
-                        await self._fault(
-                            f"{reason} (emergency_off could not confirm OFF)",
-                            channel=channel,
-                            value=value,
-                        )
-                        return
-                self._active_sources.clear()
-                await self._publish_keithley_channel_states(f"interlock_stop:{interlock_name}")
-                if self._state not in (SafetyState.FAULT_LATCHED, SafetyState.MANUAL_RECOVERY):
-                    self._transition(
-                        SafetyState.SAFE_OFF,
-                        f"Interlock stop_source: {interlock_name}",
-                        channel=channel,
-                        value=value,
+            # F4 liveness: raise the pending flag BEFORE contending for
+            # _cmd_lock so an in-flight request_run (holding the lock through
+            # slow start_source I/O) aborts its start instead of committing a
+            # source we are about to shut down. Cleared once our shutdown
+            # bookkeeping completes (the finally runs on every exit path).
+            self._interlock_trip_pending = True
+            try:
+                async with self._cmd_lock:
+                    if self._keithley is not None:
+                        try:
+                            ok = await self._keithley.emergency_off()
+                        except Exception as exc:
+                            logger.error(
+                                "stop_source interlock: emergency_off failed: %s — "
+                                "escalating to full fault",
+                                exc,
+                            )
+                            # The lock is released when this `async with` block
+                            # exits via the `return` below. _fault itself is
+                            # unlocked, so it does not deadlock — but it WILL
+                            # serialize behind the lock until _fault returns.
+                            await self._fault(
+                                f"{reason} (emergency_off failed: {exc})",
+                                channel=channel,
+                                value=value,
+                            )
+                            return
+                        # CR-2 contract: emergency_off never raises and returns
+                        # True iff all channels verified OFF. An unconfirmed OFF
+                        # (False) must NOT soft-stop to SAFE_OFF — fail closed and
+                        # latch FAULT, same as the other emergency_off call sites.
+                        if not ok:
+                            await self._fault(
+                                f"{reason} (emergency_off could not confirm OFF)",
+                                channel=channel,
+                                value=value,
+                            )
+                            return
+                    self._active_sources.clear()
+                    await self._publish_keithley_channel_states(
+                        f"interlock_stop:{interlock_name}"
                     )
+                    if self._state not in (
+                        SafetyState.FAULT_LATCHED,
+                        SafetyState.MANUAL_RECOVERY,
+                    ):
+                        self._transition(
+                            SafetyState.SAFE_OFF,
+                            f"Interlock stop_source: {interlock_name}",
+                            channel=channel,
+                            value=value,
+                        )
+            finally:
+                self._interlock_trip_pending = False
             return
 
         # Unknown action — fail-safe to a full fault rather than ignore.

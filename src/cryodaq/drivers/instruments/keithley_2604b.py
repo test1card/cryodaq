@@ -18,6 +18,15 @@ from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
 log = logging.getLogger(__name__)
 
+
+class OutputStateUnverifiedError(RuntimeError):
+    """Raised when an OUTPUT_OFF could not be readback-verified.
+
+    The SMU output state is UNVERIFIED — it may still be sourcing. Callers
+    (SafetyManager) must fail CLOSED and latch a fault rather than report a
+    clean SAFE_OFF.
+    """
+
 # Minimum measurable current for resistance calculation (avoid division by noise).
 # At 1 nA, R = V/I is dominated by noise.  For heaters with R ~ 10–1000 Ω,
 # 100 nA gives R accurate to ~1%.
@@ -125,6 +134,10 @@ class Keithley2604B(InstrumentDriver):
         # Compliance tracking: consecutive cycles where SMU reports compliance.
         self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
+        # F2: set True when the crash-recovery force-OFF on connect() cannot be
+        # readback-verified (outputs may still be ON). A blocking RUN
+        # precondition in SafetyManager, cleared by a later verified OFF.
+        self._unsafe_output_state = False
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
@@ -136,35 +149,65 @@ class Keithley2604B(InstrumentDriver):
                 raise RuntimeError(f"{self.name}: unexpected IDN {idn!r}")
             # Drain stale errors so they don't confuse runtime error checks.
             await self._transport.write("errorqueue.clear()")
+            # Mark connected BEFORE the crash-recovery readback so
+            # _verify_output_off issues a real query (it short-circuits to True
+            # while _connected is False). Reset in the except below if anything
+            # here re-raises (only the IDN/clear steps above can, and they run
+            # before this point).
+            self._connected = True
             # SAFETY (Phase 2a G.1): force outputs off on every connect.
             # The previous engine process may have crashed mid-experiment
             # while sourcing — Keithley holds the last programmed voltage
             # indefinitely with no TSP-side watchdog (see CLAUDE.md). This
             # guarantees a known-safe state every time we assume control.
-            # Best-effort: an exception here is logged but does NOT abort
-            # connect (the higher-level health checks will catch a truly
-            # broken instrument; our priority is to avoid leaving an
-            # unconnected lab in a worse state than "possibly still sourcing").
+            # connect() must NOT abort on a force-off failure (refusing connect
+            # strips the operator of all control — Phase 2a G.1 rationale). F2:
+            # instead readback-verify both channels; an unverified/still-ON
+            # output sets the blocking _unsafe_output_state flag so SafetyManager
+            # refuses RUN (only RUN) until a later verified OFF clears it.
             if not self.mock:
+                self._unsafe_output_state = False
                 try:
                     await self._transport.write("smua.source.levelv = 0")
                     await self._transport.write("smub.source.levelv = 0")
                     await self._transport.write("smua.source.output = smua.OUTPUT_OFF")
                     await self._transport.write("smub.source.output = smub.OUTPUT_OFF")
-                    log.info(
-                        "%s: SAFETY: forced outputs off on connect (crash-recovery guard)",
-                        self.name,
-                    )
                 except Exception as exc:
                     log.critical(
                         "%s: SAFETY: failed to force output off on connect: %s",
                         self.name,
                         exc,
                     )
+                    self._unsafe_output_state = True
+                else:
+                    for smu_channel in SMU_CHANNELS:
+                        try:
+                            if not await self._verify_output_off(smu_channel):
+                                self._unsafe_output_state = True
+                        except Exception as exc:
+                            log.critical(
+                                "%s: SAFETY: connect force-off readback FAILED on %s: %s",
+                                self.name,
+                                smu_channel,
+                                exc,
+                            )
+                            self._unsafe_output_state = True
+                    if self._unsafe_output_state:
+                        log.critical(
+                            "%s: SAFETY: output state UNVERIFIED after connect "
+                            "force-OFF — RUN blocked until a verified OFF",
+                            self.name,
+                        )
+                    else:
+                        log.info(
+                            "%s: SAFETY: forced outputs off on connect "
+                            "(crash-recovery guard, readback-verified)",
+                            self.name,
+                        )
         except Exception:
+            self._connected = False
             await self._transport.close()
             raise
-        self._connected = True
         try:
             await self._wdog_arm()
         except Exception:
@@ -348,7 +391,16 @@ class Keithley2604B(InstrumentDriver):
 
         await self._transport.write(f"{smu_channel}.source.levelv = 0")
         await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
-        await self._verify_output_off(smu_channel)
+        # F1 fail-closed: an unverified OFF (readback still ON / unparseable)
+        # must RAISE so SafetyManager latches FAULT instead of reporting
+        # SAFE_OFF. Raise BEFORE clearing runtime state — the host-side P=const
+        # loop must keep treating this channel as active while the output is
+        # UNVERIFIED. (A transport error from the query already propagates.)
+        if not await self._verify_output_off(smu_channel):
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} output state UNVERIFIED after "
+                f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
+            )
         self._last_v[smu_channel] = 0.0
         self._compliance_count[smu_channel] = 0
         runtime.active = False
@@ -414,6 +466,11 @@ class Keithley2604B(InstrumentDriver):
                     exc,
                 )
                 all_confirmed = False
+        # F2: a full both-channel emergency_off that confirms OFF resolves any
+        # connect-time unverified-output block. Only the full scope (channel is
+        # None) confirms BOTH channels, so only it may clear the flag.
+        if channel is None and all_confirmed:
+            self._unsafe_output_state = False
         return all_confirmed
 
     async def check_error(self) -> str | None:
@@ -423,6 +480,13 @@ class Keithley2604B(InstrumentDriver):
         if response in {"", "0"}:
             return None
         return response
+
+    @property
+    def output_state_unverified(self) -> bool:
+        """True when the crash-recovery force-OFF on connect() could not be
+        readback-verified (outputs may still be ON). SafetyManager treats this
+        as a blocking RUN precondition until a later verified OFF clears it."""
+        return self._unsafe_output_state
 
     @property
     def any_active(self) -> bool:
