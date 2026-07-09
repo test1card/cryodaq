@@ -50,6 +50,31 @@ logger = logging.getLogger("cryodaq.launcher")
 _ZMQ_PORT = 5555
 _WEB_PORT = 8080
 
+
+def _assistant_enabled_in_config() -> bool:
+    """B1: whether config/agent.yaml asks for the cryodaq-assistant child.
+
+    Deliberately does NOT import ``cryodaq.agents`` (that would defeat the
+    point of the extraction for the one process that spawns everything) —
+    just enough YAML parsing to read the same ``enabled`` flag
+    ``AssistantConfig.from_yaml_path`` reads, handling the same legacy
+    ``gemma:`` namespace fallback.
+    """
+    import yaml
+
+    from cryodaq.paths import get_config_dir
+
+    agent_cfg_path = get_config_dir() / "agent.yaml"
+    if not agent_cfg_path.exists():
+        return False
+    try:
+        raw = yaml.safe_load(agent_cfg_path.read_text(encoding="utf-8")) or {}
+        section = raw.get("agent", raw.get("gemma", {}))
+        return bool(section.get("enabled", True))
+    except Exception:
+        logger.warning("_assistant_enabled_in_config: config/agent.yaml parse failed", exc_info=True)
+        return False
+
 # Settings → Тема menu: curated display order. Dark group first, then
 # a visual separator, then light group. Packs not listed here fall
 # through to a trailing alphabetical extras block — keeps the menu
@@ -318,6 +343,17 @@ class LauncherWindow(QMainWindow):
         self._last_alarm_count: int = 0
         self._safety_worker: ZmqCommandWorker | None = None
 
+        # B1 (2026-07): cryodaq-assistant (Гемма + RAG) — a THIRD supervised
+        # child, only spawned if config/agent.yaml asks for it. Restart/
+        # backoff mirrors the engine child, but its death is NON-safety:
+        # log + tray note only — no alarm, no banner, no giving-up latch.
+        # See scratchpad/montana/exec/impl_b1.md.
+        self._assistant_proc: subprocess.Popen | None = None
+        self._assistant_enabled: bool = _assistant_enabled_in_config()
+        self._assistant_restart_attempts: int = 0
+        self._assistant_last_restart_time: float = 0.0
+        self._assistant_restart_pending: bool = False
+
         if replay_source is not None:
             self.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
         else:
@@ -347,6 +383,10 @@ class LauncherWindow(QMainWindow):
 
         # --- Engine ---
         self._start_engine()
+
+        # --- Assistant (B1) ---
+        if self._assistant_enabled:
+            self._start_assistant()
 
         # Start ZMQ bridge subprocess — skip if replay engine failed to start
         # so the bridge doesn't silently attach to a live engine.
@@ -679,6 +719,103 @@ class LauncherWindow(QMainWindow):
         if self._engine_proc is None:
             return False
         return self._engine_proc.poll() is None
+
+    # ------------------------------------------------------------------
+    # Assistant management (B1) — non-safety third child, see the wiring
+    # comment on ``self._assistant_enabled`` in __init__.
+    # ------------------------------------------------------------------
+
+    def _start_assistant(self) -> None:
+        """Spawn the cryodaq-assistant subprocess (Гемма + RAG)."""
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--mode=assistant"]
+        else:
+            python = sys.executable
+            if sys.platform == "win32":
+                pythonw = Path(python).parent / "pythonw.exe"
+                if pythonw.exists():
+                    python = str(pythonw)
+            cmd = [python, "-m", "cryodaq.agents.assistant_main"]
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            self._assistant_proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                # setup_logging("assistant", ...) writes logs/assistant.log —
+                # no need to pipe+pump stderr through the launcher like the
+                # engine child (that machinery exists for the safety-alarm
+                # banner; the assistant has no such path).
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            logger.info("cryodaq-assistant запущен, PID=%d", self._assistant_proc.pid)
+        except Exception:
+            logger.exception("Не удалось запустить cryodaq-assistant")
+            self._assistant_proc = None
+
+    def _stop_assistant(self) -> None:
+        """Остановить cryodaq-assistant подпроцесс, если он запущен."""
+        if self._assistant_proc is None:
+            return
+        logger.info("Остановка cryodaq-assistant (PID=%d)...", self._assistant_proc.pid)
+        self._assistant_proc.terminate()
+        try:
+            self._assistant_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("cryodaq-assistant не завершился за 10с, принудительное завершение")
+            self._assistant_proc.kill()
+            self._assistant_proc.wait(timeout=5)
+        self._assistant_proc = None
+        logger.info("cryodaq-assistant остановлен")
+
+    def _check_assistant_health(self) -> None:
+        """Restart cryodaq-assistant with backoff if it died. NON-safety:
+        the assistant is Гемма chat/RAG, not instrument control — its
+        death gets a log line + tray note, never the alarm/banner path
+        the engine child uses.
+        """
+        if not self._assistant_enabled or self._shutdown_requested:
+            return
+        if self._assistant_proc is not None and self._assistant_proc.poll() is None:
+            # Alive — reset backoff after a healthy run window.
+            if (
+                self._assistant_restart_attempts > 0
+                and time.monotonic() - self._assistant_last_restart_time > 300.0
+            ):
+                self._assistant_restart_attempts = 0
+            return
+        if self._assistant_restart_pending:
+            return
+
+        self._assistant_proc = None
+        delay_idx = min(self._assistant_restart_attempts, len(self._restart_backoff_s) - 1)
+        delay_s = self._restart_backoff_s[delay_idx]
+        logger.warning(
+            "cryodaq-assistant недоступен, перезапуск через %ds (попытка %d)",
+            delay_s,
+            self._assistant_restart_attempts + 1,
+        )
+        if hasattr(self, "_tray") and self._tray is not None:
+            self._tray.showMessage(
+                "CryoDAQ",
+                "Ассистент (Гемма) перезапускается — чат временно недоступен.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+        self._assistant_restart_attempts += 1
+        self._assistant_last_restart_time = time.monotonic()
+        self._assistant_restart_pending = True
+
+        def _do_restart() -> None:
+            self._assistant_restart_pending = False
+            if not self._shutdown_requested:
+                self._start_assistant()
+
+        QTimer.singleShot(delay_s * 1000, _do_restart)
 
     # ------------------------------------------------------------------
     # UI
@@ -1214,6 +1351,7 @@ class LauncherWindow(QMainWindow):
         self._tray.hide()
         self._bridge.shutdown()
         self._stop_engine()
+        self._stop_assistant()
         self._loop.close()
         if self._lock_fd is not None:
             release_lock(self._lock_fd, ".launcher.lock")
@@ -1359,6 +1497,8 @@ class LauncherWindow(QMainWindow):
 
     def _check_engine_health(self) -> None:
         """Проверить состояние engine, перезапустить при падении."""
+        if self._assistant_enabled:
+            self._check_assistant_health()
         alive = self._is_engine_alive()
 
         if alive:

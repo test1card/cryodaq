@@ -20,6 +20,7 @@ from typing import Any
 from PySide6.QtCore import QThread, Signal
 
 from cryodaq.core.zmq_subprocess import (
+    DEFAULT_ASSISTANT_CMD_ADDR,
     DEFAULT_CMD_ADDR,
     DEFAULT_PUB_ADDR,
     zmq_bridge_main,
@@ -65,9 +66,14 @@ class ZmqBridge:
         self,
         pub_addr: str = DEFAULT_PUB_ADDR,
         cmd_addr: str = DEFAULT_CMD_ADDR,
+        assistant_cmd_addr: str = DEFAULT_ASSISTANT_CMD_ADDR,
     ) -> None:
         self._pub_addr = pub_addr
         self._cmd_addr = cmd_addr
+        # B1: assistant.*/rag.* commands route here instead — see
+        # core/zmq_subprocess.py's cmd_forward_loop. Defaulted so no
+        # call site needs to change to pick this up.
+        self._assistant_cmd_addr = assistant_cmd_addr
         self._data_queue: mp.Queue = mp.Queue(maxsize=10_000)
         self._cmd_queue: mp.Queue = mp.Queue(maxsize=1_000)
         self._reply_queue: mp.Queue = mp.Queue(maxsize=1_000)
@@ -115,6 +121,7 @@ class ZmqBridge:
                 self._cmd_queue,
                 self._reply_queue,
                 self._shutdown_event,
+                self._assistant_cmd_addr,
             ),
             daemon=True,
             name="zmq_bridge",

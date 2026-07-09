@@ -103,11 +103,14 @@ cryodaq-replay-curve = "cryodaq.replay.cli:main"
 # F32 RAG indexer Stage 1
 cryodaq-rag-index = "cryodaq.agents.rag.cli:index_main"
 cryodaq-rag-search = "cryodaq.agents.rag.cli:search_main"
+# B1 (2026-07): Гемма + RAG process extraction — see scratchpad/montana/exec/impl_b1.md
+cryodaq-assistant = "cryodaq.agents.assistant_main:main"
 # Frozen entry points — used by PyInstaller spec. Call freeze_support()
 # BEFORE importing PySide6 / cryodaq submodules to avoid Windows fork bomb.
 cryodaq-frozen = "cryodaq._frozen_main:main_launcher"
 cryodaq-frozen-engine = "cryodaq._frozen_main:main_engine"
 cryodaq-frozen-gui = "cryodaq._frozen_main:main_gui"
+cryodaq-frozen-assistant = "cryodaq._frozen_main:main_assistant"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cryodaq"]

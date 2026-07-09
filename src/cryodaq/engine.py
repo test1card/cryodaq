@@ -28,11 +28,6 @@ from typing import Any
 
 import yaml
 
-from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
-from cryodaq.agents.assistant.live.context_builder import ContextBuilder
-from cryodaq.agents.assistant.live.output_router import OutputRouter
-from cryodaq.agents.assistant.shared.audit import AuditLogger
-from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -104,42 +99,6 @@ _DATA_DIR = get_data_dir()
 _WATCHDOG_INTERVAL_S = 30.0
 _LOG_GET_TIMEOUT_S = 5.0
 _EXPERIMENT_STATUS_TIMEOUT_S = 5.0
-
-
-async def _periodic_report_tick(
-    agent_config: AssistantConfig,
-    event_bus: EventBus,
-    experiment_manager: ExperimentManager,
-    *,
-    sleep=asyncio.sleep,
-) -> None:
-    """Publish periodic_report_request events on the assistant schedule."""
-    interval_s = float(agent_config.get_periodic_report_interval_s())
-    if interval_s <= 0:
-        logger.info("Periodic assistant reports disabled (interval=0)")
-        return
-
-    window_minutes = int(agent_config.periodic_report_interval_minutes)
-    while True:
-        await sleep(interval_s)
-        try:
-            experiment_id = getattr(experiment_manager, "active_experiment_id", None)
-            if experiment_id is None:
-                active = getattr(experiment_manager, "active_experiment", None)
-                experiment_id = getattr(active, "experiment_id", None) if active else None
-            await event_bus.publish(
-                EngineEvent(
-                    event_type="periodic_report_request",
-                    timestamp=datetime.now(UTC),
-                    payload={
-                        "window_minutes": window_minutes,
-                        "trigger": "scheduled",
-                    },
-                    experiment_id=experiment_id,
-                )
-            )
-        except Exception as exc:
-            logger.error("Periodic assistant report tick error: %s", exc)
 
 
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
@@ -319,62 +278,75 @@ async def _run_operator_log_command(
     raise ValueError(f"Unsupported operator log command: {action}")
 
 
-async def _handle_assistant_query_command(
-    query_agent: Any,
-    cmd: dict[str, Any],
-    *,
-    timeout_s: float = 50.0,  # H7: bumped from 25s for Ollama cold-start
-) -> dict[str, Any]:
-    """Dispatch ``assistant.query`` GUI/Telegram command to AssistantQueryAgent.
+class _RemoteAssistantQueryProxy:
+    """Forwards Telegram free-text chat to the cryodaq-assistant process.
 
-    F34: extracted as a module-level helper so the dispatch logic is unit-
-    testable without spinning up the full engine. Mirrors the exception
-    hierarchy of :class:`AssistantQueryAgent.handle_query` (never raises;
-    returns a Russian error string-shaped dict on every failure path).
-
-    Default ``timeout_s`` (50 s) is chosen to absorb Ollama cold-start
-    on the first query after engine boot: loading gemma4:e2b takes
-    20–40 s, and the previous 25 s ceiling fired before the model had
-    finished loading, surfacing a Russian "Запрос обрабатывался слишком
-    долго" error on the operator's first GUI query. The surrounding
-    transport budget is bumped in lockstep and nests strictly: ZMQ slow
-    envelope ``HANDLER_TIMEOUT_SLOW_S`` is 55 s (``core/zmq_bridge.py``)
-    < subprocess REQ socket ``SUBPROCESS_REQ_TIMEOUT_S`` 60 s
-    (``core/zmq_subprocess.py``) < GUI client reply timeout
-    ``_CMD_REPLY_TIMEOUT_S`` 65 s (``gui/zmq_client.py``); Telegram path
-    stays at 60 s via ``telegram_commands.py`` (it does not flow through
-    the ZMQ REP server). Subsequent warm-cache queries land well under 5 s.
+    B1: ``TelegramCommandBot._handle_text`` (notifications/telegram_commands.py)
+    calls ``self._query_agent.handle_query(text, chat_id=chat_id)`` for any
+    non-command message. That used to be the in-process
+    ``AssistantQueryAgent``; now it's this proxy, which sends the exact
+    same request to the assistant process's own REP socket
+    (``tcp://127.0.0.1:5557``, ``{"cmd": "assistant.query", ...}``) and
+    returns its answer. This is the engine calling OUT to the assistant
+    for a read-only answer — the opposite direction from (and unrelated
+    to) the no-write-path-into-the-engine constraint on the assistant
+    process itself.
     """
-    query = str(cmd.get("query", "")).strip()
-    chat_id = cmd.get("chat_id", "gui")
-    if not query:
-        return {"ok": False, "error": "Пустой запрос."}
-    if query_agent is None:
-        return {
-            "ok": False,
-            "error": (
-                "AssistantQueryAgent не сконфигурирован "
-                "(query_enabled=false в agent.yaml)."
-            ),
-        }
-    try:
-        response = await asyncio.wait_for(
-            query_agent.handle_query(query, chat_id=chat_id),
-            timeout=timeout_s,
-        )
-        return {"ok": True, "response": response}
-    except TimeoutError:
-        return {
-            "ok": False,
-            "error": (
-                f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). "
-                "Попробуй ещё раз — модель уже прогрелась — "
-                "или используй Telegram-бота для длинных вопросов."
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("assistant.query error: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
+
+    def __init__(
+        self,
+        address: str = "tcp://127.0.0.1:5557",
+        *,
+        timeout_s: float = 55.0,
+    ) -> None:
+        self._address = address
+        self._timeout_ms = int(timeout_s * 1000)
+
+    async def handle_query(self, query: str, *, chat_id: Any) -> str:
+        import json as _json  # noqa: PLC0415
+
+        import zmq  # noqa: PLC0415
+        import zmq.asyncio  # noqa: PLC0415
+
+        ctx = zmq.asyncio.Context.instance()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        try:
+            sock.connect(self._address)
+            await sock.send_string(
+                _json.dumps({"cmd": "assistant.query", "query": query, "chat_id": chat_id})
+            )
+            reply = _json.loads(await sock.recv_string())
+        except Exception as exc:  # noqa: BLE001
+            return f"🤖 Гемма: ассистент недоступен ({exc})."
+        finally:
+            sock.close(linger=0)
+        if reply.get("ok"):
+            return str(reply.get("response", ""))
+        return str(reply.get("error", "Ассистент вернул ошибку."))
+
+
+def _assistant_process_unavailable_reply(action: str) -> dict[str, Any]:
+    """B1: Гемма/RAG moved out of the engine into the standalone
+    ``cryodaq-assistant`` process (own REP at ``tcp://127.0.0.1:5557``).
+
+    The GUI's ZMQ bridge subprocess routes ``assistant.*`` / ``rag.*``
+    actions directly to that port now (see ``core/zmq_subprocess.py``),
+    so this engine-side handler should not normally be hit. It exists as
+    a backward-compat safety net — an old bridge build, or any other
+    client still pointed at the engine's REP (:5556) for these actions —
+    gets a clear redirect message instead of "unknown command".
+    """
+    return {
+        "ok": False,
+        "error": (
+            f"'{action}' обслуживается процессом cryodaq-assistant "
+            "(tcp://127.0.0.1:5557), а не engine. Убедитесь, что ассистент "
+            "запущен, и что GUI подключается к его порту."
+        ),
+    }
 
 
 def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
@@ -822,71 +794,6 @@ def _format_diag_telegram_messages(
     ]
 
 
-async def _handle_rag_search_command(
-    rag_searcher: Any,
-    cmd: dict[str, Any],
-    *,
-    timeout_s: float = 30.0,
-) -> dict[str, Any]:
-    """Dispatch ``rag.search`` GUI command to the F32 RagSearcher.
-
-    Module-level helper mirrors :func:`_handle_assistant_query_command` so
-    the v0.55.6 knowledge-base overlay's dispatch path is unit-testable
-    without spinning up the engine. Returns a serialised list of
-    SearchResult dicts on success or a Russian error string-shaped dict
-    on every failure (missing index, empty query, timeout, exception).
-    """
-    if rag_searcher is None:
-        return {
-            "ok": False,
-            "error": "RAG индекс не построен. Запустите cryodaq-rag-index.",
-        }
-    query = str(cmd.get("query", "")).strip()
-    if not query:
-        return {"ok": False, "error": "Пустой запрос."}
-    top_k = int(cmd.get("limit", cmd.get("top_k", 10)))
-    raw_filter = cmd.get("source_kind_filter")
-    if raw_filter is None:
-        source_kind_filter: list[str] | None = None
-    elif isinstance(raw_filter, list):
-        source_kind_filter = [str(x) for x in raw_filter]
-    else:
-        source_kind_filter = [str(raw_filter)]
-    try:
-        results = await asyncio.wait_for(
-            rag_searcher.search(
-                query,
-                top_k=top_k,
-                source_kind_filter=source_kind_filter,
-            ),
-            timeout=timeout_s,
-        )
-        return {
-            "ok": True,
-            "results": [
-                {
-                    "chunk_id": r.chunk_id,
-                    "source_kind": r.source_kind,
-                    "source_id": r.source_id,
-                    "text": r.text,
-                    "metadata": r.metadata,
-                    "score": r.score,
-                }
-                for r in results
-            ],
-        }
-    except TimeoutError:
-        return {
-            "ok": False,
-            "error": (
-                f"RAG-поиск занял больше {timeout_s:g}с — возможно Ollama зависла."
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("rag.search error: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
-
-
 async def _handle_multiline_set_channels_command(
     cmd: dict[str, Any],
     *,
@@ -1192,225 +1099,10 @@ async def _handle_multiline_burst_command(
     return {"ok": False, "error": f"unknown burst action: {action}"}
 
 
-# v0.55.7.1 — rag.rebuild_index command state machine. Single-instance:
-# concurrent rebuild is rejected с a Russian error string. State is
-# module-level rather than per-engine because the rebuild is also
-# operator-facing (GUI poll), and idle/running/complete/failed maps
-# directly к the panel's status label states. The accompanying task
-# ref is also held here; engine startup constructs both fresh.
-_rag_rebuild_state: dict[str, Any] = {
-    "state": "idle",
-    "started_at": None,
-    "finished_at": None,
-    "chunks_indexed": 0,
-    "error": None,
-}
-_rag_rebuild_task: asyncio.Task[None] | None = None
-
-
-def _rag_rebuild_status_snapshot() -> dict[str, Any]:
-    """Return a JSON-serialisable copy of the rebuild state."""
-    return {
-        "ok": True,
-        "state": _rag_rebuild_state["state"],
-        "started_at": _rag_rebuild_state["started_at"],
-        "finished_at": _rag_rebuild_state["finished_at"],
-        "chunks_indexed": _rag_rebuild_state["chunks_indexed"],
-        "error": _rag_rebuild_state["error"],
-    }
-
-
-async def _run_rag_rebuild(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    """Body of the manual rebuild task.
-
-    Updates ``_rag_rebuild_state`` in-place across the lifecycle so
-    poll responses always reflect the latest state. Failures populate
-    ``error`` field rather than re-raising; the engine task wrapper
-    discards the task ref после completion.
-    """
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        _rag_rebuild_state.update(
-            {
-                "state": "complete",
-                "finished_at": time.time(),
-                "chunks_indexed": int(stats.get("indexed", 0)),
-                "error": None,
-            }
-        )
-        logger.info(
-            "RAG manual rebuild complete: %d chunks indexed в %s",
-            stats.get("indexed", 0),
-            db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _rag_rebuild_state.update(
-            {
-                "state": "failed",
-                "finished_at": time.time(),
-                "error": str(exc),
-            }
-        )
-        logger.error("RAG manual rebuild failed: %s", exc, exc_info=True)
-
-
-async def _handle_rag_rebuild_command(
-    action: str,
-    cmd: dict[str, Any],
-    *,
-    db_path: Path | None,
-    embeddings_client: Any | None,
-    knowledge_dir: Path | None,
-    experiments_dir: Path | None,
-    sqlite_path: Path | None,
-    repo_root: Path | None,
-) -> dict[str, Any]:
-    """Dispatch ``rag.rebuild_index`` / ``rag.rebuild_status`` GUI commands.
-
-    Module-level helper (mirrors ``_handle_assistant_query_command``)
-    so the closure inside ``_handle_gui_command`` is a one-line delegate
-    and tests can exercise the dispatch path without spinning up an
-    engine. Concurrent rebuilds rejected — operator must wait for the
-    current run to finish before re-clicking the GUI button.
-    """
-    global _rag_rebuild_task
-
-    if action == "rag.rebuild_status":
-        return _rag_rebuild_status_snapshot()
-
-    if action != "rag.rebuild_index":
-        return {"ok": False, "error": f"unknown rebuild action: {action}"}
-
-    if _rag_rebuild_state["state"] == "running":
-        return {
-            "ok": False,
-            "error": "Rebuild уже идёт — дождитесь завершения.",
-        }
-    if (
-        embeddings_client is None
-        or db_path is None
-        or knowledge_dir is None
-        or experiments_dir is None
-        or repo_root is None
-    ):
-        return {
-            "ok": False,
-            "error": "RAG не сконфигурирован (config/rag.yaml отсутствует?).",
-        }
-
-    # Reset state — operator-clicked start always wins over a stale
-    # complete/failed status from a previous run.
-    _rag_rebuild_state.update(
-        {
-            "state": "running",
-            "started_at": time.time(),
-            "finished_at": None,
-            "chunks_indexed": 0,
-            "error": None,
-        }
-    )
-    _rag_rebuild_task = asyncio.create_task(
-        _run_rag_rebuild(
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            knowledge_dir=knowledge_dir,
-            experiments_dir=experiments_dir,
-            sqlite_path=sqlite_path,
-            repo_root=repo_root,
-        ),
-        name="rag_manual_rebuild",
-    )
-    return {
-        "ok": True,
-        "state": "running",
-        "started_at": _rag_rebuild_state["started_at"],
-    }
-
-
-async def _bootstrap_rag_index_if_empty(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    """Build the RAG index из bundled corpus if it's empty.
-
-    F-KnowledgeBaseExpansion (v0.55.7.1): operator demos на свежем
-    клон должны видеть базу знаний без manual ``cryodaq-rag-index``
-    step. The engine fires this as ``asyncio.create_task`` — the
-    bootstrap progresses в фоне; engine ``ready`` signal is NOT
-    awaited on it. Failures are logged but never propagated; operator
-    briefly sees empty KnowledgeBasePanel, then it populates без
-    restart once embeddings finish.
-
-    Idempotent: probes the index с a 1-result search; non-empty
-    response → skip. Pre-existing tables therefore safe to leave
-    alone (e.g. RAGIndexSink built one earlier in this engine's
-    lifetime, or a manual ``cryodaq-rag-index`` run).
-    """
-    try:
-        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
-
-        searcher = RagSearcher(
-            db_path=db_path, embeddings_client=embeddings_client
-        )
-        sample = await searcher.search("test", top_k=1)
-        if sample:
-            logger.info(
-                "RAG index already populated (%d sample), skipping bootstrap",
-                len(sample),
-            )
-            return
-    except Exception as exc:  # noqa: BLE001
-        # Probe failure is expected on the very first run (table missing).
-        # Log at INFO — that path IS the bootstrap's reason for existing.
-        logger.info("RAG index probe failed, proceeding with bootstrap: %s", exc)
-
-    logger.info("RAG bootstrap starting from bundled sources в %s", knowledge_dir)
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,  # vault не bundled
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        logger.info(
-            "RAG bootstrap complete: %d chunks indexed в %s",
-            stats.get("indexed", 0),
-            db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
-
-
+# B1 (2026-07): the rag.rebuild_index state machine + bootstrap-on-empty
+# index logic below moved to cryodaq.agents.assistant_main — the standalone
+# assistant process now owns the RAG index end-to-end (own REP command
+# surface at tcp://127.0.0.1:5557). See scratchpad/montana/exec/impl_b1.md.
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -3389,13 +3081,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if _vacuum_guard is None:
                     return {"state": "UNAVAILABLE"}
                 return {"state": _vacuum_guard.state.name}
-            if action == "assistant.query":
-                # F34: Гемма chat overlay reuses F30 AssistantQueryAgent.
-                return await _handle_assistant_query_command(_query_agent, cmd)
-            if action == "rag.search":
-                # v0.55.6 — knowledge-base GUI overlay calls this from
-                # ZmqCommandWorker. Helper extracted for unit-testing.
-                return await _handle_rag_search_command(_rag_searcher, cmd)
+            if action in ("assistant.query", "rag.search"):
+                # B1 (2026-07): the GUI bridge routes these directly to
+                # the cryodaq-assistant process's own REP (:5557) now —
+                # this is a backward-compat fallback, see the helper.
+                return _assistant_process_unavailable_reply(action)
             if action == "multiline.set_channels":
                 # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
                 # channels via the panel selector dialog.
@@ -3462,20 +3152,17 @@ async def _run_engine(*, mock: bool = False) -> None:
                     _multiline_burst_auto_stop_tasks[target_name] = _t
                 return response
             if action in ("rag.rebuild_index", "rag.rebuild_status"):
-                # v0.55.7.1 PHASE 8 — operator-driven «Обновить индекс»
-                # in KnowledgeBasePanel. Single-instance enforced inside
-                # the helper; concurrent click rejected. State machine
-                # exposed via rag.rebuild_status poll.
-                return await _handle_rag_rebuild_command(
-                    action,
-                    cmd,
-                    db_path=_rag_rebuild_db_path,
-                    embeddings_client=_rag_rebuild_embeddings,
-                    knowledge_dir=_rag_rebuild_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                )
+                # B1 (2026-07): moved to cryodaq-assistant's own REP (:5557).
+                return _assistant_process_unavailable_reply(action)
+            if action == "cooldown_eta_get":
+                # B1 (2026-07): additive read-only command — exposes the
+                # same CooldownService.last_prediction() the old in-process
+                # CooldownAdapter read directly, now for the assistant
+                # process's ZMQ-based CooldownAdapter (agents/assistant/
+                # query/adapters/cooldown_adapter.py). Never a write path.
+                if cooldown_service is None:
+                    return {"ok": True, "prediction": None}
+                return {"ok": True, "prediction": cooldown_service.last_prediction()}
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды '%s': %s", action, exc)
@@ -3609,243 +3296,51 @@ async def _run_engine(*, mock: bool = False) -> None:
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
 
-    # --- AssistantLiveAgent (Гемма local LLM agent) ---
-    _agent_cfg_path = _CONFIG_DIR / "agent.yaml"
-    _gemma_config: AssistantConfig | None = None
-    gemma_agent: AssistantLiveAgent | None = None
-    if _agent_cfg_path.exists():
-        try:
-            _gemma_config = AssistantConfig.from_yaml_path(_agent_cfg_path)
-            if _gemma_config.enabled:
-                _gemma_ollama = OllamaClient(
-                    base_url=_gemma_config.ollama_base_url,
-                    default_model=_gemma_config.default_model,
-                    timeout_s=_gemma_config.timeout_s,
-                )
-                # v0.55.5 — pass a lazy snapshot fn so the hourly periodic
-                # report can include a sensor-health digest without coupling
-                # ContextBuilder to the SensorDiagnosticsEngine instance.
-                _sd_for_ctx = sensor_diag
-                _gemma_ctx = ContextBuilder(
-                    writer,
-                    experiment_manager,
-                    sensor_diag_provider=(
-                        _sd_for_ctx.get_summary if _sd_for_ctx is not None else None
-                    ),
-                )
-                _gemma_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "assistant" / "audit",
-                    enabled=_gemma_config.audit_enabled,
-                    retention_days=_gemma_config.audit_retention_days,
-                )
-                _gemma_router = OutputRouter(
-                    telegram_bot=telegram_bot,
-                    event_logger=event_logger,
-                    event_bus=event_bus,
-                    brand_name=_gemma_config.brand_name,
-                    brand_emoji=_gemma_config.brand_emoji,
-                )
-                gemma_agent = AssistantLiveAgent(
-                    config=_gemma_config,
-                    event_bus=event_bus,
-                    ollama_client=_gemma_ollama,
-                    context_builder=_gemma_ctx,
-                    audit_logger=_gemma_audit,
-                    output_router=_gemma_router,
-                )
-                logger.info(
-                    "AssistantLiveAgent (Гемма): инициализирован, модель=%s",
-                    _gemma_config.default_model,
-                )
-        except Exception as _gemma_exc:
-            logger.warning("AssistantLiveAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)  # noqa: E501 — single RU log call, splitting hurts grep-ability
-    else:
-        logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
+    # --- B1 (2026-07): Гемма (AssistantLiveAgent), RAG searcher, and
+    # AssistantQueryAgent (F30 live chat) all moved to the standalone
+    # cryodaq-assistant process (agents/assistant_main.py) — the engine no
+    # longer imports agents/ at all. The engine keeps only:
+    #  - the events relay below (publishes the EngineEvent types Гемма
+    #    reacts to onto the ZMQ "events" topic — see core/zmq_bridge.py);
+    #  - a read-only proxy so Telegram free-text chat (previously
+    #    ``telegram_bot._query_agent = <in-process AssistantQueryAgent>``)
+    #    still resolves, by forwarding to the assistant process's own
+    #    REP (:5557) instead of calling an in-process object.
+    # See scratchpad/montana/exec/impl_b1.md for the full design.
+    if telegram_bot is not None:
+        telegram_bot._query_agent = _RemoteAssistantQueryProxy()
 
-    # --- F32 RAG searcher (relocated from post-QueryAdapters in v0.55.7 so
-    #     the AssistantQueryAgent KNOWLEDGE_QUERY adapter can wrap the same
-    #     RagSearcher instance the GUI knowledge-base overlay already uses).
-    _rag_searcher: Any = None
-    # v0.55.7.1: handles for the rebuild dispatch helper. Populated
-    # below when the searcher block successfully resolves config.
-    _rag_rebuild_db_path: Path | None = None
-    _rag_rebuild_embeddings: Any | None = None
-    _rag_rebuild_knowledge_dir: Path | None = None
-    try:
-        from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
-        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
+    # B1: relay the EngineEvent types the assistant process's
+    # AssistantLiveAgent reacts to onto the ZMQ "events" topic (additive —
+    # existing GUI subscribers only subscribe to the "readings" topic and
+    # never see this). Generic forwarder, not agents/-specific: it does
+    # not know what Гемма does with these events, only that these are the
+    # event types worth shipping across the process boundary.
+    _ASSISTANT_RELAY_EVENT_TYPES = frozenset(
+        {
+            "alarm_fired",
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+            "sensor_anomaly_critical",
+            "shift_handover_request",
+            "periodic_report_request",
+        }
+    )
 
-        # v0.55.14 — config-resolution
-        # priority: rag.local.yaml → rag.yaml → rag.yaml.example.
-        # The v0.55.7 ship report claimed an example fallback existed
-        # but the code didn't implement it; now it does. The example
-        # ships in-repo so RAG defaults are always available.
-        _rag_cfg_path = _CONFIG_DIR / "rag.local.yaml"
-        _rag_cfg_source = "rag.local.yaml"
-        if not _rag_cfg_path.exists():
-            _rag_cfg_path = _CONFIG_DIR / "rag.yaml"
-            _rag_cfg_source = "rag.yaml"
-        if not _rag_cfg_path.exists():
-            _rag_cfg_path = _CONFIG_DIR / "rag.yaml.example"
-            _rag_cfg_source = "rag.yaml.example (defaults)"
-        if _rag_cfg_path.exists():
-            import yaml as _yaml  # noqa: PLC0415
-
-            _rag_raw = _yaml.safe_load(_rag_cfg_path.read_text(encoding="utf-8")) or {}
-            _rag_cfg = _rag_raw.get("rag", {})
-            _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
-            _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
-            _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
-            # v0.55.7.1: default fallback aligned с modernized stack —
-            # qwen3-embedding:0.6b (1024d). Older v0.55.7 default
-            # multilingual-e5-small (384d) deprecated due к Ollama
-            # 0.23+ runtime incompatibility for community uploads.
-            _rag_emb_model = str(_rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            _rag_knowledge_dir = Path(  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
-                str(_rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
-            ).expanduser()
-            # v0.55.7.1: create searcher unconditionally — LanceDB
-            # connects lazily on the first .search() call, so an
-            # absent db_path is fine. Bootstrap (below) will populate
-            # the index from the bundled corpus в фоне; the searcher
-            # itself returns [] from search() until the table exists.
-            _rag_db_path.mkdir(parents=True, exist_ok=True)
-            _rag_emb = EmbeddingsClient(
-                base_url=_rag_emb_url,
-                model=_rag_emb_model,
-            )
-            _rag_searcher = RagSearcher(
-                db_path=_rag_db_path,
-                embeddings_client=_rag_emb,
-                table_name=_rag_table,
-            )
-            # Hand off resolved paths к the rebuild dispatch helper.
-            _rag_rebuild_db_path = _rag_db_path
-            _rag_rebuild_embeddings = _rag_emb
-            _rag_rebuild_knowledge_dir = _rag_knowledge_dir
-            logger.info(
-                "RAG searcher: инициализирован (config=%s, db=%s, table=%s, knowledge=%s)",
-                _rag_cfg_source,
-                _rag_db_path,
-                _rag_table,
-                _rag_knowledge_dir,
-            )
-            # v0.55.7.1 PHASE 6: fire-and-forget bootstrap. Engine
-            # ready signal does NOT await this; the operator may
-            # briefly see empty KnowledgeBasePanel during first boot
-            # of a fresh deploy, then it populates без restart.
-            asyncio.create_task(
-                _bootstrap_rag_index_if_empty(
-                    db_path=_rag_db_path,
-                    embeddings_client=_rag_emb,
-                    knowledge_dir=_rag_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                ),
-                name="rag_bootstrap",
-            )
-        else:
-            logger.info(
-                "RAG searcher: ни rag.local.yaml/rag.yaml/rag.yaml.example "
-                "не найдены — RAG отключён"
-            )
-    except Exception as _rag_exc:
-        logger.warning("RAG searcher: ошибка инициализации — %s", _rag_exc)
-        _rag_searcher = None
-
-    # --- AssistantQueryAgent (F30 Live Query) ---
-    _query_agent: Any = None
-    _q_broker_snap: Any = None
-    if _gemma_config is not None and _gemma_config.query_enabled:
-        try:
-            from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
-            from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
-            from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
-            from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
-            from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
-            from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
-            from cryodaq.agents.assistant.query.adapters.rag_adapter import RAGAdapter
-            from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
-            from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
-            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
-            from cryodaq.agents.assistant.query.schemas import QueryAdapters
-
-            try:
-                _q_ollama = _gemma_ollama
-                _q_audit = _gemma_audit
-            except NameError:
-                _q_ollama = OllamaClient(
-                    base_url=_gemma_config.ollama_base_url,
-                    default_model=_gemma_config.default_model,
-                    timeout_s=_gemma_config.timeout_s,
-                )
-                _q_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "assistant" / "audit",
-                    enabled=_gemma_config.audit_enabled,
-                )
-
-            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
-            await _q_broker_snap.start()
-
-            _q_cooldown = CooldownAdapter(cooldown_service)
-            _q_vacuum = VacuumAdapter(vacuum_trend)
-            _q_sqlite = SQLiteAdapter(writer)
-            _q_alarms = AlarmAdapter(alarm_v2_state_mgr)
-            _q_experiment = ExperimentAdapter(experiment_manager)
-            _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
-            _q_rag = RAGAdapter(_rag_searcher)
-            _q_composite = CompositeAdapter(
-                broker_snapshot=_q_broker_snap,
-                cooldown=_q_cooldown,
-                vacuum=_q_vacuum,
-                alarms=_q_alarms,
-                experiment=_q_experiment,
+    async def _assistant_event_relay_loop(queue: asyncio.Queue[EngineEvent]) -> None:
+        while True:
+            event = await queue.get()
+            if event.event_type not in _ASSISTANT_RELAY_EVENT_TYPES:
+                continue
+            await zmq_pub.publish_event(
+                event_type=event.event_type,
+                timestamp=event.timestamp,
+                payload=event.payload,
+                experiment_id=event.experiment_id,
             )
 
-            from cryodaq.agents.assistant.query.chart_dispatcher import (
-                ChartDispatcher,  # noqa: PLC0415
-            )
-
-            _q_chart_dispatcher: ChartDispatcher | None = None
-            if telegram_bot is not None:
-                _q_chart_dispatcher = ChartDispatcher(
-                    send_photo=telegram_bot.send_photo
-                )
-
-            _query_agent = AssistantQueryAgent(
-                ollama_client=_q_ollama,
-                audit_logger=_q_audit,
-                config=_gemma_config,
-                adapters=QueryAdapters(
-                    broker_snapshot=_q_broker_snap,
-                    cooldown=_q_cooldown,
-                    vacuum=_q_vacuum,
-                    sqlite=_q_sqlite,
-                    alarms=_q_alarms,
-                    experiment=_q_experiment,
-                    composite=_q_composite,
-                    archive=_q_archive,
-                    rag=_q_rag,
-                ),
-                intent_model=_gemma_config.query_intent_model,
-                format_model=_gemma_config.query_format_model,
-                intent_temperature=_gemma_config.query_intent_temperature,
-                format_temperature=_gemma_config.query_format_temperature,
-                intent_timeout_s=_gemma_config.query_intent_timeout_s,
-                format_timeout_s=_gemma_config.query_format_timeout_s,
-                max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
-                channel_manager=get_channel_manager(),
-                chart_dispatcher=_q_chart_dispatcher,
-            )
-
-            if telegram_bot is not None:
-                telegram_bot._query_agent = _query_agent
-            logger.info("AssistantQueryAgent (F30): инициализирован")
-        except Exception as _q_exc:
-            logger.warning(
-                "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
-            )
+    _assistant_relay_queue = await event_bus.subscribe("assistant_zmq_relay", maxsize=1000)
 
     # --- Запуск всех подсистем ---
     await safety_manager.start()
@@ -4003,18 +3498,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         await telegram_bot.start()
     if _photo_handler is not None:
         await _photo_handler.start()
-    if gemma_agent is not None:
-        try:
-            await gemma_agent.start()
-        except Exception as _gemma_start_exc:
-            logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)  # noqa: E501 — single RU log call, splitting hurts grep-ability
-            gemma_agent = None
-    periodic_report_tick_task: asyncio.Task | None = None
-    if _gemma_config is not None and _gemma_config.periodic_report_enabled:
-        periodic_report_tick_task = _spawn_supervised(
-            "periodic_report_tick",
-            lambda: _periodic_report_tick(_gemma_config, event_bus, experiment_manager),
-        )
+    # B1: relay EngineEvents to the assistant process over ZMQ (see the
+    # wiring comment above _assistant_relay_queue for what this replaces).
+    assistant_event_relay_task = _spawn_supervised(
+        "assistant_event_relay",
+        lambda: _assistant_event_relay_loop(_assistant_relay_queue),
+    )
     await scheduler.start()
     throttle_task = _spawn_supervised("adaptive_throttle_runtime", _track_runtime_signals)
     alarm_v2_feed_task = _spawn_supervised("alarm_v2_feed", _alarm_v2_feed_readings)
@@ -4274,12 +3763,11 @@ async def _run_engine(*, mock: bool = False) -> None:
             await vt_tick_task
         except asyncio.CancelledError:
             pass
-    if periodic_report_tick_task is not None:
-        periodic_report_tick_task.cancel()
-        try:
-            await periodic_report_tick_task
-        except asyncio.CancelledError:
-            pass
+    assistant_event_relay_task.cancel()
+    try:
+        await assistant_event_relay_task
+    except asyncio.CancelledError:
+        pass
     leak_rate_feed_task.cancel()
     try:
         await leak_rate_feed_task
@@ -4316,13 +3804,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         await periodic_reporter.stop()
         logger.info("PeriodicReporter остановлен")
 
-    if gemma_agent is not None:
-        await gemma_agent.stop()
-        logger.info("AssistantLiveAgent (Гемма) остановлен")
-
-    if _q_broker_snap is not None:
-        await _q_broker_snap.stop()
-        logger.info("QueryAgent BrokerSnapshot остановлен")
+    event_bus.unsubscribe("assistant_zmq_relay")
 
     if _photo_handler is not None:
         await _photo_handler.stop()

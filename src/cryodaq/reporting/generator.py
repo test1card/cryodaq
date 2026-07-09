@@ -84,22 +84,15 @@ class ReportGenerator:
         raw_sections = self._resolve_raw_sections(dataset.metadata)
         editable_sections = tuple(list(raw_sections) + list(self._EDITABLE_ONLY_SECTIONS))
 
-        # Slice C: Гемма-generated annotation (sync, graceful degradation)
+        # B1 (2026-07): Гемма-generated annotation used to be produced
+        # in-process here (import + synchronous Ollama call from the
+        # engine process). B1 moved all LLM/RAG code out of the engine —
+        # the intro paragraph is not reinstated via a cross-process call
+        # in this pass (see scratchpad/montana/exec/impl_b1.md, "forks").
+        # ``_build_document`` already treats ``gemma_intro=None`` as
+        # "skip the annotation section", which is exactly the existing
+        # graceful-degradation behaviour when Ollama was unavailable.
         gemma_intro: str | None = None
-        try:
-            from cryodaq.agents.assistant.shared.report_intro import (
-                generate_report_intro,
-                load_intro_config,
-            )
-
-            gemma_intro = generate_report_intro(dataset, load_intro_config())
-        except Exception:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "ReportGenerator: Гемма intro unavailable — continuing without",
-                exc_info=True,
-            )
 
         raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro)
         raw_document.save(str(raw_source_docx_path))

@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 # Re-export constants so GUI code doesn't need to import zmq_bridge
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
+# B1 (2026-07): cryodaq-assistant's own REP (Гемма + RAG, see
+# agents/assistant_main.py). ``assistant.*`` / ``rag.*`` commands route
+# here instead of the engine's DEFAULT_CMD_ADDR — additive, no change to
+# any other command's routing.
+DEFAULT_ASSISTANT_CMD_ADDR = "tcp://127.0.0.1:5557"
+# Command name prefixes routed to DEFAULT_ASSISTANT_CMD_ADDR instead of
+# the engine's cmd_addr.
+_ASSISTANT_CMD_PREFIXES = ("assistant.", "rag.")
 # Mirror of zmq_bridge.DEFAULT_TOPIC. Duplicated (not imported) because this
 # module is loaded in the GUI process, which must not import zmq/zmq_bridge
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
@@ -72,6 +80,7 @@ def zmq_bridge_main(
     cmd_queue: mp.Queue,
     reply_queue: mp.Queue,
     shutdown_event: mp.Event,
+    assistant_cmd_addr: str = DEFAULT_ASSISTANT_CMD_ADDR,
 ) -> None:
     """Entry point for ZMQ bridge subprocess.
 
@@ -90,6 +99,13 @@ def zmq_bridge_main(
         Subprocess → GUI: command reply dicts.
     shutdown_event:
         Set by GUI to signal clean shutdown.
+    assistant_cmd_addr:
+        B1: cryodaq-assistant's own REP address, e.g.
+        "tcp://127.0.0.1:5557". ``assistant.*`` / ``rag.*`` commands are
+        routed here instead of ``cmd_addr`` — see ``_ASSISTANT_CMD_PREFIXES``.
+        If the assistant process isn't running, the REQ simply times out
+        the same way it would against a dead engine — same graceful
+        ``{"ok": False, ...}`` path, nothing new to handle.
     """
     import zmq
 
@@ -184,8 +200,8 @@ def zmq_bridge_main(
         command-channel-only failures and restart the bridge.
         """
 
-        def _new_req_socket():
-            """Build a fresh per-command REQ socket.
+        def _new_req_socket(addr: str):
+            """Build a fresh per-command REQ socket connected to ``addr``.
 
             IV.6: REQ_RELAXED / REQ_CORRELATE dropped — they were only
             useful for stateful recovery on a shared socket, which the
@@ -208,7 +224,7 @@ def zmq_bridge_main(
             _req_timeout_ms = int(SUBPROCESS_REQ_TIMEOUT_S * 1000)
             req.setsockopt(zmq.RCVTIMEO, _req_timeout_ms)
             req.setsockopt(zmq.SNDTIMEO, _req_timeout_ms)
-            req.connect(cmd_addr)
+            req.connect(addr)
             return req
 
         while not shutdown_event.is_set():
@@ -218,9 +234,17 @@ def zmq_bridge_main(
                 continue
             rid = cmd.pop("_rid", None) if isinstance(cmd, dict) else None
             cmd_type = cmd.get("cmd", "?") if isinstance(cmd, dict) else "?"
+            # B1: assistant.*/rag.* go to cryodaq-assistant's own REP,
+            # everything else to the engine — additive, all other
+            # commands keep going to cmd_addr exactly as before.
+            target_addr = (
+                assistant_cmd_addr
+                if isinstance(cmd_type, str) and cmd_type.startswith(_ASSISTANT_CMD_PREFIXES)
+                else cmd_addr
+            )
 
             # Fresh socket per command — no shared state across commands.
-            req = _new_req_socket()
+            req = _new_req_socket(target_addr)
             try:
                 try:
                     req.send_string(json.dumps(cmd))

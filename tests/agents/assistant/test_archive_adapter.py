@@ -1,14 +1,22 @@
 """F33 — ArchiveAdapter tests.
 
-Stubs out :class:`cryodaq.core.experiment.ExperimentManager` and the alarm-v2
-state manager so the adapter is exercised in isolation. Asserts on:
+B1 (2026-07): ArchiveAdapter now calls the engine's existing read-only REP
+commands (``experiment_archive_list`` / ``experiment_get_archive_item`` /
+``alarm_v2_history``) over ZMQ instead of holding direct references to
+``ExperimentManager`` / ``AlarmStateManager``. These tests mock
+``EngineQueryClient.call`` to return the same reply shapes those REP
+commands already produce, and verify:
 
-- ``list_recent`` honours ``days`` window + ``limit``.
-- ``get_detail`` reads ``metadata.json`` and exposes phases / cooldown_metrics.
+- ``list_recent`` unwraps the reply and truncates client-side to ``limit``
+  (the engine-side ``start_date`` window filtering is exercised by the
+  engine's own command tests — unchanged by this move).
+- ``get_detail`` still reads ``metadata.json`` directly from disk (an
+  archived experiment's file is immutable, no ZMQ round-trip needed) and
+  exposes phases / cooldown_metrics from it, unchanged from before.
 - ``get_detail`` returns ``None`` for a missing experiment id.
-- ``alarm_history_summary`` aggregates triggered/cleared transitions, drops
-  entries past the time window, and breaks down by alarm_id.
-- Each method returns ``None`` (never raises) when its dependency is absent.
+- ``alarm_history_summary`` aggregates triggered/cleared transitions and
+  breaks down by alarm_id from the ``alarm_v2_history`` reply.
+- Each method returns ``None`` (never raises) when the engine call fails.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -32,77 +41,38 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# ---------------------------------------------------------------------------
-# Test stubs
-# ---------------------------------------------------------------------------
+def _fake_client(**cmd_replies: dict) -> MagicMock:
+    """Stand-in for EngineQueryClient: dispatches by ``cmd["cmd"]``."""
+    client = MagicMock()
+
+    async def _call(cmd: dict) -> dict:
+        return cmd_replies.get(cmd["cmd"], {"ok": False, "error": "not stubbed"})
+
+    client.call = AsyncMock(side_effect=_call)
+    return client
 
 
-class _ArchiveEntryStub:
-    """Mimics the subset of ExperimentManager.ArchiveEntry the adapter reads."""
-
-    def __init__(
-        self,
-        *,
-        experiment_id: str,
-        sample: str = "sample-A",
-        operator: str = "Иванов",
-        status: str = "completed",
-        start_time: datetime | None = None,
-        end_time: datetime | None = None,
-        metadata_path: Path | None = None,
-    ) -> None:
-        self.experiment_id = experiment_id
-        self.title = ""
-        self.sample = sample
-        self.operator = operator
-        self.status = status
-        self.start_time = start_time or datetime.now(UTC) - timedelta(days=1)
-        self.end_time = end_time
-        self.metadata_path = metadata_path or Path("/tmp/nonexistent.json")
-        self.run_records = ()
-        self.artifact_index = ()
-        self.result_tables = ()
-
-    def to_payload(self) -> dict:
-        return {
-            "experiment_id": self.experiment_id,
-            "title": self.title,
-            "sample": self.sample,
-            "operator": self.operator,
-            "status": self.status,
-            "start_time": self.start_time.isoformat(),
-            "end_time": self.end_time.isoformat() if self.end_time else None,
-        }
-
-
-class _ExperimentManagerStub:
-    def __init__(self, entries: list[_ArchiveEntryStub]) -> None:
-        self._entries = entries
-
-    def list_archive_entries(
-        self,
-        *,
-        start_date=None,
-        sort_by="start_time",
-        descending=True,
-    ) -> list[_ArchiveEntryStub]:
-        if start_date is None:
-            return list(self._entries)
-        return [e for e in self._entries if e.start_time >= start_date]
-
-    def get_archive_item(self, experiment_id: str) -> _ArchiveEntryStub | None:
-        for e in self._entries:
-            if e.experiment_id == experiment_id:
-                return e
-        return None
-
-
-class _AlarmStateStub:
-    def __init__(self, history: list[dict]) -> None:
-        self._history = history
-
-    def get_history(self, limit: int = 50) -> list[dict]:
-        return list(self._history[-limit:])
+def _entry_payload(
+    *,
+    experiment_id: str,
+    sample: str = "sample-A",
+    operator: str = "Иванов",
+    status: str = "completed",
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    metadata_path: Path | None = None,
+) -> dict:
+    start_time = start_time or datetime.now(UTC) - timedelta(days=1)
+    return {
+        "experiment_id": experiment_id,
+        "title": "",
+        "sample": sample,
+        "operator": operator,
+        "status": status,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat() if end_time else None,
+        "metadata_path": str(metadata_path or Path("/tmp/nonexistent.json")),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +80,11 @@ class _AlarmStateStub:
 # ---------------------------------------------------------------------------
 
 
-def test_list_recent_filters_by_window(tmp_path: Path) -> None:
-    now = datetime.now(UTC)
-    entries = [
-        _ArchiveEntryStub(experiment_id="exp-1", start_time=now - timedelta(days=1)),
-        _ArchiveEntryStub(experiment_id="exp-2", start_time=now - timedelta(days=20)),
-    ]
-    em = _ExperimentManagerStub(entries)
-    adapter = ArchiveAdapter(em, alarm_v2_state_mgr=None)
+def test_list_recent_wraps_entries_reply() -> None:
+    entry = _entry_payload(experiment_id="exp-1")
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_archive_list={"ok": True, "entries": [entry]})
+    )
 
     result = _run(adapter.list_recent(days=7, limit=20))
 
@@ -128,13 +95,10 @@ def test_list_recent_filters_by_window(tmp_path: Path) -> None:
 
 
 def test_list_recent_caps_at_limit() -> None:
-    now = datetime.now(UTC)
-    entries = [
-        _ArchiveEntryStub(experiment_id=f"exp-{i}", start_time=now - timedelta(hours=i))
-        for i in range(30)
-    ]
-    em = _ExperimentManagerStub(entries)
-    adapter = ArchiveAdapter(em)
+    entries = [_entry_payload(experiment_id=f"exp-{i}") for i in range(30)]
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_archive_list={"ok": True, "entries": entries})
+    )
 
     result = _run(adapter.list_recent(days=7, limit=5))
 
@@ -143,17 +107,34 @@ def test_list_recent_caps_at_limit() -> None:
 
 
 def test_list_recent_empty_archive_returns_empty_result() -> None:
-    em = _ExperimentManagerStub([])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_archive_list={"ok": True, "entries": []})
+    )
     result = _run(adapter.list_recent(days=7))
     assert isinstance(result, ArchiveListResult)
     assert result.total_count == 0
     assert result.entries == []
 
 
-def test_list_recent_returns_none_when_em_missing() -> None:
-    adapter = ArchiveAdapter(None)
+def test_list_recent_returns_none_when_call_fails() -> None:
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_archive_list={"ok": False, "error": "engine недоступен"})
+    )
     assert _run(adapter.list_recent(days=7)) is None
+
+
+def test_list_recent_sends_start_date_and_sort_order() -> None:
+    """The adapter delegates window filtering to the engine command —
+    verify it actually asks for it (start_date present, newest-first)."""
+    client = _fake_client(experiment_archive_list={"ok": True, "entries": []})
+    adapter = ArchiveAdapter(client)
+    _run(adapter.list_recent(days=7))
+
+    cmd = client.call.await_args.args[0]
+    assert cmd["cmd"] == "experiment_archive_list"
+    assert cmd["sort_by"] == "start_time"
+    assert cmd["descending"] is True
+    assert "start_date" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -178,14 +159,12 @@ def test_get_detail_reads_phases_and_cooldown(tmp_path: Path) -> None:
 
     started = datetime(2025, 12, 1, 8, 0, tzinfo=UTC)
     ended = datetime(2025, 12, 2, 4, 0, tzinfo=UTC)  # 20h total
-    entry = _ArchiveEntryStub(
-        experiment_id="exp-1",
-        start_time=started,
-        end_time=ended,
-        metadata_path=md_path,
+    entry = _entry_payload(
+        experiment_id="exp-1", start_time=started, end_time=ended, metadata_path=md_path
     )
-    em = _ExperimentManagerStub([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
 
     result = _run(adapter.get_detail("exp-1"))
 
@@ -199,22 +178,24 @@ def test_get_detail_reads_phases_and_cooldown(tmp_path: Path) -> None:
 
 
 def test_get_detail_unknown_experiment_returns_none() -> None:
-    em = _ExperimentManagerStub([])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": None})
+    )
     assert _run(adapter.get_detail("does-not-exist")) is None
 
 
 def test_get_detail_handles_missing_metadata_file_gracefully(tmp_path: Path) -> None:
     """metadata.json missing on disk → adapter returns a detail with empty phases,
     not None, and never raises."""
-    entry = _ArchiveEntryStub(
+    entry = _entry_payload(
         experiment_id="exp-1",
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
         metadata_path=tmp_path / "missing.json",
     )
-    em = _ExperimentManagerStub([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
     result = _run(adapter.get_detail("exp-1"))
     assert isinstance(result, ArchiveDetailResult)
     assert result.phases == []
@@ -222,14 +203,15 @@ def test_get_detail_handles_missing_metadata_file_gracefully(tmp_path: Path) -> 
 
 
 def test_get_detail_empty_id_returns_none() -> None:
-    em = _ExperimentManagerStub([])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(_fake_client())
     assert _run(adapter.get_detail("")) is None
     assert _run(adapter.get_detail("   ")) is None
 
 
-def test_get_detail_returns_none_when_em_missing() -> None:
-    adapter = ArchiveAdapter(None)
+def test_get_detail_returns_none_when_call_fails() -> None:
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": False, "error": "engine недоступен"})
+    )
     assert _run(adapter.get_detail("exp-1")) is None
 
 
@@ -246,7 +228,9 @@ def test_alarm_history_aggregates_triggered_and_cleared() -> None:
         {"at": now - 600, "transition": "TRIGGERED", "alarm_id": "overheat"},
         {"at": now - 500, "transition": "TRIGGERED", "alarm_id": "vacuum_loss"},
     ]
-    adapter = ArchiveAdapter(experiment_manager=None, alarm_v2_state_mgr=_AlarmStateStub(history))
+    adapter = ArchiveAdapter(
+        _fake_client(alarm_v2_history={"ok": True, "history": history})
+    )
 
     result = _run(adapter.alarm_history_summary(days=7))
 
@@ -256,29 +240,17 @@ def test_alarm_history_aggregates_triggered_and_cleared() -> None:
     assert result.by_alarm_id == {"overheat": 2, "vacuum_loss": 1}
 
 
-def test_alarm_history_drops_entries_past_window() -> None:
-    now = datetime.now(UTC).timestamp()
-    old = now - timedelta(days=30).total_seconds()
-    history = [
-        {"at": old, "transition": "TRIGGERED", "alarm_id": "ancient"},
-        {"at": now - 600, "transition": "TRIGGERED", "alarm_id": "fresh"},
-    ]
-    adapter = ArchiveAdapter(experiment_manager=None, alarm_v2_state_mgr=_AlarmStateStub(history))
-
-    result = _run(adapter.alarm_history_summary(days=7))
-
-    assert result is not None
-    assert result.triggered_count == 1
-    assert "ancient" not in result.by_alarm_id
-
-
-def test_alarm_history_returns_none_when_state_mgr_missing() -> None:
-    adapter = ArchiveAdapter(experiment_manager=None, alarm_v2_state_mgr=None)
+def test_alarm_history_returns_none_when_call_fails() -> None:
+    adapter = ArchiveAdapter(
+        _fake_client(alarm_v2_history={"ok": False, "error": "engine недоступен"})
+    )
     assert _run(adapter.alarm_history_summary(days=7)) is None
 
 
 def test_alarm_history_returns_zero_counts_when_history_empty() -> None:
-    adapter = ArchiveAdapter(experiment_manager=None, alarm_v2_state_mgr=_AlarmStateStub([]))
+    adapter = ArchiveAdapter(
+        _fake_client(alarm_v2_history={"ok": True, "history": []})
+    )
     result = _run(adapter.alarm_history_summary(days=7))
     assert isinstance(result, AlarmHistoryResult)
     assert result.triggered_count == 0
@@ -286,45 +258,25 @@ def test_alarm_history_returns_zero_counts_when_history_empty() -> None:
     assert result.by_alarm_id == {}
 
 
+def test_alarm_history_sends_start_ts_window() -> None:
+    client = _fake_client(alarm_v2_history={"ok": True, "history": []})
+    adapter = ArchiveAdapter(client)
+    _run(adapter.alarm_history_summary(days=7))
+
+    cmd = client.call.await_args.args[0]
+    assert cmd["cmd"] == "alarm_v2_history"
+    assert "start_ts" in cmd
+
+
 # ---------------------------------------------------------------------------
-# Async offload — Cycle-2 fix from dc5350b
+# Async offload — get_detail's metadata.json read stays on a thread
 # ---------------------------------------------------------------------------
 
 
-def test_list_recent_offloads_filesystem_scan_to_thread(monkeypatch) -> None:
-    """``ExperimentManager.list_archive_entries`` does synchronous filesystem
-    I/O; the adapter must hand it to ``asyncio.to_thread`` so the live
-    query event loop stays responsive."""
-    import asyncio
-
+def test_get_detail_offloads_metadata_read_to_thread(monkeypatch, tmp_path: Path) -> None:
     from cryodaq.agents.assistant.query.adapters import archive_adapter
 
     seen: list[str] = []
-
-    original_to_thread = asyncio.to_thread
-
-    async def spy_to_thread(func, *args, **kwargs):
-        seen.append(getattr(func, "__name__", repr(func)))
-        return await original_to_thread(func, *args, **kwargs)
-
-    monkeypatch.setattr(archive_adapter.asyncio, "to_thread", spy_to_thread)
-
-    em = _ExperimentManagerStub([])
-    adapter = ArchiveAdapter(em)
-    _run(adapter.list_recent(days=7))
-
-    assert "list_archive_entries" in seen
-
-
-def test_get_detail_offloads_archive_lookup_and_metadata_read(
-    monkeypatch, tmp_path: Path
-) -> None:
-    import asyncio
-
-    from cryodaq.agents.assistant.query.adapters import archive_adapter
-
-    seen: list[str] = []
-
     original_to_thread = asyncio.to_thread
 
     async def spy_to_thread(func, *args, **kwargs):
@@ -335,16 +287,16 @@ def test_get_detail_offloads_archive_lookup_and_metadata_read(
 
     md_path = tmp_path / "metadata.json"
     md_path.write_text(json.dumps({"phases": []}), encoding="utf-8")
-    entry = _ArchiveEntryStub(
+    entry = _entry_payload(
         experiment_id="exp-1",
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
         metadata_path=md_path,
     )
-    em = _ExperimentManagerStub([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
     _run(adapter.get_detail("exp-1"))
 
-    assert "get_archive_item" in seen
     # ``Path.read_text`` is a bound method — its __name__ is "read_text".
     assert any(name == "read_text" for name in seen)

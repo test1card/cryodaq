@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
 from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
@@ -23,6 +23,18 @@ from cryodaq.agents.assistant.query.schemas import ArchiveDetailResult
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _fake_client(**cmd_replies: dict) -> MagicMock:
+    """B1: ArchiveAdapter now calls the engine's read-only REP commands
+    over ZMQ — stand-in for EngineQueryClient dispatching by cmd["cmd"]."""
+    client = MagicMock()
+
+    async def _call(cmd: dict) -> dict:
+        return cmd_replies.get(cmd["cmd"], {"ok": False, "error": "not stubbed"})
+
+    client.call = AsyncMock(side_effect=_call)
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -121,40 +133,27 @@ def test_archive_detail_prompt_filters_non_dict_phase_entries() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _ArchiveEntry:
-    def __init__(
-        self,
-        *,
-        experiment_id: str,
-        metadata_path: Path,
-        sample: str = "sample-A",
-        operator: str = "Иванов",
-        status: str = "completed",
-        start_time: datetime | None = None,
-        end_time: datetime | None = None,
-    ) -> None:
-        self.experiment_id = experiment_id
-        self.title = ""
-        self.sample = sample
-        self.operator = operator
-        self.status = status
-        self.start_time = start_time or datetime.now(UTC) - timedelta(days=1)
-        self.end_time = end_time
-        self.metadata_path = metadata_path
-        self.run_records = ()
-        self.artifact_index = ()
-        self.result_tables = ()
-
-
-class _ExperimentManager:
-    def __init__(self, entries: list[_ArchiveEntry]) -> None:
-        self._entries = entries
-
-    def get_archive_item(self, experiment_id: str):
-        for e in self._entries:
-            if e.experiment_id == experiment_id:
-                return e
-        return None
+def _entry_payload(
+    *,
+    experiment_id: str,
+    metadata_path: Path,
+    sample: str = "sample-A",
+    operator: str = "Иванов",
+    status: str = "completed",
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> dict:
+    start_time = start_time or datetime.now(UTC) - timedelta(days=1)
+    return {
+        "experiment_id": experiment_id,
+        "title": "",
+        "sample": sample,
+        "operator": operator,
+        "status": status,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat() if end_time else None,
+        "metadata_path": str(metadata_path),
+    }
 
 
 def test_get_detail_handles_malformed_metadata_json(tmp_path: Path) -> None:
@@ -165,14 +164,15 @@ def test_get_detail_handles_malformed_metadata_json(tmp_path: Path) -> None:
     md_path = tmp_path / "metadata.json"
     md_path.write_text("{not valid json at all", encoding="utf-8")
 
-    entry = _ArchiveEntry(
+    entry = _entry_payload(
         experiment_id="exp-corrupt",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
-    em = _ExperimentManager([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
 
     result = _run(adapter.get_detail("exp-corrupt"))
 
@@ -204,14 +204,15 @@ def test_get_detail_handles_invalid_iso_date_in_metadata(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    entry = _ArchiveEntry(
+    entry = _entry_payload(
         experiment_id="exp-bad-date",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
-    em = _ExperimentManager([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
 
     result = _run(adapter.get_detail("exp-bad-date"))
 
@@ -235,13 +236,14 @@ def test_get_detail_handles_phases_field_being_a_string(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    entry = _ArchiveEntry(
+    entry = _entry_payload(
         experiment_id="exp-bad-shape",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
     )
-    em = _ExperimentManager([entry])
-    adapter = ArchiveAdapter(em)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+    )
 
     result = _run(adapter.get_detail("exp-bad-shape"))
 

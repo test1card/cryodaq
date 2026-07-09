@@ -111,6 +111,13 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_TOPIC = b"readings"
 
+# B1 (agents/ process extraction): additive second topic on the SAME PUB
+# socket/port carrying EngineEvent notifications (alarm_fired,
+# experiment_finalize, ...) for the new cryodaq-assistant process. Existing
+# GUI subscribers only ``.subscribe(DEFAULT_TOPIC)`` (b"readings"), so this
+# frame type is invisible to them — no protocol break, no port change.
+EVENTS_TOPIC = b"events"
+
 # Audit C.2 / D6: socket-level size caps on the unauthenticated
 # loopback command/data path. libzmq (ZMQ_MAXMSGSIZE) drops an oversize
 # frame before it is allocated in user space — this is the trust-boundary
@@ -272,6 +279,36 @@ def _pack_reading(reading: Reading) -> bytes:
     return msgpack.packb(data, use_bin_type=True)
 
 
+def _pack_event(event_type: str, timestamp: datetime, payload: dict, experiment_id: str | None) -> bytes:
+    """Сериализовать EngineEvent в JSON для топика ``events``.
+
+    JSON (not msgpack) because EngineEvent payloads are heterogeneous,
+    application-defined dicts (alarm details, experiment metadata, ...)
+    rather than the fixed Reading schema — JSON keeps this frame
+    self-describing without a second bespoke packer.
+    """
+    return json.dumps(
+        {
+            "event_type": event_type,
+            "ts": timestamp.timestamp(),
+            "payload": payload,
+            "experiment_id": experiment_id,
+        },
+        default=str,
+    ).encode("utf-8")
+
+
+def _unpack_event(payload: bytes) -> dict[str, Any]:
+    """Десериализовать событие из топика ``events``.
+
+    Same defence-in-depth as ``_unpack_reading``: size-bound before
+    decode (events are small JSON objects; this cap is generous).
+    """
+    if len(payload) > MAX_DATA_MSG_SIZE:
+        raise ValueError(f"event frame too large: {len(payload)} > {MAX_DATA_MSG_SIZE}")
+    return json.loads(payload.decode("utf-8"))
+
+
 def _unpack_reading(payload: bytes) -> Reading:
     """Десериализовать Reading из msgpack.
 
@@ -336,6 +373,32 @@ class ZMQPublisher:
                 self._total_sent += 1
             except Exception:
                 logger.exception("Ошибка отправки ZMQ")
+
+    async def publish_event(
+        self,
+        *,
+        event_type: str,
+        timestamp: datetime,
+        payload: dict,
+        experiment_id: str | None,
+    ) -> None:
+        """Publish one EngineEvent on the ``events`` topic (best-effort).
+
+        B1: separate from the Reading queue path — events are ad-hoc
+        (alarm_fired, experiment_finalize, ...), not a steady stream, so
+        they are sent directly rather than routed through the
+        Reading-typed ``_publish_loop`` queue. No-op if the socket isn't
+        started yet (mirrors the Reading path's silent-drop-until-ready
+        behaviour); a send failure is logged, never raised — a lost
+        event must not affect the safety-critical engine loop.
+        """
+        if self._socket is None:
+            return
+        try:
+            frame = _pack_event(event_type, timestamp, payload, experiment_id)
+            await self._socket.send_multipart([EVENTS_TOPIC, frame])
+        except Exception:
+            logger.exception("Ошибка отправки ZMQ события %s", event_type)
 
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
         self._ctx = zmq.asyncio.Context()
@@ -470,6 +533,94 @@ class ZMQSubscriber:
             self._ctx.term()
             self._ctx = None
         logger.info("ZMQSubscriber остановлен (получено: %d)", self._total_received)
+
+
+class ZMQEventSubscriber:
+    """SUB-сокет на топик ``events``: cryodaq-assistant подписывается на
+    EngineEvent-уведомления (alarm_fired, experiment_finalize, ...).
+
+    Same socket options / reconnect semantics as :class:`ZMQSubscriber`
+    (kept separate rather than parametrising ``ZMQSubscriber`` — the two
+    have different payload/topic/unpack shapes and this avoids risking a
+    regression in the well-exercised Reading subscriber).
+    """
+
+    def __init__(
+        self,
+        address: str = DEFAULT_PUB_ADDR,
+        *,
+        callback: Callable[[dict], object] | None = None,
+    ) -> None:
+        self._address = address
+        self._callback = callback
+        self._ctx: zmq.asyncio.Context | None = None
+        self._socket: zmq.asyncio.Socket | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._running = False
+
+    async def _receive_loop(self) -> None:
+        while self._running:
+            try:
+                events = await self._socket.poll(timeout=1000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка poll ZMQ (events)")
+                continue
+            if not (events & zmq.POLLIN):
+                continue
+            try:
+                parts = await self._socket.recv_multipart()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка приёма ZMQ (events)")
+                continue
+            if len(parts) != 2:
+                continue
+            try:
+                event = _unpack_event(parts[1])
+            except Exception:
+                logger.exception("Ошибка десериализации события")
+                continue
+            if self._callback:
+                try:
+                    result = self._callback(event)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    logger.exception("Ошибка в callback подписчика событий")
+
+    async def start(self) -> None:
+        self._ctx = zmq.asyncio.Context()
+        self._socket = self._ctx.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_DATA_MSG_SIZE)
+        self._socket.setsockopt(zmq.RECONNECT_IVL, 500)
+        self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)
+        self._socket.setsockopt(zmq.RCVTIMEO, 3000)
+        self._socket.connect(self._address)
+        self._socket.subscribe(EVENTS_TOPIC)
+        self._running = True
+        self._task = asyncio.create_task(self._receive_loop(), name="zmq_event_subscriber")
+        logger.info("ZMQEventSubscriber подключён: %s", self._address)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        if self._socket:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._ctx:
+            self._ctx.term()
+            self._ctx = None
+        logger.info("ZMQEventSubscriber остановлен")
 
 
 class ZMQCommandServer:

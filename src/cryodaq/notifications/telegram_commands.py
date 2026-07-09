@@ -15,7 +15,6 @@ from typing import Any
 
 import aiohttp
 
-from cryodaq.agents.assistant.query.ru_labels import phase_display_name
 from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.broker import DataBroker
 
@@ -25,6 +24,7 @@ from cryodaq.core.broker import DataBroker
 # missing "vacuum") so remote operators received bogus "unknown phase"
 # errors for phases that exist locally.
 from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
+from cryodaq.core.ru_labels import phase_display_name
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
 

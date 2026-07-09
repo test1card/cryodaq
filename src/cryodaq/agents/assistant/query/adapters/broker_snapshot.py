@@ -1,4 +1,12 @@
-"""BrokerSnapshot — latest-per-channel cache subscribing to DataBroker."""
+"""BrokerSnapshot — latest-per-channel cache subscribing to the engine's ZMQ readings feed.
+
+B1: previously subscribed to the in-process ``DataBroker`` directly; now
+subscribes to the same ``tcp://127.0.0.1:5555`` PUB feed the GUI already
+uses (:class:`cryodaq.core.zmq_bridge.ZMQSubscriber`) — the assistant
+process is, for this purpose, just another read-only subscriber like the
+GUI. Cache semantics (latest reading per channel, channel-name resolution)
+are unchanged.
+"""
 
 from __future__ import annotations
 
@@ -7,66 +15,44 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cryodaq.core.zmq_bridge import DEFAULT_PUB_ADDR, ZMQSubscriber
+
 if TYPE_CHECKING:
-    from cryodaq.core.broker import DataBroker
     from cryodaq.core.channel_manager import ChannelManager
     from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
 
-_SUBSCRIBER_NAME = "assistant_query_snapshot"
-
 
 class BrokerSnapshot:
-    """Subscribes to DataBroker and maintains a latest-per-channel cache.
+    """Subscribes to the engine's readings feed and maintains a latest-per-channel cache.
 
-    Read-only consumer. No state mutation on broker. Safe to read from any
-    coroutine; internal lock prevents torn reads.
+    Read-only consumer. Safe to read from any coroutine; internal lock
+    prevents torn reads.
     """
 
     def __init__(
         self,
-        broker: DataBroker,
+        pub_addr: str = DEFAULT_PUB_ADDR,
         *,
         channel_manager: ChannelManager | None = None,
     ) -> None:
-        self._broker = broker
         self._channel_manager = channel_manager
         self._latest: dict[str, Reading] = {}
         self._lock = asyncio.Lock()
-        self._queue: asyncio.Queue[Reading] | None = None
-        self._task: asyncio.Task | None = None
+        self._sub = ZMQSubscriber(pub_addr, callback=self._on_reading)
+
+    async def _on_reading(self, reading: Reading) -> None:
+        async with self._lock:
+            self._latest[reading.channel] = reading
 
     async def start(self) -> None:
-        self._queue = await self._broker.subscribe(
-            _SUBSCRIBER_NAME, maxsize=1000
-        )
-        self._task = asyncio.create_task(
-            self._consume_loop(), name="broker_snapshot_consume"
-        )
-        logger.info("BrokerSnapshot started")
+        await self._sub.start()
+        logger.info("BrokerSnapshot started (ZMQ)")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        await self._broker.unsubscribe(_SUBSCRIBER_NAME)
+        await self._sub.stop()
         logger.info("BrokerSnapshot stopped")
-
-    async def _consume_loop(self) -> None:
-        assert self._queue is not None
-        while True:
-            try:
-                reading = await self._queue.get()
-                async with self._lock:
-                    self._latest[reading.channel] = reading
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("BrokerSnapshot consume error: %s", exc)
 
     async def latest(self, channel: str) -> Reading | None:
         """Return latest reading, accepting canonical id OR display name.

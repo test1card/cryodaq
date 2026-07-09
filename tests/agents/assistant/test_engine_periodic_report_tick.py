@@ -7,8 +7,8 @@ from datetime import UTC
 from unittest.mock import MagicMock
 
 from cryodaq.agents.assistant.live.agent import AssistantConfig
+from cryodaq.agents.assistant_main import _periodic_report_tick
 from cryodaq.core.event_bus import EventBus
-from cryodaq.engine import _periodic_report_tick
 
 
 def _make_config(**overrides) -> AssistantConfig:

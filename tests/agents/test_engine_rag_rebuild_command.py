@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-import cryodaq.engine as engine_mod
-from cryodaq.agents.rag.indexer import _EMBEDDING_DIM
-from cryodaq.engine import (
+import cryodaq.agents.assistant_main as engine_mod
+from cryodaq.agents.assistant_main import (
     _handle_rag_rebuild_command,
     _rag_rebuild_state,
 )
+from cryodaq.agents.rag.indexer import _EMBEDDING_DIM
 
 
 class _MockEmbeddings:

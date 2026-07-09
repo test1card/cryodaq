@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from cryodaq.engine import _handle_rag_search_command
+from cryodaq.agents.assistant_main import _handle_rag_search_command
 
 
 def _run(coro):

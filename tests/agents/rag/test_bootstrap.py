@@ -14,8 +14,8 @@ from unittest.mock import patch
 
 import pytest
 
+from cryodaq.agents.assistant_main import _bootstrap_rag_index_if_empty
 from cryodaq.agents.rag.indexer import _EMBEDDING_DIM
-from cryodaq.engine import _bootstrap_rag_index_if_empty
 from tests.agents.rag.loaders.conftest import write_pdf
 
 

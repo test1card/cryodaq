@@ -75,6 +75,17 @@ def main_gui() -> None:
     main()
 
 
+def main_assistant() -> None:
+    """Frozen entry for the cryodaq-assistant process (Гемма + RAG, B1)."""
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
+    from cryodaq.agents.assistant_main import main
+
+    main()
+
+
 def _dispatch() -> None:
     """Read ``--mode=...`` from ``sys.argv`` and call the matching ``main_*``."""
     import multiprocessing
@@ -92,6 +103,10 @@ def _dispatch() -> None:
         main()
     elif mode == "replay-engine":
         from cryodaq.replay_engine.__main__ import main
+
+        main()
+    elif mode == "assistant":
+        from cryodaq.agents.assistant_main import main
 
         main()
     else:
