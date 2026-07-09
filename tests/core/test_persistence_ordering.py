@@ -168,10 +168,10 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path, monkeypatch) 
 
     original_write_immediate = writer.write_immediate
 
-    async def gated_write_immediate(batch: list) -> None:
+    async def gated_write_immediate(batch: list) -> bool:
         write_started.set()           # signal: write has been entered
         await write_gate.wait()       # block until test releases
-        await original_write_immediate(batch)
+        return await original_write_immediate(batch)
 
     writer.write_immediate = gated_write_immediate  # type: ignore[method-assign]
 
@@ -309,7 +309,8 @@ async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monk
     """F1 (Phase A gate, CRITICAL): a locked/busy write that write_immediate
     swallows (no re-raise, per A6) must still suppress publication to BOTH
     brokers — the scheduler's only prior guard was ``is_disk_full``, which a
-    locked-DB failure never sets.
+    locked-DB failure never sets. R1 (Phase A recheck): the drop is signalled
+    via write_immediate()'s per-call return value, not shared writer state.
     """
     monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     from cryodaq.core.safety_broker import SafetyBroker
@@ -326,10 +327,11 @@ async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monk
     sched = Scheduler(broker, sqlite_writer=writer, safety_broker=safety_broker)
     sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
 
-    def fake_write_batch(batch: list) -> None:
+    def fake_write_batch(batch: list) -> bool:
         # Mirrors _write_day_batch's locked-DB swallow: no raise, but the
-        # batch was never durably persisted.
-        writer._last_batch_dropped = True
+        # batch was never durably persisted — reported via the return value
+        # (R1, Phase A recheck), not shared writer state.
+        return False
 
     with patch.object(writer, "_write_batch", side_effect=fake_write_batch):
         await sched.start()

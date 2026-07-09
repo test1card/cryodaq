@@ -396,13 +396,31 @@ async def test_mode_best_effort_happy_arms() -> None:
 
 async def test_mode_best_effort_arm_fail_is_non_fatal(caplog) -> None:
     drv = _mode_driver("best_effort")
-    t = _RecordingTransport(fail_on="cryodaq_wdog_run")
+    # NOTE: fail_on is a substring match against every write, and the
+    # uploaded Lua script itself defines "function cryodaq_wdog_run()" — a
+    # naive fail_on="cryodaq_wdog_run" would (wrongly) fail the script
+    # upload, never reaching the explicit run() call this test targets. Fail
+    # only the EXACT run() command (same technique used elsewhere in this
+    # file for the disarm-only and readback-only failure cases).
+    t = _RecordingTransport()
+    original_write = t.write
+
+    async def _write_fail_run_only(cmd: str) -> None:
+        if cmd == "cryodaq_wdog_run()":
+            raise RuntimeError("simulated run-write failure")
+        await original_write(cmd)
+
+    t.write = _write_fail_run_only  # type: ignore[assignment]
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
         await drv.connect()  # must NOT raise (fail-OPEN on watchdog layer)
     assert drv._connected is True
     assert drv._wdog_armed is False
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    # R2 (Phase A recheck, MEDIUM): the run write itself raising is ambiguous
+    # (the instrument may have accepted the command before the write failed)
+    # — a best-effort disarm must be attempted regardless.
+    assert "cryodaq_wdog_disarm()" in t.writes
 
 
 async def test_mode_required_arm_fail_raises_and_closes(caplog) -> None:
@@ -420,11 +438,25 @@ async def test_mode_required_arm_fail_raises_and_closes(caplog) -> None:
 
 async def test_mode_required_run_fail_raises() -> None:
     drv = _mode_driver("required")
-    t = _RecordingTransport(fail_on="cryodaq_wdog_run")
+    # See test_mode_best_effort_arm_fail_is_non_fatal above: fail only the
+    # EXACT run() command, not the script upload (which also contains the
+    # substring "cryodaq_wdog_run" as part of the function definition).
+    t = _RecordingTransport()
+    original_write = t.write
+
+    async def _write_fail_run_only(cmd: str) -> None:
+        if cmd == "cryodaq_wdog_run()":
+            raise RuntimeError("simulated run-write failure")
+        await original_write(cmd)
+
+    t.write = _write_fail_run_only  # type: ignore[assignment]
     drv._transport = t
     with pytest.raises(Exception):
         await drv.connect()
     assert drv._connected is False
+    # R2 (Phase A recheck, MEDIUM): required mode still fails closed, but the
+    # ambiguous run-write failure must attempt a best-effort disarm first.
+    assert "cryodaq_wdog_disarm()" in t.writes
 
 
 async def test_latch_read_before_upload_and_proceeds(caplog) -> None:

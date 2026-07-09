@@ -618,8 +618,13 @@ class Keithley2604B(InstrumentDriver):
                     f"expected={_WDOG_SCRIPT_VERSION} (truncated or stale upload)"
                 )
             await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
-            await self._transport.write("cryodaq_wdog_run()")
+            # R2 (Phase A recheck, MEDIUM): mark issued BEFORE the write, not
+            # after it returns. A write that raises AFTER the instrument has
+            # already accepted the command (ambiguous VISA/TSP failure) must
+            # still trigger the best-effort disarm below — conservative:
+            # ambiguity means attempt the disarm.
             run_issued = True
+            await self._transport.write("cryodaq_wdog_run()")
             # DELTA A8b — state readback: _wdog_arm used to set _wdog_armed on
             # faith after three fire-and-forget writes. Confirm the firmware
             # actually armed (active==1) and did not boot latched (tripped==0);

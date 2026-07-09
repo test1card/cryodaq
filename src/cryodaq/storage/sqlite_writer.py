@@ -214,14 +214,6 @@ class SQLiteWriter:
         self._locked_failure_count = 0
         self._locked_failure_first_ts: float | None = None
 
-        # F1 (Phase A gate, CRITICAL): even a single below-threshold locked/
-        # busy failure is swallowed without re-raising (see _write_day_batch),
-        # so write_immediate() returns normally with the batch never durably
-        # written. Reset once per _write_batch() call (i.e. per write_immediate
-        # invocation) and set True if any day's sub-batch was dropped, so the
-        # scheduler can skip publishing that batch to any broker.
-        self._last_batch_dropped = False
-
         _check_sqlite_version()
 
     def _db_path(self, day: date) -> Path:
@@ -234,14 +226,6 @@ class SQLiteWriter:
     def is_disk_full(self) -> bool:
         """True when the most recent write hit a disk-full / out-of-space error."""
         return self._disk_full
-
-    @property
-    def last_batch_dropped(self) -> bool:
-        """True when the most recent write_immediate()/_write_batch() call did
-        NOT durably persist at least one day's sub-batch (a swallowed locked/
-        busy failure — F1, Phase A gate). Callers (Scheduler) must not
-        publish that batch to any broker."""
-        return self._last_batch_dropped
 
     def clear_disk_full(self) -> None:
         """Clear the disk-full flag.
@@ -370,7 +354,7 @@ class SQLiteWriter:
         logger.info("Открыта БД: %s", db_path)
         return conn
 
-    def _write_batch(self, batch: list[Reading]) -> None:
+    def _write_batch(self, batch: list[Reading]) -> bool:
         """Вставить пакет в таблицу readings (вызывается в потоке).
 
         Readings с value=None или value=NaN пропускаются (sqlite3 maps NaN
@@ -378,11 +362,18 @@ class SQLiteWriter:
 
         Readings are grouped by day before writing so that a batch spanning
         midnight is correctly split across daily DB files.
+
+        Returns True iff every day's sub-batch was durably persisted; False
+        if any sub-batch was swallowed (disk-full / locked-DB — see
+        _write_day_batch). This is a LOCAL result of this one call, not
+        shared writer state (R1, Phase A recheck) — concurrent
+        write_immediate() calls on the same writer can otherwise interleave
+        on the single-worker executor and clobber a shared drop flag before
+        the dropping caller ever checks it.
         """
         if not batch:
-            return
-        # F1: reset once per call — reflects only the LAST batch attempted.
-        self._last_batch_dropped = False
+            return True
+        persisted = True
         # Group readings by day to handle midnight crossing
         by_day: dict[date, list[Reading]] = {}
         for r in batch:
@@ -390,10 +381,18 @@ class SQLiteWriter:
             by_day.setdefault(day, []).append(r)
         for day, day_readings in sorted(by_day.items()):
             conn = self._ensure_connection(day)
-            self._write_day_batch(conn, day_readings)
+            if not self._write_day_batch(conn, day_readings):
+                persisted = False
+        return persisted
 
-    def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> None:
+    def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> bool:
         """Write a single day's readings to the given connection.
+
+        Returns True if the batch was durably committed (or there was
+        nothing to write), False if it was swallowed (disk-full / locked-DB
+        below the A6 signalling threshold — see below). The caller
+        (_write_batch) folds this per-day result into the per-call return
+        of write_immediate().
 
         NaN-доктрина (P2-2): a non-finite value paired with a non-OK status is
         persisted as the finite ``sentinel.SENTINEL`` value carrying that status,
@@ -452,7 +451,7 @@ class SQLiteWriter:
                 len(batch),
             )
         if not rows:
-            return
+            return True
         try:
             conn.executemany(
                 "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
@@ -490,7 +489,7 @@ class SQLiteWriter:
                 # write_immediate / scheduler and cause the historic tight
                 # CRITICAL-log loop. The flag + signalled callback are the
                 # signalling mechanism now.
-                return
+                return False
 
             # Locked-DB parity (roadmap A6): "database is locked"/"database
             # is busy" is usually transient (WAL writer contention) and
@@ -526,13 +525,15 @@ class SQLiteWriter:
                         span,
                         exc,
                     )
-                # F1 (Phase A gate, CRITICAL): the batch was swallowed, not
-                # persisted — the scheduler must not publish it to any broker,
+                # F1/R1 (Phase A gate + recheck, CRITICAL): the batch was
+                # swallowed, not persisted — report it via the return value
+                # (not shared writer state) so the caller (_write_batch) can
+                # fold it into write_immediate()'s own per-call result and
+                # the scheduler can skip publishing to any broker,
                 # regardless of whether the A6 signalling threshold was hit.
-                self._last_batch_dropped = True
                 # Do NOT re-raise — same graceful-degradation rationale as
                 # disk-full above (avoid the historic tight CRITICAL-log loop).
-                return
+                return False
             # Any other OperationalError keeps the existing semantics.
             raise
 
@@ -547,6 +548,7 @@ class SQLiteWriter:
                 logger.warning("Periodic WAL checkpoint failed: %s", exc)
             self._checkpoint_counter = 0
         self._total_written += len(rows)
+        return True
 
     def _write_source_row(
         self,
@@ -757,16 +759,23 @@ class SQLiteWriter:
                 except Exception:
                     logger.exception("Ошибка записи батча (%d записей)", len(batch))
 
-    async def write_immediate(self, readings: list[Reading]) -> None:
+    async def write_immediate(self, readings: list[Reading]) -> bool:
         """Записать пакет синхронно (await до WAL commit).
 
         Используется Scheduler для гарантии persistence-first:
         данные попадают в DataBroker ТОЛЬКО после записи на диск.
         При ошибке — логирует CRITICAL и пробрасывает исключение.
+
+        Returns True iff the batch was durably persisted, False if it was
+        swallowed (disk-full / locked-DB — see _write_batch). This result is
+        per-call (R1, Phase A recheck): callers must not rely on any shared
+        writer state, since concurrent write_immediate() calls on the same
+        writer share one executor and could otherwise clobber each other's
+        outcome.
         """
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(self._executor, self._write_batch, readings)
+            return await loop.run_in_executor(self._executor, self._write_batch, readings)
         except Exception:
             logger.critical(
                 "CRITICAL: Ошибка write_immediate (%d записей) — данные НЕ персистированы",

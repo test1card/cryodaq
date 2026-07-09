@@ -387,7 +387,7 @@ class Scheduler:
         combined = list(persisted_readings) + srdg_to_persist
         if self._sqlite_writer is not None and combined:
             try:
-                await self._sqlite_writer.write_immediate(combined)
+                persisted = await self._sqlite_writer.write_immediate(combined)
             except Exception:
                 logger.exception(
                     "CRITICAL: Ошибка записи '%s' — данные НЕ отправлены подписчикам",
@@ -401,13 +401,15 @@ class Scheduler:
             if getattr(self._sqlite_writer, "is_disk_full", False):
                 return
 
-            # F1 (Phase A gate, CRITICAL): a locked/busy write below the A6
+            # R1 (Phase A recheck, CRITICAL): a locked/busy write below the A6
             # signalling threshold is swallowed without raising (see
-            # sqlite_writer._write_day_batch) — write_immediate() returns
-            # normally even though the batch was never durably persisted.
-            # Mirror the disk-full gate above: skip publish to both brokers.
-            # The drop itself stays loud via A6's existing warning/critical log.
-            if getattr(self._sqlite_writer, "last_batch_dropped", False):
+            # sqlite_writer._write_day_batch) — write_immediate() reports this
+            # via its per-call return value, NOT shared writer state (a shared
+            # flag could be reset by a concurrent poll task's later, successful
+            # write on the same writer before this caller checked it). Mirror
+            # the disk-full gate above: skip publish to both brokers. The drop
+            # itself stays loud via A6's existing warning/critical log.
+            if not persisted:
                 return
 
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
