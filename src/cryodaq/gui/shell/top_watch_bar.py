@@ -15,17 +15,29 @@ import time
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+from cryodaq.gui.shell.alarm_sound import plan_from_response
 from cryodaq.gui.utils.plural import ru_plural
 
 logger = logging.getLogger(__name__)
 
 _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
+
+# A3b: CRITICAL alarms beep three times, spaced so the operator hears three
+# distinct beeps rather than one stutter — same QApplication.beep() bell the
+# launcher uses for engine-down (no sound-asset pipeline in this codebase).
+_CRITICAL_BEEP_GAP_MS = 150
+
+
+def _beep_critical() -> None:
+    QApplication.beep()
+    QTimer.singleShot(_CRITICAL_BEEP_GAP_MS, QApplication.beep)
+    QTimer.singleShot(2 * _CRITICAL_BEEP_GAP_MS, QApplication.beep)
 
 
 def _format_pressure(p: float) -> str:
@@ -138,6 +150,13 @@ class TopWatchBar(QWidget):
         self._slow_timer.setInterval(2000)
         self._slow_timer.timeout.connect(self._poll_alarms)
         self._slow_timer.start()
+
+        # A3b: same 2s cadence carries the recent_alarms sound poll — one
+        # more slot on the existing timer, no new QTimer needed.
+        self._slow_timer.timeout.connect(self._poll_recent_alarms)
+        self._alarm_sound_last_seq = 0
+        self._alarm_sound_have_baseline = False
+        self._alarm_sound_worker = None
 
         # B.4: 1 Hz stale check for persistent context strip
         self._stale_timer = QTimer(self)
@@ -559,6 +578,32 @@ class TopWatchBar(QWidget):
             verb = ru_plural(n, "активна", "активны", "активны")
             self._alarms_label.setText(f"Тревоги: {n} {verb}")
             self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+
+    def _poll_recent_alarms(self) -> None:
+        """Poll recent_alarms for A3b sound. Skips if previous still in flight."""
+        if self._alarm_sound_worker is not None and not self._alarm_sound_worker.isFinished():
+            return
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        self._alarm_sound_worker = ZmqCommandWorker(
+            {"cmd": "recent_alarms", "since_seq": self._alarm_sound_last_seq}, parent=self
+        )
+        self._alarm_sound_worker.finished.connect(self._on_recent_alarms_result)
+        self._alarm_sound_worker.start()
+
+    def _on_recent_alarms_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        plan = plan_from_response(
+            result, self._alarm_sound_last_seq, have_baseline=self._alarm_sound_have_baseline
+        )
+        self._alarm_sound_have_baseline = True
+        self._alarm_sound_last_seq = plan.next_seq
+        for level in plan.new_levels:
+            if level == "CRITICAL":
+                _beep_critical()
+            else:
+                QApplication.beep()
 
     # ------------------------------------------------------------------
     # External setters (for direct injection from MainWindowV2 dispatchers)

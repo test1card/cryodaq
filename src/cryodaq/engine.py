@@ -20,6 +20,7 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -634,6 +635,71 @@ async def _dispatch_alarm_notification(
             experiment_id=experiment_id,
         )
     )
+
+
+class _AlarmRingBuffer:
+    """In-memory ring buffer of recent ``alarm_fired`` events (A3b sound).
+
+    Feeds the GUI's ``recent_alarms`` poll — the GUI has no other way to
+    see engine-side alarm_fired events since only Readings cross the ZMQ
+    PUB stream. Bounded: the GUI polls every ~2s and only ever needs
+    "what's new since my last seq", so a small history is enough and
+    memory can't grow unbounded through a busy alarm episode.
+    """
+
+    def __init__(self, maxlen: int = 50) -> None:
+        self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)
+        self._seq = 0
+
+    def record(self, event: EngineEvent) -> None:
+        """Append an ``alarm_fired`` EngineEvent, assigning the next seq."""
+        self._seq += 1
+        payload = event.payload
+        self._entries.append(
+            {
+                "seq": self._seq,
+                "alarm_id": str(payload.get("alarm_id", "")),
+                "level": str(payload.get("level", "")),
+                "message": str(payload.get("message", "")),
+                "ts": event.timestamp.timestamp(),
+            }
+        )
+
+    def since(self, since_seq: int) -> dict[str, Any]:
+        """Return the current head seq plus every entry newer than *since_seq*.
+
+        Ring-buffer semantics: if *since_seq* predates the oldest retained
+        entry (buffer wrapped while the GUI wasn't polling), only what's
+        still retained comes back — treated by the GUI the same as "no new
+        alarms", which is fine: anything that fell off was already old.
+        """
+        return {
+            "seq": self._seq,
+            "alarms": [e for e in self._entries if e["seq"] > since_seq],
+        }
+
+
+async def _alarm_ring_buffer_loop(
+    queue: asyncio.Queue[EngineEvent],
+    ring: _AlarmRingBuffer,
+) -> None:
+    """Drain *queue* onto *ring*, one ``alarm_fired`` event at a time (A3b).
+
+    Mirrors ``_alarm_v2_feed_loop``: queue and buffer passed in so this is
+    unit-testable without engine wiring, per-event guarded so one bad event
+    can't kill the feed the GUI sound poller depends on.
+    """
+    try:
+        while True:
+            event = await queue.get()
+            if event.event_type != "alarm_fired":
+                continue
+            try:
+                ring.record(event)
+            except Exception:
+                logger.exception("Alarm ring buffer: ошибка записи события")
+    except asyncio.CancelledError:
+        return
 
 
 def _should_dispatch_dead_channel_alarm(
@@ -2424,6 +2490,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     sink_registry.load_config(_sink_cfg_path)
 
     event_bus = EventBus()
+    # A3b: engine-side ring buffer of alarm_fired events for the GUI's
+    # recent_alarms poll (sound) — see _alarm_ring_feed()/_AlarmRingBuffer.
+    _alarm_ring = _AlarmRingBuffer()
     event_logger = EventLogger(writer, experiment_manager, event_bus=event_bus)
 
     # --- F13: Leak rate estimator ---
@@ -2655,6 +2724,11 @@ async def _run_engine(*, mock: bool = False) -> None:
         # A2(a): loop body extracted to the importable, per-reading-guarded
         # _alarm_v2_feed_loop so a single bad reading can't kill the feed.
         await _alarm_v2_feed_loop(queue, _alarm_v2_state_tracker, _alarm_v2_rate)
+
+    async def _alarm_ring_feed() -> None:
+        """Подписаться на EventBus и наполнять A3b-буфер тревог для GUI-звука."""
+        queue = await event_bus.subscribe("alarm_ring_buffer", maxsize=200)
+        await _alarm_ring_buffer_loop(queue, _alarm_ring)
 
     # Strong-ref set for fire-and-forget Telegram dispatch tasks.
     # Without this the loop only weak-refs tasks and GC can drop a pending
@@ -2935,6 +3009,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                     },
                     "history": alarm_v2_state_mgr.get_history(limit=20),
                 }
+            if action == "recent_alarms":
+                # A3b: GUI sound poller — same (lack of) auth as alarm_v2_status.
+                since_seq = int(cmd.get("since_seq", 0) or 0)
+                return {"ok": True, **_alarm_ring.since(since_seq)}
             if action == "alarm_v2_history":
                 # IV.4 F11: time-range slice of the existing alarm-v2
                 # history deque. Used by the shift-end dialog to fill
@@ -3913,6 +3991,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     await scheduler.start()
     throttle_task = _spawn_supervised("adaptive_throttle_runtime", _track_runtime_signals)
     alarm_v2_feed_task = _spawn_supervised("alarm_v2_feed", _alarm_v2_feed_readings)
+    alarm_ring_task = _spawn_supervised("alarm_ring_buffer_feed", _alarm_ring_feed)
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
         alarm_v2_tick_task = _spawn_supervised("alarm_v2_tick", _alarm_v2_tick)
@@ -4116,6 +4195,12 @@ async def _run_engine(*, mock: bool = False) -> None:
     alarm_v2_feed_task.cancel()
     try:
         await alarm_v2_feed_task
+    except asyncio.CancelledError:
+        pass
+
+    alarm_ring_task.cancel()
+    try:
+        await alarm_ring_task
     except asyncio.CancelledError:
         pass
     if alarm_v2_tick_task is not None:
