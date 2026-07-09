@@ -1,0 +1,63 @@
+name: CryoDAQ Nightly
+
+# Nightly-only CI (roadmap D4 + B-phase-exit "72h mock soak (nightly CI job)
+# clean"). Kept out of main.yml on purpose: these lanes are heavier/longer
+# than the per-push suite and their failures are loud-but-async, not a merge
+# gate. workflow_dispatch is enabled so failures can be re-run/investigated
+# on demand; surfacing is GitHub-native (Actions tab / email), no Telegram
+# wiring from CI.
+
+on:
+  schedule:
+    # 03:17 UTC — an off-the-hour minute avoids the GitHub Actions
+    # top-of-hour cron thundering herd.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  golden-replay:
+    name: golden-run replay regression (D4)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,web]"
+
+      - name: Golden replay lane
+        # Selects by marker (not path) so any future golden-marked test
+        # anywhere under tests/ is picked up automatically.
+        run: pytest tests/ -m golden -v --tb=short
+
+  mock-soak:
+    name: bounded mock soak (B-phase-exit)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,web]"
+
+      - name: Bounded mock soak
+        # CI-feasible bounded window, NOT the literal 72h from the roadmap —
+        # GitHub-hosted runners cap a job at 6h. The lab runs the identical
+        # driver with --duration 259200 (72h) for the real B-phase-exit soak;
+        # this job is the nightly regression check for the same code path.
+        run: python -m scripts.soak_mock_engine --duration 1500 --grace 30
+        timeout-minutes: 35

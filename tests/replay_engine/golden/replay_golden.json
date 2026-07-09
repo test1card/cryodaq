@@ -1,0 +1,32 @@
+{
+  "alarm_active_at_end": [],
+  "alarm_transitions": [
+    {
+      "alarm_id": "golden_cold_rate_drop",
+      "idx": 6,
+      "transition": "TRIGGERED"
+    },
+    {
+      "alarm_id": "golden_cold_sensor_fault",
+      "idx": 45,
+      "transition": "TRIGGERED"
+    },
+    {
+      "alarm_id": "golden_cold_sensor_fault",
+      "idx": 60,
+      "transition": "CLEARED"
+    },
+    {
+      "alarm_id": "golden_cold_rate_drop",
+      "idx": 60,
+      "transition": "CLEARED"
+    }
+  ],
+  "leak_rate": {
+    "dpdt_mbar_per_s": 1e-08,
+    "fit_quality_r2": 0.999854,
+    "leak_rate_mbar_l_per_s": 2.497e-07,
+    "samples_n": 30
+  },
+  "reading_count": 90
+}

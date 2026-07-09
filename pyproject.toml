@@ -124,6 +124,7 @@ addopts = "-m 'not ollama'"
 markers = [
     "smoke: requires live external services (ollama, instruments); excluded from default CI",
     "ollama: requires a live Ollama HTTP server on localhost:11434. Skipped by default. Run with: pytest -m ollama",
+    "golden: golden-run replay regression (roadmap D4) — pins alarm/analytics outcomes on a fixed fixture. Runs by default; also selectable via pytest -m golden",
 ]
 
 [tool.ruff]
