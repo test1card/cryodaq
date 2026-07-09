@@ -11,7 +11,7 @@ import pytest
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.storage.replay import ReplaySource
+from cryodaq.storage.broker_replay import ReplaySource
 from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -158,12 +158,12 @@ async def test_replay_missing_file(tmp_path: Path) -> None:
 async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
     """stop() halts replay deterministically while it is parked inside asyncio.sleep.
 
-    Strategy: monkeypatch cryodaq.storage.replay.asyncio.sleep so the FIRST
+    Strategy: monkeypatch cryodaq.storage.broker_replay.asyncio.sleep so the FIRST
     call sets a ``sleep_started`` event and then blocks on a ``release`` event.
     We await ``sleep_started``, call ``replay.stop()``, then release — verifying
     that fewer than all rows were emitted.
     """
-    import cryodaq.storage.replay as replay_module
+    import cryodaq.storage.broker_replay as replay_module
 
     n = 10
     readings = [
