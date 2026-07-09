@@ -229,8 +229,6 @@ Active configuration files as of v0.64.0:
 - `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
 - `config/cooldown.yaml` — cooldown-predictor parameters
 - `config/analytics_layout.yaml` — phase-aware analytics widget layout
-- `config/shifts.yaml` — reserved/unused (no code loader; shift handover runs
-  via the operator-query command surface, not this file)
 - `config/agent.yaml` — local operator-query service (Ollama model, triggers, rate limit)
 - `config/rag.yaml.example` — knowledge base / RAG (embedding model, corpus)
 - `config/rag_categories.yaml` — KnowledgeBasePanel sidebar query presets

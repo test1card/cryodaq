@@ -351,8 +351,6 @@ _REST_IDENTITY = "REST API"
 #     / experiment / calibration / ai / auto classification buckets
 #   - core/event_logger.py — auto + event_type tags on every logged event
 #   - engine.py::_safety_fault_log_callback — safety_fault
-#   - gui/widgets/shift_handover.py::_SHIFT_EVENT_TAGS — phase / experiment /
-#     safety_fault / alarm_ack
 #   - agents/assistant/live/output_router.py — ai
 _RESERVED_TAGS = frozenset(
     {

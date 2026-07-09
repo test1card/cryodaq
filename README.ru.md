@@ -227,8 +227,6 @@ cryodaq-rag-search               # семантический поиск по б
 - `config/plugins.yaml` — sensor_diagnostics + vacuum_trend; `aggregation_threshold` + `escalation_cooldown_s`
 - `config/cooldown.yaml` — параметры cooldown predictor
 - `config/analytics_layout.yaml` — phase-aware раскладка analytics-виджетов
-- `config/shifts.yaml` — reserved/unused (нет загрузчика в src; shift handover
-  идёт через operator-query command surface, не из этого файла)
 - `config/agent.yaml` — локальный сервис операторских запросов (модель Ollama,
   триггеры, rate limit)
 - `config/rag.yaml.example` — база знаний / RAG (embedding-модель, корпус)

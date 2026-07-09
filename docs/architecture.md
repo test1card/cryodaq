@@ -150,7 +150,6 @@ Config files in `config/`:
 | `cooldown.yaml` | Cooldown predictor parameters |
 | `analytics_layout.yaml` | Analytics view widget layout |
 | `agent.yaml` | Local-assistant runtime settings |
-| `shifts.yaml` | Reserved/unused (no loader in src) |
 | `experiment_templates/*.yaml` | Experiment type templates |
 | `web.local.yaml` | Web write token (gitignored) |
 
