@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style
+from cryodaq.gui.shell.overlays._base_panel import is_stale
 from cryodaq.gui.state.time_window import TimeWindow, get_time_window_controller
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -759,10 +760,8 @@ class _SmuChannelBlock(QFrame):
             plot_item.setXRange(left, 0, padding=0)
 
     def _refresh_stale(self, now: float) -> None:
-        should_be_stale = (
-            self._channel_state == "on"
-            and self._last_update_ts is not None
-            and (now - self._last_update_ts) > _STALE_AFTER_S
+        should_be_stale = self._channel_state == "on" and is_stale(
+            self._last_update_ts, _STALE_AFTER_S, now=now
         )
         if should_be_stale == self._stale:
             return

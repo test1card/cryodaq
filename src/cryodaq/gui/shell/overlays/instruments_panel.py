@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase, is_stale
 from cryodaq.gui.shell.overlays.alarm_panel import SeverityChip
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -328,7 +329,7 @@ class _InstrumentCard(QFrame):
         if self._last_reading_time == 0.0:
             color = theme.STATUS_STALE
             status_text = "Нет данных"
-        elif now - self._last_reading_time > self._timeout_s:
+        elif is_stale(self._last_reading_time, self._timeout_s, now=now):
             color = theme.STATUS_FAULT
             status_text = "Нет связи"
         elif self._last_status != ChannelStatus.OK:
@@ -575,17 +576,15 @@ class _SensorDiagSection(QFrame):
         return self._table.rowCount()
 
 
-class InstrumentsPanel(QWidget):
+class InstrumentsPanel(OverlayPanelBase, QWidget):
     """Phase II.8 instruments + sensor diagnostics overlay (K2-critical)."""
 
     _reading_signal = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # OverlayPanelBase: _connected, _workers
 
-        self._connected: bool = False
         self._cards: dict[str, _InstrumentCard] = {}
-        self._workers: list[ZmqCommandWorker] = []
         self._diag_poll_in_flight: bool = False
 
         self.setObjectName("instrumentsPanel")
@@ -695,10 +694,9 @@ class InstrumentsPanel(QWidget):
         self._reading_signal.emit(reading)
 
     def set_connected(self, connected: bool) -> None:
-        if connected == self._connected:
+        if not super().set_connected(connected):
             return
-        self._connected = connected
-        if connected:
+        if self._connected:
             if not self._diag_poll_timer.isActive():
                 self._diag_poll_timer.start()
             # Immediate first fetch on False → True so the K2 diagnostics
@@ -811,13 +809,10 @@ class InstrumentsPanel(QWidget):
             return
         self._diag_poll_in_flight = True
         worker = ZmqCommandWorker({"cmd": "get_sensor_diagnostics"}, parent=self)
-        worker.finished.connect(self._on_diagnostics_received)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_diagnostics_received)
 
     def _on_diagnostics_received(self, result: dict) -> None:
         self._diag_poll_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not isinstance(result, dict):
             return
         if not result.get("ok"):

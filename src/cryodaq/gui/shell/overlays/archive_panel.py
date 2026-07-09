@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
+from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
@@ -329,7 +330,7 @@ class _ExportWorker(QThread):
         self.result_ready.emit(self._kind, count, "")
 
 
-class ArchivePanel(QWidget):
+class ArchivePanel(OverlayPanelBase, QWidget):
     """Experiment archive overlay (Phase II.2)."""
 
     entry_selected = Signal(dict)
@@ -337,10 +338,8 @@ class ArchivePanel(QWidget):
     export_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._connected: bool = False
+        super().__init__(parent)  # OverlayPanelBase: _connected, _workers
         self._entries: list[dict] = []
-        self._workers: list[ZmqCommandWorker] = []
         # Keep Python refs to export QThread workers alive while they run.
         # Qt ownership (parent=self) also guards; the list gives the slot
         # a way to prune finished workers on the next tick.
@@ -759,9 +758,7 @@ class ArchivePanel(QWidget):
         self._refresh_in_flight = True
         payload = self._build_list_payload()
         worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_refresh_result)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_refresh_result)
 
     def _build_list_payload(self) -> dict:
         template_id = str(self._template_combo.currentData() or "").strip()
@@ -785,7 +782,6 @@ class ArchivePanel(QWidget):
         # Clear the in-flight flag BEFORE any branch so failure paths
         # don't leave the overlay locked out of future refreshes.
         self._refresh_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok", False):
             error = result.get("error", "Не удалось загрузить архив.")
             self.show_error(str(error))
@@ -968,12 +964,9 @@ class ArchivePanel(QWidget):
             {"cmd": "experiment_generate_report", "experiment_id": experiment_id},
             parent=self,
         )
-        worker.finished.connect(self._on_regenerate_result)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_regenerate_result)
 
     def _on_regenerate_result(self, result: dict) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else True
         self._regenerate_btn.setEnabled(self._connected and report_enabled)
@@ -1138,10 +1131,9 @@ class ArchivePanel(QWidget):
         _ = reading  # explicit silence
 
     def set_connected(self, connected: bool) -> None:
-        if connected == self._connected:
-            return
         was_connected = self._connected
-        self._connected = connected
+        if not super().set_connected(connected):
+            return
         self._update_control_enablement()
         # II.2 post-review: auto-refresh on the first transition to
         # connected when no entries have been loaded yet. The overlay

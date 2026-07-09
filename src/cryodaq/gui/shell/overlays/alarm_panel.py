@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
 from cryodaq.gui.utils.plural import ru_plural
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -269,19 +270,17 @@ def _card_qss(object_name: str) -> str:
     )
 
 
-class AlarmPanel(QWidget):
+class AlarmPanel(OverlayPanelBase, QWidget):
     """Dual-engine alarm overlay (Phase II.4, K1-critical)."""
 
     _reading_signal = Signal(object)
     v2_alarm_count_changed = Signal(int)  # preserved for tray-icon consumer
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # OverlayPanelBase: _connected, _workers
 
-        self._connected: bool = False
         self._alarms: dict[str, _AlarmRow] = {}
         self._v2_alarms: dict[str, dict] = {}
-        self._workers: list[ZmqCommandWorker] = []
         self._v2_poll_in_flight: bool = False
         self._v1_ack_buttons: list[QPushButton] = []
         self._v2_ack_buttons: list[QPushButton] = []
@@ -565,10 +564,9 @@ class AlarmPanel(QWidget):
         self._reading_signal.emit(reading)
 
     def set_connected(self, connected: bool) -> None:
-        if connected == self._connected:
+        if not super().set_connected(connected):
             return
-        self._connected = connected
-        if connected:
+        if self._connected:
             if not self._v2_poll_timer.isActive():
                 self._v2_poll_timer.start()
             if not self._cooldown_poll_timer.isActive():
@@ -855,12 +853,11 @@ class AlarmPanel(QWidget):
         worker = ZmqCommandWorker(
             {"cmd": "alarm_acknowledge", "alarm_name": alarm_name}, parent=self
         )
-        worker.finished.connect(lambda result, name=alarm_name: self._on_ack_result(result, name))
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(
+            worker, lambda result, name=alarm_name: self._on_ack_result(result, name)
+        )
 
     def _on_ack_result(self, result: dict, alarm_name: str) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
         if result.get("ok"):
             logger.info("Alarm '%s' acknowledged via engine", alarm_name)
         else:
@@ -872,12 +869,11 @@ class AlarmPanel(QWidget):
 
     def _acknowledge_v2(self, alarm_id: str) -> None:
         worker = ZmqCommandWorker({"cmd": "alarm_v2_ack", "alarm_name": alarm_id}, parent=self)
-        worker.finished.connect(lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid))
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(
+            worker, lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid)
+        )
 
     def _on_ack_v2_result(self, result: dict, alarm_id: str) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
         if result.get("ok"):
             logger.info("Alarm v2 '%s' acknowledged", alarm_id)
         else:
@@ -899,13 +895,10 @@ class AlarmPanel(QWidget):
             return
         self._v2_poll_in_flight = True
         worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
-        worker.finished.connect(self._on_poll_v2_result)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_poll_v2_result)
 
     def _on_poll_v2_result(self, result: dict) -> None:
         self._v2_poll_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not isinstance(result, dict):
             return
         if result.get("ok"):
@@ -921,13 +914,10 @@ class AlarmPanel(QWidget):
             return
         self._cooldown_poll_in_flight = True
         worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self)
-        worker.finished.connect(self._on_cooldown_status)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_cooldown_status)
 
     def _on_cooldown_status(self, result: dict) -> None:
         self._cooldown_poll_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not isinstance(result, dict):
             return
         state = result.get("state", "UNAVAILABLE")
