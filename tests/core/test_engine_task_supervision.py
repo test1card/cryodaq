@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +26,11 @@ from cryodaq.engine import (
     _SUPERVISE_RESET_WINDOW_S,
     _alarm_v2_feed_loop,
     _handle_supervised_task_exit,
+)
+from cryodaq.engine_wiring import supervision as supervision_mod
+from cryodaq.engine_wiring.supervision import (
+    TaskSupervisor,
+    install_loop_exception_backstop,
 )
 
 # --------------------------------------------------------------------------
@@ -287,3 +294,177 @@ async def test_safety_task_latches_fault_after_two_restarts() -> None:
     assert calls["fault"] and calls["fault"][-1][0] == "widget"
     # restart list must not have grown for the fault-latch case (3 restarts scheduled max = 2).
     assert len(calls["restart"]) == _SAFETY_TASK_MAX_RESTARTS
+
+
+class _RecordingEventBus:
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+
+
+class _RecordingSafetyManager:
+    def __init__(self) -> None:
+        self.faults: list[dict] = []
+        self._collect_task: asyncio.Task | None = None
+
+    async def latch_fault(self, **kwargs) -> None:
+        self.faults.append(kwargs)
+
+
+def _make_supervisor():
+    event_bus = _RecordingEventBus()
+    safety_manager = _RecordingSafetyManager()
+    dispatch_tasks: set[asyncio.Task] = set()
+    supervisor = TaskSupervisor(
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="exp-1"),
+        safety_manager=safety_manager,
+        alarm_dispatch_tasks=dispatch_tasks,
+        logger_=logging.getLogger("test.task-supervisor.integration"),
+    )
+    return supervisor, event_bus, safety_manager, dispatch_tasks
+
+
+async def _spin_until(predicate, *, turns: int = 200) -> None:
+    for _ in range(turns):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition did not become true")
+
+
+async def _cancel_live_supervised_tasks(supervisor: TaskSupervisor) -> None:
+    supervisor.stop()
+    tasks = [task for task in supervisor.supervised_tasks.values() if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_task_supervisor_respawns_replaces_registry_and_updates_on_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.0)
+    supervisor, _, safety_manager, _ = _make_supervisor()
+    attempts = 0
+    keep_alive = asyncio.Event()
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("first incarnation failed")
+        await keep_alive.wait()
+
+    initial = supervisor.spawn(
+        "safety_collect",
+        factory,
+        safety_critical=True,
+        on_spawn=lambda task: setattr(safety_manager, "_collect_task", task),
+    )
+    await _spin_until(lambda: attempts == 2)
+
+    replacement = supervisor.supervised_tasks["safety_collect"]
+    assert replacement is not initial
+    assert safety_manager._collect_task is replacement
+    await _cancel_live_supervised_tasks(supervisor)
+
+
+async def test_task_supervisor_latches_after_two_failed_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.0)
+    supervisor, event_bus, safety_manager, dispatch_tasks = _make_supervisor()
+    attempts = 0
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError(f"failure-{attempts}")
+
+    supervisor.spawn("safety_collect", factory, safety_critical=True)
+    await _spin_until(lambda: bool(safety_manager.faults))
+    if dispatch_tasks:
+        await asyncio.gather(*list(dispatch_tasks), return_exceptions=True)
+
+    assert attempts == _SAFETY_TASK_MAX_RESTARTS + 1
+    assert len(event_bus.events) == _SAFETY_TASK_MAX_RESTARTS + 1
+    assert len(safety_manager.faults) == 1
+    assert safety_manager.faults[0]["source"] == "safety_collect"
+    supervisor.stop()
+
+
+async def test_task_supervisor_healthy_window_resets_integrated_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.0)
+    supervisor, _, _, _ = _make_supervisor()
+    release = asyncio.Event()
+    attempts = 0
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("initial failure")
+        await release.wait()
+        raise RuntimeError("failure after healthy run")
+
+    supervisor.spawn("ordinary", factory)
+    await _spin_until(lambda: attempts == 2)
+    supervisor._spawn_times["ordinary"] = time.monotonic() - _SUPERVISE_RESET_WINDOW_S
+    release.set()
+    await _spin_until(lambda: attempts == 3)
+
+    assert supervisor._restarts["ordinary"] == 1
+    await _cancel_live_supervised_tasks(supervisor)
+
+
+async def test_task_supervisor_stop_before_timer_suppresses_respawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.05)
+    supervisor, _, _, _ = _make_supervisor()
+    attempts = 0
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("failure")
+
+    supervisor.spawn("ordinary", factory)
+    await _spin_until(lambda: supervisor._restarts.get("ordinary") == 1)
+    supervisor.stop()
+    await asyncio.sleep(0.08)
+
+    assert attempts == 1
+
+
+async def test_loop_exception_backstop_logs_named_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    test_logger = logging.getLogger("test.loop-backstop")
+    caplog.set_level(logging.CRITICAL, logger=test_logger.name)
+    install_loop_exception_backstop(loop, test_logger)
+
+    async def fail() -> None:
+        raise RuntimeError("backstop-boom")
+
+    task = asyncio.create_task(fail(), name="named-backstop-task")
+    try:
+        await task
+    except RuntimeError as exc:
+        loop.call_exception_handler(
+            {"message": "manual backstop", "exception": exc, "task": task}
+        )
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert "manual backstop" in caplog.text
+    assert "named-backstop-task" in caplog.text
+    assert "backstop-boom" in caplog.text

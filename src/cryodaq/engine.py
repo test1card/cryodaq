@@ -14,14 +14,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
 import os
 import signal
 import sys
 import time
-from collections import deque
-from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager, tick_alarm
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
@@ -71,20 +71,57 @@ from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
 from cryodaq.drivers.base import Reading
+from cryodaq.engine_wiring.runtime_tasks import (
+    _alarm_ring_buffer_loop,
+    _alarm_v2_feed_loop,
+    _AlarmRingBuffer,
+    _format_diag_telegram_messages,
+    alarm_ring_feed,
+    alarm_v2_feed_readings,
+    alarm_v2_tick,
+    assistant_event_relay_loop,
+    cold_rotation_scheduler,
+    cooldown_alarm_tick_loop,
+    leak_rate_feed,
+    sensor_diag_feed,
+    sensor_diag_tick,
+    track_runtime_signals,
+    vacuum_guard_tick_loop,
+    vacuum_trend_feed,
+    vacuum_trend_tick,
+)
+from cryodaq.engine_wiring.supervision import (
+    _SAFETY_TASK_MAX_RESTARTS,
+    _SUPERVISE_BACKOFF_BASE_S,
+    _SUPERVISE_BACKOFF_MAX_S,
+    _SUPERVISE_RESET_WINDOW_S,
+    TaskSupervisor,
+    _handle_supervised_task_exit,
+    install_loop_exception_backstop,
+)
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.reporting.generator import ReportGenerator
-from cryodaq.storage.cold_rotation import (
-    build_cold_rotation_service,
-    normalize_schedule_time,
-    seconds_until_next,
-)
+from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 logger = logging.getLogger("cryodaq.engine")
+
+# Compatibility re-exports for tests and callers that import moved helpers
+# from ``cryodaq.engine``. Referenced here so linters keep the imports.
+_ = (
+    _alarm_ring_buffer_loop,
+    _alarm_v2_feed_loop,
+    _format_diag_telegram_messages,
+    _SAFETY_TASK_MAX_RESTARTS,
+    _SUPERVISE_BACKOFF_BASE_S,
+    _SUPERVISE_BACKOFF_MAX_S,
+    _SUPERVISE_RESET_WINDOW_S,
+    _handle_supervised_task_exit,
+)
 
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
@@ -453,126 +490,10 @@ async def _drain_dispatch_tasks(
 
 
 # ───────────────────────── Task supervision (A2) ──────────────────────────
-# Silent task death is the #1 overnight risk: a long-lived engine loop whose
-# coroutine raises dies without a trace, and monitoring/alarms go dark. The
-# helpers below extract the supervision policy so it is unit-testable without
-# bringing up the full engine (same rationale as ``_drain_dispatch_tasks``).
-
-_SUPERVISE_BACKOFF_BASE_S = 1.0  # first restart delay; doubles each crash
-_SUPERVISE_BACKOFF_MAX_S = 60.0  # cap so a hard-down task never spins hot
-_SAFETY_TASK_MAX_RESTARTS = 2  # safety_collect/safety_monitor: latch FAULT after this
-# F3 (Phase A gate, MEDIUM): roadmap policy is "after 2 FAILED restarts" —
-# consecutive, not lifetime. A task that ran at least this long before dying
-# had its previous incarnation recover; its restart count resets to 0 before
-# incrementing, so sparse/transient crashes hours apart never false-latch
-# FAULT the way a genuine rapid crash loop must.
-_SUPERVISE_RESET_WINDOW_S = 300.0
-
-
-async def _alarm_v2_feed_loop(
-    queue: asyncio.Queue[Reading],
-    state_tracker: Any,
-    rate_estimator: Any,
-) -> None:
-    """Feed alarm-v2 channel_state + rate_estimator from a DataBroker queue.
-
-    A2(a): a single malformed reading raising inside ``state_tracker.update``
-    (or the rate push) must NOT kill the whole feed task — that silently
-    blinds alarm-v2 until restart. Guard per iteration: log and move on. The
-    outer ``CancelledError`` handler keeps clean-shutdown semantics intact.
-    """
-    try:
-        while True:
-            reading = await queue.get()
-            try:
-                state_tracker.update(reading)
-                # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
-                # конечно; не годное показание (flapping sensor: NaN/inf или
-                # статус ошибки) не отравляет OLS-окно rate-оценщика.
-                if reading.is_usable():
-                    rate_estimator.push(
-                        reading.channel,
-                        reading.timestamp.timestamp(),
-                        reading.value,
-                    )
-            except Exception:
-                logger.exception(
-                    "Alarm v2 feed: ошибка обработки показания %s",
-                    getattr(reading, "channel", "?"),
-                )
-    except asyncio.CancelledError:
-        return
-
-
-def _handle_supervised_task_exit(
-    *,
-    name: str,
-    task: asyncio.Task[Any],
-    stopping: bool,
-    restart_counts: dict[str, int],
-    logger_: logging.Logger,
-    on_alarm: Callable[[str, BaseException], None],
-    on_restart: Callable[[float], None],
-    on_fault_latch: Callable[[str, BaseException], None],
-    safety_critical: bool = False,
-    running_s: float = 0.0,
-) -> str:
-    """Decide + act on a supervised long-lived task's termination.
-
-    A2(b): the done-callback core. On UNEXPECTED death (not cancellation, not
-    a clean return, not during shutdown) it raises the operator alarm through
-    the existing alarm/event path and restarts with exponential backoff. For
-    the two safety tasks (``safety_critical``) it latches FAULT via SafetyManager
-    after ``_SAFETY_TASK_MAX_RESTARTS`` failed restarts instead of looping
-    forever. Side effects are injected so the policy is testable in isolation.
-
-    ``running_s`` (F3) is how long THIS incarnation ran before dying. A run
-    of at least ``_SUPERVISE_RESET_WINDOW_S`` means the previous restart
-    recovered, so the count resets before incrementing — only consecutive
-    rapid restarts accumulate toward the safety latch / backoff escalation.
-
-    Returns one of ``"ignored" | "restart" | "fault_latch"``.
-    """
-    # Clean cancellation or engine shutdown: never restart, never alarm.
-    if task.cancelled() or stopping:
-        return "ignored"
-    try:
-        exc = task.exception()
-    except asyncio.CancelledError:
-        return "ignored"
-    if exc is None:
-        # Loop returned without error (e.g. a disabled subsystem returning
-        # early). Nothing died unexpectedly — leave it be.
-        return "ignored"
-
-    logger_.critical(
-        "Надзор: служебная задача %s аварийно завершилась — %r",
-        name,
-        exc,
-        exc_info=(type(exc), exc, exc.__traceback__),
-    )
-    on_alarm(name, exc)  # operator-visible/audible alert via existing alarm path
-
-    if running_s >= _SUPERVISE_RESET_WINDOW_S:
-        # F3: previous incarnation recovered and ran healthily — this crash
-        # is not consecutive with any earlier one. Reset before incrementing.
-        restart_counts[name] = 0
-
-    count = restart_counts.get(name, 0) + 1
-    restart_counts[name] = count
-
-    if safety_critical and count > _SAFETY_TASK_MAX_RESTARTS:
-        logger_.critical(
-            "Надзор: %s не восстановилась за %d перезапуска — латч FAULT",
-            name,
-            _SAFETY_TASK_MAX_RESTARTS,
-        )
-        on_fault_latch(name, exc)
-        return "fault_latch"
-
-    delay = min(_SUPERVISE_BACKOFF_BASE_S * 2 ** (count - 1), _SUPERVISE_BACKOFF_MAX_S)
-    on_restart(delay)
-    return "restart"
+# Политика надзора (TaskSupervisor + решающее ядро
+# _handle_supervised_task_exit + константы бэкоффа) вынесена в
+# engine_wiring.supervision и импортируется выше. Тихая смерть долгоживущей
+# задачи — риск №1 в ночную смену; ядро тестируется в изоляции.
 
 
 # ─────────────────────────── Audible faults (A3) ──────────────────────────
@@ -623,71 +544,6 @@ async def _dispatch_alarm_notification(
             experiment_id=experiment_id,
         )
     )
-
-
-class _AlarmRingBuffer:
-    """In-memory ring buffer of recent ``alarm_fired`` events (A3b sound).
-
-    Feeds the GUI's ``recent_alarms`` poll — the GUI has no other way to
-    see engine-side alarm_fired events since only Readings cross the ZMQ
-    PUB stream. Bounded: the GUI polls every ~2s and only ever needs
-    "what's new since my last seq", so a small history is enough and
-    memory can't grow unbounded through a busy alarm episode.
-    """
-
-    def __init__(self, maxlen: int = 50) -> None:
-        self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)
-        self._seq = 0
-
-    def record(self, event: EngineEvent) -> None:
-        """Append an ``alarm_fired`` EngineEvent, assigning the next seq."""
-        self._seq += 1
-        payload = event.payload
-        self._entries.append(
-            {
-                "seq": self._seq,
-                "alarm_id": str(payload.get("alarm_id", "")),
-                "level": str(payload.get("level", "")),
-                "message": str(payload.get("message", "")),
-                "ts": event.timestamp.timestamp(),
-            }
-        )
-
-    def since(self, since_seq: int) -> dict[str, Any]:
-        """Return the current head seq plus every entry newer than *since_seq*.
-
-        Ring-buffer semantics: if *since_seq* predates the oldest retained
-        entry (buffer wrapped while the GUI wasn't polling), only what's
-        still retained comes back — treated by the GUI the same as "no new
-        alarms", which is fine: anything that fell off was already old.
-        """
-        return {
-            "seq": self._seq,
-            "alarms": [e for e in self._entries if e["seq"] > since_seq],
-        }
-
-
-async def _alarm_ring_buffer_loop(
-    queue: asyncio.Queue[EngineEvent],
-    ring: _AlarmRingBuffer,
-) -> None:
-    """Drain *queue* onto *ring*, one ``alarm_fired`` event at a time (A3b).
-
-    Mirrors ``_alarm_v2_feed_loop``: queue and buffer passed in so this is
-    unit-testable without engine wiring, per-event guarded so one bad event
-    can't kill the feed the GUI sound poller depends on.
-    """
-    try:
-        while True:
-            event = await queue.get()
-            if event.event_type != "alarm_fired":
-                continue
-            try:
-                ring.record(event)
-            except Exception:
-                logger.exception("Alarm ring buffer: ошибка записи события")
-    except asyncio.CancelledError:
-        return
 
 
 def _should_dispatch_dead_channel_alarm(
@@ -752,46 +608,6 @@ def _build_experiment_export(
         description=str(exp_info.get("description") or ""),
         custom_fields=dict(exp_info.get("custom_fields") or {}),
     )
-
-
-def _format_diag_telegram_messages(
-    new_events: list[Any],
-    aggregation_threshold: int = 3,
-) -> list[tuple[str, str]]:
-    """Build the Telegram dispatch ``(task_name, message)`` pairs for a batch
-    of sensor-diagnostic events.
-
-    F10/F20: extracted from the ``_sensor_diag_tick`` closure so the message
-    formatting — including the F20 aggregation rule (more than
-    *aggregation_threshold* simultaneous events collapse into one batch
-    summary; otherwise one message per event) — is unit-testable without the
-    engine loop. Returns pairs in dispatch order (empty when nothing to send).
-    Behaviour-preserving, including the asyncio task names.
-    """
-    if not new_events:
-        return []
-    if len(new_events) > aggregation_threshold:
-        criticals = [e for e in new_events if e.level == "CRITICAL"]
-        warnings = [e for e in new_events if e.level == "WARNING"]
-        parts: list[str] = []
-        if criticals:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in criticals
-            )
-            parts.append(f"{len(criticals)} channels critical: {names}")
-        if warnings:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in warnings
-            )
-            parts.append(f"{len(warnings)} channels warning: {names}")
-        return [("diag_tg_batch", "⚠ Diagnostic alarm batch:\n" + "\n".join(parts))]
-    return [
-        (
-            f"diag_tg_{event.alarm_id}",
-            f"⚠ [{event.level}] {event.alarm_id}\n{event.message}",
-        )
-        for event in new_events
-    ]
 
 
 async def _handle_multiline_set_channels_command(
@@ -1896,19 +1712,796 @@ async def _watchdog(
 # ---------------------------------------------------------------------------
 
 
+def _set_safety_task_ref(safety_manager: Any, attr: str, task: asyncio.Task[Any]) -> None:
+    """on_spawn-хук для safety_collect/safety_monitor: синхронизирует ссылку на
+    перезапущенную задачу в SafetyManager, чтобы stop() и sweep завершения
+    видели живую задачу (раньше — вложенная lambda в _run_engine)."""
+    setattr(safety_manager, attr, task)
+
+
+def _engine_config_path(name: str) -> Path:
+    """Resolve a config, preferring the machine-local override."""
+    local = _CONFIG_DIR / f"{name}.local.yaml"
+    return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
+
+
+@dataclass(slots=True)
+class _SafetyFaultLogContext:
+    writer: Any
+    broker: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    event_bus: Any | None = None
+    experiment_manager: Any | None = None
+    telegram_bot: Any | None = None
+
+
+async def _safety_fault_log_callback(
+    source: str,
+    message: str,
+    channel: str = "",
+    value: float = 0.0,
+    *,
+    context: _SafetyFaultLogContext,
+) -> None:
+    """Persist and publish a SafetyManager fault through the existing paths."""
+    entry = await context.writer.append_operator_log(
+        message=message,
+        author=source,
+        source="machine",
+        tags=("safety_fault", channel) if channel else ("safety_fault",),
+    )
+    try:
+        await _publish_operator_log_entry(context.broker, entry)
+    except Exception as exc:
+        logger.error("Failed to publish safety fault operator_log entry: %s", exc)
+
+    try:
+        await _dispatch_alarm_notification(
+            context.event_bus,
+            context.alarm_dispatch_tasks,
+            alarm_id=f"safety_fault_{source}" if source else "safety_fault",
+            level="CRITICAL",
+            message=message,
+            experiment_id=context.experiment_manager.active_experiment_id,
+            telegram_bot=context.telegram_bot,
+            channel=channel,
+            value=value,
+        )
+    except Exception as exc:
+        logger.error("Failed to dispatch safety fault alarm/telegram: %s", exc)
+
+
+@dataclass(slots=True)
+class _InterlockHandlerContext:
+    safety_manager: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    dead_channel_alarm_sent: set[str]
+    event_bus: Any | None = None
+    experiment_manager: Any | None = None
+
+
+async def _interlock_noop() -> None:
+    return None
+
+
+async def _interlock_trip_handler(
+    condition: Any,
+    reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Route an interlock trip to SafetyManager, failing closed on errors."""
+    try:
+        await context.safety_manager.on_interlock_trip(
+            interlock_name=condition.name,
+            channel=reading.channel,
+            value=float(reading.value) if reading.value is not None else 0.0,
+            action=condition.action,
+        )
+    except Exception as exc:
+        logger.critical(
+            "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
+            "escalating to guaranteed fault.",
+            condition.name,
+            condition.action,
+            exc,
+            exc_info=True,
+        )
+        try:
+            await context.safety_manager.latch_fault(
+                reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
+                source="interlock",
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else 0.0,
+            )
+        except Exception as exc2:
+            logger.critical(
+                "INTERLOCK escalation _fault FAILED for '%s': %s — "
+                "instrument state UNKNOWN, immediate operator intervention!",
+                condition.name,
+                exc2,
+                exc_info=True,
+            )
+
+
+async def _interlock_dead_channel_handler(
+    condition: Any,
+    reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> bool:
+    """Route a persistently unusable protected channel, preserving retry policy."""
+    try:
+        escalated = await context.safety_manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=float(reading.value) if reading.value is not None else float("nan"),
+        )
+    except Exception as exc:
+        logger.critical(
+            "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
+            "escalating to guaranteed fault.",
+            condition.name,
+            reading.channel,
+            exc,
+            exc_info=True,
+        )
+        try:
+            await context.safety_manager.latch_fault(
+                reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
+                source="interlock",
+                channel=reading.channel,
+            )
+            return True
+        except Exception as exc2:
+            logger.critical(
+                "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
+                condition.name,
+                exc2,
+                exc_info=True,
+            )
+            return False
+
+    key = f"{condition.name}:{reading.channel}"
+    if _should_dispatch_dead_channel_alarm(
+        key, escalated, context.dead_channel_alarm_sent
+    ):
+        try:
+            await _dispatch_alarm_notification(
+                context.event_bus,
+                context.alarm_dispatch_tasks,
+                alarm_id=f"dead_channel_{reading.channel}",
+                level="WARNING",
+                message=(
+                    f"Интерлок-канал {reading.channel} ('{condition.name}') "
+                    "устойчиво непригоден, источник неактивен — fault не "
+                    "латчится, но требуется внимание оператора."
+                ),
+                experiment_id=context.experiment_manager.active_experiment_id,
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else float("nan"),
+            )
+        except Exception as exc:
+            logger.error(
+                "Dead-channel audible dispatch failed for '%s': %s",
+                reading.channel,
+                exc,
+            )
+    return escalated
+
+
+async def _multiline_burst_auto_stop(
+    driver_name: str,
+    delay_s: float,
+    *,
+    drivers_by_name: dict[str, Any],
+    experiments_root: Path,
+    auto_stop_tasks: dict[str, asyncio.Task[None]],
+) -> None:
+    """Stop a timed MultiLine burst and remove its task bookkeeping entry."""
+    try:
+        await asyncio.sleep(delay_s)
+        driver = drivers_by_name.get(driver_name)
+        if driver is None:
+            return
+        try:
+            path = await driver.burst_stop(experiments_root=experiments_root)
+            logger.info(
+                "MultiLine '%s' burst auto-stopped after %.1fs → %s",
+                driver_name,
+                delay_s,
+                path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "MultiLine '%s' auto-stop failed: %s",
+                driver_name,
+                exc,
+                exc_info=True,
+            )
+    finally:
+        auto_stop_tasks.pop(driver_name, None)
+
+
+def _request_shutdown(shutdown_event: asyncio.Event, *_signal_args: Any) -> None:
+    logger.info("Получен сигнал завершения")
+    shutdown_event.set()
+
+
+@dataclass(slots=True)
+class EngineCommandContext:
+    safety_manager: Any
+    event_logger: Any
+    sink_registry: Any
+    interlock_engine: Any
+    leak_rate_estimator: Any
+    leak_cfg: dict[str, Any]
+    alarm_v2_state_mgr: Any
+    alarm_ring: Any
+    broker: Any
+    experiment_manager: Any
+    calibration_acquisition: Any
+    event_bus: Any
+    cooldown_alarm: Any
+    vacuum_guard: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    calibration_store: Any
+    writer: Any
+    drivers_by_name: dict[str, Any]
+    sensor_diag: Any
+    vacuum_trend: Any
+    alarm_v2_state_tracker: Any
+    multiline_burst_auto_stop_meta: dict[str, dict[str, Any]]
+    multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
+    escalation_service: Any = None
+    cooldown_service: Any = None
+
+
+async def _handle_gui_command(
+    cmd: dict[str, Any],
+    *,
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    safety_manager = context.safety_manager
+    event_logger = context.event_logger
+    sink_registry = context.sink_registry
+    interlock_engine = context.interlock_engine
+    leak_rate_estimator = context.leak_rate_estimator
+    _leak_cfg = context.leak_cfg
+    alarm_v2_state_mgr = context.alarm_v2_state_mgr
+    _alarm_ring = context.alarm_ring
+    broker = context.broker
+    experiment_manager = context.experiment_manager
+    calibration_acquisition = context.calibration_acquisition
+    event_bus = context.event_bus
+    _cooldown_alarm = context.cooldown_alarm
+    _vacuum_guard = context.vacuum_guard
+    _alarm_dispatch_tasks = context.alarm_dispatch_tasks
+    calibration_store = context.calibration_store
+    writer = context.writer
+    drivers_by_name = context.drivers_by_name
+    sensor_diag = context.sensor_diag
+    vacuum_trend = context.vacuum_trend
+    _alarm_v2_state_tracker = context.alarm_v2_state_tracker
+    _multiline_burst_auto_stop_meta = context.multiline_burst_auto_stop_meta
+    _multiline_burst_auto_stop_tasks = context.multiline_burst_auto_stop_tasks
+    escalation_service = context.escalation_service
+    cooldown_service = context.cooldown_service
+    action = cmd.get("cmd", "")
+    try:
+        if action in {
+            "keithley_emergency_off",
+            "keithley_stop",
+            "keithley_start",
+            "keithley_set_target",
+            "keithley_set_limits",
+        }:
+            result = await _run_keithley_command(action, cmd, safety_manager)
+            if result.get("ok"):
+                ch = cmd.get("channel", "?")
+                if action == "keithley_start":
+                    await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
+                elif action == "keithley_stop":
+                    await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
+                elif action == "keithley_emergency_off":
+                    await event_logger.log_event(
+                        "keithley", f"\u26a0 Keithley {ch}: аварийное отключение"
+                    )
+                    if escalation_service is not None:
+                        await escalation_service.escalate(
+                            "emergency",
+                            f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
+                        )
+            return result
+        if action == "safety_status":
+            return {"ok": True, **safety_manager.get_status()}
+        if action == "sinks_status":
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "sink": r.sink_name,
+                        "success": r.success,
+                        "target": r.target,
+                        "error": r.error,
+                        "timestamp": r.timestamp.isoformat(),
+                    }
+                    for r in sink_registry.recent_results[-20:]
+                ],
+            }
+        if action == "safety_acknowledge":
+            reason = cmd.get("reason", "")
+            return await safety_manager.acknowledge_fault(reason)
+        if action == "interlock_acknowledge":
+            # F24: re-arm a tripped interlock after operator clears the condition.
+            name = cmd.get("interlock_name", "")
+            try:
+                interlock_engine.acknowledge(name)
+                return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
+            except KeyError as exc:
+                return {"ok": False, "error": str(exc)}
+        _leak_resp = await _handle_leak_rate_command(
+            action, cmd, leak_rate_estimator, _leak_cfg, event_logger
+        )
+        if _leak_resp is not None:
+            return _leak_resp
+        if action == "alarm_v2_status":
+            active = alarm_v2_state_mgr.get_active()
+            return {
+                "ok": True,
+                "active": {
+                    k: {
+                        "level": v.level,
+                        "message": v.message,
+                        "triggered_at": v.triggered_at,
+                        "channels": v.channels,
+                        "acknowledged": v.acknowledged,
+                        "acknowledged_at": v.acknowledged_at,
+                        "acknowledged_by": v.acknowledged_by,
+                    }
+                    for k, v in active.items()
+                },
+                "history": alarm_v2_state_mgr.get_history(limit=20),
+            }
+        if action == "recent_alarms":
+            # A3b: GUI sound poller — same (lack of) auth as alarm_v2_status.
+            since_seq = int(cmd.get("since_seq", 0) or 0)
+            return {"ok": True, **_alarm_ring.since(since_seq)}
+        if action == "alarm_v2_history":
+            # IV.4 F11: time-range slice of the existing alarm-v2
+            # history deque. Used by the shift-end dialog to fill
+            # the «Тревоги за смену» section; the state manager's
+            # own 1000-entry ring buffer is the source of truth
+            # (no persistence layer for alarm transitions yet).
+            raw_start = cmd.get("start_ts")
+            raw_end = cmd.get("end_ts")
+            try:
+                start_ts = float(raw_start) if raw_start is not None else None
+                end_ts = float(raw_end) if raw_end is not None else None
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "start_ts / end_ts must be numeric"}
+            limit = int(cmd.get("limit", 500))
+            history = alarm_v2_state_mgr.get_history(limit=1000)
+            filtered: list[dict[str, Any]] = []
+            for entry in history:
+                at = float(entry.get("at", 0.0) or 0.0)
+                if start_ts is not None and at < start_ts:
+                    continue
+                if end_ts is not None and at > end_ts:
+                    continue
+                filtered.append(entry)
+            return {
+                "ok": True,
+                "history": filtered[:limit],
+            }
+        if action == "alarm_v2_ack":
+            name = cmd.get("alarm_name", "")
+            operator = cmd.get("operator", "")
+            reason = cmd.get("reason", "")
+            ack_event = alarm_v2_state_mgr.acknowledge(
+                name,
+                operator=operator,
+                reason=reason,
+            )
+            if ack_event is not None:
+                await broker.publish(
+                    Reading(
+                        timestamp=datetime.now(UTC),
+                        instrument_id="alarm_v2",
+                        channel="alarm_v2/acknowledged",
+                        value=ack_event["acknowledged_at"],
+                        unit="",
+                        metadata=ack_event,
+                    )
+                )
+            return {
+                "ok": ack_event is not None or name in alarm_v2_state_mgr.get_active(),
+                "alarm_name": name,
+                "event_emitted": ack_event is not None,
+            }
+        if action in {
+            "get_app_mode",
+            "set_app_mode",
+            "experiment_templates",
+            "experiment_status",
+            "experiment_archive_list",
+            "experiment_list_archive",
+            "experiment_start",
+            "experiment_create",
+            "experiment_get_active",
+            "experiment_update",
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+            "experiment_get_archive_item",
+            "experiment_attach_run_record",
+            "experiment_create_retroactive",
+            "experiment_generate_report",
+            "experiment_advance_phase",
+            "experiment_phase_status",
+        }:
+            experiment_call = asyncio.to_thread(
+                _run_experiment_command,
+                action,
+                cmd,
+                experiment_manager,
+            )
+            if action == "experiment_status":
+                # NOTE: asyncio.wait_for on an asyncio.to_thread() call times out the AWAIT,
+                # not the worker thread. If get_status_payload() is pathologically slow, the
+                # background thread keeps running until it returns naturally. This is an
+                # accepted residual risk — REP is still protected by the outer 2.0s handler
+                # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
+                # only gives faster client feedback and frees the REP loop earlier. There is
+                # no safe way to terminate a Python thread mid-call, so Option C
+                # ("actually interrupt") is not available.
+                try:
+                    result = await asyncio.wait_for(
+                        experiment_call,
+                        timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
+                    )
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)"
+                    ) from exc
+            else:
+                result = await experiment_call
+            # Hook calibration acquisition on experiment lifecycle
+            if result.get("ok") and action in {"experiment_start", "experiment_create"}:
+                await asyncio.to_thread(
+                    _try_activate_calibration_acquisition,
+                    calibration_acquisition,
+                    experiment_manager,
+                    cmd,
+                )
+                name = cmd.get("name") or cmd.get("title") or "?"
+                await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type="experiment_start",
+                        timestamp=datetime.now(UTC),
+                        payload={"name": name, "experiment_id": result.get("experiment_id")},
+                        experiment_id=result.get("experiment_id"),
+                    )
+                )
+            elif result.get("ok") and action in {
+                "experiment_finalize",
+                "experiment_stop",
+                "experiment_abort",
+            }:
+                calibration_acquisition.deactivate()
+                if action == "experiment_abort":
+                    await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
+                else:
+                    await event_logger.log_event("experiment", "Эксперимент завершён")
+                _exp_info = result.get("experiment", {})
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type=action,
+                        timestamp=datetime.now(UTC),
+                        payload={"action": action, "experiment": _exp_info},
+                        experiment_id=_exp_info.get("experiment_id"),
+                    )
+                )
+                if _cooldown_alarm is not None:
+                    _cooldown_alarm.notify_experiment_finalized()
+
+                # F31: dispatch experiment export to sinks (fire-and-forget,
+                # strong-ref against GC via _alarm_dispatch_tasks).
+                if sink_registry.sinks:
+                    try:
+                        _exp_id = _exp_info.get("experiment_id") or ""
+                        _metadata: dict = {}
+                        if _exp_id:
+                            _meta_path = (
+                                experiment_manager.data_dir
+                                / "experiments"
+                                / _exp_id
+                                / "metadata.json"
+                            )
+                            # H2: offload metadata read to thread.
+                            _metadata = await asyncio.to_thread(
+                                _load_experiment_metadata_sync, _meta_path
+                            )
+                        # F31 H1: build the sink export via the extracted
+                        # helper — summary comes from the canonical
+                        # "summary_metadata" metadata key, not the empty
+                        # bare "summary" key.
+                        _export = _build_experiment_export(_exp_info, _metadata)
+                        _t = asyncio.create_task(
+                            sink_registry.dispatch(_export),
+                            name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
+                        )
+                        _alarm_dispatch_tasks.add(_t)
+                        _t.add_done_callback(_alarm_dispatch_tasks.discard)
+                    except Exception as _exc:  # noqa: BLE001 — fire-and-forget
+                        logger.warning(
+                            "F31: sink dispatch setup failed: %s", _exc, exc_info=True
+                        )
+            elif result.get("ok") and action == "experiment_advance_phase":
+                phase = cmd.get("phase", "?")
+                await event_logger.log_event("phase", f"Фаза: → {phase}")
+                _active = experiment_manager.active_experiment
+                await event_bus.publish(
+                    EngineEvent(
+                        event_type="phase_transition",
+                        timestamp=datetime.now(UTC),
+                        payload={"phase": phase, "entry": result.get("phase", {})},
+                        experiment_id=_active.experiment_id if _active else None,
+                    )
+                )
+                # v0.55.12 — feed every phase transition into the
+                # CooldownAlarm so it can disarm itself when the
+                # operator advances away from cooldown and clear
+                # its cold-start flag
+                # on a fresh cooldown entry (finding 1.5). Runs
+                # BEFORE the auto-arm path so a phase=cooldown call
+                # always sees a cleared flag.
+                if _cooldown_alarm is not None:
+                    try:
+                        _cooldown_alarm.notify_phase_change(phase)
+                    except Exception as _exc:
+                        logger.warning(
+                            "CooldownAlarm: notify_phase_change ошибка: %s",
+                            _exc,
+                            exc_info=True,
+                        )
+                # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
+                # entry. Operator can still disarm manually via the
+                # alarm panel footer button. Idempotent: arm() is a
+                # no-op if already armed.
+                if (
+                    phase == "cooldown"
+                    and _cooldown_alarm is not None
+                    and _cooldown_alarm.is_auto_arm_enabled
+                ):
+                    try:
+                        armed = _cooldown_alarm.arm()
+                        if not armed and _cooldown_alarm.cold_start_skipped:
+                            # v0.55.12 — surface the skip explicitly so
+                            # the operator log shows why auto-arm
+                            # didn't engage on this phase entry.
+                            logger.info(
+                                "CooldownAlarm: auto-arm skipped — "
+                                "cold-start detected"
+                            )
+                        else:
+                            logger.info(
+                                "CooldownAlarm: auto-arm на phase=cooldown → %s",
+                                "ARMED" if armed else "FAILED (no model)",
+                            )
+                    except Exception as _exc:
+                        logger.warning(
+                            "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True
+                        )
+            return result
+        if action == "calibration_acquisition_status":
+            return {"ok": True, **calibration_acquisition.stats}
+        if action in {
+            "calibration_v2_extract",
+            "calibration_v2_fit",
+            "calibration_v2_coverage",
+        }:
+            return await asyncio.to_thread(
+                _run_calibration_v2_command,
+                action,
+                cmd,
+                calibration_store,
+            )
+        if action == "readings_history":
+            channels_raw = cmd.get("channels")
+            channels = list(channels_raw) if channels_raw else None
+            from_ts = cmd.get("from_ts")
+            to_ts = cmd.get("to_ts")
+            limit = int(cmd.get("limit_per_channel", 3600))
+            data = await writer.read_readings_history(
+                channels=channels,
+                from_ts=float(from_ts) if from_ts is not None else None,
+                to_ts=float(to_ts) if to_ts is not None else None,
+                limit_per_channel=limit,
+            )
+            # Serialize: {channel: [[ts, value], ...]}
+            return {
+                "ok": True,
+                "data": {ch: pts for ch, pts in data.items()},
+            }
+        if action == "cooldown_history_get":
+            return await _run_cooldown_history_command(
+                cmd, experiment_manager, writer
+            )
+        if action in {"log_entry", "log_get"}:
+            return await _run_operator_log_command(
+                action,
+                cmd,
+                writer,
+                experiment_manager,
+                broker,
+            )
+        if action in {
+            "calibration_curve_evaluate",
+            "calibration_curve_list",
+            "calibration_curve_get",
+            "calibration_curve_lookup",
+            "calibration_curve_assign",
+            "calibration_runtime_status",
+            "calibration_runtime_set_global",
+            "calibration_runtime_set_channel_policy",
+            "calibration_curve_export",
+            "calibration_curve_import",
+        }:
+            return await asyncio.to_thread(
+                _run_calibration_command,
+                action,
+                cmd,
+                calibration_store=calibration_store,
+                experiment_manager=experiment_manager,
+                drivers_by_name=drivers_by_name,
+            )
+        if action == "get_sensor_diagnostics":
+            if sensor_diag is None:
+                return {"ok": False, "error": "SensorDiagnostics отключён"}
+            from dataclasses import asdict
+
+            diag = sensor_diag.get_diagnostics()
+            summary = sensor_diag.get_summary()
+            return {
+                "ok": True,
+                "channels": {k: asdict(v) for k, v in diag.items()},
+                "summary": asdict(summary),
+            }
+        if action == "get_vacuum_trend":
+            if vacuum_trend is None:
+                return {"ok": False, "error": "VacuumTrendPredictor отключён"}
+            from dataclasses import asdict
+
+            pred = vacuum_trend.get_prediction()
+            if pred is None:
+                return {"ok": True, "status": "no_data"}
+            return {"ok": True, **asdict(pred)}
+        if action == "shift_handover_summary":
+            _sh_active = experiment_manager.active_experiment
+            await event_bus.publish(
+                EngineEvent(
+                    event_type="shift_handover_request",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "requested_by": cmd.get("operator", ""),
+                        "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
+                    },
+                    experiment_id=_sh_active.experiment_id if _sh_active else None,
+                )
+            )
+            return {"ok": True, "status": "queued"}
+        if action == "cooldown_alarm.arm":
+            if _cooldown_alarm is None:
+                return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+            ok = _cooldown_alarm.arm()
+            return {"ok": ok, "state": _cooldown_alarm.state.name}
+        if action == "cooldown_alarm.disarm":
+            if _cooldown_alarm is None:
+                return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+            _cooldown_alarm.disarm()
+            return {"ok": True, "state": "DISARMED"}
+        if action == "cooldown_alarm.status":
+            if _cooldown_alarm is None:
+                return {"state": "UNAVAILABLE"}
+            _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
+            _t_cold_val = (
+                _t_cold_state.value
+                if _t_cold_state is not None and not _t_cold_state.is_stale
+                else None
+            )
+            return {
+                "state": _cooldown_alarm.state.name,
+                "eta_h": _cooldown_alarm.current_eta_h,
+                "progress": _cooldown_alarm.current_progress,
+                "t_cold": _t_cold_val,
+            }
+        if action == "vacuum_guard.status":
+            if _vacuum_guard is None:
+                return {"state": "UNAVAILABLE"}
+            return {"state": _vacuum_guard.state.name}
+        if action in ("assistant.query", "rag.search"):
+            # B1 (2026-07): the GUI bridge routes these directly to
+            # the cryodaq-assistant process's own REP (:5557) now —
+            # this is a backward-compat fallback, see the helper.
+            return _assistant_process_unavailable_reply(action)
+        if action == "multiline.set_channels":
+            # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
+            # channels via the panel selector dialog.
+            return await _handle_multiline_set_channels_command(
+                cmd,
+                drivers_by_name=drivers_by_name,
+                config_dir=_CONFIG_DIR,
+            )
+        if action.startswith("multiline.burst_"):
+            # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
+            # button + status poll + manual stop.
+            response = await _handle_multiline_burst_command(
+                action,
+                cmd,
+                drivers_by_name=drivers_by_name,
+                experiment_manager=experiment_manager,
+                experiments_root=_DATA_DIR / "experiments",
+                auto_stop_tasks=_multiline_burst_auto_stop_meta,
+            )
+            # Schedule auto-stop on the engine loop if duration_s
+            # was set — the helper records intent in the meta dict;
+            # this site materialises the task so it runs on the
+            # right loop and gets cleaned up automatically.
+            if (
+                response.get("ok")
+                and action == "multiline.burst_start"
+                and response.get("duration_s") is not None
+            ):
+                target_name = response.get("name", "")
+                duration_s = float(response["duration_s"])
+
+                _t = asyncio.create_task(
+                    _multiline_burst_auto_stop(
+                        target_name,
+                        duration_s,
+                        drivers_by_name=drivers_by_name,
+                        experiments_root=_DATA_DIR / "experiments",
+                        auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+                    ),
+                    name=f"multiline_burst_auto_stop_{target_name}",
+                )
+                # Cancel any pre-existing auto-stop for the same
+                # driver — operator restarting the timer wins.
+                prev = _multiline_burst_auto_stop_tasks.get(target_name)
+                if prev is not None and not prev.done():
+                    prev.cancel()
+                _multiline_burst_auto_stop_tasks[target_name] = _t
+            return response
+        if action in ("rag.rebuild_index", "rag.rebuild_status"):
+            # B1 (2026-07): moved to cryodaq-assistant's own REP (:5557).
+            return _assistant_process_unavailable_reply(action)
+        if action == "cooldown_eta_get":
+            # B1 (2026-07): additive read-only command — exposes the
+            # same CooldownService.last_prediction() the old in-process
+            # CooldownAdapter read directly, now for the assistant
+            # process's ZMQ-based CooldownAdapter (agents/assistant/
+            # query/adapters/cooldown_adapter.py). Never a write path.
+            if cooldown_service is None:
+                return {"ok": True, "prediction": None}
+            return {"ok": True, "prediction": cooldown_service.last_prediction()}
+        return {"ok": False, "error": f"unknown command: {action}"}
+    except Exception as exc:
+        logger.error("Ошибка выполнения команды '%s': %s", action, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+
 async def _run_engine(*, mock: bool = False) -> None:
     """Инициализировать и запустить все подсистемы engine."""
     start_ts = time.monotonic()
     logger.info("═══ CryoDAQ Engine запускается ═══")
 
     # --- Конфигурация путей (*.local.yaml приоритетнее *.yaml) ---
-    def _cfg(name: str) -> Path:
-        local = _CONFIG_DIR / f"{name}.local.yaml"
-        return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
-
-    instruments_cfg = _cfg("instruments")
-    interlocks_cfg = _cfg("interlocks")
-    housekeeping_cfg = _cfg("housekeeping")
+    instruments_cfg = _engine_config_path("instruments")
+    interlocks_cfg = _engine_config_path("interlocks")
+    housekeeping_cfg = _engine_config_path("housekeeping")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
 
     # --- Создать основные компоненты ---
@@ -1932,7 +2525,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             break
 
     # SafetyManager — создаётся ПЕРВЫМ
-    safety_cfg = _cfg("safety")
+    safety_cfg = _engine_config_path("safety")
     safety_manager = SafetyManager(
         safety_broker,
         keithley_driver=keithley_driver,
@@ -1973,46 +2566,18 @@ async def _run_engine(*, mock: bool = False) -> None:
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
 
-    # H.6: wire safety fault → operator_log machine event
-    async def _safety_fault_log_callback(
-        source: str,
-        message: str,
-        channel: str = "",
-        value: float = 0.0,
-    ) -> None:
-        entry = await writer.append_operator_log(
-            message=message,
-            author=source,
-            source="machine",
-            tags=("safety_fault", channel) if channel else ("safety_fault",),
-        )
-        # Publish to broker so live consumers (GUI, web)
-        # see safety faults without waiting for SQLite refresh.
-        try:
-            await _publish_operator_log_entry(broker, entry)
-        except Exception as exc:
-            logger.error("Failed to publish safety fault operator_log entry: %s", exc)
-
-        # A3: audible + Telegram-if-configured — same alarm_fired/Telegram
-        # channel alarm-v2/cooldown-alarm/vacuum-guard already use. Own
-        # try/except so a notification failure can never surface as a
-        # safety-fault failure (this runs shielded on the _fault() path).
-        try:
-            await _dispatch_alarm_notification(
-                event_bus,
-                _alarm_dispatch_tasks,
-                alarm_id=f"safety_fault_{source}" if source else "safety_fault",
-                level="CRITICAL",
-                message=message,
-                experiment_id=experiment_manager.active_experiment_id,
-                telegram_bot=telegram_bot,
-                channel=channel,
-                value=value,
-            )
-        except Exception as exc:
-            logger.error("Failed to dispatch safety fault alarm/telegram: %s", exc)
-
-    safety_manager._fault_log_callback = _safety_fault_log_callback
+    # H.6: wire safety fault → operator_log machine event. Dependencies that
+    # are created later are filled on this stable context before manager start.
+    _alarm_dispatch_tasks: set[asyncio.Task[Any]] = set()
+    safety_fault_context = _SafetyFaultLogContext(
+        writer=writer,
+        broker=broker,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+    )
+    safety_manager._fault_log_callback = functools.partial(
+        _safety_fault_log_callback,
+        context=safety_fault_context,
+    )
 
     # Calibration acquisition — continuous SRDG during calibration experiments
     calibration_acquisition = CalibrationAcquisitionService(
@@ -2042,133 +2607,28 @@ async def _run_engine(*, mock: bool = False) -> None:
     # the REAL safety routing happens via trip_handler which receives the
     # full (condition, reading) context. Without this the action name and
     # channel would be discarded and stop_source would behave as emergency_off.
-    async def _interlock_noop() -> None:
-        return None
-
     interlock_actions: dict[str, Any] = {
         "emergency_off": _interlock_noop,
         "stop_source": _interlock_noop,
     }
 
-    async def _interlock_trip_handler(condition: Any, reading: Any) -> None:
-        # SAFETY: the actions-dict callables are no-ops,
-        # so this handler is the SOLE path that triggers a SafetyManager
-        # response. If anything raises here, InterlockEngine._trip will
-        # log-and-swallow → fail-open. We catch ourselves and escalate to
-        # a guaranteed _fault as a last resort. _fault is unlocked and
-        # idempotent on the Keithley side (verified Phase 1).
-        try:
-            await safety_manager.on_interlock_trip(
-                interlock_name=condition.name,
-                channel=reading.channel,
-                value=float(reading.value) if reading.value is not None else 0.0,
-                action=condition.action,
-            )
-        except Exception as exc:
-            logger.critical(
-                "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
-                "escalating to guaranteed fault.",
-                condition.name,
-                condition.action,
-                exc,
-                exc_info=True,
-            )
-            try:
-                # v0.55.12 — public latch_fault() replaces the private
-                # _fault() call.
-                await safety_manager.latch_fault(
-                    reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
-                    source="interlock",
-                    channel=reading.channel,
-                    value=float(reading.value) if reading.value is not None else 0.0,
-                )
-            except Exception as exc2:
-                logger.critical(
-                    "INTERLOCK escalation _fault FAILED for '%s': %s — "
-                    "instrument state UNKNOWN, immediate operator intervention!",
-                    condition.name,
-                    exc2,
-                    exc_info=True,
-                )
-
-    # A3: once-per-episode bookkeeping for the outside-RUNNING dead-channel
-    # audible alert — see _should_dispatch_dead_channel_alarm.
-    _dead_channel_alarm_sent: set[str] = set()
-
-    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> bool:
-        # P2-5: a persistently non-usable reading on an interlock-protected
-        # channel. SafetyManager gates the fault on RUNNING (sole authority);
-        # this handler only forwards. Failures escalate to a guaranteed fault.
-        # S1: return True iff a fault is now latched — the InterlockEngine marks
-        # the debounce window escalated ONLY on True, so a declined escalation
-        # (not RUNNING) is retried on the next non-usable sample (fail-closed).
-        try:
-            escalated = await safety_manager.on_interlock_dead_channel(
-                condition.name,
-                reading.channel,
-                value=float(reading.value) if reading.value is not None else float("nan"),
-            )
-        except Exception as exc:
-            logger.critical(
-                "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
-                "escalating to guaranteed fault.",
-                condition.name,
-                reading.channel,
-                exc,
-                exc_info=True,
-            )
-            try:
-                await safety_manager.latch_fault(
-                    reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
-                    source="interlock",
-                    channel=reading.channel,
-                )
-                return True
-            except Exception as exc2:
-                logger.critical(
-                    "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
-                    condition.name,
-                    exc2,
-                    exc_info=True,
-                )
-                return False
-
-        # A3: SafetyManager's log-only decision outside RUNNING is
-        # unchanged — but a dead sensor while idle should still be heard,
-        # not just log-grepped. Own try/except: a notification failure must
-        # never affect the safety decision above or the return value.
-        key = f"{condition.name}:{reading.channel}"
-        if _should_dispatch_dead_channel_alarm(key, escalated, _dead_channel_alarm_sent):
-            try:
-                await _dispatch_alarm_notification(
-                    event_bus,
-                    _alarm_dispatch_tasks,
-                    alarm_id=f"dead_channel_{reading.channel}",
-                    level="WARNING",
-                    message=(
-                        f"Интерлок-канал {reading.channel} ('{condition.name}') "
-                        "устойчиво непригоден, источник неактивен — fault не "
-                        "латчится, но требуется внимание оператора."
-                    ),
-                    experiment_id=experiment_manager.active_experiment_id,
-                    channel=reading.channel,
-                    value=(
-                        float(reading.value) if reading.value is not None else float("nan")
-                    ),
-                )
-            except Exception as exc:
-                logger.error(
-                    "Dead-channel audible dispatch failed for '%s': %s",
-                    reading.channel,
-                    exc,
-                )
-        return escalated
+    interlock_handler_context = _InterlockHandlerContext(
+        safety_manager=safety_manager,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+        dead_channel_alarm_sent=set(),
+    )
 
     interlock_engine = InterlockEngine(
         broker,
         actions=interlock_actions,
-        trip_handler=_interlock_trip_handler,
-        dead_channel_handler=_interlock_dead_channel_handler,
+        trip_handler=functools.partial(
+            _interlock_trip_handler,
+            context=interlock_handler_context,
+        ),
+        dead_channel_handler=functools.partial(
+            _interlock_dead_channel_handler,
+            context=interlock_handler_context,
+        ),
     )
     interlock_engine.load_config(interlocks_cfg)
 
@@ -2189,6 +2649,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     sink_registry.load_config(_sink_cfg_path)
 
     event_bus = EventBus()
+    safety_fault_context.event_bus = event_bus
+    safety_fault_context.experiment_manager = experiment_manager
+    interlock_handler_context.event_bus = event_bus
+    interlock_handler_context.experiment_manager = experiment_manager
     # A3b: engine-side ring buffer of alarm_fired events for the GUI's
     # recent_alarms poll (sound) — see _alarm_ring_feed()/_AlarmRingBuffer.
     _alarm_ring = _AlarmRingBuffer()
@@ -2306,7 +2770,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.info("VacuumGuard: отключён в конфиге")
 
     # --- Sensor Diagnostics Engine ---
-    _plugins_cfg_path = _cfg("plugins")
+    _plugins_cfg_path = _engine_config_path("plugins")
     _plugins_raw: dict[str, Any] = {}
     if _plugins_cfg_path.exists():
         with _plugins_cfg_path.open(encoding="utf-8") as fh:
@@ -2394,788 +2858,49 @@ async def _run_engine(*, mock: bool = False) -> None:
     # rotation silently. normalize_schedule_time falls back to 03:00 + ERROR log.
     cold_rotation_schedule = normalize_schedule_time(str(cold_cfg.get("schedule_time", "03:00")))
 
-    async def _cold_rotation_scheduler() -> None:
-        """Run rotation once per day at cold_rotation.schedule_time."""
-        assert cold_rotation_service is not None
-        while True:
-            await asyncio.sleep(seconds_until_next(cold_rotation_schedule, datetime.now(UTC)))
-            try:
-                rotated = await cold_rotation_service.run_once()
-                if rotated:
-                    logger.info(
-                        "ColdRotation: вытеснено %d суточных файлов в холодное хранилище",
-                        len(rotated),
-                    )
-            except Exception:
-                logger.exception("ColdRotation: проход ротации завершился ошибкой")
-
-    async def _track_runtime_signals() -> None:
-        queue = await broker.subscribe("adaptive_throttle_runtime", maxsize=2000)
-        try:
-            while True:
-                adaptive_throttle.observe_runtime_signal(await queue.get())
-        except asyncio.CancelledError:
-            return
-
-    async def _alarm_v2_feed_readings() -> None:
-        """Подписаться на DataBroker и кормить v2 channel_state + rate_estimator."""
-        queue = await broker.subscribe("alarm_v2_state_feed", maxsize=2000)
-        # A2(a): loop body extracted to the importable, per-reading-guarded
-        # _alarm_v2_feed_loop so a single bad reading can't kill the feed.
-        await _alarm_v2_feed_loop(queue, _alarm_v2_state_tracker, _alarm_v2_rate)
-
-    async def _alarm_ring_feed() -> None:
-        """Подписаться на EventBus и наполнять A3b-буфер тревог для GUI-звука."""
-        queue = await event_bus.subscribe("alarm_ring_buffer", maxsize=200)
-        await _alarm_ring_buffer_loop(queue, _alarm_ring)
-
-    # Strong-ref set for fire-and-forget Telegram dispatch tasks.
-    # Without this the loop only weak-refs tasks and GC can drop a pending
-    # alarm notification mid-flight. See DEEP_AUDIT_CC.md A.1/A.2/I.2.
-    _alarm_dispatch_tasks: set[asyncio.Task] = set()
-
-    async def _alarm_v2_tick() -> None:
-        """Периодически вычислять алармы v2 и диспетчеризировать события."""
-        poll_s = _alarm_v2_engine_cfg.poll_interval_s
-        while True:
-            await asyncio.sleep(poll_s)
-            if _alarm_v2_configs:
-                await _alarm_v2_tick_configs()
-            # B2: republish the total active-alarm count every poll cycle
-            # (not just when _alarm_v2_configs is non-empty) — this feeds
-            # AdaptiveThrottle.observe_runtime_signal via the
-            # "analytics/alarm_count" channel, which AlarmEngine v1 used to
-            # own exclusively. Without this the throttle never learns an
-            # alarm is active and keeps thinning archived data during a
-            # fault. Counts alarms from ALL v2 sources sharing
-            # alarm_v2_state_mgr (global/phase alarms here, plus
-            # CooldownAlarm/VacuumGuard/diagnostic alarms ticked
-            # elsewhere) — not independently unit-tested (this closure
-            # isn't importable); covered by test_housekeeping.py's
-            # observe_runtime_signal tests + the engine boot smoke test.
-            await broker.publish(
-                Reading.now(
-                    channel="analytics/alarm_count",
-                    value=float(len(alarm_v2_state_mgr.get_active())),
-                    unit="",
-                    instrument_id="alarm_v2",
-                )
-            )
-
-    async def _alarm_v2_tick_configs() -> None:
-        # A2(a): guard the once-per-tick phase lookup — a raise here (it sits
-        # outside the per-alarm try below) would kill the whole tick task.
-        try:
-            current_phase = _alarm_v2_phase.get_current_phase()
-        except Exception as exc:
-            logger.error("Alarm v2 tick: ошибка получения фазы: %s", exc)
-            return
-        for alarm_cfg in _alarm_v2_configs:
-            try:
-                # Phase-filter -> evaluate -> process. Shared with tests via
-                # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
-                # by the real production logic. Out-of-phase returns
-                # (None, None) after clearing, so nothing dispatches below.
-                event, transition = tick_alarm(
-                    alarm_cfg, current_phase, alarm_v2_evaluator, alarm_v2_state_mgr
-                )
-                if transition == "TRIGGERED" and event is not None:
-                    # GUI polls via alarm_v2_status command; optionally notify via Telegram
-                    if "telegram" in alarm_cfg.notify and telegram_bot is not None:
-                        msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
-                        t = asyncio.create_task(
-                            telegram_bot._send_to_all(msg),
-                            name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
-                        )
-                        _alarm_dispatch_tasks.add(t)
-                        t.add_done_callback(_alarm_dispatch_tasks.discard)
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_fired",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": event.alarm_id,
-                                "level": event.level,
-                                "message": event.message,
-                                "channels": event.channels,
-                                "values": event.values,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-                elif transition == "CLEARED":
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_cleared",
-                            timestamp=datetime.now(UTC),
-                            payload={"alarm_id": alarm_cfg.alarm_id},
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-            except Exception as exc:
-                logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
-
-    # --- Sensor diagnostics feed + tick tasks ---
-    async def _sensor_diag_feed() -> None:
-        """Feed readings into SensorDiagnosticsEngine buffers."""
-        if sensor_diag is None:
-            return
-        queue = await broker.subscribe("sensor_diag_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно;
-                # не годное показание не отравляет буферы диагностики.
-                if reading.is_usable():
-                    sensor_diag.push(
-                        reading.channel,
-                        reading.timestamp.timestamp(),
-                        reading.value,
-                    )
-        except asyncio.CancelledError:
-            return
-
-    async def _sensor_diag_tick() -> None:
-        """Periodically recompute sensor diagnostics and dispatch alarm notifications."""
-        if sensor_diag is None:
-            return
-        interval = _sd_cfg.get("update_interval_s", 10)
-        # v0.55.5: default False — sensor-health alarms route to GUI only
-        # by policy; the hourly periodic_report carries a digest section.
-        _notify_telegram = _sd_cfg.get("notify_telegram", False)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                new_events = sensor_diag.update()
-                if _notify_telegram and telegram_bot is not None and new_events:
-                    aggregation_threshold = _sd_cfg.get("aggregation_threshold", 3)
-                    # F20 aggregation handled by _format_diag_telegram_messages.
-                    for _tg_name, _tg_msg in _format_diag_telegram_messages(
-                        new_events, aggregation_threshold
-                    ):
-                        t = asyncio.create_task(
-                            telegram_bot._send_to_all(_tg_msg),
-                            name=_tg_name,
-                        )
-                        _alarm_dispatch_tasks.add(t)
-                        t.add_done_callback(_alarm_dispatch_tasks.discard)
-                for _sd_ev in new_events:
-                    if _sd_ev.level.upper() == "CRITICAL":
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="sensor_anomaly_critical",
-                                timestamp=datetime.now(UTC),
-                                payload={
-                                    "alarm_id": _sd_ev.alarm_id,
-                                    "level": _sd_ev.level,
-                                    "channels": _sd_ev.channels,
-                                    "values": _sd_ev.values,
-                                    "message": _sd_ev.message,
-                                },
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
-                        )
-            except Exception as exc:
-                logger.error("SensorDiagnostics tick error: %s", exc)
-
-    # --- Vacuum trend feed + tick tasks ---
-    async def _vacuum_trend_feed() -> None:
-        """Feed pressure readings into VacuumTrendPredictor."""
-        if vacuum_trend is None:
-            return
-        pressure_channel = _vt_cfg.get("pressure_channel", "")
-        queue = await broker.subscribe("vacuum_trend_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                # Accept readings from the pressure channel or any mbar-unit reading
-                if pressure_channel and reading.channel != pressure_channel:
-                    if reading.unit != "mbar":
-                        continue
-                elif not pressure_channel and reading.unit != "mbar":
-                    continue
-                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно.
-                # push сохраняет свою доменную защиту P <= 0 (log₁₀ не определён).
-                if reading.is_usable():
-                    vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
-        except asyncio.CancelledError:
-            return
-
-    async def _vacuum_trend_tick() -> None:
-        """Periodically recompute vacuum trend prediction."""
-        if vacuum_trend is None:
-            return
-        interval = _vt_cfg.get("update_interval_s", 30)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                vacuum_trend.update()
-            except Exception as exc:
-                logger.error("VacuumTrendPredictor tick error: %s", exc)
-
-    async def _leak_rate_feed() -> None:
-        """Feed pressure readings into LeakRateEstimator; auto-finalize on window expiry."""
-        pressure_channel = _vt_cfg.get("pressure_channel", "")
-        queue = await broker.subscribe("leak_rate_feed", maxsize=500)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                if pressure_channel and reading.channel != pressure_channel:
-                    continue
-                if reading.unit != "mbar":
-                    continue
-                if not leak_rate_estimator.is_active:
-                    continue
-                leak_rate_estimator.add_sample(reading.timestamp, reading.value)
-                if leak_rate_estimator.should_finalize():
-                    try:
-                        result = leak_rate_estimator.finalize()
-                        await event_logger.log_event(
-                            "leak_rate",
-                            f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
-                        )
-                    except (ValueError, Exception) as exc:  # noqa: BLE001
-                        logger.error("Leak rate auto-finalize failed: %s", exc)
-        except asyncio.CancelledError:
-            return
-
     # v0.55.11 — auto-stop bookkeeping for multiline.burst_start. The
     # meta dict is populated by the helper (intent); the tasks dict is
     # populated at the dispatch site (materialised on the engine loop).
     _multiline_burst_auto_stop_meta: dict[str, dict[str, Any]] = {}
     _multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]] = {}
 
-    # Обработчик команд от GUI — через SafetyManager
-    async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
-        action = cmd.get("cmd", "")
-        try:
-            if action in {
-                "keithley_emergency_off",
-                "keithley_stop",
-                "keithley_start",
-                "keithley_set_target",
-                "keithley_set_limits",
-            }:
-                result = await _run_keithley_command(action, cmd, safety_manager)
-                if result.get("ok"):
-                    ch = cmd.get("channel", "?")
-                    if action == "keithley_start":
-                        await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
-                    elif action == "keithley_stop":
-                        await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
-                    elif action == "keithley_emergency_off":
-                        await event_logger.log_event(
-                            "keithley", f"\u26a0 Keithley {ch}: аварийное отключение"
-                        )
-                        if escalation_service is not None:
-                            await escalation_service.escalate(
-                                "emergency",
-                                f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
-                            )
-                return result
-            if action == "safety_status":
-                return {"ok": True, **safety_manager.get_status()}
-            if action == "sinks_status":
-                return {
-                    "ok": True,
-                    "results": [
-                        {
-                            "sink": r.sink_name,
-                            "success": r.success,
-                            "target": r.target,
-                            "error": r.error,
-                            "timestamp": r.timestamp.isoformat(),
-                        }
-                        for r in sink_registry.recent_results[-20:]
-                    ],
-                }
-            if action == "safety_acknowledge":
-                reason = cmd.get("reason", "")
-                return await safety_manager.acknowledge_fault(reason)
-            if action == "interlock_acknowledge":
-                # F24: re-arm a tripped interlock after operator clears the condition.
-                name = cmd.get("interlock_name", "")
-                try:
-                    interlock_engine.acknowledge(name)
-                    return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
-                except KeyError as exc:
-                    return {"ok": False, "error": str(exc)}
-            _leak_resp = await _handle_leak_rate_command(
-                action, cmd, leak_rate_estimator, _leak_cfg, event_logger
-            )
-            if _leak_resp is not None:
-                return _leak_resp
-            if action == "alarm_v2_status":
-                active = alarm_v2_state_mgr.get_active()
-                return {
-                    "ok": True,
-                    "active": {
-                        k: {
-                            "level": v.level,
-                            "message": v.message,
-                            "triggered_at": v.triggered_at,
-                            "channels": v.channels,
-                            "acknowledged": v.acknowledged,
-                            "acknowledged_at": v.acknowledged_at,
-                            "acknowledged_by": v.acknowledged_by,
-                        }
-                        for k, v in active.items()
-                    },
-                    "history": alarm_v2_state_mgr.get_history(limit=20),
-                }
-            if action == "recent_alarms":
-                # A3b: GUI sound poller — same (lack of) auth as alarm_v2_status.
-                since_seq = int(cmd.get("since_seq", 0) or 0)
-                return {"ok": True, **_alarm_ring.since(since_seq)}
-            if action == "alarm_v2_history":
-                # IV.4 F11: time-range slice of the existing alarm-v2
-                # history deque. Used by the shift-end dialog to fill
-                # the «Тревоги за смену» section; the state manager's
-                # own 1000-entry ring buffer is the source of truth
-                # (no persistence layer for alarm transitions yet).
-                raw_start = cmd.get("start_ts")
-                raw_end = cmd.get("end_ts")
-                try:
-                    start_ts = float(raw_start) if raw_start is not None else None
-                    end_ts = float(raw_end) if raw_end is not None else None
-                except (TypeError, ValueError):
-                    return {"ok": False, "error": "start_ts / end_ts must be numeric"}
-                limit = int(cmd.get("limit", 500))
-                history = alarm_v2_state_mgr.get_history(limit=1000)
-                filtered: list[dict[str, Any]] = []
-                for entry in history:
-                    at = float(entry.get("at", 0.0) or 0.0)
-                    if start_ts is not None and at < start_ts:
-                        continue
-                    if end_ts is not None and at > end_ts:
-                        continue
-                    filtered.append(entry)
-                return {
-                    "ok": True,
-                    "history": filtered[:limit],
-                }
-            if action == "alarm_v2_ack":
-                name = cmd.get("alarm_name", "")
-                operator = cmd.get("operator", "")
-                reason = cmd.get("reason", "")
-                ack_event = alarm_v2_state_mgr.acknowledge(
-                    name,
-                    operator=operator,
-                    reason=reason,
-                )
-                if ack_event is not None:
-                    await broker.publish(
-                        Reading(
-                            timestamp=datetime.now(UTC),
-                            instrument_id="alarm_v2",
-                            channel="alarm_v2/acknowledged",
-                            value=ack_event["acknowledged_at"],
-                            unit="",
-                            metadata=ack_event,
-                        )
-                    )
-                return {
-                    "ok": ack_event is not None or name in alarm_v2_state_mgr.get_active(),
-                    "alarm_name": name,
-                    "event_emitted": ack_event is not None,
-                }
-            if action in {
-                "get_app_mode",
-                "set_app_mode",
-                "experiment_templates",
-                "experiment_status",
-                "experiment_archive_list",
-                "experiment_list_archive",
-                "experiment_start",
-                "experiment_create",
-                "experiment_get_active",
-                "experiment_update",
-                "experiment_finalize",
-                "experiment_stop",
-                "experiment_abort",
-                "experiment_get_archive_item",
-                "experiment_attach_run_record",
-                "experiment_create_retroactive",
-                "experiment_generate_report",
-                "experiment_advance_phase",
-                "experiment_phase_status",
-            }:
-                experiment_call = asyncio.to_thread(
-                    _run_experiment_command,
-                    action,
-                    cmd,
-                    experiment_manager,
-                )
-                if action == "experiment_status":
-                    # NOTE: asyncio.wait_for on an asyncio.to_thread() call times out the AWAIT,
-                    # not the worker thread. If get_status_payload() is pathologically slow, the
-                    # background thread keeps running until it returns naturally. This is an
-                    # accepted residual risk — REP is still protected by the outer 2.0s handler
-                    # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
-                    # only gives faster client feedback and frees the REP loop earlier. There is
-                    # no safe way to terminate a Python thread mid-call, so Option C
-                    # ("actually interrupt") is not available.
-                    try:
-                        result = await asyncio.wait_for(
-                            experiment_call,
-                            timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
-                        )
-                    except TimeoutError as exc:
-                        raise TimeoutError(
-                            f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)"
-                        ) from exc
-                else:
-                    result = await experiment_call
-                # Hook calibration acquisition on experiment lifecycle
-                if result.get("ok") and action in {"experiment_start", "experiment_create"}:
-                    await asyncio.to_thread(
-                        _try_activate_calibration_acquisition,
-                        calibration_acquisition,
-                        experiment_manager,
-                        cmd,
-                    )
-                    name = cmd.get("name") or cmd.get("title") or "?"
-                    await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="experiment_start",
-                            timestamp=datetime.now(UTC),
-                            payload={"name": name, "experiment_id": result.get("experiment_id")},
-                            experiment_id=result.get("experiment_id"),
-                        )
-                    )
-                elif result.get("ok") and action in {
-                    "experiment_finalize",
-                    "experiment_stop",
-                    "experiment_abort",
-                }:
-                    calibration_acquisition.deactivate()
-                    if action == "experiment_abort":
-                        await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
-                    else:
-                        await event_logger.log_event("experiment", "Эксперимент завершён")
-                    _exp_info = result.get("experiment", {})
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type=action,
-                            timestamp=datetime.now(UTC),
-                            payload={"action": action, "experiment": _exp_info},
-                            experiment_id=_exp_info.get("experiment_id"),
-                        )
-                    )
-                    if _cooldown_alarm is not None:
-                        _cooldown_alarm.notify_experiment_finalized()
-
-                    # F31: dispatch experiment export to sinks (fire-and-forget,
-                    # strong-ref against GC via _alarm_dispatch_tasks).
-                    if sink_registry.sinks:
-                        try:
-                            _exp_id = _exp_info.get("experiment_id") or ""
-                            _metadata: dict = {}
-                            if _exp_id:
-                                _meta_path = (
-                                    experiment_manager.data_dir
-                                    / "experiments"
-                                    / _exp_id
-                                    / "metadata.json"
-                                )
-                                # H2: offload metadata read to thread.
-                                _metadata = await asyncio.to_thread(
-                                    _load_experiment_metadata_sync, _meta_path
-                                )
-                            # F31 H1: build the sink export via the extracted
-                            # helper — summary comes from the canonical
-                            # "summary_metadata" metadata key, not the empty
-                            # bare "summary" key.
-                            _export = _build_experiment_export(_exp_info, _metadata)
-                            _t = asyncio.create_task(
-                                sink_registry.dispatch(_export),
-                                name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
-                            )
-                            _alarm_dispatch_tasks.add(_t)
-                            _t.add_done_callback(_alarm_dispatch_tasks.discard)
-                        except Exception as _exc:  # noqa: BLE001 — fire-and-forget
-                            logger.warning(
-                                "F31: sink dispatch setup failed: %s", _exc, exc_info=True
-                            )
-                elif result.get("ok") and action == "experiment_advance_phase":
-                    phase = cmd.get("phase", "?")
-                    await event_logger.log_event("phase", f"Фаза: → {phase}")
-                    _active = experiment_manager.active_experiment
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="phase_transition",
-                            timestamp=datetime.now(UTC),
-                            payload={"phase": phase, "entry": result.get("phase", {})},
-                            experiment_id=_active.experiment_id if _active else None,
-                        )
-                    )
-                    # v0.55.12 — feed every phase transition into the
-                    # CooldownAlarm so it can disarm itself when the
-                    # operator advances away from cooldown and clear
-                    # its cold-start flag
-                    # on a fresh cooldown entry (finding 1.5). Runs
-                    # BEFORE the auto-arm path so a phase=cooldown call
-                    # always sees a cleared flag.
-                    if _cooldown_alarm is not None:
-                        try:
-                            _cooldown_alarm.notify_phase_change(phase)
-                        except Exception as _exc:
-                            logger.warning(
-                                "CooldownAlarm: notify_phase_change ошибка: %s",
-                                _exc,
-                                exc_info=True,
-                            )
-                    # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
-                    # entry. Operator can still disarm manually via the
-                    # alarm panel footer button. Idempotent: arm() is a
-                    # no-op if already armed.
-                    if (
-                        phase == "cooldown"
-                        and _cooldown_alarm is not None
-                        and _cooldown_alarm.is_auto_arm_enabled
-                    ):
-                        try:
-                            armed = _cooldown_alarm.arm()
-                            if not armed and _cooldown_alarm.cold_start_skipped:
-                                # v0.55.12 — surface the skip explicitly so
-                                # the operator log shows why auto-arm
-                                # didn't engage on this phase entry.
-                                logger.info(
-                                    "CooldownAlarm: auto-arm skipped — "
-                                    "cold-start detected"
-                                )
-                            else:
-                                logger.info(
-                                    "CooldownAlarm: auto-arm на phase=cooldown → %s",
-                                    "ARMED" if armed else "FAILED (no model)",
-                                )
-                        except Exception as _exc:
-                            logger.warning(
-                                "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True
-                            )
-                return result
-            if action == "calibration_acquisition_status":
-                return {"ok": True, **calibration_acquisition.stats}
-            if action in {
-                "calibration_v2_extract",
-                "calibration_v2_fit",
-                "calibration_v2_coverage",
-            }:
-                return await asyncio.to_thread(
-                    _run_calibration_v2_command,
-                    action,
-                    cmd,
-                    calibration_store,
-                )
-            if action == "readings_history":
-                channels_raw = cmd.get("channels")
-                channels = list(channels_raw) if channels_raw else None
-                from_ts = cmd.get("from_ts")
-                to_ts = cmd.get("to_ts")
-                limit = int(cmd.get("limit_per_channel", 3600))
-                data = await writer.read_readings_history(
-                    channels=channels,
-                    from_ts=float(from_ts) if from_ts is not None else None,
-                    to_ts=float(to_ts) if to_ts is not None else None,
-                    limit_per_channel=limit,
-                )
-                # Serialize: {channel: [[ts, value], ...]}
-                return {
-                    "ok": True,
-                    "data": {ch: pts for ch, pts in data.items()},
-                }
-            if action == "cooldown_history_get":
-                return await _run_cooldown_history_command(
-                    cmd, experiment_manager, writer
-                )
-            if action in {"log_entry", "log_get"}:
-                return await _run_operator_log_command(
-                    action,
-                    cmd,
-                    writer,
-                    experiment_manager,
-                    broker,
-                )
-            if action in {
-                "calibration_curve_evaluate",
-                "calibration_curve_list",
-                "calibration_curve_get",
-                "calibration_curve_lookup",
-                "calibration_curve_assign",
-                "calibration_runtime_status",
-                "calibration_runtime_set_global",
-                "calibration_runtime_set_channel_policy",
-                "calibration_curve_export",
-                "calibration_curve_import",
-            }:
-                return await asyncio.to_thread(
-                    _run_calibration_command,
-                    action,
-                    cmd,
-                    calibration_store=calibration_store,
-                    experiment_manager=experiment_manager,
-                    drivers_by_name=drivers_by_name,
-                )
-            if action == "get_sensor_diagnostics":
-                if sensor_diag is None:
-                    return {"ok": False, "error": "SensorDiagnostics отключён"}
-                from dataclasses import asdict
-
-                diag = sensor_diag.get_diagnostics()
-                summary = sensor_diag.get_summary()
-                return {
-                    "ok": True,
-                    "channels": {k: asdict(v) for k, v in diag.items()},
-                    "summary": asdict(summary),
-                }
-            if action == "get_vacuum_trend":
-                if vacuum_trend is None:
-                    return {"ok": False, "error": "VacuumTrendPredictor отключён"}
-                from dataclasses import asdict
-
-                pred = vacuum_trend.get_prediction()
-                if pred is None:
-                    return {"ok": True, "status": "no_data"}
-                return {"ok": True, **asdict(pred)}
-            if action == "shift_handover_summary":
-                _sh_active = experiment_manager.active_experiment
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="shift_handover_request",
-                        timestamp=datetime.now(UTC),
-                        payload={
-                            "requested_by": cmd.get("operator", ""),
-                            "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
-                        },
-                        experiment_id=_sh_active.experiment_id if _sh_active else None,
-                    )
-                )
-                return {"ok": True, "status": "queued"}
-            if action == "cooldown_alarm.arm":
-                if _cooldown_alarm is None:
-                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
-                ok = _cooldown_alarm.arm()
-                return {"ok": ok, "state": _cooldown_alarm.state.name}
-            if action == "cooldown_alarm.disarm":
-                if _cooldown_alarm is None:
-                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
-                _cooldown_alarm.disarm()
-                return {"ok": True, "state": "DISARMED"}
-            if action == "cooldown_alarm.status":
-                if _cooldown_alarm is None:
-                    return {"state": "UNAVAILABLE"}
-                _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
-                _t_cold_val = (
-                    _t_cold_state.value
-                    if _t_cold_state is not None and not _t_cold_state.is_stale
-                    else None
-                )
-                return {
-                    "state": _cooldown_alarm.state.name,
-                    "eta_h": _cooldown_alarm.current_eta_h,
-                    "progress": _cooldown_alarm.current_progress,
-                    "t_cold": _t_cold_val,
-                }
-            if action == "vacuum_guard.status":
-                if _vacuum_guard is None:
-                    return {"state": "UNAVAILABLE"}
-                return {"state": _vacuum_guard.state.name}
-            if action in ("assistant.query", "rag.search"):
-                # B1 (2026-07): the GUI bridge routes these directly to
-                # the cryodaq-assistant process's own REP (:5557) now —
-                # this is a backward-compat fallback, see the helper.
-                return _assistant_process_unavailable_reply(action)
-            if action == "multiline.set_channels":
-                # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
-                # channels via the panel selector dialog.
-                return await _handle_multiline_set_channels_command(
-                    cmd,
-                    drivers_by_name=drivers_by_name,
-                    config_dir=_CONFIG_DIR,
-                )
-            if action.startswith("multiline.burst_"):
-                # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
-                # button + status poll + manual stop.
-                response = await _handle_multiline_burst_command(
-                    action,
-                    cmd,
-                    drivers_by_name=drivers_by_name,
-                    experiment_manager=experiment_manager,
-                    experiments_root=_DATA_DIR / "experiments",
-                    auto_stop_tasks=_multiline_burst_auto_stop_meta,
-                )
-                # Schedule auto-stop on the engine loop if duration_s
-                # was set — the helper records intent in the meta dict;
-                # this site materialises the task so it runs on the
-                # right loop and gets cleaned up automatically.
-                if (
-                    response.get("ok")
-                    and action == "multiline.burst_start"
-                    and response.get("duration_s") is not None
-                ):
-                    target_name = response.get("name", "")
-                    duration_s = float(response["duration_s"])
-
-                    async def _auto_stop(driver_name: str = target_name,
-                                         delay_s: float = duration_s) -> None:
-                        try:
-                            await asyncio.sleep(delay_s)
-                            d = drivers_by_name.get(driver_name)
-                            if d is None:
-                                return
-                            try:
-                                path = await d.burst_stop(
-                                    experiments_root=_DATA_DIR / "experiments",
-                                )
-                                logger.info(
-                                    "MultiLine '%s' burst auto-stopped after %.1fs → %s",
-                                    driver_name, delay_s, path,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.error(
-                                    "MultiLine '%s' auto-stop failed: %s",
-                                    driver_name, exc, exc_info=True,
-                                )
-                        finally:
-                            _multiline_burst_auto_stop_tasks.pop(driver_name, None)
-
-                    _t = asyncio.create_task(
-                        _auto_stop(),
-                        name=f"multiline_burst_auto_stop_{target_name}",
-                    )
-                    # Cancel any pre-existing auto-stop for the same
-                    # driver — operator restarting the timer wins.
-                    prev = _multiline_burst_auto_stop_tasks.get(target_name)
-                    if prev is not None and not prev.done():
-                        prev.cancel()
-                    _multiline_burst_auto_stop_tasks[target_name] = _t
-                return response
-            if action in ("rag.rebuild_index", "rag.rebuild_status"):
-                # B1 (2026-07): moved to cryodaq-assistant's own REP (:5557).
-                return _assistant_process_unavailable_reply(action)
-            if action == "cooldown_eta_get":
-                # B1 (2026-07): additive read-only command — exposes the
-                # same CooldownService.last_prediction() the old in-process
-                # CooldownAdapter read directly, now for the assistant
-                # process's ZMQ-based CooldownAdapter (agents/assistant/
-                # query/adapters/cooldown_adapter.py). Never a write path.
-                if cooldown_service is None:
-                    return {"ok": True, "prediction": None}
-                return {"ok": True, "prediction": cooldown_service.last_prediction()}
-            return {"ok": False, "error": f"unknown command: {action}"}
-        except Exception as exc:
-            logger.error("Ошибка выполнения команды '%s': %s", action, exc)
-            return {"ok": False, "error": str(exc)}
-
-    cmd_server = ZMQCommandServer(handler=_handle_gui_command)
+    command_context = EngineCommandContext(
+        safety_manager=safety_manager,
+        event_logger=event_logger,
+        sink_registry=sink_registry,
+        interlock_engine=interlock_engine,
+        leak_rate_estimator=leak_rate_estimator,
+        leak_cfg=_leak_cfg,
+        alarm_v2_state_mgr=alarm_v2_state_mgr,
+        alarm_ring=_alarm_ring,
+        broker=broker,
+        experiment_manager=experiment_manager,
+        calibration_acquisition=calibration_acquisition,
+        event_bus=event_bus,
+        cooldown_alarm=_cooldown_alarm,
+        vacuum_guard=_vacuum_guard,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+        calibration_store=calibration_store,
+        writer=writer,
+        drivers_by_name=drivers_by_name,
+        sensor_diag=sensor_diag,
+        vacuum_trend=vacuum_trend,
+        alarm_v2_state_tracker=_alarm_v2_state_tracker,
+        multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
+        multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+    )
+    handle_gui_command = functools.partial(
+        _handle_gui_command,
+        context=command_context,
+    )
+    cmd_server = ZMQCommandServer(handler=handle_gui_command)
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None
-    cooldown_cfg_path = _cfg("cooldown")
+    cooldown_cfg_path = _engine_config_path("cooldown")
     if cooldown_cfg_path.exists():
         try:
             with cooldown_cfg_path.open(encoding="utf-8") as fh:
@@ -3203,13 +2928,14 @@ async def _run_engine(*, mock: bool = False) -> None:
                     )
         except Exception as exc:
             logger.error("Ошибка создания CooldownService: %s", exc)
+    command_context.cooldown_service = cooldown_service
 
     # --- Уведомления (один раз разбираем YAML) ---
     periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
     _photo_handler: CompositionPhotoHandler | None = None
     escalation_service: EscalationService | None = None
-    notifications_cfg = _cfg("notifications")
+    notifications_cfg = _engine_config_path("notifications")
     if notifications_cfg.exists():
         try:
             with notifications_cfg.open(encoding="utf-8") as fh:
@@ -3259,7 +2985,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                         bot_token=bot_token,
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
-                        command_handler=_handle_gui_command,
+                        command_handler=handle_gui_command,
                         verify_ssl=verify_ssl,
                     )
                     logger.info(
@@ -3295,6 +3021,8 @@ async def _run_engine(*, mock: bool = False) -> None:
             logger.error("Ошибка загрузки конфигурации уведомлений: %s", exc)
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
+    command_context.escalation_service = escalation_service
+    safety_fault_context.telegram_bot = telegram_bot
 
     # --- B1 (2026-07): Гемма (AssistantLiveAgent), RAG searcher, and
     # AssistantQueryAgent (F30 live chat) all moved to the standalone
@@ -3328,18 +3056,6 @@ async def _run_engine(*, mock: bool = False) -> None:
         }
     )
 
-    async def _assistant_event_relay_loop(queue: asyncio.Queue[EngineEvent]) -> None:
-        while True:
-            event = await queue.get()
-            if event.event_type not in _ASSISTANT_RELAY_EVENT_TYPES:
-                continue
-            await zmq_pub.publish_event(
-                event_type=event.event_type,
-                timestamp=event.timestamp,
-                payload=event.payload,
-                experiment_id=event.experiment_id,
-            )
-
     _assistant_relay_queue = await event_bus.subscribe("assistant_zmq_relay", maxsize=1000)
 
     # --- Запуск всех подсистем ---
@@ -3347,108 +3063,20 @@ async def _run_engine(*, mock: bool = False) -> None:
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
 
     # ─────────────────── Надзор за долгоживущими задачами (A2) ────────────────
-    # Каждая долгоживущая задача движка регистрируется здесь. Если её корутина
-    # неожиданно падает, done-callback пишет CRITICAL, поднимает оператору
-    # тревогу по штатному каналу событий и перезапускает задачу с экспоненц.
-    # выдержкой. safety_collect/safety_monitor создаёт SafetyManager; движок
-    # надзирает за ними снаружи и после _SAFETY_TASK_MAX_RESTARTS неудачных
-    # перезапусков латчит FAULT вместо бесконечного цикла.
-    _engine_stopping = False
-    _supervised_tasks: dict[str, asyncio.Task[Any]] = {}
-    _supervise_restarts: dict[str, int] = {}
-    # F3: per-task spawn timestamp, so the done-callback can tell how long
-    # each incarnation ran before dying (see _SUPERVISE_RESET_WINDOW_S).
-    _supervise_spawn_times: dict[str, float] = {}
-
-    def _dispatch_supervisor_alarm(task_name: str, exc: BaseException) -> None:
-        # Штатный путь тревоги: то же событие alarm_fired, что и у alarm-v2 —
-        # GUI/оператор получают его через event_bus (звук/панель), новый канал
-        # не изобретаем.
-        ev = asyncio.create_task(
-            event_bus.publish(
-                EngineEvent(
-                    event_type="alarm_fired",
-                    timestamp=datetime.now(UTC),
-                    payload={
-                        "alarm_id": f"task_supervisor_{task_name}",
-                        "level": "CRITICAL",
-                        "message": (
-                            f"Служебная задача {task_name} аварийно завершилась: {exc!r}"
-                        ),
-                        "channels": [],
-                        "values": [],
-                    },
-                    experiment_id=experiment_manager.active_experiment_id,
-                )
-            ),
-            name=f"supervisor_alarm_{task_name}",
-        )
-        _alarm_dispatch_tasks.add(ev)
-        ev.add_done_callback(_alarm_dispatch_tasks.discard)
-
-    def _dispatch_safety_fault_latch(task_name: str, exc: BaseException) -> None:
-        ft = asyncio.create_task(
-            safety_manager.latch_fault(
-                reason=(
-                    f"Задача мониторинга безопасности {task_name} аварийно "
-                    f"завершилась и не восстановилась: {exc!r}"
-                ),
-                source=task_name,
-            ),
-            name=f"{task_name}_fault_latch",
-        )
-        _alarm_dispatch_tasks.add(ft)
-        ft.add_done_callback(_alarm_dispatch_tasks.discard)
-
-    def _register_supervision(
-        name: str,
-        task: asyncio.Task[Any],
-        factory: Callable[[], Any],
-        *,
-        safety_critical: bool = False,
-        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
-    ) -> asyncio.Task[Any]:
-        _supervised_tasks[name] = task
-        _supervise_spawn_times[name] = time.monotonic()
-        if on_spawn is not None:
-            on_spawn(task)
-
-        def _done(t: asyncio.Task[Any]) -> None:
-            spawned_at = _supervise_spawn_times.get(name, time.monotonic())
-            _handle_supervised_task_exit(
-                name=name,
-                task=t,
-                stopping=_engine_stopping,
-                restart_counts=_supervise_restarts,
-                logger_=logger,
-                on_alarm=_dispatch_supervisor_alarm,
-                on_restart=lambda delay: asyncio.get_running_loop().call_later(
-                    delay,
-                    lambda: _spawn_supervised(
-                        name, factory, safety_critical=safety_critical, on_spawn=on_spawn
-                    ),
-                ),
-                on_fault_latch=_dispatch_safety_fault_latch,
-                safety_critical=safety_critical,
-                running_s=time.monotonic() - spawned_at,
-            )
-
-        task.add_done_callback(_done)
-        return task
-
-    def _spawn_supervised(
-        name: str,
-        factory: Callable[[], Any],
-        *,
-        safety_critical: bool = False,
-        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
-    ) -> asyncio.Task[Any]:
-        if _engine_stopping:
-            return _supervised_tasks[name]
-        task = asyncio.create_task(factory(), name=name)
-        return _register_supervision(
-            name, task, factory, safety_critical=safety_critical, on_spawn=on_spawn
-        )
+    # Каждая долгоживущая задача движка регистрируется в TaskSupervisor. Если её
+    # корутина неожиданно падает, done-callback пишет CRITICAL, поднимает
+    # оператору тревогу по штатному каналу событий и перезапускает задачу с
+    # экспоненц. выдержкой. safety_collect/safety_monitor создаёт SafetyManager;
+    # движок надзирает за ними снаружи и после _SAFETY_TASK_MAX_RESTARTS
+    # неудачных перезапусков латчит FAULT вместо бесконечного цикла. Политика
+    # надзора вынесена в engine_wiring.supervision.TaskSupervisor.
+    supervisor = TaskSupervisor(
+        event_bus=event_bus,
+        experiment_manager=experiment_manager,
+        safety_manager=safety_manager,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+        logger_=logger,
+    )
 
     # safety_collect/safety_monitor уже созданы SafetyManager.start(); надзираем
     # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
@@ -3458,32 +3086,15 @@ async def _run_engine(*, mock: bool = False) -> None:
         _stask = getattr(safety_manager, _sattr, None)
         if _stask is not None:
             _loop_fn = getattr(safety_manager, f"_{_sname.split('_', 1)[1]}_loop")
-            _register_supervision(
+            supervisor.register(
                 _sname,
                 _stask,
                 _loop_fn,
                 safety_critical=True,
-                on_spawn=(lambda attr: lambda t: setattr(safety_manager, attr, t))(_sattr),
+                on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _sattr),
             )
 
-    def _loop_exception_backstop(
-        _loop: asyncio.AbstractEventLoop, context: dict[str, Any]
-    ) -> None:
-        # Последний рубеж: всё, что ускользнуло от надзора (fire-and-forget
-        # задачи, баги в самом loop), логируем CRITICAL, а не роняем молча.
-        exc = context.get("exception")
-        _tname = ""
-        fut = context.get("future") or context.get("task")
-        if isinstance(fut, asyncio.Task):
-            _tname = fut.get_name()
-        logger.critical(
-            "Необработанное исключение в event loop: %s | task=%s | %r",
-            context.get("message", ""),
-            _tname or "-",
-            exc,
-        )
-
-    asyncio.get_running_loop().set_exception_handler(_loop_exception_backstop)
+    install_loop_exception_backstop(asyncio.get_running_loop(), logger)
 
     # writer уже запущен через start_immediate() выше
     await zmq_pub.start(zmq_queue)
@@ -3500,127 +3111,102 @@ async def _run_engine(*, mock: bool = False) -> None:
         await _photo_handler.start()
     # B1: relay EngineEvents to the assistant process over ZMQ (see the
     # wiring comment above _assistant_relay_queue for what this replaces).
-    assistant_event_relay_task = _spawn_supervised(
+    assistant_event_relay_task = supervisor.spawn(
         "assistant_event_relay",
-        lambda: _assistant_event_relay_loop(_assistant_relay_queue),
+        functools.partial(
+            assistant_event_relay_loop,
+            _assistant_relay_queue,
+            zmq_pub,
+            _ASSISTANT_RELAY_EVENT_TYPES,
+        ),
     )
     await scheduler.start()
-    throttle_task = _spawn_supervised("adaptive_throttle_runtime", _track_runtime_signals)
-    alarm_v2_feed_task = _spawn_supervised("alarm_v2_feed", _alarm_v2_feed_readings)
-    alarm_ring_task = _spawn_supervised("alarm_ring_buffer_feed", _alarm_ring_feed)
+    throttle_task = supervisor.spawn(
+        "adaptive_throttle_runtime",
+        functools.partial(track_runtime_signals, broker, adaptive_throttle),
+    )
+    alarm_v2_feed_task = supervisor.spawn(
+        "alarm_v2_feed",
+        functools.partial(
+            alarm_v2_feed_readings,
+            broker,
+            _alarm_v2_state_tracker,
+            _alarm_v2_rate,
+        ),
+    )
+    alarm_ring_task = supervisor.spawn(
+        "alarm_ring_buffer_feed",
+        functools.partial(alarm_ring_feed, event_bus, _alarm_ring),
+    )
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
-        alarm_v2_tick_task = _spawn_supervised("alarm_v2_tick", _alarm_v2_tick)
-
-    async def _cooldown_alarm_tick_loop() -> None:
-        """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
-        interval = float(_cooldown_cfg.get("eval_interval_s", 30))
-        _last_triggered_id = "cooldown_alarm"
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                transition = await _cooldown_alarm.tick()  # type: ignore[union-attr]
-            except Exception as exc:
-                logger.error("CooldownAlarm tick error: %s", exc)
-                continue
-            if transition == "TRIGGERED":
-                _active = alarm_v2_state_mgr.get_active()
-                # CooldownAlarm fires under "cooldown_alarm" OR "cooldown_watchdog"
-                _ev = _active.get("cooldown_alarm") or _active.get("cooldown_watchdog")
-                if _ev is not None:
-                    _last_triggered_id = _ev.alarm_id
-                    if telegram_bot is not None:
-                        _pt = asyncio.create_task(
-                            telegram_bot._send_to_all(
-                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                            ),
-                            name=f"phys_alarm_tg_{_ev.alarm_id}",
-                        )
-                        _alarm_dispatch_tasks.add(_pt)
-                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_fired",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": _ev.alarm_id,
-                                "level": _ev.level,
-                                "message": _ev.message,
-                                "channels": _ev.channels,
-                                "values": _ev.values,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-            elif transition == "CLEARED":
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_cleared",
-                        timestamp=datetime.now(UTC),
-                        payload={"alarm_id": _last_triggered_id},
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
-
-    async def _vacuum_guard_tick_loop() -> None:
-        """Independent tick for VacuumGuard at its own configured cadence (F-X v3)."""
-        interval = float(_vacuum_cfg.get("eval_interval_s", 30))
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                transition = await _vacuum_guard.tick()  # type: ignore[union-attr]
-            except Exception as exc:
-                logger.error("VacuumGuard tick error: %s", exc)
-                continue
-            if transition == "TRIGGERED":
-                _active = alarm_v2_state_mgr.get_active()
-                _ev = _active.get("vacuum_guard")
-                if _ev is not None:
-                    if telegram_bot is not None:
-                        _pt = asyncio.create_task(
-                            telegram_bot._send_to_all(
-                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                            ),
-                            name="phys_alarm_tg_vacuum_guard",
-                        )
-                        _alarm_dispatch_tasks.add(_pt)
-                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_fired",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": _ev.alarm_id,
-                                "level": _ev.level,
-                                "message": _ev.message,
-                                "channels": _ev.channels,
-                                "values": _ev.values,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-            elif transition == "CLEARED":
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_cleared",
-                        timestamp=datetime.now(UTC),
-                        payload={"alarm_id": "vacuum_guard"},
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
+        alarm_v2_tick_task = supervisor.spawn(
+            "alarm_v2_tick",
+            functools.partial(
+                alarm_v2_tick,
+                engine_cfg=_alarm_v2_engine_cfg,
+                configs=_alarm_v2_configs,
+                phase_provider=_alarm_v2_phase,
+                evaluator=alarm_v2_evaluator,
+                state_mgr=alarm_v2_state_mgr,
+                broker=broker,
+                telegram_bot=telegram_bot,
+                alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                event_bus=event_bus,
+                experiment_manager=experiment_manager,
+            ),
+        )
 
     cooldown_alarm_task: asyncio.Task | None = None
     vacuum_guard_task: asyncio.Task | None = None
     if _cooldown_alarm is not None:
-        cooldown_alarm_task = _spawn_supervised("cooldown_alarm_tick", _cooldown_alarm_tick_loop)
+        cooldown_alarm_task = supervisor.spawn(
+            "cooldown_alarm_tick",
+            functools.partial(
+                cooldown_alarm_tick_loop,
+                cooldown_cfg=_cooldown_cfg,
+                cooldown_alarm=_cooldown_alarm,
+                state_mgr=alarm_v2_state_mgr,
+                telegram_bot=telegram_bot,
+                alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                event_bus=event_bus,
+                experiment_manager=experiment_manager,
+            ),
+        )
     if _vacuum_guard is not None:
-        vacuum_guard_task = _spawn_supervised("vacuum_guard_tick", _vacuum_guard_tick_loop)
+        vacuum_guard_task = supervisor.spawn(
+            "vacuum_guard_tick",
+            functools.partial(
+                vacuum_guard_tick_loop,
+                vacuum_cfg=_vacuum_cfg,
+                vacuum_guard=_vacuum_guard,
+                state_mgr=alarm_v2_state_mgr,
+                telegram_bot=telegram_bot,
+                alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                event_bus=event_bus,
+                experiment_manager=experiment_manager,
+            ),
+        )
 
     sd_feed_task: asyncio.Task | None = None
     sd_tick_task: asyncio.Task | None = None
     if sensor_diag is not None:
-        sd_feed_task = _spawn_supervised("sensor_diag_feed", _sensor_diag_feed)
-        sd_tick_task = _spawn_supervised("sensor_diag_tick", _sensor_diag_tick)
+        sd_feed_task = supervisor.spawn(
+            "sensor_diag_feed",
+            functools.partial(sensor_diag_feed, sensor_diag, broker),
+        )
+        sd_tick_task = supervisor.spawn(
+            "sensor_diag_tick",
+            functools.partial(
+                sensor_diag_tick,
+                sensor_diag=sensor_diag,
+                sd_cfg=_sd_cfg,
+                telegram_bot=telegram_bot,
+                alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                event_bus=event_bus,
+                experiment_manager=experiment_manager,
+            ),
+        )
         # v0.55.5 — anchor the cold-start grace at the moment the feed
         # and tick tasks are actually live. Doing this here (rather than
         # in the constructor) avoids counting the engine bootstrap
@@ -3629,14 +3215,36 @@ async def _run_engine(*, mock: bool = False) -> None:
     vt_feed_task: asyncio.Task | None = None
     vt_tick_task: asyncio.Task | None = None
     if vacuum_trend is not None:
-        vt_feed_task = _spawn_supervised("vacuum_trend_feed", _vacuum_trend_feed)
-        vt_tick_task = _spawn_supervised("vacuum_trend_tick", _vacuum_trend_tick)
-    leak_rate_feed_task = _spawn_supervised("leak_rate_feed", _leak_rate_feed)
+        vt_feed_task = supervisor.spawn(
+            "vacuum_trend_feed",
+            functools.partial(vacuum_trend_feed, vacuum_trend, _vt_cfg, broker),
+        )
+        vt_tick_task = supervisor.spawn(
+            "vacuum_trend_tick",
+            functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg),
+        )
+    leak_rate_feed_task = supervisor.spawn(
+        "leak_rate_feed",
+        functools.partial(
+            leak_rate_feed,
+            vt_cfg=_vt_cfg,
+            broker=broker,
+            leak_rate_estimator=leak_rate_estimator,
+            event_logger=event_logger,
+        ),
+    )
     await housekeeping_service.start()
 
     cold_rotation_task: asyncio.Task | None = None
     if cold_rotation_service is not None:
-        cold_rotation_task = _spawn_supervised("cold_rotation_scheduler", _cold_rotation_scheduler)
+        cold_rotation_task = supervisor.spawn(
+            "cold_rotation_scheduler",
+            functools.partial(
+                cold_rotation_scheduler,
+                cold_rotation_service,
+                cold_rotation_schedule,
+            ),
+        )
         logger.info(
             "ColdRotationService запущен: archive=%s, age_days=%d, schedule=%s",
             cold_rotation_service._archive_dir,
@@ -3647,9 +3255,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.info("ColdRotationService отключён (cold_rotation.enabled != true)")
 
     # Watchdog
-    watchdog_task = _spawn_supervised(
+    watchdog_task = supervisor.spawn(
         "engine_watchdog",
-        lambda: _watchdog(broker, scheduler, writer, start_ts),
+        functools.partial(_watchdog, broker, scheduler, writer, start_ts),
     )
 
     # DiskMonitor — also wires the writer so disk-recovery can clear the
@@ -3668,18 +3276,15 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Ожидание сигнала завершения ---
     shutdown_event = asyncio.Event()
 
-    def _request_shutdown() -> None:
-        logger.info("Получен сигнал завершения")
-        shutdown_event.set()
-
     # Регистрация обработчиков сигналов
     loop = asyncio.get_running_loop()
+    request_shutdown = functools.partial(_request_shutdown, shutdown_event)
     if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
+        loop.add_signal_handler(signal.SIGINT, request_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
     else:
         # Windows: signal.signal работает только в главном потоке
-        signal.signal(signal.SIGINT, lambda *_: _request_shutdown())
+        signal.signal(signal.SIGINT, request_shutdown)
 
     await shutdown_event.wait()
 
@@ -3688,7 +3293,7 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
     # только что отменённую задачу прямо во время завершения.
-    _engine_stopping = True
+    supervisor.stop()
 
     # F31 H3: drain in-flight sink dispatches before downstream teardown.
     # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
@@ -3781,7 +3386,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     # перезапуске), чтобы мониторинг безопасности жил до конца завершения.
     _stragglers = [
         t
-        for name, t in _supervised_tasks.items()
+        for name, t in supervisor.supervised_tasks.items()
         if name not in ("safety_collect", "safety_monitor") and not t.done()
     ]
     for _t in _stragglers:

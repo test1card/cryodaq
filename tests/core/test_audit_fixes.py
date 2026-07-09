@@ -461,8 +461,11 @@ def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
 
 
 def test_engine_feed_sites_gate_on_is_usable() -> None:
-    """All three estimator feed loops in _run_engine gate on the doctrine
-    predicate; the old float-only _push_if_finite helper is gone."""
+    """All estimator feed loops gate on the doctrine predicate.
+
+    The loops live in importable runtime-task functions, so inspect those
+    production functions directly.
+    """
     import inspect
     import re
 
@@ -470,7 +473,20 @@ def test_engine_feed_sites_gate_on_is_usable() -> None:
 
     assert not hasattr(engine, "_push_if_finite")
 
-    src = re.sub(r"\s+", "", inspect.getsource(engine._run_engine))
+    from cryodaq.engine_wiring import runtime_tasks
+
+    src = re.sub(
+        r"\s+",
+        "",
+        "\n".join(
+            inspect.getsource(fn)
+            for fn in (
+                runtime_tasks.sensor_diag_feed,
+                runtime_tasks.vacuum_trend_feed,
+                runtime_tasks._alarm_v2_feed_loop,
+            )
+        ),
+    )
     assert "sensor_diag.push(" in src
     assert "vacuum_trend.push(" in src
     # Every feed loop is guarded by the doctrine predicate; no _push_if_finite.

@@ -1,0 +1,253 @@
+"""Надзор за долгоживущими задачами движка (A2) — вынесен из ``_run_engine``.
+
+Тихая смерть задачи — риск №1 в ночную смену: долгоживущий цикл движка, чья
+корутина падает, умирает без следа, и мониторинг/тревоги гаснут. Политика
+надзора собрана здесь как импортируемый, тестируемый в изоляции код (тот же
+резон, что и у ``_drain_dispatch_tasks``): решающее ядро
+``_handle_supervised_task_exit`` тестируется без подъёма всего движка, а
+``TaskSupervisor`` держит мутабельное состояние (``engine_stopping`` + реестры
+задач), которое раньше было локальными переменными ``_run_engine``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
+
+from cryodaq.core.event_bus import EngineEvent
+
+_SUPERVISE_BACKOFF_BASE_S = 1.0  # first restart delay; doubles each crash
+_SUPERVISE_BACKOFF_MAX_S = 60.0  # cap so a hard-down task never spins hot
+_SAFETY_TASK_MAX_RESTARTS = 2  # safety_collect/safety_monitor: latch FAULT after this
+# The safety policy is "after 2 failed restarts" — consecutive, not lifetime.
+# A task that ran at least this long before dying
+# had its previous incarnation recover; its restart count resets to 0 before
+# incrementing, so sparse/transient crashes hours apart never false-latch
+# FAULT the way a genuine rapid crash loop must.
+_SUPERVISE_RESET_WINDOW_S = 300.0
+
+
+def _handle_supervised_task_exit(
+    *,
+    name: str,
+    task: asyncio.Task[Any],
+    stopping: bool,
+    restart_counts: dict[str, int],
+    logger_: logging.Logger,
+    on_alarm: Callable[[str, BaseException], None],
+    on_restart: Callable[[float], None],
+    on_fault_latch: Callable[[str, BaseException], None],
+    safety_critical: bool = False,
+    running_s: float = 0.0,
+) -> str:
+    """Decide + act on a supervised long-lived task's termination.
+
+    A2(b): the done-callback core. On UNEXPECTED death (not cancellation, not
+    a clean return, not during shutdown) it raises the operator alarm through
+    the existing alarm/event path and restarts with exponential backoff. For
+    the two safety tasks (``safety_critical``) it latches FAULT via SafetyManager
+    after ``_SAFETY_TASK_MAX_RESTARTS`` failed restarts instead of looping
+    forever. Side effects are injected so the policy is testable in isolation.
+
+    ``running_s`` (F3) is how long THIS incarnation ran before dying. A run
+    of at least ``_SUPERVISE_RESET_WINDOW_S`` means the previous restart
+    recovered, so the count resets before incrementing — only consecutive
+    rapid restarts accumulate toward the safety latch / backoff escalation.
+
+    Returns one of ``"ignored" | "restart" | "fault_latch"``.
+    """
+    # Clean cancellation or engine shutdown: never restart, never alarm.
+    if task.cancelled() or stopping:
+        return "ignored"
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return "ignored"
+    if exc is None:
+        # Loop returned without error (e.g. a disabled subsystem returning
+        # early). Nothing died unexpectedly — leave it be.
+        return "ignored"
+
+    logger_.critical(
+        "Надзор: служебная задача %s аварийно завершилась — %r",
+        name,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    on_alarm(name, exc)  # operator-visible/audible alert via existing alarm path
+
+    if running_s >= _SUPERVISE_RESET_WINDOW_S:
+        # F3: previous incarnation recovered and ran healthily — this crash
+        # is not consecutive with any earlier one. Reset before incrementing.
+        restart_counts[name] = 0
+
+    count = restart_counts.get(name, 0) + 1
+    restart_counts[name] = count
+
+    if safety_critical and count > _SAFETY_TASK_MAX_RESTARTS:
+        logger_.critical(
+            "Надзор: %s не восстановилась за %d перезапуска — латч FAULT",
+            name,
+            _SAFETY_TASK_MAX_RESTARTS,
+        )
+        on_fault_latch(name, exc)
+        return "fault_latch"
+
+    delay = min(_SUPERVISE_BACKOFF_BASE_S * 2 ** (count - 1), _SUPERVISE_BACKOFF_MAX_S)
+    on_restart(delay)
+    return "restart"
+
+
+class TaskSupervisor:
+    """Реестр надзора за долгоживущими задачами движка.
+
+    Держит то, что раньше было локальными переменными ``_run_engine``:
+    флаг ``engine_stopping`` (мутируется при завершении, чтобы done-callback
+    не перезапускал только что отменённую задачу) и реестры задач/счётчиков
+    перезапуска/времени старта. Тревога и латч FAULT идут по штатному каналу
+    ``alarm_fired`` — нового канала не изобретаем.
+    """
+
+    def __init__(
+        self,
+        *,
+        event_bus: Any,
+        experiment_manager: Any,
+        safety_manager: Any,
+        alarm_dispatch_tasks: set[asyncio.Task[Any]],
+        logger_: logging.Logger,
+    ) -> None:
+        self._event_bus = event_bus
+        self._experiment_manager = experiment_manager
+        self._safety_manager = safety_manager
+        self._alarm_dispatch_tasks = alarm_dispatch_tasks
+        self._logger = logger_
+        self.engine_stopping = False
+        self.supervised_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._restarts: dict[str, int] = {}
+        # F3: per-task spawn timestamp, so the done-callback can tell how long
+        # each incarnation ran before dying (see _SUPERVISE_RESET_WINDOW_S).
+        self._spawn_times: dict[str, float] = {}
+
+    def dispatch_supervisor_alarm(self, task_name: str, exc: BaseException) -> None:
+        # Штатный путь тревоги: то же событие alarm_fired, что и у alarm-v2 —
+        # GUI/оператор получают его через event_bus (звук/панель), новый канал
+        # не изобретаем.
+        ev = asyncio.create_task(
+            self._event_bus.publish(
+                EngineEvent(
+                    event_type="alarm_fired",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "alarm_id": f"task_supervisor_{task_name}",
+                        "level": "CRITICAL",
+                        "message": (
+                            f"Служебная задача {task_name} аварийно завершилась: {exc!r}"
+                        ),
+                        "channels": [],
+                        "values": [],
+                    },
+                    experiment_id=self._experiment_manager.active_experiment_id,
+                )
+            ),
+            name=f"supervisor_alarm_{task_name}",
+        )
+        self._alarm_dispatch_tasks.add(ev)
+        ev.add_done_callback(self._alarm_dispatch_tasks.discard)
+
+    def dispatch_safety_fault_latch(self, task_name: str, exc: BaseException) -> None:
+        ft = asyncio.create_task(
+            self._safety_manager.latch_fault(
+                reason=(
+                    f"Задача мониторинга безопасности {task_name} аварийно "
+                    f"завершилась и не восстановилась: {exc!r}"
+                ),
+                source=task_name,
+            ),
+            name=f"{task_name}_fault_latch",
+        )
+        self._alarm_dispatch_tasks.add(ft)
+        ft.add_done_callback(self._alarm_dispatch_tasks.discard)
+
+    def register(
+        self,
+        name: str,
+        task: asyncio.Task[Any],
+        factory: Callable[[], Any],
+        *,
+        safety_critical: bool = False,
+        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> asyncio.Task[Any]:
+        self.supervised_tasks[name] = task
+        self._spawn_times[name] = time.monotonic()
+        if on_spawn is not None:
+            on_spawn(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            spawned_at = self._spawn_times.get(name, time.monotonic())
+            _handle_supervised_task_exit(
+                name=name,
+                task=t,
+                stopping=self.engine_stopping,
+                restart_counts=self._restarts,
+                logger_=self._logger,
+                on_alarm=self.dispatch_supervisor_alarm,
+                on_restart=lambda delay: asyncio.get_running_loop().call_later(
+                    delay,
+                    lambda: self.spawn(
+                        name, factory, safety_critical=safety_critical, on_spawn=on_spawn
+                    ),
+                ),
+                on_fault_latch=self.dispatch_safety_fault_latch,
+                safety_critical=safety_critical,
+                running_s=time.monotonic() - spawned_at,
+            )
+
+        task.add_done_callback(_done)
+        return task
+
+    def spawn(
+        self,
+        name: str,
+        factory: Callable[[], Any],
+        *,
+        safety_critical: bool = False,
+        on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> asyncio.Task[Any]:
+        if self.engine_stopping:
+            return self.supervised_tasks[name]
+        task = asyncio.create_task(factory(), name=name)
+        return self.register(
+            name, task, factory, safety_critical=safety_critical, on_spawn=on_spawn
+        )
+
+    def stop(self) -> None:
+        """A2: гасим надзор до отмены задач — иначе done-callback перезапустит
+        только что отменённую задачу прямо во время завершения."""
+        self.engine_stopping = True
+
+
+def install_loop_exception_backstop(
+    loop: asyncio.AbstractEventLoop, logger_: logging.Logger
+) -> None:
+    """Последний рубеж: всё, что ускользнуло от надзора (fire-and-forget
+    задачи, баги в самом loop), логируем CRITICAL, а не роняем молча."""
+
+    def _backstop(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        _tname = ""
+        fut = context.get("future") or context.get("task")
+        if isinstance(fut, asyncio.Task):
+            _tname = fut.get_name()
+        logger_.critical(
+            "Необработанное исключение в event loop: %s | task=%s | %r",
+            context.get("message", ""),
+            _tname or "-",
+            exc,
+        )
+
+    loop.set_exception_handler(_backstop)
