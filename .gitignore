@@ -32,6 +32,10 @@ export/
 # Local config overrides (machine-specific, not committed)
 config/*.local.yaml
 config/*.local.yaml.yaml
+config/*.local.yaml.bak
+config/.first_run_done
+config/.first_run_pending
+config/.first_run_recovery.*
 
 # Local dev-tooling state (repo hygiene 2026-07-08: fully user-local).
 .claude/

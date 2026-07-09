@@ -1665,6 +1665,12 @@ def main() -> None:
         help="Использовать карту переименования каналов для указанной эпохи "
         "(например, 'pre-2025-02'). Применяется только к SQLite/Directory replay.",
     )
+    parser.add_argument(
+        "--setup-wizard",
+        action="store_true",
+        help="Показать мастер первого запуска повторно "
+        "(приборы, обзор безопасности, Telegram).",
+    )
     args, remaining = parser.parse_known_args()
 
     from cryodaq.logging_setup import resolve_log_level, setup_logging
@@ -1703,7 +1709,8 @@ def main() -> None:
     # GTK themes leak light defaults without it.
     apply_fusion_dark_palette(app)
 
-    # Single-instance guard
+    # Acquire the process-wide guard before any modal setup UI or config
+    # mutation. A second launcher must never race the live process's config.
     lock_fd = try_acquire_lock(".launcher.lock")
     if lock_fd is None:
         QMessageBox.critical(
@@ -1714,6 +1721,31 @@ def main() -> None:
             "или завершите его через иконку в трее → Выход.",
         )
         sys.exit(0)
+
+    from cryodaq.gui.first_run_config import recover_pending_setup
+    from cryodaq.paths import get_config_dir
+
+    try:
+        recover_pending_setup(get_config_dir())
+    except Exception as exc:
+        logger.error("First-run transaction recovery failed (%s)", type(exc).__name__)
+        QMessageBox.critical(
+            None,
+            "CryoDAQ — требуется восстановление настройки",
+            "Не удалось безопасно восстановить незавершённую настройку. "
+            "Запуск остановлен, чтобы не использовать частично обновлённую "
+            "конфигурацию. Проверьте права и свободное место в папке config.",
+        )
+        sys.exit(1)
+
+    # Normal tray/autostart must remain unattended and nonblocking. An
+    # operator can still request the wizard explicitly with --setup-wizard.
+    if args.setup_wizard or not args.tray:
+        from cryodaq.gui.first_run_wizard import maybe_show_first_run_wizard
+
+        maybe_show_first_run_wizard(force=args.setup_wizard)
+    else:
+        logger.info("Первичная настройка отложена: launcher запущен в --tray режиме")
 
     window = LauncherWindow(
         app,
