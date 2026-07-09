@@ -61,7 +61,8 @@ import logging
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from importlib.metadata import version as _pkg_version
+from typing import Any, Literal
 
 import msgpack
 import zmq
@@ -117,6 +118,21 @@ DEFAULT_TOPIC = b"readings"
 # GUI subscribers only ``.subscribe(DEFAULT_TOPIC)`` (b"readings"), so this
 # frame type is invisible to them — no protocol break, no port change.
 EVENTS_TOPIC = b"events"
+
+# Version of the ZMQ REP command envelope and PUB frame encodings this module
+# defines (topics, msgpack/JSON shapes — see docs/protocol.md). REST
+# (web/server.py's GET /api/version) imports this same constant instead of
+# declaring its own: the ZMQ and REST surfaces ship together from one
+# package build, so one number is honest; a REST-only break would still
+# warrant bumping this the same way a ZMQ-only break would.
+PROTOCOL_VERSION = 1
+
+try:
+    _APP_VERSION = _pkg_version("cryodaq")
+except Exception:
+    _APP_VERSION = "dev"
+
+_SERVER_LABELS = frozenset({"engine", "assistant"})
 
 # Audit C.2 / D6: socket-level size caps on the unauthenticated
 # loopback command/data path. libzmq (ZMQ_MAXMSGSIZE) drops an oversize
@@ -643,9 +659,14 @@ class ZMQCommandServer:
         *,
         handler: Callable[[dict[str, Any]], Any] | None = None,
         handler_timeout_s: float | None = None,
+        server_label: Literal["engine", "assistant"] = "engine",
     ) -> None:
+        if not isinstance(server_label, str) or server_label not in _SERVER_LABELS:
+            allowed = ", ".join(sorted(_SERVER_LABELS))
+            raise ValueError(f"server_label must be one of: {allowed}")
         self._address = address
         self._handler = handler
+        self._server_role = server_label
         # IV.3 Finding 7: honour an explicit override (tests supply one
         # to exercise the timeout path without sleeping for 2 s), but
         # the production path uses the tiered ``_timeout_for(cmd)``
@@ -706,6 +727,16 @@ class ZMQCommandServer:
         timeout — the ``_handler_timeout`` marker so callers can tell
         the difference from a normal handler-reported error.
         """
+        # Answer discovery before application dispatch so it remains available
+        # even if no command handler is configured.
+        if isinstance(cmd, dict) and str(cmd.get("cmd", "")) == "protocol_version":
+            return {
+                "ok": True,
+                "proto": PROTOCOL_VERSION,
+                "server": self._server_label(),
+                "app_version": _APP_VERSION,
+            }
+
         if self._handler is None:
             return {"ok": False, "error": "no handler"}
 
@@ -782,6 +813,21 @@ class ZMQCommandServer:
 
         return result if isinstance(result, dict) else {"ok": True}
 
+    def _server_label(self) -> str:
+        """Return the explicit role advertised by ``protocol_version``."""
+        return self._server_role
+
+    def _encode_reply(self, reply: dict[str, Any]) -> bytes:
+        """Serialize a REP reply, injecting the additive ``proto`` field.
+
+        Success, malformed-JSON reject, handler timeout/exception, and
+        recoverable serialization-failure replies pass through this method
+        before ``send()``. Other keys are preserved; the authoritative
+        ``proto`` value replaces any handler-provided value so handlers cannot
+        omit or spoof the envelope version.
+        """
+        return json.dumps({**reply, "proto": PROTOCOL_VERSION}, default=str).encode()
+
     async def _serve_loop(self) -> None:
         while self._running:
             try:
@@ -806,7 +852,7 @@ class ZMQCommandServer:
             try:
                 cmd = _decode_command(raw)
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-                await self._socket.send(json.dumps({"ok": False, "error": "invalid JSON"}).encode())
+                await self._socket.send(self._encode_reply({"ok": False, "error": "invalid JSON"}))
                 continue
 
             try:
@@ -815,7 +861,7 @@ class ZMQCommandServer:
                 # CancelledError during handler — must still send reply
                 # to avoid leaving REP socket in stuck state.
                 try:
-                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
+                    await self._socket.send(self._encode_reply({"ok": False, "error": "internal"}))
                 except Exception:
                     pass
                 raise
@@ -824,11 +870,11 @@ class ZMQCommandServer:
                 reply = {"ok": False, "error": str(exc)}
 
             try:
-                await self._socket.send(json.dumps(reply, default=str).encode())
+                await self._socket.send(self._encode_reply(reply))
             except asyncio.CancelledError:
                 # Shutting down — try best-effort send
                 try:
-                    await self._socket.send(json.dumps({"ok": False, "error": "internal"}).encode())
+                    await self._socket.send(self._encode_reply({"ok": False, "error": "internal"}))
                 except Exception:
                     pass
                 raise
@@ -838,7 +884,7 @@ class ZMQCommandServer:
                 # to avoid leaving the REP socket in stuck state.
                 try:
                     await self._socket.send(
-                        json.dumps({"ok": False, "error": "serialization error"}).encode()
+                        self._encode_reply({"ok": False, "error": "serialization error"})
                     )
                 except Exception:
                     pass

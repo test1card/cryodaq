@@ -40,7 +40,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from cryodaq.core.zmq_bridge import ZMQSubscriber
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
 from cryodaq.storage._sqlite import sqlite3
@@ -393,6 +393,12 @@ def create_app() -> FastAPI:
             logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
         return base
+
+    @application.get("/api/version")
+    async def api_version() -> dict[str, Any]:
+        """Protocol + app version triple — unauthenticated read, same trust
+        as the other GET routes (see docs/protocol.md)."""
+        return {"proto": PROTOCOL_VERSION, "server": "web", "app_version": _VERSION}
 
     @application.get("/api/log")
     async def api_log(limit: int = 10) -> dict[str, Any]:

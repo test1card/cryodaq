@@ -759,7 +759,11 @@ async def run(
             logger.error("Ошибка выполнения команды ассистента '%s': %s", action, exc)
             return {"ok": False, "error": str(exc)}
 
-    cmd_server = ZMQCommandServer(address=assistant_cmd_addr, handler=_handle_assistant_command)
+    cmd_server = ZMQCommandServer(
+        address=assistant_cmd_addr,
+        handler=_handle_assistant_command,
+        server_label="assistant",
+    )
 
     # --- Start everything ---
     await state_cache.start()

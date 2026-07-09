@@ -6,11 +6,13 @@ import asyncio
 import json
 import logging
 import socket
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 import zmq
 import zmq.asyncio
 
-from cryodaq.core.zmq_bridge import ZMQCommandServer
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQCommandServer
 
 
 def _free_tcp_address() -> str:
@@ -32,6 +34,22 @@ async def _send_command(
     req.connect(address)
     try:
         await req.send(json.dumps(payload).encode())
+        raw = await asyncio.wait_for(req.recv(), timeout=timeout_s)
+        return json.loads(raw)
+    finally:
+        req.close(linger=0)
+        ctx.term()
+
+
+async def _send_raw(address: str, payload: bytes, *, timeout_s: float = 5.0) -> dict:
+    ctx = zmq.asyncio.Context()
+    req = ctx.socket(zmq.REQ)
+    req.setsockopt(zmq.LINGER, 0)
+    req.setsockopt(zmq.RCVTIMEO, int(timeout_s * 1000))
+    req.setsockopt(zmq.SNDTIMEO, int(timeout_s * 1000))
+    req.connect(address)
+    try:
+        await req.send(payload)
         raw = await asyncio.wait_for(req.recv(), timeout=timeout_s)
         return json.loads(raw)
     finally:
@@ -66,7 +84,8 @@ async def test_command_server_restarts_after_unexpected_task_error(caplog) -> No
 
         reply = await _send_command(address, {"cmd": "ping"})
         assert calls >= 2
-        assert reply == {"ok": True, "cmd": "ping"}
+        # Every REP reply carries the additive protocol version.
+        assert reply == {"ok": True, "cmd": "ping", "proto": PROTOCOL_VERSION}
         assert "serve loop crashed; restarting" in caplog.text
     finally:
         await server.stop()
@@ -93,9 +112,10 @@ async def test_command_server_times_out_slow_handler_and_keeps_serving(caplog) -
         # can distinguish envelope timeout from a handler-reported error.
         assert slow_reply["ok"] is False
         assert slow_reply.get("_handler_timeout") is True
+        assert slow_reply["proto"] == PROTOCOL_VERSION
         assert "handler timeout (2s)" in slow_reply["error"]
         assert "operation may still be running" in slow_reply["error"]
-        assert fast_reply == {"ok": True, "cmd": "fast"}
+        assert fast_reply == {"ok": True, "cmd": "fast", "proto": PROTOCOL_VERSION}
         assert "action=slow" in caplog.text
     finally:
         await server.stop()
@@ -119,10 +139,178 @@ async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
         assert reply["ok"] is False
         assert reply["error"] == "log_get timeout (1.5s)"
         assert reply.get("_handler_timeout") is True
+        assert reply["proto"] == PROTOCOL_VERSION
         assert "log_get timeout (1.5s)" in caplog.text
         assert "handler timeout (2s)" not in caplog.text
     finally:
         await server.stop()
+
+
+async def test_protocol_version_command_over_the_wire() -> None:
+    """End-to-end: protocol_version answers even though the wired handler
+    knows nothing about it (never routed to `handler`, unlike every other
+    command)."""
+    address = _free_tcp_address()
+    calls: list[str] = []
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        calls.append(str(cmd.get("cmd")))
+        return {"ok": False, "error": "should never be reached for protocol_version"}
+
+    server = ZMQCommandServer(address=address, handler=handler)
+    await server.start()
+    try:
+        reply = await _send_command(address, {"cmd": "protocol_version"})
+        assert reply["ok"] is True
+        assert reply["proto"] == PROTOCOL_VERSION
+        assert reply["server"] == "engine"
+        assert isinstance(reply["app_version"], str)
+        assert calls == [], "protocol_version must not reach the wired handler"
+    finally:
+        await server.stop()
+
+
+async def test_malformed_json_reply_still_carries_proto() -> None:
+    """The reply encoder covers every reply branch, not just the success path —
+    a malformed-JSON reject must carry `proto` too."""
+    address = _free_tcp_address()
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        return {"ok": True}
+
+    server = ZMQCommandServer(address=address, handler=handler)
+    await server.start()
+    try:
+        ctx = zmq.asyncio.Context()
+        req = ctx.socket(zmq.REQ)
+        req.setsockopt(zmq.LINGER, 0)
+        req.setsockopt(zmq.RCVTIMEO, 5000)
+        req.setsockopt(zmq.SNDTIMEO, 5000)
+        req.connect(address)
+        try:
+            await req.send(b"not valid json")
+            raw = await asyncio.wait_for(req.recv(), timeout=5.0)
+            reply = json.loads(raw)
+        finally:
+            req.close(linger=0)
+            ctx.term()
+
+        assert reply == {"ok": False, "error": "invalid JSON", "proto": PROTOCOL_VERSION}
+    finally:
+        await server.stop()
+
+
+@pytest.mark.parametrize("payload", [b'"string"', b"42", b"[1, 2]", b"null"])
+async def test_valid_non_object_json_reply_still_carries_proto(payload: bytes) -> None:
+    address = _free_tcp_address()
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        return {"ok": True}
+
+    server = ZMQCommandServer(address=address, handler=handler)
+    await server.start()
+    try:
+        reply = await _send_raw(address, payload)
+        assert reply["ok"] is False
+        assert "invalid payload" in reply["error"]
+        assert reply["proto"] == PROTOCOL_VERSION
+    finally:
+        await server.stop()
+
+
+async def test_no_handler_reply_still_carries_proto() -> None:
+    address = _free_tcp_address()
+    server = ZMQCommandServer(address=address, handler=None)
+    await server.start()
+    try:
+        reply = await _send_command(address, {"cmd": "status"})
+        assert reply == {
+            "ok": False,
+            "error": "no handler",
+            "proto": PROTOCOL_VERSION,
+        }
+    finally:
+        await server.stop()
+
+
+async def test_handler_exception_reply_still_carries_proto() -> None:
+    address = _free_tcp_address()
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        raise RuntimeError("handler failed")
+
+    server = ZMQCommandServer(address=address, handler=handler)
+    await server.start()
+    try:
+        reply = await _send_command(address, {"cmd": "status"})
+        assert reply == {
+            "ok": False,
+            "error": "handler failed",
+            "proto": PROTOCOL_VERSION,
+        }
+    finally:
+        await server.stop()
+
+
+async def test_serialization_fallback_reply_carries_proto() -> None:
+    """A non-JSON dictionary key takes the deterministic fallback reply path."""
+
+    async def handler(cmd: dict[str, object]) -> dict[object, object]:
+        return {("not", "json"): True}
+
+    socket_mock = MagicMock()
+    socket_mock.poll = AsyncMock(side_effect=[zmq.POLLIN, asyncio.CancelledError()])
+    socket_mock.recv = AsyncMock(return_value=b'{"cmd": "status"}')
+    socket_mock.send = AsyncMock()
+    server = ZMQCommandServer(handler=handler)
+    server._socket = socket_mock
+    server._running = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await server._serve_loop()
+
+    socket_mock.send.assert_awaited_once()
+    reply = json.loads(socket_mock.send.await_args.args[0])
+    assert reply == {
+        "ok": False,
+        "error": "serialization error",
+        "proto": PROTOCOL_VERSION,
+    }
+
+
+async def test_handler_cancellation_best_effort_reply_carries_proto() -> None:
+    socket_mock = MagicMock()
+    socket_mock.poll = AsyncMock(return_value=zmq.POLLIN)
+    socket_mock.recv = AsyncMock(return_value=b'{"cmd": "status"}')
+    socket_mock.send = AsyncMock()
+    server = ZMQCommandServer(handler=None)
+    server._socket = socket_mock
+    server._running = True
+    server._run_handler = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await server._serve_loop()
+
+    socket_mock.send.assert_awaited_once()
+    reply = json.loads(socket_mock.send.await_args.args[0])
+    assert reply == {"ok": False, "error": "internal", "proto": PROTOCOL_VERSION}
+
+
+async def test_send_cancellation_best_effort_reply_carries_proto() -> None:
+    socket_mock = MagicMock()
+    socket_mock.poll = AsyncMock(return_value=zmq.POLLIN)
+    socket_mock.recv = AsyncMock(return_value=b'{"cmd": "status"}')
+    socket_mock.send = AsyncMock(side_effect=[asyncio.CancelledError(), None])
+    server = ZMQCommandServer(handler=lambda cmd: {"ok": True})
+    server._socket = socket_mock
+    server._running = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await server._serve_loop()
+
+    assert socket_mock.send.await_count == 2
+    fallback = json.loads(socket_mock.send.await_args_list[1].args[0])
+    assert fallback == {"ok": False, "error": "internal", "proto": PROTOCOL_VERSION}
 
 
 def test_engine_commands_keep_inner_timeouts_wired() -> None:

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
 from cryodaq.web.server import _query_history, create_app
 
 
@@ -51,6 +52,20 @@ def test_api_status_returns_json(client) -> None:
     assert "readings" in data
     assert data.get("safety", {}).get("state") == "SAFE_OFF"
     assert "active_alarms" in data
+
+
+def test_api_version_returns_proto_server_app_version(client) -> None:
+    """GET /api/version is unauthenticated (same trust as other reads)
+    and returns the {proto, server, app_version} triple, `server: "web"`."""
+    resp = client.get("/api/version")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {
+        "proto": PROTOCOL_VERSION,
+        "server": "web",
+        "app_version": data["app_version"],
+    }
+    assert isinstance(data["app_version"], str) and data["app_version"]
 
 
 def test_api_log_returns_entries(client) -> None:

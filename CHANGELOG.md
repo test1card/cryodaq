@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Добавлено версионирование ZMQ/REST-протокола (`PROTOCOL_VERSION = 1`):
+  каждый REP-ответ получает дополнительное поле `proto`; read-only команда
+  `protocol_version` возвращает `{ok, proto, server, app_version}`, а
+  `GET /api/version` — `{proto, server, app_version}`. Роль REP-сервера задаётся
+  явно и не зависит от настраиваемого адреса. GUI умеет запрашивать версию
+  engine и assistant, один раз за время жизни клиента предупреждает о более
+  новой версии сервера и никогда не блокирует оператора. Политика совместимости
+  описана в `docs/protocol.md`.
+
 ### Changed
 
 - Alarm Engine v1 (`src/cryodaq/core/alarm.py`, `config/alarms.yaml`) удалён.

@@ -38,6 +38,7 @@ DEFAULT_ASSISTANT_CMD_ADDR = "tcp://127.0.0.1:5557"
 # Command name prefixes routed to DEFAULT_ASSISTANT_CMD_ADDR instead of
 # the engine's cmd_addr.
 _ASSISTANT_CMD_PREFIXES = ("assistant.", "rag.")
+_ASSISTANT_PROTOCOL_VERSION_CMD = "assistant.protocol_version"
 # Mirror of zmq_bridge.DEFAULT_TOPIC. Duplicated (not imported) because this
 # module is loaded in the GUI process, which must not import zmq/zmq_bridge
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
@@ -242,12 +243,18 @@ def zmq_bridge_main(
                 if isinstance(cmd_type, str) and cmd_type.startswith(_ASSISTANT_CMD_PREFIXES)
                 else cmd_addr
             )
+            # The GUI-facing name is namespaced so the existing router can
+            # select assistant REP. The wire command remains the standard,
+            # server-independent discovery command handled by ZMQCommandServer.
+            wire_cmd = cmd
+            if cmd_type == _ASSISTANT_PROTOCOL_VERSION_CMD:
+                wire_cmd = {**cmd, "cmd": "protocol_version"}
 
             # Fresh socket per command — no shared state across commands.
             req = _new_req_socket(target_addr)
             try:
                 try:
-                    req.send_string(json.dumps(cmd))
+                    req.send_string(json.dumps(wire_cmd))
                     reply_raw = req.recv_string()
                     reply = json.loads(reply_raw)
                 except zmq.ZMQError as exc:

@@ -10,6 +10,7 @@ and we can inspect every socket-factory and setsockopt call directly.
 
 from __future__ import annotations
 
+import json
 import queue as stdlib_queue
 import threading
 import time
@@ -174,6 +175,19 @@ def test_cmd_forward_closes_socket_after_success(_sockets):
     # sockets[0] = SUB (sub_drain_loop), sockets[1] = REQ for cmd #1.
     req_socket = _sockets[1]
     req_socket.close.assert_called()
+
+
+def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
+    """The GUI-facing alias reaches assistant REP as the standard wire command."""
+    commands = [{"cmd": "assistant.protocol_version", "_rid": "version-1"}]
+
+    replies, _control = _run_cmd_forward(commands, sockets=_sockets)
+
+    assert replies == [{"ok": True, "_rid": "version-1"}]
+    request = _sockets[1]
+    request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
+    wire_payload = request.send_string.call_args.args[0]
+    assert json.loads(wire_payload) == {"cmd": "protocol_version"}
 
 
 def test_cmd_forward_closes_socket_after_zmq_error(_sockets):

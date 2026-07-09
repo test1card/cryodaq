@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 60s < GUI 65s
 
+# Mirror of core.zmq_bridge.PROTOCOL_VERSION. Duplicated (not imported) —
+# this module must not import zmq/core.zmq_bridge at module scope (the GUI
+# process never imports zmq; see module docstring). Keep in sync with
+# cryodaq.core.zmq_bridge.PROTOCOL_VERSION. Used only to warn once if a
+# server ever reports a newer proto than this client knows — see
+# docs/protocol.md.
+CLIENT_PROTOCOL_VERSION = 1
+
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
     """Reconstruct a Reading from a plain dict (received via mp.Queue)."""
@@ -98,6 +106,9 @@ class ZmqBridge:
         self._reply_consumer: threading.Thread | None = None
         # Hardening 2026-04-21: restart counter for B1 diagnostic correlation
         self._restart_count: int = 0
+        # Warn at most once for this ZmqBridge instance. Subprocess restarts do
+        # not re-arm the warning and therefore cannot create operator log spam.
+        self._proto_warned: bool = False
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -238,6 +249,26 @@ class ZmqBridge:
             with self._pending_lock:
                 self._pending.pop(rid, None)
 
+    def _check_proto(self, reply: dict[str, Any]) -> None:
+        """Warn once if a server's ``proto`` is newer than this client knows.
+
+        Never blocks and never drops the reply — an operator-facing command
+        path must not stall on a version check (see docs/protocol.md). A
+        missing/non-int ``proto`` from an older server is silently fine —
+        this is a forward-compat check only.
+        """
+        if self._proto_warned:
+            return
+        proto = reply.get("proto")
+        if isinstance(proto, int) and proto > CLIENT_PROTOCOL_VERSION:
+            self._proto_warned = True
+            logger.warning(
+                "ZMQ server proto %d is newer than this client's %d — "
+                "some newer reply fields may be ignored; see docs/protocol.md.",
+                proto,
+                CLIENT_PROTOCOL_VERSION,
+            )
+
     def _consume_replies(self) -> None:
         """Dedicated thread: reads replies from subprocess, routes to correct Future."""
         while not self._reply_stop.is_set():
@@ -252,6 +283,7 @@ class ZmqBridge:
                 if not isinstance(reply, dict):
                     logger.warning("ZMQ reply consumer: non-dict reply: %r", type(reply))
                     continue
+                self._check_proto(reply)
                 rid = reply.pop("_rid", None)
                 if rid:
                     with self._pending_lock:

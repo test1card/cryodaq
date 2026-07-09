@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from cryodaq.core.zmq_bridge import (
     HANDLER_TIMEOUT_FAST_S,
     HANDLER_TIMEOUT_SLOW_S,
+    PROTOCOL_VERSION,
     ZMQCommandServer,
     _pack_reading,
     _timeout_for,
@@ -311,6 +313,72 @@ async def test_valid_json_non_dict_payload_returns_error_reply() -> None:
         assert isinstance(reply, dict)
         assert reply["ok"] is False
         assert "invalid payload" in reply["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Protocol versioning
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_version_constant_is_a_positive_int() -> None:
+    assert isinstance(PROTOCOL_VERSION, int)
+    assert PROTOCOL_VERSION >= 1
+
+
+@pytest.mark.asyncio
+async def test_protocol_version_command_answers_without_handler() -> None:
+    """protocol_version is handler-independent — answered by the server
+    class itself, even when no handler is wired (unlike every other
+    command, which returns {"ok": False, "error": "no handler"})."""
+    server = ZMQCommandServer(handler=None)
+    reply = await server._run_handler({"cmd": "protocol_version"})
+    assert reply["ok"] is True
+    assert reply["proto"] == PROTOCOL_VERSION
+    assert reply["server"] == "engine"
+    assert isinstance(reply["app_version"], str) and reply["app_version"]
+
+
+@pytest.mark.asyncio
+async def test_protocol_version_command_uses_explicit_assistant_label() -> None:
+    """Server identity is independent of the configured bind address."""
+    server = ZMQCommandServer(
+        address="tcp://127.0.0.1:6001",
+        handler=None,
+        server_label="assistant",
+    )
+    reply = await server._run_handler({"cmd": "protocol_version"})
+    assert reply["server"] == "assistant"
+
+
+def test_server_label_defaults_to_engine_for_custom_address() -> None:
+    server = ZMQCommandServer(address="tcp://127.0.0.1:6002", handler=None)
+    assert server._server_label() == "engine"
+
+
+@pytest.mark.parametrize("server_label", ["web", "", "ENGINE", None, 1])
+def test_server_label_rejects_unknown_values(server_label) -> None:
+    with pytest.raises(ValueError, match="server_label"):
+        ZMQCommandServer(handler=None, server_label=server_label)
+
+
+def test_client_and_server_protocol_versions_match() -> None:
+    """The GUI mirrors the constant to preserve its no-pyzmq import boundary."""
+    from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
+
+    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION
+
+
+def test_encode_reply_adds_protocol_version() -> None:
+    """_encode_reply is the single place `proto` is injected — verify it
+    adds the authoritative field without disturbing other keys."""
+    server = ZMQCommandServer(handler=None)
+    for reply in (
+        {"ok": True, "cmd": "x"},
+        {"ok": False, "error": "boom"},
+        {"ok": True, "proto": 999},
+    ):
+        encoded = json.loads(server._encode_reply(reply))
+        assert encoded == {**reply, "proto": PROTOCOL_VERSION}
 
 
 def test_gui_client_cmd_reply_timeout_exceeds_server_slow_ceiling() -> None:
