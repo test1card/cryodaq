@@ -490,6 +490,12 @@ async def _drain_dispatch_tasks(
 _SUPERVISE_BACKOFF_BASE_S = 1.0  # first restart delay; doubles each crash
 _SUPERVISE_BACKOFF_MAX_S = 60.0  # cap so a hard-down task never spins hot
 _SAFETY_TASK_MAX_RESTARTS = 2  # safety_collect/safety_monitor: latch FAULT after this
+# F3 (Phase A gate, MEDIUM): roadmap policy is "after 2 FAILED restarts" —
+# consecutive, not lifetime. A task that ran at least this long before dying
+# had its previous incarnation recover; its restart count resets to 0 before
+# incrementing, so sparse/transient crashes hours apart never false-latch
+# FAULT the way a genuine rapid crash loop must.
+_SUPERVISE_RESET_WINDOW_S = 300.0
 
 
 async def _alarm_v2_feed_loop(
@@ -538,6 +544,7 @@ def _handle_supervised_task_exit(
     on_restart: Callable[[float], None],
     on_fault_latch: Callable[[str, BaseException], None],
     safety_critical: bool = False,
+    running_s: float = 0.0,
 ) -> str:
     """Decide + act on a supervised long-lived task's termination.
 
@@ -547,6 +554,11 @@ def _handle_supervised_task_exit(
     the two safety tasks (``safety_critical``) it latches FAULT via SafetyManager
     after ``_SAFETY_TASK_MAX_RESTARTS`` failed restarts instead of looping
     forever. Side effects are injected so the policy is testable in isolation.
+
+    ``running_s`` (F3) is how long THIS incarnation ran before dying. A run
+    of at least ``_SUPERVISE_RESET_WINDOW_S`` means the previous restart
+    recovered, so the count resets before incrementing — only consecutive
+    rapid restarts accumulate toward the safety latch / backoff escalation.
 
     Returns one of ``"ignored" | "restart" | "fault_latch"``.
     """
@@ -569,6 +581,11 @@ def _handle_supervised_task_exit(
         exc_info=(type(exc), exc, exc.__traceback__),
     )
     on_alarm(name, exc)  # operator-visible/audible alert via existing alarm path
+
+    if running_s >= _SUPERVISE_RESET_WINDOW_S:
+        # F3: previous incarnation recovered and ran healthily — this crash
+        # is not consecutive with any earlier one. Reset before incrementing.
+        restart_counts[name] = 0
 
     count = restart_counts.get(name, 0) + 1
     restart_counts[name] = count
@@ -3839,6 +3856,9 @@ async def _run_engine(*, mock: bool = False) -> None:
     _engine_stopping = False
     _supervised_tasks: dict[str, asyncio.Task[Any]] = {}
     _supervise_restarts: dict[str, int] = {}
+    # F3: per-task spawn timestamp, so the done-callback can tell how long
+    # each incarnation ran before dying (see _SUPERVISE_RESET_WINDOW_S).
+    _supervise_spawn_times: dict[str, float] = {}
 
     def _dispatch_supervisor_alarm(task_name: str, exc: BaseException) -> None:
         # Штатный путь тревоги: то же событие alarm_fired, что и у alarm-v2 —
@@ -3889,10 +3909,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         on_spawn: Callable[[asyncio.Task[Any]], None] | None = None,
     ) -> asyncio.Task[Any]:
         _supervised_tasks[name] = task
+        _supervise_spawn_times[name] = time.monotonic()
         if on_spawn is not None:
             on_spawn(task)
 
         def _done(t: asyncio.Task[Any]) -> None:
+            spawned_at = _supervise_spawn_times.get(name, time.monotonic())
             _handle_supervised_task_exit(
                 name=name,
                 task=t,
@@ -3908,6 +3930,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 ),
                 on_fault_latch=_dispatch_safety_fault_latch,
                 safety_critical=safety_critical,
+                running_s=time.monotonic() - spawned_at,
             )
 
         task.add_done_callback(_done)

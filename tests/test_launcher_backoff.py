@@ -116,6 +116,51 @@ def test_handle_engine_exit_restart_pending_guard_is_noop():
     assert w._restart_attempts == 0
 
 
+def test_stale_restart_shot_noops_after_manual_restart():
+    """F2 (Phase A gate, HIGH): if the operator manually restarts (which
+    resets _restart_pending=False) before the scheduled singleShot fires, the
+    stale shot must no-op — NOT call _start_engine and misclassify the fresh
+    engine as external, leaving it alive at shutdown."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1, restart_attempts=0)
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    assert w._restart_pending is True
+    do_restart = mock_qtimer.singleShot.call_args[0][1]
+
+    # Operator manually restarts meanwhile — resets _restart_pending.
+    w._restart_pending = False
+
+    # The stale singleShot now fires.
+    do_restart()
+
+    w._start_engine.assert_not_called()
+    assert w._restart_pending is False, "manual restart's state must not be clobbered"
+
+
+def test_restart_shot_fires_when_still_pending():
+    """Sanity: the F2 guard must not break the normal (non-stale) restart."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1, restart_attempts=0)
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    do_restart = mock_qtimer.singleShot.call_args[0][1]
+    do_restart()
+
+    w._start_engine.assert_called_once_with(wait=False)
+    assert w._restart_pending is False
+
+
 def test_check_engine_health_does_not_call_start_engine_directly():
     """_check_engine_health must not contain a direct _start_engine(wait=False) call.
 

@@ -699,6 +699,87 @@ async def test_arm_state_readback_active_false_required_raises() -> None:
     assert drv._wdog_armed is False
 
 
+# ---------------------------------------------------------------------------
+# F4 (Phase A gate, MEDIUM): readback failure AFTER cryodaq_wdog_run() must
+# attempt a best-effort disarm write — otherwise firmware may actually be
+# armed while the host believes it is not, and a later un-petted firmware
+# timer kills outputs by surprise.
+# ---------------------------------------------------------------------------
+
+
+async def test_arm_readback_timeout_after_run_sends_disarm_best_effort(caplog) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    assert "cryodaq_wdog_run()" in t.writes, "run() must have been issued before the readback failed"
+    assert "cryodaq_wdog_disarm()" in t.writes, (
+        "a best-effort disarm write must follow a readback failure after run()"
+    )
+
+
+async def test_arm_readback_timeout_after_run_sends_disarm_required(caplog) -> None:
+    drv = _mode_driver("required")
+    # "cryodaq_wdog_active" is unique to the POST-run readback (line ~626) —
+    # unlike "cryodaq_wdog_tripped", which is also queried pre-upload (the
+    # latch check) and would fail before run() is ever issued.
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        with pytest.raises(Exception):
+            await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
+    assert "cryodaq_wdog_run()" in t.writes
+    assert "cryodaq_wdog_disarm()" in t.writes
+
+
+async def test_arm_readback_failure_before_run_does_not_send_disarm() -> None:
+    """A failure BEFORE cryodaq_wdog_run() (e.g. version-stamp mismatch) must
+    NOT attempt a disarm write — the firmware timer was never armed."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_version_raw = "1"  # mismatch -> raises before cryodaq_wdog_run()
+    drv._transport = t
+    await drv.connect()
+    assert drv._wdog_armed is False
+    assert "cryodaq_wdog_run()" not in t.writes
+    assert "cryodaq_wdog_disarm()" not in t.writes
+
+
+async def test_arm_readback_timeout_disarm_write_also_fails_logs_critical(caplog) -> None:
+    """If the best-effort disarm write ALSO fails, firmware arm state is truly
+    unknown — must log CRITICAL and still route per mode (best_effort
+    degrades host-only, connect still succeeds)."""
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
+    # _RecordingTransport's fail_on is a substring match, and the uploaded
+    # script text itself contains "cryodaq_wdog_disarm()" as part of the
+    # function definition — a substring fail_on would (wrongly) fail the
+    # initial script upload instead of the disarm command. Override write()
+    # to fail only the EXACT disarm command (same technique as
+    # test_arm_state_readback_active_false_best_effort_degrades above).
+    original_write = t.write
+
+    async def _write_fail_disarm_only(cmd: str) -> None:
+        if cmd == "cryodaq_wdog_disarm()":
+            raise RuntimeError("simulated disarm failure")
+        await original_write(cmd)
+
+    t.write = _write_fail_disarm_only  # type: ignore[assignment]
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()  # must NOT raise
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    msg = " ".join(r.getMessage() for r in crits).lower()
+    assert "unknown" in msg, "disarm-write failure must log that firmware state is UNKNOWN"
+
+
 def test_config_short_timeout_warns(tmp_path, caplog) -> None:
     """DELTA 5: timeout_s shorter than 2×poll_interval_s warns (no fail)."""
     from cryodaq.engine import _load_drivers

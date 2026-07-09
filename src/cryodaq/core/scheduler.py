@@ -401,6 +401,15 @@ class Scheduler:
             if getattr(self._sqlite_writer, "is_disk_full", False):
                 return
 
+            # F1 (Phase A gate, CRITICAL): a locked/busy write below the A6
+            # signalling threshold is swallowed without raising (see
+            # sqlite_writer._write_day_batch) — write_immediate() returns
+            # normally even though the batch was never durably persisted.
+            # Mirror the disk-full gate above: skip publish to both brokers.
+            # The drop itself stays loud via A6's existing warning/critical log.
+            if getattr(self._sqlite_writer, "last_batch_dropped", False):
+                return
+
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
         if srdg_to_persist:
             self._calibration_acquisition.on_srdg_persisted(

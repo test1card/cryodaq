@@ -601,6 +601,7 @@ class Keithley2604B(InstrumentDriver):
                 "kill — re-arming (outputs already forced OFF on connect)",
                 self.name,
             )
+        run_issued = False
         try:
             await self._transport.write(_load_wdog_script())
             # DELTA A8a — version stamp: the script is re-uploaded every arm, so
@@ -618,6 +619,7 @@ class Keithley2604B(InstrumentDriver):
                 )
             await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
             await self._transport.write("cryodaq_wdog_run()")
+            run_issued = True
             # DELTA A8b — state readback: _wdog_arm used to set _wdog_armed on
             # faith after three fire-and-forget writes. Confirm the firmware
             # actually armed (active==1) and did not boot latched (tripped==0);
@@ -639,6 +641,25 @@ class Keithley2604B(InstrumentDriver):
             )
         except Exception as exc:
             self._wdog_armed = False
+            if run_issued:
+                # F4 (Phase A gate, MEDIUM): cryodaq_wdog_run() was already
+                # written before this failure (e.g. the readback that would
+                # confirm/refute the arm timed out) — the firmware timer may
+                # actually be armed even though we just set _wdog_armed=False.
+                # An un-petted, un-disarmed firmware timer would later kill
+                # outputs by surprise. Best-effort disarm write, bypassing the
+                # _wdog_armed gate in _wdog_disarm() (we don't trust host
+                # state here — that's the whole problem).
+                try:
+                    await self._transport.write("cryodaq_wdog_disarm()")
+                except Exception as disarm_exc:
+                    log.critical(
+                        "%s: TSP watchdog best-effort disarm after a failed "
+                        "post-run readback ALSO failed — firmware arm state "
+                        "UNKNOWN: %s",
+                        self.name,
+                        disarm_exc,
+                    )
             if self._wdog_mode is WatchdogMode.REQUIRED:
                 log.critical(
                     "%s: TSP watchdog arm FAILED and mode=required — refusing to "

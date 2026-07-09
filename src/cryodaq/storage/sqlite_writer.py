@@ -214,6 +214,14 @@ class SQLiteWriter:
         self._locked_failure_count = 0
         self._locked_failure_first_ts: float | None = None
 
+        # F1 (Phase A gate, CRITICAL): even a single below-threshold locked/
+        # busy failure is swallowed without re-raising (see _write_day_batch),
+        # so write_immediate() returns normally with the batch never durably
+        # written. Reset once per _write_batch() call (i.e. per write_immediate
+        # invocation) and set True if any day's sub-batch was dropped, so the
+        # scheduler can skip publishing that batch to any broker.
+        self._last_batch_dropped = False
+
         _check_sqlite_version()
 
     def _db_path(self, day: date) -> Path:
@@ -226,6 +234,14 @@ class SQLiteWriter:
     def is_disk_full(self) -> bool:
         """True when the most recent write hit a disk-full / out-of-space error."""
         return self._disk_full
+
+    @property
+    def last_batch_dropped(self) -> bool:
+        """True when the most recent write_immediate()/_write_batch() call did
+        NOT durably persist at least one day's sub-batch (a swallowed locked/
+        busy failure — F1, Phase A gate). Callers (Scheduler) must not
+        publish that batch to any broker."""
+        return self._last_batch_dropped
 
     def clear_disk_full(self) -> None:
         """Clear the disk-full flag.
@@ -365,6 +381,8 @@ class SQLiteWriter:
         """
         if not batch:
             return
+        # F1: reset once per call — reflects only the LAST batch attempted.
+        self._last_batch_dropped = False
         # Group readings by day to handle midnight crossing
         by_day: dict[date, list[Reading]] = {}
         for r in batch:
@@ -508,6 +526,10 @@ class SQLiteWriter:
                         span,
                         exc,
                     )
+                # F1 (Phase A gate, CRITICAL): the batch was swallowed, not
+                # persisted — the scheduler must not publish it to any broker,
+                # regardless of whether the A6 signalling threshold was hit.
+                self._last_batch_dropped = True
                 # Do NOT re-raise — same graceful-degradation rationale as
                 # disk-full above (avoid the historic tight CRITICAL-log loop).
                 return

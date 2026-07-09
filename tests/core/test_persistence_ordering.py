@@ -305,6 +305,49 @@ async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> 
 # ---------------------------------------------------------------------------
 
 
+async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monkeypatch) -> None:
+    """F1 (Phase A gate, CRITICAL): a locked/busy write that write_immediate
+    swallows (no re-raise, per A6) must still suppress publication to BOTH
+    brokers — the scheduler's only prior guard was ``is_disk_full``, which a
+    locked-DB failure never sets.
+    """
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    from cryodaq.core.safety_broker import SafetyBroker
+
+    broker = DataBroker()
+    test_queue = await broker.subscribe("test_consumer", maxsize=100)
+    safety_broker = SafetyBroker()
+    safety_queue = safety_broker.subscribe("test_safety_consumer", maxsize=100)
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    driver = MockDriver()
+    sched = Scheduler(broker, sqlite_writer=writer, safety_broker=safety_broker)
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
+
+    def fake_write_batch(batch: list) -> None:
+        # Mirrors _write_day_batch's locked-DB swallow: no raise, but the
+        # batch was never durably persisted.
+        writer._last_batch_dropped = True
+
+    with patch.object(writer, "_write_batch", side_effect=fake_write_batch):
+        await sched.start()
+        await asyncio.sleep(0.3)
+        await sched.stop()
+
+    assert test_queue.empty(), (
+        "Locked-DB swallow marked the batch dropped, but a reading still "
+        "reached the DataBroker subscriber — persistence-first violated (F1)"
+    )
+    assert safety_queue.empty(), (
+        "Locked-DB swallow marked the batch dropped, but a reading still "
+        "reached the SafetyBroker subscriber — persistence-first violated (F1)"
+    )
+
+    await writer.stop()
+
+
 async def test_scheduler_without_writer_still_publishes(tmp_path: Path) -> None:
     """Scheduler(sqlite_writer=None) must behave exactly like the old Scheduler."""
     broker = DataBroker()

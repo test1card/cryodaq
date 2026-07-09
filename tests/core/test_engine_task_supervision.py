@@ -21,6 +21,7 @@ import pytest
 from cryodaq.engine import (
     _SAFETY_TASK_MAX_RESTARTS,
     _SUPERVISE_BACKOFF_BASE_S,
+    _SUPERVISE_RESET_WINDOW_S,
     _alarm_v2_feed_loop,
     _handle_supervised_task_exit,
 )
@@ -155,7 +156,7 @@ def _spy_actions() -> dict:
     return calls
 
 
-def _invoke(task, *, stopping=False, counts=None, calls=None, safety=False):
+def _invoke(task, *, stopping=False, counts=None, calls=None, safety=False, running_s=0.0):
     calls = calls if calls is not None else _spy_actions()
     counts = counts if counts is not None else {}
     logger = logging.getLogger("test.supervise")
@@ -170,6 +171,7 @@ def _invoke(task, *, stopping=False, counts=None, calls=None, safety=False):
             on_restart=lambda d: calls["restart"].append(d),
             on_fault_latch=lambda n, e: calls["fault"].append((n, repr(e))),
             safety_critical=safety,
+            running_s=running_s,
         ),
         calls,
         counts,
@@ -213,6 +215,59 @@ async def test_crash_alarms_and_restarts_with_backoff() -> None:
     assert verdict2 == "restart"
     assert counts["widget"] == 2
     assert calls2["restart"] == [_SUPERVISE_BACKOFF_BASE_S * 2]
+
+
+async def test_healthy_run_resets_restart_count_before_latch() -> None:
+    """F3 (Phase A gate, MEDIUM): sparse crashes, each separated by a healthy
+    run window (>= _SUPERVISE_RESET_WINDOW_S), must NOT accumulate toward the
+    safety latch — only CONSECUTIVE rapid restarts count (roadmap policy:
+    "after 2 FAILED restarts", i.e. consecutive, not lifetime)."""
+    counts: dict[str, int] = {}
+    calls = _spy_actions()
+
+    # Crash 1: fresh task, no prior healthy run to credit.
+    task = await _failed_task(RuntimeError("transient 1"))
+    verdict, calls, counts = _invoke(task, counts=counts, calls=calls, safety=True)
+    assert verdict == "restart"
+    assert counts["widget"] == 1
+
+    # That restarted incarnation ran HEALTHILY for a long window before it
+    # too crashed — this must reset the streak, not accumulate to 2.
+    task2 = await _failed_task(RuntimeError("transient 2"))
+    verdict2, calls, counts = _invoke(
+        task2, counts=counts, calls=calls, safety=True, running_s=_SUPERVISE_RESET_WINDOW_S
+    )
+    assert verdict2 == "restart"
+    assert counts["widget"] == 1, "a healthy run before the crash must reset the count"
+
+    # A third crash, again after a healthy run — must still not approach latch.
+    task3 = await _failed_task(RuntimeError("transient 3"))
+    verdict3, calls, counts = _invoke(
+        task3, counts=counts, calls=calls, safety=True, running_s=_SUPERVISE_RESET_WINDOW_S
+    )
+    assert verdict3 == "restart"
+    assert counts["widget"] == 1
+    assert calls["fault"] == [], "sparse, well-separated crashes must never latch FAULT"
+
+
+async def test_rapid_triple_crash_still_latches_byte_identical() -> None:
+    """Safe-direction behavior for a genuine rapid crash loop (no healthy run
+    between failures) is unchanged: latches FAULT after
+    _SAFETY_TASK_MAX_RESTARTS consecutive restarts."""
+    counts: dict[str, int] = {}
+    calls = _spy_actions()
+    for expected_count in (1, 2):
+        task = await _failed_task(RuntimeError("safety down"))
+        verdict, calls, counts = _invoke(task, counts=counts, calls=calls, safety=True)
+        assert verdict == "restart"
+        assert counts["widget"] == expected_count
+    assert counts["widget"] == _SAFETY_TASK_MAX_RESTARTS
+
+    task = await _failed_task(RuntimeError("safety down"))
+    verdict, calls, counts = _invoke(task, counts=counts, calls=calls, safety=True)
+    assert verdict == "fault_latch"
+    assert calls["fault"] and calls["fault"][-1][0] == "widget"
+    assert len(calls["restart"]) == _SAFETY_TASK_MAX_RESTARTS
 
 
 async def test_safety_task_latches_fault_after_two_restarts() -> None:

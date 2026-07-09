@@ -1310,6 +1310,15 @@ class LauncherWindow(QMainWindow):
         self._restart_pending = True
 
         def _do_restart() -> None:
+            # F2 (Phase A gate, HIGH): this singleShot is not cancelable. If
+            # the operator manually restarted meanwhile, _restart_pending was
+            # already reset to False — a stale fire here would call
+            # _start_engine(wait=False), see the FRESH engine on the command
+            # port, misclassify it as external (_engine_external=True), and
+            # then _stop_engine() would no-op at shutdown, leaving that engine
+            # running. No-op unless this shot is still the live one.
+            if not self._restart_pending:
+                return
             self._restart_pending = False
             self._start_engine(wait=False)
 

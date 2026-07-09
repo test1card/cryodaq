@@ -130,3 +130,57 @@ def test_other_operational_errors_still_raise_and_do_not_track(tmp_path):
 
     assert writer._locked_failure_count == 0
     assert writer._locked_failure_first_ts is None
+
+
+# ---------------------------------------------------------------------------
+# F1 (Phase A gate, CRITICAL): persistence-first violation on locked-DB.
+#
+# A locked/busy write_immediate failure is swallowed WITHOUT re-raising (see
+# above) even a single time, below the A6 signalling threshold. The writer
+# must expose that the last batch was NOT durably persisted so the scheduler
+# can skip publishing it to any broker — publishing an unwritten batch
+# breaks the "if a broker has a reading, it was already written to SQLite"
+# invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_single_locked_failure_below_threshold_marks_batch_dropped(tmp_path, monkeypatch):
+    """Even a single (non-signalling) locked failure must mark the batch
+    dropped — the scheduler must not publish it regardless of whether the
+    A6 threshold was crossed."""
+    writer = SQLiteWriter(tmp_path)
+    monkeypatch.setattr(writer, "_signal_persistence_failure", MagicMock())
+    _fake_clock(monkeypatch, [0.0])
+
+    assert writer.last_batch_dropped is False
+
+    poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
+    writer._write_day_batch(poisoned, [_reading()])
+
+    assert writer.last_batch_dropped is True, (
+        "A swallowed locked-DB failure must mark the batch as dropped, even "
+        "below the signalling threshold (F1)"
+    )
+
+
+def test_write_batch_resets_dropped_flag_at_entry(tmp_path):
+    """last_batch_dropped reflects only the LAST write_immediate/_write_batch
+    call — a fresh, successful call must clear a stale drop from before."""
+    writer = SQLiteWriter(tmp_path)
+    writer._last_batch_dropped = True  # simulate a drop from a prior call
+
+    writer._write_batch([_reading()])  # real, healthy write against tmp_path
+
+    assert writer.last_batch_dropped is False
+
+
+def test_other_operational_error_raise_path_does_not_mark_dropped(tmp_path):
+    """The existing raise-through path for unrelated OperationalErrors is
+    unaffected — the caller sees the exception directly, no flag needed."""
+    writer = SQLiteWriter(tmp_path)
+
+    poisoned = _poisoned_conn(sqlite3.OperationalError("table readings has no column foo"))
+    with pytest.raises(sqlite3.OperationalError):
+        writer._write_day_batch(poisoned, [_reading()])
+
+    assert writer.last_batch_dropped is False
