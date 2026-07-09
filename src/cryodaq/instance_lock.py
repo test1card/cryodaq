@@ -9,13 +9,27 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from pathlib import Path
 
 from cryodaq.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 
-def try_acquire_lock(lock_name: str) -> int | None:
+def _lock_path(lock_name: str, lock_dir: Path | None) -> Path:
+    relative = Path(lock_name)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError("lock_name must be a relative path without '..'")
+    root = (lock_dir if lock_dir is not None else get_data_dir()).resolve()
+    path = root.joinpath(relative)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = path.parent.resolve()
+    if resolved_parent != root and root not in resolved_parent.parents:
+        raise ValueError("lock_name escapes the lock directory")
+    return path
+
+
+def try_acquire_lock(lock_name: str, *, lock_dir: Path | None = None) -> int | None:
     """Try to acquire an exclusive process lock.
 
     Parameters
@@ -28,8 +42,7 @@ def try_acquire_lock(lock_name: str) -> int | None:
     -------
     File descriptor on success, None if lock is held by another process.
     """
-    lock_path = get_data_dir() / lock_name
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _lock_path(lock_name, lock_dir)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         if sys.platform == "win32":
@@ -51,13 +64,26 @@ def try_acquire_lock(lock_name: str) -> int | None:
     return fd
 
 
-def release_lock(fd: int, lock_name: str) -> None:
-    """Release lock and remove lock file."""
+def release_lock(
+    fd: int,
+    lock_name: str,
+    *,
+    unlink: bool = True,
+    lock_dir: Path | None = None,
+) -> None:
+    """Release a lock, optionally retaining its stable lock-file inode.
+
+    Existing launcher/GUI callers retain the historical unlinking default.
+    High-contention report locks pass ``unlink=False``: unlinking after close
+    creates a POSIX race where another contender can lock the old inode while
+    a third contender creates and locks a new one at the same path.
+    """
     try:
         os.close(fd)
     except OSError:
         pass
-    try:
-        (get_data_dir() / lock_name).unlink(missing_ok=True)
-    except OSError:
-        pass
+    if unlink:
+        try:
+            _lock_path(lock_name, lock_dir).unlink(missing_ok=True)
+        except OSError:
+            pass

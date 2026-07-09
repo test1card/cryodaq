@@ -127,3 +127,47 @@ def test_pid_written_to_lock_file(lock_name):
     assert content == str(os.getpid())
 
     release_lock(fd, lock_name)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="inode identity is a POSIX contract")
+def test_persistent_release_keeps_same_inode(lock_name):
+    """Report locks close without unlinking so contenders share one inode."""
+    from cryodaq.paths import get_data_dir
+
+    lock_path = get_data_dir() / lock_name
+    fd = try_acquire_lock(lock_name)
+    assert fd is not None
+    first_inode = lock_path.stat().st_ino
+
+    release_lock(fd, lock_name, unlink=False)
+
+    fd = try_acquire_lock(lock_name)
+    assert fd is not None
+    try:
+        assert lock_path.stat().st_ino == first_inode
+    finally:
+        release_lock(fd, lock_name, unlink=False)
+
+
+def test_persistent_lock_is_reacquired_after_process_death(lock_name):
+    """Kernel release, not PID text or unlinking, recovers a dead owner."""
+    from cryodaq.paths import get_data_dir
+
+    acquired = mp.Event()
+    release = mp.Event()
+    proc = mp.Process(
+        target=_acquire_in_subprocess,
+        args=(lock_name, acquired, release),
+        daemon=True,
+    )
+    proc.start()
+    assert acquired.wait(timeout=5)
+    proc.kill()
+    proc.join(timeout=3)
+
+    lock_path = get_data_dir() / lock_name
+    lock_path.write_text("999999\n", encoding="ascii")
+    fd = try_acquire_lock(lock_name)
+    assert fd is not None
+    release_lock(fd, lock_name, unlink=False)
+    assert lock_path.exists()

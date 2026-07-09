@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.core.experiment import ExperimentManager
 
 
@@ -182,3 +183,142 @@ async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -
     assert entry.sample == ""
     assert entry.status == ""
     assert entry.notes == ""
+
+
+async def test_archive_rejects_symlinked_experiment_escape(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-experiment"
+    reports = outside / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report_editable.docx").write_bytes(b"outside")
+    (outside / "metadata.json").write_text(
+        json.dumps(
+            {
+                "experiment": {
+                    "experiment_id": "evil",
+                    "status": "COMPLETED",
+                    "start_time": "2026-03-16T10:00:00+00:00",
+                },
+                "template": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    experiments = tmp_path / "experiments"
+    experiments.mkdir(exist_ok=True)
+    (experiments / "evil").symlink_to(outside, target_is_directory=True)
+
+    assert all(entry.experiment_id != "evil" for entry in manager.list_archive_entries())
+
+
+async def test_archive_rejects_symlinked_experiments_root(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-experiments-root"
+    experiment = outside / "evil"
+    reports = experiment / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report_editable.docx").write_bytes(b"outside")
+    (experiment / "metadata.json").write_text(
+        json.dumps(
+            {
+                "experiment": {
+                    "experiment_id": "evil",
+                    "status": "COMPLETED",
+                    "start_time": "2026-03-16T10:00:00+00:00",
+                },
+                "template": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    experiments = tmp_path / "experiments"
+    experiments.symlink_to(outside, target_is_directory=True)
+
+    assert manager.list_archive_entries() == []
+
+
+async def test_archive_rejects_escaping_current_manifest(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Unsafe manifest",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    reports = tmp_path / "experiments" / created.experiment_id / "reports"
+    reports.mkdir(exist_ok=True)
+    payload = {
+        "schema": 1,
+        "experiment_id": created.experiment_id,
+        "generation_id": "generation-token-0001",
+        "source_fingerprint": "sha256:" + "1" * 64,
+        "created_at": 1.0,
+        "report": {
+            "docx_path": "../../outside.docx",
+            "pdf_path": None,
+            "assets_dir": "../../outside-assets",
+            "sections": [],
+            "skipped": False,
+            "reason": "",
+        },
+        "artifacts": [],
+    }
+    atomic_write_text(reports / "current_report.json", json.dumps(payload))
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_present is False
+    assert entry.docx_path is None
+
+
+async def test_archive_rejects_symlinked_canonical_report(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Unsafe canonical report",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    outside = tmp_path / "outside.docx"
+    outside.write_bytes(b"outside")
+    reports = tmp_path / "experiments" / created.experiment_id / "reports"
+    reports.mkdir()
+    (reports / "report_editable.docx").symlink_to(outside)
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_present is False
+    assert entry.docx_path is None
+
+
+async def test_archive_rejects_symlinked_reports_directory(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Unsafe reports directory",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    outside = tmp_path / "outside-reports"
+    outside.mkdir()
+    (outside / "report_editable.docx").write_bytes(b"outside")
+    experiment_root = tmp_path / "experiments" / created.experiment_id
+    (experiment_root / "reports").symlink_to(outside, target_is_directory=True)
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_present is False
+    assert entry.docx_path is None

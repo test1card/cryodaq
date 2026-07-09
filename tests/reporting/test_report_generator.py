@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from docx import Document
 
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.report_process import ReportProcessRunner
+from cryodaq.report_state import ReportContractError, load_current_manifest
 from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -122,6 +125,123 @@ def _doc_text(path: Path) -> str:
                 if cell.text.strip():
                     parts.append(cell.text)
     return "\n".join(parts)
+
+
+def test_direct_generator_rejects_experiment_traversal(tmp_path: Path) -> None:
+    with pytest.raises(ReportContractError):
+        ReportGenerator(tmp_path).generate("../outside")
+
+
+async def test_direct_generator_rejects_missing_metadata_artifact(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Missing artifact",
+        operator="Operator",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+    metadata_path = tmp_path / "experiments" / exp_id / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload.setdefault("artifact_index", []).append(
+        {"role": "missing", "path": str(metadata_path.parent / "missing.csv")}
+    )
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReportContractError, match="must exist"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_direct_generator_rejects_symlinked_archive_input(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Symlink artifact",
+        operator="Operator",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+    experiment_root = tmp_path / "experiments" / exp_id
+    outside = tmp_path / "outside.csv"
+    outside.write_text("a,b\n1,2\n", encoding="utf-8")
+    link = experiment_root / "archive" / "tables" / "linked.csv"
+    link.symlink_to(outside)
+    metadata_path = experiment_root / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload.setdefault("result_tables", []).append(
+        {"table_id": "linked", "path": str(link)}
+    )
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReportContractError, match="symlink"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_ephemeral_child_preserves_manual_schema_and_selects_generation(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Child report",
+        title="Child report",
+        operator="Operator",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    report = ReportProcessRunner(tmp_path, timeout_s=20).generate_experiment(exp_id)
+
+    assert set(report) == {
+        "docx_path",
+        "pdf_path",
+        "assets_dir",
+        "sections",
+        "skipped",
+        "reason",
+    }
+    assert isinstance(report["docx_path"], str)
+    assert report["pdf_path"] is None or isinstance(report["pdf_path"], str)
+    assert isinstance(report["assets_dir"], str)
+    assert isinstance(report["sections"], list)
+    assert type(report["skipped"]) is bool
+    assert isinstance(report["reason"], str)
+    assert Path(report["docx_path"]).is_file()  # noqa: ASYNC240 - child completed
+    manifest = load_current_manifest(tmp_path / "experiments" / exp_id)
+    assert manifest is not None
+    assert report["docx_path"].endswith(
+        f"reports/generations/{manifest['generation_id']}/report_editable.docx"
+    )
+    archive = manager.get_archive_item(exp_id)
+    assert archive is not None
+    assert archive.docx_path == Path(report["docx_path"])
+
+
+async def test_ephemeral_child_preserves_disabled_report_types(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Disabled child report",
+        title="Disabled child report",
+        operator="Operator",
+        template_id="debug_checkout",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    report = ReportProcessRunner(tmp_path, timeout_s=20).generate_experiment(exp_id)
+
+    assert report["skipped"] is True
+    assert report["pdf_path"] is None
+    assert report["sections"] == []
+    assert isinstance(report["docx_path"], str)
+    assert isinstance(report["assets_dir"], str)
 
 
 async def test_report_generation_uses_new_output_names_and_sections(

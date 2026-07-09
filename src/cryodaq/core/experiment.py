@@ -16,6 +16,12 @@ from typing import Any
 
 import yaml
 
+from cryodaq.report_state import (
+    ReportContractError,
+    load_current_manifest,
+    resolve_report_artifact,
+    resolve_report_paths,
+)
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 
@@ -401,11 +407,32 @@ class ExperimentManager:
 
             end_dt = end_dt + timedelta(days=1)
         entries: list[ArchiveEntry] = []
+        data_root = self._data_dir.resolve()
+        if self._artifacts_dir.is_symlink():
+            logger.warning(
+                "Ignoring symlinked experiments archive root: %s", self._artifacts_dir
+            )
+            return entries
+        resolved_artifacts = self._artifacts_dir.resolve()
+        if (
+            resolved_artifacts != data_root
+            and data_root not in resolved_artifacts.parents
+        ):
+            logger.warning("Ignoring experiments archive root outside data directory")
+            return entries
         if not self._artifacts_dir.exists():
             return entries
 
         for metadata_path in sorted(self._artifacts_dir.glob("*/metadata.json")):
             try:
+                archive_root = self._artifacts_dir.resolve()
+                resolved_metadata = metadata_path.resolve()
+                if (
+                    metadata_path.is_symlink()
+                    or metadata_path.parent.is_symlink()
+                    or archive_root not in resolved_metadata.parents
+                ):
+                    raise ValueError("archive metadata escapes experiments root")
                 payload = json.loads(metadata_path.read_text(encoding="utf-8"))
                 experiment = payload.get("experiment", {})
                 template = payload.get("template", {})
@@ -423,12 +450,63 @@ class ExperimentManager:
                     if isinstance(item, dict)
                 )
                 artifact_dir = metadata_path.parent
-                docx_path = artifact_dir / "reports" / "report_editable.docx"
-                if not docx_path.exists():
-                    docx_path = artifact_dir / "reports" / "report.docx"
-                pdf_path = artifact_dir / "reports" / "report_raw.pdf"
-                if not pdf_path.exists():
-                    pdf_path = artifact_dir / "reports" / "report.pdf"
+                manifest = None
+                try:
+                    report_paths = resolve_report_paths(artifact_dir)
+                    manifest = load_current_manifest(artifact_dir)
+                except ReportContractError as exc:
+                    logger.warning(
+                        "Ignoring unsafe report manifest %s: %s", artifact_dir, exc
+                    )
+                    report_paths = None
+                if manifest is not None:
+                    report = manifest["report"]
+                    docx_path = artifact_dir / report["docx_path"]
+                    pdf_path = (
+                        artifact_dir / report["pdf_path"]
+                        if report["pdf_path"] is not None
+                        else None
+                    )
+                else:
+                    docx_path = None
+                    pdf_path = None
+                    if report_paths is not None:
+                        for name in ("report_editable.docx", "report.docx"):
+                            try:
+                                candidate = resolve_report_artifact(
+                                    report_paths.reports / name,
+                                    report_paths,
+                                    field="archive DOCX",
+                                    required=False,
+                                )
+                                if candidate.exists():
+                                    docx_path = resolve_report_artifact(
+                                        candidate,
+                                        report_paths,
+                                        field="archive DOCX",
+                                        required=True,
+                                    )
+                                    break
+                            except ReportContractError as exc:
+                                logger.warning("Ignoring unsafe archive DOCX: %s", exc)
+                        for name in ("report_raw.pdf", "report.pdf"):
+                            try:
+                                candidate = resolve_report_artifact(
+                                    report_paths.reports / name,
+                                    report_paths,
+                                    field="archive PDF",
+                                    required=False,
+                                )
+                                if candidate.exists():
+                                    pdf_path = resolve_report_artifact(
+                                        candidate,
+                                        report_paths,
+                                        field="archive PDF",
+                                        required=True,
+                                    )
+                                    break
+                            except ReportContractError as exc:
+                                logger.warning("Ignoring unsafe archive PDF: %s", exc)
                 entry = ArchiveEntry(
                     experiment_id=_clean_text(experiment.get("experiment_id")),
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
@@ -443,10 +521,15 @@ class ExperimentManager:
                     end_time=_parse_time(experiment.get("end_time")),
                     artifact_dir=artifact_dir,
                     metadata_path=metadata_path,
-                    docx_path=docx_path if docx_path.exists() else None,
-                    pdf_path=pdf_path if pdf_path.exists() else None,
+                    docx_path=docx_path
+                    if docx_path is not None and docx_path.exists()
+                    else None,
+                    pdf_path=pdf_path
+                    if pdf_path is not None and pdf_path.exists()
+                    else None,
                     report_enabled=bool(experiment.get("report_enabled", True)),
-                    report_present=docx_path.exists() or pdf_path.exists(),
+                    report_present=(docx_path is not None and docx_path.exists())
+                    or (pdf_path is not None and pdf_path.exists()),
                     notes=_clean_text(experiment.get("notes")),
                     retroactive=bool(experiment.get("retroactive", False)),
                     run_record_count=len(run_records),

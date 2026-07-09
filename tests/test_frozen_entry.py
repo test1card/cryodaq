@@ -8,6 +8,8 @@ inspections and run in any environment.
 from __future__ import annotations
 
 import ast
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -128,3 +130,19 @@ def test_frozen_main_imports_in_function_body_only():
                     f"_frozen_main.py: top-level import of {name!r} would defeat "
                     f"freeze_support() ordering"
                 )
+
+
+def test_frozen_dispatch_supports_report_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq._frozen_main as module
+
+    called: list[bool] = []
+    fake = types.ModuleType("cryodaq.reporting.__main__")
+    fake.main = lambda: called.append(True) or 0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cryodaq.reporting.__main__", fake)
+    monkeypatch.setattr(sys, "argv", ["CryoDAQ.exe", "--mode=report-render"])
+    with pytest.raises(SystemExit) as exc:
+        module._dispatch()
+    assert exc.value.code == 0
+    assert called == [True]

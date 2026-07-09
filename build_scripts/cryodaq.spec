@@ -83,6 +83,8 @@ hidden_imports = [
     "cryodaq.launcher",
     "cryodaq.gui.app",
     "cryodaq.gui.main_window",
+    "cryodaq.reporting.__main__",
+    "cryodaq.reporting.generator",
     "cryodaq.drivers.instruments.lakeshore_218s",
     "cryodaq.drivers.instruments.keithley_2604b",
     "cryodaq.drivers.instruments.thyracont_vsp63d",

@@ -105,9 +105,11 @@ cryodaq-rag-index                # построение индекса базы 
 cryodaq-rag-search               # семантический поиск по базе знаний
 cryodaq-assistant                # standalone-процесс локального LLM-ассистента + RAG (B1),
                                   # подключается к работающему engine по ZMQ
+cryodaq-report-render            # внутренний одноразовый renderer отчёта; запускается engine
 ```
 
 `cryodaq-frozen`, `cryodaq-frozen-engine`, `cryodaq-frozen-gui`,
-`cryodaq-frozen-assistant` — точки входа для frozen-сборки (PyInstaller),
+`cryodaq-frozen-assistant`, `cryodaq-frozen-report-render` — точки входа для
+frozen-сборки (PyInstaller),
 не для ручного запуска из venv; см. `build_scripts/build.sh` /
 `build_scripts/build.bat`.

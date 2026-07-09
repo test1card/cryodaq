@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,13 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Mm, Pt, RGBColor
 
+from cryodaq.report_process import terminate_descendant_tree
+from cryodaq.report_state import (
+    ReportContractError,
+    compute_source_fingerprint,
+    resolve_experiment_dir,
+    resolve_report_paths,
+)
 from cryodaq.reporting.data import ReportDataExtractor
 from cryodaq.reporting.sections import SECTION_REGISTRY
 
@@ -58,11 +66,50 @@ class ReportGenerator:
         self._extractor = ReportDataExtractor(data_dir)
 
     def generate(self, experiment_id: str) -> ReportGenerationResult:
-        metadata_path = self._experiments_dir / experiment_id / "metadata.json"
+        experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
+        compute_source_fingerprint(experiment_root)
+        report_paths = resolve_report_paths(experiment_root, create_reports=True)
+        return self._generate_into(experiment_root, report_paths.reports)
+
+    def generate_to_directory(
+        self,
+        experiment_id: str,
+        output_dir: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> ReportGenerationResult:
+        """Render into one validated, child-owned generation staging directory."""
+        experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
+        report_paths = resolve_report_paths(experiment_root)
+        staging_root = report_paths.staging_root
+        output_dir = Path(output_dir)
+        if output_dir.is_symlink():
+            raise ReportContractError("report output directory must not be a symlink")
+        resolved_output = output_dir.resolve()
+        if (
+            resolved_output.parent != staging_root
+            or report_paths.experiment_root not in resolved_output.parents
+        ):
+            raise ReportContractError(
+                "report output must be one generation staging directory"
+            )
+        return self._generate_into(
+            experiment_root,
+            resolved_output,
+            deadline_epoch=deadline_epoch,
+        )
+
+    def _generate_into(
+        self,
+        experiment_root: Path,
+        reports_dir: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> ReportGenerationResult:
+        metadata_path = experiment_root / "metadata.json"
         dataset = self._extractor.load_dataset(metadata_path)
         experiment = dataset.metadata["experiment"]
         template = dataset.metadata["template"]
-        reports_dir = metadata_path.parent / "reports"
         assets_dir = reports_dir / "assets"
         editable_docx_path = reports_dir / "report_editable.docx"
         raw_source_docx_path = reports_dir / "report_raw.docx"
@@ -96,7 +143,11 @@ class ReportGenerator:
 
         raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro)
         raw_document.save(str(raw_source_docx_path))
-        pdf_path = self._try_convert_pdf(raw_source_docx_path, raw_pdf_path)
+        pdf_path = self._try_convert_pdf(
+            raw_source_docx_path,
+            raw_pdf_path,
+            deadline_epoch=deadline_epoch,
+        )
 
         editable_document = self._build_document(
             dataset, assets_dir, editable_sections, gemma_intro
@@ -264,7 +315,13 @@ class ReportGenerator:
             ordered.append("config_section")
         return tuple(ordered)
 
-    def _try_convert_pdf(self, source_docx_path: Path, target_pdf_path: Path) -> Path | None:
+    def _try_convert_pdf(
+        self,
+        source_docx_path: Path,
+        target_pdf_path: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> Path | None:
         """Best-effort DOCX→PDF via LibreOffice; None on any degradation.
 
         Every degradation path (missing soffice, timeout, failed conversion)
@@ -281,27 +338,48 @@ class ReportGenerator:
             )
             return None
         output_dir = source_docx_path.parent
+        timeout_s = float(_SOFFICE_TIMEOUT_S)
+        if deadline_epoch is not None:
+            # Reserve time for the editable document, hashing, promotion, and reply.
+            timeout_s = min(timeout_s, max(0.1, deadline_epoch - time.time() - 2.0))
+        command = [
+            soffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            str(source_docx_path),
+            "--outdir",
+            str(output_dir),
+        ]
         try:
-            subprocess.run(
-                [
-                    soffice,
-                    "--headless",
-                    "--convert-to",
-                    "pdf",
-                    str(source_docx_path),
-                    "--outdir",
-                    str(output_dir),
-                ],
-                check=False,
-                capture_output=True,
-                timeout=_SOFFICE_TIMEOUT_S,
-            )
+            if deadline_epoch is None:
+                # Preserve the direct synchronous API's characterized behavior.
+                subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    timeout=timeout_s,
+                )
+            else:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+                try:
+                    process.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    terminate_descendant_tree(process.pid)
+                    process.wait(timeout=2.0)
+                    raise
         except subprocess.TimeoutExpired:
             logger.error(
                 "ReportGenerator: конвертация soffice в PDF превысила таймаут %d с — "
                 "PDF не создан, доступен только DOCX. Проверьте зависшие процессы "
                 "soffice / установку LibreOffice.",
-                _SOFFICE_TIMEOUT_S,
+                timeout_s,
             )
             return None
         produced = output_dir / f"{source_docx_path.stem}.pdf"

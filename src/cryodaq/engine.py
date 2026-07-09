@@ -101,10 +101,9 @@ from cryodaq.engine_wiring.supervision import (
 )
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
-from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
-from cryodaq.reporting.generator import ReportGenerator
+from cryodaq.report_process import ReportProcessRunner
 from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -1387,19 +1386,8 @@ def _run_experiment_command(
         experiment_id = str(cmd.get("experiment_id", "")).strip()
         if not experiment_id:
             raise ValueError("experiment_id is required for report generation.")
-        generator = ReportGenerator(experiment_manager.data_dir)
-        result = generator.generate(experiment_id)
-        return {
-            "ok": True,
-            "report": {
-                "docx_path": str(result.docx_path),
-                "pdf_path": str(result.pdf_path) if result.pdf_path else None,
-                "assets_dir": str(result.assets_dir),
-                "sections": list(result.sections),
-                "skipped": result.skipped,
-                "reason": result.reason,
-            },
-        }
+        report = ReportProcessRunner(experiment_manager.data_dir).generate_experiment(experiment_id)
+        return {"ok": True, "report": report}
 
     if action == "experiment_advance_phase":
         phase = str(cmd.get("phase", "")).strip()
@@ -2949,6 +2937,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             # PeriodicReporter
             pr_cfg = notif_raw.get("periodic_report", {})
             if pr_cfg.get("enabled", False) and token_valid:
+                # Keep this optional import lazy so the engine/manual command
+                # surface does not load matplotlib when periodic reports are off.
+                from cryodaq.notifications.periodic_report import PeriodicReporter
+
                 periodic_reporter = PeriodicReporter(
                     broker,
                     alarm_v2_state_mgr,

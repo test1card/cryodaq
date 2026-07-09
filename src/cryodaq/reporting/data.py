@@ -8,6 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryodaq.report_state import (
+    ALLOWED_REPORT_INPUT_SUFFIXES,
+    MAX_SOURCE_FILE_BYTES,
+    MAX_SOURCE_TOTAL_BYTES,
+    ReportContractError,
+)
 from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
@@ -68,16 +74,21 @@ class ReportDataExtractor:
         self._data_dir = data_dir
 
     def load_metadata(self, metadata_path: Path) -> dict[str, Any]:
+        if metadata_path.is_symlink() or not metadata_path.is_file():
+            raise ReportContractError("metadata must be a regular file")
+        if metadata_path.stat().st_size > MAX_SOURCE_FILE_BYTES:
+            raise ReportContractError("metadata file is too large")
         return json.loads(metadata_path.read_text(encoding="utf-8"))
 
     def load_dataset(self, metadata_path: Path) -> ReportDataset:
         metadata = self.load_metadata(metadata_path)
+        self._validate_artifact_paths(metadata, metadata_path.parent)
         experiment = metadata.get("experiment", {})
         start_time = self._parse_time(experiment.get("start_time"))
         end_time = self._parse_time(experiment.get("end_time")) or datetime.now(UTC)
         experiment_id = experiment.get("experiment_id")
 
-        readings = self._load_archived_readings(metadata)
+        readings = self._load_archived_readings(metadata, metadata_path.parent)
         if not readings:
             readings = self._load_readings(start_time, end_time)
         alarm_readings = [item for item in readings if item.channel.startswith("alarm/")]
@@ -99,8 +110,64 @@ class ReportDataExtractor:
             summary_metadata=dict(metadata.get("summary_metadata") or {}),
         )
 
-    def _load_archived_readings(self, metadata: dict[str, Any]) -> list[HistoricalReading]:
-        table_path = self._resolve_archived_table(metadata, table_id="measured_values")
+    @staticmethod
+    def _validate_artifact_paths(
+        metadata: dict[str, Any], experiment_root: Path
+    ) -> None:
+        """Reject metadata-controlled artifact paths outside the experiment jail."""
+        root = experiment_root.resolve()
+        total = 0
+        for collection_name in ("artifact_index", "result_tables"):
+            collection = metadata.get(collection_name, [])
+            if not isinstance(collection, list):
+                raise ReportContractError(f"{collection_name} must be a list")
+            for item in collection:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get("path")
+                if raw in (None, ""):
+                    continue
+                if not isinstance(raw, str) or len(raw) > 4_096:
+                    raise ReportContractError("artifact path must be a bounded string")
+                candidate = Path(raw)
+                if candidate.suffix.lower() not in ALLOWED_REPORT_INPUT_SUFFIXES:
+                    raise ReportContractError(
+                        "artifact path has an unsupported extension"
+                    )
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                if candidate.is_symlink():
+                    raise ReportContractError("artifact path must not be a symlink")
+                resolved = candidate.resolve()
+                if resolved != root and root not in resolved.parents:
+                    raise ReportContractError(
+                        "artifact path escapes the experiment root"
+                    )
+                if not resolved.exists():
+                    raise ReportContractError("artifact path must exist")
+                if not resolved.is_file():
+                    raise ReportContractError(
+                        "artifact path must reference a regular file"
+                    )
+                size = resolved.stat().st_size
+                if size > MAX_SOURCE_FILE_BYTES:
+                    raise ReportContractError("artifact input is too large")
+                total += size
+                if total > MAX_SOURCE_TOTAL_BYTES:
+                    raise ReportContractError("artifact inputs exceed total size limit")
+                item["path"] = str(resolved)
+
+    def _load_archived_readings(
+        self,
+        metadata: dict[str, Any],
+        experiment_root: Path | None = None,
+    ) -> list[HistoricalReading]:
+        experiment_root = experiment_root or self._data_dir
+        table_path = self._resolve_archived_table(
+            metadata,
+            experiment_root=experiment_root,
+            table_id="measured_values",
+        )
         if table_path is None or not table_path.exists():
             return []
         rows: list[HistoricalReading] = []
@@ -123,18 +190,35 @@ class ReportDataExtractor:
             return []
         return rows
 
-    def _resolve_archived_table(self, metadata: dict[str, Any], *, table_id: str) -> Path | None:
+    def _resolve_archived_table(
+        self,
+        metadata: dict[str, Any],
+        *,
+        experiment_root: Path,
+        table_id: str,
+    ) -> Path | None:
+        root = experiment_root.resolve()
+
+        def safe_csv(path: Path) -> Path | None:
+            if path.suffix.lower() != ".csv" or path.is_symlink():
+                return None
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return None
+            if resolved != root and root not in resolved.parents:
+                return None
+            return resolved if resolved.is_file() else None
+
         for item in metadata.get("result_tables", []):
             if not isinstance(item, dict):
                 continue
             if str(item.get("table_id", "")).strip() != table_id:
                 continue
             path = Path(str(item.get("path", "")).strip())
-            if path.exists():
-                return path
-        artifact_root = Path(str(metadata.get("artifacts", {}).get("root_dir", "")).strip())
-        fallback = artifact_root / "archive" / "tables" / f"{table_id}.csv"
-        return fallback if fallback.exists() else None
+            if safe := safe_csv(path):
+                return safe
+        return safe_csv(root / "archive" / "tables" / f"{table_id}.csv")
 
     def _load_readings(self, start_time: datetime, end_time: datetime) -> list[HistoricalReading]:
         # Route through ArchiveReader: once cold rotation (F17) deletes an aged

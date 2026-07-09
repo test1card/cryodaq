@@ -11,7 +11,8 @@ Mode dispatch
 Under PyInstaller, ``sys.executable`` points at the bundled exe, NOT a Python
 interpreter. The launcher cannot fork "python -m cryodaq.engine" — it must
 re-invoke its own exe with a mode flag. We pop ``--mode=engine`` /
-``--mode=gui`` / ``--mode=launcher`` from ``sys.argv`` and dispatch to the
+``--mode=gui`` / ``--mode=report-render`` / ``--mode=launcher`` from
+``sys.argv`` and dispatch to the
 matching ``main_*`` function. The flag is consumed before any downstream
 ``argparse`` runs, so it's invisible to ``cryodaq.engine.main``,
 ``cryodaq.gui.app.main``, ``cryodaq.launcher.main``.
@@ -86,6 +87,17 @@ def main_assistant() -> None:
     main()
 
 
+def main_report_render() -> None:
+    """Frozen entry for one bounded ephemeral report render."""
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
+    from cryodaq.reporting.__main__ import main
+
+    raise SystemExit(main())
+
+
 def _dispatch() -> None:
     """Read ``--mode=...`` from ``sys.argv`` and call the matching ``main_*``."""
     import multiprocessing
@@ -109,6 +121,10 @@ def _dispatch() -> None:
         from cryodaq.agents.assistant_main import main
 
         main()
+    elif mode == "report-render":
+        from cryodaq.reporting.__main__ import main
+
+        raise SystemExit(main())
     else:
         from cryodaq.launcher import main
 

@@ -237,3 +237,33 @@ async def test_experiment_create_retroactive_command(manager: ExperimentManager)
     assert result["ok"] is True
     assert result["experiment"]["retroactive"] is True
     assert result["experiment"]["status"] == "COMPLETED"
+
+
+async def test_manual_report_command_preserves_gui_response_schema(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {
+        "docx_path": "/trusted/report.docx",
+        "pdf_path": None,
+        "assets_dir": "/trusted/assets",
+        "sections": ["title_page"],
+        "skipped": False,
+        "reason": "",
+    }
+
+    class FakeRunner:
+        def __init__(self, data_dir: Path) -> None:
+            assert data_dir == manager.data_dir
+
+        def generate_experiment(self, experiment_id: str):
+            assert experiment_id == "exp-1"
+            return expected
+
+    monkeypatch.setattr("cryodaq.engine.ReportProcessRunner", FakeRunner)
+    result = _run_experiment_command(
+        "experiment_generate_report",
+        {"experiment_id": "exp-1"},
+        manager,
+    )
+    assert result == {"ok": True, "report": expected}
