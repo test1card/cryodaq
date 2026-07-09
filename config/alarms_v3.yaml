@@ -156,9 +156,16 @@ global_alarms:
     notify: [gui, telegram, sound]
 
   # --- Keithley ---
+  # B2 alarm-v1→v2 migration: channels corrected from bare "smua_power"/
+  # "smub_power" to the real Reading.channel emitted by Keithley2604B
+  # ("{instrument_name}/smua/power") — AlarmEvaluator/ChannelStateTracker
+  # match channels by EXACT string, no regex/alias resolution, so the old
+  # short names never matched anything and this alarm never fired. Ties
+  # the rule to the current instruments.yaml instrument name ("Keithley_1");
+  # rename here too if that instrument name ever changes.
   keithley_overpower:
     alarm_type: threshold
-    channels: [smua_power, smub_power]
+    channels: ["Keithley_1/smua/power", "Keithley_1/smub/power"]
     check: above
     threshold: 4.0               # W (лимит 5W, запас 20%)
     hysteresis: 0.5
@@ -168,20 +175,25 @@ global_alarms:
     notify: [gui, telegram, sound]
 
   # --- Диск ---
+  # B2: channel corrected from "system_disk_gb" (never published by anything)
+  # to the real DiskMonitor channel "system/disk_free_gb"; hysteresis restored
+  # to match the retired alarms.yaml v1 rule (same thresholds, no re-tuning).
   disk_space_warning:
     alarm_type: threshold
-    channel: system_disk_gb
+    channel: system/disk_free_gb
     check: below
     threshold: 10
+    hysteresis: 2.0
     level: WARNING
     message: "Диск < 10 GB."
     notify: [gui]
 
   disk_space_critical:
     alarm_type: threshold
-    channel: system_disk_gb
+    channel: system/disk_free_gb
     check: below
     threshold: 2
+    hysteresis: 0.5
     level: CRITICAL
     message: "Диск < 2 GB. Запись может прерваться."
     notify: [gui, telegram]

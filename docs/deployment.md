@@ -99,7 +99,7 @@ Copy-Item config\web.local.yaml.example config\web.local.yaml
 
 Также в репозитории уже используются:
 
-- `config/alarms.yaml`
+- `config/alarms_v3.yaml`
 - `config/interlocks.yaml`
 - `config/housekeeping.yaml`
 - `config/safety.yaml`

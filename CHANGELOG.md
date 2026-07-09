@@ -7,6 +7,22 @@
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- Alarm Engine v1 (`src/cryodaq/core/alarm.py`, `config/alarms.yaml`) удалён.
+  `keithley_overpower` и `disk_space_warning`/`disk_space_critical` в
+  `config/alarms_v3.yaml` ссылались на несуществующие короткие имена каналов
+  (`smua_power`/`smub_power`, `system_disk_gb`) и никогда не срабатывали —
+  исправлены на реальные каналы (`Keithley_1/smua|smub/power`,
+  `system/disk_free_gb`), гистерезис перенесён из retired v1-правил без
+  изменения порогов. `PeriodicReporter`, `TelegramCommandBot`, query-agent
+  `AlarmAdapter` переведены на `AlarmStateManager` (alarm v2); движок теперь
+  republish'ит `analytics/alarm_count` из v2 на каждом тике, чтобы
+  `AdaptiveThrottle` не потерял сигнал "есть активная тревога, не
+  прореживать данные". Один синтаксис правил, один конфиг.
+
 ## [0.64.1] — 2026-07-08 — актуализация документации и гигиена репозитория
 
 Документационный patch-релиз: вся трекаемая документация приведена к

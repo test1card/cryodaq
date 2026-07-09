@@ -6,7 +6,7 @@
 
 Загружает конфигурации, создаёт и связывает все подсистемы:
     drivers → DataBroker →
-    [SQLiteWriter, ZMQPublisher, AlarmEngine, InterlockEngine, PluginPipeline]
+    [SQLiteWriter, ZMQPublisher, AlarmEngineV2, InterlockEngine, PluginPipeline]
 
 Корректное завершение по SIGINT / SIGTERM (Unix) или Ctrl+C (Windows).
 """
@@ -37,7 +37,6 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-from cryodaq.core.alarm import AlarmEngine
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager, tick_alarm
@@ -2216,7 +2215,6 @@ async def _run_engine(*, mock: bool = False) -> None:
         return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
 
     instruments_cfg = _cfg("instruments")
-    alarms_cfg = _cfg("alarms")
     interlocks_cfg = _cfg("interlocks")
     housekeeping_cfg = _cfg("housekeeping")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
@@ -2252,11 +2250,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     safety_manager.load_config(safety_cfg)
 
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
-    # Merge legacy alarms.yaml/interlocks.yaml protection
-    # patterns with the modern alarms_v3.yaml critical channels. Without this
-    # the throttle thins critical channels even though alarms_v3 marks them
-    # CRITICAL.
-    legacy_patterns = load_protected_channel_patterns(alarms_cfg, interlocks_cfg)
+    # Merge legacy interlocks.yaml protection patterns with the modern
+    # alarms_v3.yaml critical channels. Without this the throttle thins
+    # critical channels even though alarms_v3 marks them CRITICAL.
+    legacy_patterns = load_protected_channel_patterns(interlocks_cfg)
     alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
     merged_patterns = list({*legacy_patterns, *v3_patterns})
@@ -2346,13 +2343,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     # ZMQ PUB
     zmq_queue = await broker.subscribe("zmq_publisher")
     zmq_pub = ZMQPublisher()
-
-    # Alarm Engine
-    alarm_engine = AlarmEngine(broker)
-    if alarms_cfg.exists():
-        alarm_engine.load_config(alarms_cfg)
-    else:
-        logger.warning("Файл тревог не найден: %s", alarms_cfg)
 
     # Interlock Engine — действия делегируются SafetyManager.
     # The actions-dict callables are kept as no-ops for
@@ -2757,59 +2747,81 @@ async def _run_engine(*, mock: bool = False) -> None:
         poll_s = _alarm_v2_engine_cfg.poll_interval_s
         while True:
             await asyncio.sleep(poll_s)
-            if not _alarm_v2_configs:
-                continue
-            # A2(a): guard the once-per-tick phase lookup — a raise here (it sits
-            # outside the per-alarm try below) would kill the whole tick task.
+            if _alarm_v2_configs:
+                await _alarm_v2_tick_configs()
+            # B2: republish the total active-alarm count every poll cycle
+            # (not just when _alarm_v2_configs is non-empty) — this feeds
+            # AdaptiveThrottle.observe_runtime_signal via the
+            # "analytics/alarm_count" channel, which AlarmEngine v1 used to
+            # own exclusively. Without this the throttle never learns an
+            # alarm is active and keeps thinning archived data during a
+            # fault. Counts alarms from ALL v2 sources sharing
+            # alarm_v2_state_mgr (global/phase alarms here, plus
+            # CooldownAlarm/VacuumGuard/diagnostic alarms ticked
+            # elsewhere) — not independently unit-tested (this closure
+            # isn't importable); covered by test_housekeeping.py's
+            # observe_runtime_signal tests + the engine boot smoke test.
+            await broker.publish(
+                Reading.now(
+                    channel="analytics/alarm_count",
+                    value=float(len(alarm_v2_state_mgr.get_active())),
+                    unit="",
+                    instrument_id="alarm_v2",
+                )
+            )
+
+    async def _alarm_v2_tick_configs() -> None:
+        # A2(a): guard the once-per-tick phase lookup — a raise here (it sits
+        # outside the per-alarm try below) would kill the whole tick task.
+        try:
+            current_phase = _alarm_v2_phase.get_current_phase()
+        except Exception as exc:
+            logger.error("Alarm v2 tick: ошибка получения фазы: %s", exc)
+            return
+        for alarm_cfg in _alarm_v2_configs:
             try:
-                current_phase = _alarm_v2_phase.get_current_phase()
-            except Exception as exc:
-                logger.error("Alarm v2 tick: ошибка получения фазы: %s", exc)
-                continue
-            for alarm_cfg in _alarm_v2_configs:
-                try:
-                    # Phase-filter -> evaluate -> process. Shared with tests via
-                    # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
-                    # by the real production logic. Out-of-phase returns
-                    # (None, None) after clearing, so nothing dispatches below.
-                    event, transition = tick_alarm(
-                        alarm_cfg, current_phase, alarm_v2_evaluator, alarm_v2_state_mgr
+                # Phase-filter -> evaluate -> process. Shared with tests via
+                # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
+                # by the real production logic. Out-of-phase returns
+                # (None, None) after clearing, so nothing dispatches below.
+                event, transition = tick_alarm(
+                    alarm_cfg, current_phase, alarm_v2_evaluator, alarm_v2_state_mgr
+                )
+                if transition == "TRIGGERED" and event is not None:
+                    # GUI polls via alarm_v2_status command; optionally notify via Telegram
+                    if "telegram" in alarm_cfg.notify and telegram_bot is not None:
+                        msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                        t = asyncio.create_task(
+                            telegram_bot._send_to_all(msg),
+                            name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
+                        )
+                        _alarm_dispatch_tasks.add(t)
+                        t.add_done_callback(_alarm_dispatch_tasks.discard)
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="alarm_fired",
+                            timestamp=datetime.now(UTC),
+                            payload={
+                                "alarm_id": event.alarm_id,
+                                "level": event.level,
+                                "message": event.message,
+                                "channels": event.channels,
+                                "values": event.values,
+                            },
+                            experiment_id=experiment_manager.active_experiment_id,
+                        )
                     )
-                    if transition == "TRIGGERED" and event is not None:
-                        # GUI polls via alarm_v2_status command; optionally notify via Telegram
-                        if "telegram" in alarm_cfg.notify and telegram_bot is not None:
-                            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
-                            t = asyncio.create_task(
-                                telegram_bot._send_to_all(msg),
-                                name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
-                            )
-                            _alarm_dispatch_tasks.add(t)
-                            t.add_done_callback(_alarm_dispatch_tasks.discard)
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="alarm_fired",
-                                timestamp=datetime.now(UTC),
-                                payload={
-                                    "alarm_id": event.alarm_id,
-                                    "level": event.level,
-                                    "message": event.message,
-                                    "channels": event.channels,
-                                    "values": event.values,
-                                },
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
+                elif transition == "CLEARED":
+                    await event_bus.publish(
+                        EngineEvent(
+                            event_type="alarm_cleared",
+                            timestamp=datetime.now(UTC),
+                            payload={"alarm_id": alarm_cfg.alarm_id},
+                            experiment_id=experiment_manager.active_experiment_id,
                         )
-                    elif transition == "CLEARED":
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="alarm_cleared",
-                                timestamp=datetime.now(UTC),
-                                payload={"alarm_id": alarm_cfg.alarm_id},
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
-                        )
-                except Exception as exc:
-                    logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
+                    )
+            except Exception as exc:
+                logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
 
     # --- Sensor diagnostics feed + tick tasks ---
     async def _sensor_diag_feed() -> None:
@@ -2988,13 +3000,6 @@ async def _run_engine(*, mock: bool = False) -> None:
             if action == "safety_acknowledge":
                 reason = cmd.get("reason", "")
                 return await safety_manager.acknowledge_fault(reason)
-            if action == "alarm_acknowledge":
-                name = cmd.get("alarm_name", "")
-                try:
-                    await alarm_engine.acknowledge(name)
-                    return {"ok": True, "action": "alarm_acknowledge"}
-                except (KeyError, ValueError) as exc:
-                    return {"ok": False, "error": str(exc)}
             if action == "interlock_acknowledge":
                 # F24: re-arm a tripped interlock after operator clears the condition.
                 name = cmd.get("interlock_name", "")
@@ -3533,7 +3538,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             if pr_cfg.get("enabled", False) and token_valid:
                 periodic_reporter = PeriodicReporter(
                     broker,
-                    alarm_engine,
+                    alarm_v2_state_mgr,
                     bot_token=bot_token,
                     chat_id=tg_cfg.get("chat_id", 0),
                     report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
@@ -3563,7 +3568,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 else:
                     telegram_bot = TelegramCommandBot(
                         broker,
-                        alarm_engine,
+                        alarm_v2_state_mgr,
                         bot_token=bot_token,
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
@@ -3786,7 +3791,7 @@ async def _run_engine(*, mock: bool = False) -> None:
             _q_cooldown = CooldownAdapter(cooldown_service)
             _q_vacuum = VacuumAdapter(vacuum_trend)
             _q_sqlite = SQLiteAdapter(writer)
-            _q_alarms = AlarmAdapter(alarm_engine)
+            _q_alarms = AlarmAdapter(alarm_v2_state_mgr)
             _q_experiment = ExperimentAdapter(experiment_manager)
             _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
             _q_rag = RAGAdapter(_rag_searcher)
@@ -3988,7 +3993,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     # writer уже запущен через start_immediate() выше
     await zmq_pub.start(zmq_queue)
     await cmd_server.start()
-    await alarm_engine.start()
     await interlock_engine.start()
     await plugin_pipeline.start()
     if cooldown_service is not None:
@@ -4167,7 +4171,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     logger.info(
         "═══ CryoDAQ Engine запущен ═══ | приборов=%d | тревог=%d | блокировок=%d | mock=%s",
         len(driver_configs),
-        len(alarm_engine.get_state()),
+        len(_alarm_v2_configs),
         len(interlock_engine.get_state()),
         mock,
     )
@@ -4327,9 +4331,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     if telegram_bot is not None:
         await telegram_bot.stop()
         logger.info("TelegramCommandBot остановлен")
-
-    await alarm_engine.stop()
-    logger.info("Движок тревог остановлен")
 
     await interlock_engine.stop()
     logger.info("Движок блокировок остановлен")

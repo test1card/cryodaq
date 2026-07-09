@@ -3,19 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
-from cryodaq.core.alarm import AlarmEvent, AlarmSeverity
 from cryodaq.notifications.telegram import TelegramNotifier
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+#
+# AlarmSeverity / AlarmEvent below are test-local stand-ins for the retired
+# alarm-v1 types (cryodaq.core.alarm, deleted in the v1->v2 migration).
+# TelegramNotifier.__call__/_format_message are duck-typed (event: Any) and
+# were never actually wired to a notifiers list in production engine.py, so
+# any object exposing this shape exercises the same formatting code.
+
+
+class AlarmSeverity(Enum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+@dataclass(frozen=True)
+class AlarmEvent:
+    timestamp: datetime
+    alarm_name: str
+    channel: str
+    value: float
+    threshold: float
+    severity: AlarmSeverity
+    event_type: str
 
 
 def _event(
@@ -234,9 +258,7 @@ def _make_bot(**kwargs):
     broker = MagicMock()
     broker.subscribe = AsyncMock(return_value=asyncio.Queue())
     alarm_engine = MagicMock()
-    alarm_engine.get_active_alarms.return_value = {}
-    alarm_engine.get_state.return_value = {}
-    alarm_engine.get_events.return_value = []
+    alarm_engine.get_active.return_value = {}
     # Phase 2b K.1: TelegramCommandBot now refuses empty allowlist
     # when commands are enabled. Pass a default test chat id unless the
     # caller overrides it.

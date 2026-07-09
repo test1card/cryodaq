@@ -140,8 +140,7 @@ Config files in `config/`:
 |---|---|
 | `instruments.yaml` + `instruments.local.yaml` | GPIB/serial/USB addresses |
 | `safety.yaml` | FSM timeouts, rate limits, drain timeout |
-| `alarms.yaml` | Legacy alarm definitions |
-| `alarms_v3.yaml` | v2 alarm engine rules |
+| `alarms_v3.yaml` | Alarm engine rules |
 | `physical_alarms.yaml` | VacuumGuard + CooldownAlarm tunables |
 | `interlocks.yaml` | Interlock conditions + actions |
 | `channels.yaml` | Display names, visibility, groupings |

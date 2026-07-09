@@ -23,6 +23,7 @@ from cryodaq.agents.assistant.query.schemas import (
     CooldownETA,
     VacuumETA,
 )
+from cryodaq.core.alarm_v2 import AlarmEvent as AlarmEventV2
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -247,27 +248,31 @@ async def test_sqlite_adapter_returns_none_for_empty_channel() -> None:
 
 
 async def test_alarm_adapter_active_alarms() -> None:
-    """Returns AlarmStatusResult with structured info from engine."""
+    """Returns AlarmStatusResult with structured info from engine (alarm v2)."""
+    triggered_at = datetime(2026, 5, 1, 11, 0, 0, tzinfo=UTC).timestamp()
     engine = MagicMock()
-    engine.get_active_alarm_details.return_value = [
-        {
-            "alarm_id": "T1_high",
-            "level": "WARNING",
-            "channel_pattern": "T_cold",
-            "triggered_at": datetime(2026, 5, 1, 11, 0, 0, tzinfo=UTC),
-        }
-    ]
+    engine.get_active.return_value = {
+        "T1_high": AlarmEventV2(
+            alarm_id="T1_high",
+            level="WARNING",
+            message="T_cold above threshold",
+            triggered_at=triggered_at,
+            channels=["T_cold"],
+            values={"T_cold": 350.0},
+        )
+    }
     adapter = AlarmAdapter(engine)
     result = await adapter.active()
     assert isinstance(result, AlarmStatusResult)
     assert result.count == 1
     assert result.active[0].alarm_id == "T1_high"
     assert result.active[0].level == "WARNING"
+    assert result.active[0].channels == ["T_cold"]
 
 
 async def test_alarm_adapter_returns_empty_when_no_alarms() -> None:
     engine = MagicMock()
-    engine.get_active_alarm_details.return_value = []
+    engine.get_active.return_value = {}
     adapter = AlarmAdapter(engine)
     result = await adapter.active()
     assert result.count == 0

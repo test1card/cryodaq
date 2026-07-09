@@ -35,9 +35,9 @@ SafetyManager через `vacuum.escalate_to_safety` (по умолчанию `t
 эскалация включена для необслуживаемых/холодных прогонов; выставь
 `false` для attended/debug-прогонов, где достаточно alarm-only).
 
-Ещё есть **Alarm Engine v1** (`config/alarms.yaml`) — legacy path с
-несколькими старыми threshold-правилами (`enabled` по умолчанию `true`).
-Не добавляй туда новые алармы; новые правила идут в v3 / physical alarms.
+Alarm Engine v1 (`config/alarms.yaml`) удалён (B2, миграция v1→v2
+завершена) — все его правила либо уже дублировались в `alarms_v3.yaml`,
+либо были перенесены туда. Один синтаксис правил, один конфиг.
 
 ---
 
@@ -53,17 +53,17 @@ SafetyManager через `vacuum.escalate_to_safety` (по умолчанию `t
   ┌──────────────────────────────────────────────────────────────┐
   │              DataBroker (engine, asyncio)                    │
   │  persistence-first: SQLite WAL commit → затем subscribers    │
-  └──┬────────────────┬─────────────────┬─────────────────┬──────┘
-     │                │                 │                 │
-     ▼                ▼                 ▼                 ▼
-  ┌──────┐     ┌──────────┐     ┌──────────────┐   ┌──────────┐
-  │Safety│     │Interlock │     │ Alarm v2     │   │ Alarm v1 │
-  │Mgr   │     │Engine    │     │ Evaluator    │   │ Engine   │
-  │(fsm) │     │          │     │ + State Mgr  │   │ (legacy) │
-  └──┬───┘     └────┬─────┘     └──────┬───────┘   └────┬─────┘
-     │              │                  │                │
-     ▼              ▼                  ▼                ▼
-  блокирует    emergency_off /    GUI badge +       (отключено)
+  └──┬────────────────┬─────────────────┬─────────────────────────┘
+     │                │                 │
+     ▼                ▼                 ▼
+  ┌──────┐     ┌──────────┐     ┌──────────────┐
+  │Safety│     │Interlock │     │ Alarm v2     │
+  │Mgr   │     │Engine    │     │ Evaluator    │
+  │(fsm) │     │          │     │ + State Mgr  │
+  └──┬───┘     └────┬─────┘     └──────┬───────┘
+     │              │                  │
+     ▼              ▼                  ▼
+  блокирует    emergency_off /    GUI badge +
   запуск       stop_source        Telegram +
   источника                       звук
 ```
@@ -468,8 +468,7 @@ doc. Это снимет "магические числа" для следующ
 
 - `config/safety.yaml` — инварианты запуска, rate-limit, source cap
 - `config/interlocks.yaml` — жёсткие отключения
-- `config/alarms.yaml` — **legacy, не трогать**
-- `config/alarms_v3.yaml` — основная alarm система
+- `config/alarms_v3.yaml` — основная и единственная alarm система
 - `config/physical_alarms.yaml` — CooldownAlarm + VacuumGuard
 - `config/experiment_templates/*.yaml` — setpoints через custom_fields
 - `config/notifications.yaml` — Telegram bot token, chat IDs
@@ -482,7 +481,6 @@ doc. Это снимет "магические числа" для следующ
 
 - `src/cryodaq/core/safety_manager.py` — FSM + preconditions
 - `src/cryodaq/core/interlock.py` — Interlock Engine
-- `src/cryodaq/core/alarm.py` — Alarm Engine v1 (legacy)
 - `src/cryodaq/core/alarm_v2.py` — AlarmEvaluator + StateManager
 - `src/cryodaq/core/alarm_config.py` — загрузчик YAML v3
 - `src/cryodaq/core/alarm_providers.py` — ExperimentPhaseProvider,

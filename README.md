@@ -216,8 +216,7 @@ Active configuration files as of v0.64.0:
 - `config/instruments.local.yaml.example` — template for machine-specific
   instrument overrides (`instruments.local.yaml` is gitignored)
 - `config/safety.yaml` — FSM timeouts, rate limits, drain timeout
-- `config/alarms.yaml` — legacy alarm definitions
-- `config/alarms_v3.yaml` — alarm-engine-v2 rules (threshold/rate/composite/phase)
+- `config/alarms_v3.yaml` — alarm engine rules (threshold/rate/composite/phase)
 - `config/interlocks.yaml` — interlock conditions + actions
 - `config/physical_alarms.yaml` — tunables for the cold-cryostat physical
   guards (CooldownAlarm, VacuumGuard, including the

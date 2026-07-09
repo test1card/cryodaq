@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 if TYPE_CHECKING:
-    from cryodaq.core.alarm import AlarmEngine
+    from cryodaq.core.alarm_v2 import AlarmStateManager
     from cryodaq.core.broker import DataBroker
 
 logger = logging.getLogger("cryodaq.notifications.periodic_report")
@@ -51,7 +51,7 @@ class PeriodicReporter:
     broker:
         DataBroker для получения показаний в реальном времени.
     alarm_engine:
-        AlarmEngine для получения списка активных тревог.
+        AlarmStateManager (alarm v2) для получения списка активных тревог.
     bot_token:
         Токен Telegram-бота.
     chat_id:
@@ -69,7 +69,7 @@ class PeriodicReporter:
     def __init__(
         self,
         broker: DataBroker,
-        alarm_engine: AlarmEngine,
+        alarm_engine: AlarmStateManager,
         *,
         bot_token,
         chat_id: int | str,
@@ -239,20 +239,11 @@ class PeriodicReporter:
         has_pressure = bool(pres_channels)
 
         # Активные тревоги для подсветки каналов
-        alarm_states = self._alarm_engine.get_state()
+        active_alarms = self._alarm_engine.get_active()
 
-        # Определить «тревожные» каналы: те, чьё имя совпадает с именем активной тревоги
-        # или содержится в имени активной тревоги (простое соответствие)
         def _channel_in_alarm(channel: str) -> bool:
-            """Проверить, находится ли канал под активной тревогой."""
-            from cryodaq.core.alarm import AlarmState
-
-            for alarm_name, state in alarm_states.items():
-                if state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED):
-                    # Используем имя канала для грубого совпадения
-                    if channel in alarm_name or alarm_name in channel:
-                        return True
-            return False
+            """Проверить, находится ли канал под активной тревогой (alarm v2)."""
+            return any(channel in event.channels for event in active_alarms.values())
 
         # Создать фигуру
         if has_pressure:
@@ -459,12 +450,12 @@ class PeriodicReporter:
                 lines.append(f"  {label}: {cur:.4g} {unit}")
 
         # --- Активные тревоги ---
-        active = self._alarm_engine.get_active_alarms()
+        active = self._alarm_engine.get_active()
         lines.append("")
         if active:
             lines.append(f"<b>Активные тревоги ({len(active)}):</b>")
-            for alarm_name in active:
-                lines.append(f"  ⚠ {alarm_name}")
+            for alarm_id in active:
+                lines.append(f"  ⚠ {alarm_id}")
         else:
             lines.append("Тревог нет ✓")
 

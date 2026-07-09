@@ -214,8 +214,7 @@ cryodaq-rag-search               # семантический поиск по б
 - `config/instruments.local.yaml.example` — шаблон машино-специфических
   переопределений приборов (`instruments.local.yaml` — gitignored)
 - `config/safety.yaml` — таймауты FSM, rate limits, drain timeout
-- `config/alarms.yaml` — legacy определения алармов
-- `config/alarms_v3.yaml` — правила аларм-движка v2 (threshold/rate/composite/phase)
+- `config/alarms_v3.yaml` — правила аларм-движка (threshold/rate/composite/phase)
 - `config/interlocks.yaml` — условия interlocks + действия
 - `config/physical_alarms.yaml` — параметры физических защит холодного криостата
   (CooldownAlarm, VacuumGuard, включая защёлку `vacuum_guard.escalate_to_safety`

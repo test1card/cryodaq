@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 
 from cryodaq.agents.assistant.query.ru_labels import phase_display_name
-from cryodaq.core.alarm import AlarmEngine
+from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.broker import DataBroker
 
 # Phase 2c I.2: derive the accepted phase vocabulary from the canonical
@@ -72,7 +72,7 @@ class TelegramCommandBot:
     Параметры
     ----------
     broker:       DataBroker для подписки на данные.
-    alarm_engine: AlarmEngine для запроса состояния тревог.
+    alarm_engine: AlarmStateManager (alarm v2) для запроса состояния тревог.
     bot_token:    Токен Telegram-бота (str или SecretStr).
     allowed_chat_ids: Список разрешённых chat_id. Phase 2b K.1:
         пустой список + commands_enabled=True → ValueError при создании
@@ -86,7 +86,7 @@ class TelegramCommandBot:
     def __init__(
         self,
         broker: DataBroker | None = None,
-        alarm_engine: AlarmEngine | None = None,
+        alarm_engine: AlarmStateManager | None = None,
         *,
         bot_token: str | SecretStr,
         allowed_chat_ids: list[int] | None = None,
@@ -386,7 +386,7 @@ class TelegramCommandBot:
             if inst:
                 instruments[inst] = instruments.get(inst, 0) + 1
 
-        alarms = self._alarm_engine.get_active_alarms()
+        alarms = list(self._alarm_engine.get_active().keys())
 
         lines = [
             "<b>CryoDAQ — Статус</b>",
@@ -451,22 +451,20 @@ class TelegramCommandBot:
         return "\n".join(lines)
 
     def _cmd_alarms(self) -> str:
-        active = self._alarm_engine.get_active_alarms()
-        states = self._alarm_engine.get_state()
-        events = self._alarm_engine.get_events()
+        active = self._alarm_engine.get_active()
 
         if not active:
             return "Активных тревог нет."
 
         lines = ["<b>Активные тревоги</b>", ""]
-        for name in active:
-            state = states.get(name)
-            recent = [e for e in events if e.alarm_name == name]
-            last = recent[-1] if recent else None
-            state_ru = _ALARM_STATE_RU.get(state.value, state.value) if state else "?"
-            line = f"  <b>{name}</b> — {state_ru}"
-            if last:
-                line += f"\n    Канал: {last.channel}, значение: {last.value:.4g}"
+        for alarm_id, event in active.items():
+            state_ru = "подтверждена" if event.acknowledged else "активна"
+            line = f"  <b>{alarm_id}</b> [{event.level}] — {state_ru}"
+            if event.channels:
+                ch = event.channels[0]
+                val = event.values.get(ch)
+                if val is not None:
+                    line += f"\n    Канал: {ch}, значение: {val:.4g}"
             lines.append(line)
         return "\n".join(lines)
 

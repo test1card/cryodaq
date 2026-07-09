@@ -1,37 +1,38 @@
-"""AlarmAdapter — wraps AlarmEngine for query agent."""
+"""AlarmAdapter — wraps AlarmStateManager (alarm v2) for query agent."""
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.query.schemas import ActiveAlarmInfo, AlarmStatusResult
 
 if TYPE_CHECKING:
-    from cryodaq.core.alarm import AlarmEngine
+    from cryodaq.core.alarm_v2 import AlarmStateManager
 
 logger = logging.getLogger(__name__)
 
 
 class AlarmAdapter:
-    """Read active alarms from AlarmEngine. Read-only."""
+    """Read active alarms from AlarmStateManager (alarm v2). Read-only."""
 
-    def __init__(self, alarm_engine: AlarmEngine | None) -> None:
-        self._engine = alarm_engine
+    def __init__(self, alarm_state_mgr: AlarmStateManager | None) -> None:
+        self._mgr = alarm_state_mgr
 
     async def active(self) -> AlarmStatusResult:
-        if self._engine is None:
+        if self._mgr is None:
             return AlarmStatusResult()
         try:
-            details: list[dict[str, Any]] = self._engine.get_active_alarm_details()
+            active: dict[str, Any] = self._mgr.get_active()
             infos = [
                 ActiveAlarmInfo(
-                    alarm_id=d["alarm_id"],
-                    level=d["level"],
-                    channels=[d["channel_pattern"]],
-                    triggered_at=d["triggered_at"],
+                    alarm_id=alarm_id,
+                    level=event.level,
+                    channels=list(event.channels),
+                    triggered_at=datetime.fromtimestamp(event.triggered_at, tz=UTC),
                 )
-                for d in details
+                for alarm_id, event in active.items()
             ]
             return AlarmStatusResult(active=infos)
         except Exception as exc:
