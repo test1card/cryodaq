@@ -59,6 +59,7 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — generic acquisition backbone exists; registry/capabilities/metadata are missing | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -114,6 +115,58 @@ Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
 ---
 
+## ASC scalability milestone — F35
+
+CryoDAQ must remain usable beyond the current stand. The existing
+`InstrumentDriver -> Scheduler -> SQLite -> DataBroker` path is a strong
+module boundary, but adding a new instrument type still requires central
+`engine.py` edits and several GUI paths infer semantics from deployed model or
+channel names. F35 turns that internal modularity into a supported extension
+contract for other ASC laboratories.
+
+Scope and acceptance criteria:
+
+1. **Driver registry outside the engine.** A built-in/allowlisted registry
+   owns type lookup, construction, and strict per-driver configuration.
+   `engine.py` contains no instrument-model switch. Unknown configured types
+   fail visibly instead of being silently skipped.
+2. **Explicit capability protocols.** Passive sensors, calibratable sensors,
+   burst/waveform devices, shared-bus devices, controllable sources, and
+   verified-OFF sources expose separate narrow contracts. The scheduler and
+   command plane do not reach into driver-private state or transports. A
+   public bus/recovery descriptor replaces resource-prefix inference and
+   concrete `GPIBTransport` resets, preserves each device's declared
+   connect/read timeout and polling cadence, and passes a mixed-cadence
+   shared-bus conformance test.
+3. **Channel descriptors, not naming heuristics.** Quantity, unit, role,
+   safety class, display group, and stable channel identity are metadata.
+   Generic GUI paths do not depend on `Т1..Т24`, `/pressure`, `smua/smub`,
+   or a vendor/model substring.
+4. **Registry-driven setup and packaging.** The first-run wizard renders
+   connection fields from the registered driver schema. Development and
+   frozen builds include and verify every allowlisted driver explicitly.
+5. **Driver conformance kit.** A reusable test harness covers bounded
+   connect/read/disconnect, cancellation, reconnect, malformed/non-finite
+   input, mock mode, stable `instrument_id`, persistence-first publication,
+   replay, and resource cleanup.
+6. **Reference extension proof.** A new passive reference driver can be added
+   with its own module, schema, config, and tests without editing engine,
+   scheduler, launcher, storage, or generic GUI code; an end-to-end test proves
+   acquisition, persistence, replay, reporting, and instrument-health display.
+   Replay must resolve the same stable channel descriptor—including quantity,
+   role, safety class, and display group—and reporting/generic GUI paths must
+   consume that descriptor rather than rediscovering semantics from names.
+7. **Safety boundary stays deliberate.** Arbitrary plugins never gain source
+   authority by duck typing. A new hazardous actuator requires an explicit
+   reviewed safety adapter, hazard analysis, verified-OFF contract, independent
+   host-death protection, and physical bench evidence.
+
+Passive measurement extensions are the first target. A generic safety-actuator
+plugin system is explicitly not an acceptance criterion and must not weaken the
+current safety authority.
+
+---
+
 ## Deferred feature work
 
 - **F8 — Cooldown ML prediction upgrade.** Still research-gated: dataset
@@ -124,6 +177,9 @@ Use `docs/lab_verification_checklist.md` as the turnkey protocol.
   model and explicit go/no-go before implementation.
 - **F15 — Linux packaging.** Deployment convenience after lab verification.
 - **F16 — Plugin SDK/examples.** Documentation/examples work, not core runtime.
+- **F35 is not deferred.** Implement it after the current lab-readiness
+  integration/frozen gates and before calling CryoDAQ a multi-lab ASC
+  platform or adding another safety-critical source family.
 - **F18 — CI/CD residuals.** Matrix and green full suite are done; coverage
   publishing, release automation, and binary artifacts remain optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces
