@@ -146,3 +146,19 @@ def test_frozen_dispatch_supports_report_render(
         module._dispatch()
     assert exc.value.code == 0
     assert called == [True]
+
+
+def test_frozen_dispatch_uses_lightweight_assistant_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq._frozen_main as module
+
+    called: list[bool] = []
+    fake = types.ModuleType("cryodaq.agents.assistant_bootstrap")
+    fake.main = lambda: called.append(True)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cryodaq.agents.assistant_bootstrap", fake)
+    monkeypatch.setattr(sys, "argv", ["CryoDAQ.exe", "--mode=assistant"])
+
+    module._dispatch()
+
+    assert called == [True]

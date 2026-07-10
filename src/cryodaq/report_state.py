@@ -16,6 +16,7 @@ import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,112 @@ ALLOWED_REPORT_INPUT_SUFFIXES = frozenset(
 
 class ReportContractError(ValueError):
     """A report state, path, manifest, or fingerprint violates its contract."""
+
+
+class ReportIOError(ReportContractError):
+    """A retryable filesystem/text-decoding failure, not invalid durable content."""
+
+
+def load_active_experiment_id(data_dir: Path) -> str | None:
+    """Read the atomic active-experiment guard, failing closed on corruption."""
+    root = Path(data_dir).resolve()
+    path = root / "experiment_state.json"
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
+        raise ReportContractError("active experiment state must be a bounded regular file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReportContractError("active experiment state is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ReportContractError("active experiment state root must be a mapping")
+    required = {"schema_version", "app_mode", "active_experiment_id", "updated_at"}
+    if set(payload) != required:
+        raise ReportContractError("active experiment state has unexpected fields")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ReportContractError("active experiment state schema is invalid")
+    if payload["app_mode"] not in {"experiment", "debug"}:
+        raise ReportContractError("active experiment app_mode is invalid")
+    updated_at = payload["updated_at"]
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        raise ReportContractError("active experiment updated_at is invalid")
+    try:
+        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        timestamp = parsed.timestamp()
+        if not math.isfinite(timestamp) or timestamp > time.time() + 300:
+            raise ValueError("future or non-finite timestamp")
+    except (OverflowError, ValueError) as exc:
+        raise ReportContractError("active experiment updated_at is invalid") from exc
+    value = payload["active_experiment_id"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ReportContractError("active_experiment_id must be a string or null")
+    return validate_experiment_id(value)
+
+
+def automatic_report_eligible(
+    experiment_root: Path,
+    *,
+    active_experiment_id: str | None,
+) -> bool:
+    """Strictly validate terminal metadata used as an automatic work request."""
+    root = Path(experiment_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ReportContractError("experiment root must be a real directory")
+    resolved_root = root.resolve()
+    experiment_id = validate_experiment_id(root.name)
+    if experiment_id == active_experiment_id:
+        return False
+    metadata_path = root / "metadata.json"
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        raise ReportContractError("metadata must be a regular file")
+    if metadata_path.resolve().parent != resolved_root:
+        raise ReportContractError("metadata escapes the experiment root")
+    if metadata_path.stat().st_size > MAX_JSON_BYTES:
+        raise ReportContractError("metadata exceeds the size limit")
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ReportIOError("metadata could not be read") from exc
+    except json.JSONDecodeError as exc:
+        raise ReportContractError("metadata is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ReportContractError("metadata root must be a mapping")
+    experiment = payload.get("experiment")
+    template = payload.get("template", {})
+    if not isinstance(experiment, dict) or not isinstance(template, dict):
+        raise ReportContractError("metadata experiment/template must be mappings")
+    if experiment.get("experiment_id") != experiment_id:
+        raise ReportContractError("metadata experiment_id does not match its directory")
+    status = experiment.get("status")
+    if status == "RUNNING":
+        return False
+    if status not in {"COMPLETED", "ABORTED"}:
+        raise ReportContractError("metadata status is not a supported terminal value")
+    ended = experiment.get("end_time")
+    if not isinstance(ended, str) or not ended.strip():
+        raise ReportContractError("terminal metadata end_time is required")
+    try:
+        parsed = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+        if not math.isfinite(parsed.timestamp()):
+            raise ValueError("non-finite timestamp")
+    except (OverflowError, ValueError) as exc:
+        raise ReportContractError("terminal metadata end_time is invalid") from exc
+    enabled = (
+        experiment["report_enabled"]
+        if "report_enabled" in experiment
+        else template.get("report_enabled")
+    )
+    if type(enabled) is not bool:
+        raise ReportContractError("report_enabled must be a boolean")
+    if enabled is False:
+        return False
+    retroactive = experiment.get("retroactive")
+    if type(retroactive) is not bool:
+        raise ReportContractError("retroactive must be a boolean")
+    return retroactive is False
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +418,9 @@ def read_json_object(path: Path, *, required: bool = True) -> dict[str, Any] | N
         raise ReportContractError(f"{path.name} is too large")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
+        raise ReportIOError(f"could not read {path.name}") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReportContractError(f"invalid {path.name}") from exc
     if not isinstance(payload, dict):
         raise ReportContractError(f"{path.name} must contain a JSON object")
@@ -346,17 +455,46 @@ def validate_report_state(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ReportContractError("invalid source fingerprint")
     if payload.get("status") not in _REPORT_STATUSES:
         raise ReportContractError("invalid report state status")
-    for field in ("attempt_count", "max_attempts"):
-        value = payload.get(field)
-        if type(value) is not int or not (0 <= value <= 100):
-            raise ReportContractError(f"invalid {field}")
+    attempt_count = payload.get("attempt_count")
+    max_attempts = payload.get("max_attempts")
+    if type(max_attempts) is not int or not (1 <= max_attempts <= 20):
+        raise ReportContractError("invalid max_attempts")
+    if type(attempt_count) is not int or not (0 <= attempt_count <= max_attempts):
+        raise ReportContractError("invalid attempt_count")
+    status = payload["status"]
+    if status == "PENDING" and attempt_count != 0:
+        raise ReportContractError("PENDING state must have attempt_count zero")
+    if status != "PENDING" and attempt_count < 1:
+        raise ReportContractError("non-PENDING state must consume an attempt")
+    now = time.time()
+    times: dict[str, float] = {}
     for field in ("not_before", "started_at", "updated_at"):
         value = payload.get(field)
-        if type(value) not in (int, float) or not math.isfinite(float(value)):
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
             raise ReportContractError(f"invalid {field}")
+        times[field] = float(value)
+    if times["started_at"] > times["updated_at"]:
+        raise ReportContractError("report state timestamps are out of order")
+    if times["updated_at"] > now + 300:
+        raise ReportContractError("report state updated_at is in the future")
+    if times["not_before"] > times["updated_at"] + 86_400 + 300:
+        raise ReportContractError("report state not_before exceeds bounded backoff")
     finished_at = payload.get("finished_at")
-    if finished_at is not None and (type(finished_at) not in (int, float) or not math.isfinite(float(finished_at))):
-        raise ReportContractError("invalid finished_at")
+    if status in {"PENDING", "RUNNING"}:
+        if finished_at is not None:
+            raise ReportContractError("nonterminal state must not have finished_at")
+    else:
+        if (
+            type(finished_at) not in (int, float)
+            or not math.isfinite(float(finished_at))
+            or not times["started_at"] <= float(finished_at) <= times["updated_at"]
+            or float(finished_at) > now + 300
+        ):
+            raise ReportContractError("invalid finished_at")
     for field in ("error_code", "error_text"):
         value = payload.get(field)
         if value is not None and (not isinstance(value, str) or len(value) > 2_048):
@@ -397,6 +535,38 @@ def write_report_state(
     atomic_write_text(
         path,
         _json_text(validate_report_state(payload)),
+    )
+
+
+def new_pending_state(
+    experiment_id: str,
+    source_fingerprint: str,
+    generation_id: str,
+    owner_token: str,
+    *,
+    max_attempts: int = 5,
+    not_before: float | None = None,
+) -> dict[str, Any]:
+    """Create durable automatic work without claiming the child lock."""
+    now = time.time()
+    return validate_report_state(
+        {
+            "schema": SCHEMA_VERSION,
+            "experiment_id": experiment_id,
+            "source_fingerprint": source_fingerprint,
+            "generation_id": generation_id,
+            "status": "PENDING",
+            "attempt_count": 0,
+            "max_attempts": max_attempts,
+            "not_before": now if not_before is None else not_before,
+            "started_at": now,
+            "updated_at": now,
+            "finished_at": None,
+            "owner_token": owner_token,
+            "error_code": None,
+            "error_text": "",
+            "artifacts": {},
+        }
     )
 
 

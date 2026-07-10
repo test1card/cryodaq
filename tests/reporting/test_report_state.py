@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from cryodaq.report_state import (
     build_current_manifest,
     compute_source_fingerprint,
     experiment_lock_name,
+    load_active_experiment_id,
     new_running_state,
     promote_generation,
     resolve_experiment_dir,
@@ -161,6 +164,75 @@ def test_report_state_rejects_bool_and_nonfinite_numbers(field: str, value: obje
     payload[field] = value
     with pytest.raises(ReportContractError):
         validate_report_state(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda state: state.update(max_attempts=0),
+        lambda state: state.update(attempt_count=6, max_attempts=5),
+        lambda state: state.update(status="PENDING", attempt_count=1),
+        lambda state: state.update(status="FAILED", finished_at=None),
+        lambda state: state.update(updated_at=time.time() + 301),
+        lambda state: state.update(not_before=state["updated_at"] + 86_701),
+    ],
+)
+def test_report_state_rejects_impossible_relations(mutate) -> None:
+    state = new_running_state(
+        "exp-1",
+        "sha256:" + "1" * 64,
+        "generation-token-0001",
+        "owner-token-valid-0001",
+        attempt_count=1,
+    )
+    mutate(state)
+    with pytest.raises(ReportContractError):
+        validate_report_state(state)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "schema_version": True,
+            "app_mode": "experiment",
+            "active_experiment_id": None,
+            "updated_at": "2026-07-09T00:00:00+00:00",
+        },
+        {
+            "schema_version": 1,
+            "app_mode": "invalid",
+            "active_experiment_id": None,
+            "updated_at": "2026-07-09T00:00:00+00:00",
+        },
+        {
+            "schema_version": 1,
+            "app_mode": "experiment",
+            "active_experiment_id": 42,
+            "updated_at": "2026-07-09T00:00:00+00:00",
+        },
+    ],
+)
+def test_active_experiment_state_requires_exact_writer_contract(
+    tmp_path: Path,
+    payload: dict,
+) -> None:
+    (tmp_path / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ReportContractError):
+        load_active_experiment_id(tmp_path)
+
+
+def test_active_experiment_state_rejects_future_timestamp(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "app_mode": "experiment",
+        "active_experiment_id": None,
+        "updated_at": datetime.fromtimestamp(time.time() + 600, tz=UTC).isoformat(),
+    }
+    (tmp_path / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ReportContractError, match="updated_at"):
+        load_active_experiment_id(tmp_path)
 
 
 def test_reports_root_rejects_symlinked_reports_and_children(tmp_path: Path) -> None:

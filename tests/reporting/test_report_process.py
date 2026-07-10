@@ -35,6 +35,19 @@ def test_frozen_command_reinvokes_bundle(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "-m" not in command
 
 
+def test_automatic_command_carries_locked_state_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    command = build_report_command(
+        "exp-1",
+        "generation-token-0001",
+        deadline_epoch=123.0,
+        automatic=True,
+    )
+    assert "--automatic" in command
+
+
 def test_result_file_is_size_and_schema_bounded(tmp_path: Path) -> None:
     result = tmp_path / "result.json"
     result.write_text(json.dumps({"schema": 1, "ok": True, "report": {}}), encoding="utf-8")

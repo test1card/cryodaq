@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -129,7 +131,9 @@ async def test_archive_filters_and_sorts(manager: ExperimentManager, tmp_path: P
     assert [entry.operator for entry in operator_sorted] == ["Ivanov", "Petrov"]
 
 
-async def test_archive_finalize_generates_editable_report_entry(manager: ExperimentManager) -> None:
+async def test_archive_finalize_leaves_report_for_eventual_reconciliation(
+    manager: ExperimentManager,
+) -> None:
     exp_id = manager.start_experiment(
         name="No Report",
         title="No Report",
@@ -140,12 +144,54 @@ async def test_archive_finalize_generates_editable_report_entry(manager: Experim
     manager.finalize_experiment(exp_id, end_time="2026-03-16T11:00:00+00:00")
 
     entry = manager.list_archive_entries()[0]
-    assert entry.report_present is True
-    assert entry.docx_path is not None
-    assert entry.docx_path.name == "report_editable.docx"
-    # PDF generation depends on soffice availability — both outcomes valid
-    if entry.pdf_path is not None:
-        assert entry.pdf_path.name == "report_raw.pdf"
+    assert entry.report_present is False
+    assert entry.docx_path is None
+    assert entry.pdf_path is None
+
+
+def test_finalize_order_has_no_renderer_step(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Ordered finalize",
+        operator="Sidorov",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T10:00:00+00:00",
+    )
+    events: list[str] = []
+    monkeypatch.setattr(manager, "list_run_records", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        manager,
+        "_build_archive_snapshot",
+        lambda *_args: {
+            "run_records": [],
+            "artifact_index": [],
+            "result_tables": [],
+            "summary_metadata": {},
+        },
+    )
+    monkeypatch.setattr(manager, "_write_end", lambda _finished: events.append("metadata"))
+    monkeypatch.setattr(
+        manager,
+        "_write_artifact",
+        lambda *_args, **_kwargs: events.append("archive"),
+    )
+    monkeypatch.setattr(manager, "_clear_active", lambda: events.append("clear"))
+    parquet = types.ModuleType("cryodaq.storage.parquet_archive")
+    parquet.export_experiment_readings_to_parquet = (  # type: ignore[attr-defined]
+        lambda **_kwargs: events.append("parquet")
+    )
+    monkeypatch.setitem(sys.modules, "cryodaq.storage.parquet_archive", parquet)
+    monkeypatch.setitem(sys.modules, "cryodaq.reporting.generator", None)
+
+    finished = manager.finalize_experiment(
+        exp_id,
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+
+    assert finished.experiment_id == exp_id
+    assert events == ["metadata", "archive", "parquet", "clear"]
 
 
 async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -> None:

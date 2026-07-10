@@ -41,6 +41,7 @@ def build_report_command(
     generation_id: str,
     *,
     deadline_epoch: float,
+    automatic: bool = False,
 ) -> list[str]:
     """Build the fixed development or frozen experiment-render argv."""
     validate_experiment_id(experiment_id)
@@ -52,8 +53,12 @@ def build_report_command(
         f"--deadline-epoch={deadline_epoch:.6f}",
     ]
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--mode=report-render", *suffix]
-    return [sys.executable, "-m", "cryodaq.reporting", *suffix]
+        command = [sys.executable, "--mode=report-render", *suffix]
+    else:
+        command = [sys.executable, "-m", "cryodaq.reporting", *suffix]
+    if automatic:
+        command.append("--automatic")
+    return command
 
 
 def result_file_path(data_dir: Path, generation_id: str) -> Path:
@@ -292,7 +297,12 @@ def _create_windows_job(process: subprocess.Popen[Any]) -> _WindowsJob:
 class ReportProcessRunner:
     """Run one synchronous manual report child within the REP budget."""
 
-    def __init__(self, data_dir: Path, *, timeout_s: float = DEFAULT_MANUAL_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        timeout_s: float = DEFAULT_MANUAL_TIMEOUT_S,
+    ) -> None:
         self._data_dir = Path(data_dir).resolve()
         self._timeout_s = float(timeout_s)
         if not (0.05 <= self._timeout_s <= 3_600.0):
@@ -366,7 +376,12 @@ class ReportProcessRunner:
                 windows_job.close()
         return return_code
 
-    def generate_experiment(self, experiment_id: str) -> dict[str, Any]:
+    def generate_experiment(
+        self,
+        experiment_id: str,
+        *,
+        automatic: bool = False,
+    ) -> dict[str, Any]:
         """Render one experiment and return the exact legacy report mapping."""
         experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
         generation_id = secrets.token_hex(16)
@@ -381,6 +396,7 @@ class ReportProcessRunner:
             experiment_id,
             generation_id,
             deadline_epoch=deadline_epoch,
+            automatic=automatic,
         )
         env = os.environ.copy()
         env["CRYODAQ_REPORT_DATA_DIR"] = str(self._data_dir)

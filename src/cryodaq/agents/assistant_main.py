@@ -1,4 +1,4 @@
-"""cryodaq-assistant — standalone process for Гемма (LLM assistant) + RAG.
+"""Optional Гемма/RAG runtime loaded by the lightweight assistant bootstrap.
 
 B1 (roadmap: extract Гемма + RAG out of the safety-critical engine
 process). This module is the *only* place agents/ code runs now — the
@@ -36,11 +36,9 @@ the enforcement mechanism, not a runtime permission check.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import logging
-import sys
 import time
 import types
 from datetime import UTC, datetime
@@ -558,13 +556,14 @@ async def _periodic_report_tick(
 # ---------------------------------------------------------------------------
 
 
-async def run(
+async def _run_llm_runtime(
     *,
     engine_cmd_addr: str = DEFAULT_ENGINE_CMD_ADDR,
     engine_pub_addr: str = DEFAULT_PUB_ADDR,
     assistant_cmd_addr: str = DEFAULT_ASSISTANT_CMD_ADDR,
+    shutdown_event: asyncio.Event,
 ) -> None:
-    """Build and run the assistant process until a shutdown signal arrives."""
+    """Build and run the optional LLM/RAG portion of the assistant."""
     engine_client = EngineQueryClient(engine_cmd_addr)
     event_bus = EventBus()
 
@@ -599,37 +598,42 @@ async def run(
         default_model=config.default_model,
         timeout_s=config.timeout_s,
     )
-    # B1: sqlite_reader is a real SQLiteWriter pointed at the engine's data
-    # dir — read-only USE (only .get_operator_log / .read_readings_history
-    # are ever called here), same WAL-mode file the engine writes to, so
-    # concurrent cross-process reads are safe by the class's own design.
-    reader = SQLiteWriter(_DATA_DIR)
-    await reader.start_immediate()
-    context_builder = ContextBuilder(
-        reader, state_cache, sensor_diag_provider=state_cache.get_summary
-    )
-    audit_logger = AuditLogger(
-        _DATA_DIR / "agents" / "assistant" / "audit",
-        enabled=config.audit_enabled,
-        retention_days=config.audit_retention_days,
-    )
-    telegram_sender = _load_telegram_sender()
-    event_logger = EventLogger(reader, state_cache, event_bus=event_bus)
-    output_router = OutputRouter(
-        telegram_bot=telegram_sender,
-        event_logger=event_logger,
-        event_bus=event_bus,
-        brand_name=config.brand_name,
-        brand_emoji=config.brand_emoji,
-    )
-    live_agent = AssistantLiveAgent(
-        config=config,
-        event_bus=event_bus,
-        ollama_client=ollama,
-        context_builder=context_builder,
-        audit_logger=audit_logger,
-        output_router=output_router,
-    )
+    telegram_sender: Any | None = None
+    try:
+        # This reader is used read-only against the engine-owned WAL database.
+        reader = SQLiteWriter(_DATA_DIR)
+        context_builder = ContextBuilder(
+            reader, state_cache, sensor_diag_provider=state_cache.get_summary
+        )
+        audit_logger = AuditLogger(
+            _DATA_DIR / "agents" / "assistant" / "audit",
+            enabled=config.audit_enabled,
+            retention_days=config.audit_retention_days,
+        )
+        telegram_sender = _load_telegram_sender()
+        event_logger = EventLogger(reader, state_cache, event_bus=event_bus)
+        output_router = OutputRouter(
+            telegram_bot=telegram_sender,
+            event_logger=event_logger,
+            event_bus=event_bus,
+            brand_name=config.brand_name,
+            brand_emoji=config.brand_emoji,
+        )
+        live_agent = AssistantLiveAgent(
+            config=config,
+            event_bus=event_bus,
+            ollama_client=ollama,
+            context_builder=context_builder,
+            audit_logger=audit_logger,
+            output_router=output_router,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await ollama.close()
+        if telegram_sender is not None:
+            with contextlib.suppress(Exception):
+                await telegram_sender.close()
+        raise
 
     # --- RAG searcher ---
     rag_searcher: Any = None
@@ -637,7 +641,16 @@ async def run(
     rag_rebuild_embeddings: Any | None = None
     rag_rebuild_knowledge_dir: Path | None = None
     rag_emb_client: Any | None = None
-    rag_cfg = _resolve_rag_config()
+    rag_bootstrap_args: dict[str, Any] | None = None
+    try:
+        rag_cfg = _resolve_rag_config()
+    except Exception:
+        with contextlib.suppress(Exception):
+            await ollama.close()
+        if telegram_sender is not None:
+            with contextlib.suppress(Exception):
+                await telegram_sender.close()
+        raise
     if rag_cfg is not None:
         try:
             from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
@@ -662,17 +675,14 @@ async def run(
             logger.info(
                 "RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path
             )
-            asyncio.create_task(
-                _bootstrap_rag_index_if_empty(
-                    db_path=rag_db_path,
-                    embeddings_client=rag_emb,
-                    knowledge_dir=rag_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                ),
-                name="rag_bootstrap",
-            )
+            rag_bootstrap_args = {
+                "db_path": rag_db_path,
+                "embeddings_client": rag_emb,
+                "knowledge_dir": rag_knowledge_dir,
+                "experiments_dir": _DATA_DIR / "experiments",
+                "sqlite_path": None,
+                "repo_root": _PROJECT_ROOT,
+            }
         except Exception as exc:
             logger.warning("RAG searcher: ошибка инициализации — %s", exc)
             rag_searcher = None
@@ -686,7 +696,6 @@ async def run(
         try:
             channel_manager = ChannelManager()
             broker_snapshot = BrokerSnapshot(engine_pub_addr, channel_manager=channel_manager)
-            await broker_snapshot.start()
 
             q_cooldown = CooldownAdapter(engine_client)
             q_vacuum = VacuumAdapter(engine_client)
@@ -759,70 +768,116 @@ async def run(
             logger.error("Ошибка выполнения команды ассистента '%s': %s", action, exc)
             return {"ok": False, "error": str(exc)}
 
-    cmd_server = ZMQCommandServer(
-        address=assistant_cmd_addr,
-        handler=_handle_assistant_command,
-        server_label="assistant",
-    )
+    try:
+        cmd_server = ZMQCommandServer(
+            address=assistant_cmd_addr,
+            handler=_handle_assistant_command,
+            server_label="assistant",
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await ollama.close()
+        if rag_emb_client is not None:
+            with contextlib.suppress(Exception):
+                await rag_emb_client.close()
+        if telegram_sender is not None:
+            with contextlib.suppress(Exception):
+                await telegram_sender.close()
+        raise
 
     # --- Start everything ---
-    await state_cache.start()
-    await event_sub.start()
-    await cmd_server.start()
-    await live_agent.start()
+    state_started = False
+    event_started = False
+    command_started = False
+    live_started = False
+    reader_started = False
+    broker_started = False
+    periodic_task: asyncio.Task[None] | None = None
+    rag_bootstrap_task: asyncio.Task[None] | None = None
 
-    periodic_task = asyncio.create_task(
-        _periodic_report_tick(config, event_bus, state_cache), name="assistant_periodic_report_tick"
+    async def _cleanup(label: str, operation) -> None:
+        try:
+            await operation()
+        except Exception:
+            logger.exception("Optional assistant cleanup failed: %s", label)
+
+    try:
+        reader_started = True
+        await reader.start_immediate()
+        if broker_snapshot is not None:
+            broker_started = True
+            await broker_snapshot.start()
+        state_started = True
+        await state_cache.start()
+        event_started = True
+        await event_sub.start()
+        command_started = True
+        await cmd_server.start()
+        live_started = True
+        await live_agent.start()
+        if rag_bootstrap_args is not None:
+            rag_bootstrap_task = asyncio.create_task(
+                _bootstrap_rag_index_if_empty(**rag_bootstrap_args),
+                name="rag_bootstrap",
+            )
+
+        periodic_task = asyncio.create_task(
+            _periodic_report_tick(config, event_bus, state_cache),
+            name="assistant_periodic_report_tick",
+        )
+        logger.info("═══ cryodaq-assistant запущен ═══ (REP=%s)", assistant_cmd_addr)
+        await shutdown_event.wait()
+    finally:
+        logger.info("═══ Завершение cryodaq-assistant ═══")
+        if periodic_task is not None:
+            periodic_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await periodic_task
+        if rag_bootstrap_task is not None:
+            rag_bootstrap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await rag_bootstrap_task
+        if live_started:
+            await _cleanup("live agent", live_agent.stop)
+        if command_started:
+            await _cleanup("command server", cmd_server.stop)
+        if event_started:
+            await _cleanup("event subscriber", event_sub.stop)
+        if state_started:
+            await _cleanup("state cache", state_cache.stop)
+        if broker_started and broker_snapshot is not None:
+            await _cleanup("broker snapshot", broker_snapshot.stop)
+        if reader_started:
+            await _cleanup("SQLite reader", reader.stop)
+        await _cleanup("Ollama client", ollama.close)
+        if rag_emb_client is not None:
+            await _cleanup("RAG embeddings client", rag_emb_client.close)
+        if telegram_sender is not None:
+            await _cleanup("Telegram sender", telegram_sender.close)
+        logger.info("cryodaq-assistant остановлен")
+
+
+async def run(
+    *,
+    engine_cmd_addr: str = DEFAULT_ENGINE_CMD_ADDR,
+    engine_pub_addr: str = DEFAULT_PUB_ADDR,
+    assistant_cmd_addr: str = DEFAULT_ASSISTANT_CMD_ADDR,
+) -> None:
+    """Compatibility wrapper; the real process entrypoint is the bootstrap."""
+    from cryodaq.agents.assistant_bootstrap import run as bootstrap_run  # noqa: PLC0415
+
+    await bootstrap_run(
+        engine_cmd_addr=engine_cmd_addr,
+        engine_pub_addr=engine_pub_addr,
+        assistant_cmd_addr=assistant_cmd_addr,
     )
-
-    logger.info("═══ cryodaq-assistant запущен ═══ (REP=%s)", assistant_cmd_addr)
-
-    shutdown_event = asyncio.Event()
-
-    def _request_shutdown() -> None:
-        logger.info("cryodaq-assistant: получен сигнал завершения")
-        shutdown_event.set()
-
-    loop = asyncio.get_running_loop()
-    if sys.platform != "win32":
-        import signal  # noqa: PLC0415
-
-        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
-
-    await shutdown_event.wait()
-
-    logger.info("═══ Завершение cryodaq-assistant ═══")
-    periodic_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await periodic_task
-    await live_agent.stop()
-    await cmd_server.stop()
-    await event_sub.stop()
-    await state_cache.stop()
-    if broker_snapshot is not None:
-        await broker_snapshot.stop()
-    await ollama.close()
-    if rag_emb_client is not None:
-        await rag_emb_client.close()
-    if telegram_sender is not None:
-        await telegram_sender.close()
-    logger.info("cryodaq-assistant остановлен")
 
 
 def main() -> None:
-    """Точка входа cryodaq-assistant."""
-    from cryodaq.logging_setup import resolve_log_level, setup_logging
+    """Compatibility wrapper for historical module invocation."""
+    from cryodaq.agents.assistant_bootstrap import main as bootstrap_main  # noqa: PLC0415
 
-    parser = argparse.ArgumentParser(description="CryoDAQ Assistant (Гемма + RAG)")
-    parser.parse_args()
-
-    setup_logging("assistant", level=resolve_log_level())
-
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        logger.info("cryodaq-assistant: прервано оператором (Ctrl+C)")
+    bootstrap_main()
 
 
 if __name__ == "__main__":

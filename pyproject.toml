@@ -104,7 +104,7 @@ cryodaq-replay-curve = "cryodaq.replay.cli:main"
 cryodaq-rag-index = "cryodaq.agents.rag.cli:index_main"
 cryodaq-rag-search = "cryodaq.agents.rag.cli:search_main"
 # B1 (2026-07): Гемма + RAG process extraction — see scratchpad/montana/exec/impl_b1.md
-cryodaq-assistant = "cryodaq.agents.assistant_main:main"
+cryodaq-assistant = "cryodaq.agents.assistant_bootstrap:main"
 cryodaq-report-render = "cryodaq.reporting.__main__:main"
 # Frozen entry points — used by PyInstaller spec. Call freeze_support()
 # BEFORE importing PySide6 / cryodaq submodules to avoid Windows fork bomb.

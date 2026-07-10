@@ -51,29 +51,64 @@ _ZMQ_PORT = 5555
 _WEB_PORT = 8080
 
 
-def _assistant_enabled_in_config() -> bool:
-    """B1: whether config/agent.yaml asks for the cryodaq-assistant child.
-
-    Deliberately does NOT import ``cryodaq.agents`` (that would defeat the
-    point of the extraction for the one process that spawns everything) —
-    just enough YAML parsing to read the same ``enabled`` flag
-    ``AssistantConfig.from_yaml_path`` reads, handling the same legacy
-    ``gemma:`` namespace fallback.
-    """
+def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
+    """Whether LLM or automatic reporting needs the existing assistant child."""
     import yaml
 
     from cryodaq.paths import get_config_dir
 
-    agent_cfg_path = get_config_dir() / "agent.yaml"
-    if not agent_cfg_path.exists():
-        return False
-    try:
-        raw = yaml.safe_load(agent_cfg_path.read_text(encoding="utf-8")) or {}
-        section = raw.get("agent", raw.get("gemma", {}))
-        return bool(section.get("enabled", True))
-    except Exception:
-        logger.warning("_assistant_enabled_in_config: config/agent.yaml parse failed", exc_info=True)
-        return False
+    config_dir = get_config_dir()
+    llm_enabled = False
+    automatic_enabled = bool(experiment_mode)
+    agent_cfg_path = config_dir / "agent.yaml"
+    if agent_cfg_path.is_file() and not agent_cfg_path.is_symlink():
+        try:
+            stat = agent_cfg_path.stat()
+            if stat.st_size > 64 * 1024 or stat.st_mtime > time.time() + 300:
+                raise ValueError("agent config is oversized or future-dated")
+            raw = yaml.safe_load(agent_cfg_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                raise ValueError("agent config root must be a mapping")
+            section = raw.get("agent", raw.get("gemma", {}))
+            if isinstance(section, dict):
+                enabled = section.get("enabled", True)
+                if type(enabled) is bool:
+                    llm_enabled = enabled
+                else:
+                    logger.warning("agent.enabled must be a boolean; disabling optional LLM")
+            reporting = raw.get("reporting", {})
+            if experiment_mode and isinstance(reporting, dict) and "automatic_enabled" in reporting:
+                enabled = reporting["automatic_enabled"]
+                if type(enabled) is bool:
+                    automatic_enabled = enabled
+                else:
+                    logger.warning(
+                        "reporting.automatic_enabled must be a boolean; using normal-mode default"
+                    )
+        except Exception:
+            logger.warning("agent.yaml parse failed; preserving automatic reporting", exc_info=True)
+
+    reporting_path = config_dir / "reporting.yaml"
+    if experiment_mode and reporting_path.is_file() and not reporting_path.is_symlink():
+        try:
+            stat = reporting_path.stat()
+            if stat.st_size > 64 * 1024 or stat.st_mtime > time.time() + 300:
+                raise ValueError("reporting config is oversized or future-dated")
+            raw = yaml.safe_load(reporting_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                raise ValueError("reporting config root must be a mapping")
+            reporting = raw.get("reporting", raw)
+            if isinstance(reporting, dict) and "automatic_enabled" in reporting:
+                enabled = reporting["automatic_enabled"]
+                if type(enabled) is bool:
+                    automatic_enabled = enabled
+                else:
+                    logger.warning(
+                        "reporting.automatic_enabled must be a boolean; preserving current default"
+                    )
+        except Exception:
+            logger.warning("reporting.yaml parse failed; preserving automatic reporting", exc_info=True)
+    return llm_enabled or automatic_enabled
 
 # Settings → Тема menu: curated display order. Dark group first, then
 # a visual separator, then light group. Packs not listed here fall
@@ -343,13 +378,16 @@ class LauncherWindow(QMainWindow):
         self._last_alarm_count: int = 0
         self._safety_worker: ZmqCommandWorker | None = None
 
-        # B1 (2026-07): cryodaq-assistant (Гемма + RAG) — a THIRD supervised
-        # child, only spawned if config/agent.yaml asks for it. Restart/
-        # backoff mirrors the engine child, but its death is NON-safety:
+        # cryodaq-assistant (Гемма + RAG + automatic report reconciliation)
+        # remains the existing third supervised child. It is
+        # spawned when either optional LLM or automatic reporting needs it.
+        # Restart/backoff mirrors the engine child, but its death is NON-safety:
         # log + tray note only — no alarm, no banner, no giving-up latch.
-        # See scratchpad/montana/exec/impl_b1.md.
         self._assistant_proc: subprocess.Popen | None = None
-        self._assistant_enabled: bool = _assistant_enabled_in_config()
+        self._assistant_experiment_mode = replay_source is None
+        self._assistant_enabled: bool = _assistant_runtime_required(
+            experiment_mode=self._assistant_experiment_mode
+        )
         self._assistant_restart_attempts: int = 0
         self._assistant_last_restart_time: float = 0.0
         self._assistant_restart_pending: bool = False
@@ -735,10 +773,13 @@ class LauncherWindow(QMainWindow):
                 pythonw = Path(python).parent / "pythonw.exe"
                 if pythonw.exists():
                     python = str(pythonw)
-            cmd = [python, "-m", "cryodaq.agents.assistant_main"]
+            cmd = [python, "-m", "cryodaq.agents.assistant_bootstrap"]
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = (
+            "1" if self._assistant_experiment_mode else "0"
+        )
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
             self._assistant_proc = subprocess.Popen(

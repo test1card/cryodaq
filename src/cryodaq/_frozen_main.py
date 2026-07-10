@@ -82,7 +82,7 @@ def main_assistant() -> None:
 
     multiprocessing.freeze_support()
 
-    from cryodaq.agents.assistant_main import main
+    from cryodaq.agents.assistant_bootstrap import main
 
     main()
 
@@ -118,7 +118,7 @@ def _dispatch() -> None:
 
         main()
     elif mode == "assistant":
-        from cryodaq.agents.assistant_main import main
+        from cryodaq.agents.assistant_bootstrap import main
 
         main()
     elif mode == "report-render":

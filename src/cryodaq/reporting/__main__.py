@@ -18,9 +18,11 @@ from cryodaq.report_process import result_file_path
 from cryodaq.report_state import (
     MAX_JSON_BYTES,
     ReportContractError,
+    automatic_report_eligible,
     build_current_manifest,
     compute_source_fingerprint,
     experiment_lock_name,
+    load_active_experiment_id,
     load_current_manifest,
     load_report_state,
     new_running_state,
@@ -41,6 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     experiment.add_argument("--experiment-id", required=True)
     experiment.add_argument("--generation-id", required=True)
     experiment.add_argument("--deadline-epoch", required=True, type=float)
+    experiment.add_argument("--automatic", action="store_true")
     return parser
 
 
@@ -110,18 +113,102 @@ def _run_experiment(args: argparse.Namespace, data_dir: Path, result_path: Path)
     manifest_selected = False
     success: dict[str, Any] | None = None
     try:
+        automatic = bool(getattr(args, "automatic", False))
+        if automatic and not automatic_report_eligible(
+            experiment_root,
+            active_experiment_id=load_active_experiment_id(data_dir),
+        ):
+            _write_result(
+                result_path,
+                _result_payload(
+                    generation_id,
+                    error_code="ineligible",
+                    error_text="experiment is not eligible for automatic reporting",
+                ),
+            )
+            return 3
         fingerprint = compute_source_fingerprint(
             experiment_root,
             deadline_epoch=deadline_epoch,
         )
         previous = load_report_state(experiment_root)
-        attempt = int(previous["attempt_count"]) + 1 if previous else 1
+        same_source = previous is not None and previous["source_fingerprint"] == fingerprint
+        if automatic:
+            try:
+                current = load_current_manifest(experiment_root)
+            except ReportContractError:
+                current = None
+            if current is not None and current["source_fingerprint"] == fingerprint:
+                _write_result(
+                    result_path,
+                    _result_payload(
+                        generation_id,
+                        error_code="already_current",
+                        error_text="a current report already covers this source fingerprint",
+                    ),
+                )
+                return 3
+        if automatic and same_source:
+            now = time.time()
+            error_code: str | None = None
+            error_text = ""
+            if previous["status"] == "FAILED":
+                if int(previous["attempt_count"]) >= int(previous["max_attempts"]):
+                    error_code = "poisoned"
+                    error_text = "automatic report retry budget is exhausted"
+                elif now < float(previous["not_before"]):
+                    error_code = "backoff"
+                    error_text = "automatic report retry is not due yet"
+            elif previous["status"] == "PENDING" and now < float(previous["not_before"]):
+                error_code = "backoff"
+                error_text = "automatic report retry is not due yet"
+            elif previous["status"] == "RUNNING":
+                exhausted = int(previous["attempt_count"]) >= int(previous["max_attempts"])
+                failed = terminal_state(
+                    previous,
+                    owner_token=previous["owner_token"],
+                    succeeded=False,
+                    error_code="poisoned" if exhausted else "stale_running",
+                    error_text=(
+                        "automatic report retry budget is exhausted"
+                        if exhausted
+                        else "previous report child no longer owns the kernel lock"
+                    ),
+                )
+                write_report_state(
+                    experiment_root,
+                    failed,
+                    expected_owner_token=previous["owner_token"],
+                    expected_generation_id=previous["generation_id"],
+                    expected_status="RUNNING",
+                )
+                error_code = "poisoned" if exhausted else "stale_running"
+                error_text = failed["error_text"]
+            if error_code is not None:
+                _write_result(
+                    result_path,
+                    _result_payload(
+                        generation_id,
+                        error_code=error_code,
+                        error_text=error_text,
+                    ),
+                )
+                return 3
+        poison_reset = (
+            not automatic
+            and same_source
+            and previous["status"] in {"FAILED", "RUNNING"}
+            and int(previous["attempt_count"]) >= int(previous["max_attempts"])
+        )
+        attempt = int(previous["attempt_count"]) + 1 if same_source and not poison_reset else 1
+        max_attempts = int(previous["max_attempts"]) if same_source else 5
         running = new_running_state(
             experiment_id,
             fingerprint,
             generation_id,
             owner_token,
             attempt_count=attempt,
+            max_attempts=max_attempts,
         )
         write_report_state(experiment_root, running)
 

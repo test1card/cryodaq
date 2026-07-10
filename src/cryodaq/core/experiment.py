@@ -959,16 +959,6 @@ class ExperimentManager:
             result_tables=archive_snapshot["result_tables"],
             summary_metadata=archive_snapshot["summary_metadata"],
         )
-        if finished.report_enabled:
-            try:
-                from cryodaq.reporting.generator import ReportGenerator
-
-                ReportGenerator(self.data_dir).generate(finished.experiment_id)
-            except Exception:
-                logger.exception(
-                    "Failed to auto-generate reports for %s", finished.experiment_id
-                )
-
         # Phase 2e stage 1: Parquet archive — best-effort
         try:
             from cryodaq.storage.parquet_archive import export_experiment_readings_to_parquet
