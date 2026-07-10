@@ -14,15 +14,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import math
 import os
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
@@ -49,10 +54,67 @@ logger = logging.getLogger("cryodaq.launcher")
 # Порт ZMQ — для проверки, запущен ли уже engine
 _ZMQ_PORT = 5555
 _WEB_PORT = 8080
+_PERIODIC_HEALTH_DEADLINE_S = 90.0
+_PERIODIC_HEALTH_FUTURE_SKEW_S = 300.0
+_PERIODIC_CONFIG_REJECTED_CODE = "H3_CONFIG_REJECTED"
+_PERIODIC_HEALTH_READ_FAILED_CODE = "H3_HEALTH_READ_FAILED"
+_PERIODIC_RUNTIME_UNAVAILABLE_CODE = "H3_RUNTIME_UNAVAILABLE"
 
 
-def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
-    """Whether LLM or automatic reporting needs the existing assistant child."""
+@dataclass(slots=True)
+class _PeriodicHealthObservation:
+    """Local observation clock for the domain-wide H3 health heartbeat."""
+
+    started_at: float
+    baseline_observed: bool = False
+    high_water_updated_at: float | None = None
+    last_observed_updated_at: float | None = None
+    last_ready_observed_at: float | None = None
+
+    def observe(
+        self,
+        *,
+        status: str | None,
+        updated_at: float | None,
+        monotonic_now: float,
+        wall_now: float,
+    ) -> bool:
+        observable_timestamp = isinstance(updated_at, float) and math.isfinite(updated_at) and updated_at >= 0.0
+        unchanged_timestamp = bool(
+            observable_timestamp
+            and self.last_observed_updated_at is not None
+            and updated_at == self.last_observed_updated_at
+        )
+        if observable_timestamp:
+            self.last_observed_updated_at = updated_at
+        valid = (
+            isinstance(status, str) and observable_timestamp and updated_at <= wall_now + _PERIODIC_HEALTH_FUTURE_SKEW_S
+        )
+        if unchanged_timestamp:
+            return False
+        if not self.baseline_observed:
+            if valid:
+                self.baseline_observed = True
+                self.high_water_updated_at = updated_at
+            return False
+        if not valid:
+            return False
+        if self.high_water_updated_at is not None and updated_at <= self.high_water_updated_at:
+            return False
+        self.high_water_updated_at = updated_at
+        if status != "ready":
+            return False
+        self.last_ready_observed_at = monotonic_now
+        return True
+
+    def deadline_expired(self, monotonic_now: float) -> bool:
+        anchor = self.started_at if self.last_ready_observed_at is None else self.last_ready_observed_at
+        return monotonic_now - anchor >= _PERIODIC_HEALTH_DEADLINE_S
+
+
+def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, bool]:
+    """Return ``(assistant_required, periodic_requested)`` without secrets."""
+
     import yaml
 
     from cryodaq.paths import get_config_dir
@@ -82,9 +144,7 @@ def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
                 if type(enabled) is bool:
                     automatic_enabled = enabled
                 else:
-                    logger.warning(
-                        "reporting.automatic_enabled must be a boolean; using normal-mode default"
-                    )
+                    logger.warning("reporting.automatic_enabled must be a boolean; using normal-mode default")
         except Exception:
             logger.warning("agent.yaml parse failed; preserving automatic reporting", exc_info=True)
 
@@ -103,12 +163,29 @@ def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
                 if type(enabled) is bool:
                     automatic_enabled = enabled
                 else:
-                    logger.warning(
-                        "reporting.automatic_enabled must be a boolean; preserving current default"
-                    )
+                    logger.warning("reporting.automatic_enabled must be a boolean; preserving current default")
         except Exception:
             logger.warning("reporting.yaml parse failed; preserving automatic reporting", exc_info=True)
-    return llm_enabled or automatic_enabled
+    periodic_requested = False
+    if experiment_mode:
+        from cryodaq.periodic_config import probe_periodic_png
+
+        try:
+            probe = probe_periodic_png(config_dir)
+            periodic_requested = probe.requested
+            rejected = probe.error_code is not None
+        except Exception:
+            rejected = True
+        if rejected:
+            logger.warning("Periodic PNG request ignored: %s", _PERIODIC_CONFIG_REJECTED_CODE)
+    return llm_enabled or automatic_enabled or periodic_requested, periodic_requested
+
+
+def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
+    """Whether LLM, H2, or requested live H3 needs the assistant child."""
+
+    return _assistant_runtime_decision(experiment_mode=experiment_mode)[0]
+
 
 # Settings → Тема menu: curated display order. Dark group first, then
 # a visual separator, then light group. Packs not listed here fall
@@ -140,6 +217,108 @@ _LIGHT_THEME_IDS: frozenset[str] = frozenset({"gost", "xcode", "braun"})
 
 # Флаги создания процесса без окна (Windows)
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_WINDOWS_CREATE_NO_WINDOW = 0x08000000
+_ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
+_ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
+
+
+def _real_directory_stat(path: Path) -> os.stat_result | None:
+    """Return lstat identity only for a non-link, non-reparse directory."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if not (
+        stat_module.S_ISDIR(metadata.st_mode)
+        and not stat_module.S_ISLNK(metadata.st_mode)
+        and not (reparse_flag and file_attributes & reparse_flag)
+    ):
+        return None
+    return metadata
+
+
+def _is_real_regular_file(path: Path) -> bool:
+    """Check the observed path object without following a link/reparse point."""
+
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(
+        stat_module.S_ISREG(metadata.st_mode)
+        and not stat_module.S_ISLNK(metadata.st_mode)
+        and not (reparse_flag and file_attributes & reparse_flag)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _AssistantShutdownAuthority:
+    path: Path
+    data_dir: Path
+    runtime_dir: Path
+    data_identity: os.stat_result
+    runtime_identity: os.stat_result
+
+    def directories_match(self) -> bool:
+        """Recheck identities; this is not a directory-handle atomic guarantee."""
+
+        data_now = _real_directory_stat(self.data_dir)
+        runtime_now = _real_directory_stat(self.runtime_dir)
+        if data_now is None or runtime_now is None:
+            return False
+        return bool(
+            self.runtime_dir.parent == self.data_dir
+            and self.path.parent == self.runtime_dir
+            and os.path.samestat(self.data_identity, data_now)
+            and os.path.samestat(self.runtime_identity, runtime_now)
+        )
+
+
+def _new_assistant_shutdown_authority(data_dir: Path) -> _AssistantShutdownAuthority:
+    """Return a token path bound to current data/runtime identities.
+
+    Python exposes no portable Windows directory-relative exclusive create, so
+    identities are checked around later operations without claiming that every
+    rename between individual system calls is eliminated.
+    """
+
+    data_root = Path(data_dir)
+    if _real_directory_stat(data_root) is None:
+        raise RuntimeError("unsafe assistant data directory")
+    resolved_data = data_root.resolve(strict=True)
+    runtime_dir = data_root / "runtime"
+    try:
+        runtime_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if _real_directory_stat(runtime_dir) is None:
+        raise RuntimeError("unsafe assistant runtime directory")
+    resolved_runtime = runtime_dir.resolve(strict=True)
+    if resolved_runtime.parent != resolved_data:
+        raise RuntimeError("assistant runtime directory escapes data root")
+    data_identity = _real_directory_stat(resolved_data)
+    runtime_identity = _real_directory_stat(resolved_runtime)
+    if data_identity is None or runtime_identity is None:
+        raise RuntimeError("unsafe assistant shutdown directory identity")
+    shutdown_path = resolved_runtime / f"{_ASSISTANT_SHUTDOWN_PREFIX}{uuid.uuid4().hex}.signal"
+    if os.path.lexists(shutdown_path):
+        raise RuntimeError("assistant shutdown sentinel already exists")
+    authority = _AssistantShutdownAuthority(
+        path=shutdown_path,
+        data_dir=resolved_data,
+        runtime_dir=resolved_runtime,
+        data_identity=data_identity,
+        runtime_identity=runtime_identity,
+    )
+    if not authority.directories_match():
+        raise RuntimeError("unsafe assistant shutdown directory identity")
+    return authority
+
+
 _ENGINE_STDERR_LOG_NAME = "engine.stderr.log"
 _ENGINE_STDERR_MAX_BYTES = 50 * 1024 * 1024
 _ENGINE_STDERR_BACKUP_COUNT = 3
@@ -171,9 +350,7 @@ def _print_replay_sources() -> None:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
                 duration = data.get("duration_hours", "?")
                 t_cold = data.get("T_cold_final", "?")
-                dur_str = (
-                    f"{duration:.1f}h" if isinstance(duration, (int, float)) else str(duration)
-                )
+                dur_str = f"{duration:.1f}h" if isinstance(duration, (int, float)) else str(duration)
                 t_str = f"{t_cold:.1f}K" if isinstance(t_cold, (int, float)) else str(t_cold)
                 print(f"  {json_path.name} — длительность {dur_str}, T_cold_final {t_str}")
             except Exception:
@@ -190,9 +367,7 @@ def _print_replay_sources() -> None:
         for db_path in sorted(data_dir.glob("data_*.db")):
             try:
                 con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
-                row = con.execute(
-                    "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM readings"
-                ).fetchone()
+                row = con.execute("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM readings").fetchone()
                 con.close()
                 count, ts_min, ts_max = row
                 if ts_min and ts_max:
@@ -363,6 +538,7 @@ class LauncherWindow(QMainWindow):
         # A4: persistent non-modal "engine down" banner + repeating audible
         # alarm. Built lazily; None until first use / in tray-only mode.
         self._engine_down_banner: QLabel | None = None
+        self._periodic_status_banner: QLabel | None = None
         self._alarm_timer: QTimer | None = None
         # Guards against multiple QTimer.singleShot restarts piling up while
         # _check_engine_health keeps firing every 3s during the backoff
@@ -384,10 +560,20 @@ class LauncherWindow(QMainWindow):
         # Restart/backoff mirrors the engine child, but its death is NON-safety:
         # log + tray note only — no alarm, no banner, no giving-up latch.
         self._assistant_proc: subprocess.Popen | None = None
+        self._assistant_shutdown_path: Path | None = None
+        self._assistant_shutdown_authority: _AssistantShutdownAuthority | None = None
         self._assistant_experiment_mode = replay_source is None
-        self._assistant_enabled: bool = _assistant_runtime_required(
+        self._assistant_enabled, self._assistant_periodic_requested = _assistant_runtime_decision(
             experiment_mode=self._assistant_experiment_mode
         )
+        self._assistant_periodic_data_dir: Path | None = None
+        self._assistant_periodic_health: _PeriodicHealthObservation | None = None
+        if self._assistant_periodic_requested:
+            from cryodaq.paths import get_data_dir
+
+            self._assistant_periodic_data_dir = get_data_dir()
+        self._periodic_health_read_failed_logged = False
+        self._periodic_reporting_fault = False
         self._assistant_restart_attempts: int = 0
         self._assistant_last_restart_time: float = 0.0
         self._assistant_restart_pending: bool = False
@@ -492,8 +678,7 @@ class LauncherWindow(QMainWindow):
         canonical = root / "cooldown_v5" / "predictor_model.json"
         if not deployed.exists() and canonical.exists():
             logger.info(
-                "Cooldown predictor model not deployed. "
-                "Run `make bootstrap-predictor` to copy from cooldown_v5/."
+                "Cooldown predictor model not deployed. Run `make bootstrap-predictor` to copy from cooldown_v5/."
             )
 
     def _start_engine(self, *, wait: bool = True) -> None:
@@ -552,9 +737,7 @@ class LauncherWindow(QMainWindow):
                             return
                         break  # replay mode: don't hijack live engine
                 else:
-                    logger.error(
-                        "Engine holds lock but port not ready. Run: cryodaq-engine --force"
-                    )
+                    logger.error("Engine holds lock but port not ready. Run: cryodaq-engine --force")
                     return
             finally:
                 if probe_fd is not None:
@@ -567,10 +750,14 @@ class LauncherWindow(QMainWindow):
         if self._replay_source is not None:
             if getattr(sys, "frozen", False):
                 cmd = [
-                    sys.executable, "--mode=replay-engine",
-                    "--source", str(self._replay_source),
-                    "--speed", str(self._replay_speed),
-                    "--phase", self._replay_phase,
+                    sys.executable,
+                    "--mode=replay-engine",
+                    "--source",
+                    str(self._replay_source),
+                    "--speed",
+                    str(self._replay_speed),
+                    "--phase",
+                    self._replay_phase,
                 ]
             else:
                 python = sys.executable
@@ -579,10 +766,15 @@ class LauncherWindow(QMainWindow):
                     if pythonw.exists():
                         python = str(pythonw)
                 cmd = [
-                    python, "-m", "cryodaq.replay_engine",
-                    "--source", str(self._replay_source),
-                    "--speed", str(self._replay_speed),
-                    "--phase", self._replay_phase,
+                    python,
+                    "-m",
+                    "cryodaq.replay_engine",
+                    "--source",
+                    str(self._replay_source),
+                    "--speed",
+                    str(self._replay_speed),
+                    "--phase",
+                    self._replay_phase,
                 ]
             if self._replay_loop:
                 cmd.append("--loop")
@@ -703,6 +895,7 @@ class LauncherWindow(QMainWindow):
     def _show_replay_engine_failure(self) -> None:
         """Show error and close when the replay engine could not start."""
         from PySide6.QtWidgets import QMessageBox
+
         QMessageBox.critical(
             self,
             "Replay Engine Failed",
@@ -765,6 +958,12 @@ class LauncherWindow(QMainWindow):
 
     def _start_assistant(self) -> None:
         """Spawn the cryodaq-assistant subprocess (Гемма + RAG)."""
+        if (
+            self._assistant_experiment_mode
+            and self._assistant_periodic_requested
+            and getattr(self, "_assistant_periodic_health", None) is None
+        ):
+            self._assistant_periodic_health = _PeriodicHealthObservation(started_at=time.monotonic())
         if getattr(sys, "frozen", False):
             cmd = [sys.executable, "--mode=assistant"]
         else:
@@ -777,11 +976,22 @@ class LauncherWindow(QMainWindow):
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = (
-            "1" if self._assistant_experiment_mode else "0"
+        env["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = "1" if self._assistant_experiment_mode else "0"
+        env["CRYODAQ_ASSISTANT_PERIODIC_MODE"] = (
+            "1" if self._assistant_experiment_mode and self._assistant_periodic_requested else "0"
         )
-        creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        # CREATE_NO_WINDOW children do not have a console on which
+        # GenerateConsoleCtrlEvent can be relied upon.  Use a private file
+        # sentinel for the production graceful path; SIGBREAK remains useful
+        # for the console-enabled frozen smoke harness.
+        creationflags = _WINDOWS_CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        shutdown_authority: _AssistantShutdownAuthority | None = None
         try:
+            if sys.platform == "win32":
+                from cryodaq.paths import get_data_dir
+
+                shutdown_authority = _new_assistant_shutdown_authority(get_data_dir())
+                env[_ASSISTANT_SHUTDOWN_ENV] = str(shutdown_authority.path)
             self._assistant_proc = subprocess.Popen(
                 cmd,
                 env=env,
@@ -793,23 +1003,77 @@ class LauncherWindow(QMainWindow):
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
+            self._assistant_shutdown_path = None if shutdown_authority is None else shutdown_authority.path
+            self._assistant_shutdown_authority = shutdown_authority
             logger.info("cryodaq-assistant запущен, PID=%d", self._assistant_proc.pid)
         except Exception:
             logger.exception("Не удалось запустить cryodaq-assistant")
             self._assistant_proc = None
+            self._assistant_shutdown_path = None
+            self._assistant_shutdown_authority = None
 
     def _stop_assistant(self) -> None:
         """Остановить cryodaq-assistant подпроцесс, если он запущен."""
         if self._assistant_proc is None:
             return
-        logger.info("Остановка cryodaq-assistant (PID=%d)...", self._assistant_proc.pid)
-        self._assistant_proc.terminate()
+        process = self._assistant_proc
+        logger.info("Остановка cryodaq-assistant (PID=%d)...", process.pid)
+        shutdown_path = getattr(self, "_assistant_shutdown_path", None)
+        shutdown_authority = getattr(self, "_assistant_shutdown_authority", None)
+        cleanup_authorized = isinstance(shutdown_authority, _AssistantShutdownAuthority)
         try:
-            self._assistant_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            logger.warning("cryodaq-assistant не завершился за 10с, принудительное завершение")
-            self._assistant_proc.kill()
-            self._assistant_proc.wait(timeout=5)
+            if (
+                sys.platform == "win32"
+                and shutdown_path is not None
+                and isinstance(shutdown_authority, _AssistantShutdownAuthority)
+                and shutdown_authority.path == shutdown_path
+                and shutdown_authority.directories_match()
+            ):
+                sentinel_ready = False
+                try:
+                    descriptor = os.open(shutdown_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    # Accept an earlier request only if the exact observed
+                    # object is still an ordinary file, never a link/reparse.
+                    sentinel_ready = shutdown_authority.directories_match() and _is_real_regular_file(shutdown_path)
+                except OSError:
+                    logger.exception("Не удалось запросить мягкую остановку cryodaq-assistant")
+                else:
+                    try:
+                        sentinel_ready = shutdown_authority.directories_match()
+                    finally:
+                        os.close(descriptor)
+                    if not sentinel_ready:
+                        cleanup_authorized = False
+                if sentinel_ready:
+                    try:
+                        process.wait(timeout=10)
+                        self._assistant_proc = None
+                        logger.info("cryodaq-assistant остановлен")
+                        return
+                    except subprocess.TimeoutExpired:
+                        logger.warning("cryodaq-assistant не завершился мягко за 10с")
+
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                logger.warning("cryodaq-assistant не завершился за 10с, принудительное завершение")
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            if (
+                cleanup_authorized
+                and shutdown_path is not None
+                and isinstance(shutdown_authority, _AssistantShutdownAuthority)
+                and shutdown_authority.directories_match()
+            ):
+                try:
+                    shutdown_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Не удалось удалить сигнал остановки cryodaq-assistant")
+            self._assistant_shutdown_path = None
+            self._assistant_shutdown_authority = None
         self._assistant_proc = None
         logger.info("cryodaq-assistant остановлен")
 
@@ -822,13 +1086,14 @@ class LauncherWindow(QMainWindow):
         if not self._assistant_enabled or self._shutdown_requested:
             return
         if self._assistant_proc is not None and self._assistant_proc.poll() is None:
+            if self._assistant_periodic_requested:
+                self._check_periodic_health()
             # Alive — reset backoff after a healthy run window.
-            if (
-                self._assistant_restart_attempts > 0
-                and time.monotonic() - self._assistant_last_restart_time > 300.0
-            ):
+            if self._assistant_restart_attempts > 0 and time.monotonic() - self._assistant_last_restart_time > 300.0:
                 self._assistant_restart_attempts = 0
             return
+        if self._assistant_periodic_requested:
+            self._set_periodic_reporting_fault()
         if self._assistant_restart_pending:
             return
 
@@ -858,6 +1123,74 @@ class LauncherWindow(QMainWindow):
 
         QTimer.singleShot(delay_s * 1000, _do_restart)
 
+    def _check_periodic_health(self, *, monotonic_now: float | None = None) -> None:
+        """Observe H3 health without using its wall timestamp as an age clock."""
+        if not self._assistant_periodic_requested:
+            return
+        observation = self._assistant_periodic_health
+        data_dir = self._assistant_periodic_data_dir
+        if observation is None or data_dir is None:
+            return
+        now = time.monotonic() if monotonic_now is None else monotonic_now
+        status: str | None = None
+        updated_at: float | None = None
+        try:
+            from cryodaq.periodic_state import load_periodic_state
+
+            state = load_periodic_state(data_dir)
+            health = state.payload.get("health")
+            if isinstance(health, Mapping):
+                raw_status = health.get("status")
+                raw_updated_at = health.get("updated_at")
+                if isinstance(raw_status, str):
+                    status = raw_status
+                if type(raw_updated_at) is float:
+                    updated_at = raw_updated_at
+            self._periodic_health_read_failed_logged = False
+        except Exception:
+            if not self._periodic_health_read_failed_logged:
+                logger.warning(
+                    "Periodic PNG health unavailable: %s",
+                    _PERIODIC_HEALTH_READ_FAILED_CODE,
+                )
+                self._periodic_health_read_failed_logged = True
+
+        refreshed = observation.observe(
+            status=status,
+            updated_at=updated_at,
+            monotonic_now=now,
+            wall_now=time.time(),
+        )
+        if refreshed:
+            self._clear_periodic_reporting_fault()
+        elif observation.deadline_expired(now):
+            self._set_periodic_reporting_fault()
+
+    def _set_periodic_reporting_fault(self) -> None:
+        """Show one persistent non-safety H3 operator status."""
+        if self._periodic_reporting_fault:
+            return
+        self._periodic_reporting_fault = True
+        logger.error("Periodic PNG runtime unavailable: %s", _PERIODIC_RUNTIME_UNAVAILABLE_CODE)
+        if self._periodic_status_banner is not None:
+            self._periodic_status_banner.show()
+        if hasattr(self, "_tray") and self._tray is not None:
+            self._tray.showMessage(
+                "CryoDAQ",
+                "Периодические PNG-отчёты недоступны. Управление оборудованием не затронуто.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
+
+    def _clear_periodic_reporting_fault(self) -> None:
+        """Clear H3 status only after a strictly newer ready heartbeat."""
+        if not self._periodic_reporting_fault:
+            return
+        self._periodic_reporting_fault = False
+        logger.info("Periodic PNG runtime recovered")
+        if self._periodic_status_banner is not None:
+            self._periodic_status_banner.hide()
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
@@ -878,6 +1211,18 @@ class LauncherWindow(QMainWindow):
         )
         self._engine_down_banner.hide()
         root.addWidget(self._engine_down_banner)
+
+        self._periodic_status_banner = QLabel(
+            "Периодические PNG-отчёты недоступны "
+            f"({_PERIODIC_RUNTIME_UNAVAILABLE_CODE}). "
+            "Управление оборудованием не затронуто."
+        )
+        self._periodic_status_banner.setWordWrap(True)
+        self._periodic_status_banner.setStyleSheet(
+            "background-color: #FFB000; color: #161616; font-weight: bold; padding: 8px 12px;"
+        )
+        self._periodic_status_banner.hide()
+        root.addWidget(self._periodic_status_banner)
 
         # --- Верхняя панель статуса engine ---
         # Phase UI-1 v2: this top bar is hidden because shell v2's
@@ -1023,9 +1368,7 @@ class LauncherWindow(QMainWindow):
             if pack.get("description"):
                 action.setToolTip(pack["description"])
             action.setChecked(pack["id"] == current)
-            action.triggered.connect(
-                lambda _checked=False, p=pack["id"]: self._on_theme_selected(p)
-            )
+            action.triggered.connect(lambda _checked=False, p=pack["id"]: self._on_theme_selected(p))
             group.addAction(action)
             theme_menu.addAction(action)
 
@@ -1214,16 +1557,26 @@ class LauncherWindow(QMainWindow):
         make partial reload fragile. A full process replacement is the
         single robust path.
 
-        Engine + bridge are shut down explicitly before execv. Letting the
+        Engine, assistant, and bridge are shut down explicitly before execv. Letting the
         orphaned engine survive re-parenting was deadlocking the REP port
         (5556) — the orphaned bridge's mid-flight REQ was never consumed
         by its dead peer, so every subsequent REQ from the new launcher's
         bridge queued behind the stranded reply and timed out. Cold-start
         everything from scratch is the only robust path.
         """
-        logger.info("theme: stopping engine + bridge before exec")
-        # Order matters: shut down the bridge first so no REQ is mid-flight,
-        # then terminate engine. Same sequence as _do_shutdown but without
+        logger.info("theme: stopping assistant + bridge + engine before exec")
+        self._shutdown_requested = True
+        # Fail before touching the engine/bridge if the assistant/H3 owner
+        # cannot be settled.  This prevents both a duplicate owner after exec
+        # and a half-shut-down current launcher after an aborted exec.
+        try:
+            self._stop_assistant()
+        except Exception:
+            logger.exception("theme: assistant stop failed; aborting re-exec")
+            self._shutdown_requested = False
+            raise
+        # With the assistant settled, shut down the bridge before the engine
+        # so no REQ is mid-flight. Same sequence as _do_shutdown but without
         # QApplication.quit().
         try:
             self._bridge.shutdown()
@@ -1307,10 +1660,7 @@ class LauncherWindow(QMainWindow):
             now = time.monotonic()
             last_cmd_restart = getattr(self, "_last_cmd_watchdog_restart", 0.0)
             if now - last_cmd_restart >= 60.0:
-                logger.warning(
-                    "ZMQ bridge: command channel unhealthy "
-                    "(recent command timeout). Restarting bridge."
-                )
+                logger.warning("ZMQ bridge: command channel unhealthy (recent command timeout). Restarting bridge.")
                 self._last_cmd_watchdog_restart = now
                 self._bridge.shutdown()
                 self._bridge.start()
@@ -1390,13 +1740,33 @@ class LauncherWindow(QMainWindow):
             self._status_timer.stop()
         self._async_timer.stop()
         self._tray.hide()
-        self._bridge.shutdown()
-        self._stop_engine()
-        self._stop_assistant()
-        self._loop.close()
+
+        first_error: Exception | None = None
+
+        def attempt(label: str, action: Callable[[], Any]) -> None:
+            nonlocal first_error
+            try:
+                action()
+            except Exception as exc:
+                logger.exception("Launcher shutdown step failed: %s", label)
+                if first_error is None:
+                    first_error = exc
+
+        attempt("assistant", self._stop_assistant)
+        attempt("bridge", self._bridge.shutdown)
+        attempt("engine", self._stop_engine)
+        attempt("event_loop", self._loop.close)
         if self._lock_fd is not None:
-            release_lock(self._lock_fd, ".launcher.lock")
-        self._app.quit()
+            lock_fd = self._lock_fd
+
+            def release_launcher_lock() -> None:
+                release_lock(lock_fd, ".launcher.lock")
+                self._lock_fd = None
+
+            attempt("launcher_lock", release_launcher_lock)
+        attempt("application", self._app.quit)
+        if first_error is not None:
+            raise first_error
 
     def _tray_open(self) -> None:
         self.showNormal()
@@ -1480,8 +1850,7 @@ class LauncherWindow(QMainWindow):
         if self._tray.isVisible():
             self._tray.showMessage(
                 "CryoDAQ",
-                f"Engine остановлен — перезапуск через {delay_s}с "
-                f"(попытка {self._restart_attempts})",
+                f"Engine остановлен — перезапуск через {delay_s}с (попытка {self._restart_attempts})",
                 QSystemTrayIcon.MessageIcon.Warning,
                 3000,
             )
@@ -1583,6 +1952,9 @@ class LauncherWindow(QMainWindow):
         elif self._last_alarm_count > 0:
             self._tray.setIcon(self._tray_icon_yellow)
             self._tray.setToolTip(f"CryoDAQ — {self._last_alarm_count} алармов")
+        elif self._periodic_reporting_fault:
+            self._tray.setIcon(self._tray_icon_yellow)
+            self._tray.setToolTip(f"CryoDAQ — отчёты недоступны ({_PERIODIC_RUNTIME_UNAVAILABLE_CODE})")
         elif not data_flowing:
             self._tray.setIcon(self._tray_icon_yellow)
             self._tray.setToolTip("CryoDAQ — ожидание данных")
@@ -1709,8 +2081,7 @@ def main() -> None:
     parser.add_argument(
         "--setup-wizard",
         action="store_true",
-        help="Показать мастер первого запуска повторно "
-        "(приборы, обзор безопасности, Telegram).",
+        help="Показать мастер первого запуска повторно (приборы, обзор безопасности, Telegram).",
     )
     args, remaining = parser.parse_known_args()
 

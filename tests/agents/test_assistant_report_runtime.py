@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -170,12 +171,161 @@ async def test_shutdown_allows_optional_llm_cleanup_before_exit(
     assert _FakeCoordinator.stopped.is_set()
 
 
+async def test_windows_shutdown_sentinel_reaches_ordered_runtime_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.signal, "SIGBREAK", 21, raising=False)
+    signal_mock = MagicMock(return_value=object())
+    monkeypatch.setattr(module.signal, "signal", signal_mock)
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+    monkeypatch.setattr(module, "ReportCoordinator", _FakeCoordinator)
+
+    task = asyncio.create_task(module.run(config_dir=tmp_path, data_dir=tmp_path))
+    await asyncio.wait_for(_FakeCoordinator.started.wait(), timeout=1)
+    assert signal_mock.call_args_list[0].args[0] == 21
+    assert callable(signal_mock.call_args_list[0].args[1])
+    sentinel.touch()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert _FakeCoordinator.stopped.is_set()
+
+
+@pytest.mark.parametrize(
+    "candidate_kind",
+    ["symlink", "broken-symlink", "directory"],
+)
+def test_windows_shutdown_validation_rejects_preexisting_path_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_kind: str,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    if candidate_kind == "directory":
+        sentinel.mkdir()
+    else:
+        target = tmp_path / ("target" if candidate_kind == "symlink" else "missing")
+        if candidate_kind == "symlink":
+            target.touch()
+        sentinel.symlink_to(target)
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        module._validated_shutdown_sentinel(tmp_path)
+
+
+def test_windows_shutdown_validation_rejects_link_backed_runtime_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.symlink_to(outside, target_is_directory=True)
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+
+    with pytest.raises(RuntimeError, match="runtime directory"):
+        module._validated_shutdown_sentinel(tmp_path)
+
+
+@pytest.mark.parametrize("candidate_kind", ["symlink", "broken-symlink", "directory"])
+async def test_windows_shutdown_watcher_rejects_unsafe_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_kind: str,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+    authority = module._validated_shutdown_sentinel(tmp_path)
+    assert authority is not None
+    waiter = asyncio.create_task(module._wait_for_shutdown_sentinel(authority))
+    await asyncio.sleep(0)
+    if candidate_kind == "directory":
+        sentinel.mkdir()
+    else:
+        target = tmp_path / ("target" if candidate_kind == "symlink" else "missing")
+        if candidate_kind == "symlink":
+            target.touch()
+        sentinel.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="unsafe assistant shutdown sentinel"):
+        await asyncio.wait_for(waiter, timeout=1)
+
+
+async def test_windows_shutdown_watcher_accepts_real_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+    authority = module._validated_shutdown_sentinel(tmp_path)
+    assert authority is not None
+    waiter = asyncio.create_task(module._wait_for_shutdown_sentinel(authority))
+    await asyncio.sleep(0)
+    sentinel.touch()
+    await asyncio.wait_for(waiter, timeout=1)
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "real-directory"])
+async def test_windows_shutdown_watcher_rejects_runtime_identity_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    sentinel = runtime_dir / "assistant-shutdown-0123456789abcdef0123456789abcdef.signal"
+    monkeypatch.setenv(module._ASSISTANT_SHUTDOWN_ENV, str(sentinel))
+    authority = module._validated_shutdown_sentinel(tmp_path)
+    assert authority is not None
+    waiter = asyncio.create_task(module._wait_for_shutdown_sentinel(authority))
+    await asyncio.sleep(0)
+
+    original_runtime = tmp_path / "runtime-original"
+    runtime_dir.rename(original_runtime)
+    if replacement_kind == "symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        runtime_dir.symlink_to(outside, target_is_directory=True)
+    else:
+        runtime_dir.mkdir()
+    sentinel.touch()
+
+    with pytest.raises(RuntimeError, match="unsafe assistant shutdown sentinel authority"):
+        await asyncio.wait_for(waiter, timeout=1)
+
+
 def test_assistant_bootstrap_import_is_report_only_and_lightweight() -> None:
     code = (
         "import sys; import cryodaq.agents.assistant_bootstrap; "
         "blocked = ('cryodaq.agents.assistant_main', 'cryodaq.reporting.generator', "
         "'cryodaq.notifications.periodic_report', 'docx', 'matplotlib', 'lancedb', "
-        "'cryodaq.storage.sqlite_writer'); "
+        "'cryodaq.storage.sqlite_writer', 'cryodaq.agents.assistant.periodic_png', "
+        "'cryodaq.agents.assistant.periodic_runtime', "
+        "'cryodaq.agents.assistant.periodic_telegram', 'zmq', 'msgpack', 'aiohttp'); "
         "assert not [name for name in blocked if name in sys.modules], "
         "[name for name in blocked if name in sys.modules]"
     )

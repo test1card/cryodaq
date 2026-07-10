@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
 import os
+import signal
+import stat as stat_module
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 import yaml
 
@@ -26,6 +29,11 @@ from cryodaq.agents.assistant.report_coordinator import (
 from cryodaq.paths import get_config_dir, get_data_dir
 
 logger = logging.getLogger("cryodaq.assistant.bootstrap")
+
+_ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
+_ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
+_ASSISTANT_SHUTDOWN_SUFFIX = ".signal"
+_ASSISTANT_SHUTDOWN_TOKEN_LENGTH = 32
 
 DEFAULT_ENGINE_CMD_ADDR = "tcp://127.0.0.1:5556"
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
@@ -67,10 +75,186 @@ def _automatic_allowed_from_environment() -> bool:
     return raw == "1"
 
 
+def _periodic_allowed_from_environment() -> bool:
+    """Accept only the launcher's exact live-mode H3 grant."""
+
+    raw = os.environ.get("CRYODAQ_ASSISTANT_PERIODIC_MODE")
+    if raw in {None, "0"}:
+        return False
+    if raw != "1":
+        logger.warning("Invalid assistant periodic-mode flag; disabling periodic PNG reporting")
+        return False
+    return True
+
+
 def _load_llm_runtime() -> Callable[..., Awaitable[None]]:
     from cryodaq.agents.assistant_main import _run_llm_runtime  # noqa: PLC0415
 
     return _run_llm_runtime
+
+
+class _PeriodicSupervisor(Protocol):
+    async def run(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+def _load_periodic_runtime() -> tuple[type[Any], Callable[..., Any]]:
+    """Lazy H3 import; exact-off execution must never call this loader."""
+
+    from cryodaq.agents.assistant.periodic_png import PeriodicPngSupervisor  # noqa: PLC0415
+    from cryodaq.agents.assistant.periodic_runtime import (  # noqa: PLC0415
+        make_periodic_coordinator_factory,
+    )
+
+    return PeriodicPngSupervisor, make_periodic_coordinator_factory
+
+
+@dataclass(frozen=True, slots=True)
+class _ShutdownSentinelAuthority:
+    path: Path
+    data_dir: Path
+    runtime_dir: Path
+    data_identity: os.stat_result
+    runtime_identity: os.stat_result
+
+    def directories_match(self) -> bool:
+        """Recheck identities without claiming directory-handle atomicity."""
+
+        data_now = _real_directory_stat(self.data_dir)
+        runtime_now = _real_directory_stat(self.runtime_dir)
+        if data_now is None or runtime_now is None:
+            return False
+        return bool(
+            self.runtime_dir.parent == self.data_dir
+            and self.path.parent == self.runtime_dir
+            and os.path.samestat(self.data_identity, data_now)
+            and os.path.samestat(self.runtime_identity, runtime_now)
+        )
+
+
+def _validated_shutdown_sentinel(data_dir: Path) -> _ShutdownSentinelAuthority | None:
+    """Validate the launcher's private Windows shutdown path without following it."""
+    raw = os.environ.get(_ASSISTANT_SHUTDOWN_ENV)
+    if not raw:
+        return None
+    candidate = Path(raw)
+    data_root = Path(data_dir)
+    if _real_directory_stat(data_root) is None:
+        raise RuntimeError("invalid assistant data directory")
+    resolved_data = data_root.resolve(strict=True)
+    runtime_dir = data_root / "runtime"
+    if _real_directory_stat(runtime_dir) is None:
+        raise RuntimeError("invalid assistant runtime directory")
+    resolved_runtime = runtime_dir.resolve(strict=True)
+    if resolved_runtime.parent != resolved_data:
+        raise RuntimeError("invalid assistant runtime directory")
+    if not candidate.is_absolute() or candidate.parent != resolved_runtime:
+        raise RuntimeError("invalid assistant shutdown sentinel directory")
+    name = candidate.name
+    if not name.startswith(_ASSISTANT_SHUTDOWN_PREFIX) or not name.endswith(_ASSISTANT_SHUTDOWN_SUFFIX):
+        raise RuntimeError("invalid assistant shutdown sentinel name")
+    token = name[len(_ASSISTANT_SHUTDOWN_PREFIX) : -len(_ASSISTANT_SHUTDOWN_SUFFIX)]
+    if len(token) != _ASSISTANT_SHUTDOWN_TOKEN_LENGTH or any(char not in "0123456789abcdef" for char in token):
+        raise RuntimeError("invalid assistant shutdown sentinel token")
+    if os.path.lexists(candidate):
+        raise RuntimeError("assistant shutdown sentinel already exists")
+    data_identity = _real_directory_stat(resolved_data)
+    runtime_identity = _real_directory_stat(resolved_runtime)
+    if data_identity is None or runtime_identity is None:
+        raise RuntimeError("invalid assistant shutdown directory identity")
+    authority = _ShutdownSentinelAuthority(
+        path=candidate,
+        data_dir=resolved_data,
+        runtime_dir=resolved_runtime,
+        data_identity=data_identity,
+        runtime_identity=runtime_identity,
+    )
+    if not authority.directories_match():
+        raise RuntimeError("invalid assistant shutdown directory identity")
+    return authority
+
+
+def _real_directory_stat(path: Path) -> os.stat_result | None:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if not (
+        stat_module.S_ISDIR(metadata.st_mode)
+        and not stat_module.S_ISLNK(metadata.st_mode)
+        and not (reparse_flag and file_attributes & reparse_flag)
+    ):
+        return None
+    return metadata
+
+
+def _observe_shutdown_sentinel(path: Path) -> bool:
+    """Return false only for absence; reject every observed non-regular object."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError("unsafe assistant shutdown sentinel") from exc
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if not (
+        stat_module.S_ISREG(metadata.st_mode)
+        and not stat_module.S_ISLNK(metadata.st_mode)
+        and not (reparse_flag and file_attributes & reparse_flag)
+    ):
+        raise RuntimeError("unsafe assistant shutdown sentinel")
+    return True
+
+
+async def _wait_for_shutdown_sentinel(authority: _ShutdownSentinelAuthority) -> None:
+    loop = asyncio.get_running_loop()
+    while True:
+        if not await asyncio.to_thread(authority.directories_match):
+            raise RuntimeError("unsafe assistant shutdown sentinel authority")
+        observed = await asyncio.to_thread(_observe_shutdown_sentinel, authority.path)
+        if not await asyncio.to_thread(authority.directories_match):
+            raise RuntimeError("unsafe assistant shutdown sentinel authority")
+        if observed:
+            return
+        next_poll: asyncio.Future[None] = loop.create_future()
+        handle = loop.call_later(0.1, next_poll.set_result, None)
+        try:
+            await next_poll
+        finally:
+            handle.cancel()
+
+
+async def _settle_cleanup_task(
+    task: asyncio.Task[None],
+) -> tuple[asyncio.CancelledError | None, BaseException | None]:
+    """Settle the whole teardown despite repeated outer cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    current = asyncio.current_task()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.done():
+                # The cleanup task itself was cancelled; collect that result
+                # below rather than misclassifying it as outer cancellation.
+                break
+            cancellation = exc
+            if current is not None:
+                current.uncancel()
+        except BaseException:
+            # The cleanup task owns the error; collect it exactly once below.
+            pass
+    try:
+        task.result()
+    except BaseException as exc:
+        return cancellation, exc
+    return cancellation, None
 
 
 async def run(
@@ -81,15 +265,25 @@ async def run(
     config_dir: Path | None = None,
     data_dir: Path | None = None,
 ) -> None:
-    """Run the critical coordinator and isolate the optional LLM lifecycle."""
+    """Run independent critical H2/H3 lanes plus the optional LLM lane."""
     resolved_config = Path(config_dir) if config_dir is not None else get_config_dir()
     resolved_data = Path(data_dir) if data_dir is not None else get_data_dir()
+    periodic_allowed = _periodic_allowed_from_environment()
     reporting = load_report_coordinator_config(
         resolved_config,
         automatic_allowed=_automatic_allowed_from_environment(),
     )
     llm_enabled = _strict_agent_enabled(resolved_config)
     shutdown_event = asyncio.Event()
+    shutdown_sentinel = _validated_shutdown_sentinel(resolved_data) if sys.platform == "win32" else None
+
+    # Construct H2 before installing signal handlers. A constructor failure has
+    # no process-global cleanup obligation and cannot leak handlers.
+    coordinator = ReportCoordinator(
+        resolved_data,
+        config=reporting,
+        event_addr=engine_pub_addr,
+    )
 
     def request_shutdown() -> None:
         logger.info("cryodaq-assistant: shutdown requested")
@@ -97,66 +291,102 @@ async def run(
 
     loop = asyncio.get_running_loop()
     installed_signals: list[int] = []
-    if sys.platform != "win32":
-        import signal  # noqa: PLC0415
+    installed_windows_signal: tuple[int, Any] | None = None
+    if sys.platform == "win32":
+        signum = signal.SIGBREAK
 
+        def request_windows_shutdown(_signum: int, _frame: object) -> None:
+            loop.call_soon_threadsafe(request_shutdown)
+
+        previous = signal.signal(signum, request_windows_shutdown)
+        installed_windows_signal = (signum, previous)
+    else:
         try:
             for signum in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(signum, request_shutdown)
                 installed_signals.append(signum)
-        except Exception:
+        except Exception as primary_signal_error:
+            signal_cleanup_error: BaseException | None = None
             for signum in installed_signals:
-                loop.remove_signal_handler(signum)
+                try:
+                    loop.remove_signal_handler(signum)
+                except BaseException as exc:
+                    if signal_cleanup_error is None:
+                        signal_cleanup_error = exc
+            if signal_cleanup_error is not None:
+                raise primary_signal_error from signal_cleanup_error
             raise
 
-    coordinator = ReportCoordinator(
-        resolved_data,
-        config=reporting,
-        event_addr=engine_pub_addr,
-    )
+    shutdown_task: asyncio.Task[bool] | None = None
+    sentinel_task: asyncio.Task[None] | None = None
+    coordinator_task: asyncio.Task[None] | None = None
+    periodic_supervisor: _PeriodicSupervisor | None = None
+    periodic_task: asyncio.Task[None] | None = None
+    llm_task: asyncio.Task[None] | None = None
+    primary: BaseException | None = None
     try:
         await coordinator.start()
-    except Exception:
-        with contextlib.suppress(Exception):
-            await coordinator.stop()
-        for signum in installed_signals:
-            loop.remove_signal_handler(signum)
-        raise
-    shutdown_task = asyncio.create_task(shutdown_event.wait(), name="assistant_shutdown_wait")
-    coordinator_task: asyncio.Task[None] | None = None
-    if reporting.automatic_enabled:
-        coordinator_task = asyncio.create_task(
-            coordinator.wait(), name="automatic_report_coordinator_monitor"
-        )
-    llm_task: asyncio.Task[None] | None = None
-    if llm_enabled:
-        try:
-            llm_runtime = _load_llm_runtime()
-            llm_task = asyncio.create_task(
-                llm_runtime(
-                    engine_cmd_addr=engine_cmd_addr,
-                    engine_pub_addr=engine_pub_addr,
-                    assistant_cmd_addr=assistant_cmd_addr,
-                    shutdown_event=shutdown_event,
-                ),
-                name="optional_llm_runtime",
+        shutdown_task = asyncio.create_task(shutdown_event.wait(), name="assistant_shutdown_wait")
+        if shutdown_sentinel is not None:
+            sentinel_task = asyncio.create_task(
+                _wait_for_shutdown_sentinel(shutdown_sentinel),
+                name="assistant_shutdown_sentinel_wait",
             )
-        except Exception:
-            logger.exception("Optional LLM runtime could not be loaded; continuing report-only")
+        if reporting.automatic_enabled:
+            coordinator_task = asyncio.create_task(coordinator.wait(), name="automatic_report_coordinator_monitor")
 
-    try:
+        if periodic_allowed:
+            supervisor_type, factory_builder = _load_periodic_runtime()
+            coordinator_factory = factory_builder(
+                data_dir=resolved_data,
+                archive_dir=resolved_data / "archive",
+            )
+            periodic_supervisor = supervisor_type(
+                data_dir=resolved_data,
+                config_dir=resolved_config,
+                periodic_allowed=True,
+                coordinator_factory=coordinator_factory,
+            )
+            periodic_task = asyncio.create_task(periodic_supervisor.run(), name="periodic_png_supervisor")
+
+        if llm_enabled:
+            try:
+                llm_runtime = _load_llm_runtime()
+                llm_task = asyncio.create_task(
+                    llm_runtime(
+                        engine_cmd_addr=engine_cmd_addr,
+                        engine_pub_addr=engine_pub_addr,
+                        assistant_cmd_addr=assistant_cmd_addr,
+                        shutdown_event=shutdown_event,
+                    ),
+                    name="optional_llm_runtime",
+                )
+            except Exception:
+                logger.exception("Optional LLM runtime could not be loaded; continuing report-only")
+
         watched = {shutdown_task}
+        if sentinel_task is not None:
+            watched.add(sentinel_task)
         if coordinator_task is not None:
             watched.add(coordinator_task)
+        if periodic_task is not None:
+            watched.add(periodic_task)
         if llm_task is not None:
             watched.add(llm_task)
         while True:
             done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
-            if shutdown_task in done:
-                return
             if coordinator_task is not None and coordinator_task in done:
                 await coordinator_task
                 raise RuntimeError("automatic report coordinator stopped unexpectedly")
+            if periodic_task is not None and periodic_task in done:
+                await periodic_task
+                raise RuntimeError("periodic PNG supervisor stopped unexpectedly")
+            if shutdown_task in done:
+                break
+            if sentinel_task is not None and sentinel_task in done:
+                await sentinel_task
+                request_shutdown()
+                break
             if llm_task is not None and llm_task in done:
                 try:
                     await llm_task
@@ -166,29 +396,81 @@ async def run(
                     logger.info("Optional LLM runtime stopped; continuing report-only")
                 watched.discard(llm_task)
                 llm_task = None
-    finally:
+    except BaseException as exc:
+        primary = exc
+
+    async def cleanup() -> None:
+        cleanup_error: BaseException | None = None
         shutdown_event.set()
-        for task in (shutdown_task, coordinator_task):
-            if task is not None and not task.done():
-                task.cancel()
-        for task in (shutdown_task, coordinator_task):
-            if task is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-        if llm_task is not None and not llm_task.done():
+
+        async def attempt(awaitable: Awaitable[Any]) -> None:
+            nonlocal cleanup_error
             try:
-                await asyncio.wait_for(asyncio.shield(llm_task), timeout=10)
-            except TimeoutError:
-                logger.error("Optional LLM runtime did not stop within 10 seconds")
-                llm_task.cancel()
-            except Exception:
-                logger.exception("Optional LLM runtime failed during shutdown")
-        if llm_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await llm_task
-        await coordinator.stop()
-        for signum in installed_signals:
-            loop.remove_signal_handler(signum)
+                await awaitable
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+
+        try:
+            # H3 owns outbound side effects. Stop and settle it before H2.
+            if periodic_supervisor is not None:
+                await attempt(periodic_supervisor.stop())
+            if periodic_task is not None:
+                if not periodic_task.done():
+                    periodic_task.cancel()
+                await asyncio.gather(periodic_task, return_exceptions=True)
+
+            for task in (shutdown_task, sentinel_task, coordinator_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            for task in (shutdown_task, sentinel_task, coordinator_task):
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+
+            await attempt(coordinator.stop())
+
+            if llm_task is not None and not llm_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(llm_task), timeout=10)
+                except TimeoutError:
+                    logger.error("Optional LLM runtime did not stop within 10 seconds")
+                    llm_task.cancel()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Optional LLM runtime failed during shutdown")
+            if llm_task is not None:
+                await asyncio.gather(llm_task, return_exceptions=True)
+        finally:
+            if installed_windows_signal is not None:
+                signum, previous = installed_windows_signal
+                try:
+                    signal.signal(signum, previous)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            for signum in installed_signals:
+                try:
+                    loop.remove_signal_handler(signum)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    cleanup_task = asyncio.create_task(cleanup(), name="assistant_runtime_cleanup")
+    cleanup_cancellation, cleanup_error = await _settle_cleanup_task(cleanup_task)
+    if primary is not None:
+        if cleanup_error is not None and cleanup_error is not primary:
+            raise primary from cleanup_error
+        raise primary
+    if cleanup_cancellation is not None:
+        if cleanup_error is not None:
+            raise cleanup_cancellation from cleanup_error
+        raise cleanup_cancellation
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def main() -> None:

@@ -194,16 +194,8 @@ async def _run_keithley_command(
     if action == "keithley_set_limits":
         smu_channel = normalize_smu_channel(cmd.get("channel"))
         try:
-            v = (
-                _coerce_finite_setpoint(cmd["v_comp"], "v_comp")
-                if cmd.get("v_comp") is not None
-                else None
-            )
-            i = (
-                _coerce_finite_setpoint(cmd["i_comp"], "i_comp")
-                if cmd.get("i_comp") is not None
-                else None
-            )
+            v = _coerce_finite_setpoint(cmd["v_comp"], "v_comp") if cmd.get("v_comp") is not None else None
+            i = _coerce_finite_setpoint(cmd["i_comp"], "i_comp") if cmd.get("i_comp") is not None else None
         except (TypeError, ValueError, OverflowError) as exc:
             return {"ok": False, "channel": smu_channel, "error": str(exc)}
         return await safety_manager.update_limits(channel=smu_channel, v_comp=v, i_comp=i)
@@ -357,9 +349,7 @@ class _RemoteAssistantQueryProxy:
         sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
         try:
             sock.connect(self._address)
-            await sock.send_string(
-                _json.dumps({"cmd": "assistant.query", "query": query, "chat_id": chat_id})
-            )
+            await sock.send_string(_json.dumps({"cmd": "assistant.query", "query": query, "chat_id": chat_id}))
             reply = _json.loads(await sock.recv_string())
         except Exception as exc:  # noqa: BLE001
             return f"🤖 Гемма: ассистент недоступен ({exc})."
@@ -448,6 +438,7 @@ async def _handle_leak_rate_command(
     if action == "leak_rate_stop":
         try:
             from dataclasses import asdict as _asdict  # noqa: PLC0415
+
             result = leak_rate_estimator.finalize()
             await event_logger.log_event(
                 "leak_rate",
@@ -551,9 +542,7 @@ async def _dispatch_alarm_notification(
     )
 
 
-def _should_dispatch_dead_channel_alarm(
-    key: str, escalated: bool, already_sent: set[str]
-) -> bool:
+def _should_dispatch_dead_channel_alarm(key: str, escalated: bool, already_sent: set[str]) -> bool:
     """Once-per-episode edge-trigger for the outside-RUNNING dead-channel alert.
 
     ``on_interlock_dead_channel`` stays log-only outside RUNNING by design
@@ -649,20 +638,13 @@ async def _handle_multiline_set_channels_command(
 
     name = str(cmd.get("name", "")).strip()
     if not name:
-        ml_names = [
-            n
-            for n, d in drivers_by_name.items()
-            if d.__class__.__name__ == "MultiLineDriver"
-        ]
+        ml_names = [n for n, d in drivers_by_name.items() if d.__class__.__name__ == "MultiLineDriver"]
         if len(ml_names) == 1:
             name = ml_names[0]
         else:
             return {
                 "ok": False,
-                "error": (
-                    "MultiLine instance not specified and multiple drivers "
-                    "are configured"
-                ),
+                "error": ("MultiLine instance not specified and multiple drivers are configured"),
             }
 
     driver = drivers_by_name.get(name)
@@ -742,12 +724,8 @@ def _persist_multiline_channels_to_local_yaml(
     if local_path.exists():
         local_raw = _yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
 
-    base_instruments = [
-        e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)
-    ]
-    local_instruments = [
-        e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)
-    ]
+    base_instruments = [e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)]
+    local_instruments = [e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)]
 
     # Merge by (type, name) — local entries override base entries with
     # the same identity. Order: local first (preserves operator
@@ -767,10 +745,7 @@ def _persist_multiline_channels_to_local_yaml(
 
     matched = False
     for entry in merged:
-        if (
-            str(entry.get("type")) == "etalon_multiline"
-            and str(entry.get("name")) == instrument_name
-        ):
+        if str(entry.get("type")) == "etalon_multiline" and str(entry.get("name")) == instrument_name:
             entry["channels"] = list(channels)
             matched = True
             break
@@ -839,20 +814,13 @@ async def _handle_multiline_burst_command(
     if not name:
         # Default to the first MultiLine driver if exactly one is
         # configured — keeps the GUI single-instrument case ergonomic.
-        ml_names = [
-            n
-            for n, d in drivers_by_name.items()
-            if d.__class__.__name__ == "MultiLineDriver"
-        ]
+        ml_names = [n for n, d in drivers_by_name.items() if d.__class__.__name__ == "MultiLineDriver"]
         if len(ml_names) == 1:
             name = ml_names[0]
         else:
             return {
                 "ok": False,
-                "error": (
-                    "MultiLine instance not specified and "
-                    f"{len(ml_names)} configured — pass `name` explicitly."
-                ),
+                "error": (f"MultiLine instance not specified and {len(ml_names)} configured — pass `name` explicitly."),
             }
     driver = drivers_by_name.get(name)
     if driver is None or driver.__class__.__name__ != "MultiLineDriver":
@@ -942,9 +910,7 @@ def _run_calibration_command(
     if action == "calibration_curve_list":
         return {
             "ok": True,
-            "curves": calibration_store.list_curves(
-                sensor_id=str(cmd.get("sensor_id", "")).strip() or None
-            ),
+            "curves": calibration_store.list_curves(sensor_id=str(cmd.get("sensor_id", "")).strip() or None),
             "assignments": calibration_store.list_assignments(),
         }
 
@@ -992,9 +958,7 @@ def _run_calibration_command(
             policy=str(cmd.get("policy", "")).strip(),
             sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
             curve_id=str(cmd.get("curve_id", "")).strip() or None,
-            runtime_apply_ready=(
-                bool(cmd.get("runtime_apply_ready")) if "runtime_apply_ready" in cmd else None
-            ),
+            runtime_apply_ready=(bool(cmd.get("runtime_apply_ready")) if "runtime_apply_ready" in cmd else None),
         )
         return {"ok": True, **result}
 
@@ -1117,9 +1081,7 @@ def _try_activate_calibration_acquisition(
         if reference and targets:
             service.activate(reference, targets)
         else:
-            logger.warning(
-                "Calibration experiment missing reference_channel/target_channels in custom_fields"
-            )
+            logger.warning("Calibration experiment missing reference_channel/target_channels in custom_fields")
     except CalibrationCommandError as e:
         logger.error("Calibration activation rejected: %s", e)
     except Exception:
@@ -1154,19 +1116,13 @@ async def _run_cooldown_history_command(
         try:
             # Offload the per-file metadata read off the engine loop (no
             # blocking I/O on the loop). json parse of a small file stays inline.
-            raw_meta = await asyncio.to_thread(
-                entry.metadata_path.read_text, encoding="utf-8"
-            )
+            raw_meta = await asyncio.to_thread(entry.metadata_path.read_text, encoding="utf-8")
             payload = _json.loads(raw_meta)
         except Exception:
             continue
         phases: list[dict] = payload.get("phases", [])
         cooldown_phase = next(
-            (
-                p
-                for p in phases
-                if p.get("phase") == "cooldown" and p.get("ended_at") is not None
-            ),
+            (p for p in phases if p.get("phase") == "cooldown" and p.get("ended_at") is not None),
             None,
         )
         if cooldown_phase is None:
@@ -1178,9 +1134,7 @@ async def _run_cooldown_history_command(
         try:
             started_dt = datetime.fromisoformat(cooldown_started_at).astimezone(UTC)
             ended_dt = datetime.fromisoformat(cooldown_ended_at).astimezone(UTC)
-            duration_hours = round(
-                (ended_dt - started_dt).total_seconds() / 3600, 3
-            )
+            duration_hours = round((ended_dt - started_dt).total_seconds() / 3600, 3)
         except Exception:
             continue
         start_t: float | None = None
@@ -1209,9 +1163,7 @@ async def _run_cooldown_history_command(
                 "start_T_kelvin": start_t,
                 "end_T_kelvin": end_t,
                 "phase_transitions": [
-                    {"phase": p.get("phase"), "ts": p.get("started_at")}
-                    for p in phases
-                    if p.get("started_at")
+                    {"phase": p.get("phase"), "ts": p.get("started_at")} for p in phases if p.get("started_at")
                 ],
             }
         )
@@ -1360,11 +1312,7 @@ def _run_experiment_command(
             source_run_id=str(cmd.get("source_run_id", "")).strip() or None,
             parameters=_normalize_dict_payload(cmd.get("parameters")),
             result_summary=_normalize_dict_payload(cmd.get("result_summary")),
-            artifact_paths=[
-                str(item).strip()
-                for item in list(cmd.get("artifact_paths") or [])
-                if str(item).strip()
-            ],
+            artifact_paths=[str(item).strip() for item in list(cmd.get("artifact_paths") or []) if str(item).strip()],
         )
         return {
             "ok": True,
@@ -1465,8 +1413,7 @@ def _run_experiment_command(
                 elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
             except Exception as exc:
                 logger.warning(
-                    "Не удалось вычислить elapsed_in_phase_s из started_at=%r: %s — "
-                    "возвращаю 0.0 (display-only)",
+                    "Не удалось вычислить elapsed_in_phase_s из started_at=%r: %s — возвращаю 0.0 (display-only)",
                     history[-1].get("started_at"),
                     exc,
                 )
@@ -1665,9 +1612,7 @@ def _load_drivers(
 
             baudrate = int(entry.get("baudrate", 9600))
             validate_checksum = bool(entry.get("validate_checksum", True))
-            driver = ThyracontVSP63D(
-                name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock
-            )
+            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock)
         elif itype == "etalon_multiline":
             from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
 
@@ -1700,9 +1645,7 @@ def _load_drivers(
             logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
             continue
 
-        configs.append(
-            InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource)
-        )
+        configs.append(InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource))
         logger.info(
             "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
             name,
@@ -1852,8 +1795,7 @@ async def _interlock_trip_handler(
         )
     except Exception as exc:
         logger.critical(
-            "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
-            "escalating to guaranteed fault.",
+            "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — escalating to guaranteed fault.",
             condition.name,
             condition.action,
             exc,
@@ -1891,8 +1833,7 @@ async def _interlock_dead_channel_handler(
         )
     except Exception as exc:
         logger.critical(
-            "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
-            "escalating to guaranteed fault.",
+            "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — escalating to guaranteed fault.",
             condition.name,
             reading.channel,
             exc,
@@ -1915,9 +1856,7 @@ async def _interlock_dead_channel_handler(
             return False
 
     key = f"{condition.name}:{reading.channel}"
-    if _should_dispatch_dead_channel_alarm(
-        key, escalated, context.dead_channel_alarm_sent
-    ):
+    if _should_dispatch_dead_channel_alarm(key, escalated, context.dead_channel_alarm_sent):
         try:
             await _dispatch_alarm_notification(
                 context.event_bus,
@@ -2088,20 +2027,11 @@ async def _handle_gui_command(
             if context.zmq_publisher is None:
                 return _periodic_barrier_failure("barrier_unavailable")
             nonce = cmd.get("nonce")
-            if (
-                type(nonce) is not str
-                or len(nonce) != 32
-                or any(ch not in "0123456789abcdef" for ch in nonce)
-            ):
+            if type(nonce) is not str or len(nonce) != 32 or any(ch not in "0123456789abcdef" for ch in nonce):
                 return _periodic_barrier_failure("barrier_invalid")
-            return encode_periodic_command_reply(
-                await context.zmq_publisher.barrier(nonce)
-            )
+            return encode_periodic_command_reply(await context.zmq_publisher.barrier(nonce))
         if action == "periodic_alarm_snapshot":
-            if (
-                set(cmd) != {"cmd", "schema"}
-                or cmd.get("schema") != PERIODIC_QUERY_SCHEMA
-            ):
+            if set(cmd) != {"cmd", "schema"} or cmd.get("schema") != PERIODIC_QUERY_SCHEMA:
                 return _periodic_query_failure("snapshot_unavailable")
             return _periodic_snapshot_response(context)
         if action in {
@@ -2119,9 +2049,7 @@ async def _handle_gui_command(
                 elif action == "keithley_stop":
                     await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
                 elif action == "keithley_emergency_off":
-                    await event_logger.log_event(
-                        "keithley", f"\u26a0 Keithley {ch}: аварийное отключение"
-                    )
+                    await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
                     if escalation_service is not None:
                         await escalation_service.escalate(
                             "emergency",
@@ -2155,9 +2083,7 @@ async def _handle_gui_command(
                 return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
             except KeyError as exc:
                 return {"ok": False, "error": str(exc)}
-        _leak_resp = await _handle_leak_rate_command(
-            action, cmd, leak_rate_estimator, _leak_cfg, event_logger
-        )
+        _leak_resp = await _handle_leak_rate_command(action, cmd, leak_rate_estimator, _leak_cfg, event_logger)
         if _leak_resp is not None:
             return _leak_resp
         if action == "alarm_v2_status":
@@ -2276,9 +2202,7 @@ async def _handle_gui_command(
                         timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
                     )
                 except TimeoutError as exc:
-                    raise TimeoutError(
-                        f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)"
-                    ) from exc
+                    raise TimeoutError(f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)") from exc
             else:
                 result = await experiment_call
             # Hook calibration acquisition on experiment lifecycle
@@ -2328,16 +2252,9 @@ async def _handle_gui_command(
                         _exp_id = _exp_info.get("experiment_id") or ""
                         _metadata: dict = {}
                         if _exp_id:
-                            _meta_path = (
-                                experiment_manager.data_dir
-                                / "experiments"
-                                / _exp_id
-                                / "metadata.json"
-                            )
+                            _meta_path = experiment_manager.data_dir / "experiments" / _exp_id / "metadata.json"
                             # H2: offload metadata read to thread.
-                            _metadata = await asyncio.to_thread(
-                                _load_experiment_metadata_sync, _meta_path
-                            )
+                            _metadata = await asyncio.to_thread(_load_experiment_metadata_sync, _meta_path)
                         # F31 H1: build the sink export via the extracted
                         # helper — summary comes from the canonical
                         # "summary_metadata" metadata key, not the empty
@@ -2350,9 +2267,7 @@ async def _handle_gui_command(
                         _alarm_dispatch_tasks.add(_t)
                         _t.add_done_callback(_alarm_dispatch_tasks.discard)
                     except Exception as _exc:  # noqa: BLE001 — fire-and-forget
-                        logger.warning(
-                            "F31: sink dispatch setup failed: %s", _exc, exc_info=True
-                        )
+                        logger.warning("F31: sink dispatch setup failed: %s", _exc, exc_info=True)
             elif result.get("ok") and action == "experiment_advance_phase":
                 phase = cmd.get("phase", "?")
                 await event_logger.log_event("phase", f"Фаза: → {phase}")
@@ -2385,30 +2300,21 @@ async def _handle_gui_command(
                 # entry. Operator can still disarm manually via the
                 # alarm panel footer button. Idempotent: arm() is a
                 # no-op if already armed.
-                if (
-                    phase == "cooldown"
-                    and _cooldown_alarm is not None
-                    and _cooldown_alarm.is_auto_arm_enabled
-                ):
+                if phase == "cooldown" and _cooldown_alarm is not None and _cooldown_alarm.is_auto_arm_enabled:
                     try:
                         armed = _cooldown_alarm.arm()
                         if not armed and _cooldown_alarm.cold_start_skipped:
                             # v0.55.12 — surface the skip explicitly so
                             # the operator log shows why auto-arm
                             # didn't engage on this phase entry.
-                            logger.info(
-                                "CooldownAlarm: auto-arm skipped — "
-                                "cold-start detected"
-                            )
+                            logger.info("CooldownAlarm: auto-arm skipped — cold-start detected")
                         else:
                             logger.info(
                                 "CooldownAlarm: auto-arm на phase=cooldown → %s",
                                 "ARMED" if armed else "FAILED (no model)",
                             )
                     except Exception as _exc:
-                        logger.warning(
-                            "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True
-                        )
+                        logger.warning("CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True)
             return result
         if action == "calibration_acquisition_status":
             return {"ok": True, **calibration_acquisition.stats}
@@ -2441,9 +2347,7 @@ async def _handle_gui_command(
                 "data": {ch: pts for ch, pts in data.items()},
             }
         if action == "cooldown_history_get":
-            return await _run_cooldown_history_command(
-                cmd, experiment_manager, writer
-            )
+            return await _run_cooldown_history_command(cmd, experiment_manager, writer)
         if action in {"log_entry", "log_get"}:
             return await _run_operator_log_command(
                 action,
@@ -2521,11 +2425,7 @@ async def _handle_gui_command(
             if _cooldown_alarm is None:
                 return {"state": "UNAVAILABLE"}
             _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
-            _t_cold_val = (
-                _t_cold_state.value
-                if _t_cold_state is not None and not _t_cold_state.is_stale
-                else None
-            )
+            _t_cold_val = _t_cold_state.value if _t_cold_state is not None and not _t_cold_state.is_stale else None
             return {
                 "state": _cooldown_alarm.state.name,
                 "eta_h": _cooldown_alarm.current_eta_h,
@@ -2564,11 +2464,7 @@ async def _handle_gui_command(
             # was set — the helper records intent in the meta dict;
             # this site materialises the task so it runs on the
             # right loop and gets cleaned up automatically.
-            if (
-                response.get("ok")
-                and action == "multiline.burst_start"
-                and response.get("duration_s") is not None
-            ):
+            if response.get("ok") and action == "multiline.burst_start" and response.get("duration_s") is not None:
                 target_name = response.get("name", "")
                 duration_s = float(response["duration_s"])
 
@@ -2606,6 +2502,11 @@ async def _handle_gui_command(
         logger.error("Ошибка выполнения команды '%s': %s", action, exc)
         return {"ok": False, "error": str(exc)}
 
+
+def _zmq_publisher_drop_count(broker: DataBroker) -> int:
+    """Return the current publisher drop counter without nested wiring logic."""
+
+    return int(broker.stats["zmq_publisher"]["dropped"])
 
 
 async def _run_engine(*, mock: bool = False) -> None:
@@ -2798,15 +2699,11 @@ async def _run_engine(*, mock: bool = False) -> None:
         min_points=_alarm_v2_engine_cfg.rate_min_points,
     )
     _alarm_v2_phase = ExperimentPhaseProvider(experiment_manager)
-    _alarm_v2_setpoint = ExperimentSetpointProvider(
-        experiment_manager, _alarm_v2_engine_cfg.setpoints
-    )
-    alarm_v2_evaluator = AlarmEvaluator(
-        _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
-    )
+    _alarm_v2_setpoint = ExperimentSetpointProvider(experiment_manager, _alarm_v2_engine_cfg.setpoints)
+    alarm_v2_evaluator = AlarmEvaluator(_alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint)
     alarm_v2_state_mgr = AlarmStateManager()
     zmq_pub.configure_periodic_authority(
-        reading_drop_count=lambda: broker.stats["zmq_publisher"]["dropped"],
+        reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
         alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
     )
     # P2-5: interlock non-usable readings emit alarm-v2 events via the same
@@ -2820,8 +2717,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         # the engine), so this branch is reached only when the file exists and
         # parses but defines zero alarms — the message must reflect that.
         logger.info(
-            "Alarm Engine v2: config/alarms_v3.yaml не содержит определений "
-            "алармов — v2-движку нечего оценивать"
+            "Alarm Engine v2: config/alarms_v3.yaml не содержит определений алармов — v2-движку нечего оценивать"
         )
 
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
@@ -2877,11 +2773,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 # bool, fail-closed like the wdog gate — pass the handle only on
                 # an explicit `escalate_to_safety: true`; default keeps None
                 # (alarm-only, byte-identical to prior behavior).
-                safety_manager=(
-                    safety_manager
-                    if _vacuum_cfg.get("escalate_to_safety") is True
-                    else None
-                ),
+                safety_manager=(safety_manager if _vacuum_cfg.get("escalate_to_safety") is True else None),
             )
         except Exception as exc:
             logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
@@ -2900,11 +2792,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _sd_enabled:
         _ch_mgr = get_channel_manager()
         # Build correlation groups from config; channel ids use display prefix (Т1→T1)
-        _sd_alarm_publisher = (
-            alarm_v2_state_mgr
-            if _sd_cfg.get("alarm_publishing_enabled", True)
-            else None
-        )
+        _sd_alarm_publisher = alarm_v2_state_mgr if _sd_cfg.get("alarm_publishing_enabled", True) else None
         sensor_diag = SensorDiagnosticsEngine(
             config=_sd_cfg,
             alarm_publisher=_sd_alarm_publisher,
@@ -2912,17 +2800,12 @@ async def _run_engine(*, mock: bool = False) -> None:
             critical_duration_s=float(_sd_cfg.get("critical_duration_s", 900.0)),
         )
         # Set display names from channel_manager
-        sensor_diag.set_channel_names(
-            {ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()}
-        )
+        sensor_diag.set_channel_names({ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()})
         # v0.55.2 A4: tell the engine which channels are cryogenic so warm
         # references (calibration, flange, vacuum case, structural) don't
         # get scored against cryogenic noise/drift thresholds.
         sensor_diag.set_channel_cold_map(
-            {
-                ch_id: bool(info.get("is_cold", True))
-                for ch_id, info in _ch_mgr.get_all().items()
-            }
+            {ch_id: bool(info.get("is_cold", True)) for ch_id, info in _ch_mgr.get_all().items()}
         )
         logger.info(
             "SensorDiagnostics: enabled, update_interval=%ds, groups=%d, alarm_publishing=%s",
@@ -2954,9 +2837,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         # F1a: while rotation is enabled, retention must not gzip daily readings
         # DBs — rotation owns their lifecycle, and a .db.gz is invisible to
         # every reader (the day-14 gzip starved the day-30 rotation).
-        skip_daily_db_compression=(
-            (housekeeping_raw.get("cold_rotation", {}) or {}).get("enabled") is True
-        ),
+        skip_daily_db_compression=((housekeeping_raw.get("cold_rotation", {}) or {}).get("enabled") is True),
     )
 
     # Cold rotation: aged daily SQLite → Parquet cold storage, once per day at
@@ -3043,15 +2924,12 @@ async def _run_engine(*, mock: bool = False) -> None:
                 # SteadyStatePredictor to CooldownAlarm so its WATCHING
                 # path can short-circuit when the system is quasi-steady.
                 if _cooldown_alarm is not None:
-                    _cooldown_alarm.set_steady_state_predictor(
-                        cooldown_service._ss_predictor
-                    )
+                    _cooldown_alarm.set_steady_state_predictor(cooldown_service._ss_predictor)
         except Exception as exc:
             logger.error("Ошибка создания CooldownService: %s", exc)
     command_context.cooldown_service = cooldown_service
 
     # --- Уведомления (один раз разбираем YAML) ---
-    periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
     _photo_handler: CompositionPhotoHandler | None = None
     escalation_service: EscalationService | None = None
@@ -3066,31 +2944,11 @@ async def _run_engine(*, mock: bool = False) -> None:
             token_valid = bot_token and bot_token != "YOUR_BOT_TOKEN_HERE"
             verify_ssl = bool(tg_cfg.get("verify_ssl", True))
 
-            # PeriodicReporter
-            pr_cfg = notif_raw.get("periodic_report", {})
-            if pr_cfg.get("enabled", False) and token_valid:
-                # Keep this optional import lazy so the engine/manual command
-                # surface does not load matplotlib when periodic reports are off.
-                from cryodaq.notifications.periodic_report import PeriodicReporter
-
-                periodic_reporter = PeriodicReporter(
-                    broker,
-                    alarm_v2_state_mgr,
-                    bot_token=bot_token,
-                    chat_id=tg_cfg.get("chat_id", 0),
-                    report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
-                    chart_hours=float(pr_cfg.get("chart_hours", 2.0)),
-                    include_channels=pr_cfg.get("include_channels"),
-                )
-                logger.info("PeriodicReporter создан")
-
             # TelegramCommandBot
             cmd_cfg = notif_raw.get("commands", {})
             commands_enabled = bool(cmd_cfg.get("enabled", False)) and token_valid
             if commands_enabled:
-                allowed_raw = (
-                    tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
-                )
+                allowed_raw = tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
                 allowed_ids = [int(x) for x in allowed_raw]
                 # TelegramCommandBot raises on empty list,
                 # so refuse to enable cleanly here with a config-error log
@@ -3228,8 +3086,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     await plugin_pipeline.start()
     if cooldown_service is not None:
         await cooldown_service.start()
-    if periodic_reporter is not None:
-        await periodic_reporter.start()
     if telegram_bot is not None:
         await telegram_bot.start()
     if _photo_handler is not None:
@@ -3529,10 +3385,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     if cooldown_service is not None:
         await cooldown_service.stop()
         logger.info("CooldownService остановлен")
-
-    if periodic_reporter is not None:
-        await periodic_reporter.stop()
-        logger.info("PeriodicReporter остановлен")
 
     event_bus.unsubscribe("assistant_zmq_relay")
 

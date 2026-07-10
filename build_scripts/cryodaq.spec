@@ -15,6 +15,7 @@ DEEP_AUDIT_CC.md E.2 for the Windows fork bomb explanation.
 Configs and data live NEXT TO the exe, not inside ``_MEIPASS``. ``paths.py``
 detects ``sys.frozen`` and resolves against ``sys.executable.parent``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,8 +43,10 @@ hidden_imports = [
     "pyqtgraph.canvas",
     # ZMQ
     "zmq",
+    "zmq.asyncio",
     "zmq.backend.cython",
     "zmq.utils",
+    "zmq.utils.monitor",
     "zmq.utils.strtypes",
     "zmq.utils.jsonapi",
     # Serial
@@ -73,6 +76,16 @@ hidden_imports = [
     # msgpack (C extension)
     "msgpack",
     "msgpack._cmsgpack",
+    # H3 outbound transport is loaded through importlib only after exact-on.
+    "aiohttp",
+    "aiohttp.client",
+    "aiohttp.client_exceptions",
+    "aiohttp.client_reqrep",
+    "aiohttp.cookiejar",
+    "aiohttp.connector",
+    "aiohttp.formdata",
+    "aiohttp.payload",
+    "aiohttp.resolver",
     # matplotlib (used in periodic reports)
     "matplotlib",
     "matplotlib.backends.backend_agg",
@@ -81,6 +94,14 @@ hidden_imports = [
     # Our own dynamically-loaded modules
     "cryodaq.engine",
     "cryodaq.launcher",
+    "cryodaq.agents.assistant_bootstrap",
+    "cryodaq.agents.assistant.periodic_png",
+    "cryodaq.agents.assistant.periodic_projection",
+    "cryodaq.agents.assistant.periodic_runtime",
+    "cryodaq.agents.assistant.periodic_telegram",
+    "cryodaq.periodic_config",
+    "cryodaq.periodic_state",
+    "cryodaq.report_process",
     "cryodaq.gui.app",
     "cryodaq.gui.main_window",
     "cryodaq.reporting.__main__",
@@ -94,6 +115,11 @@ hidden_imports = [
     "cryodaq.core.safety_manager",
     "cryodaq.core.scheduler",
     "cryodaq.storage.sqlite_writer",
+    "cryodaq.storage.archive_reader",
+    # H3 archive hydration imports Arrow inside bounded read methods.
+    "pyarrow",
+    "pyarrow.compute",
+    "pyarrow.parquet",
 ]
 
 # Collect every cryodaq submodule (catches anything we missed above).

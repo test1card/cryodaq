@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -54,8 +56,7 @@ def test_double_acquire_same_process(lock_name):
     fd2 = try_acquire_lock(lock_name)
     try:
         assert fd2 is None, (
-            "Same-process second acquire must fail — "
-            "instance lock relies on this to prevent double-start"
+            "Same-process second acquire must fail — instance lock relies on this to prevent double-start"
         )
     finally:
         if fd2 is not None:
@@ -71,6 +72,50 @@ def _acquire_in_subprocess(lock_name: str, acquired_event: mp.Event, release_eve
     acquired_event.set()
     release_event.wait(timeout=10)
     release_lock(fd, lock_name)
+
+
+def _race_nested_parent_creation(
+    lock_dir: str,
+    messages: Any,
+    create_gate: Any,
+    holder_gate: Any,
+) -> None:
+    """Force two spawned contenders to enter the same nested mkdir race."""
+
+    nested_parent = Path(lock_dir) / ".report-locks"
+    original_mkdir = Path.mkdir
+    rendezvoused = False
+
+    def synchronized_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal rendezvoused
+        if path == nested_parent and not rendezvoused:
+            rendezvoused = True
+            messages.put(("ready", os.getpid()))
+            if not create_gate.wait(timeout=5):
+                raise TimeoutError("nested-parent create gate was not released")
+        original_mkdir(path, *args, **kwargs)
+
+    Path.mkdir = synchronized_mkdir  # type: ignore[method-assign]
+    fd: int | None = None
+    try:
+        fd = try_acquire_lock(
+            ".report-locks/periodic-coordinator.lock",
+            lock_dir=Path(lock_dir),
+        )
+        messages.put(("result", os.getpid(), fd is not None))
+        if fd is not None and not holder_gate.wait(timeout=5):
+            raise TimeoutError("lock-holder gate was not released")
+    except BaseException as exc:
+        messages.put(("error", os.getpid(), type(exc).__name__, str(exc)))
+    finally:
+        Path.mkdir = original_mkdir  # type: ignore[method-assign]
+        if fd is not None:
+            release_lock(
+                fd,
+                ".report-locks/periodic-coordinator.lock",
+                unlink=False,
+                lock_dir=Path(lock_dir),
+            )
 
 
 def test_cross_process_lock(lock_name):
@@ -92,6 +137,51 @@ def test_cross_process_lock(lock_name):
 
     release.set()
     proc.join(timeout=5)
+
+
+def test_concurrent_nested_parent_creation_returns_one_owner(tmp_path: Path) -> None:
+    """Concurrent first use creates one safe parent and elects one owner."""
+
+    context = mp.get_context("spawn")
+    messages = context.Queue()
+    create_gate = context.Event()
+    holder_gate = context.Event()
+    processes = [
+        context.Process(
+            target=_race_nested_parent_creation,
+            args=(str(tmp_path), messages, create_gate, holder_gate),
+        )
+        for _ in range(2)
+    ]
+    observed: list[tuple[object, ...]] = []
+    try:
+        for process in processes:
+            process.start()
+        observed.extend(messages.get(timeout=5) for _ in range(2))
+        assert all(item[0] == "ready" for item in observed)
+
+        create_gate.set()
+        observed.extend(messages.get(timeout=5) for _ in range(2))
+        results = [item for item in observed if item[0] == "result"]
+        errors = [item for item in observed if item[0] == "error"]
+        assert errors == []
+        assert sorted(item[2] for item in results) == [False, True]
+
+        nested_parent = tmp_path / ".report-locks"
+        parent_info = nested_parent.lstat()
+        assert stat.S_ISDIR(parent_info.st_mode)
+        assert not stat.S_ISLNK(parent_info.st_mode)
+        if os.name != "nt":
+            assert stat.S_IMODE(parent_info.st_mode) == 0o700
+    finally:
+        create_gate.set()
+        holder_gate.set()
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+    assert all(process.exitcode == 0 for process in processes)
 
 
 def test_lock_released_on_process_death(lock_name):
@@ -197,9 +287,7 @@ def test_lock_rejects_nonregular_and_hardlinked_paths(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "do-not-touch"
 
 
-def test_lock_rejects_path_replacement_during_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_lock_rejects_path_replacement_during_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.instance_lock as module
 
     path = tmp_path / ".replaced.lock"

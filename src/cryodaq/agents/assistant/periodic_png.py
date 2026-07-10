@@ -90,15 +90,12 @@ _KNOWN_RENDER_OUTCOMES = frozenset(
 
 
 def _known_render_outcome(error_code: str) -> bool:
-    return error_code in _KNOWN_RENDER_OUTCOMES or bool(
-        re.fullmatch(r"exit_(?:unknown|-?[0-9]+)", error_code)
-    )
+    return error_code in _KNOWN_RENDER_OUTCOMES or bool(re.fullmatch(r"exit_(?:unknown|-?[0-9]+)", error_code))
 
 
 def _known_input_failure(exc: Exception) -> bool:
     return isinstance(exc, PeriodicInputError) or (
-        isinstance(exc, ReportProcessError)
-        and exc.error_code in {"unsafe_periodic_input", "unsafe_periodic_path"}
+        isinstance(exc, ReportProcessError) and exc.error_code in {"unsafe_periodic_input", "unsafe_periodic_path"}
     )
 
 
@@ -130,9 +127,7 @@ async def _acquire_lock_cancellation_safe(
 ) -> int | None:
     """Do not leak a kernel lock acquired after its waiter is cancelled."""
 
-    task = asyncio.create_task(
-        run_blocking(try_acquire_lock, lock_name, lock_dir=lock_dir)
-    )
+    task = asyncio.create_task(run_blocking(try_acquire_lock, lock_name, lock_dir=lock_dir))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError as cancelled:
@@ -191,10 +186,7 @@ class LiveSourceCut:
         _exact_nonnegative(self.reading_drop_count, "reading_drop_count")
         _exact_nonnegative(self.publish_failure_count, "publish_failure_count")
         _exact_nonnegative(self.alarm_state_revision, "alarm_state_revision")
-        if (
-            not isinstance(self.alarm_state_token, str)
-            or _HASH.fullmatch(self.alarm_state_token) is None
-        ):
+        if not isinstance(self.alarm_state_token, str) or _HASH.fullmatch(self.alarm_state_token) is None:
             raise ValueError("alarm_state_token is invalid")
 
 
@@ -237,6 +229,10 @@ class Clock(Protocol):
     def display_time(self, epoch: int) -> str: ...
 
     async def sleep(self, seconds: float) -> None: ...
+
+
+class PeriodicSourceUnavailable(RuntimeError):
+    """Initial live authority is absent, rather than the H3 runtime failing."""
 
 
 class PeriodicLiveSources(Protocol):
@@ -437,21 +433,15 @@ class PeriodicPngCoordinator:
                 self._readings.mark_history_incomplete("live_hydration_seal_incomplete")
             await self._refresh_alarm_and_seal()
             startup_snapshot = self.projection_snapshot(
-                window_start=(
-                    self._startup_cut.published_at - self._config.chart_window_s
-                ),
+                window_start=(self._startup_cut.published_at - self._config.chart_window_s),
                 window_end=self._startup_cut.published_at,
             )
             await self._set_projection_health(startup_snapshot)
             monotonic_now = self._clock.monotonic()
             self._next_health_heartbeat = monotonic_now + _HEALTH_HEARTBEAT_S
             self._next_alarm_refresh = monotonic_now + _ALARM_REFRESH_S
-            self._loop_task = asyncio.create_task(
-                self._run_loop(), name="periodic_png_coordinator"
-            )
-            self._live_task = asyncio.create_task(
-                self._watch_live(), name="periodic_png_live_source"
-            )
+            self._loop_task = asyncio.create_task(self._run_loop(), name="periodic_png_coordinator")
+            self._live_task = asyncio.create_task(self._watch_live(), name="periodic_png_live_source")
         except asyncio.CancelledError as exc:
             await self._settle_start_cleanup(exc)
         except Exception as exc:
@@ -546,12 +536,8 @@ class PeriodicPngCoordinator:
                 and result.state_token == last_seal.alarm_state_token
             )
             _items, projection_complete = self._alarms.freeze(now=self._clock.wall_time())
-            cuts_complete = self._cuts_complete(
-                self._startup_cut, self._hydration_seal, last_seal
-            )
-            self._last_alarm_complete = bool(
-                tokens_match and projection_complete and cuts_complete
-            )
+            cuts_complete = self._cuts_complete(self._startup_cut, self._hydration_seal, last_seal)
+            self._last_alarm_complete = bool(tokens_match and projection_complete and cuts_complete)
             self._last_seal = last_seal
             if self._last_alarm_complete:
                 return last_seal
@@ -589,9 +575,7 @@ class PeriodicPngCoordinator:
             window_start=window_start,
             window_end=window_end,
             alarms=alarms,
-            alarm_state_complete=(
-                self._last_alarm_complete and alarm_projection_complete and cuts_complete
-            ),
+            alarm_state_complete=(self._last_alarm_complete and alarm_projection_complete and cuts_complete),
         )
         await self._set_projection_health(snapshot)
         monotonic_now = self._clock.monotonic()
@@ -600,20 +584,14 @@ class PeriodicPngCoordinator:
         return snapshot
 
     async def _set_projection_health(self, snapshot: ProjectionSnapshot) -> None:
-        cuts_complete = self._cuts_complete(
-            self._startup_cut, self._hydration_seal, self._last_seal
-        )
+        cuts_complete = self._cuts_complete(self._startup_cut, self._hydration_seal, self._last_seal)
         if self._live_source_failed:
             await self._set_health(
                 "degraded_source",
                 "periodic_live_source_stopped",
                 "periodic live source stopped unexpectedly",
             )
-        elif not (
-            snapshot.history_complete
-            and snapshot.alarm_state_complete
-            and cuts_complete
-        ):
+        elif not (snapshot.history_complete and snapshot.alarm_state_complete and cuts_complete):
             await self._set_health(
                 "degraded_projection",
                 "periodic_projection_incomplete",
@@ -775,9 +753,7 @@ class PeriodicPngCoordinator:
     async def _load_state(self) -> PeriodicStateDocument:
         return await self._run_blocking(load_periodic_state, self._data_dir)
 
-    async def _persist(
-        self, before: PeriodicStateDocument, candidate: PeriodicStateDocument
-    ) -> None:
+    async def _persist(self, before: PeriodicStateDocument, candidate: PeriodicStateDocument) -> None:
         current = _active(before)
         kwargs: dict[str, object] = {}
         if current is not None:
@@ -786,9 +762,7 @@ class PeriodicPngCoordinator:
                 "expected_owner_token": current["owner_token"],
                 "expected_status": PeriodicStatus(current["status"]),
             }
-        await self._run_blocking(
-            write_periodic_state, self._data_dir, candidate, **kwargs
-        )
+        await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
 
     def _logical_now(self, state: PeriodicStateDocument, *, floor: float | None = None) -> float:
         value = max(self._clock.wall_time(), float(state.payload["updated_at"]))
@@ -803,29 +777,25 @@ class PeriodicPngCoordinator:
                 status = "degraded_source"
                 code = "periodic_live_source_stopped"
                 text = "periodic live source stopped unexpectedly"
-            elif not self._cuts_complete(
-                self._startup_cut, self._hydration_seal, self._last_seal
-            ):
+            elif not self._cuts_complete(self._startup_cut, self._hydration_seal, self._last_seal):
                 status = "degraded_projection"
                 code = "periodic_projection_incomplete"
                 text = "periodic projection evidence is incomplete"
         existing_health = state.payload["health"]
-        if (
-            status in {"ready", "degraded_projection", "degraded_tls"}
-            and existing_health["status"]
-            in {
-                "paused_unknown_capacity",
-                "delivery_paused_unknown_capacity",
-            }
-        ):
+        if status in {
+            "ready",
+            "degraded_projection",
+            "degraded_tls",
+        } and existing_health["status"] in {
+            "paused_unknown_capacity",
+            "delivery_paused_unknown_capacity",
+        }:
             status = str(existing_health["status"])
             code = existing_health["error_code"]
             text = str(existing_health["error_text"])
         previous = float(state.payload["updated_at"])
         wall_now = self._clock.wall_time()
-        health_now = (
-            wall_now if wall_now > previous else math.nextafter(previous, math.inf)
-        )
+        health_now = wall_now if wall_now > previous else math.nextafter(previous, math.inf)
         candidate = set_periodic_health(
             state,
             status=status,
@@ -867,9 +837,7 @@ class PeriodicPngCoordinator:
             state = await self._load_state()
             if _active(state) is not None:
                 return False
-            refreshed_latest = latest_completed_slot(
-                self._clock.wall_time(), self._config.interval_s
-            )
+            refreshed_latest = latest_completed_slot(self._clock.wall_time(), self._config.interval_s)
             if refreshed_latest != latest:
                 return True
             high_water = state.payload["high_water_slot_end"]
@@ -997,21 +965,26 @@ class PeriodicPngCoordinator:
         self._next_health_heartbeat = monotonic_now + _HEALTH_HEARTBEAT_S
 
     def _retry_due(self, active: Mapping[str, object]) -> bool:
-        key = (str(active["slot_id"]), str(active["status"]), float(active["not_before"]))
+        key = (
+            str(active["slot_id"]),
+            str(active["status"]),
+            float(active["not_before"]),
+        )
         deadline = self._retry_deadlines.get(key)
         if deadline is None:
             self._retry_deadlines.clear()
             remaining = max(
                 0.0,
-                min(_MAX_RESTART_RETRY_S, float(active["not_before"]) - self._clock.wall_time()),
+                min(
+                    _MAX_RESTART_RETRY_S,
+                    float(active["not_before"]) - self._clock.wall_time(),
+                ),
             )
             deadline = self._clock.monotonic() + remaining
             self._retry_deadlines[key] = deadline
         return self._clock.monotonic() >= deadline
 
-    async def _recover_rendering(
-        self, state: PeriodicStateDocument, active: dict[str, Any]
-    ) -> bool:
+    async def _recover_rendering(self, state: PeriodicStateDocument, active: dict[str, Any]) -> bool:
         try:
             result = await self._run_blocking(
                 self._runner.recover_periodic,
@@ -1026,9 +999,7 @@ class PeriodicPngCoordinator:
         if result is not None:
             await self._adopt_render_result(state, active, result)
             return True
-        fd = await _acquire_lock_cancellation_safe(
-            self._run_blocking, PERIODIC_RENDER_LOCK, lock_dir=self._data_dir
-        )
+        fd = await _acquire_lock_cancellation_safe(self._run_blocking, PERIODIC_RENDER_LOCK, lock_dir=self._data_dir)
         if fd is None:
             return False
         release_lock(
@@ -1045,9 +1016,7 @@ class PeriodicPngCoordinator:
         )
         return True
 
-    async def _render_pending(
-        self, state: PeriodicStateDocument, active: dict[str, Any]
-    ) -> bool:
+    async def _render_pending(self, state: PeriodicStateDocument, active: dict[str, Any]) -> bool:
         try:
             await self._ensure_input(active)
         except asyncio.CancelledError:
@@ -1058,9 +1027,7 @@ class PeriodicPngCoordinator:
                 raise
             current = await self._load_state()
             current_active = _active(current)
-            if self._same_active(
-                active, current_active, expected_status=PeriodicStatus.PENDING
-            ):
+            if self._same_active(active, current_active, expected_status=PeriodicStatus.PENDING):
                 await self._record_render_failure(
                     current,
                     current_active,
@@ -1103,28 +1070,20 @@ class PeriodicPngCoordinator:
                 return False
             if not _known_render_outcome(exc.error_code):
                 raise
-            return await self._settle_generate_failure(
-                rendering_active, code=exc.error_code
-            )
+            return await self._settle_generate_failure(rendering_active, code=exc.error_code)
         except asyncio.CancelledError:
             raise
         except Exception:
-            return await self._settle_generate_failure(
-                rendering_active, code="render_failed"
-            )
+            return await self._settle_generate_failure(rendering_active, code="render_failed")
 
         current = await self._load_state()
         current_active = _active(current)
-        if not self._same_active(
-            rendering_active, current_active, expected_status=PeriodicStatus.RENDERING
-        ):
+        if not self._same_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
             return False
         await self._adopt_render_result(current, current_active, result)
         return True
 
-    async def _settle_generate_failure(
-        self, rendering_active: dict[str, Any], *, code: str
-    ) -> bool:
+    async def _settle_generate_failure(self, rendering_active: dict[str, Any], *, code: str) -> bool:
         # Even an ordinary process-launch/runtime failure may have raced a
         # successfully promoted immutable final.  Recovery is authoritative.
         recovered = await self._run_blocking(
@@ -1135,9 +1094,7 @@ class PeriodicPngCoordinator:
         )
         current = await self._load_state()
         current_active = _active(current)
-        if not self._same_active(
-            rendering_active, current_active, expected_status=PeriodicStatus.RENDERING
-        ):
+        if not self._same_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
             return False
         if recovered is not None:
             await self._adopt_render_result(current, current_active, recovered)
@@ -1145,17 +1102,13 @@ class PeriodicPngCoordinator:
         await self._record_render_failure(
             current,
             current_active,
-            code=(
-                code if re.fullmatch(r"[a-z0-9_]{1,128}", code) else "render_failed"
-            ),
+            code=(code if re.fullmatch(r"[a-z0-9_]{1,128}", code) else "render_failed"),
             text="periodic render failed",
         )
         return True
 
     async def _ensure_input(self, active: dict[str, Any]) -> None:
-        path = await self._run_blocking(
-            periodic_input_path, self._data_dir, active["generation_id"]
-        )
+        path = await self._run_blocking(periodic_input_path, self._data_dir, active["generation_id"])
         exists = await self._run_blocking(os.path.lexists, path)
         if exists:
             frozen = await self._run_blocking(
@@ -1174,8 +1127,7 @@ class PeriodicPngCoordinator:
                 and frozen.slot.config_fingerprint == active["config_fingerprint"]
                 and frozen.render.display_time == active["display_time"]
                 and frozen.render.include_channels == self._config.include_channels
-                and frozen.render.max_points_per_channel
-                == self._config.max_points_per_channel
+                and frozen.render.max_points_per_channel == self._config.max_points_per_channel
                 and frozen.render.max_total_points == self._config.max_total_points
                 and frozen.render.max_input_bytes == self._config.max_input_bytes
             ):
@@ -1193,9 +1145,7 @@ class PeriodicPngCoordinator:
             expected_max_input_bytes=self._config.max_input_bytes,
         )
 
-    def _input_payload(
-        self, active: Mapping[str, object], snapshot: ProjectionSnapshot
-    ) -> dict[str, object]:
+    def _input_payload(self, active: Mapping[str, object], snapshot: ProjectionSnapshot) -> dict[str, object]:
         return {
             "schema": 1,
             "generation_id": active["generation_id"],
@@ -1211,9 +1161,7 @@ class PeriodicPngCoordinator:
             "render": {
                 "display_time": active["display_time"],
                 "include_channels": (
-                    None
-                    if self._config.include_channels is None
-                    else list(self._config.include_channels)
+                    None if self._config.include_channels is None else list(self._config.include_channels)
                 ),
                 "max_points_per_channel": self._config.max_points_per_channel,
                 "max_total_points": self._config.max_total_points,
@@ -1308,9 +1256,7 @@ class PeriodicPngCoordinator:
             )
         await self._persist(state, failed)
 
-    async def _deliver(
-        self, state: PeriodicStateDocument, active: dict[str, Any], now: float
-    ) -> bool:
+    async def _deliver(self, state: PeriodicStateDocument, active: dict[str, Any], now: float) -> bool:
         artifact = _artifact_from_active(active)
         try:
             photo = await self._run_blocking(self._artifact_reader, self._data_dir, artifact)
@@ -1359,11 +1305,7 @@ class PeriodicPngCoordinator:
             owner_token=active["owner_token"],
             now=self._logical_now(
                 fresh,
-                floor=(
-                    float(active["not_before"])
-                    if expected_status is PeriodicStatus.FAILED
-                    else None
-                ),
+                floor=(float(active["not_before"]) if expected_status is PeriodicStatus.FAILED else None),
             ),
         )
         await self._persist(fresh, delivering)
@@ -1377,13 +1319,15 @@ class PeriodicPngCoordinator:
         )
         return True
 
-    async def _delivery_transaction(
-        self, active: dict[str, Any], photo: bytes, caption: str
-    ) -> None:
+    async def _delivery_transaction(self, active: dict[str, Any], photo: bytes, caption: str) -> None:
         try:
             result = await self._telegram.send_photo(photo, caption)
         except asyncio.CancelledError:
-            await self._persist_unknown(active, "telegram_cancelled_unknown", "delivery was cancelled after invocation")
+            await self._persist_unknown(
+                active,
+                "telegram_cancelled_unknown",
+                "delivery was cancelled after invocation",
+            )
             raise
         except Exception:
             await self._persist_unknown(active, "telegram_internal_unknown", "delivery outcome is unknown")
@@ -1415,15 +1359,12 @@ class PeriodicPngCoordinator:
                 )
             else:
                 retryable = (
-                    result.outcome is TelegramOutcome.REJECTED
-                    and result.error_code == "telegram_retryable_rejection"
+                    result.outcome is TelegramOutcome.REJECTED and result.error_code == "telegram_retryable_rejection"
                 ) or (
                     result.outcome is TelegramOutcome.NOT_SENT
                     and result.error_code in {"telegram_connect_failed", "client_busy"}
                 )
-                certainty = (
-                    "rejected" if result.outcome is TelegramOutcome.REJECTED else "not_sent"
-                )
+                certainty = "rejected" if result.outcome is TelegramOutcome.REJECTED else "not_sent"
                 count = int(active["delivery_attempt_count"])
                 if retryable and count < int(active["max_delivery_attempts"]):
                     delay = (
@@ -1485,9 +1426,7 @@ class PeriodicPngCoordinator:
     ) -> Any:
         task = asyncio.ensure_future(awaitable)
         if heartbeat:
-            return await self._await_transaction_with_heartbeat(
-                task, settlement_lock=settlement_lock
-            )
+            return await self._await_transaction_with_heartbeat(task, settlement_lock=settlement_lock)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError as cancelled:
@@ -1512,9 +1451,7 @@ class PeriodicPngCoordinator:
             delay = max(0.001, deadline - monotonic_now)
             timer = asyncio.create_task(self._clock.sleep(delay))
             try:
-                done, _pending = await asyncio.wait(
-                    {task, timer}, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _pending = await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
             except asyncio.CancelledError as cancelled:
                 timer.cancel()
                 await asyncio.gather(timer, return_exceptions=True)
@@ -1605,6 +1542,7 @@ class PeriodicPngSupervisor:
         self._leader_fd: int | None = None
         self._coordinator: PeriodicPngCoordinator | None = None
         self._run_task: asyncio.Task[None] | None = None
+        self._published_health_record: PeriodicStateDocument | None = None
 
     async def run(self) -> None:
         if self._run_task is not None and self._run_task is not asyncio.current_task():
@@ -1619,9 +1557,7 @@ class PeriodicPngSupervisor:
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
                 except Exception:
-                    backoff_index = await self._handle_config_loader_failure(
-                        backoff_index
-                    )
+                    backoff_index = await self._handle_config_loader_failure(backoff_index)
                     continue
                 if not load.requested:
                     if self._leader_fd is not None:
@@ -1646,9 +1582,7 @@ class PeriodicPngSupervisor:
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
                 except Exception:
-                    backoff_index = await self._handle_config_loader_failure(
-                        backoff_index
-                    )
+                    backoff_index = await self._handle_config_loader_failure(backoff_index)
                     continue
                 if not load.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1661,9 +1595,7 @@ class PeriodicPngSupervisor:
                         await self._sleep_or_stop(_CONFIG_POLL_S)
                     else:
                         self._release_leader()
-                        await self._sleep_or_stop(
-                            _ELECTION_BACKOFF[min(backoff_index, 5)]
-                        )
+                        await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                         backoff_index = min(backoff_index + 1, 5)
                     continue
 
@@ -1689,13 +1621,9 @@ class PeriodicPngSupervisor:
                     continue
 
                 try:
-                    refreshed = await self._run_blocking(
-                        self._loader, self._config_dir
-                    )
+                    refreshed = await self._run_blocking(self._loader, self._config_dir)
                 except Exception:
-                    backoff_index = await self._handle_config_loader_failure(
-                        backoff_index
-                    )
+                    backoff_index = await self._handle_config_loader_failure(backoff_index)
                     continue
                 if not refreshed.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1708,9 +1636,7 @@ class PeriodicPngSupervisor:
                         await self._sleep_or_stop(_CONFIG_POLL_S)
                     else:
                         self._release_leader()
-                        await self._sleep_or_stop(
-                            _ELECTION_BACKOFF[min(backoff_index, 5)]
-                        )
+                        await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                         backoff_index = min(backoff_index + 1, 5)
                     continue
                 assert self._coordinator is not None
@@ -1720,14 +1646,13 @@ class PeriodicPngSupervisor:
                         self._release_leader()
                         if self._stop_requested:
                             return
-                        await self._sleep_or_stop(
-                            _ELECTION_BACKOFF[min(backoff_index, 5)]
-                        )
+                        await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                         backoff_index = min(backoff_index + 1, 5)
             if self._leader_fd is not None:
                 await self._stop_then_write_orderly(disabled=False)
                 self._release_leader()
         except asyncio.CancelledError as cancelled:
+
             async def cancelled_cleanup() -> None:
                 if self._leader_fd is not None:
                     await self._stop_then_write_orderly(disabled=False)
@@ -1750,8 +1675,45 @@ class PeriodicPngSupervisor:
             try:
                 await self._stop_coordinator()
             finally:
+                if self._stop_requested and self._leader_fd is None and self._published_health_record is not None:
+                    await self._write_stopped_if_unowned()
                 self._release_leader()
                 self._run_task = None
+
+    async def _write_stopped_if_unowned(self) -> None:
+        """Publish terminal health only while holding otherwise-free authority."""
+
+        try:
+            leader_fd = await _acquire_lock_cancellation_safe(
+                self._run_blocking,
+                PERIODIC_LEADER_LOCK,
+                lock_dir=self._data_dir,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+        if leader_fd is None:
+            # Another supervisor is authoritative.  Its health must win.
+            return
+        self._leader_fd = leader_fd
+        try:
+            published = self._published_health_record
+            if published is None:
+                return
+            try:
+                current = await self._run_blocking(load_periodic_state, self._data_dir)
+            except Exception:
+                return
+            if _active(current) is not None or current.payload != published.payload:
+                # Leadership may have changed hands and become free again
+                # before this old idle supervisor stopped.  Exact durable
+                # provenance, not merely a familiar health status, is the
+                # authority to replace that record with terminal health.
+                return
+            await self._write_orderly_health(disabled=False)
+        finally:
+            self._release_leader()
 
     async def _handle_config_loader_failure(self, backoff_index: int) -> int:
         if self._leader_fd is not None:
@@ -1772,9 +1734,22 @@ class PeriodicPngSupervisor:
             except BaseException as cleanup_error:
                 raise cancelled from cleanup_error
             raise
+        except PeriodicSourceUnavailable:
+            await self._stop_then_mark_engine_unavailable()
+            return False
         except Exception:
             await self._stop_then_mark_runtime_failed()
             return False
+
+    async def _stop_then_mark_engine_unavailable(self) -> None:
+        cleanup_error: BaseException | None = None
+        try:
+            await self._stop_coordinator()
+        except BaseException as exc:
+            cleanup_error = exc
+        await self._write_engine_unavailable_health()
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def _stop_then_mark_runtime_failed(self) -> None:
         cleanup_error: BaseException | None = None
@@ -1796,9 +1771,7 @@ class PeriodicPngSupervisor:
         if cleanup_error is not None:
             raise cleanup_error
 
-    async def _stop_then_write_degraded_config(
-        self, load: PeriodicPngConfigLoad
-    ) -> bool:
+    async def _stop_then_write_degraded_config(self, load: PeriodicPngConfigLoad) -> bool:
         cleanup_error: BaseException | None = None
         try:
             await self._stop_coordinator()
@@ -1855,9 +1828,8 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(
-                write_periodic_state, self._data_dir, candidate, **kwargs
-            )
+            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            self._published_health_record = candidate
             return True
         except Exception:
             return False
@@ -1872,11 +1844,7 @@ class PeriodicPngSupervisor:
                 state,
                 status="disabled" if disabled else "stopped",
                 code="periodic_disabled" if disabled else "periodic_stopped",
-                text=(
-                    "periodic reporting is disabled"
-                    if disabled
-                    else "periodic runtime is stopped"
-                ),
+                text=("periodic reporting is disabled" if disabled else "periodic runtime is stopped"),
                 now=now,
             )
             active = _active(state)
@@ -1887,9 +1855,8 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(
-                write_periodic_state, self._data_dir, candidate, **kwargs
-            )
+            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            self._published_health_record = candidate
         except Exception:
             return
 
@@ -1914,9 +1881,34 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(
-                write_periodic_state, self._data_dir, candidate, **kwargs
+            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            self._published_health_record = candidate
+        except Exception:
+            return
+
+    async def _write_engine_unavailable_health(self) -> None:
+        try:
+            state = await self._run_blocking(load_periodic_state, self._data_dir)
+            previous = float(state.payload["updated_at"])
+            wall_now = self._clock.wall_time()
+            now = wall_now if wall_now > previous else math.nextafter(previous, math.inf)
+            candidate = set_periodic_health(
+                state,
+                status="degraded_source",
+                code="periodic_engine_unavailable",
+                text="periodic engine authority is unavailable",
+                now=now,
             )
+            active = _active(state)
+            kwargs: dict[str, object] = {}
+            if active is not None:
+                kwargs = {
+                    "expected_slot_id": active["slot_id"],
+                    "expected_owner_token": active["owner_token"],
+                    "expected_status": PeriodicStatus(active["status"]),
+                }
+            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            self._published_health_record = candidate
         except Exception:
             return
 

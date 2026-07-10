@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from cryodaq.agents.assistant.periodic_png import PeriodicPngSupervisor
+from cryodaq.agents.assistant.periodic_png import (
+    PeriodicPngSupervisor,
+    PeriodicSourceUnavailable,
+)
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 from cryodaq.periodic_config import PeriodicPngConfigLoad
 from cryodaq.periodic_state import (
@@ -156,9 +159,7 @@ async def test_standby_without_leadership_constructs_zero_runtime_resources(
         await supervisor.stop()
         await task
     finally:
-        release_lock(
-            incumbent, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path
-        )
+        release_lock(incumbent, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
 
 
 @pytest.mark.asyncio
@@ -184,13 +185,13 @@ def test_h2_and_h3_kernel_locks_are_independent(tmp_path: Path) -> None:
         finally:
             release_lock(h3, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
     finally:
-        release_lock(
-            h2, ".report-locks/coordinator.lock", unlink=False, lock_dir=tmp_path
-        )
+        release_lock(h2, ".report-locks/coordinator.lock", unlink=False, lock_dir=tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(tmp_path: Path) -> None:
+async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(
+    tmp_path: Path,
+) -> None:
     coordinator = Coordinator()
     supervisor = PeriodicPngSupervisor(
         data_dir=tmp_path,
@@ -222,7 +223,9 @@ async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_invalid_requested_config_writes_redacted_health_without_runtime(tmp_path: Path) -> None:
+async def test_invalid_requested_config_writes_redacted_health_without_runtime(
+    tmp_path: Path,
+) -> None:
     made = 0
 
     def factory(_config):
@@ -356,17 +359,13 @@ async def test_initial_factory_failure_marks_nonready_before_release_and_backoff
         data_dir=tmp_path,
         config_dir=tmp_path,
         periodic_allowed=True,
-        coordinator_factory=lambda _config: (_ for _ in ()).throw(
-            RuntimeError("factory failed")
-        ),
+        coordinator_factory=lambda _config: (_ for _ in ()).throw(RuntimeError("factory failed")),
         config_loader=lambda _path: _runnable_load(),
         clock=clock,
     )
     task = asyncio.create_task(supervisor.run())
     await clock.entered.wait()
-    assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-        "degraded_runtime"
-    )
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_runtime")
     fd = None
     for _ in range(100):
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
@@ -377,6 +376,165 @@ async def test_initial_factory_failure_marks_nonready_before_release_and_backoff
     release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
     await supervisor.stop()
     await task
+
+
+@pytest.mark.asyncio
+async def test_initial_engine_absence_has_exact_allowed_idle_health(
+    tmp_path: Path,
+) -> None:
+    class NoEngine(Coordinator):
+        async def start(self) -> None:
+            self.started += 1
+            raise PeriodicSourceUnavailable("no engine authority")
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    coordinator = NoEngine()
+    clock = BackoffClock()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: coordinator,
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    task = asyncio.create_task(supervisor.run())
+    await clock.entered.wait()
+
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_source"
+    assert health["error_code"] == "periodic_engine_unavailable"
+    assert health["error_text"] == "periodic engine authority is unavailable"
+    assert coordinator.stopped == 1
+    degraded_updated_at = health["updated_at"]
+
+    await supervisor.stop()
+    await task
+    stopped = load_periodic_state(tmp_path).payload["health"]
+    assert stopped["status"] == "stopped"
+    assert stopped["error_code"] == "periodic_stopped"
+    assert stopped["error_text"] == "periodic runtime is stopped"
+    assert stopped["updated_at"] > degraded_updated_at
+
+
+@pytest.mark.asyncio
+async def test_idle_stop_does_not_overwrite_a_new_active_owner(tmp_path: Path) -> None:
+    class NoEngine(Coordinator):
+        async def start(self) -> None:
+            self.started += 1
+            raise PeriodicSourceUnavailable("no engine authority")
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    clock = BackoffClock()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: NoEngine(),
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    task = asyncio.create_task(supervisor.run())
+    await clock.entered.wait()
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_source")
+
+    incumbent = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert incumbent is not None
+    try:
+        state = load_periodic_state(tmp_path)
+        ready = set_periodic_health(
+            state,
+            status="ready",
+            code=None,
+            text="",
+            now=200.0,
+        )
+        write_periodic_state(tmp_path, ready)
+        await supervisor.stop()
+        await task
+        assert load_periodic_state(tmp_path).payload["health"] == {
+            "status": "ready",
+            "error_code": None,
+            "error_text": "",
+            "updated_at": 200.0,
+        }
+    finally:
+        release_lock(
+            incumbent,
+            PERIODIC_LEADER_LOCK,
+            unlink=False,
+            lock_dir=tmp_path,
+        )
+
+
+@pytest.mark.asyncio
+async def test_idle_stop_does_not_overwrite_newer_released_owner_health(
+    tmp_path: Path,
+) -> None:
+    class NoEngine(Coordinator):
+        async def start(self) -> None:
+            self.started += 1
+            raise PeriodicSourceUnavailable("no engine authority")
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    clock = BackoffClock()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: NoEngine(),
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    task = asyncio.create_task(supervisor.run())
+    await clock.entered.wait()
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_source")
+
+    newer_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert newer_owner is not None
+    state = load_periodic_state(tmp_path)
+    ready = set_periodic_health(
+        state,
+        status="ready",
+        code=None,
+        text="",
+        now=200.0,
+    )
+    write_periodic_state(tmp_path, ready)
+    release_lock(
+        newer_owner,
+        PERIODIC_LEADER_LOCK,
+        unlink=False,
+        lock_dir=tmp_path,
+    )
+
+    await supervisor.stop()
+    await task
+    assert load_periodic_state(tmp_path).payload == ready.payload
 
 
 @pytest.mark.asyncio
@@ -408,15 +566,10 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
     )
     task = asyncio.create_task(supervisor.run())
     for _ in range(100):
-        if (
-            (await _load_stable(tmp_path)).payload["health"]["status"]
-            == "degraded_runtime"
-        ):
+        if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
-    assert (await _load_stable(tmp_path)).payload["health"]["status"] == (
-        "degraded_runtime"
-    )
+    assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("degraded_runtime")
     fd = None
     for _ in range(100):
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
@@ -468,9 +621,7 @@ async def test_reload_factory_failure_replaces_prior_ready_with_nonready(
     first = _config()
     second = replace(first, telegram_chat_id=2)
     state = load_periodic_state(tmp_path)
-    ready = set_periodic_health(
-        state, status="ready", code=None, text="", now=1.0
-    )
+    ready = set_periodic_health(state, status="ready", code=None, text="", now=1.0)
     write_periodic_state(tmp_path, ready)
     loads = 0
 
@@ -515,15 +666,10 @@ async def test_reload_factory_failure_replaces_prior_ready_with_nonready(
     clock.entered.clear()
     clock.release.set()
     for _ in range(100):
-        if (
-            (await _load_stable(tmp_path)).payload["health"]["status"]
-            == "degraded_runtime"
-        ):
+        if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
-    assert (await _load_stable(tmp_path)).payload["health"]["status"] == (
-        "degraded_runtime"
-    )
+    assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("degraded_runtime")
     assert original.stopped == 1
     await supervisor.stop()
     await task
@@ -837,12 +983,14 @@ async def test_unrequested_requested_cycle_stays_alive_without_host_restart(
 
     requested = False
     clock.pulse()
-    for _ in range(100):
-        if coordinators[0].stopped == 1:
-            break
-        await asyncio.sleep(0.001)
+    async with asyncio.timeout(5):
+        while True:
+            state = await _load_stable(tmp_path)
+            if state.payload["health"]["status"] == "disabled":
+                break
+            await asyncio.sleep(0)
     assert coordinators[0].stopped == 1
-    assert (await _load_stable(tmp_path)).payload["health"]["status"] == "disabled"
+    assert state.payload["health"]["status"] == "disabled"
     fd = None
     for _ in range(100):
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)

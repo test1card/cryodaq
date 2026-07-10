@@ -30,15 +30,17 @@ def _lock_path(lock_name: str, lock_dir: Path | None) -> Path:
     parent = root
     for part in relative.parts[:-1]:
         parent /= part
-        if os.path.lexists(parent):
-            info = parent.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise ValueError("lock parent must be a real directory")
-        else:
-            parent.mkdir(mode=0o700)
-            info = parent.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise ValueError("lock parent must be a real directory")
+        if not os.path.lexists(parent):
+            try:
+                parent.mkdir(mode=0o700)
+            except FileExistsError:
+                # Another contender may create the shared lock parent after
+                # our existence check.  Validate what won the race below;
+                # files and symlinks remain forbidden.
+                pass
+        info = parent.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError("lock parent must be a real directory")
     path = parent / relative.name
     resolved_parent = parent.resolve(strict=True)
     if resolved_parent != root and root not in resolved_parent.parents:
@@ -64,11 +66,7 @@ def try_acquire_lock(lock_name: str, *, lock_dir: Path | None = None) -> int | N
     try:
         if os.path.lexists(lock_path):
             before = lock_path.lstat()
-            if (
-                stat.S_ISLNK(before.st_mode)
-                or not stat.S_ISREG(before.st_mode)
-                or before.st_nlink != 1
-            ):
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 return None
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(lock_path), flags, 0o600)
