@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from cryodaq.drivers.base import Reading
@@ -18,6 +18,12 @@ from cryodaq.drivers.base import Reading
 logger = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_SIZE = 10_000
+
+# Closed engine-transport marker.  It is deliberately outside the public
+# Reading schema: DataBroker overwrites any caller-supplied value on a detached
+# Reading copy, and the ZMQ publisher must strip it from its own metadata copy
+# before encoding public metadata.
+PERSISTENCE_AUTHORITATIVE_METADATA_KEY = "_cryodaq_persistence_authoritative"
 
 
 class OverflowPolicy(Enum):
@@ -81,9 +87,7 @@ class DataBroker:
             if name in self._subscribers:
                 raise ValueError(f"Подписчик '{name}' уже зарегистрирован")
             queue: asyncio.Queue[Reading] = asyncio.Queue(maxsize=maxsize)
-            self._subscribers[name] = Subscription(
-                name=name, queue=queue, policy=policy, filter_fn=filter_fn
-            )
+            self._subscribers[name] = Subscription(name=name, queue=queue, policy=policy, filter_fn=filter_fn)
             logger.info("Подписчик '%s' зарегистрирован (maxsize=%d)", name, maxsize)
             return queue
 
@@ -94,25 +98,49 @@ class DataBroker:
             if sub:
                 logger.info("Подписчик '%s' удалён (потеряно сообщений: %d)", name, sub.dropped)
 
-    async def publish(self, reading: Reading) -> None:
-        """Разослать Reading всем подписчикам."""
+    async def publish(
+        self,
+        reading: Reading,
+        *,
+        persistence_authoritative: bool = False,
+    ) -> None:
+        """Разослать Reading всем подписчикам.
+
+        ``persistence_authoritative`` is an internal provenance bit for closed
+        engine transports.  A detached Reading and metadata mapping prevent a
+        caller from forging the bit or observing a broker-side mutation.
+        """
+        if type(persistence_authoritative) is not bool:
+            raise TypeError("persistence_authoritative must be exactly bool")
+        metadata = dict(reading.metadata)
+        metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, None)
+        if persistence_authoritative:
+            metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] = persistence_authoritative
+        delivered = replace(
+            reading,
+            metadata=metadata,
+        )
         self._total_published += 1
         for sub in tuple(self._subscribers.values()):
             try:
-                if sub.filter_fn and not sub.filter_fn(reading):
-                    continue
+                if sub.filter_fn:
+                    filter_reading = replace(delivered, metadata=dict(delivered.metadata))
+                    if not sub.filter_fn(filter_reading):
+                        continue
                 if sub.queue.full():
                     if sub.policy == OverflowPolicy.DROP_OLDEST:
                         try:
                             sub.queue.get_nowait()
                         except asyncio.QueueEmpty:
                             pass
+                        else:
+                            sub.queue.task_done()
                         sub.dropped += 1
                     elif sub.policy == OverflowPolicy.DROP_NEWEST:
                         sub.dropped += 1
                         continue
                 try:
-                    sub.queue.put_nowait(reading)
+                    sub.queue.put_nowait(delivered)
                 except asyncio.QueueFull:
                     sub.dropped += 1
             except asyncio.CancelledError:
@@ -123,10 +151,20 @@ class DataBroker:
                     sub.name,
                 )
 
-    async def publish_batch(self, readings: list[Reading]) -> None:
-        """Опубликовать пакет показаний."""
+    async def publish_batch(
+        self,
+        readings: list[Reading],
+        *,
+        persistence_authoritative: bool = False,
+    ) -> None:
+        """Опубликовать пакет показаний with one exact provenance value."""
+        if type(persistence_authoritative) is not bool:
+            raise TypeError("persistence_authoritative must be exactly bool")
         for reading in readings:
-            await self.publish(reading)
+            await self.publish(
+                reading,
+                persistence_authoritative=persistence_authoritative,
+            )
 
     @property
     def stats(self) -> dict[str, dict[str, int]]:
