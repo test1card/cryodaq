@@ -1321,7 +1321,6 @@ def _run_experiment_command(
             custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
             end_time=_parse_experiment_time(cmd.get("end_time")),
         )
-        # Report is generated inside finalize_experiment() by ExperimentManager.
         return {"ok": True, "experiment": info.to_payload()}
 
     if action == "experiment_abort":
@@ -1559,7 +1558,10 @@ def _load_drivers(
                 calibration_store=calibration_store,
             )
         elif itype == "keithley_2604b":
-            from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
+            from cryodaq.drivers.instruments.keithley_2604b import (
+                Keithley2604B,
+                _validate_wdog_timeout_s,
+            )
 
             wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
             # Operator-selected mode (off|best_effort|required) wins; else fall
@@ -1575,8 +1577,11 @@ def _load_drivers(
                 # truthy in Python and would arm this safety path on a config
                 # typo. Only the literal boolean True enables it.
                 wdog_enabled = wdog_cfg.get("enabled", False) is True
-            wdog_timeout_s = float(wdog_cfg.get("timeout_s", 5.0))
-            # Spurious-trip guard: pets ride the poll loop, so a firmware
+            # Validate before interpolation into TSP. In particular, NaN would
+            # make every elapsed > timeout comparison false, while bool/zero/
+            # negative values can create accidental immediate trips.
+            wdog_timeout_s = _validate_wdog_timeout_s(wdog_cfg.get("timeout_s", 5.0))
+            # Spurious-trip guard: pets ride the poll loop, so a late-pet
             # deadline shorter than ~2 poll intervals risks a false trip on a
             # single slow poll. Warn (do not fail, do not clamp) — the operator
             # owns the trade-off.
@@ -1584,7 +1589,7 @@ def _load_drivers(
             if _armed_mode and wdog_timeout_s < 2.0 * poll_interval_s:
                 logger.warning(
                     "Keithley watchdog timeout_s=%.2f is < 2×poll_interval_s=%.2f "
-                    "— a single slow poll may spurious-trip the firmware watchdog",
+                    "— a single slow poll may trigger the late-pet watchdog",
                     wdog_timeout_s,
                     poll_interval_s,
                 )

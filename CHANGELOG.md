@@ -22,6 +22,20 @@
 
 ### Changed
 
+- TSP watchdog v3 исправляет safety-описание и поведение: удалён прежний
+  автономный timer-path, использовавший недопустимые по reference manual
+  атрибуты/action. Скрипт теперь явно сообщает `cryodaq_wdog_autonomous=0` и
+  реализует только late-pet stall-recovery. `required` fail-closed отказывает
+  с v3; `best_effort` один раз пишет CRITICAL о нулевом full-host-death
+  покрытии. Полный host-death OFF, независимое измерение terminal V/I/P и
+  внешний latching cutout остаются физическими гейтами. 5 W уточнён как
+  host-only target cap, а не сохраняющийся после смерти хоста energy bound.
+  Все protocol readback теперь принимают только конечные точные значения
+  (version=3, flags=0/1); malformed pre-upload latch не разрешает стирающую
+  upload-операцию. Trip evidence потребляется только явным operator fault-ack
+  после повторного verified both-output OFF, затем late-pet check
+  реактивируется. До ack RUN блокируется без ожидания monitor tick; power-cycle
+  `nil` обрабатывается тем же явным recovery path.
 - Alarm Engine v1 (`src/cryodaq/core/alarm.py`, `config/alarms.yaml`) удалён.
   `keithley_overpower` и `disk_space_warning`/`disk_space_critical` в
   `config/alarms_v3.yaml` ссылались на несуществующие короткие имена каналов
@@ -250,7 +264,7 @@ config-когерентность). Три из четырёх ревью наш
 ## [0.62.0] — 2026-07-07 — TSP watchdog: operator-selected mode (off | best_effort | required)
 
 Phase 5 распаркована без стенда: бинарный `watchdog.enabled` заменён на
-выбираемый оператором режим прошивочного dead-man бэкстопа Keithley 2604B.
+выбираемый оператором режим TSP late-pet проверки Keithley 2604B.
 Host-side семантика каждого режима полностью реализована и покрыта
 тестами; дефолт `off` байт-идентичен прежнему поведению. Волна прошла
 внешнее ревью (1 HIGH найден и закрыт с re-check PASS).
@@ -289,15 +303,15 @@ Host-side семантика каждого режима полностью ре
   last_pet: опоздавший pet убивает выходы и защёлкивает trip, а не
   прощает себя). Честное покрытие задокументировано (docs/instruments.md,
   dev-индекс модулей): armed-режимы дают stall-recovery kill + latch + reconcile
-  SafetyManager; полную смерть хоста прикрывает crash-recovery force-OFF
-  на следующем connect; автономный dead-man (trigger.timer) — единственный
-  оставшийся bench-verified апгрейд.
+  SafetyManager; полную смерть хоста этот путь не покрывает. Последующий
+  crash-recovery force-OFF — восстановление, а не host-death protection.
 
 ### Known Issues
 
-- Прошивочный run-механизм не проверен на стенде; `required` гейтит на
-  host-наблюдаемых взводе и защёлке. Bench-план: docs (lab checklist,
-  Phase 7).
+- На момент релиза autonomous path ошибочно считался только bench-pending.
+  Позднейшая проверка reference manual установила, что тот timer-path был
+  документированно некорректен; исправление и новый fail-closed contract — в
+  Unreleased. Bench-план разделён на A8a–A8e.
 
 ### Test baseline
 
@@ -638,12 +652,12 @@ edge-фиксы вошли отдельными коммитами.
   через backend’овый `baseline.json`, delta к эталону; компактный verdict-badge
   (НОРМА / ДЕГРАДАЦИЯ / НЕТ ДАННЫХ) в `Аналитика`, скрыт при выключенной фиче или
   без закреплённого эталона (3ef27cb).
-- **Плумбинг Keithley TSP dead-man watchdog (inert, default-OFF).**
-  `tsp/cryodaq_wdog.lua` — чистый watchdog для обоих SMU-каналов: по пропущенному
+- **Плумбинг Keithley TSP late-pet watchdog (inert, default-OFF).**
+  `tsp/cryodaq_wdog.lua` — проверка для обоих SMU-каналов: поздний pet после
   deadline гасит оба выхода и латчит `cryodaq_wdog_tripped`. Драйвер получает
   arm-on-connect / pet-on-poll / disarm-on-stop под флагом
   `keithley.watchdog.enabled` (default false); при выключенном флаге поток команд
-  байт-в-байт идентичен прежнему (test-proven). SafetyManager сверяет firmware-trip
+  байт-в-байт идентичен прежнему (test-proven). SafetyManager сверяет TSP-trip
   в `FAULT_LATCHED`, так что сработавший watchdog нельзя молча пере-взвести.
   Аппаратного взаимодействия нет; go-live — отдельная bench-фаза (195f6f0).
 
@@ -705,10 +719,10 @@ edge-фиксы вошли отдельными коммитами.
 - **Windows frozen-build smoke для регенерированного lock — manual gate pending.**
   Проверка RAG lancedb-import + parquet `tz=UTC` на замороженной Windows-сборке
   ещё не прогнана; закрыть до следующего релиза.
-- **TSP-watchdog inert за `keithley.watchdog.enabled=false`.** Go-live bench-gated:
-  run-loop владеет однопоточным TSP-интерпретатором, pet’ы нельзя обслужить из
-  того же FIFO — нужна `trigger.timer` / background-script переработка
-  (задокументирована в header `tsp/cryodaq_wdog.lua`).
+- **TSP-watchdog inert за `keithley.watchdog.enabled=false`.** Полный host-death
+  OFF не был реализован. Позднейшая проверка reference manual отвергла прежний
+  timer-проект; актуальный documented-API redesign и внешний final element
+  описаны в Unreleased и lab checklist.
 - **Hardlink-escape на truncating csv / `.340` экспортах — принято.** Экспортный
   каталог operator-controlled; риск ограничен доверенным периметром.
 

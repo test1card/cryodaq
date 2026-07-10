@@ -76,7 +76,7 @@
 28. **REST-периметр (v0.58 / v0.60).** `/api/v1` — read-only GET-фасад (Pydantic-модели как field-whitelist) плюс ровно два authenticated write-endpoint (`POST /log` append, `POST /alarms/{id}/ack`) за `require_write_token` (токен в gitignored `config/web.local.yaml`, fail-closed default). Loopback-only bind; `zmq_bridge` отбивает wildcard-bind.
 29. **Path jail (v0.58).** Все operator-supplied пути импорта/экспорта калибровки confined через `core/path_jail.resolve_within()` (realpath + commonpath + normcase); escape → `{ok: false}`.
 30. **ZMQ size-caps (v0.58).** `ZMQ_MAXMSGSIZE` на командном REP (256 KiB) и data-SUB (2 MiB) до bind/connect; `_unpack_reading` — bounded msgpack с per-type `max_*_len`.
-31. **TSP watchdog — operator-selected mode (v0.62).** `keithley.watchdog.mode`: `off` (default, байт-идентичен прежнему потоку команд) | `best_effort` | `required` (fail-closed на connect). Host-side семантика полностью реализована и покрыта тестами; прошивочный run-механизм (`trigger.timer`) — открытый стендовый гейт.
+31. **TSP late-pet check — operator-selected mode (v0.62).** `keithley.watchdog.mode`: `off` (driver default, байт-идентичен прежнему потоку команд) | `best_effort` | `required`. V3 явно неавтономен: `best_effort` покрывает только stall-then-recover, а `required` fail-closed отказывает при `cryodaq_wdog_autonomous=0`. Полный host-death OFF требует нового документированного решения и независимого стендового доказательства.
 
 ---
 
@@ -154,7 +154,12 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 1. **Гейт версии SQLite на лабораторном Ubuntu ПК** — подтвердить, что движок линкуется с безопасной версией (или срабатывает self-heal fallback).
 2. **Верификация H5 / ZMQ idle-death** на текущем лабораторном ПК (регрессионный гейт `diag_zmq_direct_req.py`, 180 s без зависаний).
 3. **Runtime-калибровка LakeShore на реальном железе** — per-channel KRDG/SRDG, консервативный откат на KRDG вне диапазона.
-4. **Стендовый проход TSP watchdog Keithley (armed-mode)** — только на макетной (dummy) нагрузке и безопасном низком уровне, НИКОГДА на нагревателе криостата. Снимает ручной гейт «TSP watchdog go-live».
+4. **Keithley A8a–A8e, не один armed-mode checkbox** — A8a (upload/version/
+   explicit non-autonomous contract) и A8b (late-pet stall-recovery) выполняются
+   на dummy-нагрузке; A8c (host death без последующей команды), A8d
+   (независимые terminal V/I/P + trip time) и A8e (внешний final element +
+   common-cause proof) остаются физическими блокерами. Ни один подпункт не
+   заменяет другой; Phase C заблокирована до A8c–A8e.
 5. **Smoke frozen-сборки на Windows** — `install.bat` + ярлык + запуск лаунчера. Снимает ручной гейт Windows frozen-build smoke.
 
 ### Известная проблема
@@ -182,8 +187,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 15. **Cold-storage lossless** — архивный Parquet хранит сырые пары `(value, status)`; маскирование делают reader-ы на чтении; ротация идемпотентна (index пишется до удаления; sweep удаляет только байт-идентичный оригинал по `source_md5`).
 16. **REST write-поверхность — ровно два endpoint-а** (log append, alarm ack) by design; source control, setpoint-ы, OFF-пути, калибровка и lifecycle эксперимента через REST недостижимы.
 17. **REP trust-model** — unauthenticated loopback REP by-design для single-operator lab (D7.2 accepted); LAN-доступ только через SSH-туннель, никогда bind 0.0.0.0.
-18. **TSP watchdog — operator-selected mode**, default `off` байт-идентичен прежнему поведению; safety-регуляция host-side, watchdog — прошивочный бэкстоп.
-19. **Три ступени safety-регуляции** — SafetyManager (host, единственный авторитет source on/off), interlock-engine (пороги, делегирует действия), опциональный TSP-watchdog (firmware dead-man).
+18. **TSP watchdog — operator-selected mode**, driver default `off`
+    байт-идентичен прежнему поведению; v3 — только неавтономный late-pet check.
+    `required` отказывает при autonomous=0; независимого host-death бэкстопа в
+    SMU нет.
+19. **Ступени safety-регуляции** — SafetyManager (host, единственный авторитет source on/off), interlock-engine (пороги, делегирует действия), опциональный TSP late-pet check. Независимый host-death final element пока не реализован и блокирует Phase C.
 
 ---
 

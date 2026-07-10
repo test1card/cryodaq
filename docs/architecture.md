@@ -198,7 +198,10 @@ the GUI as a safety authority.
 
 **Out of scope:** real-time DAQ at microsecond cadence, hardware PID loops
 running on Python, multi-station federation. Safety regulation is host-side;
-the Keithley TSP firmware watchdog (`tsp/cryodaq_wdog.lua`) is an
-operator-selectable backstop (`keithley.watchdog.mode: off | best_effort |
-required`, default off) — its autonomous dead-man mechanism remains
-bench-unverified.
+the Keithley TSP v3 script (`tsp/cryodaq_wdog.lua`) is an operator-selectable
+software late-pet check (`keithley.watchdog.mode: off | best_effort |
+required`). It is explicitly non-autonomous: `best_effort` covers only
+stall-then-recover, while `required` refuses v3 because its independent
+autonomous contract bit is 0. Host-death energy removal remains a physical
+architecture and proof-test gate, preferably using an independent latching
+cutout rather than another path inside the same SMU.

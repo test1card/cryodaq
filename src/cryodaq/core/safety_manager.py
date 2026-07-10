@@ -694,6 +694,38 @@ class SafetyManager:
                 }
 
             self._recovery_reason = reason.strip()
+            # Watchdog trip evidence is consumed only by this explicit
+            # operator-authorized recovery path. The driver first re-verifies
+            # both outputs OFF, then atomically clears the TSP latch and
+            # reactivates late-pet checking. Any readback/transport ambiguity
+            # keeps FAULT_LATCHED and returns an actionable error; reconnect is
+            # explicit operator work, never a hidden monitor-loop side effect.
+            wdog_ack = getattr(self._keithley, "acknowledge_wdog_trip", None)
+            if callable(wdog_ack):
+                try:
+                    ack_result = wdog_ack()
+                    wdog_ok = (
+                        bool(await ack_result)
+                        if inspect.isawaitable(ack_result)
+                        else bool(ack_result)
+                    )
+                except Exception as exc:
+                    logger.critical("Watchdog trip acknowledgment failed: %s", exc)
+                    wdog_ok = False
+                if not wdog_ok:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "error": (
+                            "Watchdog trip evidence could not be acknowledged "
+                            "after verified OFF; fault remains latched. Retry "
+                            "emergency OFF, then acknowledge, or explicitly "
+                            "disconnect/reconnect the Keithley. With "
+                            "watchdog.mode=required and non-autonomous v3, "
+                            "explicitly select best_effort first (off only "
+                            "intentionally disables the TSP path)."
+                        ),
+                    }
             # Phase 2a H.1: clear persistence-failure latch on the writer
             # via the engine-wired callback. This is what unblocks scheduler
             # polling — DiskMonitor only logs recovery, it does not clear.
@@ -1059,6 +1091,15 @@ class SafetyManager:
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()
 
+        if (
+            self._keithley is not None
+            and getattr(self._keithley, "watchdog_trip_pending", False) is True
+        ):
+            return False, (
+                "Keithley watchdog has unconsumed prior-trip evidence — "
+                "verified OFF and explicit fault acknowledgment required before RUN"
+            )
+
         for pattern in self._config.critical_channels:
             matched = False
             for ch, (ts, value, status) in self._latest.items():
@@ -1132,6 +1173,21 @@ class SafetyManager:
     async def _run_checks(self) -> None:
         now = time.monotonic()
 
+        # A pre-upload trip latch found during connect is preserved by the
+        # driver without re-uploading the script. Surface that evidence even
+        # while SAFE_OFF/READY so RUN cannot bypass operator acknowledgment.
+        if (
+            self._keithley is not None
+            and not self._mock
+            and getattr(self._keithley, "watchdog_trip_pending", False) is True
+            and self._state != SafetyState.FAULT_LATCHED
+        ):
+            await self._fault(
+                "Keithley watchdog has unconsumed prior-trip evidence; "
+                "outputs require verified OFF and explicit acknowledgment"
+            )
+            return
+
         if self._state == SafetyState.MANUAL_RECOVERY:
             ok, _ = self._check_preconditions()
             if ok:
@@ -1166,8 +1222,10 @@ class SafetyManager:
                     return
 
         if self._keithley is not None and not self._mock:
-            # Watchdog reconcile: if the firmware dead-man watchdog killed the
-            # outputs while the host was away, latch FAULT. Silently re-arming
+            # Watchdog reconcile: if the TSP late-pet check latched after its
+            # OFF commands, latch FAULT. This is not independent proof of
+            # terminal de-energization or any action during complete host death.
+            # Silently re-arming
             # over a tripped watchdog is worse than having no watchdog. Inert
             # unless the driver's watchdog is enabled+armed (wdog_tripped()
             # returns False, no bus I/O, under the default-OFF flag). getattr +
@@ -1179,11 +1237,14 @@ class SafetyManager:
                     result = wdog_check()
                     tripped = await result if inspect.isawaitable(result) else False
                 except Exception as exc:
-                    logger.error("Watchdog reconcile query failed: %s", exc)
-                    tripped = False
+                    await self._fault(
+                        f"Keithley watchdog state readback invalid/unavailable: {exc}"
+                    )
+                    return
                 if tripped:
                     await self._fault(
-                        "Keithley firmware watchdog tripped — outputs killed while host away"
+                        "Keithley late-pet watchdog tripped — TSP issued "
+                        "both-output OFF when host polling resumed after the deadline"
                     )
                     return
 

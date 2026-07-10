@@ -1,4 +1,4 @@
-"""TSP dead-man watchdog plumbing for the Keithley 2604B.
+"""TSP software late-pet watchdog plumbing for the Keithley 2604B.
 
 All behaviour is gated behind ``_wdog_enabled`` (default False). The default-OFF
 path MUST emit a command stream byte-identical to today (zero ``cryodaq_wdog``
@@ -8,6 +8,7 @@ strings). Tests drive a fake TSP transport and assert exact command strings.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -34,11 +35,11 @@ class _RecordingTransport:
         self._query_raises_on = query_raises_on
         self._opened = False
         self.wdog_tripped_raw = "0"
-        # Post-upload integrity readbacks (A8). Defaults model a healthy arm:
-        # version matches the driver constant, and cryodaq_wdog_run() has set
-        # active=1 / tripped=0. write() below mutates these to mirror the
-        # firmware state transitions so latch-then-arm tests stay realistic.
-        self.wdog_version_raw = "2"
+        # Post-upload integrity readbacks (A8). Version 3 is intentionally
+        # non-autonomous; required mode must refuse it while best_effort may
+        # activate the software late-pet check.
+        self.wdog_version_raw = "3"
+        self.wdog_autonomous_raw = "0"
         self.wdog_active_raw = "0"
 
     async def open(self, resource: str) -> None:
@@ -57,6 +58,8 @@ class _RecordingTransport:
             return "Keithley Instruments Inc., Model 2604B"
         if "cryodaq_wdog_version" in c:
             return self.wdog_version_raw
+        if "cryodaq_wdog_autonomous" in c:
+            return self.wdog_autonomous_raw
         if "cryodaq_wdog_active" in c:
             return self.wdog_active_raw
         if "cryodaq_wdog_tripped" in c:
@@ -78,12 +81,48 @@ class _RecordingTransport:
         if cmd == "cryodaq_wdog_run()":
             self.wdog_active_raw = "1"
             self.wdog_tripped_raw = "0"
+        elif cmd == "cryodaq_wdog_acknowledge()":
+            self.wdog_active_raw = "1"
+            self.wdog_tripped_raw = "0"
         elif cmd == "cryodaq_wdog_disarm()":
             self.wdog_active_raw = "0"
 
 
 def _wdog_writes(transport: _RecordingTransport) -> list[str]:
     return [w for w in transport.writes if "cryodaq_wdog" in w or "CRYODAQ_WDOG" in w]
+
+
+def _lua_script() -> str:
+    return (
+        Path(__file__).resolve().parents[2] / "tsp" / "cryodaq_wdog.lua"
+    ).read_text(encoding="utf-8")
+
+
+def test_lua_v3_is_explicitly_non_autonomous() -> None:
+    script = _lua_script()
+    assert "CRYODAQ_WDOG_VERSION = 3" in script
+    assert "cryodaq_wdog_autonomous = 0" in script
+    assert "cryodaq_wdog_timer_armed = 0" in script
+    assert "function cryodaq_wdog_shutdown()" in script
+    assert "local function cryodaq_wdog_shutdown()" not in script
+    assert "function cryodaq_wdog_acknowledge()" in script
+
+
+def test_lua_v3_has_no_invalid_timer_or_source_action_contract() -> None:
+    script = _lua_script()
+    assert ".enable" not in script
+    assert "trigger.timer" not in script
+    assert "trigger.source.action" not in script
+    assert "SOURCE_IDLE" not in script
+    assert "cryodaq_wdog_arm_timer" not in script
+    assert "cryodaq_wdog_kick_timer" not in script
+
+
+def test_lua_v3_documents_integer_second_strict_boundary() -> None:
+    script = _lua_script()
+    assert "os.time()" in script
+    assert "one-second granularity" in script
+    assert "Strict `>`" in script
 
 
 def _driver(*, enabled: bool, mock: bool = False, timeout_s: float = 5.0):
@@ -160,6 +199,137 @@ async def test_disarm_on_disconnect() -> None:
 
     assert "cryodaq_wdog_disarm()" in t.writes
     assert drv._wdog_armed is False
+
+
+async def test_operator_ack_consumes_trip_only_after_verified_off() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    t.wdog_tripped_raw = "1"
+    t.wdog_active_raw = "0"
+    t.writes.clear()
+
+    assert await drv.acknowledge_wdog_trip() is True
+
+    ack_idx = t.writes.index("cryodaq_wdog_acknowledge()")
+    assert t.writes.index("smua.source.output = smua.OUTPUT_OFF") < ack_idx
+    assert t.writes.index("smub.source.output = smub.OUTPUT_OFF") < ack_idx
+    assert t.wdog_tripped_raw == "0"
+    assert t.wdog_active_raw == "1"
+    assert drv._wdog_armed is True
+    assert drv._wdog_autonomous is False
+    assert drv.watchdog_trip_pending is False
+
+
+async def test_operator_ack_refuses_to_clear_trip_when_off_unverified() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    t.wdog_tripped_raw = "1"
+    t.wdog_active_raw = "0"
+    original_query = t.query
+
+    async def _query_output_still_on(cmd: str, timeout_ms: int | None = None) -> str:
+        if "source.output" in cmd:
+            return "1"
+        return await original_query(cmd, timeout_ms)
+
+    t.query = _query_output_still_on  # type: ignore[assignment]
+    assert await drv.acknowledge_wdog_trip() is False
+    assert "cryodaq_wdog_acknowledge()" not in t.writes
+    assert t.wdog_tripped_raw == "1"
+    assert drv.watchdog_trip_pending is True
+
+
+async def test_operator_ack_bad_readback_disarms_and_stays_failed() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    t.wdog_tripped_raw = "1"
+    t.wdog_active_raw = "0"
+    original_write = t.write
+
+    async def _write_bad_ack_state(cmd: str) -> None:
+        await original_write(cmd)
+        if cmd == "cryodaq_wdog_acknowledge()":
+            t.wdog_active_raw = "nan"
+
+    t.write = _write_bad_ack_state  # type: ignore[assignment]
+    assert await drv.acknowledge_wdog_trip() is False
+    assert "cryodaq_wdog_disarm()" in t.writes
+    assert drv._wdog_armed is False
+    assert drv.watchdog_trip_pending is True
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "2", "0.5", "true", ""])
+async def test_runtime_trip_readback_rejects_non_exact_flag(raw) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    t.wdog_tripped_raw = raw
+
+    with pytest.raises(ValueError):
+        await drv.wdog_tripped()
+    assert drv.watchdog_trip_pending is False
+
+
+async def test_runtime_exact_trip_sets_host_pending_evidence() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    t.wdog_tripped_raw = "1"
+
+    assert await drv.wdog_tripped() is True
+    assert drv.watchdog_trip_pending is True
+
+
+async def test_preexisting_v3_latch_connect_then_explicit_ack_recovers() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_tripped_raw = "1"
+    drv._transport = t
+    await drv.connect()
+    assert drv.watchdog_trip_pending is True
+    assert drv._wdog_armed is False
+
+    assert await drv.acknowledge_wdog_trip() is True
+    assert "cryodaq_wdog_acknowledge()" in t.writes
+    assert drv.watchdog_trip_pending is False
+    assert drv._wdog_armed is True
+
+
+async def test_power_cycle_nil_after_host_pending_allows_explicit_v3_reactivation() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    drv._wdog_trip_pending = True
+    drv._wdog_armed = False
+    t.wdog_tripped_raw = "nil"
+    t.wdog_version_raw = "nil"
+    original_write = t.write
+
+    async def _write_models_fresh_upload(cmd: str) -> None:
+        await original_write(cmd)
+        if "CRYODAQ_WDOG_VERSION = 3" in cmd:
+            t.wdog_version_raw = "3"
+            t.wdog_autonomous_raw = "0"
+            t.wdog_active_raw = "0"
+            t.wdog_tripped_raw = "0"
+
+    t.write = _write_models_fresh_upload  # type: ignore[assignment]
+    t.writes.clear()
+
+    assert await drv.acknowledge_wdog_trip() is True
+    assert any("CRYODAQ_WDOG_VERSION = 3" in w for w in t.writes)
+    assert "cryodaq_wdog_run()" in t.writes
+    assert drv.watchdog_trip_pending is False
+    assert drv._wdog_armed is True
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +484,21 @@ def test_default_timeout_is_five_seconds() -> None:
     assert drv._wdog_timeout_s == pytest.approx(5.0)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [True, False, "5", None, float("nan"), float("inf"), float("-inf"), 0, -1, 300.1],
+)
+def test_watchdog_timeout_rejects_invalid_or_unsafe_values(value) -> None:
+    with pytest.raises(ValueError, match="watchdog_timeout_s"):
+        Keithley2604B("k2604", "USB0::FAKE", watchdog_timeout_s=value)
+
+
+@pytest.mark.parametrize("value", [1, 1.0, 5, 300, 300.0])
+def test_watchdog_timeout_accepts_finite_supported_range(value) -> None:
+    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_timeout_s=value)
+    assert drv._wdog_timeout_s == pytest.approx(float(value))
+
+
 # ---------------------------------------------------------------------------
 # (i) config parse is strict-bool: a quoted YAML string must fail closed
 # ---------------------------------------------------------------------------
@@ -391,6 +576,7 @@ async def test_mode_best_effort_happy_arms() -> None:
     await drv.connect()
     assert drv._connected is True
     assert drv._wdog_armed is True
+    assert drv._wdog_autonomous is False
     assert "cryodaq_wdog_run()" in t.writes
 
 
@@ -442,6 +628,9 @@ async def test_mode_required_run_fail_raises() -> None:
     # EXACT run() command, not the script upload (which also contains the
     # substring "cryodaq_wdog_run" as part of the function definition).
     t = _RecordingTransport()
+    # Reach the downstream ambiguous-run path by modelling a future script
+    # that has separately established the autonomous contract.
+    t.wdog_autonomous_raw = "1"
     original_write = t.write
 
     async def _write_fail_run_only(cmd: str) -> None:
@@ -459,48 +648,43 @@ async def test_mode_required_run_fail_raises() -> None:
     assert "cryodaq_wdog_disarm()" in t.writes
 
 
-async def test_latch_read_before_upload_and_proceeds(caplog) -> None:
-    """DELTA 1/2: a latched past-trip is read BEFORE the upload wipes it, logs
-    CRITICAL, and arming PROCEEDS in armed modes (no operator lockout)."""
+async def test_latch_read_before_upload_is_preserved_for_operator_ack(caplog) -> None:
+    """A prior trip is exposed without the upload resetting its evidence."""
     drv = _mode_driver("required")
     t = _RecordingTransport()
-    t.wdog_tripped_raw = "1"  # firmware latched a kill while host was away
+    t.wdog_tripped_raw = "1"  # prior late-pet check latched a trip
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise — pre-existing latch is not a failure
+        await drv.connect()
 
     assert drv._connected is True
-    assert drv._wdog_armed is True
+    assert drv._wdog_armed is False
+    assert drv.watchdog_trip_pending is True
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
-    # The latch query must appear BEFORE the script upload in the call log.
-    kinds = t.calls
-    latch_idx = next(
-        i for i, (kind, cmd) in enumerate(kinds)
-        if kind == "query" and "cryodaq_wdog_tripped" in cmd
-    )
-    upload_idx = next(
-        i for i, (kind, cmd) in enumerate(kinds)
-        if kind == "write" and "function cryodaq_wdog_pet" in cmd
-    )
-    assert latch_idx < upload_idx
+    assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
+    assert "operator acknowledgment" in " ".join(
+        r.getMessage() for r in caplog.records
+    ).lower()
 
 
 async def test_latch_read_before_upload_best_effort_too() -> None:
-    """Latch read + CRITICAL proceed applies in best_effort as well."""
+    """Evidence preservation applies in best_effort as well."""
     drv = _mode_driver("best_effort")
     t = _RecordingTransport()
     t.wdog_tripped_raw = "1"
     drv._transport = t
     await drv.connect()
     assert drv._connected is True
-    assert drv._wdog_armed is True
+    assert drv._wdog_armed is False
+    assert drv.watchdog_trip_pending is True
+    assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
 
 
 async def test_latch_read_transport_fail_required_raises_and_closes(caplog) -> None:
     """HIGH: a TRANSPORT failure on the pre-upload latch read (state UNKNOWN,
     not "no latch") must abort connect in required mode AND close the transport.
     The script must NOT be uploaded — a re-upload would run
-    ``cryodaq_wdog_tripped = 0`` and erase a possible past firmware kill."""
+    ``cryodaq_wdog_tripped = 0`` and erase a possible prior trip."""
     drv = _mode_driver("required")
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_tripped")
     drv._transport = t
@@ -538,12 +722,13 @@ async def test_latch_read_transport_fail_best_effort_degrades(caplog) -> None:
     assert "cryodaq_wdog_pet()" not in t.writes
 
 
-async def test_latch_read_unparseable_response_is_untripped() -> None:
-    """A SUCCESSFUL query returning an unparseable value (fresh instrument
-    prints ``nil``) is genuinely "no latch to read" → arm proceeds normally."""
+@pytest.mark.parametrize("sentinel", ["nil", " NIL "])
+async def test_latch_read_explicit_fresh_sentinel_is_untripped(sentinel) -> None:
+    """Only explicit fresh-instrument sentinels permit the first upload."""
     drv = _mode_driver("required")
     t = _RecordingTransport()
-    t.wdog_tripped_raw = "nil"
+    t.wdog_tripped_raw = sentinel
+    t.wdog_autonomous_raw = "1"  # isolate latch parsing from the v3 gate
     drv._transport = t
     await drv.connect()  # must NOT raise
     assert drv._connected is True
@@ -551,13 +736,106 @@ async def test_latch_read_unparseable_response_is_untripped() -> None:
     assert "cryodaq_wdog_run()" in t.writes
 
 
-async def test_mode_required_happy_arms() -> None:
-    drv = _mode_driver("required")
-    t = _RecordingTransport()  # tripped_raw defaults to "0"
+@pytest.mark.parametrize(
+    "raw",
+    ["garbage", "undefined", "nan", "inf", "-inf", "2", "-1", "0.5", "", "true"],
+)
+@pytest.mark.parametrize("mode", ["best_effort", "required"])
+async def test_latch_malformed_preserves_evidence_without_upload(raw, mode, caplog) -> None:
+    drv = _mode_driver(mode)
+    t = _RecordingTransport()
+    t.wdog_tripped_raw = raw
     drv._transport = t
-    await drv.connect()
+    with caplog.at_level(logging.CRITICAL):
+        if mode == "required":
+            with pytest.raises(Exception):
+                await drv.connect()
+        else:
+            await drv.connect()
+    assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
+    assert "cryodaq_wdog_run()" not in t.writes
+    assert drv._wdog_armed is False
+    assert "unknown" in " ".join(r.getMessage() for r in caplog.records).lower()
+
+
+async def test_mode_required_refuses_non_autonomous_v3(caplog) -> None:
+    drv = _mode_driver("required")
+    t = _RecordingTransport()  # v3 reports cryodaq_wdog_autonomous=0
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        with pytest.raises(Exception):
+            await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
+    assert drv._wdog_autonomous is False
+    assert t._opened is False
+    assert "cryodaq_wdog_run()" not in t.writes
+    assert "required" in " ".join(r.getMessage() for r in caplog.records).lower()
+
+
+@pytest.mark.parametrize("raw", ["0", "2", "true", "nil", ""])
+async def test_required_accepts_only_literal_numeric_one(raw) -> None:
+    drv = _mode_driver("required")
+    t = _RecordingTransport()
+    t.wdog_autonomous_raw = raw
+    drv._transport = t
+    with pytest.raises(Exception):
+        await drv.connect()
+    assert drv._wdog_autonomous is False
+    assert "cryodaq_wdog_run()" not in t.writes
+
+
+async def test_best_effort_non_autonomous_warning_is_bounded(caplog) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()
+        await drv.read_channels()
+        await drv.read_channels()
+    degraded = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL and "non-autonomous" in r.getMessage().lower()
+    ]
+    assert len(degraded) == 1
+    assert "zero full-host-death coverage" in degraded[0].getMessage().lower()
+    assert drv._wdog_armed is True
+    assert drv._wdog_autonomous is False
+
+
+async def test_best_effort_autonomous_readback_failure_still_runs_late_pet(caplog) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_autonomous")
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()
     assert drv._connected is True
     assert drv._wdog_armed is True
+    assert drv._wdog_autonomous is False
+    assert "cryodaq_wdog_run()" in t.writes
+    assert "zero full-host-death coverage" in " ".join(
+        r.getMessage() for r in caplog.records
+    ).lower()
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "2", "-1", "0.5", "true", ""])
+async def test_best_effort_invalid_autonomous_flag_is_rejected_but_late_pet_runs(
+    raw, caplog
+) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_autonomous_raw = raw
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()
+    assert drv._connected is True
+    assert drv._wdog_armed is True
+    assert drv._wdog_autonomous is False
+    assert "cryodaq_wdog_run()" in t.writes
+    assert "readback failed" in " ".join(
+        r.getMessage() for r in caplog.records
+    ).lower()
 
 
 def test_alias_enabled_true_maps_to_best_effort() -> None:
@@ -632,7 +910,7 @@ async def test_version_stamp_readback_matches_and_arms() -> None:
     """Happy path: firmware version equals the driver constant → arm proceeds
     and the version query is issued AFTER the script upload."""
     drv = _mode_driver("best_effort")
-    t = _RecordingTransport()  # wdog_version_raw defaults to the matching "2"
+    t = _RecordingTransport()  # wdog_version_raw defaults to matching v3
     drv._transport = t
     await drv.connect()
     assert drv._wdog_armed is True
@@ -644,7 +922,29 @@ async def test_version_stamp_readback_matches_and_arms() -> None:
         i for i, (kind, cmd) in enumerate(t.calls)
         if kind == "query" and "CRYODAQ_WDOG_VERSION" in cmd
     )
-    assert upload_idx < ver_idx
+    autonomous_idx = next(
+        i
+        for i, (kind, cmd) in enumerate(t.calls)
+        if kind == "query" and "cryodaq_wdog_autonomous" in cmd
+    )
+    run_idx = next(
+        i
+        for i, (kind, cmd) in enumerate(t.calls)
+        if kind == "write" and cmd == "cryodaq_wdog_run()"
+    )
+    assert upload_idx < ver_idx < autonomous_idx < run_idx
+
+
+async def test_autonomous_readback_failure_required_refuses_before_run() -> None:
+    drv = _mode_driver("required")
+    t = _RecordingTransport(query_raises_on="cryodaq_wdog_autonomous")
+    drv._transport = t
+    with pytest.raises(Exception):
+        await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
+    assert drv._wdog_autonomous is False
+    assert "cryodaq_wdog_run()" not in t.writes
 
 
 async def test_version_mismatch_best_effort_degrades(caplog) -> None:
@@ -690,8 +990,24 @@ async def test_version_unparseable_required_raises() -> None:
     assert drv._connected is False
 
 
+@pytest.mark.parametrize(
+    "raw", ["3.9", "2", "nan", "inf", "-inf", "true", "", "  "]
+)
+async def test_version_readback_requires_exact_finite_v3(raw, caplog) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_version_raw = raw
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()
+    assert drv._connected is True
+    assert drv._wdog_armed is False
+    assert "cryodaq_wdog_run()" not in t.writes
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
 async def test_arm_state_readback_active_false_best_effort_degrades(caplog) -> None:
-    """Post-run readback shows the firmware did NOT arm (active=0): best_effort
+    """Post-run readback shows the script did not activate (active=0): best_effort
     refuses to set _wdog_armed and continues host-only."""
     drv = _mode_driver("best_effort")
     t = _RecordingTransport()
@@ -717,6 +1033,7 @@ async def test_arm_state_readback_active_false_required_raises() -> None:
     """Post-run active=0 in required is fail-CLOSED."""
     drv = _mode_driver("required")
     t = _RecordingTransport()
+    t.wdog_autonomous_raw = "1"  # reach downstream active readback
     original_write = t.write
 
     async def _write_swallow_run(cmd: str) -> None:
@@ -731,11 +1048,51 @@ async def test_arm_state_readback_active_false_required_raises() -> None:
     assert drv._wdog_armed is False
 
 
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("active", "nan"),
+        ("active", "inf"),
+        ("active", "-inf"),
+        ("active", "2"),
+        ("active", "0.5"),
+        ("active", "true"),
+        ("active", ""),
+        ("tripped", "nan"),
+        ("tripped", "inf"),
+        ("tripped", "-inf"),
+        ("tripped", "2"),
+        ("tripped", "0.5"),
+        ("tripped", "true"),
+        ("tripped", ""),
+    ],
+)
+async def test_post_run_state_requires_exact_zero_one(field, raw, caplog) -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    original_write = t.write
+
+    async def _write_bad_state(cmd: str) -> None:
+        await original_write(cmd)
+        if cmd == "cryodaq_wdog_run()":
+            if field == "active":
+                t.wdog_active_raw = raw
+            else:
+                t.wdog_tripped_raw = raw
+
+    t.write = _write_bad_state  # type: ignore[assignment]
+    drv._transport = t
+    with caplog.at_level(logging.CRITICAL):
+        await drv.connect()
+    assert drv._wdog_armed is False
+    assert "cryodaq_wdog_disarm()" in t.writes
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # F4 (Phase A gate, MEDIUM): readback failure AFTER cryodaq_wdog_run() must
-# attempt a best-effort disarm write — otherwise firmware may actually be
-# armed while the host believes it is not, and a later un-petted firmware
-# timer kills outputs by surprise.
+# attempt a best-effort disarm write — the command may have been accepted even
+# though the host cannot confirm the script state.
 # ---------------------------------------------------------------------------
 
 
@@ -759,6 +1116,7 @@ async def test_arm_readback_timeout_after_run_sends_disarm_required(caplog) -> N
     # unlike "cryodaq_wdog_tripped", which is also queried pre-upload (the
     # latch check) and would fail before run() is ever issued.
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
+    t.wdog_autonomous_raw = "1"  # reach downstream active readback
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
         with pytest.raises(Exception):
@@ -771,7 +1129,7 @@ async def test_arm_readback_timeout_after_run_sends_disarm_required(caplog) -> N
 
 async def test_arm_readback_failure_before_run_does_not_send_disarm() -> None:
     """A failure BEFORE cryodaq_wdog_run() (e.g. version-stamp mismatch) must
-    NOT attempt a disarm write — the firmware timer was never armed."""
+    NOT attempt a disarm write — the activation command was never issued."""
     drv = _mode_driver("best_effort")
     t = _RecordingTransport()
     t.wdog_version_raw = "1"  # mismatch -> raises before cryodaq_wdog_run()
@@ -783,7 +1141,7 @@ async def test_arm_readback_failure_before_run_does_not_send_disarm() -> None:
 
 
 async def test_arm_readback_timeout_disarm_write_also_fails_logs_critical(caplog) -> None:
-    """If the best-effort disarm write ALSO fails, firmware arm state is truly
+    """If the best-effort disarm write ALSO fails, TSP activation state is
     unknown — must log CRITICAL and still route per mode (best_effort
     degrades host-only, connect still succeeds)."""
     drv = _mode_driver("best_effort")
@@ -809,7 +1167,7 @@ async def test_arm_readback_timeout_disarm_write_also_fails_logs_critical(caplog
     assert drv._wdog_armed is False
     crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     msg = " ".join(r.getMessage() for r in crits).lower()
-    assert "unknown" in msg, "disarm-write failure must log that firmware state is UNKNOWN"
+    assert "unknown" in msg, "disarm-write failure must log that TSP state is UNKNOWN"
 
 
 def test_config_short_timeout_warns(tmp_path, caplog) -> None:
@@ -837,3 +1195,23 @@ def test_config_short_timeout_warns(tmp_path, caplog) -> None:
         for r in caplog.records
         if r.levelno == logging.WARNING
     )
+
+
+@pytest.mark.parametrize("literal", ["true", '"5"', ".nan", ".inf", "0", "-1", "301"])
+def test_config_watchdog_timeout_invalid_fails_load(tmp_path, literal) -> None:
+    from cryodaq.engine import _load_drivers
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text(
+        "keithley:\n"
+        "  watchdog:\n"
+        "    mode: best_effort\n"
+        f"    timeout_s: {literal}\n"
+        "instruments:\n"
+        "  - type: keithley_2604b\n"
+        "    name: k2604\n"
+        "    resource: USB0::FAKE\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="watchdog_timeout_s"):
+        _load_drivers(cfg, mock=True)

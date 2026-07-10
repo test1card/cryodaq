@@ -81,35 +81,42 @@ instruments:
     mode: averaged
     target_rate_hz: 1.0
 
-# Keithley 2604B TSP dead-man watchdog (firmware backstop below the host
-# SafetyManager). Operator-selected mode (default off):
+# Keithley 2604B TSP software late-pet checker below the host SafetyManager.
+# Operator-selected mode (driver default off; this example opts into best_effort):
 #
 #   mode          host behaviour on connect
 #   ------------  ------------------------------------------------------------
 #   off (default) no TSP script; host SafetyManager is the sole authority;
 #                 byte-identical command stream (zero firmware dependency)
-#   best_effort   arm on connect; on arm failure log CRITICAL and continue
-#                 host-only (fail-OPEN on the watchdog layer)
-#   required      arm on connect; connect() raises ONLY when the backstop
-#                 cannot be established (arm failure, incl. an unreadable latch)
-#                 → instrument unavailable → SAFE_OFF held (fail-CLOSED). A
-#                 read-back latched past-trip is logged CRITICAL and proceeds —
-#                 it never blocks (arming clears the latch; outputs are already
-#                 force-OFF'd on connect).
+#   best_effort   activate late-pet checking; log CRITICAL that it has ZERO
+#                 full-host-death coverage; failures continue host-only
+#   required      require literal cryodaq_wdog_autonomous == 1; current v3
+#                 reports 0, so connect() raises → instrument unavailable →
+#                 SAFE_OFF held (fail-CLOSED). A read-back prior-trip latch is
+#                 preserved without upload; connect remains recovery-only and
+#                 RUN is blocked until verified OFF + explicit operator ack.
 #
 # Legacy alias: ``enabled: true`` maps to best_effort, ``enabled: false`` to
 # off (mode wins if both are present).
 #
-# CAVEAT: the firmware run-mechanism (trigger.timer, non-blocking FIFO) is
-# still bench-unverified — see tsp/cryodaq_wdog.lua. ``required`` gates only on
-# host-observable arm success (incl. a readable latch), NOT on proven firmware
-# timer behaviour.
+# The previous autonomous timer attempt was removed as documented-invalid, not
+# merely bench-unverified. A true host-death OFF path needs a documented redesign
+# and independent terminal V/I/P proof. Prefer an external latching cutout after
+# common-cause analysis; an in-SMU design is only a bench hypothesis.
+#
+# The 5 W safety value is a host-only target cap. Instrument compliance
+# (typically limitv=40 V, limiti=1 A) is a load/instrument operating envelope;
+# it does not guarantee <=5 W or bound cumulative energy after host death.
 keithley:
   watchdog:
-    # A1(a): best_effort — arm on connect, fail-OPEN on the watchdog layer (an
-    # arm failure logs CRITICAL and continues host-only; it NEVER blocks connect).
-    # Use "required" only for an opt-in fail-CLOSED bench; "off" disables entirely.
+    # best_effort activates only late-pet detection and logs the missing
+    # autonomous protection. Use required only to fail closed until a separately
+    # evidenced autonomous implementation exists; off disables the script.
     mode: "best_effort"   # quote: bare off/on are YAML booleans
+    # Finite numeric seconds only, range [1, 300]. TSP os.time() has one-second
+    # granularity and the Lua comparison is strict `>`: equality is not late
+    # until the next elapsed second. Keep >= 2 * poll_interval_s to avoid a
+    # normal slow poll causing a late-pet trip.
     timeout_s: 5.0
 
 chamber:

@@ -266,14 +266,21 @@ Guaranteed artifact: `report_editable.docx`. Optional: `report_raw.pdf`
 
 ## Keithley TSP
 
-`tsp/cryodaq_wdog.lua` — the TSP dead-man watchdog, a firmware backstop under
-the host SafetyManager. P=const still runs host-side in `keithley_2604b.py`.
+`tsp/cryodaq_wdog.lua` — a TSP software late-pet checker below the host
+SafetyManager. P=const still runs host-side in `keithley_2604b.py`.
 The watchdog is operator-selectable via `config/instruments.yaml` →
-`keithley.watchdog.mode`: `off` (default — script not loaded, host is the sole
-authority), `best_effort` (arm on connect, fall back to host-only on arm
-failure), `required` (fail-closed — a failed arm makes `connect()` raise so
-`SAFE_OFF` holds). The current mechanism covers stall-recovery only; the
-autonomous firmware run-mechanism (`trigger.timer`) remains bench-unverified.
+`keithley.watchdog.mode`: `off` (driver default — script not loaded, host is the
+sole authority), `best_effort` (activate on connect, fall back to host-only on
+failure), `required` (fail-closed — requires the explicit autonomous bit and
+makes `connect()` raise while it is absent, so `SAFE_OFF` holds). Version 3
+explicitly reports `cryodaq_wdog_autonomous=0`:
+it covers only stall-then-recover when a later pet arrives and has zero
+full-host-death coverage. The previous timer implementation was removed because
+it used commands and action values that the 2600B reference manual does not
+document as valid. A true host-death OFF path requires a documented redesign
+and physical proof; an independent latching cutout/interlock is preferred.
+`watchdog.timeout_s` must be a finite number from 1 to 300 seconds; the TSP
+clock has one-second granularity and uses a strict `elapsed > timeout` test.
 
 ## Project structure
 
@@ -408,10 +415,12 @@ As of v0.64.0. The lab-only checks below are collected as a turnkey protocol in
 - **Leak rate (F13):** `chamber.volume_l` must be set in
   `config/instruments.local.yaml` before the first measurement; `finalize()`
   raises `ValueError` when `volume_l == 0.0`.
-- **TSP watchdog firmware run-mechanism:** the autonomous firmware dead-man
-  (`trigger.timer`) is bench-unverified. The current watchdog covers
-  stall-recovery only; `required` mode gates on host-observable arm success, not
-  proven firmware-timer behaviour.
+- **Keithley host-death protection:** the TSP v3 script is intentionally
+  non-autonomous and covers only a late pet after a host stall. `required` mode
+  therefore refuses v3; `best_effort` logs a CRITICAL degraded warning and uses
+  the late-pet check. No software status bit proves physical terminal OFF.
+  Host-death removal of terminal energy and any external interlock remain lab
+  gates measured with independent instruments.
 
 ## License
 

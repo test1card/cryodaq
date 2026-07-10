@@ -1,26 +1,24 @@
-"""Bench smoke tests for the Keithley 2604B TSP dead-man watchdog (A8).
+"""Bench smoke tests for the Keithley 2604B software late-pet watchdog.
 
 These run against a REAL instrument at hardware setup and before every
 overnight — they re-verify the firmware integrity checks that get no CI:
 
   * version stamp — the script is re-uploaded from repo ``tsp/`` on every arm;
     the host reads ``CRYODAQ_WDOG_VERSION`` back and refuses to arm on mismatch.
-  * arm-state readback — ``cryodaq_wdog_active == 1`` and
-    ``cryodaq_wdog_tripped == 0`` after ``cryodaq_wdog_run()`` (a truncated
-    upload would otherwise pass the fire-and-forget writes silently).
+  * A8a upload/version — version 3 loads and explicitly reports
+    ``cryodaq_wdog_autonomous == 0``.
   * verified-OFF readback — ``emergency_off`` confirms the outputs are OFF.
-  * trip-test — arm, stall past the deadline, confirm both outputs die and the
-    latch is set.
+  * A8b late-pet recovery — stall past the deadline, send a later pet, and
+    confirm both outputs turn OFF and the latch is set.
 
 They SKIP gracefully with no hardware: set ``CRYODAQ_KEITHLEY_RESOURCE`` to the
 VISA resource string to enable them. Any test that ENERGISES the source is
 additionally gated on ``CRYODAQ_SMOKE_ALLOW_SOURCE=1`` and MUST only be run on a
 macet (dummy) load at a safe low level — NEVER on the cryostat heater.
 
-The autonomous ``trigger.timer`` dead-man (true host-death cover) is the single
-remaining bench-verified upgrade — see ``tsp/cryodaq_wdog.lua``. These smoke
-tests exercise the pet-based stall-then-recover trip; they do NOT prove the
-autonomous no-host path.
+A8c (true host death with no later command), A8d (independently measured
+terminal V/I/P and trip time), and A8e (external interlock/common-cause proof)
+are separate manual hardware gates. These in-process tests cannot prove them.
 """
 
 from __future__ import annotations
@@ -67,22 +65,24 @@ def _driver(mode: WatchdogMode = WatchdogMode.BEST_EFFORT) -> Keithley2604B:
 
 
 @requires_hw
-async def test_smoke_version_stamp_matches() -> None:
-    """The uploaded firmware reports the version the driver expects (refuse-on-
-    mismatch is proven by a successful arm)."""
+async def test_a8a_smoke_version_and_non_autonomous_contract() -> None:
+    """The uploaded script reports version 3 and no autonomous protection."""
     drv = _driver()
     await drv.connect()
     try:
         assert drv._wdog_armed is True
+        assert drv._wdog_autonomous is False
         raw = await drv._transport.query("print(CRYODAQ_WDOG_VERSION)")
         assert int(float(raw.strip())) == _WDOG_SCRIPT_VERSION
+        autonomous = await drv._transport.query("print(cryodaq_wdog_autonomous)")
+        assert int(float(autonomous.strip())) == 0
     finally:
         await drv.disconnect()
 
 
 @requires_hw
-async def test_smoke_arm_state_readback() -> None:
-    """After arm, firmware reports active==1 and tripped==0."""
+async def test_a8a_smoke_software_active_state_readback() -> None:
+    """The late-pet checker is active, without implying an autonomous arm."""
     drv = _driver()
     await drv.connect()
     try:
@@ -95,7 +95,7 @@ async def test_smoke_arm_state_readback() -> None:
 
 
 @requires_hw
-async def test_smoke_verified_off_readback() -> None:
+async def test_a8a_smoke_verified_off_readback() -> None:
     """emergency_off readback-confirms both outputs are OFF (no sourcing)."""
     drv = _driver(mode=WatchdogMode.OFF)
     await drv.connect()
@@ -106,13 +106,12 @@ async def test_smoke_verified_off_readback() -> None:
 
 
 @requires_source
-async def test_smoke_watchdog_trip_kills_output() -> None:
-    """Trip-test on a DUMMY LOAD at a safe low level: arm, source, then stall
+async def test_a8b_smoke_late_pet_stall_recovery_turns_output_off() -> None:
+    """A8b on a DUMMY LOAD: activate, source, then stall
     past the deadline without petting — both outputs must die and the latch set.
 
-    NOTE: this exercises the pet-based (stall-then-recover) mechanism, NOT the
-    autonomous no-host trigger.timer path (bench-parked). Results are for
-    Vladimir to record; this test never fabricates them.
+    A later command deliberately triggers the check. This is not A8c host-death
+    coverage and must never be reported as such.
     """
     drv = _driver()
     await drv.connect()
@@ -121,7 +120,7 @@ async def test_smoke_watchdog_trip_kills_output() -> None:
         await drv.start_source("smua", p_target=0.01, v_compliance=1.0, i_compliance=0.1)
         # Stall: do NOT pet for longer than the deadline. Manually advance the
         # firmware deadline by calling pet once past the timeout to force the
-        # stall-then-recover kill the firmware evaluates inside pet().
+        # stall-then-recover shutdown the TSP script evaluates inside pet().
         await asyncio.sleep(_TIMEOUT_S + 1.0)
         await drv._transport.write("cryodaq_wdog_pet()")
         tripped = await drv._transport.query("print(cryodaq_wdog_tripped)")

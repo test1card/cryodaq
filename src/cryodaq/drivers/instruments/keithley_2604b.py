@@ -1,7 +1,7 @@
 """Keithley 2604B driver with dual-channel runtime support.
 
-P=const control loop runs host-side in read_channels() — no TSP scripts
-are uploaded to the instrument, so the VISA bus stays free for queries.
+P=const control runs host-side in read_channels(). The optional TSP v3 script
+only checks a late pet; it does not regulate and is not autonomous.
 """
 
 from __future__ import annotations
@@ -40,6 +40,12 @@ MAX_DELTA_V_PER_STEP = 0.5  # V — do not increase without thermal analysis
 # Number of consecutive compliance cycles before notifying SafetyManager.
 _COMPLIANCE_NOTIFY_THRESHOLD = 10
 
+# TSP os.time() has one-second granularity. Sub-second deadlines are therefore
+# misleading, while an excessively long late-pet window defeats its diagnostic
+# purpose. The upper bound is deliberately generous for slow lab setups.
+_WDOG_TIMEOUT_MIN_S = 1.0
+_WDOG_TIMEOUT_MAX_S = 300.0
+
 _MOCK_R0 = 100.0
 _MOCK_T0 = 300.0
 _MOCK_ALPHA = 0.0033
@@ -53,42 +59,86 @@ _IV_FIELDS = (
     ("power", "W"),
 )
 
-# TSP dead-man watchdog (Task 9): inert firmware backstop below the host
-# SafetyManager, gated on _wdog_enabled (default False). See tsp/cryodaq_wdog.lua.
+# TSP software late-pet watchdog, gated on _wdog_enabled (default False).
+# Version 3 is explicitly non-autonomous: it covers stall-then-recover only.
+# See tsp/cryodaq_wdog.lua.
 _WDOG_SCRIPT: str | None = None
 
 # Version stamp the driver was written against. Must equal CRYODAQ_WDOG_VERSION
 # in tsp/cryodaq_wdog.lua — the script is re-uploaded from repo tsp/ on every
 # arm, so the host reads this back post-upload and refuses to arm on mismatch
 # (catches a truncated or stale upload; firmware gets no CI).
-_WDOG_SCRIPT_VERSION = 2
+_WDOG_SCRIPT_VERSION = 3
 
 
 class _WatchdogArmError(RuntimeError):
-    """Firmware watchdog upload/arm integrity check failed — a version-stamp
-    mismatch (truncated/stale upload) or a bad post-run state readback (arm did
-    not take). Routed per-mode by ``_wdog_arm``: ``required`` re-raises so
-    connect fails closed; ``best_effort`` logs CRITICAL and continues host-only.
+    """Watchdog upload/activation integrity check failed.
+
+    ``required`` also raises when the uploaded script does not report the
+    literal autonomous contract bit ``1``. Version 3 intentionally reports 0,
+    so it is usable only as a degraded late-pet check in ``best_effort`` mode.
     """
 
 
-def _parse_wdog_flag(raw: str) -> bool:
-    """Parse a firmware flag readback (``"1"``/``"0"``/``"nil"``) to bool.
-    Unparseable (fresh instrument prints ``nil``) → False."""
+def _parse_wdog_number(raw: str, *, field: str) -> float:
+    """Parse one finite numeric TSP protocol value or raise ValueError."""
+    text = raw.strip()
+    if not text:
+        raise ValueError(f"{field} readback is empty")
     try:
-        return float(raw.strip()) > 0.5
-    except ValueError:
+        value = float(text)
+    except ValueError as exc:
+        raise ValueError(f"{field} readback is not numeric: {text!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{field} readback is not finite: {text!r}")
+    return value
+
+
+def _parse_wdog_flag(raw: str, *, field: str) -> bool:
+    """Parse an exact TSP protocol flag: finite numeric 0 or 1 only."""
+    value = _parse_wdog_number(raw, field=field)
+    if value == 0.0:
         return False
+    if value == 1.0:
+        return True
+    raise ValueError(f"{field} readback must be exactly 0 or 1, got {raw.strip()!r}")
+
+
+def _parse_wdog_latch(raw: str) -> bool:
+    """Parse pre-upload latch, admitting only explicit fresh-state sentinels."""
+    text = raw.strip().lower()
+    if text == "nil":
+        return False
+    return _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
+
+
+def _validate_wdog_timeout_s(value: object) -> float:
+    """Return a finite late-pet timeout within the supported safety range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            "watchdog_timeout_s must be a real number, not a boolean or string"
+        )
+    timeout_s = float(value)
+    if not math.isfinite(timeout_s):
+        raise ValueError("watchdog_timeout_s must be finite")
+    if not (_WDOG_TIMEOUT_MIN_S <= timeout_s <= _WDOG_TIMEOUT_MAX_S):
+        raise ValueError(
+            "watchdog_timeout_s must be between "
+            f"{_WDOG_TIMEOUT_MIN_S:g} and {_WDOG_TIMEOUT_MAX_S:g} seconds"
+        )
+    return timeout_s
 
 
 class WatchdogMode(StrEnum):
     """Operator-selected TSP watchdog behaviour (config: keithley.watchdog.mode).
 
-    - ``off``: no firmware watchdog; host SafetyManager is the sole authority.
+    - ``off``: no TSP watchdog; host SafetyManager is the sole authority.
       Zero ``cryodaq_wdog`` writes — the command stream is byte-identical.
-    - ``best_effort``: arm on connect; on arm failure log CRITICAL and continue
-      host-only (fail-OPEN on the watchdog layer). == legacy ``enabled: true``.
-    - ``required``: fail-CLOSED — an arm failure makes connect() raise, so the
+    - ``best_effort``: activate the software late-pet check on connect; report
+      the absence of autonomous host-death protection at CRITICAL severity.
+      == legacy ``enabled: true``.
+    - ``required``: fail-CLOSED unless the uploaded script explicitly reports
+      an autonomous protection bit of literal 1. Version 3 reports 0, so the
       instrument stays unavailable and the SafetyManager holds SAFE_OFF. A
       read-back latched trip is NOT a failure: it is logged CRITICAL and armed
       over (outputs were already forced OFF; raising would only lock the
@@ -133,7 +183,7 @@ class Keithley2604B(InstrumentDriver):
         self._resource_str = resource_str
         self._transport = USBTMCTransport(mock=mock)
         self._instrument_id = ""
-        # TSP dead-man watchdog plumbing (default OFF → byte-identical stream).
+        # TSP late-pet watchdog plumbing (default OFF → byte-identical stream).
         # Explicit mode wins; else the deprecated ``watchdog_enabled`` alias
         # maps True→best_effort / False→off; else default off. Unknown mode
         # string raises ValueError (fail-closed config).
@@ -146,8 +196,14 @@ class Keithley2604B(InstrumentDriver):
         else:
             self._wdog_mode = WatchdogMode.OFF
         self._wdog_enabled = self._wdog_mode is not WatchdogMode.OFF
-        self._wdog_timeout_s = float(watchdog_timeout_s)
+        self._wdog_timeout_s = _validate_wdog_timeout_s(watchdog_timeout_s)
         self._wdog_armed = False
+        # Separate truth bit: _wdog_armed means only that the software late-pet
+        # check is active. It must never imply autonomous host-death coverage.
+        self._wdog_autonomous = False
+        # Host-side evidence bit survives a firmware trip or a pre-upload latch
+        # read until explicit operator-authorized acknowledgment succeeds.
+        self._wdog_trip_pending = False
         self._channels: dict[SmuChannel, ChannelRuntime] = {
             "smua": ChannelRuntime(channel="smua"),
             "smub": ChannelRuntime(channel="smub"),
@@ -181,7 +237,7 @@ class Keithley2604B(InstrumentDriver):
             # SAFETY (Phase 2a G.1): force outputs off on every connect.
             # The previous engine process may have crashed mid-experiment
             # while sourcing — Keithley holds the last programmed voltage
-            # indefinitely with no TSP-side watchdog . This
+            # indefinitely with no autonomous TSP-side watchdog. This
             # guarantees a known-safe state every time we assume control.
             # connect() must NOT abort on a force-off failure (refusing connect
             # strips the operator of all control — Phase 2a G.1 rationale). F2:
@@ -523,6 +579,11 @@ class Keithley2604B(InstrumentDriver):
         """True if compliance has persisted for >= threshold consecutive cycles."""
         return self._compliance_count.get(channel, 0) >= _COMPLIANCE_NOTIFY_THRESHOLD
 
+    @property
+    def watchdog_trip_pending(self) -> bool:
+        """Whether unconsumed TSP trip evidence requires operator recovery."""
+        return self._wdog_trip_pending
+
     async def diagnostics(self) -> dict[str, Any]:
         """Periodic health check — called by scheduler every 30s."""
         if not self._connected or self.mock:
@@ -539,68 +600,88 @@ class Keithley2604B(InstrumentDriver):
             log.error("%s: diagnostics error: %s", self.name, exc)
         return result
 
-    # --- TSP dead-man watchdog (Task 9) -------------------------------------
+    # --- TSP software late-pet watchdog -------------------------------------
     # All methods are no-ops unless _wdog_enabled and not mock, so the default
     # command stream is byte-identical to the pre-watchdog driver.
 
+    def _wdog_reject_unknown_latch(self, detail: str) -> bool:
+        """Route an unknown pre-upload latch without erasing instrument state."""
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        if self._wdog_mode is WatchdogMode.REQUIRED:
+            log.critical(
+                "%s: TSP watchdog latch state UNKNOWN and mode=required — "
+                "refusing to connect without uploading/resetting it: %s",
+                self.name,
+                detail,
+            )
+            raise _WatchdogArmError(f"TSP watchdog latch state unknown: {detail}")
+        log.critical(
+            "%s: TSP watchdog latch state UNKNOWN; NOT activating or uploading "
+            "because that would erase possible trip evidence (degraded, "
+            "host-only): %s",
+            self.name,
+            detail,
+        )
+        return False
+
     async def _wdog_arm(self) -> None:
-        """Upload + arm the firmware watchdog.
+        """Upload and activate the selected watchdog behavior.
 
         Latch read FIRST (before upload): re-uploading the script re-runs
-        ``cryodaq_wdog_tripped = 0`` and would wipe a past kill before it can
+        ``cryodaq_wdog_tripped = 0`` and would wipe a prior trip before it can
         be seen. A fresh instrument has no such global → prints ``nil`` →
-        unparseable → treated as untripped. A latched past-trip is logged
-        CRITICAL and we PROCEED (in every armed mode): the outputs were already
-        force-OFF'd on connect and arming clears the latch, so raising would
-        only lock the operator out (escape = power-cycle) — never blocks.
+        accepted only as the explicit fresh-state sentinel. A latched prior trip
+        is preserved without upload and exposed as pending evidence. The
+        operator must acknowledge it through SafetyManager after outputs are
+        verified OFF; connect itself remains available for recovery.
 
-        best_effort: NON-fatal on arm failure — connect still succeeds,
-        _wdog_armed stays False, CRITICAL flags the degraded run.
+        best_effort: NON-fatal on activation failure — connect still succeeds,
+        _wdog_armed stays False, CRITICAL flags the degraded run. With v3 it
+        may activate late-pet checking while _wdog_autonomous remains False.
 
-        required: fail-CLOSED — an arm FAILURE (the backstop cannot be
-        established) re-raises so connect() aborts. A pre-existing latch is NOT
-        a failure and does not raise."""
+        required: fail-CLOSED unless the uploaded script reports the literal
+        autonomous bit 1. The current version truthfully reports 0, so required
+        refuses it before activation. A pre-existing latch is not a failure."""
         if not self._wdog_enabled or self.mock:
+            return
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        if self._wdog_trip_pending:
+            log.critical(
+                "%s: preserving previously observed watchdog trip evidence; "
+                "explicit operator acknowledgment required before reactivation",
+                self.name,
+            )
             return
         # DELTA 1: read the latch before the upload clears it. Two failure
         # cases must NOT be conflated:
-        #   (a) query SUCCEEDS but the value is unparseable — a fresh instrument
-        #       has no cryodaq_wdog_tripped global and prints "nil" →
-        #       float("nil") raises ValueError → genuinely "no latch" → proceed.
-        #   (b) query FAILS (transport timeout / I/O error) — the latch state is
+        #   (a) query succeeds with the explicit TSP nil sentinel from a
+        #       fresh instrument → genuinely "no latch" → proceed.
+        #   (b) query fails OR returns malformed/non-finite/out-of-domain data —
+        #       the latch state is
         #       UNKNOWN. Proceeding re-uploads the script, which re-runs
         #       ``cryodaq_wdog_tripped = 0`` and silently destroys evidence of a
-        #       past firmware kill. This follows ARM-FAILURE semantics per mode.
+        #       past watchdog trip. This follows failure semantics per mode.
         try:
             raw = await self._transport.query("print(cryodaq_wdog_tripped)")
         except Exception as exc:
-            self._wdog_armed = False
-            if self._wdog_mode is WatchdogMode.REQUIRED:
-                log.critical(
-                    "%s: TSP watchdog latch read FAILED and mode=required — "
-                    "refusing to connect (fail-closed): %s",
-                    self.name,
-                    exc,
-                )
-                raise
-            log.critical(
-                "%s: TSP watchdog latch read FAILED — latch state UNKNOWN; NOT "
-                "arming the watchdog to avoid erasing a possible past firmware "
-                "kill (degraded, host-only): %s",
-                self.name,
-                exc,
-            )
+            self._wdog_reject_unknown_latch(f"transport read failed: {exc}")
             return
         try:
-            latched = float(raw.strip()) > 0.5
-        except ValueError:
-            latched = False  # nil / unparseable on a fresh instrument
+            latched = _parse_wdog_latch(raw)
+        except ValueError as exc:
+            self._wdog_reject_unknown_latch(str(exc))
+            return
         if latched:
+            self._wdog_trip_pending = True
             log.critical(
-                "%s: TSP watchdog read back a LATCHED trip from a PAST firmware "
-                "kill — re-arming (outputs already forced OFF on connect)",
+                "%s: TSP watchdog read back a LATCHED prior trip — "
+                "preserving evidence without upload/reactivation; explicit "
+                "operator acknowledgment is required after verified OFF",
                 self.name,
             )
+            return
         run_issued = False
         try:
             await self._transport.write(_load_wdog_script())
@@ -609,13 +690,53 @@ class Keithley2604B(InstrumentDriver):
             # Read CRYODAQ_WDOG_VERSION back and refuse to arm on mismatch.
             ver_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
             try:
-                ver = int(float(ver_raw.strip()))
-            except ValueError:
-                ver = -1
-            if ver != _WDOG_SCRIPT_VERSION:
+                ver = _parse_wdog_number(ver_raw, field="CRYODAQ_WDOG_VERSION")
+            except ValueError as exc:
+                raise _WatchdogArmError(str(exc)) from exc
+            if ver != float(_WDOG_SCRIPT_VERSION):
                 raise _WatchdogArmError(
                     f"TSP watchdog version mismatch: firmware={ver_raw.strip()!r} "
                     f"expected={_WDOG_SCRIPT_VERSION} (truncated or stale upload)"
+                )
+
+            # An active late-pet checker is not an autonomous dead-man. Read a
+            # separate explicit contract bit and never infer it from
+            # cryodaq_wdog_active. Version 3 deliberately reports 0.
+            self._wdog_autonomous = False
+            autonomous_read_ok = False
+            try:
+                autonomous_raw = await self._transport.query(
+                    "print(cryodaq_wdog_autonomous)"
+                )
+                self._wdog_autonomous = _parse_wdog_flag(
+                    autonomous_raw, field="cryodaq_wdog_autonomous"
+                )
+                autonomous_read_ok = True
+            except Exception as autonomous_exc:
+                if self._wdog_mode is WatchdogMode.REQUIRED:
+                    raise _WatchdogArmError(
+                        "TSP watchdog autonomous readback failed; required mode "
+                        "refuses unverified host-death protection"
+                    ) from autonomous_exc
+                log.critical(
+                    "%s: SAFETY DEGRADED: autonomous watchdog readback failed; "
+                    "continuing with software late-pet protection only, which "
+                    "has ZERO full-host-death coverage: %s",
+                    self.name,
+                    autonomous_exc,
+                )
+            if autonomous_read_ok and not self._wdog_autonomous:
+                if self._wdog_mode is WatchdogMode.REQUIRED:
+                    raise _WatchdogArmError(
+                        "TSP watchdog is not autonomous: "
+                        f"cryodaq_wdog_autonomous={autonomous_raw.strip()!r}; "
+                        "required mode refuses source availability"
+                    )
+                log.critical(
+                    "%s: SAFETY DEGRADED: watchdog is NON-AUTONOMOUS; "
+                    "best_effort enables only the software late-pet check "
+                    "and provides ZERO full-host-death coverage",
+                    self.name,
                 )
             await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
             # R2 (Phase A recheck, MEDIUM): mark issued BEFORE the write, not
@@ -625,34 +746,36 @@ class Keithley2604B(InstrumentDriver):
             # ambiguity means attempt the disarm.
             run_issued = True
             await self._transport.write("cryodaq_wdog_run()")
-            # DELTA A8b — state readback: _wdog_arm used to set _wdog_armed on
-            # faith after three fire-and-forget writes. Confirm the firmware
-            # actually armed (active==1) and did not boot latched (tripped==0);
-            # a failed/partial arm is caught here, not hidden until a trip that
-            # never fires.
+            # Software state readback: confirm the script became active and did
+            # not boot latched. This bit says nothing about autonomy; that was
+            # read separately above.
             active_raw = await self._transport.query("print(cryodaq_wdog_active)")
             tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
-            if not (_parse_wdog_flag(active_raw) and not _parse_wdog_flag(tripped_raw)):
+            active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
+            tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
+            if not active or tripped:
                 raise _WatchdogArmError(
                     f"TSP watchdog arm readback bad: active={active_raw.strip()!r} "
                     f"tripped={tripped_raw.strip()!r} (expected active=1 tripped=0)"
                 )
             self._wdog_armed = True
             log.info(
-                "%s: TSP watchdog armed (timeout=%.1fs, fw v%d)",
+                "%s: TSP software late-pet watchdog active "
+                "(timeout=%.1fs, fw v%d, autonomous=%s)",
                 self.name,
                 self._wdog_timeout_s,
-                ver,
+                _WDOG_SCRIPT_VERSION,
+                self._wdog_autonomous,
             )
         except Exception as exc:
             self._wdog_armed = False
+            self._wdog_autonomous = False
             if run_issued:
                 # F4 (Phase A gate, MEDIUM): cryodaq_wdog_run() was already
                 # written before this failure (e.g. the readback that would
-                # confirm/refute the arm timed out) — the firmware timer may
-                # actually be armed even though we just set _wdog_armed=False.
-                # An un-petted, un-disarmed firmware timer would later kill
-                # outputs by surprise. Best-effort disarm write, bypassing the
+                # confirm/refute activation timed out) — the script may still
+                # be active even though we just set _wdog_armed=False.
+                # Best-effort disarm write, bypassing the
                 # _wdog_armed gate in _wdog_disarm() (we don't trust host
                 # state here — that's the whole problem).
                 try:
@@ -660,7 +783,7 @@ class Keithley2604B(InstrumentDriver):
                 except Exception as disarm_exc:
                     log.critical(
                         "%s: TSP watchdog best-effort disarm after a failed "
-                        "post-run readback ALSO failed — firmware arm state "
+                        "post-run readback ALSO failed — TSP activation state "
                         "UNKNOWN: %s",
                         self.name,
                         disarm_exc,
@@ -674,14 +797,14 @@ class Keithley2604B(InstrumentDriver):
                 )
                 raise
             log.critical(
-                "%s: TSP watchdog upload/arm FAILED — running WITHOUT firmware "
-                "backstop (degraded): %s",
+                "%s: TSP watchdog upload/activation FAILED — running host-only "
+                "without even the software late-pet check (degraded): %s",
                 self.name,
                 exc,
             )
 
     async def _wdog_pet(self) -> None:
-        """Refresh the firmware deadline. No-op unless enabled+armed."""
+        """Run the TSP late-pet deadline check. No-op unless active."""
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
@@ -690,7 +813,7 @@ class Keithley2604B(InstrumentDriver):
             log.error("%s: TSP watchdog pet failed: %s", self.name, exc)
 
     async def _wdog_disarm(self) -> None:
-        """Clean release of the firmware watchdog on disconnect."""
+        """Clean release of the TSP late-pet checker on disconnect."""
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
@@ -699,20 +822,155 @@ class Keithley2604B(InstrumentDriver):
             log.error("%s: TSP watchdog disarm failed: %s", self.name, exc)
         finally:
             self._wdog_armed = False
+            self._wdog_autonomous = False
+
+    async def acknowledge_wdog_trip(self) -> bool:
+        """Consume a trip only after verified OFF and explicit operator ack.
+
+        SafetyManager calls this from its fault-acknowledgment path after it has
+        accepted and recorded a recovery reason. A successful command clears
+        the latch and reactivates only the non-autonomous late-pet checker.
+        Any ambiguity keeps recovery fault-latched and attempts a disarm.
+        """
+        if (
+            not self._wdog_enabled
+            or self.mock
+            or not self._connected
+        ):
+            return True
+        if not self._wdog_armed and not self._wdog_trip_pending:
+            return True
+
+        raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+        fresh_instrument = raw.strip().lower() == "nil"
+        if fresh_instrument:
+            if not self._wdog_trip_pending:
+                raise ValueError(
+                    "watchdog latch disappeared without host-side pending evidence"
+                )
+            tripped = False
+        else:
+            tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
+        if not tripped and not self._wdog_trip_pending:
+            return True
+        # Preserve host evidence until verified OFF + successful reactivation.
+        self._wdog_trip_pending = True
+        force_upload = fresh_instrument or not tripped
+
+        if not await self.emergency_off():
+            log.critical(
+                "%s: refusing watchdog trip acknowledgment because both-output "
+                "OFF could not be readback-verified",
+                self.name,
+            )
+            return False
+
+        if self._wdog_mode is WatchdogMode.REQUIRED:
+            log.critical(
+                "%s: watchdog trip evidence preserved: required mode cannot "
+                "reactivate non-autonomous v3; explicitly select best_effort "
+                "and reconnect before acknowledging (off only intentionally "
+                "disables the TSP path)",
+                self.name,
+            )
+            return False
+
+        ack_issued = False
+        try:
+            ack_issued = True
+            version: float | None = None
+            if not force_upload:
+                version_raw = await self._transport.query(
+                    "print(CRYODAQ_WDOG_VERSION)"
+                )
+                if version_raw.strip().lower() != "nil":
+                    version = _parse_wdog_number(
+                        version_raw, field="CRYODAQ_WDOG_VERSION"
+                    )
+            if version == float(_WDOG_SCRIPT_VERSION):
+                await self._transport.write("cryodaq_wdog_acknowledge()")
+            else:
+                # Explicit operator acknowledgment authorizes consuming a latch
+                # left by an older script, but only after verified OFF above.
+                # Upgrade and reactivate v3 in this same visible recovery path.
+                await self._transport.write(_load_wdog_script())
+                uploaded_raw = await self._transport.query(
+                    "print(CRYODAQ_WDOG_VERSION)"
+                )
+                uploaded = _parse_wdog_number(
+                    uploaded_raw, field="CRYODAQ_WDOG_VERSION"
+                )
+                if uploaded != float(_WDOG_SCRIPT_VERSION):
+                    raise _WatchdogArmError(
+                        "watchdog acknowledgment upgrade version mismatch: "
+                        f"{uploaded_raw.strip()!r}"
+                    )
+                autonomous_raw = await self._transport.query(
+                    "print(cryodaq_wdog_autonomous)"
+                )
+                autonomous = _parse_wdog_flag(
+                    autonomous_raw, field="cryodaq_wdog_autonomous"
+                )
+                if autonomous:
+                    raise _WatchdogArmError(
+                        "v3 acknowledgment upgrade unexpectedly reported autonomous=1"
+                    )
+                await self._transport.write(
+                    f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}"
+                )
+                await self._transport.write("cryodaq_wdog_run()")
+            active_raw = await self._transport.query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+            active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
+            still_tripped = _parse_wdog_flag(
+                tripped_raw, field="cryodaq_wdog_tripped"
+            )
+            if not active or still_tripped:
+                raise _WatchdogArmError(
+                    "TSP watchdog acknowledgment readback bad: "
+                    f"active={active_raw.strip()!r} tripped={tripped_raw.strip()!r}"
+                )
+        except Exception as exc:
+            self._wdog_armed = False
+            if ack_issued:
+                try:
+                    await self._transport.write("cryodaq_wdog_disarm()")
+                except Exception as disarm_exc:
+                    log.critical(
+                        "%s: watchdog acknowledgment failed and disarm also "
+                        "failed; TSP state UNKNOWN: %s",
+                        self.name,
+                        disarm_exc,
+                    )
+            log.critical("%s: watchdog acknowledgment failed: %s", self.name, exc)
+            return False
+
+        self._wdog_armed = True
+        self._wdog_autonomous = False
+        self._wdog_trip_pending = False
+        log.warning(
+            "%s: operator acknowledgment consumed the late-pet trip after "
+            "verified both-output OFF; late-pet checking reactivated",
+            self.name,
+        )
+        return True
 
     async def wdog_tripped(self) -> bool:
-        """True iff the firmware watchdog latched a trip (killed outputs while
-        the host was away). Inert (returns False, no bus I/O) unless the
+        """True iff the software late-pet check latched a trip.
+
+        This means a pet arrived after its deadline; it does not mean outputs
+        were removed during complete host death. Inert unless the
         watchdog is enabled+armed on a real connected instrument — so the
         SafetyManager reconcile is a no-op under the default-OFF flag."""
+        if self._wdog_trip_pending:
+            return True
         if not (self._wdog_enabled and self._wdog_armed) or self.mock or not self._connected:
             return False
-        try:
-            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
-            return float(raw.strip()) > 0.5
-        except Exception as exc:
-            log.error("%s: TSP watchdog trip query failed: %s", self.name, exc)
-            return False
+        raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+        tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
+        if tripped:
+            self._wdog_trip_pending = True
+        return tripped
 
     async def _verify_output_off(self, channel: str) -> bool:
         """Readback-verify that ``channel``'s output is OFF.

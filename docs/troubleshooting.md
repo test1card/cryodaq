@@ -68,7 +68,7 @@ CONFIG ERROR (safety|alarm|interlock|housekeeping|channel config): ...
 
 ---
 
-## 3. TSP watchdog Keithley: CRITICAL при arm
+## 3. TSP watchdog Keithley: CRITICAL при активации
 
 <!-- src/cryodaq/drivers/instruments/keithley_2604b.py: _wdog_arm, best_effort/required paths -->
 
@@ -77,28 +77,40 @@ CONFIG ERROR (safety|alarm|interlock|housekeeping|channel config): ...
 
 **Проверка.** Три разных сообщения — разная причина:
 
-- `TSP watchdog upload/arm FAILED — running WITHOUT firmware backstop
-  (degraded)` — прошивка не взвелась; `best_effort` продолжает работу
-  БЕЗ firmware-бэкстопа (host-side контур — единственная защита).
+- `SAFETY DEGRADED: watchdog is NON-AUTONOMOUS` — штатное честное сообщение
+  для v3 в `best_effort`: работает только late-pet check, полной смерти хоста
+  он не покрывает.
+- `TSP watchdog upload/activation FAILED — running host-only` — не
+  активировалась даже late-pet проверка; host-side контур — единственная защита.
 - `TSP watchdog arm FAILED and mode=required — refusing to connect` —
   режим `required`: connect() отказал полностью, прибор недоступен.
-- `TSP watchdog read back a LATCHED trip from a PAST firmware kill —
-  re-arming` — прошивка помнит прошлое срабатывание (сталл-килл);
+- `TSP watchdog read back a LATCHED trip` — TSP помнит прошлое срабатывание
+  на позднем pet;
   выходы уже принудительно выключены при коннекте, повторное
   взведение идёт штатно.
 
-**Причина.** Version stamp mismatch (`CRYODAQ_WDOG_VERSION`, обрезанная
-заливка скрипта), либо реальный сбой arm readback
-(`active`/`tripped` не совпали с ожиданием), либо латч от предыдущего
-реального срабатывания дедлайна.
+**Причина.** Для `required` текущая v3 намеренно не подходит:
+`cryodaq_wdog_autonomous=0`. Для остальных сообщений причина — version stamp
+mismatch, ошибка отдельного autonomous readback, сбой active/tripped readback
+или latch от предыдущего late-pet срабатывания.
 
 **Исправление.** Проверить `config/instruments.local.yaml` →
 `keithley.watchdog.mode`. Для деградации в `best_effort` — переподключить
 прибор (переподача TSP-скрипта происходит на каждый arm); если ошибка
 повторяется — проверить GPIB/USB-линк и версию прошивки TSP. В
-`required` insist — недоступность означает, что прибор не подаёт
-питание вообще, пока watchdog не взведётся штатно. Полный стендовый
+`required` — недоступность означает, что CryoDAQ не разрешит RUN, пока не
+появится отдельно доказанный autonomous contract. Это не доказывает
+физическое отсутствие энергии без независимого измерения. Полный стендовый
 проход — `docs/lab_verification_checklist.md`, раздел 4.
+
+Если лог сообщает unconsumed prior-trip evidence, не перезапускать цикл
+автоматически. Выполнить emergency OFF, проверить причину, затем обычный
+operator fault-ack с reason: только этот путь после повторного verified OFF
+очищает latch и реактивирует late-pet check. При ошибке ack FAULT остаётся,
+сообщение требует повторить OFF/ack или явный disconnect/reconnect. В
+`required` v3 не может реактивироваться как autonomous: сначала изменить mode
+на `best_effort` осознанно. `off` полностью отключает TSP-path и не является
+успешным consume latch.
 
 ---
 

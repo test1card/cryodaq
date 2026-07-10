@@ -128,8 +128,8 @@ scheduler_drain_timeout_s: 5.0
 | `stale_timeout_s` | 10.0 | LakeShore опрос 2с = 5 poll'ов. Если шум GPIB вызывает ложные timeouts, подними до 15-20с. |
 | `heartbeat_timeout_s` | 15.0 | Keithley USBTMC обычно отвечает <1с. 15с достаточно. |
 | `max_dT_dt_K_per_min` | 5.0 | Консервативно. Mock и calibration runs могут выдать больше. Отслеживай — если false positives, подними до 8-10. |
-| `max_power_w` | 5.0 | Проверь по datasheet Keithley 2604B (100W per channel) и по thermal budget твоего нагревателя (обычно 100-500 mW). 5W — разумный cap. |
-| `max_voltage_v` / `max_current_a` | 40 / 1.0 | 40V × 1A = 40W > 5W max_power_w. Это OK (защита многослойная). Можно ужесточить: если I<100 mA нормально, поставь 0.2A. |
+| `max_power_w` | 5.0 | Только host-side target cap: вывести из thermal budget нагревателя/криостата. Он исчезает при смерти хоста и не является автономным energy bound. |
+| `max_voltage_v` / `max_current_a` | 40 / 1.0 | Instrument compliance ограничивает применимый envelope нагрузки/прибора, но не гарантирует 5 W и не ограничивает накопленную энергию после смерти хоста. Ужесточить по реальному V/I диапазону. |
 | `require_keithley_for_run` | true | В mock должен быть false, в production — true. |
 
 ### Что **не** менять без физического обоснования
@@ -336,8 +336,11 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 
 **1.2 `keithley_overpower`**
 ```yaml
-# Сейчас: 4W alarm, 4.5W interlock, 5W hardcap
+# Сейчас: 4W host alarm, 4.5W host interlock, 5W host target hardcap
 ```
+Все три порога реализованы на хосте и не переживают полную смерть процесса;
+это operating guards, а не независимый host-death cutout.
+
 **Что учесть:** для P=const feedback на маленьком нагревателе (типично
 30-100 mW) порог 4W никогда не сработает. Подгони под реальный
 рабочий диапазон: если рабочая мощность <200 mW, alarm на 500 mW.

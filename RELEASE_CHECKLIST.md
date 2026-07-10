@@ -154,7 +154,7 @@ python -m pytest tests/reporting -q
 - [ ] пути experiment/report/archive
 - [ ] формулировки ограничений калибровки
 - [ ] формулировка PDF best-effort
-- [ ] TSP скрипт: `tsp/cryodaq_wdog.lua` (firmware watchdog backstop; P=const регулируется host-side)
+- [ ] TSP скрипт: `tsp/cryodaq_wdog.lua` (неавтономный late-pet check; P=const регулируется host-side)
 - [ ] инструкции установки/тестирования и packaging
 
 ## 12. Известные caveat'ы RC
