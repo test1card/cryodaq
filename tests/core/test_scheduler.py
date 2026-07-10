@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from cryodaq.core.broker import DataBroker
+from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import InstrumentDriver, Reading
 
@@ -84,6 +84,30 @@ async def test_mock_driver_polled(broker: DataBroker) -> None:
 
     assert reading.channel == "CH1"
     assert abs(reading.value - 4.2) < 1e-9
+    assert PERSISTENCE_AUTHORITATIVE_METADATA_KEY not in reading.metadata
+
+
+async def test_successful_sqlite_commit_marks_published_reading_authoritative(
+    broker: DataBroker,
+) -> None:
+    class _Writer:
+        is_disk_full = False
+
+        async def write_immediate(self, readings: list[Reading]) -> bool:
+            assert readings
+            return True
+
+    queue = await broker.subscribe("authority_consumer", maxsize=10)
+    driver = MockDriver("authority")
+    sched = Scheduler(broker, sqlite_writer=_Writer())
+    sched.add(InstrumentConfig(driver=driver))
+    state = sched._instruments[driver.name]
+
+    await sched._process_readings(state, await driver.read_channels())
+
+    reading = queue.get_nowait()
+    queue.task_done()
+    assert reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
 
 
 # ---------------------------------------------------------------------------

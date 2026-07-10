@@ -59,6 +59,8 @@ import errno
 import json
 import logging
 import math
+import secrets
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib.metadata import version as _pkg_version
@@ -68,6 +70,7 @@ import msgpack
 import zmq
 import zmq.asyncio
 
+from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
@@ -92,6 +95,15 @@ def _parse_finite_float(token: str) -> float:
     return value
 
 
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _decode_command(raw: bytes | str) -> dict:
     """Decode a command frame, rejecting non-finite numeric values.
 
@@ -104,7 +116,10 @@ def _decode_command(raw: bytes | str) -> dict:
     handled identically to malformed JSON by the caller.
     """
     return json.loads(
-        raw, parse_constant=_reject_nonfinite, parse_float=_parse_finite_float
+        raw,
+        parse_constant=_reject_nonfinite,
+        parse_float=_parse_finite_float,
+        object_pairs_hook=_reject_duplicate_pairs,
     )
 
 
@@ -119,6 +134,15 @@ DEFAULT_TOPIC = b"readings"
 # frame type is invisible to them — no protocol break, no port change.
 EVENTS_TOPIC = b"events"
 
+PERIODIC_STREAM_SCHEMA = "cryodaq.periodic.stream/v1"
+PERIODIC_BARRIER_SCHEMA = "cryodaq.periodic.barrier/v1"
+PERIODIC_QUERY_SCHEMA = "cryodaq.periodic.query/v1"
+PERIODIC_BARRIER_TOPIC = b"periodic.barrier"
+PERIODIC_QUERY_MAX_BYTES = 64 * 1024
+PERIODIC_MAX_SEQUENCE = 2**63 - 1
+_PERIODIC_BARRIER_TIMEOUT_S = 1.5
+_PERIODIC_TOKEN_PREFIX = "sha256:"
+
 # Version of the ZMQ REP command envelope and PUB frame encodings this module
 # defines (topics, msgpack/JSON shapes — see docs/protocol.md). REST
 # (web/server.py's GET /api/version) imports this same constant instead of
@@ -126,6 +150,35 @@ EVENTS_TOPIC = b"events"
 # package build, so one number is honest; a REST-only break would still
 # warrant bumping this the same way a ZMQ-only break would.
 PROTOCOL_VERSION = 1
+
+
+def encode_command_reply(reply: dict[str, Any]) -> bytes:
+    """Serialize the one authoritative REP envelope used on the wire."""
+    return json.dumps(
+        {**reply, "proto": PROTOCOL_VERSION},
+        default=str,
+    ).encode()
+
+
+class PeriodicCommandReply(dict[str, Any]):
+    """Closed H3 reply whose exact validated wire bytes are reused by REP."""
+
+    def __init__(self, reply: dict[str, Any], wire: bytes) -> None:
+        super().__init__(reply)
+        self.wire = wire
+
+
+def encode_periodic_command_reply(reply: dict[str, Any]) -> PeriodicCommandReply:
+    """Encode one compact, sorted, finite H3 reply exactly once."""
+    envelope = {**reply, "proto": PROTOCOL_VERSION}
+    wire = json.dumps(
+        envelope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return PeriodicCommandReply(reply, wire)
 
 try:
     _APP_VERSION = _pkg_version("cryodaq")
@@ -280,7 +333,12 @@ async def _bind_with_retry(socket: Any, address: str) -> None:
             delay = min(delay * 2, _BIND_MAX_DELAY_S)
 
 
-def _pack_reading(reading: Reading) -> bytes:
+def _pack_reading(
+    reading: Reading,
+    *,
+    transport: dict[str, Any] | None = None,
+    public_metadata: dict[str, Any] | None = None,
+) -> bytes:
     """Сериализовать Reading в msgpack."""
     data = {
         "ts": reading.timestamp.timestamp(),
@@ -290,12 +348,21 @@ def _pack_reading(reading: Reading) -> bytes:
         "u": reading.unit,
         "st": reading.status.value,
         "raw": reading.raw,
-        "meta": reading.metadata,
+        "meta": reading.metadata if public_metadata is None else public_metadata,
     }
+    if transport is not None:
+        data["transport"] = transport
     return msgpack.packb(data, use_bin_type=True)
 
 
-def _pack_event(event_type: str, timestamp: datetime, payload: dict, experiment_id: str | None) -> bytes:
+def _pack_event(
+    event_type: str,
+    timestamp: datetime,
+    payload: dict,
+    experiment_id: str | None,
+    *,
+    transport: dict[str, Any] | None = None,
+) -> bytes:
     """Сериализовать EngineEvent в JSON для топика ``events``.
 
     JSON (not msgpack) because EngineEvent payloads are heterogeneous,
@@ -303,15 +370,15 @@ def _pack_event(event_type: str, timestamp: datetime, payload: dict, experiment_
     rather than the fixed Reading schema — JSON keeps this frame
     self-describing without a second bespoke packer.
     """
-    return json.dumps(
-        {
-            "event_type": event_type,
-            "ts": timestamp.timestamp(),
-            "payload": payload,
-            "experiment_id": experiment_id,
-        },
-        default=str,
-    ).encode("utf-8")
+    data = {
+        "event_type": event_type,
+        "ts": timestamp.timestamp(),
+        "payload": payload,
+        "experiment_id": experiment_id,
+    }
+    if transport is not None:
+        data["transport"] = transport
+    return json.dumps(data, default=str).encode("utf-8")
 
 
 def _unpack_event(payload: bytes) -> dict[str, Any]:
@@ -376,6 +443,89 @@ class ZMQPublisher:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_sent: int = 0
+        self._queue: asyncio.Queue[Reading] | None = None
+        self._session_id: str | None = None
+        self._sequence = 0
+        self._publish_failure_count = 0
+        self._send_lock = asyncio.Lock()
+        self._reading_drop_count: Callable[[], int] | None = None
+        self._alarm_snapshot: Callable[[], Any] | None = None
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    @property
+    def sequence(self) -> int:
+        return self._sequence
+
+    @property
+    def publish_failure_count(self) -> int:
+        return self._publish_failure_count
+
+    def configure_periodic_authority(
+        self,
+        *,
+        reading_drop_count: Callable[[], int],
+        alarm_snapshot: Callable[[], Any],
+    ) -> None:
+        """Install live-engine-only barrier samplers without breaking replay."""
+        self._reading_drop_count = reading_drop_count
+        self._alarm_snapshot = alarm_snapshot
+
+    def _transport(self, sequence: int, *, authoritative: bool) -> dict[str, Any]:
+        session_id = self._session_id
+        if session_id is None:
+            raise RuntimeError("publisher session unavailable")
+        return {
+            "schema": PERIODIC_STREAM_SCHEMA,
+            "session_id": session_id,
+            "sequence": sequence,
+            "persistence_authoritative": authoritative,
+        }
+
+    def _allocate_sequence(self) -> int:
+        if self._sequence >= PERIODIC_MAX_SEQUENCE:
+            raise RuntimeError("periodic stream sequence exhausted")
+        self._sequence += 1
+        return self._sequence
+
+    async def _send_allocated(
+        self,
+        topic: bytes,
+        encode: Callable[[int], bytes],
+    ) -> int:
+        """Allocate, encode, and send while the caller owns ``_send_lock``."""
+        sequence = self._allocate_sequence()
+        try:
+            frame = encode(sequence)
+            socket = self._socket
+            if socket is None:
+                raise RuntimeError("publisher socket unavailable")
+            await socket.send_multipart([topic, frame])
+        except BaseException:
+            self._publish_failure_count += 1
+            raise
+        self._total_sent += 1
+        return sequence
+
+    async def _publish_reading(self, reading: Reading) -> None:
+        metadata = dict(reading.metadata)
+        authoritative = (
+            metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, False) is True
+        )
+        async with self._send_lock:
+            await self._send_allocated(
+                self._topic,
+                lambda sequence: _pack_reading(
+                    reading,
+                    transport=self._transport(
+                        sequence,
+                        authoritative=authoritative,
+                    ),
+                    public_metadata=metadata,
+                ),
+            )
 
     async def _publish_loop(self, queue: asyncio.Queue[Reading]) -> None:
         while self._running:
@@ -384,11 +534,13 @@ class ZMQPublisher:
             except TimeoutError:
                 continue
             try:
-                payload = _pack_reading(reading)
-                await self._socket.send_multipart([self._topic, payload])
-                self._total_sent += 1
+                await self._publish_reading(reading)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Ошибка отправки ZMQ")
+            finally:
+                queue.task_done()
 
     async def publish_event(
         self,
@@ -408,15 +560,171 @@ class ZMQPublisher:
         behaviour); a send failure is logged, never raised — a lost
         event must not affect the safety-critical engine loop.
         """
-        if self._socket is None:
+        if self._socket is None or not self._running:
             return
         try:
-            frame = _pack_event(event_type, timestamp, payload, experiment_id)
-            await self._socket.send_multipart([EVENTS_TOPIC, frame])
+            async with self._send_lock:
+                await self._send_allocated(
+                    EVENTS_TOPIC,
+                    lambda sequence: _pack_event(
+                        event_type,
+                        timestamp,
+                        payload,
+                        experiment_id,
+                        transport=self._transport(
+                            sequence,
+                            authoritative=False,
+                        ),
+                    ),
+                )
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Ошибка отправки ZMQ события %s", event_type)
 
+    @staticmethod
+    def _barrier_error(code: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "schema": PERIODIC_BARRIER_SCHEMA,
+            "error_code": code,
+        }
+
+    def _publisher_alive(
+        self,
+        *,
+        task: asyncio.Task[None],
+        queue: asyncio.Queue[Reading],
+    ) -> bool:
+        return (
+            self._running
+            and self._task is task
+            and not task.done()
+            and self._queue is queue
+            and self._socket is not None
+            and self._session_id is not None
+            and self._sequence < PERIODIC_MAX_SEQUENCE
+        )
+
+    async def barrier(self, nonce: str) -> dict[str, Any]:
+        """Publish one queue fence and return its byte-equivalent evidence."""
+        if (
+            type(nonce) is not str
+            or len(nonce) != 32
+            or any(ch not in "0123456789abcdef" for ch in nonce)
+        ):
+            return self._barrier_error("barrier_invalid")
+        task = self._task
+        queue = self._queue
+        if (
+            task is None
+            or queue is None
+            or self._reading_drop_count is None
+            or self._alarm_snapshot is None
+            or not self._publisher_alive(task=task, queue=queue)
+        ):
+            return self._barrier_error("barrier_unavailable")
+
+        try:
+            async with asyncio.timeout(_PERIODIC_BARRIER_TIMEOUT_S):
+                await queue.join()
+                async with self._send_lock:
+                    if not self._publisher_alive(task=task, queue=queue):
+                        return self._barrier_error("barrier_unavailable")
+                    drop_count = self._reading_drop_count()
+                    snapshot = self._alarm_snapshot()
+                    if type(drop_count) is not int or drop_count < 0:
+                        return self._barrier_error("barrier_unavailable")
+                    revision = snapshot.state_revision
+                    token = snapshot.state_token
+                    if (
+                        type(revision) is not int
+                        or revision < 0
+                        or type(token) is not str
+                        or len(token) != len(_PERIODIC_TOKEN_PREFIX) + 64
+                        or not token.startswith(_PERIODIC_TOKEN_PREFIX)
+                        or any(ch not in "0123456789abcdef" for ch in token[7:])
+                    ):
+                        return self._barrier_error("barrier_unavailable")
+                    published_at = time.time()
+                    if not math.isfinite(published_at):
+                        return self._barrier_error("barrier_unavailable")
+                    session_id = self._session_id
+                    failure_count = self._publish_failure_count
+
+                    def encode(sequence: int) -> bytes:
+                        payload = {
+                            "proto": PROTOCOL_VERSION,
+                            "schema": PERIODIC_BARRIER_SCHEMA,
+                            "nonce": nonce,
+                            "session_id": session_id,
+                            "sequence": sequence,
+                            "published_at": published_at,
+                            "reading_drop_count": drop_count,
+                            "publish_failure_count": failure_count,
+                            "alarm_state_revision": revision,
+                            "alarm_state_token": token,
+                        }
+                        return json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+
+                    sequence = await self._send_allocated(
+                        PERIODIC_BARRIER_TOPIC,
+                        encode,
+                    )
+                    if not self._publisher_alive(task=task, queue=queue):
+                        return self._barrier_error("barrier_unavailable")
+                    try:
+                        post_revision = self._alarm_snapshot().state_revision
+                        post_drop_count = self._reading_drop_count()
+                    except BaseException:
+                        self._publish_failure_count += 1
+                        raise
+                    if (
+                        type(post_revision) is not int
+                        or post_revision != revision
+                        or type(post_drop_count) is not int
+                        or post_drop_count != drop_count
+                    ):
+                        return self._barrier_error("barrier_unstable")
+                    return {
+                        "ok": True,
+                        "proto": PROTOCOL_VERSION,
+                        "schema": PERIODIC_BARRIER_SCHEMA,
+                        "nonce": nonce,
+                        "session_id": session_id,
+                        "sequence": sequence,
+                        "published_at": published_at,
+                        "reading_drop_count": drop_count,
+                        "publish_failure_count": failure_count,
+                        "alarm_state_revision": revision,
+                        "alarm_state_token": token,
+                    }
+        except TimeoutError:
+            return self._barrier_error("barrier_timeout")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic barrier failed")
+            return self._barrier_error("barrier_unavailable")
+
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
+        if (
+            self._running
+            or self._task is not None
+            or self._socket is not None
+            or self._ctx is not None
+        ):
+            raise RuntimeError("ZMQPublisher is already started")
+        self._queue = queue
+        self._session_id = secrets.token_hex(16)
+        self._sequence = 0
+        self._publish_failure_count = 0
+        self._send_lock = asyncio.Lock()
         self._ctx = zmq.asyncio.Context()
         self._socket = self._ctx.socket(zmq.PUB)
         # Phase 2b H.4: LINGER=0 so the socket doesn't hold the port open
@@ -430,27 +738,108 @@ class ZMQPublisher:
         # reverted on the command path (REQ + REP); retained on the
         # SUB drain path in zmq_subprocess.sub_drain_loop as an
         # orthogonal safeguard for long between-experiment pauses.
-        await _bind_with_retry(self._socket, self._address)
-        self._running = True
-        self._task = asyncio.create_task(self._publish_loop(queue), name="zmq_publisher")
+        try:
+            await _bind_with_retry(self._socket, self._address)
+            self._running = True
+            self._task = asyncio.create_task(
+                self._publish_loop(queue),
+                name="zmq_publisher",
+            )
+        except BaseException:
+            self._running = False
+            if self._socket is not None:
+                self._socket.close(linger=0)
+                self._socket = None
+            if self._ctx is not None:
+                self._ctx.term()
+                self._ctx = None
+            self._queue = None
+            self._session_id = None
+            raise
         logger.info("ZMQPublisher запущен: %s", self._address)
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
+        caller_task = asyncio.current_task()
+        caller_cancel_baseline = (
+            caller_task.cancelling() if caller_task is not None else 0
+        )
+        first_error: BaseException | None = None
+        drain_task = self._task
+        if drain_task is not None:
+            drain_task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        if self._socket:
-            self._socket.close(linger=0)
-            self._socket = None
-        if self._ctx:
-            self._ctx.term()
-            self._ctx = None
+                await drain_task
+            except asyncio.CancelledError as exc:
+                if (
+                    caller_task is not None
+                    and caller_task.cancelling() > caller_cancel_baseline
+                ):
+                    first_error = exc
+            except BaseException as exc:
+                first_error = exc
+            finally:
+                self._task = None
+            if (
+                caller_task is not None
+                and caller_task.cancelling() > caller_cancel_baseline
+                and not isinstance(first_error, asyncio.CancelledError)
+            ):
+                first_error = asyncio.CancelledError()
+
+        async def _cleanup() -> None:
+            cleanup_error: BaseException | None = None
+            async with self._send_lock:
+                try:
+                    if self._socket:
+                        self._socket.close(linger=0)
+                except BaseException as exc:
+                    cleanup_error = exc
+                finally:
+                    self._socket = None
+                try:
+                    if self._ctx:
+                        self._ctx.term()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                finally:
+                    self._ctx = None
+                    self._queue = None
+                    self._session_id = None
+            if cleanup_error is not None:
+                raise cleanup_error
+
+        cleanup_task = asyncio.create_task(
+            _cleanup(),
+            name="zmq_publisher_cleanup",
+        )
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError as exc:
+                if (
+                    caller_task is not None
+                    and caller_task.cancelling() > caller_cancel_baseline
+                ):
+                    first_error = exc
+                elif first_error is None:
+                    first_error = exc
+                if cleanup_task.done():
+                    try:
+                        cleanup_task.result()
+                    except BaseException as cleanup_exc:
+                        if first_error is None:
+                            first_error = cleanup_exc
+                    break
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                break
         logger.info("ZMQPublisher остановлен (отправлено: %d)", self._total_sent)
+        if first_error is not None:
+            raise first_error
 
 
 class ZMQSubscriber:
@@ -826,7 +1215,9 @@ class ZMQCommandServer:
         ``proto`` value replaces any handler-provided value so handlers cannot
         omit or spoof the envelope version.
         """
-        return json.dumps({**reply, "proto": PROTOCOL_VERSION}, default=str).encode()
+        if isinstance(reply, PeriodicCommandReply):
+            return reply.wire
+        return encode_command_reply(reply)
 
     async def _serve_loop(self) -> None:
         while self._running:

@@ -385,6 +385,7 @@ class Scheduler:
 
         # Step 1b: Persist KRDG + SRDG atomically in one transaction
         combined = list(persisted_readings) + srdg_to_persist
+        persistence_authoritative = False
         if self._sqlite_writer is not None and combined:
             try:
                 persisted = await self._sqlite_writer.write_immediate(combined)
@@ -411,6 +412,7 @@ class Scheduler:
             # itself stays loud via A6's existing warning/critical log.
             if not persisted:
                 return
+            persistence_authoritative = True
 
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
         if srdg_to_persist:
@@ -420,7 +422,10 @@ class Scheduler:
 
         # Step 2: Publish to brokers
         if persisted_readings:
-            await self._broker.publish_batch(persisted_readings)
+            await self._broker.publish_batch(
+                persisted_readings,
+                persistence_authoritative=persistence_authoritative,
+            )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
 

@@ -69,7 +69,13 @@ from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
-from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
+from cryodaq.core.zmq_bridge import (
+    PERIODIC_BARRIER_SCHEMA,
+    PERIODIC_QUERY_SCHEMA,
+    ZMQCommandServer,
+    ZMQPublisher,
+    encode_periodic_command_reply,
+)
 from cryodaq.drivers.base import Reading
 from cryodaq.engine_wiring.runtime_tasks import (
     _alarm_ring_buffer_loop,
@@ -2001,6 +2007,45 @@ class EngineCommandContext:
     multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
     escalation_service: Any = None
     cooldown_service: Any = None
+    zmq_publisher: ZMQPublisher | None = None
+
+
+def _periodic_query_failure(error_code: str) -> dict[str, Any]:
+    return encode_periodic_command_reply(
+        {
+            "ok": False,
+            "schema": PERIODIC_QUERY_SCHEMA,
+            "error_code": error_code,
+        }
+    )
+
+
+def _periodic_barrier_failure(error_code: str) -> dict[str, Any]:
+    return encode_periodic_command_reply(
+        {
+            "ok": False,
+            "schema": PERIODIC_BARRIER_SCHEMA,
+            "error_code": error_code,
+        }
+    )
+
+
+def _periodic_snapshot_response(context: EngineCommandContext) -> dict[str, Any]:
+    try:
+        snapshot = context.alarm_v2_state_mgr.snapshot_active_canonical()
+        response = {
+            "ok": True,
+            "schema": PERIODIC_QUERY_SCHEMA,
+            "state_revision": snapshot.state_revision,
+            "state_token": snapshot.state_token,
+            "active": snapshot.active,
+        }
+        encoded = encode_periodic_command_reply(response)
+        if len(encoded.wire) > 60 * 1024:
+            return _periodic_query_failure("snapshot_unavailable")
+        return encoded
+    except Exception:
+        return _periodic_query_failure("snapshot_unavailable")
 
 
 async def _handle_gui_command(
@@ -2035,6 +2080,30 @@ async def _handle_gui_command(
     cooldown_service = context.cooldown_service
     action = cmd.get("cmd", "")
     try:
+        if action == "periodic_subscription_barrier":
+            if set(cmd) != {"cmd", "schema", "nonce"}:
+                return _periodic_barrier_failure("barrier_invalid")
+            if cmd.get("schema") != PERIODIC_QUERY_SCHEMA:
+                return _periodic_barrier_failure("barrier_invalid")
+            if context.zmq_publisher is None:
+                return _periodic_barrier_failure("barrier_unavailable")
+            nonce = cmd.get("nonce")
+            if (
+                type(nonce) is not str
+                or len(nonce) != 32
+                or any(ch not in "0123456789abcdef" for ch in nonce)
+            ):
+                return _periodic_barrier_failure("barrier_invalid")
+            return encode_periodic_command_reply(
+                await context.zmq_publisher.barrier(nonce)
+            )
+        if action == "periodic_alarm_snapshot":
+            if (
+                set(cmd) != {"cmd", "schema"}
+                or cmd.get("schema") != PERIODIC_QUERY_SCHEMA
+            ):
+                return _periodic_query_failure("snapshot_unavailable")
+            return _periodic_snapshot_response(context)
         if action in {
             "keithley_emergency_off",
             "keithley_stop",
@@ -2736,6 +2805,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
     )
     alarm_v2_state_mgr = AlarmStateManager()
+    zmq_pub.configure_periodic_authority(
+        reading_drop_count=lambda: broker.stats["zmq_publisher"]["dropped"],
+        alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
+    )
     # P2-5: interlock non-usable readings emit alarm-v2 events via the same
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).
@@ -2934,6 +3007,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         alarm_v2_state_tracker=_alarm_v2_state_tracker,
         multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
         multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+        zmq_publisher=zmq_pub,
     )
     handle_gui_command = functools.partial(
         _handle_gui_command,
