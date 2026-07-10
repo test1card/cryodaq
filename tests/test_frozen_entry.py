@@ -148,6 +148,32 @@ def test_frozen_dispatch_supports_report_render(
     assert called == [True]
 
 
+def test_frozen_dispatch_forwards_periodic_argv_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq._frozen_main as module
+
+    seen: list[list[str]] = []
+    fake = types.ModuleType("cryodaq.reporting.__main__")
+    fake.main = lambda: seen.append(list(sys.argv)) or 0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cryodaq.reporting.__main__", fake)
+    argv = [
+        "CryoDAQ.exe",
+        "--mode=report-render",
+        "periodic",
+        f"--generation-id={'a' * 32}",
+        "--deadline-epoch=123.000000",
+        "--max-input-bytes=65536",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        module._dispatch()
+
+    assert exc.value.code == 0
+    assert seen == [[argv[0], *argv[2:]]]
+
+
 def test_frozen_dispatch_uses_lightweight_assistant_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

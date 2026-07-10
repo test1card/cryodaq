@@ -1,22 +1,384 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import pytest
 
+from cryodaq.periodic_state import PeriodicArtifact
 from cryodaq.report_process import (
     ReportProcessError,
     ReportProcessRunner,
+    build_periodic_report_command,
     build_report_command,
+    read_periodic_artifact_bytes,
     read_result_file,
     result_file_path,
 )
 from cryodaq.report_state import build_current_manifest, promote_generation
+from cryodaq.reporting.periodic_input import MAX_PNG_BYTES
+
+_PERIODIC_GENERATION = "a" * 32
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _periodic_png(*, width: int = 640, height: int = 480) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", b"bounded-test-data")
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _install_periodic_artifact(
+    data_dir: Path, *, raw: bytes | None = None, **overrides: object
+) -> tuple[PeriodicArtifact, Path, bytes]:
+    content = _periodic_png() if raw is None else raw
+    final = (
+        data_dir
+        / "reporting"
+        / "periodic"
+        / "generations"
+        / _PERIODIC_GENERATION
+    )
+    final.mkdir(parents=True)
+    png = final / "periodic.png"
+    png.write_bytes(content)
+    values: dict[str, object] = {
+        "path": f"periodic/generations/{_PERIODIC_GENERATION}/periodic.png",
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+        "width": 640,
+        "height": 480,
+        "mime": "image/png",
+    }
+    values.update(overrides)
+    return PeriodicArtifact(**values), png, content  # type: ignore[arg-type]
+
+
+def test_periodic_artifact_reader_supports_ready_and_delivery_retry_without_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, _png, raw = _install_periodic_artifact(tmp_path)
+
+    def forbidden_path_read(_path: Path) -> bytes:
+        raise AssertionError("artifact authority must use a bounded fd read")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_path_read)
+    assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+    assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+    assert not (tmp_path / "reporting" / "periodic_state.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", f"periodic/generations/{'b' * 32}/periodic.png"),
+        ("path", f"periodic/generations/{_PERIODIC_GENERATION}/../periodic.png"),
+        ("sha256", "sha256:" + "0" * 64),
+        ("sha256", "not-a-hash"),
+        ("size", 1),
+        ("size", True),
+        ("width", 641),
+        ("width", True),
+        ("height", 481),
+        ("mime", "image/jpeg"),
+    ],
+)
+def test_periodic_artifact_reader_revalidates_every_descriptor_field(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path, **{field: value})
+    with pytest.raises(ReportProcessError, match="periodic artifact|periodic PNG"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link semantics")
+@pytest.mark.parametrize(
+    "attack", ["file_symlink", "file_hardlink", "generation_symlink", "periodic_symlink"]
+)
+def test_periodic_artifact_reader_rejects_linked_file_or_directory(
+    tmp_path: Path, attack: str
+) -> None:
+    artifact, png, raw = _install_periodic_artifact(tmp_path)
+    if attack == "file_symlink":
+        outside = tmp_path / "outside.png"
+        outside.write_bytes(raw)
+        png.unlink()
+        png.symlink_to(outside)
+    elif attack == "file_hardlink":
+        os.link(png, tmp_path / "second-link.png")
+    elif attack == "generation_symlink":
+        final = png.parent
+        outside = tmp_path / "outside-generation"
+        outside.mkdir()
+        (outside / "periodic.png").write_bytes(raw)
+        png.unlink()
+        final.rmdir()
+        final.symlink_to(outside, target_is_directory=True)
+    else:
+        periodic = png.parents[2]
+        outside = tmp_path / "outside-periodic"
+        periodic.rename(outside)
+        periodic.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ReportProcessError, match="directory|single-link|unsafe"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
+
+
+@pytest.mark.parametrize("replacement", ["file", "generation_directory"])
+def test_periodic_artifact_reader_rejects_replacement_during_fd_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, png, raw = _install_periodic_artifact(tmp_path)
+    real_read = module.os.read
+    replaced = False
+
+    def replace_after_read(fd: int, amount: int) -> bytes:
+        nonlocal replaced
+        chunk = real_read(fd, amount)
+        if chunk and not replaced:
+            replaced = True
+            if replacement == "file":
+                candidate = png.with_name("replacement.png")
+                candidate.write_bytes(raw)
+                os.replace(candidate, png)
+            else:
+                final = png.parent
+                moved = final.with_name(f"{final.name}.moved")
+                final.rename(moved)
+                final.mkdir()
+                (final / "periodic.png").write_bytes(raw)
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", replace_after_read)
+    with pytest.raises(ReportProcessError, match="changed"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
+    assert replaced is True
+
+
+def test_periodic_artifact_reader_rejects_oversized_file_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cryodaq.report_process as module
+
+    raw = b"x" * (MAX_PNG_BYTES + 1)
+    artifact, _png, _raw = _install_periodic_artifact(
+        tmp_path, raw=raw, size=MAX_PNG_BYTES
+    )
+    monkeypatch.setattr(
+        module.os,
+        "read",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("oversized file was read")),
+    )
+    with pytest.raises(ReportProcessError, match="size|large"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
+
+
+def _assert_fixed_artifact_io_failure(error: ReportProcessError) -> None:
+    assert error.error_code == "invalid_periodic_artifact"
+    assert error.error_text == "periodic PNG could not be read safely"
+    assert "injected" not in str(error)
+    assert error.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "fault", ["read", "post_read_fstat", "post_read_stat", "directory_verify", "close"]
+)
+def test_periodic_artifact_reader_normalizes_dirfd_io_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path)
+    assert module.os.open in module.os.supports_dir_fd
+    read_finished = False
+    real_read_bounded = module._read_open_fd_bounded
+    real_fstat = module.os.fstat
+    real_stat = module.os.stat
+    real_close = module.os.close
+
+    if fault == "read":
+        monkeypatch.setattr(
+            module.os,
+            "read",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected read path")),
+        )
+    elif fault in {"post_read_fstat", "post_read_stat"}:
+
+        def mark_read_finished(fd: int, maximum: int) -> bytes:
+            nonlocal read_finished
+            raw = real_read_bounded(fd, maximum)
+            read_finished = True
+            return raw
+
+        monkeypatch.setattr(module, "_read_open_fd_bounded", mark_read_finished)
+        if fault == "post_read_fstat":
+
+            def fail_fstat(fd: int):
+                if read_finished:
+                    raise OSError("injected fstat path")
+                return real_fstat(fd)
+
+            monkeypatch.setattr(module.os, "fstat", fail_fstat)
+        else:
+
+            def fail_stat(*args: object, **kwargs: object):
+                if read_finished:
+                    raise OSError("injected stat path")
+                return real_stat(*args, **kwargs)
+
+            monkeypatch.setattr(module.os, "stat", fail_stat)
+            monkeypatch.setattr(
+                module.os,
+                "supports_dir_fd",
+                {*module.os.supports_dir_fd, fail_stat},
+            )
+    elif fault == "directory_verify":
+        monkeypatch.setattr(
+            module,
+            "_verify_open_directory_chain",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected directory path")),
+        )
+    else:
+        failed = False
+
+        def fail_close(fd: int) -> None:
+            nonlocal failed
+            real_close(fd)
+            if not failed:
+                failed = True
+                raise OSError("injected close path")
+
+        monkeypatch.setattr(module.os, "close", fail_close)
+
+    with pytest.raises(ReportProcessError) as exc_info:
+        read_periodic_artifact_bytes(tmp_path, artifact)
+    _assert_fixed_artifact_io_failure(exc_info.value)
+
+
+@pytest.mark.parametrize("fault", ["read", "post_read_fstat", "close"])
+def test_periodic_artifact_reader_fallback_normalizes_io_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path)
+    monkeypatch.setattr(module.os, "supports_dir_fd", set())
+    read_finished = False
+    real_read_bounded = module._read_open_fd_bounded
+    real_fstat = module.os.fstat
+    real_close = module.os.close
+    if fault == "read":
+        monkeypatch.setattr(
+            module.os,
+            "read",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected fallback read")),
+        )
+    elif fault == "post_read_fstat":
+
+        def mark_read_finished(fd: int, maximum: int) -> bytes:
+            nonlocal read_finished
+            raw = real_read_bounded(fd, maximum)
+            read_finished = True
+            return raw
+
+        def fail_fstat(fd: int):
+            if read_finished:
+                raise OSError("injected fallback fstat")
+            return real_fstat(fd)
+
+        monkeypatch.setattr(module, "_read_open_fd_bounded", mark_read_finished)
+        monkeypatch.setattr(module.os, "fstat", fail_fstat)
+    else:
+        failed = False
+
+        def fail_close(fd: int) -> None:
+            nonlocal failed
+            real_close(fd)
+            if not failed:
+                failed = True
+                raise OSError("injected fallback close")
+
+        monkeypatch.setattr(module.os, "close", fail_close)
+
+    with pytest.raises(ReportProcessError) as exc_info:
+        read_periodic_artifact_bytes(tmp_path, artifact)
+    _assert_fixed_artifact_io_failure(exc_info.value)
+
+
+def test_periodic_artifact_reader_close_fault_preserves_existing_contract_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path)
+    real_close = module.os.close
+    failed = False
+
+    monkeypatch.setattr(
+        module.os,
+        "read",
+        lambda *_args: (_ for _ in ()).throw(
+            ReportProcessError("sentinel_contract", "original contract failure")
+        ),
+    )
+
+    def fail_close(fd: int) -> None:
+        nonlocal failed
+        real_close(fd)
+        if not failed:
+            failed = True
+            raise OSError("injected masking close")
+
+    monkeypatch.setattr(module.os, "close", fail_close)
+    with pytest.raises(ReportProcessError) as exc_info:
+        read_periodic_artifact_bytes(tmp_path, artifact)
+    assert exc_info.value.error_code == "sentinel_contract"
+    assert exc_info.value.error_text == "original contract failure"
+
+
+@pytest.mark.parametrize("mutation", ["trailing", "bad_crc", "missing_idat", "truncated"])
+def test_periodic_artifact_reader_rejects_invalid_full_png_contract(
+    tmp_path: Path, mutation: str
+) -> None:
+    valid = _periodic_png()
+    if mutation == "trailing":
+        raw = valid + b"trailing"
+    elif mutation == "bad_crc":
+        raw = bytearray(valid)
+        raw[45] ^= 1
+        raw = bytes(raw)
+    elif mutation == "missing_idat":
+        ihdr = struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0)
+        raw = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(
+            b"IEND", b""
+        )
+    else:
+        raw = valid[:-1]
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path, raw=raw)
+    with pytest.raises(ReportProcessError, match="periodic PNG"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
 
 
 def test_development_command_uses_module_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,6 +395,29 @@ def test_frozen_command_reinvokes_bundle(monkeypatch: pytest.MonkeyPatch) -> Non
     command = build_report_command("exp-1", "generation-token-0001", deadline_epoch=123.0)
     assert command[:3] == ["/opt/CryoDAQ.exe", "--mode=report-render", "experiment"]
     assert "-m" not in command
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_periodic_development_and_frozen_commands_are_fixed(
+    monkeypatch: pytest.MonkeyPatch, frozen: bool
+) -> None:
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", "/opt/CryoDAQ.exe")
+        prefix = ["/opt/CryoDAQ.exe", "--mode=report-render", "periodic"]
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        prefix = [sys.executable, "-m", "cryodaq.reporting", "periodic"]
+    command = build_periodic_report_command(
+        "a" * 32, deadline_epoch=123.0, max_input_bytes=65_536
+    )
+    assert command[: len(prefix)] == prefix
+    assert command[-3:] == [
+        f"--generation-id={'a' * 32}",
+        "--deadline-epoch=123.000000",
+        "--max-input-bytes=65536",
+    ]
+    assert not any("token" in item or "chat" in item or "/input" in item for item in command)
 
 
 def test_automatic_command_carries_locked_state_policy(

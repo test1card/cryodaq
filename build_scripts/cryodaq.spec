@@ -85,6 +85,8 @@ hidden_imports = [
     "cryodaq.gui.main_window",
     "cryodaq.reporting.__main__",
     "cryodaq.reporting.generator",
+    "cryodaq.reporting.periodic_input",
+    "cryodaq.reporting.periodic_renderer",
     "cryodaq.drivers.instruments.lakeshore_218s",
     "cryodaq.drivers.instruments.keithley_2604b",
     "cryodaq.drivers.instruments.thyracont_vsp63d",

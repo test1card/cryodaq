@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import secrets
+import stat
 import sys
 import time
 from pathlib import Path
@@ -14,7 +17,23 @@ from typing import Any
 
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.instance_lock import release_lock, try_acquire_lock
-from cryodaq.report_process import result_file_path
+from cryodaq.periodic_state import (
+    PERIODIC_RENDER_LOCK,
+    periodic_generation_dir,
+    periodic_input_path,
+    periodic_staging_dir,
+)
+from cryodaq.report_process import (
+    ReportProcessError,
+    _fsync_dir,
+    _read_regular_bounded,
+    _require_rendering_state_fence,
+    _validate_png,
+    _write_exclusive_fsynced,
+    periodic_failure_result_path,
+    recover_periodic_generation,
+    result_file_path,
+)
 from cryodaq.report_state import (
     MAX_JSON_BYTES,
     ReportContractError,
@@ -38,10 +57,20 @@ from cryodaq.report_state import (
     write_report_state,
     write_report_state_if_unchanged,
 )
+from cryodaq.reporting.periodic_input import (
+    MAX_RESULT_BYTES,
+    PERIODIC_RESULT_SCHEMA,
+    PeriodicInputError,
+    read_periodic_input_file_fenced,
+    validate_generation_token,
+    validate_input_byte_cap,
+    validate_result_payload,
+    verify_periodic_file_fence,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cryodaq-report-render")
+    parser = argparse.ArgumentParser(prog="cryodaq-report-render", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="kind", required=True)
     experiment = subparsers.add_parser("experiment")
     experiment.add_argument("--experiment-id", required=True)
@@ -51,7 +80,23 @@ def _parser() -> argparse.ArgumentParser:
     experiment.add_argument("--force", action="store_true")
     experiment.add_argument("--force-context")
     experiment.add_argument("--operator")
+    periodic = subparsers.add_parser("periodic", allow_abbrev=False)
+    periodic.add_argument("--generation-id", required=True)
+    periodic.add_argument("--deadline-epoch", required=True)
+    periodic.add_argument("--max-input-bytes", required=True)
     return parser
+
+
+def _periodic_argv_has_duplicate_authority(argv: list[str]) -> bool:
+    if not argv or argv[0] != "periodic":
+        return False
+    for option in ("--generation-id", "--deadline-epoch", "--max-input-bytes"):
+        occurrences = sum(
+            item == option or item.startswith(option + "=") for item in argv[1:]
+        )
+        if occurrences > 1:
+            return True
+    return False
 
 
 def _result_payload(
@@ -565,15 +610,308 @@ def _run_experiment(args: argparse.Namespace, data_dir: Path, result_path: Path)
         release_lock(fd, lock_name, unlink=False, lock_dir=data_dir)
 
 
+def _periodic_deadline(raw: object) -> float:
+    if not isinstance(raw, str) or raw != raw.strip():
+        raise PeriodicInputError("periodic deadline is invalid")
+    try:
+        epoch = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise PeriodicInputError("periodic deadline is invalid") from None
+    now = time.time()
+    remaining = epoch - now
+    if not math.isfinite(epoch) or remaining <= 0:
+        raise PeriodicInputError("periodic deadline has expired")
+    return time.monotonic() + min(remaining, 600.0)
+
+
+def _periodic_cap(raw: object) -> int:
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]+", raw) is None:
+        raise PeriodicInputError("periodic input cap argv is invalid")
+    return validate_input_byte_cap(int(raw))
+
+
+def _periodic_failure_payload(snapshot, *, code: str, text: str) -> dict[str, Any]:
+    payload = {
+        "schema": PERIODIC_RESULT_SCHEMA,
+        "ok": False,
+        "generation_id": snapshot.generation_id,
+        "owner_token": snapshot.owner_token,
+        "slot_id": snapshot.slot.slot_id,
+        "config_fingerprint": snapshot.slot.config_fingerprint,
+        "artifact": None,
+        "caption": "",
+        "error_code": code,
+        "error_text": text,
+    }
+    return validate_result_payload(payload, require_success=False)
+
+
+def _write_periodic_side_failure(data_dir: Path, snapshot, *, code: str, text: str) -> None:
+    try:
+        _require_rendering_state_fence(
+            data_dir,
+            generation_id=snapshot.generation_id,
+            slot_id=snapshot.slot.slot_id,
+            owner_token=snapshot.owner_token,
+            config_fingerprint=snapshot.slot.config_fingerprint,
+        )
+        path = periodic_failure_result_path(data_dir, snapshot.generation_id)
+        payload = _periodic_failure_payload(snapshot, code=code, text=text)
+        raw = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        if len(raw) > MAX_RESULT_BYTES:
+            return
+        _publish_periodic_side_failure_atomic(path, raw)
+    except Exception:
+        # Failure evidence is useful but never success authority. The fixed
+        # process exit remains the fallback if this bounded side channel fails.
+        return
+
+
+def _publish_periodic_side_failure_atomic(path: Path, raw: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    if os.path.lexists(temporary):
+        raise PeriodicInputError("periodic failure result path is occupied")
+    _write_exclusive_fsynced(temporary, raw)
+    temp_info: os.stat_result | None = None
+    try:
+        temp_info = temporary.lstat()
+        if (
+            stat.S_ISLNK(temp_info.st_mode)
+            or not stat.S_ISREG(temp_info.st_mode)
+            or temp_info.st_nlink != 1
+        ):
+            raise PeriodicInputError("periodic failure temporary is unsafe")
+        os.replace(temporary, path)
+        published = path.lstat()
+        if (
+            stat.S_ISLNK(published.st_mode)
+            or not stat.S_ISREG(published.st_mode)
+            or published.st_nlink != 1
+            or not os.path.samestat(temp_info, published)
+        ):
+            raise PeriodicInputError("periodic failure publication is unsafe")
+        _fsync_dir(path.parent)
+    except Exception:
+        try:
+            current = temporary.lstat()
+            if temp_info is not None and os.path.samestat(current, temp_info):
+                temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _ensure_periodic_directory(path: Path) -> None:
+    if os.path.lexists(path):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PeriodicInputError("periodic protocol directory is unsafe")
+        os.chmod(path, 0o700)
+        return
+    path.mkdir(mode=0o700)
+    _fsync_dir(path.parent)
+
+
+def _clear_staging_bounded(staging: Path) -> None:
+    quarantine = staging.with_name(f".quarantine-{staging.name}")
+    if not os.path.lexists(staging):
+        if os.path.lexists(quarantine):
+            raise PeriodicInputError("periodic staging quarantine requires inspection")
+        return
+    info = staging.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise PeriodicInputError("periodic staging root is unsafe")
+    if os.path.lexists(quarantine):
+        raise PeriodicInputError("periodic staging quarantine collision")
+    os.rename(staging, quarantine)
+    _fsync_dir(quarantine.parent)
+    entries: list[Path] = []
+    with os.scandir(quarantine) as iterator:
+        for index, item in enumerate(iterator, start=1):
+            if index > 2 or item.name not in {"periodic.png", "result.json"}:
+                raise PeriodicInputError("periodic staging contains unknown entries")
+            entries.append(quarantine / item.name)
+    for item in entries:
+        item_info = item.lstat()
+        if (
+            stat.S_ISLNK(item_info.st_mode)
+            or not stat.S_ISREG(item_info.st_mode)
+            or item_info.st_nlink != 1
+        ):
+            raise PeriodicInputError("periodic staging contains an unsafe entry")
+        if item_info.st_size > 10 * 1024 * 1024:
+            raise PeriodicInputError("periodic staging entry is oversized")
+        if not os.path.samestat(item_info, item.lstat()):
+            raise PeriodicInputError("periodic staging entry changed during cleanup")
+        item.unlink()
+    _fsync_dir(quarantine)
+    quarantine.rmdir()
+    _fsync_dir(quarantine.parent)
+
+
+def _run_periodic(args: argparse.Namespace, data_dir: Path) -> int:
+    generation = validate_generation_token(args.generation_id)
+    cap = _periodic_cap(args.max_input_bytes)
+    deadline_monotonic = _periodic_deadline(args.deadline_epoch)
+    input_path = periodic_input_path(data_dir, generation)
+    snapshot, input_fence = read_periodic_input_file_fenced(
+        input_path, expected_max_input_bytes=cap
+    )
+    if snapshot.generation_id != generation:
+        raise PeriodicInputError("periodic input generation does not match argv")
+    _require_rendering_state_fence(
+        data_dir,
+        generation_id=generation,
+        slot_id=snapshot.slot.slot_id,
+        owner_token=snapshot.owner_token,
+        config_fingerprint=snapshot.slot.config_fingerprint,
+    )
+
+    try:
+        fd = try_acquire_lock(PERIODIC_RENDER_LOCK, lock_dir=data_dir)
+    except (OSError, ValueError):
+        _write_periodic_side_failure(
+            data_dir,
+            snapshot,
+            code="protocol_failed",
+            text="periodic render protocol failed",
+        )
+        return 3
+    if fd is None:
+        _write_periodic_side_failure(
+            data_dir,
+            snapshot,
+            code="busy",
+            text="periodic renderer lock is already held",
+        )
+        return 2
+    try:
+        recovered = recover_periodic_generation(
+            data_dir,
+            generation,
+            expected_slot_id=snapshot.slot.slot_id,
+            expected_owner_token=snapshot.owner_token,
+        )
+        if recovered is not None:
+            return 0
+        periodic_root = periodic_staging_dir(data_dir, generation).parent.parent
+        staging_parent = periodic_staging_dir(data_dir, generation).parent
+        generations_parent = periodic_generation_dir(data_dir, generation).parent
+        for directory in (periodic_root, staging_parent, generations_parent):
+            _ensure_periodic_directory(directory)
+        staging = periodic_staging_dir(data_dir, generation)
+        _clear_staging_bounded(staging)
+        staging.mkdir(mode=0o700)
+        _fsync_dir(staging_parent)
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("periodic render deadline expired before heavy import")
+
+        from cryodaq.reporting.periodic_renderer import render_periodic_png
+
+        rendered = render_periodic_png(
+            snapshot,
+            staging,
+            deadline_monotonic=deadline_monotonic,
+        )
+        verify_periodic_file_fence(input_path, input_fence)
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("periodic render deadline expired before artifact verification")
+        png_raw = _read_regular_bounded(rendered.png_path, 10 * 1024 * 1024, "periodic PNG")
+        width, height = _validate_png(png_raw)
+        artifact = {
+            "path": f"periodic/generations/{generation}/periodic.png",
+            "sha256": "sha256:" + hashlib.sha256(png_raw).hexdigest(),
+            "size": len(png_raw),
+            "width": width,
+            "height": height,
+            "mime": "image/png",
+        }
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("periodic render deadline expired before result write")
+        success = validate_result_payload(
+            {
+                "schema": PERIODIC_RESULT_SCHEMA,
+                "ok": True,
+                "generation_id": generation,
+                "owner_token": snapshot.owner_token,
+                "slot_id": snapshot.slot.slot_id,
+                "config_fingerprint": snapshot.slot.config_fingerprint,
+                "artifact": artifact,
+                "caption": rendered.caption,
+                "error_code": None,
+                "error_text": "",
+            },
+            require_success=True,
+        )
+        result_raw = (
+            json.dumps(success, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        if len(result_raw) > MAX_RESULT_BYTES:
+            raise PeriodicInputError("periodic result exceeds its byte cap")
+        _write_exclusive_fsynced(staging / "result.json", result_raw)
+        _fsync_dir(staging)
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("periodic render deadline expired before promotion")
+        _require_rendering_state_fence(
+            data_dir,
+            generation_id=generation,
+            slot_id=snapshot.slot.slot_id,
+            owner_token=snapshot.owner_token,
+            config_fingerprint=snapshot.slot.config_fingerprint,
+        )
+        verify_periodic_file_fence(input_path, input_fence)
+        final = periodic_generation_dir(data_dir, generation)
+        if os.path.lexists(final):
+            raise PeriodicInputError("periodic final generation already exists")
+        os.rename(staging, final)
+        _fsync_dir(generations_parent)
+        return 0
+    except TimeoutError:
+        _write_periodic_side_failure(
+            data_dir, snapshot, code="deadline", text="periodic render deadline expired"
+        )
+        return 3
+    except (PeriodicInputError, ReportProcessError):
+        _write_periodic_side_failure(
+            data_dir,
+            snapshot,
+            code="protocol_failed",
+            text="periodic render protocol failed",
+        )
+        return 3
+    except Exception:
+        _write_periodic_side_failure(
+            data_dir,
+            snapshot,
+            code="render_failed",
+            text="periodic renderer failed",
+        )
+        return 1
+    finally:
+        release_lock(fd, PERIODIC_RENDER_LOCK, unlink=False, lock_dir=data_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    generation_id = validate_generation_id(args.generation_id)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _periodic_argv_has_duplicate_authority(raw_argv):
+        return 3
+    args = _parser().parse_args(raw_argv)
     raw_data_dir = os.environ.get("CRYODAQ_REPORT_DATA_DIR", "")
     if not raw_data_dir:
         raise SystemExit("CRYODAQ_REPORT_DATA_DIR is required")
     data_dir = Path(raw_data_dir).resolve()
     if not data_dir.is_dir():
         raise SystemExit("CRYODAQ_REPORT_DATA_DIR is invalid")
+    if args.kind == "periodic":
+        try:
+            return _run_periodic(args, data_dir)
+        except (PeriodicInputError, ReportProcessError, TimeoutError):
+            return 3
+    generation_id = validate_generation_id(args.generation_id)
     result_path = result_file_path(data_dir, generation_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     if result_path.is_symlink():

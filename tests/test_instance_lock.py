@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,68 @@ def test_persistent_lock_is_reacquired_after_process_death(lock_name):
     assert fd is not None
     release_lock(fd, lock_name, unlink=False)
     assert lock_path.exists()
+
+
+def test_lock_rejects_symlink_without_truncating_target(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_text("do-not-touch", encoding="utf-8")
+    (tmp_path / ".unsafe.lock").symlink_to(target)
+
+    assert try_acquire_lock(".unsafe.lock", lock_dir=tmp_path) is None
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+
+
+def test_lock_rejects_nonregular_and_hardlinked_paths(tmp_path: Path) -> None:
+    (tmp_path / ".directory.lock").mkdir()
+    assert try_acquire_lock(".directory.lock", lock_dir=tmp_path) is None
+
+    target = tmp_path / "hardlink-target"
+    target.write_text("do-not-touch", encoding="utf-8")
+    try:
+        os.link(target, tmp_path / ".hardlink.lock")
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+    assert try_acquire_lock(".hardlink.lock", lock_dir=tmp_path) is None
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+
+
+def test_lock_rejects_path_replacement_during_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cryodaq.instance_lock as module
+
+    path = tmp_path / ".replaced.lock"
+    path.write_text("old", encoding="ascii")
+    real_open = module.os.open
+
+    def replacing_open(raw_path: str, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(raw_path, flags, mode)
+        path.unlink()
+        path.write_text("attacker", encoding="ascii")
+        return fd
+
+    monkeypatch.setattr(module.os, "open", replacing_open)
+    assert try_acquire_lock(path.name, lock_dir=tmp_path) is None
+    assert path.read_text(encoding="ascii") == "attacker"
+
+
+def test_lock_rejects_symlinked_parent_even_when_target_is_contained(tmp_path: Path) -> None:
+    contained = tmp_path / "contained"
+    contained.mkdir()
+    (tmp_path / ".report-locks").symlink_to(contained, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="real directory"):
+        try_acquire_lock(".report-locks/periodic.lock", lock_dir=tmp_path)
+    assert list(contained.iterdir()) == []
+
+
+def test_release_never_unlinks_replacement_path(tmp_path: Path) -> None:
+    path = tmp_path / ".release.lock"
+    fd = try_acquire_lock(path.name, lock_dir=tmp_path)
+    assert fd is not None
+    path.unlink()
+    path.write_text("attacker", encoding="ascii")
+
+    release_lock(fd, path.name, lock_dir=tmp_path)
+
+    assert path.read_text(encoding="ascii") == "attacker"
