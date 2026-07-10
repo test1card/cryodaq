@@ -19,6 +19,8 @@ import yaml
 from cryodaq.report_state import (
     ReportContractError,
     load_current_manifest,
+    load_report_state,
+    report_force_context,
     resolve_report_artifact,
     resolve_report_paths,
 )
@@ -162,6 +164,15 @@ class ArchiveEntry:
     pdf_path: Path | None
     report_enabled: bool
     report_present: bool
+    report_authority: str
+    report_generation_id: str | None
+    report_state_status: str | None
+    report_attempt_count: int | None
+    report_max_attempts: int | None
+    report_error_code: str | None
+    report_error_text: str
+    report_force_required: bool
+    report_force_context: str | None
     notes: str
     retroactive: bool
     run_record_count: int = 0
@@ -189,6 +200,15 @@ class ArchiveEntry:
             "pdf_path": str(self.pdf_path) if self.pdf_path else "",
             "report_enabled": self.report_enabled,
             "report_present": self.report_present,
+            "report_authority": self.report_authority,
+            "report_generation_id": self.report_generation_id,
+            "report_state_status": self.report_state_status,
+            "report_attempt_count": self.report_attempt_count,
+            "report_max_attempts": self.report_max_attempts,
+            "report_error_code": self.report_error_code,
+            "report_error_text": self.report_error_text,
+            "report_force_required": self.report_force_required,
+            "report_force_context": self.report_force_context,
             "notes": self.notes,
             "retroactive": self.retroactive,
             "run_record_count": self.run_record_count,
@@ -292,6 +312,15 @@ def _clean_text(raw: Any) -> str:
     if raw is None:
         return ""
     return str(raw).strip()
+
+
+def _report_error_display(error_code: Any, error_text: Any) -> str:
+    """Project report failures without leaking raw paths or exception payloads."""
+    if not str(error_text or "").strip():
+        return ""
+    code = str(error_code or "report_failed")[:128]
+    code = "".join(char for char in code if 32 <= ord(char) < 127).strip()
+    return f"Previous report attempt failed ({code or 'report_failed'})."[:512]
 
 
 class ExperimentManager:
@@ -451,62 +480,102 @@ class ExperimentManager:
                 )
                 artifact_dir = metadata_path.parent
                 manifest = None
+                report_paths = None
+                report_authority = "none"
+                report_generation_id = None
+                pointer = artifact_dir / "reports" / "current_report.json"
+                pointer_present = os.path.lexists(pointer)
                 try:
                     report_paths = resolve_report_paths(artifact_dir)
                     manifest = load_current_manifest(artifact_dir)
-                except ReportContractError as exc:
+                except (OSError, ReportContractError) as exc:
                     logger.warning(
                         "Ignoring unsafe report manifest %s: %s", artifact_dir, exc
                     )
-                    report_paths = None
+                    if pointer_present:
+                        report_authority = "invalid"
+                if pointer_present and manifest is None:
+                    # The pointer may have disappeared between lexists() and
+                    # the validated read.  Preserve the observed manifest
+                    # authority instead of reclassifying the entry as a
+                    # legacy/no-report archive during that race.
+                    report_authority = "invalid"
                 if manifest is not None:
+                    report_authority = "manifest"
+                    report_generation_id = manifest["generation_id"]
                     report = manifest["report"]
-                    docx_path = artifact_dir / report["docx_path"]
+                    manifest_docx = artifact_dir / report["docx_path"]
+                    docx_path = manifest_docx if manifest_docx.is_file() else None
                     pdf_path = (
                         artifact_dir / report["pdf_path"]
                         if report["pdf_path"] is not None
                         else None
                     )
-                else:
+                elif not pointer_present and report_paths is not None:
                     docx_path = None
                     pdf_path = None
-                    if report_paths is not None:
-                        for name in ("report_editable.docx", "report.docx"):
-                            try:
-                                candidate = resolve_report_artifact(
+                    for name in ("report_editable.docx", "report.docx"):
+                        try:
+                            candidate = resolve_report_artifact(
+                                report_paths.reports / name,
+                                report_paths,
+                                field="archive DOCX",
+                                required=False,
+                            )
+                            if candidate.exists():
+                                docx_path = resolve_report_artifact(
                                     report_paths.reports / name,
                                     report_paths,
                                     field="archive DOCX",
-                                    required=False,
+                                    required=True,
                                 )
-                                if candidate.exists():
-                                    docx_path = resolve_report_artifact(
-                                        candidate,
-                                        report_paths,
-                                        field="archive DOCX",
-                                        required=True,
-                                    )
-                                    break
-                            except ReportContractError as exc:
-                                logger.warning("Ignoring unsafe archive DOCX: %s", exc)
-                        for name in ("report_raw.pdf", "report.pdf"):
-                            try:
-                                candidate = resolve_report_artifact(
+                                break
+                        except ReportContractError as exc:
+                            logger.warning("Ignoring unsafe archive DOCX: %s", exc)
+                    for name in ("report_raw.pdf", "report.pdf"):
+                        try:
+                            candidate = resolve_report_artifact(
+                                report_paths.reports / name,
+                                report_paths,
+                                field="archive PDF",
+                                required=False,
+                            )
+                            if candidate.exists():
+                                pdf_path = resolve_report_artifact(
                                     report_paths.reports / name,
                                     report_paths,
                                     field="archive PDF",
-                                    required=False,
+                                    required=True,
                                 )
-                                if candidate.exists():
-                                    pdf_path = resolve_report_artifact(
-                                        candidate,
-                                        report_paths,
-                                        field="archive PDF",
-                                        required=True,
-                                    )
-                                    break
-                            except ReportContractError as exc:
-                                logger.warning("Ignoring unsafe archive PDF: %s", exc)
+                                break
+                        except ReportContractError as exc:
+                            logger.warning("Ignoring unsafe archive PDF: %s", exc)
+                    if docx_path is not None or pdf_path is not None:
+                        report_authority = "legacy"
+                else:
+                    docx_path = None
+                    pdf_path = None
+
+                state = None
+                report_state_status = None
+                try:
+                    state = load_report_state(artifact_dir)
+                except (OSError, ReportContractError) as exc:
+                    logger.warning("Ignoring invalid report state %s: %s", artifact_dir, exc)
+                    report_state_status = "INVALID"
+                if state is not None:
+                    report_state_status = state["status"]
+                report_force_required = bool(
+                    state is not None
+                    and state["status"] in {"FAILED", "RUNNING"}
+                    and int(state["attempt_count"]) >= int(state["max_attempts"])
+                    and report_authority != "invalid"
+                )
+                force_context = (
+                    report_force_context(state, manifest)
+                    if report_force_required and state is not None
+                    else None
+                )
                 entry = ArchiveEntry(
                     experiment_id=_clean_text(experiment.get("experiment_id")),
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
@@ -530,6 +599,23 @@ class ExperimentManager:
                     report_enabled=bool(experiment.get("report_enabled", True)),
                     report_present=(docx_path is not None and docx_path.exists())
                     or (pdf_path is not None and pdf_path.exists()),
+                    report_authority=report_authority,
+                    report_generation_id=report_generation_id,
+                    report_state_status=report_state_status,
+                    report_attempt_count=(int(state["attempt_count"]) if state is not None else None),
+                    report_max_attempts=(int(state["max_attempts"]) if state is not None else None),
+                    report_error_code=(
+                        str(state["error_code"])[:128]
+                        if state is not None and state["error_code"] is not None
+                        else None
+                    ),
+                    report_error_text=(
+                        _report_error_display(state["error_code"], state["error_text"])
+                        if state is not None
+                        else ""
+                    ),
+                    report_force_required=report_force_required,
+                    report_force_context=force_context,
                     notes=_clean_text(experiment.get("notes")),
                     retroactive=bool(experiment.get("retroactive", False)),
                     run_record_count=len(run_records),

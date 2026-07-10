@@ -10,6 +10,13 @@ import yaml
 
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.core.experiment import ExperimentManager
+from cryodaq.report_state import (
+    build_current_manifest,
+    new_running_state,
+    promote_generation,
+    terminal_state,
+    write_report_state,
+)
 
 
 @pytest.fixture()
@@ -126,6 +133,7 @@ async def test_archive_filters_and_sorts(manager: ExperimentManager, tmp_path: P
 
     assert len(entries) == 1
     assert entries[0].experiment_id == exp_b.experiment_id
+    assert entries[0].report_authority == "legacy"
 
     operator_sorted = manager.list_archive_entries(sort_by="operator", descending=False)
     assert [entry.operator for entry in operator_sorted] == ["Ivanov", "Petrov"]
@@ -147,6 +155,146 @@ async def test_archive_finalize_leaves_report_for_eventual_reconciliation(
     assert entry.report_present is False
     assert entry.docx_path is None
     assert entry.pdf_path is None
+    assert entry.report_authority == "none"
+
+
+async def test_archive_manifest_authority_ignores_stale_canonical_files(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Manifest authority",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    root = tmp_path / "experiments" / created.experiment_id
+    generation_id = "generation-token-0001"
+    staging = root / "reports" / ".staging" / generation_id
+    staging.mkdir(parents=True)
+    (staging / "assets").mkdir()
+    (staging / "report_editable.docx").write_bytes(b"selected")
+    manifest = build_current_manifest(
+        root,
+        generation_id=generation_id,
+        source_fingerprint="sha256:" + "1" * 64,
+        sections=("title_page",),
+        skipped=False,
+        reason="",
+    )
+    promote_generation(root, generation_id, manifest)
+    (root / "reports" / "report_editable.docx").write_bytes(b"stale")
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_authority == "manifest"
+    assert entry.report_generation_id == generation_id
+    assert entry.docx_path is not None
+    assert "generations" in entry.docx_path.parts
+
+
+async def test_archive_dangling_manifest_symlink_is_invalid_not_legacy(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Dangling manifest",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    reports = tmp_path / "experiments" / created.experiment_id / "reports"
+    reports.mkdir()
+    (reports / "report_editable.docx").write_bytes(b"stale")
+    (reports / "current_report.json").symlink_to(reports / "missing.json")
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_authority == "invalid"
+    assert entry.report_present is False
+    assert entry.docx_path is None
+
+
+async def test_archive_observed_manifest_pointer_race_remains_invalid(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Manifest race",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    monkeypatch.setattr("cryodaq.core.experiment.os.path.lexists", lambda _path: True)
+    monkeypatch.setattr("cryodaq.core.experiment.load_current_manifest", lambda _root: None)
+
+    entry = manager.get_archive_item(created.experiment_id)
+
+    assert entry is not None
+    assert entry.report_authority == "invalid"
+    assert entry.report_present is False
+
+
+async def test_archive_corrupt_report_state_keeps_card_and_disables_force(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Corrupt state",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    root = tmp_path / "experiments" / created.experiment_id
+    state_path = root / "report_state.json"
+    state_path.write_bytes(b"{broken")
+
+    entry = manager.get_archive_item(created.experiment_id)
+    assert entry is not None
+    assert entry.report_state_status == "INVALID"
+    assert entry.report_force_required is False
+    assert entry.report_force_context is None
+    assert state_path.read_bytes() == b"{broken"
+
+
+async def test_archive_exposes_bounded_force_confirmation_context(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    created = manager.create_retroactive_experiment(
+        template_id="cooldown_test",
+        title="Poisoned report",
+        operator="Operator",
+        start_time="2026-03-16T10:00:00+00:00",
+        end_time="2026-03-16T11:00:00+00:00",
+    )
+    root = tmp_path / "experiments" / created.experiment_id
+    running = new_running_state(
+        created.experiment_id,
+        "sha256:" + "1" * 64,
+        "generation-token-0001",
+        "owner-token-valid-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="owner-token-valid-0001",
+        succeeded=False,
+        error_code="render_failed",
+        error_text="failed",
+    )
+    write_report_state(root, failed)
+
+    payload = manager.get_archive_item(created.experiment_id).to_payload()  # type: ignore[union-attr]
+    assert payload["report_force_required"] is True
+    assert len(payload["report_force_context"]) == 64
+    assert "owner_token" not in payload
+    assert "source_fingerprint" not in payload
 
 
 def test_finalize_order_has_no_renderer_step(
@@ -322,6 +470,7 @@ async def test_archive_rejects_escaping_current_manifest(
     assert entry is not None
     assert entry.report_present is False
     assert entry.docx_path is None
+    assert entry.report_authority == "invalid"
 
 
 async def test_archive_rejects_symlinked_canonical_report(

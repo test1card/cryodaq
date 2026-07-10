@@ -538,6 +538,234 @@ def write_report_state(
     )
 
 
+def write_report_state_if_unchanged(
+    experiment_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    expected: Mapping[str, Any],
+) -> None:
+    """Replace exact state while the caller holds the experiment kernel lock.
+
+    The persistent per-experiment lock is the concurrency authority for every
+    legitimate report-state writer.  This equality check is an additional
+    stale-context fence inside that locked domain; filesystem rename is not a
+    portable compare-and-swap against writers that violate the lock contract.
+    """
+    root = Path(experiment_root).resolve()
+    path = _contained(root / "report_state.json", root, field="report state")
+    if path.is_symlink():
+        raise ReportContractError("report state must not be a symlink")
+    validated_expected = validate_report_state(expected)
+    validated_payload = validate_report_state(payload)
+    current = load_report_state(root)
+    if current is None or current != validated_expected:
+        raise ReportContractError("persisted report state changed before exact transition")
+    atomic_write_text(path, _json_text(validated_payload))
+
+
+def report_force_context(
+    state: Mapping[str, Any],
+    current_manifest: Mapping[str, Any] | None,
+) -> str:
+    """Return an opaque digest binding operator confirmation to exact report truth."""
+    validated = validate_report_state(state)
+    manifest_generation: str | None = None
+    if current_manifest is not None:
+        generation = current_manifest.get("generation_id")
+        manifest_generation = validate_generation_id(generation)
+    identity = {
+        "domain": "cryodaq.report-force-context",
+        "version": 1,
+        "state": {
+            "experiment_id": validated["experiment_id"],
+            "source_fingerprint": validated["source_fingerprint"],
+            "generation_id": validated["generation_id"],
+            "owner_token": validated["owner_token"],
+            "status": validated["status"],
+            "attempt_count": validated["attempt_count"],
+            "max_attempts": validated["max_attempts"],
+            "updated_at": validated["updated_at"],
+        },
+        "manifest_generation_id": manifest_generation,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def report_state_summary(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the bounded, non-secret state subset permitted in force audit records."""
+    validated = validate_report_state(state)
+    return {
+        "generation_id": validated["generation_id"],
+        "status": validated["status"],
+        "attempt_count": validated["attempt_count"],
+        "max_attempts": validated["max_attempts"],
+        "updated_at": validated["updated_at"],
+        "error_code": (
+            str(validated["error_code"])[:128]
+            if validated["error_code"] is not None
+            else None
+        ),
+    }
+
+
+def write_report_force_audit(
+    experiment_root: Path,
+    audit_id: str,
+    *,
+    phase: str,
+    payload: Mapping[str, Any],
+) -> Path:
+    """Create one immutable, experiment-local force-retry audit record."""
+    audit_id = validate_generation_id(audit_id)
+    if phase not in {"before", "after"}:
+        raise ReportContractError("force audit phase must be before or after")
+    expected = {
+        "schema",
+        "event",
+        "audit_id",
+        "at",
+        "operator",
+        "experiment_id",
+        "force_context",
+        "before",
+        "requested_generation_id",
+        "manifest_generation_id",
+        "outcome",
+        "after",
+    }
+    record = dict(payload)
+    if set(record) != expected or record.get("schema") != 1:
+        raise ReportContractError("force audit record has an invalid schema")
+    if record.get("audit_id") != audit_id:
+        raise ReportContractError("force audit id mismatch")
+    validate_experiment_id(record.get("experiment_id"))
+    validate_generation_id(record.get("requested_generation_id"))
+    manifest_generation = record.get("manifest_generation_id")
+    if manifest_generation is not None:
+        validate_generation_id(manifest_generation)
+    operator = record.get("operator")
+    if (
+        not isinstance(operator, str)
+        or not (1 <= len(operator) <= 128)
+        or operator != operator.strip()
+        or any(ord(char) < 32 or ord(char) == 127 for char in operator)
+    ):
+        raise ReportContractError("force audit operator is invalid")
+    context = record.get("force_context")
+    if not isinstance(context, str) or re.fullmatch(r"[0-9a-f]{64}", context) is None:
+        raise ReportContractError("force audit context is invalid")
+    at = record.get("at")
+    if type(at) not in (int, float) or not math.isfinite(float(at)) or float(at) < 0:
+        raise ReportContractError("force audit timestamp is invalid")
+    before = record.get("before")
+    if not isinstance(before, dict) or set(before) != {
+        "generation_id",
+        "status",
+        "attempt_count",
+        "max_attempts",
+        "updated_at",
+        "error_code",
+    }:
+        raise ReportContractError("force audit before state is invalid")
+    validate_generation_id(before.get("generation_id"))
+    if before.get("status") not in {"FAILED", "RUNNING"}:
+        raise ReportContractError("force audit before status is invalid")
+    before_attempt = before.get("attempt_count")
+    before_max = before.get("max_attempts")
+    if (
+        type(before_attempt) is not int
+        or type(before_max) is not int
+        or not (1 <= before_attempt == before_max <= 20)
+    ):
+        raise ReportContractError("force audit before attempts are invalid")
+    before_updated = before.get("updated_at")
+    if (
+        type(before_updated) not in (int, float)
+        or not math.isfinite(float(before_updated))
+        or float(before_updated) < 0
+    ):
+        raise ReportContractError("force audit before timestamp is invalid")
+    before_error = before.get("error_code")
+    if before_error is not None and (
+        not isinstance(before_error, str) or len(before_error) > 128
+    ):
+        raise ReportContractError("force audit before error code is invalid")
+    if record.get("event") == "report_force_confirmed":
+        if phase != "before" or record.get("outcome") != "accepted" or record.get("after") is not None:
+            raise ReportContractError("force before audit fields are invalid")
+    elif record.get("event") == "report_force_completed":
+        if phase != "after" or record.get("outcome") not in {"succeeded", "failed"}:
+            raise ReportContractError("force after audit fields are invalid")
+        after = record.get("after")
+        if not isinstance(after, dict) or set(after) != set(before):
+            raise ReportContractError("force audit after state is invalid")
+        validate_generation_id(after.get("generation_id"))
+        expected_status = "SUCCEEDED" if record.get("outcome") == "succeeded" else "FAILED"
+        if after.get("status") != expected_status:
+            raise ReportContractError("force audit after status is invalid")
+        if type(after.get("attempt_count")) is not int or after.get("attempt_count") != 1:
+            raise ReportContractError("force audit after attempt is invalid")
+        if type(after.get("max_attempts")) is not int or not (1 <= after["max_attempts"] <= 20):
+            raise ReportContractError("force audit after max_attempts is invalid")
+        after_updated = after.get("updated_at")
+        if (
+            type(after_updated) not in (int, float)
+            or not math.isfinite(float(after_updated))
+            or float(after_updated) < 0
+        ):
+            raise ReportContractError("force audit after timestamp is invalid")
+        after_error = after.get("error_code")
+        if after_error is not None and (
+            not isinstance(after_error, str) or len(after_error) > 128
+        ):
+            raise ReportContractError("force audit after error code is invalid")
+    else:
+        raise ReportContractError("force audit event is invalid")
+    text = _json_text(record)
+
+    root = Path(experiment_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ReportContractError("experiment root must be a real directory")
+    resolved_root = root.resolve()
+    reports = resolved_root / "reports"
+    audit = reports / "audit"
+    force_dir = audit / "report_force"
+    for directory, field in (
+        (reports, "reports directory"),
+        (audit, "report audit directory"),
+        (force_dir, "report force audit directory"),
+    ):
+        if directory.is_symlink():
+            raise ReportContractError(f"{field} must not be a symlink")
+        directory.mkdir(exist_ok=True)
+        if not directory.is_dir() or directory.resolve() != directory:
+            raise ReportContractError(f"{field} must be a real directory")
+        _contained(directory, resolved_root, field=field)
+    target = force_dir / f"{audit_id}.{phase}.json"
+    if os.path.lexists(target):
+        raise ReportContractError("force audit record already exists")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(target, flags, 0o600)
+        try:
+            remaining = memoryview(text.encode("utf-8"))
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise OSError("short force audit write")
+                remaining = remaining[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ReportIOError("force audit record could not be persisted") from exc
+    _fsync_dir(force_dir)
+    return target
+
+
 def new_pending_state(
     experiment_id: str,
     source_fingerprint: str,

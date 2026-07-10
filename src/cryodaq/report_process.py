@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -35,6 +36,24 @@ _REPORT_FIELDS = {"docx_path", "pdf_path", "assets_dir", "sections", "skipped", 
 class ReportProcessError(RuntimeError):
     """A bounded report child failed, timed out, or violated its result contract."""
 
+    def __init__(self, error_code: str, error_text: str | None = None) -> None:
+        if error_text is None:
+            raw = str(error_code)[:2_177] or "report child failed"
+            candidate, separator, remainder = raw.partition(":")
+            if separator and re.fullmatch(r"[a-z0-9_]{1,128}", candidate):
+                self.error_code = candidate
+                self.error_text = remainder.strip()[:2_048] or "report child failed"
+            else:
+                self.error_code = "process_error"
+                self.error_text = raw[:2_048]
+            # Preserve the historical one-argument string exactly.  H2's
+            # coordinator classifies known child outcomes by this prefix.
+            super().__init__(raw)
+            return
+        self.error_code = str(error_code)[:128] or "process_error"
+        self.error_text = str(error_text)[:2_048] or "report child failed"
+        super().__init__(f"{self.error_code}: {self.error_text}")
+
 
 def build_report_command(
     experiment_id: str,
@@ -42,10 +61,29 @@ def build_report_command(
     *,
     deadline_epoch: float,
     automatic: bool = False,
+    force: bool = False,
+    force_context: str | None = None,
+    operator: str | None = None,
 ) -> list[str]:
     """Build the fixed development or frozen experiment-render argv."""
     validate_experiment_id(experiment_id)
     validate_generation_id(generation_id)
+    if type(automatic) is not bool or type(force) is not bool:
+        raise ReportProcessError("invalid_force", "automatic and force must be exact booleans")
+    if automatic and force:
+        raise ReportProcessError("invalid_force", "automatic report generation cannot be forced")
+    if force:
+        if not isinstance(force_context, str) or re.fullmatch(r"[0-9a-f]{64}", force_context) is None:
+            raise ReportProcessError("invalid_force", "force_context is invalid")
+        if (
+            not isinstance(operator, str)
+            or not (1 <= len(operator) <= 128)
+            or operator != operator.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in operator)
+        ):
+            raise ReportProcessError("invalid_force", "operator is invalid")
+    elif force_context is not None or operator is not None:
+        raise ReportProcessError("invalid_force", "force_context/operator require force=true")
     suffix = [
         "experiment",
         f"--experiment-id={experiment_id}",
@@ -58,6 +96,14 @@ def build_report_command(
         command = [sys.executable, "-m", "cryodaq.reporting", *suffix]
     if automatic:
         command.append("--automatic")
+    if force:
+        command.extend(
+            [
+                "--force",
+                f"--force-context={force_context}",
+                f"--operator={operator}",
+            ]
+        )
     return command
 
 
@@ -376,12 +422,15 @@ class ReportProcessRunner:
                 windows_job.close()
         return return_code
 
-    def generate_experiment(
+    def _generate_experiment(
         self,
         experiment_id: str,
         *,
         automatic: bool = False,
-    ) -> dict[str, Any]:
+        force: bool = False,
+        force_context: str | None = None,
+        operator: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
         """Render one experiment and return the exact legacy report mapping."""
         experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
         generation_id = secrets.token_hex(16)
@@ -397,6 +446,9 @@ class ReportProcessRunner:
             generation_id,
             deadline_epoch=deadline_epoch,
             automatic=automatic,
+            force=force,
+            force_context=force_context,
+            operator=operator,
         )
         env = os.environ.copy()
         env["CRYODAQ_REPORT_DATA_DIR"] = str(self._data_dir)
@@ -410,7 +462,12 @@ class ReportProcessRunner:
                 # A damaged or unreadable manifest has no recovery authority.
                 # Preserve the child's ordinary result/exit failure below.
                 pass
-            if return_code != 0 and manifest is not None and manifest["generation_id"] == generation_id:
+            if (
+                return_code != 0
+                and not force
+                and manifest is not None
+                and manifest["generation_id"] == generation_id
+            ):
                 recovered_committed_manifest = True
                 report = manifest["report"]
                 payload = {
@@ -434,7 +491,7 @@ class ReportProcessRunner:
                 try:
                     payload = read_result_file(result_path)
                 except ReportProcessError:
-                    if manifest is None or manifest["generation_id"] != generation_id:
+                    if force or manifest is None or manifest["generation_id"] != generation_id:
                         raise
                     recovered_committed_manifest = True
                     report = manifest["report"]
@@ -460,7 +517,7 @@ class ReportProcessRunner:
         if (return_code != 0 and not recovered_committed_manifest) or not payload["ok"]:
             code = payload.get("error_code") or f"exit_{return_code}"
             text = payload.get("error_text") or "report child failed"
-            raise ReportProcessError(f"{code}: {text}")
+            raise ReportProcessError(str(code), str(text))
         if payload["generation_id"] != generation_id:
             raise ReportProcessError("report child generation mismatch")
         manifest = load_current_manifest(experiment_root)
@@ -476,4 +533,39 @@ class ReportProcessRunner:
         for field, expected_value in expected_paths.items():
             if report[field] != expected_value:
                 raise ReportProcessError(f"report child returned untrusted {field}")
+        return report, generation_id
+
+    def generate_experiment(
+        self,
+        experiment_id: str,
+        *,
+        automatic: bool = False,
+        force: bool = False,
+        force_context: str | None = None,
+        operator: str | None = None,
+    ) -> dict[str, Any]:
+        """Render one experiment and retain the exact six-field legacy mapping."""
+        report, _generation_id = self._generate_experiment(
+            experiment_id,
+            automatic=automatic,
+            force=force,
+            force_context=force_context,
+            operator=operator,
+        )
         return report
+
+    def generate_experiment_detailed(
+        self,
+        experiment_id: str,
+        *,
+        force: bool = False,
+        force_context: str | None = None,
+        operator: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Render a manual request and also return its immutable generation id."""
+        return self._generate_experiment(
+            experiment_id,
+            force=force,
+            force_context=force_context,
+            operator=operator,
+        )

@@ -13,6 +13,7 @@ from cryodaq.report_state import (
     load_report_state,
     new_pending_state,
     new_running_state,
+    report_force_context,
     terminal_state,
     write_report_state,
 )
@@ -44,6 +45,9 @@ def _args(
     generation_id: str = "generation-token-0001",
     *,
     automatic: bool = False,
+    force: bool = False,
+    force_context: str | None = None,
+    operator: str | None = None,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         kind="experiment",
@@ -51,6 +55,9 @@ def _args(
         generation_id=generation_id,
         deadline_epoch=time.time() + 30,
         automatic=automatic,
+        force=force,
+        force_context=force_context,
+        operator=operator,
     )
 
 
@@ -264,7 +271,7 @@ def test_child_resets_attempt_count_when_fingerprint_changes(
     assert state["source_fingerprint"] != failed["source_fingerprint"]
 
 
-def test_poison_blocks_automatic_but_manual_overrides_under_lock(
+def test_poison_requires_explicit_force_and_writes_audit_under_lock(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -299,16 +306,381 @@ def test_poison_blocks_automatic_but_manual_overrides_under_lock(
     assert calls == []
 
     manual_result = result_file_path(tmp_path, "generation-token-0002")
+    before_bytes = (root / "report_state.json").read_bytes()
     assert child._run_experiment(
         _args("generation-token-0002"),
         tmp_path,
         manual_result,
+    ) == 3
+    assert read_result_file(manual_result)["error_code"] == "force_required"
+    assert (root / "report_state.json").read_bytes() == before_bytes
+    assert calls == []
+
+    context = report_force_context(failed, None)
+    forced_result = result_file_path(tmp_path, "generation-token-0003")
+    assert child._run_experiment(
+        _args(
+            "generation-token-0003",
+            force=True,
+            force_context=context,
+            operator="Operator",
+        ),
+        tmp_path,
+        forced_result,
     ) == 0
     state = load_report_state(root)
     assert state is not None
     assert state["status"] == "SUCCEEDED"
     assert state["attempt_count"] == 1
-    assert calls == ["generation-token-0002"]
+    assert calls == ["generation-token-0003"]
+    audit = root / "reports" / "audit" / "report_force"
+    assert (audit / "generation-token-0003.before.json").is_file()
+    assert (audit / "generation-token-0003.after.json").is_file()
+
+
+def test_force_rejects_stale_context_without_mutating_poison(
+    tmp_path: Path,
+) -> None:
+    root = _experiment(tmp_path)
+    fingerprint = compute_source_fingerprint(root)
+    running = new_running_state(
+        "exp-1",
+        fingerprint,
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+        error_code="render_failed",
+        error_text="poison",
+    )
+    write_report_state(root, failed)
+    original = (root / "report_state.json").read_bytes()
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+
+    assert child._run_experiment(
+        _args(
+            force=True,
+            force_context="0" * 64,
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 3
+    assert read_result_file(result_path)["error_code"] == "force_conflict"
+    assert (root / "report_state.json").read_bytes() == original
+    assert not (root / "reports" / "audit").exists()
+
+
+def test_exhausted_running_requires_force_without_rewriting_state(
+    tmp_path: Path,
+) -> None:
+    root = _experiment(tmp_path)
+    running = new_running_state(
+        "exp-1",
+        compute_source_fingerprint(root),
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    write_report_state(root, running)
+    original = (root / "report_state.json").read_bytes()
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(_args(), tmp_path, result_path) == 3
+    assert read_result_file(result_path)["error_code"] == "force_required"
+    assert (root / "report_state.json").read_bytes() == original
+
+
+def test_nonexhausted_same_source_manual_retry_remains_compatible(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _experiment(tmp_path)
+    running = new_running_state(
+        "exp-1",
+        compute_source_fingerprint(root),
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=1,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+    )
+    write_report_state(root, failed)
+    _patch_fast_generator(monkeypatch)
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(_args(), tmp_path, result_path) == 0
+    state = load_report_state(root)
+    assert state is not None
+    assert state["status"] == "SUCCEEDED"
+    assert state["attempt_count"] == 2
+
+
+def test_force_audit_write_failure_preserves_poison(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _experiment(tmp_path)
+    running = new_running_state(
+        "exp-1",
+        compute_source_fingerprint(root),
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+    )
+    write_report_state(root, failed)
+    original = (root / "report_state.json").read_bytes()
+    monkeypatch.setattr(
+        child,
+        "write_report_force_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("audit disk fault")),
+    )
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(
+        _args(
+            force=True,
+            force_context=report_force_context(failed, None),
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 1
+    assert (root / "report_state.json").read_bytes() == original
+
+
+def test_force_completion_audit_failure_is_visible_after_successful_render(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _experiment(tmp_path)
+    running = new_running_state(
+        "exp-1",
+        compute_source_fingerprint(root),
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+    )
+    write_report_state(root, failed)
+    _patch_fast_generator(monkeypatch)
+    original_audit = child.write_report_force_audit
+
+    def fail_after_audit(*args, **kwargs):
+        if kwargs.get("phase") == "after":
+            raise OSError("audit disk fault")
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setattr(child, "write_report_force_audit", fail_after_audit)
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+
+    assert child._run_experiment(
+        _args(
+            force=True,
+            force_context=report_force_context(failed, None),
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 3
+    result = read_result_file(result_path)
+    assert result["error_code"] == "force_audit_incomplete"
+    state = load_report_state(root)
+    assert state is not None and state["status"] == "SUCCEEDED"
+    audit = root / "reports" / "audit" / "report_force"
+    assert (audit / "generation-token-0001.before.json").is_file()
+    assert not (audit / "generation-token-0001.after.json").exists()
+
+
+def test_child_rejects_automatic_force_combination(tmp_path: Path) -> None:
+    _experiment(tmp_path)
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(
+        _args(
+            automatic=True,
+            force=True,
+            force_context="a" * 64,
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 3
+    assert read_result_file(result_path)["error_code"] == "invalid_force"
+
+
+def test_force_cas_conflict_leaves_before_audit_and_poison(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _experiment(tmp_path)
+    fingerprint = compute_source_fingerprint(root)
+    running = new_running_state(
+        "exp-1",
+        fingerprint,
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+    )
+    write_report_state(root, failed)
+    original = (root / "report_state.json").read_bytes()
+    monkeypatch.setattr(
+        child,
+        "write_report_state_if_unchanged",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            child.ReportContractError("changed")
+        ),
+    )
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+
+    assert child._run_experiment(
+        _args(
+            force=True,
+            force_context=report_force_context(failed, None),
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 3
+    assert read_result_file(result_path)["error_code"] == "force_conflict"
+    assert (root / "report_state.json").read_bytes() == original
+    audit = root / "reports" / "audit" / "report_force"
+    assert (audit / "generation-token-0001.before.json").is_file()
+    assert not (audit / "generation-token-0001.after.json").exists()
+
+
+def test_force_rejects_corrupt_state_without_repairing_bytes(tmp_path: Path) -> None:
+    root = _experiment(tmp_path)
+    state_path = root / "report_state.json"
+    state_path.write_bytes(b"{broken")
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+
+    assert child._run_experiment(
+        _args(
+            force=True,
+            force_context="a" * 64,
+            operator="Operator",
+        ),
+        tmp_path,
+        result_path,
+    ) == 3
+    assert read_result_file(result_path)["error_code"] == "force_conflict"
+    assert state_path.read_bytes() == b"{broken"
+
+
+def test_force_rejects_active_experiment_before_fingerprint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _experiment(tmp_path)
+    (tmp_path / "experiment_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "app_mode": "experiment",
+                "active_experiment_id": "exp-1",
+                "updated_at": "2026-07-09T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        child,
+        "compute_source_fingerprint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("active force must not fingerprint")
+        ),
+    )
+    result_path = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(
+        _args(force=True, force_context="a" * 64, operator="Operator"),
+        tmp_path,
+        result_path,
+    ) == 3
+    assert read_result_file(result_path)["error_code"] == "force_conflict"
+
+
+def test_forced_render_failure_preserves_prior_selected_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _experiment(tmp_path)
+    _patch_fast_generator(monkeypatch)
+    first_result = result_file_path(tmp_path, "generation-token-0001")
+    assert child._run_experiment(_args(), tmp_path, first_result) == 0
+    first_manifest = load_current_manifest(root)
+    assert first_manifest is not None
+    fingerprint = compute_source_fingerprint(root)
+    running = new_running_state(
+        "exp-1",
+        fingerprint,
+        "old-generation-0001",
+        "old-owner-token-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    failed = terminal_state(
+        running,
+        owner_token="old-owner-token-0001",
+        succeeded=False,
+        error_code="render_failed",
+        error_text="poison",
+    )
+    write_report_state(root, failed)
+
+    from cryodaq.reporting.generator import ReportGenerator
+
+    monkeypatch.setattr(
+        ReportGenerator,
+        "generate_to_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    context = report_force_context(failed, first_manifest)
+    forced_result = result_file_path(tmp_path, "generation-token-0002")
+    assert child._run_experiment(
+        _args(
+            "generation-token-0002",
+            force=True,
+            force_context=context,
+            operator="Operator",
+        ),
+        tmp_path,
+        forced_result,
+    ) == 1
+    assert read_result_file(forced_result)["error_code"] == "render_failed"
+    current = load_current_manifest(root)
+    assert current is not None
+    assert current["generation_id"] == "generation-token-0001"
+    state = load_report_state(root)
+    assert state is not None
+    assert state["generation_id"] == "generation-token-0002"
+    assert state["status"] == "FAILED"
+    audit = root / "reports" / "audit" / "report_force"
+    assert (audit / "generation-token-0002.before.json").is_file()
+    assert (audit / "generation-token-0002.after.json").is_file()
 
 
 def test_automatic_child_enforces_not_before_under_lock(

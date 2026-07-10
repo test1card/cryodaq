@@ -28,6 +28,7 @@ Out of scope (follow-ups):
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -43,8 +44,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -59,6 +62,7 @@ from cryodaq.gui import theme
 from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
 from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.report_state import ReportContractError, load_current_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -172,31 +176,85 @@ def _style_input(widget: QLineEdit | QPlainTextEdit | QComboBox | QDateEdit) -> 
     )
 
 
-def _report_candidate_paths(entry: dict[str, Any], key: str, *fallbacks: str) -> list[Path]:
-    paths: list[Path] = []
+def _safe_report_file(path: Path, experiment_root: Path | None) -> Path | None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if experiment_root is None:
+            return path.resolve()
+        resolved_root = experiment_root.resolve()
+        if experiment_root.is_symlink() or not resolved_root.is_dir():
+            return None
+        resolved = path.resolve()
+        if resolved_root not in resolved.parents:
+            return None
+        return resolved
+    except OSError:
+        return None
+
+
+def _resolve_report_path(
+    entry: dict[str, Any],
+    key: str,
+    *legacy_names: str,
+) -> Path | None:
+    raw_root = str(entry.get("artifact_dir", "")).strip()
+    authority_present = "report_authority" in entry
+    authority = entry.get("report_authority")
+    if not raw_root:
+        primary = str(entry.get(key, "")).strip()
+        return (
+            _safe_report_file(Path(primary), None)
+            if not authority_present and primary
+            else None
+        )
+    root = Path(raw_root)
+    pointer = root / "reports" / "current_report.json"
+    if authority == "manifest":
+        generation_id = entry.get("report_generation_id")
+        if not isinstance(generation_id, str) or not generation_id:
+            return None
+        try:
+            manifest = load_current_manifest(root)
+        except (OSError, ReportContractError):
+            return None
+        if manifest is None or manifest["generation_id"] != generation_id:
+            return None
+        report = manifest["report"]
+        manifest_key = "pdf_path" if key == "pdf_path" else "docx_path"
+        relative = report[manifest_key]
+        if relative is None:
+            return None
+        return _safe_report_file(root / relative, root)
+    if authority == "invalid" or authority == "none":
+        return None
+    if authority == "legacy":
+        if os.path.lexists(pointer):
+            return None
+        for name in legacy_names:
+            candidate = _safe_report_file(root / "reports" / name, root)
+            if candidate is not None:
+                return candidate
+        return None
+    if authority_present:
+        # A present but unknown/wrong-type authority is not an old payload.
+        # Fail closed instead of treating attacker/corruption-controlled data
+        # as an explicit legacy path.
+        return None
+    # Old payload: preserve only the explicit safe path, never invent a
+    # canonical fixed-name fallback. A newly appeared pointer also wins.
+    if os.path.lexists(pointer):
+        return None
     primary = str(entry.get(key, "")).strip()
-    if primary:
-        paths.append(Path(primary))
-    artifact_dir = str(entry.get("artifact_dir", "")).strip()
-    if artifact_dir:
-        root = Path(artifact_dir) / "reports"
-        for name in fallbacks:
-            paths.append(root / name)
-    return paths
+    return _safe_report_file(Path(primary), root) if primary else None
 
 
 def resolve_pdf_path(entry: dict[str, Any]) -> Path | None:
-    for path in _report_candidate_paths(entry, "pdf_path", "report_raw.pdf", "report.pdf"):
-        if path.exists():
-            return path
-    return None
+    return _resolve_report_path(entry, "pdf_path", "report_raw.pdf", "report.pdf")
 
 
 def resolve_docx_path(entry: dict[str, Any]) -> Path | None:
-    for path in _report_candidate_paths(entry, "docx_path", "report_editable.docx", "report.docx"):
-        if path.exists():
-            return path
-    return None
+    return _resolve_report_path(entry, "docx_path", "report_editable.docx", "report.docx")
 
 
 def resolve_folder_path(entry: dict[str, Any]) -> Path | None:
@@ -351,6 +409,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         # resolving — two workers would race and the second could
         # overwrite the first's entries.
         self._refresh_in_flight: bool = False
+        self._pending_regenerate: dict[str, Any] | None = None
 
         self.setObjectName("archivePanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -808,7 +867,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             self._set_cell(row, 4, str(entry.get("operator", "")))
             self._set_cell(row, 5, str(entry.get("sample", "")))
             self._set_cell(row, 6, str(entry.get("status", "")))
-            has_report = bool(entry.get("pdf_path") or entry.get("docx_path"))
+            has_report = bool(entry.get("report_present", False))
             report_text = "Да" if has_report else "—"
             self._set_cell(row, 7, report_text)
             artifacts = entry.get("artifact_index", []) or []
@@ -871,8 +930,13 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._artifact_label.setText(
             str(folder_path) if folder_path else "Папка артефактов не найдена"
         )
-        if pdf_path or docx_path:
+        authority = entry.get("report_authority")
+        if authority == "invalid":
+            self._report_label.setText("Поколение отчёта по манифесту недоступно или повреждено")
+        elif pdf_path or docx_path:
             self._report_label.setText(f"PDF: {pdf_path or 'нет'}\nDOCX: {docx_path or 'нет'}")
+            if authority == "legacy":
+                self._report_label.setText(f"Устаревший отчёт\n{self._report_label.text()}")
         elif report_enabled:
             self._report_label.setText("Файлы отчёта отсутствуют")
         else:
@@ -893,7 +957,21 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._open_folder_btn.setEnabled(folder_path is not None)
         self._open_pdf_btn.setEnabled(pdf_path is not None)
         self._open_docx_btn.setEnabled(docx_path is not None)
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        self._regenerate_btn.setEnabled(
+            self._connected and report_enabled and self._pending_regenerate is None
+        )
+        force_required = bool(entry.get("report_force_required"))
+        self._regenerate_btn.setText(
+            "Повторить принудительно" if force_required else "Перегенерировать"
+        )
+        if force_required:
+            attempt = entry.get("report_attempt_count")
+            maximum = entry.get("report_max_attempts")
+            error = str(entry.get("report_error_text") or "Лимит попыток исчерпан.")
+            self._report_label.setText(
+                f"{self._report_label.text()}\nТребуется явный повтор "
+                f"(попытки {attempt}/{maximum}): {error}"
+            )
 
     def _clear_details(self, summary: str = "Эксперимент не выбран.") -> None:
         self._summary_label.setText(summary)
@@ -912,6 +990,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._open_pdf_btn.setEnabled(False)
         self._open_docx_btn.setEnabled(False)
         self._regenerate_btn.setEnabled(False)
+        self._regenerate_btn.setText("Перегенерировать")
         self._archive_photos_widget.set_photos([])
 
     # ------------------------------------------------------------------
@@ -947,6 +1026,8 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             self.show_warning("DOCX отсутствует или не открывается.")
 
     def _on_regenerate_clicked(self) -> None:
+        if not self._connected or self._pending_regenerate is not None:
+            return
         entry = self._selected_entry()
         if not entry:
             return
@@ -958,21 +1039,129 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             self.show_error("Не удалось определить ID эксперимента.")
             return
         self.regenerate_requested.emit(experiment_id)
+        self._start_regenerate_request(
+            {"cmd": "experiment_generate_report", "experiment_id": experiment_id}
+        )
+
+    def _start_regenerate_request(self, payload: dict[str, Any]) -> None:
+        self._pending_regenerate = dict(payload)
         self._regenerate_btn.setEnabled(False)
         self.show_info("Генерация отчёта...")
-        worker = ZmqCommandWorker(
-            {"cmd": "experiment_generate_report", "experiment_id": experiment_id},
-            parent=self,
-        )
+        worker = ZmqCommandWorker(payload, parent=self)
         self._register_worker(worker, self._on_regenerate_result)
+
+    @staticmethod
+    def _valid_force_operator(operator: str) -> bool:
+        return (
+            1 <= len(operator) <= 128
+            and operator == operator.strip()
+            and all(char.isprintable() and ord(char) != 127 for char in operator)
+        )
+
+    def _confirm_force_retry(self, entry: dict[str, Any]) -> bool:
+        if not self._connected:
+            self.show_warning("Соединение потеряно. Принудительный повтор не отправлен.")
+            return False
+        experiment_id = str(entry.get("experiment_id", "")).strip()
+        context = entry.get("report_force_context")
+        if (
+            not isinstance(context, str)
+            or len(context) != 64
+            or any(char not in "0123456789abcdef" for char in context)
+        ):
+            self.show_error("Контекст принудительного повтора устарел. Обновите архив.")
+            self.refresh_archive()
+            return False
+        operator, accepted = QInputDialog.getText(
+            self,
+            "Принудительный повтор отчёта",
+            "Оператор, подтверждающий сброс лимита попыток:",
+            QLineEdit.EchoMode.Normal,
+            str(entry.get("operator", "")),
+        )
+        operator = operator.strip()
+        if not accepted:
+            return False
+        if not self._valid_force_operator(operator):
+            self.show_error("Имя оператора должно содержать 1–128 печатных символов.")
+            return False
+        answer = QMessageBox.warning(
+            self,
+            "Подтвердите принудительный повтор",
+            "Лимит попыток исчерпан. Будет создана новая попытка с неизменяемой "
+            "аудит-записью. Если она завершится ошибкой, предыдущий выбранный "
+            "отчёт останется доступен.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        if not self._connected:
+            self.show_warning("Соединение потеряно. Принудительный повтор не отправлен.")
+            return False
+        current = self._selected_entry()
+        if (
+            current is None
+            or str(current.get("experiment_id", "")).strip() != experiment_id
+            or current.get("report_force_context") != context
+        ):
+            self.show_warning("Выбранный отчёт изменился. Обновите архив и повторите действие.")
+            self.refresh_archive()
+            return False
+        self._start_regenerate_request(
+            {
+                "cmd": "experiment_generate_report",
+                "experiment_id": experiment_id,
+                "force": True,
+                "force_context": context,
+                "operator": operator,
+            }
+        )
+        return True
 
     def _on_regenerate_result(self, result: dict) -> None:
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else True
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        # Keep the action disabled while this callback decides whether the
+        # completed ordinary request needs one confirmed force resubmission.
+        self._regenerate_btn.setEnabled(False)
         if not result.get("ok"):
+            code = str(result.get("error_code", ""))
+            request = self._pending_regenerate or {}
+            if code == "force_required" and request.get("force") is not True:
+                if not self._connected:
+                    self._pending_regenerate = None
+                    self.show_warning(
+                        "Соединение потеряно. Подтверждение принудительного повтора отменено."
+                    )
+                    return
+                request_id = str(request.get("experiment_id", "")).strip()
+                selected_id = (
+                    str(entry.get("experiment_id", "")).strip() if entry is not None else ""
+                )
+                if not request_id or selected_id != request_id:
+                    self._pending_regenerate = None
+                    self.show_warning(
+                        "Выбор эксперимента изменился. Архив будет обновлён без повтора."
+                    )
+                    self.refresh_archive()
+                    return
+                if entry is not None and self._confirm_force_retry(entry):
+                    return
+                self._pending_regenerate = None
+                self._regenerate_btn.setEnabled(self._connected and report_enabled)
+                return
+            if code == "force_conflict":
+                self.show_warning("Отчёт или исходные данные изменились. Архив будет обновлён.")
+                self._pending_regenerate = None
+                self.refresh_archive()
+                return
+            self._pending_regenerate = None
+            self._update_control_enablement()
             self.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
             return
+        self._pending_regenerate = None
+        self._update_control_enablement()
         report = result.get("report") or {}
         if report.get("skipped"):
             self.show_warning(str(report.get("reason", "Формирование отчёта пропущено.")))
@@ -1149,7 +1338,14 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._refresh_btn.setEnabled(self._connected)
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else False
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        self._regenerate_btn.setEnabled(
+            self._connected and report_enabled and self._pending_regenerate is None
+        )
+        self._regenerate_btn.setText(
+            "Повторить принудительно"
+            if entry and bool(entry.get("report_force_required"))
+            else "Перегенерировать"
+        )
         export_ok = self._connected and not self._export_in_flight
         self._export_csv_btn.setEnabled(export_ok)
         self._export_hdf5_btn.setEnabled(export_ok)

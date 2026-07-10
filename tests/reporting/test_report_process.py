@@ -48,6 +48,64 @@ def test_automatic_command_carries_locked_state_policy(
     assert "--automatic" in command
 
 
+@pytest.mark.parametrize("frozen", [False, True])
+def test_force_command_uses_fixed_argv_elements_only(
+    monkeypatch: pytest.MonkeyPatch,
+    frozen: bool,
+) -> None:
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", "/opt/CryoDAQ.exe")
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    command = build_report_command(
+        "exp-1",
+        "generation-token-0001",
+        deadline_epoch=123.0,
+        force=True,
+        force_context="a" * 64,
+        operator="Operator Name",
+    )
+    assert command[-3:] == [
+        "--force",
+        f"--force-context={'a' * 64}",
+        "--operator=Operator Name",
+    ]
+    assert "--automatic" not in command
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"force": True},
+        {"force": True, "force_context": "a" * 64, "operator": "bad\nname"},
+        {"force_context": "a" * 64},
+        {"automatic": True, "force": True, "force_context": "a" * 64, "operator": "Op"},
+    ],
+)
+def test_force_command_rejects_incomplete_or_ambiguous_authority(kwargs: dict) -> None:
+    with pytest.raises(ReportProcessError, match="invalid_force"):
+        build_report_command(
+            "exp-1",
+            "generation-token-0001",
+            deadline_epoch=123.0,
+            **kwargs,
+        )
+
+
+def test_process_error_preserves_bounded_structured_code() -> None:
+    error = ReportProcessError("force_required", "confirmation required")
+    assert error.error_code == "force_required"
+    assert error.error_text == "confirmation required"
+
+
+def test_legacy_one_argument_process_error_preserves_known_prefix() -> None:
+    error = ReportProcessError("busy: another child owns the lock")
+    assert str(error) == "busy: another child owns the lock"
+    assert error.error_code == "busy"
+    assert error.error_text == "another child owns the lock"
+
+
 def test_result_file_is_size_and_schema_bounded(tmp_path: Path) -> None:
     result = tmp_path / "result.json"
     result.write_text(json.dumps({"schema": 1, "ok": True, "report": {}}), encoding="utf-8")
@@ -187,6 +245,60 @@ def test_parent_nonzero_always_trusts_matching_manifest_over_result_file(
 
     report = runner.generate_experiment("exp-1")
     assert report["docx_path"].endswith("reports/generations/generation-token-0001/report_editable.docx")
+
+
+def test_forced_parent_surfaces_audit_failure_after_manifest_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    experiment_root = tmp_path / "experiments" / "exp-1"
+    experiment_root.mkdir(parents=True)
+    (experiment_root / "metadata.json").write_text("{}", encoding="utf-8")
+    generation_id = "generation-token-0001"
+    staging = experiment_root / "reports" / ".staging" / generation_id
+    staging.mkdir(parents=True)
+    (staging / "assets").mkdir()
+    (staging / "report_editable.docx").write_bytes(b"docx")
+    manifest = build_current_manifest(
+        experiment_root,
+        generation_id=generation_id,
+        source_fingerprint="sha256:" + "1" * 64,
+        sections=("title_page",),
+        skipped=False,
+        reason="",
+    )
+    promote_generation(experiment_root, generation_id, manifest)
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module.secrets, "token_hex", lambda _n: generation_id)
+
+    def audit_failure_result(*_args, **_kwargs) -> int:
+        result_file_path(tmp_path, generation_id).write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "ok": False,
+                    "generation_id": generation_id,
+                    "report": None,
+                    "error_code": "force_audit_incomplete",
+                    "error_text": "completion audit failed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 3
+
+    monkeypatch.setattr(runner, "_run_process", audit_failure_result)
+
+    with pytest.raises(ReportProcessError) as exc_info:
+        runner.generate_experiment_detailed(
+            "exp-1",
+            force=True,
+            force_context="a" * 64,
+            operator="Operator",
+        )
+    assert exc_info.value.error_code == "force_audit_incomplete"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group assertion")

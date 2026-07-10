@@ -103,7 +103,7 @@ from cryodaq.notifications.composition_photo_handler import CompositionPhotoHand
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
-from cryodaq.report_process import ReportProcessRunner
+from cryodaq.report_process import ReportProcessError, ReportProcessRunner
 from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -1385,8 +1385,61 @@ def _run_experiment_command(
         experiment_id = str(cmd.get("experiment_id", "")).strip()
         if not experiment_id:
             raise ValueError("experiment_id is required for report generation.")
-        report = ReportProcessRunner(experiment_manager.data_dir).generate_experiment(experiment_id)
-        return {"ok": True, "report": report}
+        raw_force = cmd.get("force", False)
+        if type(raw_force) is not bool:
+            return {
+                "ok": False,
+                "error_code": "invalid_force",
+                "error": "force must be an exact JSON boolean",
+            }
+        force = raw_force is True
+        force_context = cmd.get("force_context")
+        operator = cmd.get("operator")
+        if not force and ("force_context" in cmd or "operator" in cmd):
+            return {
+                "ok": False,
+                "error_code": "invalid_force",
+                "error": "force_context/operator require force=true",
+            }
+        if force:
+            if (
+                not isinstance(force_context, str)
+                or len(force_context) != 64
+                or any(char not in "0123456789abcdef" for char in force_context)
+                or not isinstance(operator, str)
+                or not (1 <= len(operator) <= 128)
+                or operator != operator.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in operator)
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "invalid_force",
+                    "error": "force_context/operator are invalid",
+                }
+        runner = ReportProcessRunner(experiment_manager.data_dir)
+        try:
+            if force:
+                report, generation_id = runner.generate_experiment_detailed(
+                    experiment_id,
+                    force=True,
+                    force_context=force_context,
+                    operator=operator,
+                )
+            else:
+                report = runner.generate_experiment(experiment_id)
+                generation_id = None
+        except ReportProcessError as exc:
+            return {
+                "ok": False,
+                "error_code": exc.error_code,
+                "error": exc.error_text,
+            }
+        return {
+            "ok": True,
+            "report": report,
+            "forced": force,
+            "audit_id": generation_id,
+        }
 
     if action == "experiment_advance_phase":
         phase = str(cmd.get("phase", "")).strip()

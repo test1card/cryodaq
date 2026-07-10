@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -22,6 +22,7 @@ from cryodaq.gui.shell.overlays.archive_panel import (
     resolve_folder_path,
     resolve_pdf_path,
 )
+from cryodaq.report_state import build_current_manifest, promote_generation
 
 
 def _wait_until(predicate, *, timeout_s: float = 3.0, tick_ms: int = 20) -> bool:
@@ -61,8 +62,13 @@ def _entry(
     artifact_count: int = 0,
     result_table_count: int = 0,
     artifact_index: list[dict] | None = None,
+    report_authority: str | None = None,
+    report_generation_id: str | None = None,
+    report_present: bool = False,
+    report_force_required: bool = False,
+    report_force_context: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "experiment_id": experiment_id,
         "title": title,
         "operator": operator,
@@ -81,7 +87,14 @@ def _entry(
         "artifact_count": artifact_count,
         "result_table_count": result_table_count,
         "artifact_index": artifact_index or [],
+        "report_generation_id": report_generation_id,
+        "report_present": report_present,
+        "report_force_required": report_force_required,
+        "report_force_context": report_force_context,
     }
+    if report_authority is not None:
+        payload["report_authority"] = report_authority
+    return payload
 
 
 # ----------------------------------------------------------------------
@@ -311,13 +324,97 @@ def test_resolve_pdf_path_prefers_primary_then_fallback(tmp_path: Path, app):
     assert resolve_pdf_path(entry) == primary
 
 
-def test_resolve_docx_path_falls_back_to_artifact_dir(tmp_path: Path, app):
+def test_resolve_docx_path_falls_back_only_for_legacy_authority(tmp_path: Path, app):
     reports = tmp_path / "reports"
     reports.mkdir()
     docx = reports / "report_editable.docx"
     docx.write_bytes(b"PK")
-    entry = _entry(artifact_dir=str(tmp_path), docx_path="")
+    entry = _entry(
+        artifact_dir=str(tmp_path),
+        docx_path="",
+        report_authority="legacy",
+    )
     assert resolve_docx_path(entry) == docx
+
+
+def _manifest_entry(tmp_path: Path) -> tuple[dict, Path]:
+    generation_id = "generation-token-0001"
+    staging = tmp_path / "reports" / ".staging" / generation_id
+    staging.mkdir(parents=True)
+    (staging / "assets").mkdir()
+    (staging / "report_editable.docx").write_bytes(b"selected")
+    manifest = build_current_manifest(
+        tmp_path,
+        generation_id=generation_id,
+        source_fingerprint="sha256:" + "1" * 64,
+        sections=("title_page",),
+        skipped=False,
+        reason="",
+    )
+    final = promote_generation(tmp_path, generation_id, manifest)
+    return (
+        _entry(
+            artifact_dir=str(tmp_path),
+            docx_path=str(final / "report_editable.docx"),
+            report_authority="manifest",
+            report_generation_id=generation_id,
+            report_present=True,
+        ),
+        final,
+    )
+
+
+def test_manifest_resolver_never_falls_back_after_generation_disappears(
+    tmp_path: Path,
+    app,
+) -> None:
+    entry, final = _manifest_entry(tmp_path)
+    canonical = tmp_path / "reports" / "report_editable.docx"
+    canonical.write_bytes(b"stale")
+    assert resolve_docx_path(entry) == final / "report_editable.docx"
+    (final / "report_editable.docx").unlink()
+    assert resolve_docx_path(entry) is None
+
+
+def test_legacy_resolver_stops_when_manifest_pointer_appears(tmp_path: Path, app) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    legacy = reports / "report_editable.docx"
+    legacy.write_bytes(b"legacy")
+    entry = _entry(artifact_dir=str(tmp_path), report_authority="legacy")
+    assert resolve_docx_path(entry) == legacy
+    (reports / "current_report.json").write_text("{broken", encoding="utf-8")
+    assert resolve_docx_path(entry) is None
+
+
+def test_old_payload_never_invents_fixed_name_fallback(tmp_path: Path, app) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "report_editable.docx").write_bytes(b"legacy")
+    entry = _entry(artifact_dir=str(tmp_path), docx_path="")
+    assert "report_authority" not in entry
+    assert resolve_docx_path(entry) is None
+
+
+def test_invalid_authority_never_opens_canonical_file(tmp_path: Path, app) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "report_editable.docx").write_bytes(b"stale")
+    entry = _entry(artifact_dir=str(tmp_path), report_authority="invalid")
+    assert resolve_docx_path(entry) is None
+
+
+@pytest.mark.parametrize("authority", [None, "unexpected", 1, True, []])
+def test_present_unknown_authority_never_uses_old_payload_compatibility(
+    tmp_path: Path,
+    app,
+    authority,
+) -> None:
+    explicit = tmp_path / "explicit.docx"
+    explicit.write_bytes(b"PK")
+    entry = _entry(artifact_dir=str(tmp_path), docx_path=str(explicit))
+    entry["report_authority"] = authority
+    assert resolve_docx_path(entry) is None
 
 
 # ----------------------------------------------------------------------
@@ -355,6 +452,172 @@ def test_regenerate_result_failure_shows_error(app):
     panel._on_regenerate_result({"ok": False, "error": "LibreOffice missing"})
     assert "LibreOffice missing" in panel._banner_label.text()
     assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
+
+
+def test_force_required_confirmation_sends_exact_second_request_once(
+    app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = ArchivePanel()
+    entry = _entry(
+        experiment_id="exp-1",
+        operator="Operator",
+        report_force_required=True,
+        report_force_context="a" * 64,
+    )
+    panel._on_refresh_result({"ok": True, "entries": [entry]})
+    panel.set_connected(True)
+    panel._pending_regenerate = {
+        "cmd": "experiment_generate_report",
+        "experiment_id": "exp-1",
+    }
+    sent: list[dict] = []
+    monkeypatch.setattr(panel, "_start_regenerate_request", lambda payload: sent.append(payload))
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *_args, **_kwargs: ("Operator", True)),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
+    )
+
+    panel._on_regenerate_result(
+        {"ok": False, "error_code": "force_required", "error": "confirm"}
+    )
+
+    assert sent == [
+        {
+            "cmd": "experiment_generate_report",
+            "experiment_id": "exp-1",
+            "force": True,
+            "force_context": "a" * 64,
+            "operator": "Operator",
+        }
+    ]
+
+
+def test_force_confirmation_cancel_sends_nothing(
+    app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = ArchivePanel()
+    panel._on_refresh_result(
+        {
+            "ok": True,
+            "entries": [
+                _entry(
+                    report_force_required=True,
+                    report_force_context="a" * 64,
+                )
+            ],
+        }
+    )
+    panel.set_connected(True)
+    panel._pending_regenerate = {
+        "cmd": "experiment_generate_report",
+        "experiment_id": "exp-1",
+    }
+    sent: list[dict] = []
+    monkeypatch.setattr(panel, "_start_regenerate_request", lambda payload: sent.append(payload))
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *_args, **_kwargs: ("", False)),
+    )
+    panel._on_regenerate_result(
+        {"ok": False, "error_code": "force_required", "error": "confirm"}
+    )
+    assert sent == []
+
+
+def test_force_required_never_applies_to_changed_selection(
+    app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = ArchivePanel()
+    panel._on_refresh_result(
+        {
+            "ok": True,
+            "entries": [
+                _entry(
+                    experiment_id="exp-2",
+                    report_force_required=True,
+                    report_force_context="b" * 64,
+                )
+            ],
+        }
+    )
+    panel.set_connected(True)
+    panel._pending_regenerate = {
+        "cmd": "experiment_generate_report",
+        "experiment_id": "exp-1",
+    }
+    refreshed: list[bool] = []
+    monkeypatch.setattr(panel, "refresh_archive", lambda: refreshed.append(True))
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("selection change must not prompt")
+            )
+        ),
+    )
+    panel._on_regenerate_result(
+        {"ok": False, "error_code": "force_required", "error": "confirm"}
+    )
+    assert refreshed == [True]
+    assert panel._pending_regenerate is None
+
+
+def test_disconnect_cancels_force_prompt_and_reconnect_keeps_pending_disabled(
+    app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = ArchivePanel()
+    panel._on_refresh_result(
+        {
+            "ok": True,
+            "entries": [
+                _entry(
+                    experiment_id="exp-1",
+                    report_force_required=True,
+                    report_force_context="a" * 64,
+                )
+            ],
+        }
+    )
+    panel.set_connected(True)
+    panel._pending_regenerate = {
+        "cmd": "experiment_generate_report",
+        "experiment_id": "exp-1",
+    }
+    panel.set_connected(False)
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("disconnected result must not prompt")
+            )
+        ),
+    )
+
+    panel._on_regenerate_result(
+        {"ok": False, "error_code": "force_required", "error": "confirm"}
+    )
+
+    assert panel._pending_regenerate is None
+    assert not panel._regenerate_btn.isEnabled()
+    panel._pending_regenerate = {
+        "cmd": "experiment_generate_report",
+        "experiment_id": "exp-1",
+    }
+    panel.set_connected(True)
+    assert not panel._regenerate_btn.isEnabled()
 
 
 # ----------------------------------------------------------------------

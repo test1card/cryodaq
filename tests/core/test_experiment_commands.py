@@ -266,4 +266,99 @@ async def test_manual_report_command_preserves_gui_response_schema(
         {"experiment_id": "exp-1"},
         manager,
     )
-    assert result == {"ok": True, "report": expected}
+    assert result == {
+        "ok": True,
+        "report": expected,
+        "forced": False,
+        "audit_id": None,
+    }
+
+
+@pytest.mark.parametrize("force", [None, 0, 1, 1.0, "true", "false", [], {}])
+def test_manual_report_command_rejects_non_boolean_force_without_spawning(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+    force: object,
+) -> None:
+    monkeypatch.setattr(
+        "cryodaq.engine.ReportProcessRunner",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid force must not spawn")
+        ),
+    )
+    result = _run_experiment_command(
+        "experiment_generate_report",
+        {"experiment_id": "exp-1", "force": force},
+        manager,
+    )
+    assert result["ok"] is False
+    assert result["error_code"] == "invalid_force"
+
+
+def test_manual_report_command_propagates_exact_force_fields(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict = {}
+    expected = {
+        "docx_path": "/trusted/report.docx",
+        "pdf_path": None,
+        "assets_dir": "/trusted/assets",
+        "sections": [],
+        "skipped": False,
+        "reason": "",
+    }
+
+    class FakeRunner:
+        def __init__(self, _data_dir: Path) -> None:
+            pass
+
+        def generate_experiment_detailed(self, experiment_id: str, **kwargs):
+            seen.update(experiment_id=experiment_id, **kwargs)
+            return expected, "generation-token-0001"
+
+    monkeypatch.setattr("cryodaq.engine.ReportProcessRunner", FakeRunner)
+    result = _run_experiment_command(
+        "experiment_generate_report",
+        {
+            "experiment_id": "exp-1",
+            "force": True,
+            "force_context": "a" * 64,
+            "operator": "Operator",
+        },
+        manager,
+    )
+    assert seen == {
+        "experiment_id": "exp-1",
+        "force": True,
+        "force_context": "a" * 64,
+        "operator": "Operator",
+    }
+    assert result == {
+        "ok": True,
+        "report": expected,
+        "forced": True,
+        "audit_id": "generation-token-0001",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"force": False, "operator": "Operator"},
+        {"force": False, "force_context": "a" * 64},
+        {"force": True, "force_context": "A" * 64, "operator": "Operator"},
+        {"force": True, "force_context": "a" * 64, "operator": "bad\nname"},
+    ],
+)
+def test_manual_report_command_rejects_invalid_force_context(
+    manager: ExperimentManager,
+    payload: dict,
+) -> None:
+    result = _run_experiment_command(
+        "experiment_generate_report",
+        {"experiment_id": "exp-1", **payload},
+        manager,
+    )
+    assert result["ok"] is False
+    assert result["error_code"] == "invalid_force"

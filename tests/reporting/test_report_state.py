@@ -13,15 +13,20 @@ from cryodaq.report_state import (
     compute_source_fingerprint,
     experiment_lock_name,
     load_active_experiment_id,
+    load_report_state,
     new_running_state,
     promote_generation,
+    report_force_context,
+    report_state_summary,
     resolve_experiment_dir,
     resolve_report_paths,
     terminal_state,
     validate_current_manifest,
     validate_generation_id,
     validate_report_state,
+    write_report_force_audit,
     write_report_state,
+    write_report_state_if_unchanged,
 )
 
 
@@ -141,6 +146,97 @@ def test_persisted_owner_fence_rejects_old_generation(tmp_path: Path) -> None:
             expected_owner_token="owner-token-old-0001",
             expected_generation_id="generation-token-old1",
             expected_status="RUNNING",
+        )
+
+
+def test_exact_state_cas_rejects_any_intervening_valid_state(tmp_path: Path) -> None:
+    root = _experiment(tmp_path)
+    expected = new_running_state(
+        "exp-1",
+        "sha256:" + "1" * 64,
+        "generation-token-0001",
+        "owner-token-valid-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    replacement = new_running_state(
+        "exp-1",
+        "sha256:" + "1" * 64,
+        "generation-token-0002",
+        "owner-token-valid-0002",
+        attempt_count=1,
+        max_attempts=5,
+    )
+    changed = dict(expected)
+    changed["error_text"] = "intervening writer"
+    write_report_state(root, changed)
+
+    with pytest.raises(ReportContractError, match="exact transition"):
+        write_report_state_if_unchanged(root, replacement, expected=expected)
+    assert load_report_state(root) == changed
+
+
+def test_force_context_binds_complete_poison_identity_and_manifest() -> None:
+    state = new_running_state(
+        "exp-1",
+        "sha256:" + "1" * 64,
+        "generation-token-0001",
+        "owner-token-valid-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    base = report_force_context(state, None)
+    changed = dict(state)
+    changed["owner_token"] = "owner-token-valid-0002"
+    assert report_force_context(changed, None) != base
+    assert report_force_context(
+        state,
+        {"generation_id": "manifest-token-0001"},
+    ) != base
+
+
+def test_force_audit_is_immutable_bounded_and_excludes_secret_state(
+    tmp_path: Path,
+) -> None:
+    root = _experiment(tmp_path)
+    state = new_running_state(
+        "exp-1",
+        "sha256:" + "1" * 64,
+        "generation-token-0001",
+        "owner-token-valid-0001",
+        attempt_count=5,
+        max_attempts=5,
+    )
+    context = report_force_context(state, None)
+    record = {
+        "schema": 1,
+        "event": "report_force_confirmed",
+        "audit_id": "generation-token-0002",
+        "at": time.time(),
+        "operator": "Operator",
+        "experiment_id": "exp-1",
+        "force_context": context,
+        "before": report_state_summary(state),
+        "requested_generation_id": "generation-token-0002",
+        "manifest_generation_id": None,
+        "outcome": "accepted",
+        "after": None,
+    }
+    path = write_report_force_audit(
+        root,
+        "generation-token-0002",
+        phase="before",
+        payload=record,
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "owner-token-valid" not in text
+    assert "sha256:" not in text
+    with pytest.raises(ReportContractError, match="already exists"):
+        write_report_force_audit(
+            root,
+            "generation-token-0002",
+            phase="before",
+            payload=record,
         )
 
 
