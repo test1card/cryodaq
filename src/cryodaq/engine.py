@@ -3097,6 +3097,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     _ASSISTANT_RELAY_EVENT_TYPES = frozenset(
         {
             "alarm_fired",
+            "alarm_cleared",
             "experiment_finalize",
             "experiment_stop",
             "experiment_abort",

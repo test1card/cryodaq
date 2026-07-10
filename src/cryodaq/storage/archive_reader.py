@@ -6,10 +6,22 @@ to determine which daily files have been rotated to Parquet cold storage.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
+import math
+import os
+import stat
+import struct
+import time
+from collections import defaultdict
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
+from urllib.parse import quote
 
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
@@ -46,6 +58,306 @@ FullRow = tuple[object, str, str, float, str, str]
 OperatorLogRow = tuple[object, str | None, str, str, str, str]
 
 
+class BoundedReadIssueCode(StrEnum):
+    """Stable, redacted failure codes for bounded history hydration."""
+
+    DEADLINE = "deadline"
+    ARCHIVE_INDEX_INVALID = "archive_index_invalid"
+    ARCHIVE_INDEX_OVERSIZE = "archive_index_oversize"
+    CHANNEL_LIMIT = "channel_limit"
+    SOURCE_MISSING = "source_missing"
+    SQLITE_BUSY = "sqlite_busy"
+    SQLITE_INTERRUPTED = "sqlite_interrupted"
+    SQLITE_VALUE_OVERSIZE = "sqlite_value_oversize"
+    SQLITE_READ = "sqlite_read"
+    LEGACY_TIMESTAMP_UNSUPPORTED = "legacy_timestamp_unsupported"
+    PARQUET_METADATA = "parquet_metadata"
+    PARQUET_SCHEMA = "parquet_schema"
+    PARQUET_BATCH_OVERSIZE = "parquet_batch_oversize"
+    PARQUET_READ = "parquet_read"
+    INVALID_ROW = "invalid_row"
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedReadIssue:
+    code: BoundedReadIssueCode
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedReadingRow:
+    timestamp: float
+    instrument_id: str
+    channel: str
+    value: float | None
+    unit: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedReadingQueryResult:
+    rows: tuple[BoundedReadingRow, ...]
+    complete: bool
+    truncated: bool
+    issues: tuple[BoundedReadIssue, ...]
+    issue_overflow: int
+    discovered_channels: tuple[str, ...]
+    rows_examined: int
+    rows_dropped_by_caps: int
+    retained_encoded_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundedSource:
+    day: date
+    kind: str
+    path: Path
+    token: str
+
+
+@dataclass(slots=True)
+class _CollectedRow:
+    timestamp_us: int
+    instrument_id: str
+    channel: str
+    value: float | None
+    unit: str
+    status: str
+    authority: tuple[int, int]
+    token: int
+    encoded_size: int
+
+    @property
+    def key(self) -> tuple[int, str, str]:
+        return (self.timestamp_us, self.instrument_id, self.channel)
+
+    @property
+    def rank(self) -> tuple[int, str, str]:
+        return self.key
+
+
+def _canonical_row_size(row: BoundedReadingRow) -> int:
+    return len(
+        json.dumps(
+            [
+                row.timestamp,
+                row.instrument_id,
+                row.channel,
+                row.value,
+                row.unit,
+                row.status,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+class _BoundedReadingCollector:
+    """Newest-row collector whose maps, heaps and encoded bytes are hard-capped."""
+
+    def __init__(
+        self,
+        *,
+        max_points_per_channel: int,
+        max_total_points: int,
+        max_retained_bytes: int,
+    ) -> None:
+        self._per_channel_cap = max_points_per_channel
+        self._total_cap = max_total_points
+        self._byte_cap = max_retained_bytes
+        self._by_key: dict[tuple[int, str, str], _CollectedRow] = {}
+        self._global_heap: list[tuple[tuple[int, str, str], int, tuple[int, str, str]]] = []
+        self._channel_heaps: dict[str, list[tuple[tuple[int, str, str], int, tuple[int, str, str]]]] = defaultdict(list)
+        self._channel_counts: dict[str, int] = defaultdict(int)
+        self._next_token = 0
+        self.retained_encoded_bytes = 0
+        self.rows_examined = 0
+        self.rows_dropped_by_caps = 0
+        self.truncated = False
+
+    def _entry(self, row: _CollectedRow) -> tuple[tuple[int, str, str], int, tuple[int, str, str]]:
+        return (row.rank, row.token, row.key)
+
+    def _is_live(self, entry: tuple[tuple[int, str, str], int, tuple[int, str, str]]) -> bool:
+        row = self._by_key.get(entry[2])
+        return row is not None and row.token == entry[1]
+
+    def _pop_live(self, heap: list[tuple[tuple[int, str, str], int, tuple[int, str, str]]]) -> _CollectedRow | None:
+        while heap:
+            entry = heapq.heappop(heap)
+            if self._is_live(entry):
+                return self._by_key[entry[2]]
+        return None
+
+    def _evict(self, row: _CollectedRow) -> None:
+        current = self._by_key.get(row.key)
+        if current is None or current.token != row.token:
+            return
+        del self._by_key[row.key]
+        self._channel_counts[row.channel] -= 1
+        if self._channel_counts[row.channel] == 0:
+            del self._channel_counts[row.channel]
+        self.retained_encoded_bytes -= row.encoded_size
+        self.rows_dropped_by_caps += 1
+        self.truncated = True
+
+    def _compact_heaps(self) -> None:
+        threshold = 2 * len(self._by_key) + 64
+        if len(self._global_heap) > threshold:
+            self._global_heap = [self._entry(row) for row in self._by_key.values()]
+            heapq.heapify(self._global_heap)
+        for channel in tuple(self._channel_heaps):
+            heap = self._channel_heaps[channel]
+            count = self._channel_counts.get(channel, 0)
+            if len(heap) > 2 * count + 64:
+                heap = [self._entry(row) for row in self._by_key.values() if row.channel == channel]
+                if heap:
+                    heapq.heapify(heap)
+                    self._channel_heaps[channel] = heap
+                else:
+                    del self._channel_heaps[channel]
+
+    def offer(
+        self,
+        *,
+        timestamp_us: int,
+        instrument_id: str,
+        channel: str,
+        value: float | None,
+        unit: str,
+        status: str,
+        authority: tuple[int, int],
+    ) -> None:
+        public = BoundedReadingRow(
+            timestamp=timestamp_us / 1_000_000.0,
+            instrument_id=instrument_id,
+            channel=channel,
+            value=value,
+            unit=unit,
+            status=status,
+        )
+        encoded_size = _canonical_row_size(public)
+        if encoded_size > self._byte_cap:
+            self.rows_dropped_by_caps += 1
+            self.truncated = True
+            return
+        key = (timestamp_us, instrument_id, channel)
+        prior = self._by_key.get(key)
+        if prior is not None and authority <= prior.authority:
+            return
+        if prior is not None:
+            self.retained_encoded_bytes -= prior.encoded_size
+        else:
+            self._channel_counts[channel] += 1
+        self._next_token += 1
+        row = _CollectedRow(
+            timestamp_us=timestamp_us,
+            instrument_id=instrument_id,
+            channel=channel,
+            value=value,
+            unit=unit,
+            status=status,
+            authority=authority,
+            token=self._next_token,
+            encoded_size=encoded_size,
+        )
+        self._by_key[key] = row
+        self.retained_encoded_bytes += encoded_size
+        entry = self._entry(row)
+        heapq.heappush(self._global_heap, entry)
+        heapq.heappush(self._channel_heaps[channel], entry)
+
+        channel_heap = self._channel_heaps[channel]
+        while self._channel_counts.get(channel, 0) > self._per_channel_cap:
+            victim = self._pop_live(channel_heap)
+            if victim is not None:
+                self._evict(victim)
+        while len(self._by_key) > self._total_cap:
+            victim = self._pop_live(self._global_heap)
+            if victim is not None:
+                self._evict(victim)
+        while self.retained_encoded_bytes > self._byte_cap:
+            victim = self._pop_live(self._global_heap)
+            if victim is not None:
+                self._evict(victim)
+        self._compact_heaps()
+
+    def note_examined(self) -> None:
+        self.rows_examined += 1
+
+    def finish(self) -> tuple[BoundedReadingRow, ...]:
+        ordered = sorted(self._by_key.values(), key=lambda row: row.rank)
+        return tuple(
+            BoundedReadingRow(
+                timestamp=row.timestamp_us / 1_000_000.0,
+                instrument_id=row.instrument_id,
+                channel=row.channel,
+                value=row.value,
+                unit=row.unit,
+                status=row.status,
+            )
+            for row in ordered
+        )
+
+
+class _IssueLedger:
+    def __init__(self) -> None:
+        self.items: list[BoundedReadIssue] = []
+        self.overflow = 0
+
+    def add(self, code: BoundedReadIssueCode, source: str) -> None:
+        safe_source = source[:96]
+        if len(self.items) < 32:
+            self.items.append(BoundedReadIssue(code=code, source=safe_source))
+        else:
+            self.overflow += 1
+
+
+class _ParquetMetadataError(ValueError):
+    pass
+
+
+class _ParquetSchemaError(TypeError):
+    pass
+
+
+class _IndexOversizeError(ValueError):
+    pass
+
+
+def _epoch_microseconds(value: datetime) -> int:
+    delta = value.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    return ((delta.days * 86_400) + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _sqlite_epoch_microseconds(raw: object) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError("timestamp is not numeric")
+    number = float(raw)
+    if not math.isfinite(number):
+        raise ValueError("timestamp is not finite")
+    dt = datetime.fromtimestamp(number, UTC)
+    return _epoch_microseconds(dt)
+
+
+def _bounded_text(raw: object, *, minimum: int, maximum: int) -> str:
+    if not isinstance(raw, str):
+        raise ValueError("field is not text")
+    size = len(raw.encode("utf-8"))
+    if not minimum <= size <= maximum:
+        raise ValueError("field is outside encoded bounds")
+    return raw
+
+
+def _bounded_value(raw: object, status: str) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError("value is not numeric")
+    decoded = decode(float(raw), status)
+    return float(decoded) if math.isfinite(decoded) else None
+
+
 class ArchiveReader:
     """Read channel data spanning SQLite (recent) + Parquet (cold archive).
 
@@ -60,6 +372,1042 @@ class ArchiveReader:
     def __init__(self, data_dir: Path, archive_dir: Path) -> None:
         self._data_dir = data_dir
         self._archive_dir = archive_dir
+
+    def query_reading_rows_bounded(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        channels: Sequence[str] | None,
+        max_channels: int,
+        max_points_per_channel: int,
+        max_total_points: int,
+        max_retained_bytes: int,
+        deadline_monotonic: float,
+        batch_rows: int = 2048,
+        max_arrow_batch_bytes: int = 4 * 1024 * 1024,
+    ) -> BoundedReadingQueryResult:
+        """Return a hard-bounded newest-row projection across hot and cold data.
+
+        The method is synchronous by design. Async callers must run it in a
+        worker thread; it never borrows the live writer connection.
+        """
+
+        normalized = self._validate_bounded_query(
+            start=start,
+            end=end,
+            channels=channels,
+            max_channels=max_channels,
+            max_points_per_channel=max_points_per_channel,
+            max_total_points=max_total_points,
+            max_retained_bytes=max_retained_bytes,
+            deadline_monotonic=deadline_monotonic,
+            batch_rows=batch_rows,
+            max_arrow_batch_bytes=max_arrow_batch_bytes,
+        )
+        start_utc, end_utc, explicit_channels = normalized
+        start_us = _epoch_microseconds(start_utc)
+        end_us = _epoch_microseconds(end_utc)
+        issues = _IssueLedger()
+        last_eligible_day = (end_utc - timedelta(microseconds=1)).date()
+        sources = self._bounded_sources(start_utc.date(), last_eligible_day, deadline_monotonic, issues)
+        if sources is None:
+            return BoundedReadingQueryResult(
+                rows=(),
+                complete=False,
+                truncated=False,
+                issues=tuple(issues.items),
+                issue_overflow=issues.overflow,
+                discovered_channels=(),
+                rows_examined=0,
+                rows_dropped_by_caps=0,
+                retained_encoded_bytes=0,
+            )
+
+        if explicit_channels is None and (issues.items or issues.overflow):
+            return BoundedReadingQueryResult(
+                rows=(),
+                complete=False,
+                truncated=False,
+                issues=tuple(issues.items),
+                issue_overflow=issues.overflow,
+                discovered_channels=(),
+                rows_examined=0,
+                rows_dropped_by_caps=0,
+                retained_encoded_bytes=0,
+            )
+
+        selected = explicit_channels
+        if selected is None:
+            discovered: set[str] = set()
+            discovery_ok = True
+            for source in sources:
+                if time.monotonic() >= deadline_monotonic:
+                    issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                    discovery_ok = False
+                    break
+                if source.kind == "sqlite":
+                    ok = self._discover_sqlite_channels(
+                        source,
+                        start_us=start_us,
+                        end_us=end_us,
+                        max_channels=max_channels,
+                        channels=discovered,
+                        deadline_monotonic=deadline_monotonic,
+                        batch_rows=batch_rows,
+                        issues=issues,
+                    )
+                else:
+                    ok = self._discover_parquet_channels(
+                        source,
+                        start_us=start_us,
+                        end_us=end_us,
+                        max_channels=max_channels,
+                        channels=discovered,
+                        deadline_monotonic=deadline_monotonic,
+                        batch_rows=batch_rows,
+                        max_arrow_batch_bytes=max_arrow_batch_bytes,
+                        issues=issues,
+                    )
+                if not ok:
+                    discovery_ok = False
+                    break
+                if len(discovered) > max_channels:
+                    issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
+                    discovery_ok = False
+                    break
+            if not discovery_ok:
+                return BoundedReadingQueryResult(
+                    rows=(),
+                    complete=False,
+                    truncated=False,
+                    issues=tuple(issues.items),
+                    issue_overflow=issues.overflow,
+                    discovered_channels=tuple(sorted(discovered)[:max_channels]),
+                    rows_examined=0,
+                    rows_dropped_by_caps=0,
+                    retained_encoded_bytes=0,
+                )
+            selected = tuple(sorted(discovered))
+        discovered_channels = tuple(selected)
+        collector = _BoundedReadingCollector(
+            max_points_per_channel=max_points_per_channel,
+            max_total_points=max_total_points,
+            max_retained_bytes=max_retained_bytes,
+        )
+        complete = True
+        for source in sources:
+            if time.monotonic() >= deadline_monotonic:
+                issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                complete = False
+                break
+            if source.kind == "sqlite":
+                ok = self._read_sqlite_bounded(
+                    source,
+                    start_us=start_us,
+                    end_us=end_us,
+                    channels=selected,
+                    deadline_monotonic=deadline_monotonic,
+                    batch_rows=batch_rows,
+                    collector=collector,
+                    issues=issues,
+                )
+            else:
+                ok = self._read_parquet_bounded(
+                    source,
+                    start_us=start_us,
+                    end_us=end_us,
+                    channels=selected,
+                    deadline_monotonic=deadline_monotonic,
+                    batch_rows=batch_rows,
+                    max_arrow_batch_bytes=max_arrow_batch_bytes,
+                    collector=collector,
+                    issues=issues,
+                )
+            complete = ok and complete
+        return BoundedReadingQueryResult(
+            rows=collector.finish(),
+            complete=complete and not issues.items and issues.overflow == 0,
+            truncated=collector.truncated,
+            issues=tuple(issues.items),
+            issue_overflow=issues.overflow,
+            discovered_channels=discovered_channels,
+            rows_examined=collector.rows_examined,
+            rows_dropped_by_caps=collector.rows_dropped_by_caps,
+            retained_encoded_bytes=collector.retained_encoded_bytes,
+        )
+
+    @staticmethod
+    def _validate_bounded_query(
+        *,
+        start: datetime,
+        end: datetime,
+        channels: Sequence[str] | None,
+        max_channels: int,
+        max_points_per_channel: int,
+        max_total_points: int,
+        max_retained_bytes: int,
+        deadline_monotonic: float,
+        batch_rows: int,
+        max_arrow_batch_bytes: int,
+    ) -> tuple[datetime, datetime, tuple[str, ...] | None]:
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            raise TypeError("start and end must be datetime")
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("start must be timezone-aware")
+        if end.tzinfo is None or end.utcoffset() is None:
+            raise ValueError("end must be timezone-aware")
+        start_utc, end_utc = start.astimezone(UTC), end.astimezone(UTC)
+        if not start_utc < end_utc:
+            raise ValueError("start must be before end")
+        if end_utc - start_utc > timedelta(hours=168):
+            raise ValueError("bounded query interval exceeds 168 hours")
+
+        def exact_int(name: str, value: object, minimum: int, maximum: int) -> int:
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(f"{name} outside {minimum}..{maximum}")
+            return value
+
+        exact_int("max_channels", max_channels, 1, 64)
+        exact_int("max_points_per_channel", max_points_per_channel, 2, 100_000)
+        exact_int("max_total_points", max_total_points, 2, 500_000)
+        if max_total_points < max_points_per_channel:
+            raise ValueError("max_total_points must cover one channel cap")
+        exact_int("max_retained_bytes", max_retained_bytes, 65_536, 33_554_432)
+        exact_int("batch_rows", batch_rows, 64, 8_192)
+        exact_int("max_arrow_batch_bytes", max_arrow_batch_bytes, 65_536, 33_554_432)
+        if isinstance(deadline_monotonic, bool) or not isinstance(deadline_monotonic, (int, float)):
+            raise ValueError("deadline_monotonic must be finite")
+        deadline = float(deadline_monotonic)
+        if not math.isfinite(deadline) or deadline <= time.monotonic():
+            raise ValueError("deadline_monotonic must be in the future")
+        if channels is None:
+            return start_utc, end_utc, None
+        if isinstance(channels, (str, bytes)) or not isinstance(channels, Sequence):
+            raise TypeError("channels must be a sequence of strings")
+        if not 1 <= len(channels) <= max_channels:
+            raise ValueError("channels count outside configured cap")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in channels:
+            channel = _bounded_text(raw, minimum=1, maximum=256)
+            if channel in seen:
+                raise ValueError("channels must be unique")
+            seen.add(channel)
+            normalized.append(channel)
+        return start_utc, end_utc, tuple(normalized)
+
+    @staticmethod
+    def _identity(path: Path) -> tuple[int, int, int, int]:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("source is not a regular file")
+        if getattr(info, "st_nlink", 1) != 1:
+            raise OSError("source has multiple links")
+        return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_nlink)
+
+    @classmethod
+    def _contained_regular(cls, root: Path, relative: str) -> Path:
+        if not relative or "\\" in relative or "\x00" in relative:
+            raise OSError("invalid relative path")
+        if any(part in {"", ".", ".."} for part in relative.split("/")):
+            raise OSError("invalid relative path")
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise OSError("invalid relative path")
+        if len(pure.parts[0]) >= 2 and pure.parts[0][1] == ":":
+            raise OSError("drive path is forbidden")
+        resolved_root = root.resolve(strict=True)
+        current = resolved_root
+        for part in pure.parts:
+            current = current / part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise OSError("symlink source component")
+        resolved = current.resolve(strict=True)
+        if not resolved.is_relative_to(resolved_root):
+            raise OSError("source escaped root")
+        cls._identity(resolved)
+        return resolved
+
+    @staticmethod
+    def _read_bounded_index(index_path: Path) -> object:
+        maximum = 8 * 1024 * 1024
+        before = index_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or getattr(before, "st_nlink", 1) != 1:
+            raise OSError("invalid index authority")
+        if before.st_size > maximum:
+            raise _IndexOversizeError("index exceeds bound")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(index_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            before_identity = (
+                before.st_dev,
+                before.st_ino,
+                stat.S_IFMT(before.st_mode),
+                before.st_nlink,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            opened_identity = (
+                opened.st_dev,
+                opened.st_ino,
+                stat.S_IFMT(opened.st_mode),
+                opened.st_nlink,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            )
+            if opened_identity != before_identity:
+                raise OSError("index identity changed before read")
+            payload = bytearray()
+            while len(payload) <= maximum:
+                chunk = os.read(descriptor, min(65_536, maximum + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if len(payload) > maximum or after.st_size > maximum:
+            raise _IndexOversizeError("index grew beyond bound")
+        after_path = index_path.lstat()
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            stat.S_IFMT(after.st_mode),
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        after_path_identity = (
+            after_path.st_dev,
+            after_path.st_ino,
+            stat.S_IFMT(after_path.st_mode),
+            after_path.st_nlink,
+            after_path.st_size,
+            after_path.st_mtime_ns,
+            after_path.st_ctime_ns,
+        )
+        if (
+            after_identity != opened_identity
+            or after_path_identity != opened_identity
+            or len(payload) != opened.st_size
+        ):
+            raise OSError("index changed while reading")
+        return json.loads(bytes(payload).decode("utf-8", errors="strict"))
+
+    def _bounded_sources(
+        self,
+        first_day: date,
+        last_day: date,
+        deadline_monotonic: float,
+        issues: _IssueLedger,
+    ) -> tuple[_BoundedSource, ...] | None:
+        indexed: dict[str, str] = {}
+        index_path = self._archive_dir / "index.json"
+        index_was_present = index_path.exists() or index_path.is_symlink()
+        index_document: object | None = None
+        if index_was_present:
+            try:
+                if time.monotonic() >= deadline_monotonic:
+                    issues.add(BoundedReadIssueCode.DEADLINE, "index")
+                    return None
+                doc = self._read_bounded_index(index_path)
+                index_document = doc
+                if not isinstance(doc, dict) or set(doc) != {"files"}:
+                    raise ValueError("invalid index schema")
+                entries = doc["files"]
+                if not isinstance(entries, list) or len(entries) > 100_000:
+                    raise ValueError("invalid index entries")
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise ValueError("invalid index entry")
+                    name = entry.get("original_name")
+                    archive_path = entry.get("archive_path")
+                    if not isinstance(name, str) or not isinstance(archive_path, str):
+                        raise ValueError("invalid index entry fields")
+                    day_text = _day_from_db_name(name)
+                    if day_text is None or name != f"data_{day_text}.db":
+                        continue
+                    day = date.fromisoformat(day_text)
+                    if not first_day <= day <= last_day:
+                        continue
+                    if name in indexed:
+                        raise ValueError("duplicate day authority")
+                    indexed[name] = archive_path
+            except _IndexOversizeError:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE, "index")
+                return None
+            except Exception:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
+                return None
+
+        planned: list[_BoundedSource] = []
+        current = last_day
+        while current >= first_day:
+            if time.monotonic() >= deadline_monotonic:
+                issues.add(BoundedReadIssueCode.DEADLINE, current.isoformat())
+                return None
+            name = f"data_{current.isoformat()}.db"
+            archive_rel = indexed.get(name)
+            if archive_rel is not None:
+                token = f"{current.isoformat()}:parquet:0"
+                try:
+                    archive = self._contained_regular(self._archive_dir, archive_rel)
+                except FileNotFoundError:
+                    issues.add(BoundedReadIssueCode.SOURCE_MISSING, token)
+                except OSError:
+                    issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, token)
+                else:
+                    planned.append(_BoundedSource(current, "parquet", archive, token))
+            hot = self._data_dir / name
+            if hot.exists() or hot.is_symlink():
+                token = f"{current.isoformat()}:sqlite"
+                try:
+                    relative = hot.relative_to(self._data_dir).as_posix()
+                    validated = self._contained_regular(self._data_dir, relative)
+                except (OSError, ValueError):
+                    issues.add(BoundedReadIssueCode.SQLITE_READ, token)
+                else:
+                    planned.append(_BoundedSource(current, "sqlite", validated, token))
+            current -= timedelta(days=1)
+        if time.monotonic() >= deadline_monotonic:
+            issues.add(BoundedReadIssueCode.DEADLINE, "index:post-plan")
+            return None
+        index_is_present = index_path.exists() or index_path.is_symlink()
+        if index_is_present != index_was_present:
+            issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index:changed")
+            return None
+        if index_is_present:
+            try:
+                post_plan_document = self._read_bounded_index(index_path)
+            except _IndexOversizeError:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE, "index")
+                return None
+            except Exception:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
+                return None
+            if post_plan_document != index_document:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index:changed")
+                return None
+        return tuple(planned)
+
+    @staticmethod
+    def _sqlite_issue_for(exc: BaseException) -> BoundedReadIssueCode:
+        code = getattr(exc, "sqlite_errorcode", None)
+        primary_code = code & 0xFF if isinstance(code, int) else code
+        if primary_code == getattr(sqlite3, "SQLITE_TOOBIG", -1) or isinstance(exc, getattr(sqlite3, "DataError", ())):
+            return BoundedReadIssueCode.SQLITE_VALUE_OVERSIZE
+        if primary_code in {
+            getattr(sqlite3, "SQLITE_BUSY", -2),
+            getattr(sqlite3, "SQLITE_LOCKED", -3),
+        }:
+            return BoundedReadIssueCode.SQLITE_BUSY
+        if primary_code == getattr(sqlite3, "SQLITE_INTERRUPT", -4):
+            return BoundedReadIssueCode.SQLITE_INTERRUPTED
+        return BoundedReadIssueCode.SQLITE_READ
+
+    def _open_bounded_sqlite(
+        self,
+        source: _BoundedSource,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[object, tuple[int, int, int, int], list[bool]]:
+        before = self._identity(source.path)
+        uri = f"file:{quote(str(source.path), safe='/')}?mode=ro"
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=0.25,
+            isolation_level=None,
+        )
+        try:
+            if not hasattr(conn, "setlimit") or not hasattr(sqlite3, "SQLITE_LIMIT_LENGTH"):
+                raise RuntimeError("SQLite allocation limits unavailable")
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1_048_576)
+            conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 65_536)
+            expired = [False]
+
+            def interrupt_on_deadline() -> int:
+                if time.monotonic() >= deadline_monotonic:
+                    expired[0] = True
+                    return 1
+                return 0
+
+            conn.set_progress_handler(interrupt_on_deadline, 2_000)
+            conn.execute("PRAGMA query_only=ON").close()
+            conn.execute("PRAGMA busy_timeout=250").close()
+            if self._identity(source.path) != before:
+                raise OSError("SQLite source identity changed")
+            return conn, before, expired
+        except Exception:
+            conn.close()
+            raise
+
+    def _close_bounded_sqlite(
+        self,
+        conn: object,
+        source: _BoundedSource,
+        identity: tuple[int, int, int, int],
+    ) -> bool:
+        same = False
+        try:
+            same = self._identity(source.path) == identity
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            same = False
+        return same
+
+    def _discover_sqlite_channels(
+        self,
+        source: _BoundedSource,
+        *,
+        start_us: int,
+        end_us: int,
+        max_channels: int,
+        channels: set[str],
+        deadline_monotonic: float,
+        batch_rows: int,
+        issues: _IssueLedger,
+    ) -> bool:
+        conn = None
+        identity = None
+        expired = [False]
+        ok = True
+        try:
+            conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
+            legacy = conn.execute("SELECT 1 FROM readings WHERE typeof(timestamp) = 'text' LIMIT 1")
+            try:
+                if next(iter(legacy), None) is not None:
+                    issues.add(BoundedReadIssueCode.LEGACY_TIMESTAMP_UNSUPPORTED, source.token)
+                    return False
+            finally:
+                legacy.close()
+            last_id: int | None = None
+            while True:
+                if time.monotonic() >= deadline_monotonic:
+                    issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                    return False
+                sql = (
+                    "SELECT id, channel FROM readings NOT INDEXED "
+                    "WHERE typeof(timestamp) IN ('real','integer') "
+                    "AND timestamp >= ? AND timestamp < ?"
+                )
+                params: list[object] = [
+                    start_us / 1_000_000.0,
+                    end_us / 1_000_000.0,
+                ]
+                if last_id is not None:
+                    sql += " AND id > ?"
+                    params.append(last_id)
+                sql += " ORDER BY id LIMIT ?"
+                params.append(batch_rows)
+                cursor = conn.execute(sql, params)
+                count = 0
+                try:
+                    for row_id, raw_channel in cursor:
+                        if type(row_id) is not int or (last_id is not None and row_id <= last_id):
+                            raise ValueError("invalid discovery keyset id")
+                        last_id = row_id
+                        count += 1
+                        channels.add(_bounded_text(raw_channel, minimum=1, maximum=256))
+                        if len(channels) > max_channels:
+                            issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
+                            return False
+                finally:
+                    cursor.close()
+                if count < batch_rows:
+                    break
+        except Exception as exc:
+            if expired[0]:
+                issues.add(BoundedReadIssueCode.SQLITE_INTERRUPTED, source.token)
+                issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+            elif isinstance(exc, (ValueError, UnicodeError)):
+                issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+            else:
+                issues.add(self._sqlite_issue_for(exc), source.token)
+            ok = False
+        finally:
+            if conn is not None and identity is not None:
+                if not self._close_bounded_sqlite(conn, source, identity):
+                    issues.add(BoundedReadIssueCode.SQLITE_READ, source.token)
+                    ok = False
+        return ok
+
+    def _read_sqlite_bounded(
+        self,
+        source: _BoundedSource,
+        *,
+        start_us: int,
+        end_us: int,
+        channels: Sequence[str],
+        deadline_monotonic: float,
+        batch_rows: int,
+        collector: _BoundedReadingCollector,
+        issues: _IssueLedger,
+    ) -> bool:
+        conn = None
+        identity = None
+        expired = [False]
+        ok = True
+        try:
+            conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
+            placeholders = ",".join("?" for _ in channels)
+            legacy_sql = "SELECT 1 FROM readings WHERE typeof(timestamp) = 'text'"
+            legacy_params: tuple[object, ...] = ()
+            if channels:
+                legacy_sql += f" AND channel IN ({placeholders})"
+                legacy_params = tuple(channels)
+            legacy_sql += " LIMIT 1"
+            legacy = conn.execute(legacy_sql, legacy_params)
+            try:
+                if next(iter(legacy), None) is not None:
+                    issues.add(BoundedReadIssueCode.LEGACY_TIMESTAMP_UNSUPPORTED, source.token)
+                    ok = False
+            finally:
+                legacy.close()
+
+            for channel in channels:
+                last: tuple[float, int] | None = None
+                while True:
+                    if time.monotonic() >= deadline_monotonic:
+                        issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                        return False
+                    sql = (
+                        "SELECT id, timestamp, instrument_id, channel, value, unit, status "
+                        "FROM readings WHERE typeof(timestamp) IN ('real','integer') "
+                        "AND timestamp >= ? AND timestamp < ? AND channel = ?"
+                    )
+                    params: list[object] = [
+                        start_us / 1_000_000.0,
+                        end_us / 1_000_000.0,
+                        channel,
+                    ]
+                    if last is not None:
+                        sql += " AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+                        params.extend((last[0], last[0], last[1]))
+                    sql += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+                    params.append(batch_rows)
+                    cursor = conn.execute(sql, params)
+                    count = 0
+                    try:
+                        for raw in cursor:
+                            count += 1
+                            collector.note_examined()
+                            row_id, timestamp, instrument, raw_channel, value, unit, status_value = raw
+                            last = (float(timestamp), int(row_id))
+                            try:
+                                timestamp_us = _sqlite_epoch_microseconds(timestamp)
+                                if not start_us <= timestamp_us < end_us:
+                                    raise ValueError("timestamp outside normalized interval")
+                                instrument_text = _bounded_text(instrument, minimum=1, maximum=256)
+                                channel_text = _bounded_text(raw_channel, minimum=1, maximum=256)
+                                unit_text = _bounded_text(unit, minimum=0, maximum=64)
+                                status_text = _bounded_text(status_value, minimum=0, maximum=64)
+                                decoded = _bounded_value(value, status_text)
+                            except (ValueError, TypeError, OSError, OverflowError):
+                                issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+                                ok = False
+                                continue
+                            collector.offer(
+                                timestamp_us=timestamp_us,
+                                instrument_id=instrument_text,
+                                channel=channel_text,
+                                value=decoded,
+                                unit=unit_text,
+                                status=status_text,
+                                authority=(1, int(row_id)),
+                            )
+                    finally:
+                        cursor.close()
+                    if count < batch_rows:
+                        break
+        except Exception as exc:
+            if expired[0]:
+                issues.add(BoundedReadIssueCode.SQLITE_INTERRUPTED, source.token)
+                issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+            else:
+                issues.add(self._sqlite_issue_for(exc), source.token)
+            ok = False
+        finally:
+            if conn is not None and identity is not None:
+                if not self._close_bounded_sqlite(conn, source, identity):
+                    issues.add(BoundedReadIssueCode.SQLITE_READ, source.token)
+                    ok = False
+        return ok
+
+    def _prepare_bounded_parquet(
+        self,
+        source: _BoundedSource,
+        *,
+        start_us: int,
+        end_us: int,
+    ) -> tuple[
+        BinaryIO,
+        object,
+        object,
+        object,
+        list[int],
+        list[int],
+        tuple[int, int, int, int],
+        bool,
+    ]:
+        import pyarrow as pa
+        import pyarrow.compute as pc
+        import pyarrow.parquet as pq
+
+        path_identity = self._identity(source.path)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source.path, flags)
+        handle: BinaryIO | None = None
+        try:
+            info = os.fstat(descriptor)
+            handle_identity = (
+                info.st_dev,
+                info.st_ino,
+                stat.S_IFMT(info.st_mode),
+                info.st_nlink,
+            )
+            if handle_identity != path_identity or not stat.S_ISREG(info.st_mode) or getattr(info, "st_nlink", 1) != 1:
+                raise OSError("Parquet source identity mismatch")
+            if info.st_size < 12:
+                raise _ParquetMetadataError("Parquet file too small")
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = -1
+            handle.seek(-8, os.SEEK_END)
+            trailer = handle.read(8)
+            if len(trailer) != 8 or trailer[4:] != b"PAR1":
+                raise _ParquetMetadataError("invalid Parquet trailer")
+            footer_length = struct.unpack("<I", trailer[:4])[0]
+            if footer_length > 8 * 1024 * 1024 or footer_length + 8 > info.st_size:
+                raise _ParquetMetadataError("invalid Parquet footer length")
+            handle.seek(0)
+            parquet = pq.ParquetFile(
+                handle,
+                pre_buffer=False,
+                thrift_string_size_limit=1_048_576,
+                thrift_container_size_limit=1_000_000,
+            )
+            expected = pa.schema(
+                [
+                    ("timestamp", pa.timestamp("us", tz="UTC")),
+                    ("instrument_id", pa.string()),
+                    ("channel", pa.string()),
+                    ("value", pa.float64()),
+                    ("unit", pa.string()),
+                    ("status", pa.string()),
+                ]
+            )
+            schema = parquet.schema_arrow
+            if schema.names != expected.names or any(
+                schema.field(name).type != expected.field(name).type for name in expected.names
+            ):
+                raise _ParquetSchemaError("unexpected Parquet schema")
+            metadata = parquet.metadata
+            if metadata.num_row_groups > 1_024:
+                raise _ParquetMetadataError("too many Parquet row groups")
+            starts: list[int] = []
+            cursor = 0
+            ranges: list[tuple[int | None, int | None]] = []
+            eligible: list[int] = []
+            metadata_partial = False
+            timestamp_column = schema.names.index("timestamp")
+            for group_index in range(metadata.num_row_groups):
+                starts.append(cursor)
+                group = metadata.row_group(group_index)
+                cursor += group.num_rows
+                minimum: int | None = None
+                maximum: int | None = None
+                stats = group.column(timestamp_column).statistics
+                if stats is not None and stats.has_min_max:
+                    try:
+                        minimum = _epoch_microseconds(stats.min)
+                        maximum = _epoch_microseconds(stats.max)
+                    except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+                        minimum = maximum = None
+                        metadata_partial = True
+                    if minimum is not None and maximum is not None and minimum > maximum:
+                        minimum = maximum = None
+                        metadata_partial = True
+                ranges.append((minimum, maximum))
+                if minimum is not None and maximum is not None:
+                    if maximum < start_us or minimum >= end_us:
+                        continue
+                eligible.append(group_index)
+            chronological = all(
+                ranges[index][0] is not None
+                and ranges[index][1] is not None
+                and ranges[index + 1][0] is not None
+                and ranges[index][1] <= ranges[index + 1][0]
+                for index in range(max(0, len(ranges) - 1))
+            )
+            if chronological:
+                eligible.reverse()
+            return (
+                handle,
+                parquet,
+                pa,
+                pc,
+                eligible,
+                starts,
+                path_identity,
+                metadata_partial,
+            )
+        except Exception:
+            if handle is not None:
+                handle.close()
+            elif descriptor >= 0:
+                os.close(descriptor)
+            raise
+
+    def _discover_parquet_channels(
+        self,
+        source: _BoundedSource,
+        *,
+        start_us: int,
+        end_us: int,
+        max_channels: int,
+        channels: set[str],
+        deadline_monotonic: float,
+        batch_rows: int,
+        max_arrow_batch_bytes: int,
+        issues: _IssueLedger,
+    ) -> bool:
+        handle = None
+        identity = None
+        ok = True
+        try:
+            (
+                handle,
+                parquet,
+                pa,
+                pc,
+                groups,
+                _starts,
+                identity,
+                metadata_partial,
+            ) = self._prepare_bounded_parquet(source, start_us=start_us, end_us=end_us)
+            if metadata_partial:
+                issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
+                ok = False
+            start_scalar = pa.scalar(
+                datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            end_scalar = pa.scalar(
+                datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=end_us),
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            for group in groups:
+                for batch in parquet.iter_batches(
+                    batch_size=batch_rows,
+                    row_groups=[group],
+                    columns=["timestamp", "channel"],
+                    use_threads=False,
+                ):
+                    if time.monotonic() >= deadline_monotonic:
+                        issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                        return False
+                    if batch.num_rows > batch_rows:
+                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                        return False
+                    if batch.nbytes > max_arrow_batch_bytes:
+                        issues.add(BoundedReadIssueCode.PARQUET_BATCH_OVERSIZE, source.token)
+                        return False
+                    if bool(pc.any(pc.is_null(batch["timestamp"])).as_py()) or bool(
+                        pc.any(pc.is_null(batch["channel"])).as_py()
+                    ):
+                        issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+                        ok = False
+                    mask = pc.and_(
+                        pc.greater_equal(batch["timestamp"], start_scalar),
+                        pc.less(batch["timestamp"], end_scalar),
+                    )
+                    mask = pc.fill_null(mask, False)
+                    filtered = batch.filter(mask)
+                    for index in range(filtered.num_rows):
+                        channel = _bounded_text(filtered["channel"][index].as_py(), minimum=1, maximum=256)
+                        channels.add(channel)
+                        if len(channels) > max_channels:
+                            issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
+                            return False
+        except _ParquetSchemaError:
+            issues.add(BoundedReadIssueCode.PARQUET_SCHEMA, source.token)
+            ok = False
+        except (_ParquetMetadataError, struct.error):
+            issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
+            ok = False
+        except (ValueError, UnicodeError):
+            issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+            ok = False
+        except Exception:
+            issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+            ok = False
+        finally:
+            if handle is not None:
+                handle.close()
+            if identity is not None:
+                try:
+                    if self._identity(source.path) != identity:
+                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                        ok = False
+                except OSError:
+                    issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                    ok = False
+        return ok
+
+    def _read_parquet_bounded(
+        self,
+        source: _BoundedSource,
+        *,
+        start_us: int,
+        end_us: int,
+        channels: Sequence[str],
+        deadline_monotonic: float,
+        batch_rows: int,
+        max_arrow_batch_bytes: int,
+        collector: _BoundedReadingCollector,
+        issues: _IssueLedger,
+    ) -> bool:
+        handle = None
+        identity = None
+        ok = True
+        try:
+            (
+                handle,
+                parquet,
+                pa,
+                pc,
+                groups,
+                starts,
+                identity,
+                metadata_partial,
+            ) = self._prepare_bounded_parquet(source, start_us=start_us, end_us=end_us)
+            if metadata_partial:
+                issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
+                ok = False
+            start_scalar = pa.scalar(
+                datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            end_scalar = pa.scalar(
+                datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=end_us),
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            channel_array = pa.array(channels, type=pa.string())
+            columns = [
+                "timestamp",
+                "instrument_id",
+                "channel",
+                "value",
+                "unit",
+                "status",
+            ]
+            for group in groups:
+                batch_start = 0
+                for batch in parquet.iter_batches(
+                    batch_size=batch_rows,
+                    row_groups=[group],
+                    columns=columns,
+                    use_threads=False,
+                ):
+                    if time.monotonic() >= deadline_monotonic:
+                        issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                        return False
+                    if batch.num_rows > batch_rows:
+                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                        return False
+                    if batch.nbytes > max_arrow_batch_bytes:
+                        issues.add(BoundedReadIssueCode.PARQUET_BATCH_OVERSIZE, source.token)
+                        return False
+                    if bool(pc.any(pc.is_null(batch["timestamp"])).as_py()) or bool(
+                        pc.any(pc.is_null(batch["channel"])).as_py()
+                    ):
+                        issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+                        ok = False
+                    ordinals = pa.array(
+                        range(
+                            starts[group] + batch_start,
+                            starts[group] + batch_start + batch.num_rows,
+                        ),
+                        type=pa.int64(),
+                    )
+                    batch_start += batch.num_rows
+                    mask = pc.and_(
+                        pc.greater_equal(batch["timestamp"], start_scalar),
+                        pc.less(batch["timestamp"], end_scalar),
+                    )
+                    mask = pc.and_(
+                        mask,
+                        pc.is_in(batch["channel"], value_set=channel_array),
+                    )
+                    mask = pc.fill_null(mask, False)
+                    filtered = batch.filter(mask)
+                    filtered_ordinals = ordinals.filter(mask)
+                    for index in range(filtered.num_rows):
+                        collector.note_examined()
+                        try:
+                            timestamp = filtered["timestamp"][index].as_py()
+                            timestamp_us = _epoch_microseconds(timestamp)
+                            if not start_us <= timestamp_us < end_us:
+                                raise ValueError("timestamp outside normalized interval")
+                            instrument = _bounded_text(
+                                filtered["instrument_id"][index].as_py(),
+                                minimum=1,
+                                maximum=256,
+                            )
+                            channel = _bounded_text(
+                                filtered["channel"][index].as_py(),
+                                minimum=1,
+                                maximum=256,
+                            )
+                            unit = _bounded_text(filtered["unit"][index].as_py(), minimum=0, maximum=64)
+                            status_value = _bounded_text(filtered["status"][index].as_py(), minimum=0, maximum=64)
+                            value = _bounded_value(filtered["value"][index].as_py(), status_value)
+                            ordinal = filtered_ordinals[index].as_py()
+                            if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+                                raise ValueError("invalid physical ordinal")
+                        except (ValueError, TypeError, OSError, OverflowError):
+                            issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
+                            ok = False
+                            continue
+                        collector.offer(
+                            timestamp_us=timestamp_us,
+                            instrument_id=instrument,
+                            channel=channel,
+                            value=value,
+                            unit=unit,
+                            status=status_value,
+                            authority=(2, -ordinal),
+                        )
+        except _ParquetSchemaError:
+            issues.add(BoundedReadIssueCode.PARQUET_SCHEMA, source.token)
+            ok = False
+        except (_ParquetMetadataError, struct.error):
+            issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
+            ok = False
+        except Exception:
+            issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+            ok = False
+        finally:
+            if handle is not None:
+                handle.close()
+            if identity is not None:
+                try:
+                    if self._identity(source.path) != identity:
+                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                        ok = False
+                except OSError:
+                    issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
+                    ok = False
+        return ok
 
     def query(
         self,
@@ -102,13 +1450,9 @@ class ArchiveReader:
                 # DB reappeared for an already-archived day. Union both, archived
                 # wins on an exact (channel, ts) clash — mirrors query_rows (F2)
                 # so history/journal reads no longer shadow rows exports see.
-                self._merge_overlap_day(
-                    archived_names[db_name], db_path, from_epoch, to_epoch, channel_set, result
-                )
+                self._merge_overlap_day(archived_names[db_name], db_path, from_epoch, to_epoch, channel_set, result)
             elif is_archived:
-                self._query_parquet(
-                    archived_names[db_name], from_epoch, to_epoch, channel_set, result
-                )
+                self._query_parquet(archived_names[db_name], from_epoch, to_epoch, channel_set, result)
             elif hot_exists:
                 self._query_sqlite(db_path, from_epoch, to_epoch, channel_set, result)
             current_day += timedelta(days=1)
@@ -303,10 +1647,7 @@ class ArchiveReader:
                 ).fetchone()
                 if exists is None:
                     return
-                query = (
-                    "SELECT timestamp, experiment_id, author, source, message, tags "
-                    "FROM operator_log"
-                )
+                query = "SELECT timestamp, experiment_id, author, source, message, tags FROM operator_log"
                 cond: list[str] = []
                 params: list[object] = []
                 if from_epoch is not None:
