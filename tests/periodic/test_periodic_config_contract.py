@@ -189,6 +189,47 @@ def test_fingerprint_is_canonical_and_excludes_token(tmp_path: Path) -> None:
     assert TOKEN not in repr(first)
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "123456:" + "A" * 20,
+        "9" * 20 + ":" + "z" * 256,
+    ],
+)
+def test_bot_token_grammar_accepts_exact_boundaries(tmp_path: Path, token: str) -> None:
+    (tmp_path / "notifications.yaml").write_text(_yaml(token=token), encoding="utf-8")
+    loaded = load_periodic_png_config(tmp_path)
+    assert loaded.runnable is True
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        " ",
+        "012345:" + "A" * 20,
+        "12345:" + "A" * 20,
+        "1" * 21 + ":" + "A" * 20,
+        "123456" + "A" * 20,
+        "123456::" + "A" * 20,
+        "123456:" + "A" * 19,
+        "123456:" + "A" * 257,
+        "123456:" + "A" * 20 + "/x",
+        "123456:" + "A" * 20 + "?x",
+        "123456:" + "A" * 20 + "#x",
+        "123456:" + "A" * 19 + "é",
+        "123456:" + "A" * 19 + "\n",
+        "your_bot_token_here",
+    ],
+)
+def test_bot_token_grammar_rejects_invalid_path_and_shape(tmp_path: Path, token: str) -> None:
+    (tmp_path / "notifications.yaml").write_text(_yaml(token=token), encoding="utf-8")
+    loaded = load_periodic_png_config(tmp_path)
+    assert loaded.requested is True
+    assert loaded.runnable is False
+    assert loaded.error_code == "invalid_bot_token"
+
+
 def test_yaml_failure_never_echoes_token_bearing_line(tmp_path: Path) -> None:
     path = tmp_path / "notifications.yaml"
     path.write_text(f"telegram: [bot_token: {TOKEN}\n", encoding="utf-8")

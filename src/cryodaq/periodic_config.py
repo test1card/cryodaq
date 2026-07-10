@@ -52,6 +52,7 @@ _CHANNEL_NATURAL_PART = re.compile(r"(\d+)")
 _CHANNEL_NAME = re.compile(r"\S")
 _CHANNEL_DESTINATION = re.compile(r"@[A-Za-z][A-Za-z0-9_]{0,126}")
 _CANONICAL_DECIMAL = re.compile(r"-?[1-9][0-9]*")
+_BOT_TOKEN = re.compile(r"[1-9][0-9]{5,19}:[A-Za-z0-9_-]{20,256}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,7 +303,7 @@ def _validate_enabled_config(
         raise _ConfigError("invalid_bot_token", "telegram.bot_token must be a nonempty string")
     token_bytes = _utf8_bytes(raw_token, "invalid_bot_token", "telegram.bot_token is not valid UTF-8")
     if (
-        not raw_token.strip()
+        _BOT_TOKEN.fullmatch(raw_token) is None
         or len(token_bytes) > 512
         or raw_token.strip().casefold() in _PLACEHOLDER_TOKENS
     ):
