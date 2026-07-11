@@ -76,7 +76,18 @@ from cryodaq.core.zmq_bridge import (
     ZMQPublisher,
     encode_periodic_command_reply,
 )
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import InstrumentDriver, Reading
+from cryodaq.drivers.contracts import ControlledSource, VerifiedOffSource
+from cryodaq.drivers.registry import (
+    KEITHLEY_2604B_SOURCE_BINDING,
+    REVIEWED_SOURCE_SPECS,
+    DriverConstructionContext,
+    DriverRegistryError,
+    ReviewedSourceBinding,
+    ValidatedInstrumentConfig,
+    construct_driver,
+    validate_instrument_entries,
+)
 from cryodaq.engine_wiring.runtime_tasks import (
     _alarm_ring_buffer_loop,
     _alarm_v2_feed_loop,
@@ -1530,131 +1541,116 @@ def _get_memory_mb() -> float:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class DriverLoadResult:
+    """Atomically constructed scheduler inputs with reviewed provenance.
+
+    ``validated_configs`` preserves the exact canonical registry specs used to
+    construct ``instrument_configs``.  Source authority is recorded while
+    those pairs are still together; downstream code must not rediscover it
+    from driver names, methods, or structural protocol conformance.
+    """
+
+    instrument_configs: tuple[InstrumentConfig, ...]
+    validated_configs: tuple[ValidatedInstrumentConfig, ...]
+    reviewed_source: InstrumentDriver | None
+    reviewed_source_binding: ReviewedSourceBinding | None
+
+
 def _load_drivers(
     config_path: Path,
     *,
     mock: bool,
     calibration_store: CalibrationStore | None = None,
-) -> list[InstrumentConfig]:
-    """Загрузить драйверы из config/instruments.yaml.
+    data_dir: Path | None = None,
+) -> DriverLoadResult:
+    """Validate and atomically construct the configured built-in drivers."""
 
-    Возвращает список InstrumentConfig, готовых к регистрации в Scheduler.
-    """
-    with config_path.open(encoding="utf-8") as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh)
+    try:
+        with config_path.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        raise DriverRegistryError(f"{config_path}: unable to decode instrument config") from exc
 
-    configs: list[InstrumentConfig] = []
+    if not isinstance(raw, dict):
+        raise DriverRegistryError(f"{config_path}: root config must be a mapping")
+    if any(not isinstance(key, str) for key in raw):
+        raise DriverRegistryError(f"{config_path}: root config keys must be strings")
 
-    for entry in raw.get("instruments", []):
-        itype = entry["type"]
-        name = entry["name"]
-        resource = entry.get("resource", "")
-        poll_interval_s = float(entry.get("poll_interval_s", 1.0))
-        channels = entry.get("channels", {})
+    try:
+        context = DriverConstructionContext.from_root_config(
+            raw,
+            mock=mock,
+            calibration_store=calibration_store,
+            data_dir=_DATA_DIR if data_dir is None else data_dir,
+        )
+        validated = validate_instrument_entries(raw.get("instruments", []))
+    except DriverRegistryError as exc:
+        raise DriverRegistryError(f"{config_path}: {exc}") from exc
 
-        if itype == "lakeshore_218s":
-            from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
-
-            channel_labels = {int(k): v for k, v in channels.items()}
-            driver = LakeShore218S(
-                name,
-                resource,
-                channel_labels=channel_labels,
-                mock=mock,
-                calibration_store=calibration_store,
-            )
-        elif itype == "keithley_2604b":
-            from cryodaq.drivers.instruments.keithley_2604b import (
-                Keithley2604B,
-                _validate_wdog_timeout_s,
-            )
-
-            wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
-            # Operator-selected mode (off|best_effort|required) wins; else fall
-            # back to the legacy strict-bool ``enabled`` alias. An unknown mode
-            # string makes the driver raise ValueError → engine config load
-            # fails (fail-closed).
-            if "mode" in wdog_cfg:
-                wdog_mode = wdog_cfg["mode"]
-                wdog_enabled = None
-            else:
-                wdog_mode = None
-                # Strict-bool, fail-closed: a quoted YAML string ("false") is
-                # truthy in Python and would arm this safety path on a config
-                # typo. Only the literal boolean True enables it.
-                wdog_enabled = wdog_cfg.get("enabled", False) is True
-            # Validate before interpolation into TSP. In particular, NaN would
-            # make every elapsed > timeout comparison false, while bool/zero/
-            # negative values can create accidental immediate trips.
-            wdog_timeout_s = _validate_wdog_timeout_s(wdog_cfg.get("timeout_s", 5.0))
-            # Spurious-trip guard: pets ride the poll loop, so a late-pet
-            # deadline shorter than ~2 poll intervals risks a false trip on a
-            # single slow poll. Warn (do not fail, do not clamp) — the operator
-            # owns the trade-off.
-            _armed_mode = (wdog_mode not in (None, "off")) or bool(wdog_enabled)
-            if _armed_mode and wdog_timeout_s < 2.0 * poll_interval_s:
-                logger.warning(
-                    "Keithley watchdog timeout_s=%.2f is < 2×poll_interval_s=%.2f "
-                    "— a single slow poll may trigger the late-pet watchdog",
-                    wdog_timeout_s,
-                    poll_interval_s,
-                )
-            driver = Keithley2604B(
-                name,
-                resource,
-                mock=mock,
-                watchdog_mode=wdog_mode,
-                watchdog_enabled=wdog_enabled,
-                watchdog_timeout_s=wdog_timeout_s,
-            )
-        elif itype == "thyracont_vsp63d":
-            from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
-
-            baudrate = int(entry.get("baudrate", 9600))
-            validate_checksum = bool(entry.get("validate_checksum", True))
-            driver = ThyracontVSP63D(name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock)
-        elif itype == "etalon_multiline":
-            from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
-
-            # v0.55.6.1: accept either explicit ``channels`` list or the
-            # convenience ``channel_count`` integer (1..32). Driver
-            # validates the resolved set; failure raises ValueError and
-            # the engine drops the entry with the existing logger path.
-            # v0.55.11: also pass ``mode`` (averaged|continuous) and
-            # ``target_rate_hz`` so continuous-mode deployments can
-            # opt-in via config without code changes. Burst dir defaults
-            # to ``<DATA_DIR>/multiline_bursts`` so the fallback path
-            # (no active experiment) lands inside the data root rather
-            # than CWD.
-            _ml_channels = entry.get("channels")
-            _ml_channel_count = entry.get("channel_count")
-            driver = MultiLineDriver(
-                name,
-                host=str(entry.get("host", "localhost")),
-                port=int(entry.get("port", 2001)),
-                channel_numbers=list(_ml_channels) if _ml_channels else None,
-                channel_count=(int(_ml_channel_count) if _ml_channel_count else None),
-                connect_timeout_s=float(entry.get("connect_timeout_s", 5.0)),
-                read_timeout_s=float(entry.get("read_timeout_s", 10.0)),
-                mode=str(entry.get("mode", "averaged")),
-                target_rate_hz=float(entry.get("target_rate_hz", 1.0)),
-                burst_dir=_DATA_DIR / "multiline_bursts",
-                mock=mock,
-            )
-        else:
-            logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
-            continue
-
-        configs.append(InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource))
-        logger.info(
-            "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
-            name,
-            itype,
-            resource,
-            poll_interval_s,
+    canonical_source_spec = REVIEWED_SOURCE_SPECS["keithley_2604b"]
+    reviewed_configs = tuple(config for config in validated if config.spec is canonical_source_spec)
+    if len(reviewed_configs) > 1:
+        names = ", ".join(config.name for config in reviewed_configs)
+        raise DriverRegistryError(
+            f"{config_path}: instruments define multiple reviewed sources ({names}); "
+            "SafetyManager supports exactly zero or one"
         )
 
-    return configs
+    instrument_configs: list[InstrumentConfig] = []
+    reviewed_source: InstrumentDriver | None = None
+    reviewed_binding: ReviewedSourceBinding | None = None
+    for index, config in enumerate(validated):
+        try:
+            driver = construct_driver(config, context)
+        except Exception as exc:
+            raise DriverRegistryError(
+                f"{config_path}: instruments[{index}] ({config.name!r}, "
+                f"type {config.spec.type_name!r}) construction failed"
+            ) from exc
+
+        values = config.values
+        poll_interval_s = values["poll_interval_s"]
+        assert isinstance(poll_interval_s, float)
+        resource = values.get("resource", "")
+        assert isinstance(resource, str)
+        instrument_configs.append(
+            InstrumentConfig(
+                driver=driver,
+                poll_interval_s=poll_interval_s,
+                resource_str=resource,
+            )
+        )
+
+        if config.spec is canonical_source_spec:
+            binding = config.spec.reviewed_source_binding
+            if (
+                binding is not KEITHLEY_2604B_SOURCE_BINDING
+                or not isinstance(driver, ControlledSource)
+                or not isinstance(driver, VerifiedOffSource)
+            ):
+                raise DriverRegistryError(
+                    f"{config_path}: instruments[{index}] ({config.name!r}, "
+                    "type 'keithley_2604b') violates the reviewed source contract"
+                )
+            reviewed_source = driver
+            reviewed_binding = binding
+
+    for config, scheduler_config in zip(validated, instrument_configs, strict=True):
+        logger.info(
+            "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
+            config.name,
+            config.spec.type_name,
+            scheduler_config.resource_str,
+            scheduler_config.poll_interval_s,
+        )
+
+    return DriverLoadResult(
+        instrument_configs=tuple(instrument_configs),
+        validated_configs=validated,
+        reviewed_source=reviewed_source,
+        reviewed_source_binding=reviewed_binding,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2530,21 +2526,20 @@ async def _run_engine(*, mock: bool = False) -> None:
         calibration_store.load_curves(curves_dir)
 
     # Драйверы
-    driver_configs = _load_drivers(instruments_cfg, mock=mock, calibration_store=calibration_store)
+    driver_load = _load_drivers(
+        instruments_cfg,
+        mock=mock,
+        calibration_store=calibration_store,
+        data_dir=_DATA_DIR,
+    )
+    driver_configs = driver_load.instrument_configs
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
-
-    # Keithley driver (нужен для SafetyManager)
-    keithley_driver = None
-    for cfg in driver_configs:
-        if hasattr(cfg.driver, "emergency_off"):
-            keithley_driver = cfg.driver
-            break
 
     # SafetyManager — создаётся ПЕРВЫМ
     safety_cfg = _engine_config_path("safety")
     safety_manager = SafetyManager(
         safety_broker,
-        keithley_driver=keithley_driver,
+        keithley_driver=driver_load.reviewed_source,
         mock=mock,
         data_broker=broker,
     )
@@ -3628,15 +3623,20 @@ def main() -> None:
             InterlockConfigError,
             HousekeepingConfigError,
             ChannelConfigError,
+            DriverRegistryError,
         ) as exc:
-            labels = {
-                SafetyConfigError: "safety",
-                AlarmConfigError: "alarm",
-                InterlockConfigError: "interlock",
-                HousekeepingConfigError: "housekeeping",
-                ChannelConfigError: "channel",
-            }
-            label = labels.get(type(exc), "config")
+            labels = (
+                (SafetyConfigError, "safety"),
+                (AlarmConfigError, "alarm"),
+                (InterlockConfigError, "interlock"),
+                (HousekeepingConfigError, "housekeeping"),
+                (ChannelConfigError, "channel"),
+                (DriverRegistryError, "driver registry"),
+            )
+            label = next(
+                (label for error_type, label in labels if isinstance(exc, error_type)),
+                "config",
+            )
             logger.critical(
                 "CONFIG ERROR (%s config): %s\n%s",
                 label,

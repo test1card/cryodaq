@@ -20,9 +20,7 @@ class _RecordingTransport:
     driver issues on connect/poll. ``fail_on`` marks a substring whose write
     raises, to exercise the upload-failure path."""
 
-    def __init__(
-        self, *, fail_on: str | None = None, query_raises_on: str | None = None
-    ) -> None:
+    def __init__(self, *, fail_on: str | None = None, query_raises_on: str | None = None) -> None:
         self.writes: list[str] = []
         self.queries: list[str] = []
         # Combined chronological log of ("query"|"write", cmd) so tests can
@@ -93,9 +91,7 @@ def _wdog_writes(transport: _RecordingTransport) -> list[str]:
 
 
 def _lua_script() -> str:
-    return (
-        Path(__file__).resolve().parents[2] / "tsp" / "cryodaq_wdog.lua"
-    ).read_text(encoding="utf-8")
+    return (Path(__file__).resolve().parents[2] / "tsp" / "cryodaq_wdog.lua").read_text(encoding="utf-8")
 
 
 def test_lua_v3_is_explicitly_non_autonomous() -> None:
@@ -423,9 +419,7 @@ async def test_flag_on_off_streams_differ_only_by_wdog() -> None:
             await d.read_channels()
         await d.disconnect()
 
-    on_without_wdog = [
-        w for w in on.writes if "cryodaq_wdog" not in w and "CRYODAQ_WDOG" not in w
-    ]
+    on_without_wdog = [w for w in on.writes if "cryodaq_wdog" not in w and "CRYODAQ_WDOG" not in w]
     assert on_without_wdog == off.writes
 
 
@@ -518,14 +512,16 @@ def _load_keithley_driver(tmp_path, enabled_literal: str):
         "    resource: USB0::FAKE\n",
         encoding="utf-8",
     )
-    return _load_drivers(cfg, mock=True)[0].driver
+    return _load_drivers(cfg, mock=True).instrument_configs[0].driver
 
 
 @pytest.mark.parametrize("literal", ['"false"', '"true"', '"0"'])
 def test_config_wdog_enabled_requires_real_bool(tmp_path, literal) -> None:
-    """A quoted/truthy-string ``enabled`` must fail closed (watchdog OFF)."""
-    drv = _load_keithley_driver(tmp_path, literal)
-    assert drv._wdog_enabled is False
+    """A quoted/truthy-string ``enabled`` is a fatal typed config error."""
+    from cryodaq.drivers.registry import DriverRegistryError
+
+    with pytest.raises(DriverRegistryError, match=r"keithley\.watchdog\.enabled"):
+        _load_keithley_driver(tmp_path, literal)
 
 
 def test_config_wdog_enabled_true_bool_arms(tmp_path) -> None:
@@ -662,9 +658,7 @@ async def test_latch_read_before_upload_is_preserved_for_operator_ack(caplog) ->
     assert drv.watchdog_trip_pending is True
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
     assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
-    assert "operator acknowledgment" in " ".join(
-        r.getMessage() for r in caplog.records
-    ).lower()
+    assert "operator acknowledgment" in " ".join(r.getMessage() for r in caplog.records).lower()
 
 
 async def test_latch_read_before_upload_best_effort_too() -> None:
@@ -794,9 +788,7 @@ async def test_best_effort_non_autonomous_warning_is_bounded(caplog) -> None:
         await drv.read_channels()
         await drv.read_channels()
     degraded = [
-        r
-        for r in caplog.records
-        if r.levelno == logging.CRITICAL and "non-autonomous" in r.getMessage().lower()
+        r for r in caplog.records if r.levelno == logging.CRITICAL and "non-autonomous" in r.getMessage().lower()
     ]
     assert len(degraded) == 1
     assert "zero full-host-death coverage" in degraded[0].getMessage().lower()
@@ -814,15 +806,11 @@ async def test_best_effort_autonomous_readback_failure_still_runs_late_pet(caplo
     assert drv._wdog_armed is True
     assert drv._wdog_autonomous is False
     assert "cryodaq_wdog_run()" in t.writes
-    assert "zero full-host-death coverage" in " ".join(
-        r.getMessage() for r in caplog.records
-    ).lower()
+    assert "zero full-host-death coverage" in " ".join(r.getMessage() for r in caplog.records).lower()
 
 
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "2", "-1", "0.5", "true", ""])
-async def test_best_effort_invalid_autonomous_flag_is_rejected_but_late_pet_runs(
-    raw, caplog
-) -> None:
+async def test_best_effort_invalid_autonomous_flag_is_rejected_but_late_pet_runs(raw, caplog) -> None:
     drv = _mode_driver("best_effort")
     t = _RecordingTransport()
     t.wdog_autonomous_raw = raw
@@ -833,9 +821,7 @@ async def test_best_effort_invalid_autonomous_flag_is_rejected_but_late_pet_runs
     assert drv._wdog_armed is True
     assert drv._wdog_autonomous is False
     assert "cryodaq_wdog_run()" in t.writes
-    assert "readback failed" in " ".join(
-        r.getMessage() for r in caplog.records
-    ).lower()
+    assert "readback failed" in " ".join(r.getMessage() for r in caplog.records).lower()
 
 
 def test_alias_enabled_true_maps_to_best_effort() -> None:
@@ -858,9 +844,7 @@ def test_explicit_mode_wins_over_alias() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B, WatchdogMode
 
     # alias says off, explicit mode says required — mode wins.
-    drv = Keithley2604B(
-        "k2604", "USB0::FAKE", watchdog_mode="required", watchdog_enabled=False
-    )
+    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_mode="required", watchdog_enabled=False)
     assert drv._wdog_mode is WatchdogMode.REQUIRED
 
 
@@ -885,7 +869,7 @@ def _load_keithley_driver_mode(tmp_path, mode_literal: str):
         "    resource: USB0::FAKE\n",
         encoding="utf-8",
     )
-    return _load_drivers(cfg, mock=True)[0].driver
+    return _load_drivers(cfg, mock=True).instrument_configs[0].driver
 
 
 def test_config_mode_required_builds_required(tmp_path) -> None:
@@ -915,23 +899,13 @@ async def test_version_stamp_readback_matches_and_arms() -> None:
     await drv.connect()
     assert drv._wdog_armed is True
     upload_idx = next(
-        i for i, (kind, cmd) in enumerate(t.calls)
-        if kind == "write" and "function cryodaq_wdog_pet" in cmd
+        i for i, (kind, cmd) in enumerate(t.calls) if kind == "write" and "function cryodaq_wdog_pet" in cmd
     )
-    ver_idx = next(
-        i for i, (kind, cmd) in enumerate(t.calls)
-        if kind == "query" and "CRYODAQ_WDOG_VERSION" in cmd
-    )
+    ver_idx = next(i for i, (kind, cmd) in enumerate(t.calls) if kind == "query" and "CRYODAQ_WDOG_VERSION" in cmd)
     autonomous_idx = next(
-        i
-        for i, (kind, cmd) in enumerate(t.calls)
-        if kind == "query" and "cryodaq_wdog_autonomous" in cmd
+        i for i, (kind, cmd) in enumerate(t.calls) if kind == "query" and "cryodaq_wdog_autonomous" in cmd
     )
-    run_idx = next(
-        i
-        for i, (kind, cmd) in enumerate(t.calls)
-        if kind == "write" and cmd == "cryodaq_wdog_run()"
-    )
+    run_idx = next(i for i, (kind, cmd) in enumerate(t.calls) if kind == "write" and cmd == "cryodaq_wdog_run()")
     assert upload_idx < ver_idx < autonomous_idx < run_idx
 
 
@@ -990,9 +964,7 @@ async def test_version_unparseable_required_raises() -> None:
     assert drv._connected is False
 
 
-@pytest.mark.parametrize(
-    "raw", ["3.9", "2", "nan", "inf", "-inf", "true", "", "  "]
-)
+@pytest.mark.parametrize("raw", ["3.9", "2", "nan", "inf", "-inf", "true", "", "  "])
 async def test_version_readback_requires_exact_finite_v3(raw, caplog) -> None:
     drv = _mode_driver("best_effort")
     t = _RecordingTransport()
@@ -1105,9 +1077,7 @@ async def test_arm_readback_timeout_after_run_sends_disarm_best_effort(caplog) -
     assert drv._connected is True
     assert drv._wdog_armed is False
     assert "cryodaq_wdog_run()" in t.writes, "run() must have been issued before the readback failed"
-    assert "cryodaq_wdog_disarm()" in t.writes, (
-        "a best-effort disarm write must follow a readback failure after run()"
-    )
+    assert "cryodaq_wdog_disarm()" in t.writes, "a best-effort disarm write must follow a readback failure after run()"
 
 
 async def test_arm_readback_timeout_after_run_sends_disarm_required(caplog) -> None:
@@ -1189,12 +1159,60 @@ def test_config_short_timeout_warns(tmp_path, caplog) -> None:
     )
     with caplog.at_level(logging.WARNING):
         drivers = _load_drivers(cfg, mock=True)
-    assert drivers  # still loads
-    assert any(
-        "spurious-trip" in r.message or "poll_interval_s" in r.message
-        for r in caplog.records
-        if r.levelno == logging.WARNING
+    assert drivers.instrument_configs  # still loads
+    warnings = [
+        record for record in caplog.records if record.levelno == logging.WARNING and "poll_interval_s" in record.message
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "timeout_s"),
+    [("off", 1.0), ("best_effort", 4.0)],
+)
+def test_config_watchdog_does_not_warn_when_off_or_at_two_poll_intervals(tmp_path, caplog, mode, timeout_s) -> None:
+    from cryodaq.engine import _load_drivers
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text(
+        "keithley:\n"
+        "  watchdog:\n"
+        f'    mode: "{mode}"\n'
+        f"    timeout_s: {timeout_s}\n"
+        "instruments:\n"
+        "  - type: keithley_2604b\n"
+        "    name: k2604\n"
+        "    resource: USB0::FAKE\n"
+        "    poll_interval_s: 2.0\n",
+        encoding="utf-8",
     )
+
+    with caplog.at_level(logging.WARNING):
+        _load_drivers(cfg, mock=True)
+
+    assert not [record for record in caplog.records if "poll_interval_s" in record.message]
+
+
+def test_config_watchdog_mode_wins_over_real_boolean_alias(tmp_path) -> None:
+    from cryodaq.drivers.instruments.keithley_2604b import WatchdogMode
+    from cryodaq.engine import _load_drivers
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text(
+        "keithley:\n"
+        "  watchdog:\n"
+        '    mode: "off"\n'
+        "    enabled: true\n"
+        "instruments:\n"
+        "  - type: keithley_2604b\n"
+        "    name: k2604\n"
+        "    resource: USB0::FAKE\n",
+        encoding="utf-8",
+    )
+
+    driver = _load_drivers(cfg, mock=True).instrument_configs[0].driver
+
+    assert driver._wdog_mode is WatchdogMode.OFF
 
 
 @pytest.mark.parametrize("literal", ["true", '"5"', ".nan", ".inf", "0", "-1", "301"])
@@ -1213,5 +1231,5 @@ def test_config_watchdog_timeout_invalid_fails_load(tmp_path, literal) -> None:
         "    resource: USB0::FAKE\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="watchdog_timeout_s"):
+    with pytest.raises(ValueError, match=r"keithley\.watchdog\.timeout_s"):
         _load_drivers(cfg, mock=True)
