@@ -272,8 +272,14 @@ def _immutable_png() -> bytes:
 
 
 class _CompositionClock:
+    def __init__(self) -> None:
+        self._wall = 59.0
+        self._revision = 0
+        self._waiters = 0
+        self._condition = asyncio.Condition()
+
     def wall_time(self) -> float:
-        return 239.0
+        return self._wall
 
     def monotonic(self) -> float:
         return 0.0
@@ -282,7 +288,25 @@ class _CompositionClock:
         return "01.01.1970 00:03"
 
     async def sleep(self, _seconds: float) -> None:
-        await asyncio.Event().wait()
+        async with self._condition:
+            revision = self._revision
+            self._waiters += 1
+            self._condition.notify_all()
+            try:
+                await self._condition.wait_for(lambda: self._revision != revision)
+            finally:
+                self._waiters -= 1
+                self._condition.notify_all()
+
+    async def wait_until_idle(self, owners: int) -> None:
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._waiters >= owners)
+
+    async def advance_to(self, wall: float) -> None:
+        async with self._condition:
+            self._wall = wall
+            self._revision += 1
+            self._condition.notify_all()
 
 
 def _cut(sequence: int) -> LiveSourceCut:
@@ -471,6 +495,16 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
     task = asyncio.create_task(supervisor.run())
     try:
         try:
+            # Start below the first due slot, then wait until both the real
+            # coordinator and supervisor have reached their idle boundaries.
+            # The fast multi-slot jump is deterministic on slow Windows and
+            # cannot race coordinator startup or artifact authorization.
+            await asyncio.wait_for(clock.wait_until_idle(2), timeout=3.0)
+            assert len(constructed) == 1
+            assert live.starts == 1
+            assert constructed[0]._loop_task is not None
+            assert runner.calls == 0
+            await clock.advance_to(239.0)
             await asyncio.wait_for(telegram.sent.wait(), timeout=3.0)
             for _ in range(100):
                 if load_periodic_state(tmp_path).payload["last_terminal"] is not None:
