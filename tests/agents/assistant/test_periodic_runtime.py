@@ -793,6 +793,7 @@ async def test_closed_barrier_failure_maps_to_fixed_transport_code() -> None:
         ).encode(),
         b" " * (60 * 1024 + 1),
     ],
+    ids=("extra-field", "token-mismatch", "wire-oversize"),
 )
 async def test_snapshot_extra_token_mismatch_and_full_wire_oversize_fail_closed(
     response: bytes,

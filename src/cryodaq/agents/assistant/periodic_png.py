@@ -1608,6 +1608,16 @@ class PeriodicPngSupervisor:
                         backoff_index = min(backoff_index + 1, 5)
                         continue
 
+                if self._stop_requested:
+                    await self._stop_then_write_orderly(disabled=False)
+                    self._release_leader()
+                    return
+                if self._coordinator is None:
+                    await self._stop_then_mark_runtime_failed()
+                    self._release_leader()
+                    await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
+                    backoff_index = min(backoff_index + 1, 5)
+                    continue
                 outcome = await self._monitor_iteration()
                 if outcome == "stop":
                     await self._stop_then_write_orderly(disabled=False)
@@ -1639,7 +1649,16 @@ class PeriodicPngSupervisor:
                         await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                         backoff_index = min(backoff_index + 1, 5)
                     continue
-                assert self._coordinator is not None
+                if self._stop_requested:
+                    await self._stop_then_write_orderly(disabled=False)
+                    self._release_leader()
+                    return
+                if self._coordinator is None:
+                    await self._stop_then_mark_runtime_failed()
+                    self._release_leader()
+                    await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
+                    backoff_index = min(backoff_index + 1, 5)
+                    continue
                 if refreshed.config != self._coordinator.config:
                     await self._stop_then_mark_runtime_failed()
                     if not await self._try_construct_and_start(refreshed.config):

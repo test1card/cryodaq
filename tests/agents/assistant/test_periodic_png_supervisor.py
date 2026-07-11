@@ -223,6 +223,190 @@ async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(
 
 
 @pytest.mark.asyncio
+async def test_stop_after_start_before_monitor_is_orderly_and_single_stop(
+    tmp_path: Path,
+) -> None:
+    class PausedAfterStartSupervisor(PeriodicPngSupervisor):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.after_start = asyncio.Event()
+            self.release_start_result = asyncio.Event()
+            self.coordinator_cleared = asyncio.Event()
+
+        async def _try_construct_and_start(self, config) -> bool:
+            result = await super()._try_construct_and_start(config)
+            self.after_start.set()
+            await self.release_start_result.wait()
+            return result
+
+        async def _stop_coordinator(self) -> None:
+            await super()._stop_coordinator()
+            self.coordinator_cleared.set()
+
+    coordinator = Coordinator()
+    factory_calls = 0
+
+    def factory(_config):
+        nonlocal factory_calls
+        factory_calls += 1
+        return coordinator
+
+    supervisor = PausedAfterStartSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=factory,
+        config_loader=lambda _path: _runnable_load(),
+        clock=Clock(),
+    )
+    run_task = asyncio.create_task(supervisor.run())
+    await supervisor.after_start.wait()
+    stop_task = asyncio.create_task(supervisor.stop())
+    await supervisor.coordinator_cleared.wait()
+    assert coordinator.stopped == 1
+    assert supervisor._coordinator is None
+    supervisor.release_start_result.set()
+    await stop_task
+    await run_task
+
+    assert factory_calls == 1
+    assert coordinator.started == coordinator.stopped == 1
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == "stopped"
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_refreshed_config_load_is_orderly_and_single_stop(
+    tmp_path: Path,
+) -> None:
+    class TrackingSupervisor(PeriodicPngSupervisor):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.coordinator_cleared = asyncio.Event()
+
+        async def _stop_coordinator(self) -> None:
+            await super()._stop_coordinator()
+            self.coordinator_cleared.set()
+
+    class OnePollClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sleeps = 0
+
+        async def sleep(self, _seconds: float) -> None:
+            self.sleeps += 1
+            if self.sleeps == 1:
+                return
+            await asyncio.Event().wait()
+
+    coordinator = Coordinator()
+    factory_calls = 0
+    load_calls = 0
+    refresh_entered = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    def factory(_config):
+        nonlocal factory_calls
+        factory_calls += 1
+        return coordinator
+
+    def loader(_path: Path) -> PeriodicPngConfigLoad:
+        return _runnable_load()
+
+    async def controlled_blocking(fn, *args, **kwargs):
+        nonlocal load_calls
+        if fn is loader:
+            load_calls += 1
+            if load_calls == 3:
+                refresh_entered.set()
+                await release_refresh.wait()
+        return fn(*args, **kwargs)
+
+    supervisor = TrackingSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=factory,
+        config_loader=loader,
+        clock=OnePollClock(),
+        run_blocking=controlled_blocking,
+    )
+    run_task = asyncio.create_task(supervisor.run())
+    await refresh_entered.wait()
+    stop_task = asyncio.create_task(supervisor.stop())
+    await supervisor.coordinator_cleared.wait()
+    assert coordinator.stopped == 1
+    assert supervisor._coordinator is None
+    release_refresh.set()
+    await stop_task
+    await run_task
+
+    assert load_calls == 3
+    assert factory_calls == 1
+    assert coordinator.started == coordinator.stopped == 1
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == "stopped"
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unexplained_coordinator_disappearance_is_degraded_not_orderly(
+    tmp_path: Path,
+) -> None:
+    class DisappearingSupervisor(PeriodicPngSupervisor):
+        async def _monitor_iteration(self) -> str:
+            coordinator = self._coordinator
+            assert coordinator is not None
+            await coordinator.stop()
+            self._coordinator = None
+            return "poll"
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    coordinator = Coordinator()
+    clock = BackoffClock()
+    factory_calls = 0
+
+    def factory(_config):
+        nonlocal factory_calls
+        factory_calls += 1
+        return coordinator
+
+    supervisor = DisappearingSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=factory,
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    run_task = asyncio.create_task(supervisor.run())
+    await clock.entered.wait()
+
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert health["error_code"] == "periodic_runtime_failed"
+    assert factory_calls == 1
+    assert coordinator.started == coordinator.stopped == 1
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
+    await supervisor.stop()
+    await run_task
+
+
+@pytest.mark.asyncio
 async def test_invalid_requested_config_writes_redacted_health_without_runtime(
     tmp_path: Path,
 ) -> None:
