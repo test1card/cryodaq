@@ -4,8 +4,8 @@ Service named Гемма (after the underlying Gemma 4 model via Ollama).
 Subscribes to EventBus, generates Russian-language operator insights,
 dispatches to Telegram + operator log + GUI insight panel.
 
-Constraints (ORCHESTRATION v1.3 §13):
-- NEVER executes engine commands or modifies engine state.
+Constraints (docs/ORCHESTRATION.md, "Product assistant boundary"):
+- Uses only exact allowlisted read-only queries; never mutates engine state.
 - Text-only output channels (Telegram, log, GUI).
 - Fails gracefully if Ollama is unavailable — engine continues.
 """

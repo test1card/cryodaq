@@ -24,7 +24,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 3. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
 4. **Consistency over cleverness.** The same concept must render the same way across every surface. If "active phase" is green border in dashboard, it must be green border in overlay. No per-surface variation.
 5. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
-6. **Operator autonomy.** No magic. Operators can see what the system is doing, why, and override if needed. No actions happen without explicit operator trigger.
+6. **Operator clarity and bounded autonomy.** No magic: operators can see what the system is doing and why, and may override only where the safety architecture explicitly permits it. Ordinary UI actions require an explicit operator trigger; automatic fail-closed, interlock, verified-OFF, persistence, and bounded-shutdown actions retain their independent authority.
 7. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
 
 **Anti-philosophies explicitly rejected:**
@@ -61,13 +61,13 @@ docs/design-system/
 ├── ANTI_PATTERNS.md                 # catalog of forbidden patterns with historical refs
 │
 ├── tokens/                          # what values to use
-│   ├── colors.md                    # 71 color tokens
+│   ├── colors.md                    # 74 color tokens
 │   ├── typography.md                # 36 typography tokens
 │   ├── spacing.md                   # 9 spacing tokens
 │   ├── radius.md                    # 5 radius tokens
-│   ├── layout.md                    # 5 layout tokens
+│   ├── layout.md                    # 7 layout tokens
 │   ├── chart-tokens.md              # 12 pyqtgraph-specific tokens
-│   ├── motion.md                    # proposed motion tokens (not in theme.py yet)
+│   ├── motion.md                    # 3 transition tokens
 │   ├── elevation.md                 # zero-shadow policy
 │   ├── icons.md                     # proposed icon sizing tokens
 │   ├── breakpoints.md               # viewport constraints
@@ -198,7 +198,8 @@ Rules can conflict in edge cases. When they do, this precedence applies:
 4. **Newer rule** (by `last_updated`) overrides older rule within same enforcement level.
 5. **More specific rule** overrides more general rule. E.g., `RULE-DATA-005` (sensor reading format) overrides `RULE-TYPO-003` (generic text formatting).
 
-If precedence still ambiguous, decision is Vladimir's.
+If precedence is still ambiguous, the project architect (currently Vladimir)
+makes the decision.
 
 ## How LLM consumers should use this document
 
@@ -211,7 +212,11 @@ When given a task touching GUI:
 5. **Apply enforcement markers** — when code implements a rule, add `# DESIGN: RULE-XXX` comment.
 6. **Check ANTI_PATTERNS.md** — confirm the approach isn't historically forbidden.
 
-When in doubt: **read the rule, not my code**. If my code contradicts a rule, code is wrong.
+For non-safety presentation behavior, start from the reviewed rule rather than
+copying incidental legacy code. For software truth, safety authority, hardware
+evidence, or a conflict with root `AGENTS.md`, inspect the reachable code and
+tests and follow the higher-precedence repository contract; repair stale
+design-system prose in the same reviewed slice.
 
 ## Token count summary
 

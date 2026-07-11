@@ -146,6 +146,9 @@ python -m pytest tests/reporting -q
 - [ ] `docs/operator_manual.md`
 - [ ] `docs/deployment.md`
 - [ ] `docs/architecture.md`
+- [ ] `AGENTS.md`
+- [ ] `CLAUDE.md`
+- [ ] `docs/ORCHESTRATION.md`
 
 Сверить:
 

@@ -422,6 +422,14 @@ As of v0.64.0. The lab-only checks below are collected as a turnkey protocol in
   Host-death removal of terminal energy and any external interlock remain lab
   gates measured with independent instruments.
 
+## Contributor and developer-agent guidance
+
+Repository-wide engineering and safety rules live in [`AGENTS.md`](AGENTS.md).
+[`CLAUDE.md`](CLAUDE.md) is only a compatibility pointer; the detailed,
+tool-neutral workflow is [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md).
+Historical prompts, handoffs, generated memory, and agent-run artifacts are not
+current policy unless an active task explicitly selects them.
+
 ## License
 
 See `LICENSE`. Third-party notices: `THIRD_PARTY_NOTICES.md`.

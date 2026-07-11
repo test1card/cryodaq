@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class AuditLogger:
     """Writes one JSON file per LLM call under audit_dir/<YYYY-MM-DD>/.
 
-    Schema per file matches docs/ORCHESTRATION spec §2.8 audit record.
+    Schema per file matches docs/ORCHESTRATION.md, "Audit evidence".
     Retention housekeeping (deleting old files) is handled by HousekeepingService.
     """
 

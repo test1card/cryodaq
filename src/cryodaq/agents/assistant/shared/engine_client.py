@@ -16,7 +16,7 @@ Read-only by construction: every call here is one of the engine's existing
 *query* actions (same vocabulary the GUI's ``send_command`` already uses);
 nothing in this module ever sends a control/write command. That is what
 keeps the assistant process's write path into the engine at zero, per the
-ORCHESTRATION text-only/no-commands constraint — there is no auth token and
+allowlisted read-only-query constraint in docs/ORCHESTRATION.md — there is no auth token and
 no mutating action name this client is ever asked to send.
 """
 
@@ -38,6 +38,38 @@ DEFAULT_ENGINE_CMD_ADDR = "tcp://127.0.0.1:5556"
 # slow-command envelope.
 _DEFAULT_TIMEOUT_MS = 10_000
 
+# Exact actions currently issued by the assistant query adapters.  This is a
+# capability boundary, not a naming heuristic: an engine command is denied
+# unless it is explicitly present here, even if its name sounds read-only.
+ENGINE_QUERY_ACTIONS = frozenset(
+    {
+        "alarm_v2_history",
+        "alarm_v2_status",
+        "cooldown_eta_get",
+        "experiment_archive_list",
+        "experiment_get_archive_item",
+        "experiment_status",
+        "get_sensor_diagnostics",
+        "get_vacuum_trend",
+        "readings_history",
+    }
+)
+
+
+class EngineQueryRejectedError(ValueError):
+    """Raised locally when a command is outside the assistant query capability."""
+
+
+def _query_action(cmd: object) -> str:
+    if not isinstance(cmd, dict):
+        raise EngineQueryRejectedError("engine query payload must be a dictionary")
+    action = cmd.get("cmd")
+    if not isinstance(action, str) or not action:
+        raise EngineQueryRejectedError("engine query action must be a non-empty string")
+    if action not in ENGINE_QUERY_ACTIONS:
+        raise EngineQueryRejectedError(f"engine query action is not allowlisted: {action!r}")
+    return action
+
 
 class EngineQueryClient:
     """Ephemeral REQ-per-call client for the engine's read-only REP commands."""
@@ -50,29 +82,31 @@ class EngineQueryClient:
     ) -> None:
         self._address = address
         self._timeout_ms = timeout_ms
-        self._ctx = zmq.asyncio.Context.instance()
 
     async def call(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Send one command, return the reply dict.
 
-        Never raises — a transport failure (engine down, timeout, bad
-        JSON) comes back as ``{"ok": False, "error": ...}`` so adapters
-        can treat it exactly like an engine-side "no data" reply and
-        degrade gracefully, matching the original adapters' own
-        try/except-and-return-None contract.
+        Invalid/non-query actions raise :class:`EngineQueryRejectedError`
+        locally before ZeroMQ is touched.  A transport failure (engine down,
+        timeout, bad JSON) comes back as ``{"ok": False, "error": ...}`` so
+        adapters can degrade gracefully like an engine-side "no data" reply.
         """
-        sock = self._ctx.socket(zmq.REQ)
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
-        sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        action = _query_action(cmd)
+        sock: zmq.asyncio.Socket | None = None
         try:
+            ctx = zmq.asyncio.Context.instance()
+            sock = ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+            sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
             sock.connect(self._address)
             await sock.send_string(json.dumps(cmd))
             reply_raw = await sock.recv_string()
             reply = json.loads(reply_raw)
             return reply if isinstance(reply, dict) else {"ok": False, "error": "non-dict reply"}
         except Exception as exc:  # noqa: BLE001 — transport failure, not a bug
-            logger.debug("EngineQueryClient: %s failed: %s", cmd.get("cmd"), exc)
+            logger.debug("EngineQueryClient: %s failed: %s", action, exc)
             return {"ok": False, "error": str(exc)}
         finally:
-            sock.close(linger=0)
+            if sock is not None:
+                sock.close(linger=0)

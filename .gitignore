@@ -73,12 +73,13 @@ data/knowledge/**/*.cache
 # Reference curves and predictor model — operator-supplied, not source-controlled
 cooldown_v5/
 
-# Agent orchestration workspaces (all untracked, gitignored per
-# docs/ORCHESTRATION.md §6.4)
+# Agent orchestration workspaces are local evidence/runtime state, not policy;
+# see docs/ORCHESTRATION.md, "Authority and context".
 .worktrees/
 .audit-run/
 .omc/
 .swarm/
+.superpowers/
 .venv-tools/
 agentswarm/
 .scratch/
@@ -124,7 +125,6 @@ docs/REPO_AUDIT_REPORT.md
 scratchpad/
 .agents/
 .claude/skills/
-AGENTS.md
 skills-lock.json
 release_notes.py
 uv.lock
@@ -133,10 +133,8 @@ scripts/dev/
 data/knowledge/equipment_manuals/*.pdf
 
 # --- repo hygiene (2026-07-08): historical/process docs — kept on disk, out of git ---
-CLAUDE.md
 .graphifyignore
 COST_ESTIMATE_PODRYAD.md
-docs/ORCHESTRATION.md
 docs/CODEX_SELF_REVIEW_PLAYBOOK.md
 docs/codex-architecture-control-plane.md
 docs/SPEC_AUTHORING_TEMPLATE.md
