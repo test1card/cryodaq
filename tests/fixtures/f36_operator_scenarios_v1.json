@@ -1,0 +1,1318 @@
+{
+  "schema_version": 1,
+  "evidence_schema_version": 1,
+  "baseline_kind": "f36.0_operator_task_evidence",
+  "baseline_status": "unmeasured_fixture",
+  "presentation_states": [
+    "ok",
+    "caution",
+    "warning",
+    "fault",
+    "stale",
+    "disconnected"
+  ],
+  "forbidden_outcome_vocabulary": [
+    "false_safe",
+    "false_ready",
+    "false_recording"
+  ],
+  "allowed_interaction_classes": [
+    "observe_only",
+    "local_restart_confirm",
+    "alarm_ack_request",
+    "safety_ack_request",
+    "handover_note",
+    "support_capture"
+  ],
+  "authority_boundaries": [
+    "read_only_observation",
+    "local_process_lifecycle_only",
+    "alarm_acknowledgement_only",
+    "safety_acknowledgement_only",
+    "operator_log_write_only",
+    "support_artifact_write_only"
+  ],
+  "prohibited_interaction_classes": [
+    "source_start",
+    "source_stop",
+    "source_set",
+    "source_reset",
+    "health_driven_remediation",
+    "automatic_remediation"
+  ],
+  "evidence_groups": {
+    "context": [
+      "app_version",
+      "app_git_sha",
+      "platform",
+      "dpi_scale_percent",
+      "locale",
+      "ui_surface",
+      "input_method"
+    ],
+    "accessibility": [
+      "keyboard_only_completed",
+      "focus_visible",
+      "non_color_state_identified",
+      "accessible_names_present",
+      "nvda_result",
+      "manual_review_result",
+      "exception"
+    ],
+    "performance": [
+      "max_frame_work_ms",
+      "fault_render_ms",
+      "input_response_ms",
+      "update_rate_hz",
+      "startup_interactive_s",
+      "idle_memory_mb",
+      "zmq_to_gui_ms",
+      "experiment_memory_growth_mb",
+      "soak_memory_growth_mb",
+      "soak_duration_h",
+      "measurement_method",
+      "artifact_ref",
+      "not_applicable",
+      "not_applicable_reason"
+    ],
+    "outcome": [
+      "operator_id",
+      "run_id",
+      "started_at",
+      "decision_at",
+      "completed_at",
+      "task_success",
+      "decision_time_s",
+      "errors",
+      "false_presentations",
+      "artifact_refs",
+      "notes"
+    ]
+  },
+  "performance_targets": {
+    "max_frame_work_ms_lt": 16,
+    "fault_render_ms_lt": 16,
+    "input_response_ms_lt": 100,
+    "update_rate_hz_lte": 2,
+    "startup_interactive_s_lt": 2,
+    "idle_memory_mb_lt": 300,
+    "zmq_to_gui_ms_lt": 500,
+    "experiment_memory_growth_mb_lt": 50,
+    "soak_memory_growth_mb_lt": 50,
+    "soak_duration_h_gte": 12
+  },
+  "scenarios": [
+    {
+      "id": "f36.operator.cold_start",
+      "coverage": "cold_start",
+      "title": "Cold start before authoritative evidence",
+      "initial_truth": {
+        "presentation_state": "disconnected",
+        "authority_class": "startup_authority",
+        "authority": "engine startup and first coherent status snapshot",
+        "condition": "launcher is visible but no authoritative engine snapshot or fresh reading has arrived",
+        "safety_fsm": "unknown",
+        "experiment": "unknown",
+        "recording": "unknown",
+        "freshness": "no observation",
+        "safety_relation": "unknown_no_authority"
+      },
+      "operator_question": "Has authoritative startup evidence arrived, and what is safe to inspect next?",
+      "operator_task": "Identify that readiness, safety and recording are not yet known; open startup or component evidence without initiating control.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "Engine authority has not yet been established; last-known or seeded values are not current evidence.",
+        "reason": "No coherent engine snapshot and freshness timestamp have been received.",
+        "action": "Wait for bounded startup evidence or open component diagnostics and the startup runbook.",
+        "presentation_state": "disconnected",
+        "signal_channels": ["text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "RULE-A11Y-002"]
+    },
+    {
+      "id": "f36.operator.engine_disconnected",
+      "coverage": "engine_disconnected",
+      "title": "Engine and command authority disconnected",
+      "initial_truth": {
+        "presentation_state": "disconnected",
+        "authority_class": "engine_runtime_authority",
+        "authority": "engine process, readings stream and command server health",
+        "condition": "GUI remains open after engine data and command paths are lost",
+        "safety_fsm": "last-known only",
+        "experiment": "last-known only",
+        "recording": "unknown",
+        "freshness": "expired",
+        "safety_relation": "unavailable_last_known"
+      },
+      "operator_question": "Which authority path is unavailable, and what remains last-known only?",
+      "operator_task": "Distinguish engine, reading-stream and command-path loss; find the documented local recovery route without assuming plant state.",
+      "allowed_interaction_class": "local_restart_confirm",
+      "authority_boundary": "local_process_lifecycle_only",
+      "expected_visible": {
+        "truth": "Current plant, safety and persistence truth are unavailable; retained values are historical context only.",
+        "reason": "The engine snapshot and command channel are disconnected and freshness has expired.",
+        "action": "Open component health and the engine-disconnect runbook; use only an explicitly offered confirmed local restart action.",
+        "presentation_state": "disconnected",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/state-visualization.md", "patterns/real-time-data.md", "RULE-A11Y-002"]
+    },
+    {
+      "id": "f36.operator.stale_critical_data",
+      "coverage": "stale_data",
+      "title": "Critical channel is stale",
+      "initial_truth": {
+        "presentation_state": "stale",
+        "authority_class": "channel_freshness_authority",
+        "authority": "critical-channel freshness and readiness blockers",
+        "condition": "a required critical channel has a last-known value but no fresh update",
+        "safety_fsm": "safe_off",
+        "experiment": "preflight",
+        "recording": "not_recording",
+        "freshness": "critical source expired",
+        "safety_relation": "safe_off_blocked_by_stale_input"
+      },
+      "operator_question": "Which critical value is stale, and does it block readiness?",
+      "operator_task": "Locate the stale critical channel, its observation age, readiness impact and instrument drill-down.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "The displayed value is last-known, not current, and the required-channel check blocks readiness.",
+        "reason": "The channel freshness deadline expired without an authoritative replacement sample.",
+        "action": "Open the contributing instrument and freshness evidence; do not begin the run.",
+        "presentation_state": "stale",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/state-visualization.md", "patterns/real-time-data.md", "RULE-DATA-001"]
+    },
+    {
+      "id": "f36.operator.unsafe_preconditions",
+      "coverage": "unsafe_preconditions",
+      "title": "Run blocked by unsafe preconditions",
+      "initial_truth": {
+        "presentation_state": "warning",
+        "authority_class": "safety_manager_authority",
+        "authority": "SafetyManager readiness and preflight checks",
+        "condition": "verified-OFF is confirmed, but the named non-output readiness blocker keithley_not_connected is active",
+        "safety_fsm": "safe_off",
+        "experiment": "preflight",
+        "recording": "not_recording",
+        "freshness": "fresh coherent snapshot",
+        "safety_relation": "safe_off_verified_off_other_blocker"
+      },
+      "operator_question": "Why is the run blocked, and which check must be resolved?",
+      "operator_task": "Identify the authoritative blocker, reason, evidence age and documented readiness-evidence path.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "Verified-OFF is confirmed, but run permission is denied by a distinct non-output readiness check.",
+        "reason": "SafetyManager reports Keithley not connected; the authoritative keithley_not_connected blocker prevents readiness independently of verified-OFF.",
+        "action": "Open instrument-connectivity evidence; keep the unavailable control hidden until the backend clears the blocker.",
+        "presentation_state": "warning",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "patterns/destructive-actions.md"]
+    },
+    {
+      "id": "f36.operator.alarm_acknowledgement",
+      "coverage": "alarm_acknowledgement",
+      "title": "Acknowledge an active alarm without clearing truth",
+      "initial_truth": {
+        "presentation_state": "warning",
+        "authority_class": "alarm_authority",
+        "authority": "canonical alarm state and acknowledgement audit",
+        "condition": "an active unacknowledged alarm is present while its triggering condition remains",
+        "safety_fsm": "safe_off",
+        "experiment": "active",
+        "recording": "recording",
+        "freshness": "fresh coherent snapshot",
+        "safety_relation": "safe_off_alarm_active"
+      },
+      "operator_question": "What is being acknowledged, and what truth remains active afterward?",
+      "operator_task": "Review alarm identity, cause and onset; request acknowledgement and verify that active condition and audit evidence remain visible.",
+      "allowed_interaction_class": "alarm_ack_request",
+      "authority_boundary": "alarm_acknowledgement_only",
+      "expected_visible": {
+        "truth": "Acknowledgement records operator awareness; it does not clear the alarm condition or recover safety state.",
+        "reason": "The alarm source remains active after the acknowledgement audit transition.",
+        "action": "Open the alarm cause or runbook after acknowledgement; use Safety Recovery separately if applicable.",
+        "presentation_state": "warning",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/state-visualization.md", "patterns/destructive-actions.md", "accessibility/keyboard-navigation.md"]
+    },
+    {
+      "id": "f36.operator.safety_recovery",
+      "coverage": "safety_recovery",
+      "title": "Reasoned recovery from fault-latched safety state",
+      "initial_truth": {
+        "presentation_state": "fault",
+        "authority_class": "safety_manager_authority",
+        "authority": "SafetyManager fault latch, recovery preconditions and verified-OFF evidence",
+        "condition": "safety is fault_latched after a recorded trip and recovery preconditions are not yet confirmed",
+        "safety_fsm": "fault_latched",
+        "experiment": "interrupted",
+        "recording": "unknown",
+        "freshness": "fresh fault snapshot",
+        "safety_relation": "fault_latched_recovery_only"
+      },
+      "operator_question": "Why is safety latched, and what reviewed recovery step is available?",
+      "operator_task": "Read the latched reason and preconditions, distinguish safety recovery from alarm acknowledgement, and prepare a reasoned acknowledgement request without energizing hardware.",
+      "allowed_interaction_class": "safety_ack_request",
+      "authority_boundary": "safety_acknowledgement_only",
+      "expected_visible": {
+        "truth": "Safety remains fault-latched until authoritative preconditions and acknowledgement succeed.",
+        "reason": "The recorded trip and/or verified-OFF recovery evidence has not completed the safety FSM transition.",
+        "action": "Open Safety Recovery, inspect preconditions and submit the documented reason only when the backend permits it.",
+        "presentation_state": "fault",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "accessibility/focus-management.md"]
+    },
+    {
+      "id": "f36.operator.cooldown_deviation",
+      "coverage": "cooldown_deviation",
+      "title": "Cooldown trajectory deviates from evidence",
+      "initial_truth": {
+        "presentation_state": "warning",
+        "authority_class": "cooldown_projection_authority",
+        "authority": "cooldown trajectory, source freshness, baseline and alarm state",
+        "condition": "fresh measured cooldown diverges from baseline and an attention item is active",
+        "safety_fsm": "running",
+        "experiment": "cooldown",
+        "recording": "recording",
+        "freshness": "fresh sources and prediction",
+        "safety_relation": "running_observational_only"
+      },
+      "operator_question": "Is cooldown off trajectory, why, and where is the evidence?",
+      "operator_task": "Identify the deviation, contributing channels, confidence/freshness and the correct analysis or alarm drill-down.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "Cooldown is active and durably recording, but the measured trajectory is outside the accepted baseline evidence.",
+        "reason": "A named deviation verdict and contributing source values exceed the reviewed tolerance.",
+        "action": "Open the cooldown mission evidence and related alarm; do not infer or initiate a corrective command.",
+        "presentation_state": "warning",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "patterns/real-time-data.md"]
+    },
+    {
+      "id": "f36.operator.storage_degradation",
+      "coverage": "storage_degradation",
+      "title": "Persistence or archive path degraded",
+      "initial_truth": {
+        "presentation_state": "fault",
+        "authority_class": "persistence_authority",
+        "authority": "persistence-first writer, durable timestamp, backlog and disk health",
+        "condition": "live acquisition may continue but persistence authority is unavailable or refusing writes",
+        "safety_fsm": "fault_latched",
+        "experiment": "active",
+        "recording": "not_recording",
+        "freshness": "fresh degradation snapshot",
+        "safety_relation": "fault_latched_persistence_failure"
+      },
+      "operator_question": "Are readings durably recording, and what storage action is safe next?",
+      "operator_task": "Determine durable-recording truth, the first affected timestamp and the documented storage recovery/drill-down.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "Visible or incoming samples are not proof of durable recording while persistence authority is failed.",
+        "reason": "The writer, disk or archive integrity check reports a blocking failure with a bounded evidence time.",
+        "action": "Open data-integrity evidence and the storage runbook; preserve source data and do not claim recording.",
+        "presentation_state": "fault",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "patterns/real-time-data.md"]
+    },
+    {
+      "id": "f36.operator.passive_infrastructure_degradation",
+      "coverage": "passive_infrastructure_degradation",
+      "title": "Passive support node is degraded",
+      "initial_truth": {
+        "presentation_state": "warning",
+        "authority_class": "passive_health_authority",
+        "authority": "allowlisted passive infrastructure health snapshot",
+        "condition": "a compressor, pump, cryocooler or support node reports degraded health without control authority",
+        "safety_fsm": "safe_off",
+        "experiment": "preflight",
+        "recording": "not_recording",
+        "freshness": "fresh passive telemetry",
+        "safety_relation": "safe_off_passive_only"
+      },
+      "operator_question": "Which support component degraded and what capability is affected?",
+      "operator_task": "Identify the component, freshness, impacted capability and passive diagnostic/runbook path without expecting any device-control command.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "A named passive infrastructure component is degraded; telemetry provides read-only evidence and no device-control authority.",
+        "reason": "The component reports a reviewed health reason and affected capability with fresh provenance.",
+        "action": "Open component diagnostics or its runbook and coordinate the documented external response.",
+        "presentation_state": "warning",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/state-visualization.md", "patterns/information-hierarchy.md", "governance/performance-budget.md"]
+    },
+    {
+      "id": "f36.operator.experiment_handover",
+      "coverage": "experiment_handover",
+      "title": "Active experiment shift handover",
+      "initial_truth": {
+        "presentation_state": "caution",
+        "authority_class": "experiment_authority",
+        "authority": "experiment state, durable events, attention queue and operator log",
+        "condition": "an experiment continues across a shift boundary with one unresolved non-blocking attention item",
+        "safety_fsm": "running",
+        "experiment": "active",
+        "recording": "recording",
+        "freshness": "fresh coherent snapshot",
+        "safety_relation": "running_handover_observational"
+      },
+      "operator_question": "What run is active, what remains unresolved, and what must the next shift know?",
+      "operator_task": "Identify experiment/phase, durable recording state, highest unresolved attention item and last handover note; prepare a bounded handover record.",
+      "allowed_interaction_class": "handover_note",
+      "authority_boundary": "operator_log_write_only",
+      "expected_visible": {
+        "truth": "The named experiment remains active and durably recording with one visible unresolved caution.",
+        "reason": "The attention queue and last durable operator note identify the outstanding handover item.",
+        "action": "Open the handover timeline and append a scoped operator note; do not alter phase or safety state.",
+        "presentation_state": "caution",
+        "signal_channels": ["color", "text"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "accessibility/keyboard-navigation.md"]
+    },
+    {
+      "id": "f36.operator.replay",
+      "coverage": "replay",
+      "title": "Historical replay cannot become live authority",
+      "initial_truth": {
+        "presentation_state": "caution",
+        "authority_class": "replay_authority",
+        "authority": "replay source identity, recorded timestamps and command exclusion",
+        "condition": "historical readings are replaying through the normal display path",
+        "safety_fsm": "unavailable in replay",
+        "experiment": "replay",
+        "recording": "replay_only",
+        "freshness": "historical source time",
+        "safety_relation": "unavailable_replay_no_control"
+      },
+      "operator_question": "Is this historical replay or live plant truth, and can it authorize action?",
+      "operator_task": "Identify replay mode, original source time/provenance and the absence of live safety/control authority.",
+      "allowed_interaction_class": "observe_only",
+      "authority_boundary": "read_only_observation",
+      "expected_visible": {
+        "truth": "Displayed readings are historical replay evidence and cannot establish current readiness, safety or live recording.",
+        "reason": "The snapshot provenance and mode identify a bounded replay source rather than a live engine authority.",
+        "action": "Use replay analysis and review drill-downs only; keep live hazardous controls unavailable.",
+        "presentation_state": "caution",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/state-visualization.md", "patterns/information-hierarchy.md", "RULE-A11Y-002"]
+    },
+    {
+      "id": "f36.operator.support_bundle_capture",
+      "coverage": "support_bundle_capture",
+      "title": "Capture bounded support evidence while degraded",
+      "initial_truth": {
+        "presentation_state": "warning",
+        "authority_class": "support_bundle_authority",
+        "authority": "support-bundle capability, component health and redaction policy",
+        "condition": "a non-safety component is degraded while bounded local evidence remains available",
+        "safety_fsm": "unknown",
+        "experiment": "last-known only",
+        "recording": "unknown",
+        "freshness": "mixed source freshness",
+        "safety_relation": "unknown_support_capture_only"
+      },
+      "operator_question": "Can bounded redacted evidence be captured while the system is degraded?",
+      "operator_task": "Preview bundle scope, capture it explicitly, and verify deterministic manifest/redaction results without blocking acquisition or claiming recovered state.",
+      "allowed_interaction_class": "support_capture",
+      "authority_boundary": "support_artifact_write_only",
+      "expected_visible": {
+        "truth": "Support evidence can be captured independently of recovery, with missing and stale sources declared.",
+        "reason": "The bundle preview lists bounded sources, redactions, integrity results and unavailable evidence.",
+        "action": "Confirm capture, preserve the manifest/hash result and share it through the documented support path.",
+        "presentation_state": "warning",
+        "signal_channels": ["color", "text", "shape_position"]
+      },
+      "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
+      "evidence": {
+        "context": {
+          "app_version": null,
+          "app_git_sha": null,
+          "platform": null,
+          "dpi_scale_percent": null,
+          "locale": null,
+          "ui_surface": null,
+          "input_method": null
+        },
+        "accessibility": {
+          "keyboard_only_completed": null,
+          "focus_visible": null,
+          "non_color_state_identified": null,
+          "accessible_names_present": null,
+          "nvda_result": null,
+          "manual_review_result": null,
+          "exception": null
+        },
+        "performance": {
+          "max_frame_work_ms": null,
+          "fault_render_ms": null,
+          "input_response_ms": null,
+          "update_rate_hz": null,
+          "startup_interactive_s": null,
+          "idle_memory_mb": null,
+          "zmq_to_gui_ms": null,
+          "experiment_memory_growth_mb": null,
+          "soak_memory_growth_mb": null,
+          "soak_duration_h": null,
+          "measurement_method": null,
+          "artifact_ref": null,
+          "not_applicable": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          },
+          "not_applicable_reason": {
+            "max_frame_work_ms": null,
+            "fault_render_ms": null,
+            "input_response_ms": null,
+            "update_rate_hz": null,
+            "startup_interactive_s": null,
+            "idle_memory_mb": null,
+            "zmq_to_gui_ms": null,
+            "experiment_memory_growth_mb": null,
+            "soak_memory_growth_mb": null,
+            "soak_duration_h": null
+          }
+        },
+        "outcome": {
+          "operator_id": null,
+          "run_id": null,
+          "started_at": null,
+          "decision_at": null,
+          "completed_at": null,
+          "task_success": null,
+          "decision_time_s": null,
+          "errors": [],
+          "false_presentations": [],
+          "artifact_refs": [],
+          "notes": null
+        }
+      },
+      "requires_hazardous_actuation": false,
+      "design_system_refs": ["patterns/information-hierarchy.md", "patterns/state-visualization.md", "governance/performance-budget.md"]
+    }
+  ]
+}
