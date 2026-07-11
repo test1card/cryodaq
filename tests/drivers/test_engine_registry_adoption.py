@@ -99,7 +99,28 @@ def test_current_config_preserves_classes_order_metadata_and_dependencies(tmp_pa
         "COM3",
         "",
     ]
-    assert all(config.read_timeout_s == 10.0 for config in result.instrument_configs)
+    assert [config.read_timeout_s for config in result.instrument_configs] == [
+        3.0,
+        3.0,
+        3.0,
+        10.0,
+        10.0,
+        10.0,
+    ]
+    assert [config.connect_timeout_s for config in result.instrument_configs] == [
+        3.0,
+        3.0,
+        3.0,
+        10.0,
+        10.0,
+        5.0,
+    ]
+    assert [
+        config.runtime_binding.bus_descriptor.bus_id
+        if config.runtime_binding and config.runtime_binding.bus_descriptor
+        else None
+        for config in result.instrument_configs
+    ] == ["GPIB0", "GPIB0", "GPIB0", None, None, None]
     assert all(config.enabled is True for config in result.instrument_configs)
     assert all(
         config.driver._calibration_store is calibration_store  # type: ignore[attr-defined]

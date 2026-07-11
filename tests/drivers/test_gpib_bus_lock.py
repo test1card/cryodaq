@@ -5,11 +5,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+import threading
 import types
+
+import pytest
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    BusDescriptor,
+    BusRecoveryLevel,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
+from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 
@@ -125,13 +137,45 @@ async def test_gpib_ifc_recovery_invokes_send_ifc():
     sched = Scheduler(broker=broker, sqlite_writer=None)
     transport = _SpyGPIBTransport()
     driver = _FailingGPIBDriver("ls218", transport)
-    sched.add(
-        InstrumentConfig(driver=driver, poll_interval_s=0.01, resource_str="GPIB0::12::INSTR")
+    descriptor = BusDescriptor(
+        "GPIB0",
+        supported_recovery=frozenset({BusRecoveryLevel.DEVICE_CLEAR, BusRecoveryLevel.INTERFACE_CLEAR}),
     )
+
+    class _Participant:
+        bus_descriptor = descriptor
+
+        async def mark_disconnected(self) -> None:
+            await driver.disconnect()
+
+        async def recover_device(self) -> None:
+            await transport.clear_bus()
+
+    class _Coordinator:
+        bus_descriptor = descriptor
+
+        async def interface_clear(self) -> bool:
+            return await transport.send_ifc()
+
+        async def reopen_bus(self) -> bool:
+            raise AssertionError("reopen is outside this recovery level")
+
+    binding = _issue_registry_runtime_binding(
+        driver=driver,
+        timing=AcquisitionTiming(1.0, 1.0, 0.01),
+        registry_provenance="test:explicit-gpib",
+        trust_class=DriverTrustClass.PASSIVE_EXTENSION,
+        bus_descriptor=descriptor,
+        participant=_Participant(),
+        coordinator=_Coordinator(),
+    )
+    with driver_registry._RUNTIME_BINDINGS_LOCK:
+        driver_registry._RUNTIME_BINDINGS[driver] = binding
+    sched.add(InstrumentConfig(driver=driver, runtime_binding=binding))
     state = sched._instruments["ls218"]
 
     sched._running = True
-    task = asyncio.create_task(sched._gpib_poll_loop("GPIB0", [state]))
+    task = asyncio.create_task(sched._shared_bus_poll_loop("GPIB0", [state]))
     try:
         # Level 2 fires on the 3rd consecutive bus error; well within 5s.
         await asyncio.wait_for(transport.ifc_fired.wait(), timeout=5.0)
@@ -220,3 +264,156 @@ async def test_gpib_krdg_no_argument():
 
     single = await t.query("KRDG? 3")
     assert "," not in single
+
+
+async def test_lakeshore_validated_read_timeout_reaches_concrete_transport() -> None:
+    driver = LakeShore218S(
+        "LS",
+        "GPIB0::12::INSTR",
+        mock=True,
+        connect_timeout_s=2.0,
+        read_timeout_s=7.0,
+    )
+    await driver.connect()
+    assert driver._transport._timeout_ms == 7000
+    await driver.disconnect()
+
+
+async def test_cancelled_partial_connect_closes_late_resource_and_executor(monkeypatch) -> None:
+    opened = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    class _LateResource:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def clear(self) -> None:
+            pass
+
+        def set_visa_attribute(self, _attr: int, _value: object) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.set()
+
+    class _BlockingRM:
+        def open_resource(self, _resource: str) -> _LateResource:
+            opened.set()
+            release.wait(timeout=2.0)
+            return _LateResource()
+
+    monkeypatch.setitem(sys.modules, "pyvisa", types.SimpleNamespace(ResourceManager=_BlockingRM))
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    driver = LakeShore218S(
+        "LS",
+        "GPIB0::12::INSTR",
+        mock=False,
+        connect_timeout_s=0.05,
+        read_timeout_s=0.1,
+    )
+    task = asyncio.create_task(driver.connect())
+    assert await asyncio.to_thread(opened.wait, 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="previous GPIB executor generation has not settled"):
+        await driver._transport.open("GPIB0::12::INSTR", timeout_ms=100)
+    release.set()
+    assert await asyncio.to_thread(closed.wait, 1.0)
+    assert driver._transport._resource is None
+    assert driver._transport._executor is None
+    assert not driver.connected
+
+
+async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(monkeypatch) -> None:
+    read_started = threading.Event()
+    release_read = threading.Event()
+    closed = threading.Event()
+    resources_opened = 0
+
+    class _BlockingIDNResource:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def clear(self) -> None:
+            pass
+
+        def set_visa_attribute(self, _attr: int, _value: object) -> None:
+            pass
+
+        def write(self, _command: str) -> None:
+            pass
+
+        def read(self) -> str:
+            read_started.set()
+            release_read.wait(timeout=2.0)
+            return "LSCI,MODEL218S,SERIAL,1"
+
+        def close(self) -> None:
+            closed.set()
+
+    class _RM:
+        def open_resource(self, _resource: str) -> _BlockingIDNResource:
+            nonlocal resources_opened
+            resources_opened += 1
+            return _BlockingIDNResource()
+
+    monkeypatch.setitem(sys.modules, "pyvisa", types.SimpleNamespace(ResourceManager=_RM))
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    driver = LakeShore218S("LS", "GPIB0::12::INSTR", mock=False, read_timeout_s=0.1)
+    task = asyncio.create_task(driver.connect())
+    assert await asyncio.to_thread(read_started.wait, 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="executor generation has not settled"):
+        await driver.connect()
+    assert resources_opened == 1
+    assert driver._transport._executor is not None
+    release_read.set()
+    assert await asyncio.to_thread(closed.wait, 1.0)
+    await driver.disconnect()
+    assert driver._transport._executor is None
+    assert resources_opened == 1
+
+
+async def test_cancelled_idn_phase_uses_public_partial_connect_cleanup() -> None:
+    query_started = asyncio.Event()
+
+    class _BlockingTransport:
+        aborted = 0
+
+        async def open(self, _resource: str, *, timeout_ms: int) -> None:
+            assert timeout_ms == 7000
+
+        async def query(self, _command: str, *, timeout_ms: int | None = None) -> str:
+            assert timeout_ms == 2000
+            query_started.set()
+            await asyncio.Event().wait()
+            return ""
+
+        async def abort_open(self) -> None:
+            self.aborted += 1
+
+        async def close(self) -> None:
+            self.aborted += 1
+
+    driver = LakeShore218S(
+        "LS",
+        "GPIB0::12::INSTR",
+        mock=False,
+        connect_timeout_s=2.0,
+        read_timeout_s=7.0,
+    )
+    transport = _BlockingTransport()
+    driver._transport = transport  # type: ignore[assignment]
+    task = asyncio.create_task(driver.connect())
+    await asyncio.wait_for(query_started.wait(), timeout=0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert transport.aborted >= 1
+    assert not driver.connected

@@ -312,6 +312,27 @@ def test_duplicate_instrument_names_fail_with_path() -> None:
         validate_instrument_entries(entries)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("connect_timeout_s", True),
+        ("connect_timeout_s", 0),
+        ("read_timeout_s", float("nan")),
+        ("read_timeout_s", float("inf")),
+        ("poll_interval_s", 10**1000),
+    ],
+)
+def test_runtime_timing_fields_fail_closed(field: str, value: object) -> None:
+    entry = {
+        "type": "thyracont_vsp63d",
+        "name": "P",
+        "resource": "COM3",
+        field: value,
+    }
+    with pytest.raises(DriverRegistryError):
+        validate_instrument_entry(entry)
+
+
 @pytest.fixture
 def current_root_config() -> dict[str, object]:
     return yaml.safe_load(Path("config/instruments.yaml").read_text(encoding="utf-8"))

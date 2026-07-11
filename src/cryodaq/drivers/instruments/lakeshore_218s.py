@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time as _time
 from typing import Any
@@ -30,11 +31,21 @@ class LakeShore218S(InstrumentDriver):
         channel_labels: dict[int, str] | None = None,
         mock: bool = False,
         calibration_store: CalibrationStore | None = None,
+        connect_timeout_s: float = 3.0,
+        read_timeout_s: float = 3.0,
     ) -> None:
         super().__init__(name, mock=mock)
+        for label, value in (
+            ("connect_timeout_s", connect_timeout_s),
+            ("read_timeout_s", read_timeout_s),
+        ):
+            if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"{label} must be a finite positive number")
         self._resource_str = resource_str
         self._channel_labels: dict[int, str] = channel_labels or {}
         self._transport = GPIBTransport(mock=mock)
+        self._connect_timeout_s = float(connect_timeout_s)
+        self._read_timeout_s = float(read_timeout_s)
         self._instrument_id: str = ""
         self._calibration_store = calibration_store
         self._runtime_warning_cache: set[tuple[str, str]] = set()
@@ -50,8 +61,18 @@ class LakeShore218S(InstrumentDriver):
         self._last_status_result: dict[int, int] = {}
 
     async def connect(self) -> None:
+        try:
+            await self._connect_impl()
+        except asyncio.CancelledError:
+            await asyncio.shield(self.abort_connect())
+            raise
+
+    async def _connect_impl(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
-        await self._transport.open(self._resource_str)
+        await self._transport.open(
+            self._resource_str,
+            timeout_ms=max(1, int(round(self._read_timeout_s * 1000))),
+        )
 
         if not self.mock:
             # Phase 2c F.1: validate IDN with retry-after-clear fallback.
@@ -60,10 +81,11 @@ class LakeShore218S(InstrumentDriver):
             # numbers, just from the wrong instrument.
             idn_valid = False
             idn_raw = ""
+            idn_timeout_ms = max(1, int(round(self._connect_timeout_s * 1000)))
 
             for attempt in range(2):  # initial + one retry after device clear
                 try:
-                    idn_raw = (await self._transport.query("*IDN?")).strip()
+                    idn_raw = (await self._transport.query("*IDN?", timeout_ms=idn_timeout_ms)).strip()
                 except Exception as exc:
                     log.warning(
                         "%s: *IDN? query failed (attempt %d/2): %s",
@@ -113,9 +135,13 @@ class LakeShore218S(InstrumentDriver):
         log.info("%s: connected", self.name)
 
     async def disconnect(self) -> None:
-        if not self._connected:
-            return
         await self._transport.close()
+        self._connected = False
+
+    async def abort_connect(self) -> None:
+        """Settle partial transport ownership before connection truth commits."""
+
+        await self._transport.abort_open()
         self._connected = False
 
     async def read_channels(self) -> list[Reading]:
@@ -127,13 +153,9 @@ class LakeShore218S(InstrumentDriver):
             readings = await self._read_krdg_channels()
         else:
             temperature_readings = await self._read_krdg_channels()
-            needs_curve = any(
-                policy.get("reading_mode") == "curve" for policy in runtime_policies.values()
-            )
+            needs_curve = any(policy.get("reading_mode") == "curve" for policy in runtime_policies.values())
             raw_readings = await self.read_srdg_channels() if needs_curve else []
-            readings = self._merge_runtime_readings(
-                temperature_readings, raw_readings, runtime_policies
-            )
+            readings = self._merge_runtime_readings(temperature_readings, raw_readings, runtime_policies)
 
         # Periodic RDGST? status check (every 60s)
         now = _time.monotonic()
@@ -496,9 +518,7 @@ class LakeShore218S(InstrumentDriver):
         for reading in temperature_readings:
             channel_num = int(reading.metadata.get("raw_channel", 0))
             policy = policies.get(channel_num) or {}
-            assignment = (
-                policy.get("assignment") if isinstance(policy.get("assignment"), dict) else {}
-            )
+            assignment = policy.get("assignment") if isinstance(policy.get("assignment"), dict) else {}
             if policy.get("reading_mode") != "curve":
                 merged.append(
                     self._with_runtime_metadata(
@@ -514,9 +534,7 @@ class LakeShore218S(InstrumentDriver):
 
             raw_reading = raw_by_channel.get(channel_num)
             if raw_reading is None or raw_reading.status is not ChannelStatus.OK:
-                self._log_runtime_fallback(
-                    channel_key=str(policy.get("channel_key", "")), reason="missing_srdg"
-                )
+                self._log_runtime_fallback(channel_key=str(policy.get("channel_key", "")), reason="missing_srdg")
                 merged.append(
                     self._with_runtime_metadata(
                         reading,
@@ -536,9 +554,7 @@ class LakeShore218S(InstrumentDriver):
             # (dT/dt -> 0) and blinding the SafetyManager rate fault. Fall back
             # to the native KRDG reading instead.
             try:
-                raw_in_range = self._calibration_store.raw_in_range(
-                    sensor_id, float(raw_reading.value)
-                )  # type: ignore[union-attr]
+                raw_in_range = self._calibration_store.raw_in_range(sensor_id, float(raw_reading.value))  # type: ignore[union-attr]
             except Exception:
                 raw_in_range = False
             if not raw_in_range:
@@ -559,9 +575,7 @@ class LakeShore218S(InstrumentDriver):
                 continue
 
             try:
-                calibrated_value = self._calibration_store.evaluate(
-                    sensor_id, float(raw_reading.value)
-                )  # type: ignore[union-attr]
+                calibrated_value = self._calibration_store.evaluate(sensor_id, float(raw_reading.value))  # type: ignore[union-attr]
             except Exception:
                 self._log_runtime_fallback(
                     channel_key=str(policy.get("channel_key", "")), reason="curve_evaluate_failed"

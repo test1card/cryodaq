@@ -8,7 +8,15 @@ import pytest
 
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.base import InstrumentDriver, Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    BusDescriptor,
+    DriverRuntimeBinding,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 
 # ---------------------------------------------------------------------------
 # Concrete mock driver for use in all scheduler tests
@@ -35,6 +43,19 @@ class MockDriver(InstrumentDriver):
     async def read_channels(self) -> list[Reading]:
         self.read_calls += 1
         return [Reading.now("CH1", 4.2, "K", instrument_id="test")]
+
+
+def _bus_binding(driver: InstrumentDriver, bus_id: str, poll_interval_s: float) -> DriverRuntimeBinding:
+    binding = _issue_registry_runtime_binding(
+        driver=driver,
+        timing=AcquisitionTiming(1.0, 1.0, poll_interval_s),
+        registry_provenance="test:explicit-bus",
+        trust_class=DriverTrustClass.PASSIVE_EXTENSION,
+        bus_descriptor=BusDescriptor(bus_id),
+    )
+    with driver_registry._RUNTIME_BINDINGS_LOCK:
+        driver_registry._RUNTIME_BINDINGS[driver] = binding
+    return binding
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +204,8 @@ async def test_gpib_bus_grouping(broker: DataBroker) -> None:
     usb_driver = MockDriver("keithley")
 
     sched = Scheduler(broker)
-    sched.add(InstrumentConfig(driver=ls1, poll_interval_s=0.01, resource_str="GPIB0::12::INSTR"))
-    sched.add(InstrumentConfig(driver=ls2, poll_interval_s=0.01, resource_str="GPIB0::11::INSTR"))
+    sched.add(InstrumentConfig(driver=ls1, runtime_binding=_bus_binding(ls1, "GPIB0", 0.01)))
+    sched.add(InstrumentConfig(driver=ls2, runtime_binding=_bus_binding(ls2, "GPIB0", 0.01)))
     sched.add(InstrumentConfig(driver=usb_driver, poll_interval_s=0.01, resource_str="USB0::MOCK"))
 
     await sched.start()
@@ -248,8 +269,8 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     d2.connect = lambda: _patched_connect_d2(d2)  # type: ignore[method-assign]
 
     sched = Scheduler(broker)
-    sched.add(InstrumentConfig(driver=d1, poll_interval_s=0.05, resource_str="GPIB0::12::INSTR"))
-    sched.add(InstrumentConfig(driver=d2, poll_interval_s=0.05, resource_str="GPIB0::11::INSTR"))
+    sched.add(InstrumentConfig(driver=d1, runtime_binding=_bus_binding(d1, "GPIB0", 0.05)))
+    sched.add(InstrumentConfig(driver=d2, runtime_binding=_bus_binding(d2, "GPIB0", 0.05)))
 
     await sched.start()
     # Wait until both connects complete — no fixed sleep.
@@ -264,8 +285,7 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     assert "gpib_second" in connect_order, f"gpib_second never connected; order={connect_order}"
     # Sequential invariant: at no point were two connects in-flight simultaneously
     assert max_concurrent == 1, (
-        f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. "
-        f"connect_order={connect_order}"
+        f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. connect_order={connect_order}"
     )
 
 

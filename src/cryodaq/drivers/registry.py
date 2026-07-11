@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import threading
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -17,6 +20,13 @@ from types import MappingProxyType
 from typing import Final
 
 from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    BusDescriptor,
+    DriverRuntimeBinding,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
 logger = logging.getLogger(__name__)
@@ -240,6 +250,13 @@ def _identity_normalizer(values: dict[str, object], _path: str) -> dict[str, obj
     return values
 
 
+def _lakeshore_normalizer(values: dict[str, object], path: str) -> dict[str, object]:
+    resource = values.get("resource")
+    if not isinstance(resource, str) or re.fullmatch(r"GPIB[0-9]+::[0-9]+::INSTR", resource, re.IGNORECASE) is None:
+        raise DriverRegistryError(f"{path}.resource must be an exact GPIB instrument resource")
+    return values
+
+
 def _multiline_normalizer(values: dict[str, object], path: str) -> dict[str, object]:
     selected = int("channels" in values) + int("channel_count" in values)
     if selected != 1:
@@ -259,6 +276,8 @@ def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConst
         channel_labels=dict(channels),
         mock=context.mock,
         calibration_store=context.calibration_store,  # type: ignore[arg-type]
+        connect_timeout_s=float(values["connect_timeout_s"]),
+        read_timeout_s=float(values["read_timeout_s"]),
     )
 
 
@@ -327,6 +346,8 @@ _COMMON_FIELDS: Final[dict[str, ConfigField]] = {
     "type": ConfigField(ValueKind.STRING, required=True, setup_visible=False),
     "name": ConfigField(ValueKind.STRING, required=True),
     "poll_interval_s": ConfigField(ValueKind.NUMBER, default=1.0, minimum=0.01, maximum=86_400.0),
+    "connect_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
+    "read_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
 }
 
 
@@ -344,8 +365,10 @@ _PASSIVE_SPECS = {
         config_fields=_fields(
             resource=ConfigField(ValueKind.STRING, required=True),
             channels=ConfigField(ValueKind.STRING_MAP, default={}),
+            connect_timeout_s=ConfigField(ValueKind.NUMBER, default=3.0, minimum=0.01, maximum=300.0),
+            read_timeout_s=ConfigField(ValueKind.NUMBER, default=3.0, minimum=0.01, maximum=300.0),
         ),
-        normalizer=_identity_normalizer,
+        normalizer=_lakeshore_normalizer,
         factory=_construct_lakeshore,
     ),
     "thyracont_vsp63d": DriverSpec(
@@ -620,4 +643,52 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
     driver = canonical.factory(config, context)
     if not isinstance(driver, InstrumentDriver):
         raise DriverRegistryError(f"factory for {canonical.type_name!r} returned an invalid driver")
+    binding = _runtime_binding(config, driver)
+    with _RUNTIME_BINDINGS_LOCK:
+        _RUNTIME_BINDINGS[driver] = binding
     return driver
+
+
+_GPIB_RESOURCE = re.compile(r"^(GPIB[0-9]+)::[0-9]+::INSTR$", re.IGNORECASE)
+_RUNTIME_BINDINGS: weakref.WeakKeyDictionary[InstrumentDriver, DriverRuntimeBinding] = weakref.WeakKeyDictionary()
+_RUNTIME_BINDINGS_LOCK = threading.Lock()
+
+
+def _runtime_binding(config: ValidatedInstrumentConfig, driver: InstrumentDriver) -> DriverRuntimeBinding:
+    values = config.values
+    timing = AcquisitionTiming(
+        connect_timeout_s=float(values["connect_timeout_s"]),
+        read_timeout_s=float(values["read_timeout_s"]),
+        poll_interval_s=float(values["poll_interval_s"]),
+    )
+    bus_descriptor: BusDescriptor | None = None
+    if config.spec.type_name == "lakeshore_218s":
+        resource = str(values["resource"])
+        match = _GPIB_RESOURCE.fullmatch(resource)
+        if match is None:
+            raise DriverRegistryError(
+                f"validated config.resource is not an exact GPIB instrument resource: {resource!r}"
+            )
+        bus_descriptor = BusDescriptor(match.group(1).upper())
+    if config.spec.authority is DriverAuthority.REVIEWED_SOURCE and bus_descriptor is not None:
+        raise DriverRegistryError("reviewed source cannot receive generic shared-bus recovery authority")
+    trust_class = (
+        DriverTrustClass.REVIEWED_SOURCE
+        if config.spec.authority is DriverAuthority.REVIEWED_SOURCE
+        else DriverTrustClass.PASSIVE_MEASUREMENT
+    )
+    return _issue_registry_runtime_binding(
+        driver=driver,
+        timing=timing,
+        registry_provenance=f"builtin:{DRIVER_REGISTRY_COMPAT_VERSION}:{config.spec.type_name}",
+        trust_class=trust_class,
+        bus_descriptor=bus_descriptor,
+        lifecycle=driver if config.spec.type_name == "lakeshore_218s" else None,
+    )
+
+
+def runtime_binding_for_driver(driver: InstrumentDriver) -> DriverRuntimeBinding | None:
+    """Return only the binding created beside this exact registry driver instance."""
+
+    with _RUNTIME_BINDINGS_LOCK:
+        return _RUNTIME_BINDINGS.get(driver)

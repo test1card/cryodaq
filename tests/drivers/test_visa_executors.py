@@ -21,8 +21,8 @@ async def test_gpib_query_and_write_use_dedicated_executor():
     from cryodaq.drivers.transport.gpib import GPIBTransport
 
     class _FakeResource:
-        # write() is read as an argument to run_in_executor before the spy runs,
-        # so the attribute must exist (the spy short-circuits, never calling it).
+        # The spy executes the submitted wrapper synchronously so both
+        # dedicated-executor dispatch and lifecycle settlement are exercised.
         def write(self, *a, **k) -> None: ...
         def read(self, *a, **k) -> str:
             return ""
@@ -37,7 +37,9 @@ async def test_gpib_query_and_write_use_dedicated_executor():
     def spy(executor, func, *args):
         captured.append(executor)
         fut = loop.create_future()
-        fut.set_result("MODEL218S")  # short-circuit; don't touch the fake resource
+        # Execute the submitted wrapper synchronously so its lifecycle-finally
+        # settlement is represented as well as its executor identity.
+        fut.set_result(func(*args))
         return fut
 
     with patch.object(loop, "run_in_executor", side_effect=spy):
@@ -211,9 +213,7 @@ def test_concurrent_get_rm_creates_single_manager():
     assert len(results) == 10, f"Some workers did not return: got {len(results)}"
     # All workers must have received the SAME instance.
     first = results[0]
-    assert all(r is first for r in results), (
-        "Workers received different RM instances despite the lock"
-    )
+    assert all(r is first for r in results), "Workers received different RM instances despite the lock"
     assert len(GPIBTransport._resource_managers) == 1
     GPIBTransport._resource_managers.clear()
 

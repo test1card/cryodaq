@@ -29,7 +29,7 @@ _WRITE_READ_DELAY_S = 0.1
 _CLOSE_TIMEOUT_S = 1.0
 
 
-def _run_with_timeout(fn, *, timeout_s: float, label: str) -> None:
+def _run_with_timeout(fn, *, timeout_s: float, label: str) -> bool:
     """Run a blocking cleanup function with a bounded wait.
 
     The underlying VISA call may wedge inside a C extension. In that case
@@ -54,9 +54,10 @@ def _run_with_timeout(fn, *, timeout_s: float, label: str) -> None:
             label,
             timeout_s,
         )
-        return
+        return False
     if error:
         raise error[0]
+    return True
 
 
 class GPIBTransport:
@@ -93,6 +94,11 @@ class GPIBTransport:
         # SQLite reads on the default asyncio executor. A hung PyVISA call
         # only blocks its own transport, not the entire engine.
         self._executor: ThreadPoolExecutor | None = None
+        self._state_lock = threading.Lock()
+        self._open_generation = 0
+        self._open_settled = threading.Event()
+        self._open_settled.set()
+        self._terminal_unsettled = False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -150,29 +156,61 @@ class GPIBTransport:
         timeout_ms:
             Default timeout for query/write operations.
         """
-        self._resource_str = resource_str
-        self._bus_prefix = resource_str.split("::")[0]
-        self._timeout_ms = timeout_ms
+        if isinstance(timeout_ms, bool) or timeout_ms <= 0:
+            raise ValueError("timeout_ms must be positive")
+        with self._state_lock:
+            if not self.mock and (not self._open_settled.is_set() or self._terminal_unsettled):
+                raise RuntimeError("previous GPIB executor generation has not settled")
+            self._open_generation += 1
+            generation = self._open_generation
+            self._resource_str = resource_str
+            self._bus_prefix = resource_str.split("::")[0]
+            self._timeout_ms = timeout_ms
 
         if self.mock:
             log.info("GPIB [mock]: open %s", resource_str)
             return
 
+        self._open_settled.clear()
+
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._get_executor(), self._blocking_connect)
+        try:
+            await loop.run_in_executor(
+                self._get_executor(),
+                self._blocking_connect,
+                generation,
+                resource_str,
+                self._bus_prefix,
+                timeout_ms,
+            )
+        except asyncio.CancelledError:
+            await self.abort_open()
+            raise
         log.info("GPIB: %s opened (persistent session)", resource_str)
+
+    async def abort_open(self) -> None:
+        """Invalidate a partial open; a late blocking result closes itself."""
+
+        await self.close()
 
     async def close(self) -> None:
         """Close the persistent VISA resource."""
+        with self._state_lock:
+            self._open_generation += 1
+            if not self._open_settled.is_set():
+                self._terminal_unsettled = True
+                return
+            self._terminal_unsettled = False
+            resource = self._resource
+            self._resource = None
         if self.mock:
             log.info("GPIB [mock]: close %s", self._resource_str)
             return
 
-        if self._resource is not None:
-            resource = self._resource
-            self._resource = None
+        close_settled = True
+        if resource is not None:
             try:
-                await asyncio.to_thread(
+                close_settled = await asyncio.to_thread(
                     _run_with_timeout,
                     resource.close,
                     timeout_s=_CLOSE_TIMEOUT_S,
@@ -181,6 +219,11 @@ class GPIBTransport:
             except Exception as exc:
                 log.warning("GPIB: error closing %s — %s", self._resource_str, exc)
             log.info("GPIB: %s closed", self._resource_str)
+        if not close_settled:
+            with self._state_lock:
+                self._terminal_unsettled = True
+                self._open_settled.clear()
+            return
         # Shut down the dedicated executor so threads don't accumulate
         # across reconnect cycles.
         if self._executor is not None:
@@ -199,8 +242,7 @@ class GPIBTransport:
             log.debug("GPIB [mock] write: %s", cmd)
             return
 
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._get_executor(), self._resource.write, cmd)
+        await self._run_executor_operation(self._resource.write, cmd)
         log.debug("GPIB write → %s: %s", self._resource_str, cmd)
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
@@ -224,10 +266,7 @@ class GPIBTransport:
             log.debug("GPIB [mock] query '%s' → '%s'", cmd, response)
             return response
 
-        loop = asyncio.get_running_loop()
-        response: str = await loop.run_in_executor(
-            self._get_executor(), self._blocking_query, cmd, timeout_ms
-        )
+        response: str = await self._run_executor_operation(self._blocking_query, cmd, timeout_ms)
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
 
@@ -244,8 +283,7 @@ class GPIBTransport:
         """
         if self.mock or self._resource is None:
             return False
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._get_executor(), self._blocking_clear)
+        return await self._run_executor_operation(self._blocking_clear)
 
     async def send_ifc(self) -> bool:
         """Send IFC — Interface Clear (Level 2 recovery).
@@ -260,21 +298,78 @@ class GPIBTransport:
         """
         if self.mock:
             return True
+        return await self._run_executor_operation(self._blocking_ifc)
+
+    async def _run_executor_operation(self, operation, *args):
+        with self._state_lock:
+            if not self._open_settled.is_set() or self._terminal_unsettled:
+                raise RuntimeError("previous GPIB executor generation has not settled")
+            self._open_settled.clear()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._get_executor(), self._blocking_ifc)
+        return await loop.run_in_executor(self._get_executor(), self._tracked_operation, operation, args)
+
+    def _tracked_operation(self, operation, args):
+        try:
+            return operation(*args)
+        finally:
+            self._settle_executor_operation()
+
+    def _settle_executor_operation(self) -> None:
+        resource = None
+        terminal = False
+        with self._state_lock:
+            if self._terminal_unsettled:
+                terminal = True
+                resource = self._resource
+                self._resource = None
+        if resource is not None:
+            try:
+                # This runs inside the transport's dedicated executor.  A
+                # cancelled asyncio wrapper must not outlive its VISA
+                # authority: settlement remains false until the real close
+                # call returns (or raises) in the same generation.
+                resource.close()
+            except Exception as exc:
+                log.warning("GPIB: error closing unsettled %s — %s", self._resource_str, exc)
+        self._open_settled.set()
+        if terminal and self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     # ------------------------------------------------------------------
     # Blocking methods (run in executor)
     # ------------------------------------------------------------------
 
-    def _blocking_connect(self) -> None:
+    def _blocking_connect(
+        self,
+        generation: int | None = None,
+        resource_str: str | None = None,
+        bus_prefix: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> None:
         """Open resource once, configure, VISA Clear once, enable unaddressing."""
-        rm = self._get_rm(self._bus_prefix)
-        res = rm.open_resource(self._resource_str)
+        try:
+            self._blocking_connect_impl(generation, resource_str, bus_prefix, timeout_ms)
+        finally:
+            self._settle_executor_operation()
+
+    def _blocking_connect_impl(
+        self,
+        generation: int | None,
+        resource_str: str | None,
+        bus_prefix: str | None,
+        timeout_ms: int | None,
+    ) -> None:
+        generation = self._open_generation if generation is None else generation
+        resource_str = self._resource_str if resource_str is None else resource_str
+        bus_prefix = self._bus_prefix if bus_prefix is None else bus_prefix
+        timeout_ms = self._timeout_ms if timeout_ms is None else timeout_ms
+        rm = self._get_rm(bus_prefix)
+        res = rm.open_resource(resource_str)
         try:
             res.write_termination = "\n"
             res.read_termination = "\n"
-            res.timeout = self._timeout_ms
+            res.timeout = timeout_ms
             res.clear()
             # Enable unaddressing: UNT+UNL after each transfer.
             # Prevents bus lockup from addressing state corruption
@@ -282,16 +377,21 @@ class GPIBTransport:
             _VI_ATTR_GPIB_UNADDR_EN = 0x3FFF00B0
             try:
                 res.set_visa_attribute(_VI_ATTR_GPIB_UNADDR_EN, True)
-                log.debug("GPIB unaddressing enabled on %s", self._resource_str)
+                log.debug("GPIB unaddressing enabled on %s", resource_str)
             except Exception:
-                log.debug("GPIB unaddressing not available on %s", self._resource_str)
+                log.debug("GPIB unaddressing not available on %s", resource_str)
         except Exception:
             try:
                 res.close()
             except Exception:
                 pass
             raise
-        self._resource = res
+        with self._state_lock:
+            if generation == self._open_generation:
+                self._resource = res
+                return
+            self._terminal_unsettled = True
+            self._resource = res
 
     def _blocking_query(self, cmd: str, timeout_ms: int | None = None) -> str:
         """Write → sleep(100ms) → read. Auto-clear + drain on error."""
@@ -383,10 +483,7 @@ class GPIBTransport:
                     "+004.321E+0",
                 ]
                 return values[idx] if 0 <= idx < 8 else "+000.000E+0"
-            return (
-                "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
-                "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
-            )
+            return "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
         if cmd_upper.startswith("SRDG?"):
             ch = cmd_upper.replace("SRDG?", "").strip()
             if ch:

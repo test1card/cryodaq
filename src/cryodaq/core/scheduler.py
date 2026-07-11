@@ -1,9 +1,9 @@
 """Scheduler — планировщик опроса приборов.
 
 Для каждого InstrumentDriver создаёт изолированную asyncio-задачу.
-Исключение: приборы на одной GPIB-шине группируются в один task
-и опрашиваются последовательно (NI GPIB-USB-HS не переносит
-параллельный доступ даже с asyncio.Lock + run_in_executor).
+Исключение: приборы с одним явным registry-owned BusDescriptor группируются
+в один task и опрашиваются последовательно. Текст resource не является
+источником topology/authority.
 
 Таймаут одного прибора не блокирует приборы на другой шине.
 При ошибке соединения — экспоненциальный backoff с переподключением.
@@ -12,13 +12,20 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    BusRecoveryLevel,
+    DriverRuntimeBinding,
+    SharedBusParticipant,
+    SharedBusRecoveryCoordinator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +39,57 @@ _STANDALONE_INITIAL_BACKOFF_S = 30.0
 _STANDALONE_MAX_BACKOFF_S = 300.0
 _DISCONNECT_TIMEOUT_S = 5.0
 
-_GPIB_PREFIX = "GPIB"
-
 
 @dataclass
 class InstrumentConfig:
     """Конфигурация опроса одного прибора."""
 
     driver: InstrumentDriver
-    poll_interval_s: float = DEFAULT_POLL_INTERVAL_S
-    read_timeout_s: float = READ_TIMEOUT_S
+    poll_interval_s: float | None = None
+    read_timeout_s: float | None = None
+    connect_timeout_s: float | None = None
     enabled: bool = True
     resource_str: str = ""
+    runtime_binding: DriverRuntimeBinding | None = None
+
+    def __post_init__(self) -> None:
+        from cryodaq.drivers.registry import runtime_binding_for_driver
+
+        supplied = self.runtime_binding
+        canonical = runtime_binding_for_driver(self.driver)
+        if canonical is not None:
+            if supplied is not None and supplied is not canonical:
+                raise ValueError("canonical registry runtime binding cannot be replaced")
+            binding = canonical
+        else:
+            binding = supplied
+            if binding is not None:
+                raise ValueError("unregistered driver cannot supply runtime binding directly")
+        if binding is not None and binding.driver is not self.driver:
+            raise ValueError("runtime binding belongs to a different driver instance")
+        if binding is not None:
+            timing = binding.timing
+            for field_name in ("poll_interval_s", "read_timeout_s", "connect_timeout_s"):
+                supplied = getattr(self, field_name)
+                expected = getattr(timing, field_name)
+                if supplied is not None and float(supplied) != expected:
+                    raise ValueError(f"legacy {field_name} contradicts registry runtime binding")
+                setattr(self, field_name, expected)
+            self.runtime_binding = binding
+        else:
+            self.poll_interval_s = (
+                DEFAULT_POLL_INTERVAL_S if self.poll_interval_s is None else float(self.poll_interval_s)
+            )
+            self.read_timeout_s = READ_TIMEOUT_S if self.read_timeout_s is None else float(self.read_timeout_s)
+            self.connect_timeout_s = READ_TIMEOUT_S if self.connect_timeout_s is None else float(self.connect_timeout_s)
+            timing = AcquisitionTiming(
+                connect_timeout_s=self.connect_timeout_s,
+                read_timeout_s=self.read_timeout_s,
+                poll_interval_s=self.poll_interval_s,
+            )
+            self.connect_timeout_s = timing.connect_timeout_s
+            self.read_timeout_s = timing.read_timeout_s
+            self.poll_interval_s = timing.poll_interval_s
 
 
 @dataclass
@@ -58,22 +104,15 @@ class _InstrumentState:
     backoff_s: float = field(default=INITIAL_BACKOFF_S)
 
 
-def _gpib_bus_prefix(resource_str: str) -> str | None:
-    """Extract GPIB bus prefix (e.g. 'GPIB0') or None if not GPIB."""
-    if resource_str.upper().startswith(_GPIB_PREFIX):
-        return resource_str.split("::")[0]
-    return None
-
-
 class Scheduler:
-    """Планировщик: GPIB приборы на одной шине → один последовательный task.
+    """Планировщик: explicit shared-bus binding → один последовательный task.
 
     Использование::
 
         scheduler = Scheduler(broker)
-        scheduler.add(InstrumentConfig(driver=lakeshore1, resource_str="GPIB0::12::INSTR"))
-        scheduler.add(InstrumentConfig(driver=lakeshore2, resource_str="GPIB0::11::INSTR"))
-        scheduler.add(InstrumentConfig(driver=keithley, resource_str="USB0::..."))
+        scheduler.add(InstrumentConfig(driver=lakeshore1))
+        scheduler.add(InstrumentConfig(driver=lakeshore2))
+        scheduler.add(InstrumentConfig(driver=keithley))
         await scheduler.start()
         ...
         await scheduler.stop()
@@ -97,7 +136,9 @@ class Scheduler:
         self._drain_timeout_s = drain_timeout_s
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
-        self._gpib_tasks: dict[str, asyncio.Task[None]] = {}
+        self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
+        self._unsettled_bus_operations: dict[str, asyncio.Task[Any]] = {}
+        self._terminal_bus_authority: set[str] = set()
 
     def add(self, config: InstrumentConfig) -> None:
         """Зарегистрировать прибор. Вызывать до start()."""
@@ -144,7 +185,7 @@ class Scheduler:
         while self._running:
             if not driver.connected:
                 try:
-                    await driver.connect()
+                    await asyncio.wait_for(driver.connect(), timeout=cfg.connect_timeout_s)
                     state.consecutive_errors = 0
                     state.backoff_s = INITIAL_BACKOFF_S
                     logger.info("Прибор '%s' подключён", name)
@@ -180,9 +221,7 @@ class Scheduler:
             except Exception:
                 state.consecutive_errors += 1
                 state.total_errors += 1
-                logger.warning(
-                    "Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors
-                )
+                logger.warning("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
                 if state.consecutive_errors >= 3:
                     logger.warning(
                         "'%s': %d consecutive errors, disconnect + backoff",
@@ -202,143 +241,307 @@ class Scheduler:
             sleep_remaining = max(0, next_deadline - loop.time())
             await asyncio.sleep(sleep_remaining)
 
-    async def _gpib_poll_loop(self, bus_prefix: str, states: list[_InstrumentState]) -> None:
-        """Последовательный опрос всех приборов на одной GPIB шине в одном task.
-
-        Гарантирует: ни в какой момент два run_in_executor вызова к одной GPIB
-        шине не выполняются параллельно. Один сбойный прибор не блокирует остальные.
-        """
-        poll_interval = max(s.config.poll_interval_s for s in states)
-        _CONNECT_TIMEOUT_S = 3.0
-        _POLL_TIMEOUT_S = 3.0
-        _RECONNECT_INTERVAL_S = 30.0
-        _PREVENTIVE_CLEAR_INTERVAL_S = 300.0
-        _IFC_COOLDOWN_S = 2.0
-        last_reconnect: dict[str, float] = {}
-        last_preventive_clear: dict[str, float] = {}
-        bus_error_count: int = 0  # consecutive errors across ALL devices on this bus
-
-        # Подключить все последовательно — skip failures
-        for state in states:
-            driver = state.config.driver
+    async def _mark_disconnected(self, state: _InstrumentState, bus_id: str) -> None:
+        binding = state.config.runtime_binding
+        participant: SharedBusParticipant | None = binding.participant if binding else None
+        if participant is not None:
             try:
-                await asyncio.wait_for(driver.connect(), timeout=_CONNECT_TIMEOUT_S)
-                state.consecutive_errors = 0
-                logger.info("Прибор '%s' подключён (GPIB bus %s)", driver.name, bus_prefix)
+                await participant.mark_disconnected()
+                return
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.warning(
-                    "Не удалось подключить '%s' на %s — skipping", driver.name, bus_prefix
-                )
-                driver._connected = False
+                logger.exception("Public disconnect marker failed for '%s'", state.config.driver.name)
+        await self._disconnect_driver(state.config.driver, context=f"shared bus {bus_id}")
 
-        loop = asyncio.get_event_loop()
-        next_deadline = loop.time() + poll_interval
+    async def _abort_partial_connect(self, state: _InstrumentState) -> None:
+        binding = state.config.runtime_binding
+        if binding is None or binding.lifecycle is None:
+            await self._disconnect_driver(state.config.driver, context="partial connect cleanup")
+            return
+        try:
+            await asyncio.wait_for(binding.lifecycle.abort_connect(), timeout=state.config.connect_timeout_s)
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(binding.lifecycle.abort_connect())
+            try:
+                await asyncio.shield(asyncio.wait_for(cleanup, timeout=state.config.connect_timeout_s))
+            except Exception:
+                cleanup.cancel()
+            raise
+        except Exception:
+            logger.exception("Partial connect cleanup failed for '%s'", state.config.driver.name)
+
+    async def _bounded_bus_recovery(
+        self,
+        operation: Any,
+        *,
+        timeout_s: float,
+        bus_id: str,
+        label: str,
+        completion_is_success: bool = False,
+    ) -> bool | None:
+        if bus_id in self._terminal_bus_authority:
+            return None
+        if not inspect.iscoroutinefunction(operation):
+            logger.critical("Bus-scoped %s for %s is not an async contract", label, bus_id)
+            self._terminal_bus_authority.add(bus_id)
+            return None
+        try:
+            task = asyncio.create_task(operation(), name=f"bus_{bus_id}_{label}")
+        except Exception:
+            logger.exception("Bus-scoped %s could not start for %s", label, bus_id)
+            return False
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            settlement = asyncio.create_task(
+                self._cancel_bus_recovery(
+                    task,
+                    timeout_s=timeout_s,
+                    bus_id=bus_id,
+                    label=label,
+                )
+            )
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                # A second caller cancellation cannot cancel settlement;
+                # the separately owned task will terminalize if necessary.
+                pass
+            raise
+        if done:
+            try:
+                result = task.result()
+                return True if completion_is_success else bool(result)
+            except asyncio.CancelledError:
+                return False
+            except Exception:
+                logger.exception("Bus-scoped %s failed for %s", label, bus_id)
+                return False
+        if await self._cancel_bus_recovery(
+            task,
+            timeout_s=timeout_s,
+            bus_id=bus_id,
+            label=label,
+        ):
+            return False
+        return None
+
+    async def _bounded_bus_read(
+        self,
+        operation: Any,
+        *,
+        timeout_s: float,
+        bus_id: str,
+        label: str,
+    ) -> list[Any] | None:
+        """Run one shared-bus read or terminalize if cancellation resists."""
+
+        if bus_id in self._terminal_bus_authority:
+            return None
+        if not inspect.iscoroutinefunction(operation):
+            logger.critical("Bus-scoped %s for %s is not an async contract", label, bus_id)
+            self._terminal_bus_authority.add(bus_id)
+            return None
+        task = asyncio.create_task(operation(), name=f"bus_{bus_id}_{label}")
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            settlement = asyncio.create_task(
+                self._cancel_bus_recovery(
+                    task,
+                    timeout_s=timeout_s,
+                    bus_id=bus_id,
+                    label=label,
+                )
+            )
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                pass
+            raise
+        if done:
+            result = task.result()
+            if not isinstance(result, list):
+                raise TypeError("shared-bus driver read must return a list")
+            return result
+        if await self._cancel_bus_recovery(
+            task,
+            timeout_s=timeout_s,
+            bus_id=bus_id,
+            label=label,
+        ):
+            raise TimeoutError(f"bus-scoped {label} timed out")
+        return None
+
+    async def _cancel_bus_recovery(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        timeout_s: float,
+        bus_id: str,
+        label: str,
+    ) -> bool:
+        """Cancel one recovery generation or terminalize its bus authority."""
+
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        if done:
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+            return True
+        logger.critical(
+            "Bus-scoped %s for %s resisted cancellation; bus authority is terminal",
+            label,
+            bus_id,
+        )
+        self._terminal_bus_authority.add(bus_id)
+        self._unsettled_bus_operations[bus_id] = task
+
+        def _settled(late: asyncio.Task[Any]) -> None:
+            self._unsettled_bus_operations.pop(bus_id, None)
+            try:
+                late.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        task.add_done_callback(_settled)
+        return False
+
+    async def _shared_bus_poll_loop(self, bus_id: str, states: list[_InstrumentState]) -> None:
+        """Serialize one explicit registry-bound bus while preserving per-device cadence."""
+
+        loop = asyncio.get_running_loop()
+        next_due = {state.config.driver.name: loop.time() for state in states}
+        next_eligible = {state.config.driver.name: loop.time() for state in states}
+        recovery_backoff = {state.config.driver.name: 0.01 for state in states}
+        correlated_failures = 0
+        failure_generation: set[str] = set()
+        participant_names = {state.config.driver.name for state in states}
+        ifc_succeeded = False
+        descriptor = states[0].config.runtime_binding.bus_descriptor  # type: ignore[union-attr]
+        coordinators = {
+            id(binding.coordinator): binding.coordinator
+            for state in states
+            if (binding := state.config.runtime_binding) is not None and binding.coordinator is not None
+        }
+        if len(coordinators) > 1:
+            raise RuntimeError(f"bus {bus_id} has contradictory recovery coordinators")
+        coordinator: SharedBusRecoveryCoordinator | None = next(iter(coordinators.values()), None)
 
         while self._running:
             now = loop.time()
-
-            for state in states:
-                driver = state.config.driver
-                name = driver.name
-
-                # Reconnect failed devices — rate-limited
-                if not driver.connected:
-                    last_try = last_reconnect.get(name, 0.0)
-                    if now - last_try < _RECONNECT_INTERVAL_S:
-                        continue
-                    last_reconnect[name] = now
-                    try:
-                        await asyncio.wait_for(driver.connect(), timeout=_CONNECT_TIMEOUT_S)
-                        state.consecutive_errors = 0
-                        logger.info("Прибор '%s' переподключён (GPIB bus %s)", name, bus_prefix)
-                    except Exception:
-                        logger.warning("Не удалось переподключить '%s' — skipping", name)
-                        driver._connected = False
-                        continue
-
-                # Preventive clear — every 5 minutes per device
-                last_clear = last_preventive_clear.get(name, 0.0)
-                if now - last_clear > _PREVENTIVE_CLEAR_INTERVAL_S:
-                    transport = getattr(driver, "_transport", None)
-                    if transport is not None and hasattr(transport, "clear_bus"):
-                        try:
-                            await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
-                            last_preventive_clear[name] = now
-                        except Exception:
-                            pass
-
-                # Poll
+            due = [
+                state
+                for state in states
+                if next_due[state.config.driver.name] <= now and next_eligible[state.config.driver.name] <= now
+            ]
+            if not due:
+                wake = min(
+                    max(next_due[state.config.driver.name], next_eligible[state.config.driver.name]) for state in states
+                )
+                await asyncio.sleep(max(0.0, wake - loop.time()))
+                continue
+            failures = 0
+            successes = 0
+            for state in due:
+                cfg = state.config
+                driver = cfg.driver
                 try:
-                    readings = await asyncio.wait_for(driver.safe_read(), timeout=_POLL_TIMEOUT_S)
+                    if not driver.connected:
+                        await asyncio.wait_for(driver.connect(), timeout=cfg.connect_timeout_s)
+                    readings = await self._bounded_bus_read(
+                        driver.safe_read,
+                        timeout_s=cfg.read_timeout_s,
+                        bus_id=bus_id,
+                        label=f"read {driver.name}",
+                    )
+                    if readings is None:
+                        return
                     await self._process_readings(state, readings)
-                    bus_error_count = 0  # reset on success
-                except Exception as exc:
+                    successes += 1
+                    recovery_backoff[driver.name] = 0.01
+                except asyncio.CancelledError:
+                    if bus_id not in self._terminal_bus_authority:
+                        await self._abort_partial_connect(state)
+                    raise
+                except Exception:
+                    if not driver.connected:
+                        await self._abort_partial_connect(state)
+                    failures += 1
                     state.consecutive_errors += 1
                     state.total_errors += 1
-                    bus_error_count += 1
-                    logger.warning(
-                        "Ошибка опроса '%s': %s (device: %d, bus: %d)",
-                        name,
-                        exc,
-                        state.consecutive_errors,
-                        bus_error_count,
-                    )
-
-                    transport = getattr(driver, "_transport", None)
-
-                    if bus_error_count <= 2:
-                        # Level 1: SDC on the specific device
-                        if transport is not None and hasattr(transport, "clear_bus"):
-                            try:
-                                await asyncio.wait_for(transport.clear_bus(), timeout=2.0)
-                            except Exception:
-                                logger.warning("SDC failed after '%s' error", name)
-                    elif bus_error_count <= 5:
-                        # Level 2: IFC — reset entire bus
-                        if transport is not None and hasattr(transport, "send_ifc"):
-                            try:
-                                await asyncio.wait_for(transport.send_ifc(), timeout=3.0)
-                            except Exception:
-                                logger.warning("IFC failed on bus %s", bus_prefix)
-                            await asyncio.sleep(_IFC_COOLDOWN_S)
-                            # After IFC, all devices need reconnect
-                            for s in states:
-                                await self._disconnect_driver(
-                                    s.config.driver,
-                                    context=f"GPIB IFC recovery {bus_prefix}",
-                                )
-                                s.config.driver._connected = False
-                            break  # restart the for-loop (all devices disconnected)
-                    else:
-                        # Level 3: Close and reopen ResourceManager
-                        logger.error(
-                            "GPIB bus %s: %d consecutive errors, resetting ResourceManager",
-                            bus_prefix,
-                            bus_error_count,
+                    binding = cfg.runtime_binding
+                    if (
+                        binding is not None
+                        and binding.participant is not None
+                        and binding.bus_descriptor is not None
+                        and BusRecoveryLevel.DEVICE_CLEAR in binding.bus_descriptor.supported_recovery
+                    ):
+                        recovered = await self._bounded_bus_recovery(
+                            binding.participant.recover_device,
+                            timeout_s=cfg.connect_timeout_s,
+                            bus_id=bus_id,
+                            label=f"device recovery {driver.name}",
+                            completion_is_success=True,
                         )
-                        from cryodaq.drivers.transport.gpib import GPIBTransport
-
-                        GPIBTransport.close_all_managers()
-                        for s in states:
-                            s.config.driver._connected = False
-                        bus_error_count = 0
-                        break  # restart the for-loop
-
+                        if recovered is None:
+                            return
+                        if not recovered:
+                            logger.warning("Device recovery failed for '%s'", driver.name)
                     if state.consecutive_errors >= 3:
-                        logger.warning("'%s': 3+ ошибок, disconnect + skip", name)
-                        await self._disconnect_driver(
-                            driver,
-                            context=f"GPIB error recovery {bus_prefix}",
-                        )
-                        driver._connected = False
+                        await self._mark_disconnected(state, bus_id)
+                    next_eligible[driver.name] = loop.time() + recovery_backoff[driver.name]
+                    recovery_backoff[driver.name] = min(recovery_backoff[driver.name] * 2, 1.0)
+                finally:
+                    interval = cfg.poll_interval_s
+                    deadline = next_due[driver.name] + interval
+                    now_after = loop.time()
+                    if deadline <= now_after:
+                        deadline += (int((now_after - deadline) / interval) + 1) * interval
+                    next_due[driver.name] = deadline
 
-            next_deadline += poll_interval
-            now = loop.time()
-            if next_deadline < now:
-                missed = int((now - next_deadline) / poll_interval) + 1
-                next_deadline += missed * poll_interval
-            sleep_remaining = max(0, next_deadline - loop.time())
-            await asyncio.sleep(sleep_remaining)
+            if successes:
+                failure_generation.clear()
+                correlated_failures = 0
+                ifc_succeeded = False
+            elif failures:
+                failure_generation.update(state.config.driver.name for state in due)
+            completed_epoch = failure_generation == participant_names
+            if completed_epoch:
+                correlated_failures += 1
+                failure_generation.clear()
+            if completed_epoch and coordinator is not None and descriptor is not None:
+                levels = descriptor.supported_recovery
+                if correlated_failures >= 3 and not ifc_succeeded and BusRecoveryLevel.INTERFACE_CLEAR in levels:
+                    ifc_result = await self._bounded_bus_recovery(
+                        coordinator.interface_clear,
+                        timeout_s=descriptor.recovery_timeout_s,
+                        bus_id=bus_id,
+                        label="interface clear",
+                    )
+                    if ifc_result is None:
+                        return
+                    ifc_succeeded = ifc_result
+                    if ifc_succeeded:
+                        for state in states:
+                            await self._mark_disconnected(state, bus_id)
+                if correlated_failures >= 6 and BusRecoveryLevel.REOPEN_BUS in levels:
+                    reopened = await self._bounded_bus_recovery(
+                        coordinator.reopen_bus,
+                        timeout_s=descriptor.recovery_timeout_s,
+                        bus_id=bus_id,
+                        label="reopen",
+                    )
+                    if reopened is None:
+                        return
+                    if reopened:
+                        for state in states:
+                            await self._mark_disconnected(state, bus_id)
+                        correlated_failures = 0
+                        ifc_succeeded = False
 
     async def _process_readings(self, state: _InstrumentState, readings: list[Any]) -> None:
         """Persist, calibrate, and publish readings — shared by both loop types."""
@@ -373,8 +576,8 @@ class Scheduler:
         ):
             try:
                 srdg = await driver.read_srdg_channels()
-                srdg_to_persist, srdg_pending_state = (
-                    self._calibration_acquisition.prepare_srdg_readings(readings, srdg)
+                srdg_to_persist, srdg_pending_state = self._calibration_acquisition.prepare_srdg_readings(
+                    readings, srdg
                 )
             except Exception:
                 logger.warning(
@@ -416,9 +619,7 @@ class Scheduler:
 
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
         if srdg_to_persist:
-            self._calibration_acquisition.on_srdg_persisted(
-                len(srdg_to_persist), srdg_pending_state
-            )
+            self._calibration_acquisition.on_srdg_persisted(len(srdg_to_persist), srdg_pending_state)
 
         # Step 2: Publish to brokers
         if persisted_readings:
@@ -433,9 +634,7 @@ class Scheduler:
         """При 3+ ошибках подряд — переподключение с backoff."""
         if state.consecutive_errors >= 3:
             driver = state.config.driver
-            logger.warning(
-                "Переподключение '%s' после %d ошибок", driver.name, state.consecutive_errors
-            )
+            logger.warning("Переподключение '%s' после %d ошибок", driver.name, state.consecutive_errors)
             await self._disconnect_driver(driver, context="generic error recovery")
             await self._backoff(state)
 
@@ -449,53 +648,70 @@ class Scheduler:
     async def start(self) -> None:
         """Запустить все циклы опроса.
 
-        Приборы на одной GPIB-шине группируются в один последовательный task.
-        Все остальные — каждый в своём task.
+        Приборы с одним явным bus descriptor группируются в последовательный
+        task. Все остальные — каждый в своём task.
         """
         self._running = True
 
-        # Group GPIB instruments by bus prefix
-        gpib_groups: dict[str, list[_InstrumentState]] = defaultdict(list)
+        shared_groups: dict[str, list[_InstrumentState]] = {}
         standalone: list[_InstrumentState] = []
 
         for name, state in self._instruments.items():
             if not state.config.enabled:
                 continue
-            bus = _gpib_bus_prefix(state.config.resource_str)
-            if bus is not None:
-                gpib_groups[bus].append(state)
+            binding = state.config.runtime_binding
+            descriptor = binding.bus_descriptor if binding is not None else None
+            if descriptor is not None:
+                shared_groups.setdefault(descriptor.bus_id, []).append(state)
             else:
                 standalone.append(state)
 
-        # Launch one task per GPIB bus
-        for bus_prefix, states in gpib_groups.items():
+        # Validate every group before creating any task: one bad later group
+        # cannot leave an earlier bus running after start() raises.
+        for bus_id, states in shared_groups.items():
+            descriptors = {
+                state.config.runtime_binding.bus_descriptor  # type: ignore[union-attr]
+                for state in states
+            }
+            if len(descriptors) != 1:
+                self._running = False
+                raise ValueError(f"bus {bus_id} has contradictory immutable descriptors")
+            coordinators: set[int | None] = {
+                id(binding.coordinator) if binding.coordinator is not None else None
+                for state in states
+                if (binding := state.config.runtime_binding) is not None
+            }
+            if len(coordinators) > 1:
+                self._running = False
+                raise ValueError(f"bus {bus_id} has contradictory recovery coordinators")
+
+        # Launch one task per explicitly bound shared bus.
+        for bus_id, states in shared_groups.items():
             names = [s.config.driver.name for s in states]
             logger.info(
-                "GPIB bus %s: последовательный опрос %d приборов %s",
-                bus_prefix,
+                "Shared bus %s: последовательный опрос %d приборов %s",
+                bus_id,
                 len(states),
                 names,
             )
             task = asyncio.create_task(
-                self._gpib_poll_loop(bus_prefix, states),
-                name=f"gpib_poll_{bus_prefix}",
+                self._shared_bus_poll_loop(bus_id, states),
+                name=f"shared_bus_poll_{bus_id}",
             )
-            self._gpib_tasks[bus_prefix] = task
+            self._shared_bus_tasks[bus_id] = task
             # Point each state's task ref to the shared task for stop()
             for state in states:
                 state.task = task
 
         # Launch individual tasks for non-GPIB instruments
         for state in standalone:
-            state.task = asyncio.create_task(
-                self._poll_loop(state), name=f"poll_{state.config.driver.name}"
-            )
+            state.task = asyncio.create_task(self._poll_loop(state), name=f"poll_{state.config.driver.name}")
 
-        total = sum(len(g) for g in gpib_groups.values()) + len(standalone)
+        total = sum(len(g) for g in shared_groups.values()) + len(standalone)
         logger.info(
             "Scheduler запущен (%d приборов, %d GPIB bus, %d standalone)",
             total,
-            len(gpib_groups),
+            len(shared_groups),
             len(standalone),
         )
 
@@ -514,7 +730,7 @@ class Scheduler:
         for state in self._instruments.values():
             if state.task and not state.task.done():
                 all_tasks.add(state.task)
-        for task in self._gpib_tasks.values():
+        for task in self._shared_bus_tasks.values():
             if not task.done():
                 all_tasks.add(task)
 
@@ -539,8 +755,16 @@ class Scheduler:
 
         for state in self._instruments.values():
             state.task = None
+            binding = state.config.runtime_binding
+            descriptor = binding.bus_descriptor if binding is not None else None
+            if descriptor is not None and descriptor.bus_id in self._terminal_bus_authority:
+                logger.critical(
+                    "Skipping disconnect on terminal unsettled bus authority %s",
+                    descriptor.bus_id,
+                )
+                continue
             await self._disconnect_driver(state.config.driver, context="scheduler stop")
-        self._gpib_tasks.clear()
+        self._shared_bus_tasks.clear()
         logger.info("Scheduler остановлен")
 
     @property
