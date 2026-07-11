@@ -45,26 +45,29 @@ def test_canonical_guidance_is_stable_not_campaign_state() -> None:
     assert "# Memory Context\n" not in text
     assert "get_observations([IDs])" not in text
     assert not re.search(
-        r"\b(?:commit|sha|head|master)\b[^0-9a-f\n]{0,16}`?[0-9a-f]{7,40}\b",
+        r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])",
         text,
         flags=re.IGNORECASE,
     ), "commit SHA leaked into permanent guidance"
-    assert not re.search(r"`[0-9a-f]{7,40}`", text, flags=re.IGNORECASE), (
-        "bare backticked commit SHA leaked into permanent guidance"
-    )
     assert "feat/montana" not in text
     assert not re.search(
-        r"\b(?:Fable|Opus|Sonnet|GLM(?:-[0-9.]+)?|Grok|Luna|Terra|GPT-[0-9.]+|"
-        r"Gemini|Codex|Qwen|DeepSeek)\b",
+        r"\b(?:Fable|Opus|Sonnet|Haiku|GLM(?:-[0-9.]+)?|Grok|Luna|Terra|"
+        r"GPT-[0-9.]+|Gemini|Codex|Qwen|DeepSeek|Llama|Mistral)\b",
         text,
         flags=re.IGNORECASE,
     ), "transient model/provider routing leaked into permanent guidance"
+    assert not re.search(
+        r"\bClaude\b",
+        ORCHESTRATION.read_text(encoding="utf-8"),
+        flags=re.IGNORECASE,
+    ), "Claude-specific routing leaked into the tool-neutral playbook"
 
 
 def test_product_agent_and_developer_agent_are_explicitly_separated() -> None:
     agents_text = AGENTS.read_text(encoding="utf-8")
     orchestration_text = ORCHESTRATION.read_text(encoding="utf-8")
-    assert "govern the shipped\noperator assistant, not developer agents" in agents_text
+    normalized_agents = " ".join(agents_text.split())
+    assert "govern the shipped operator assistant, not developer agents" in normalized_agents
     assert "## 8. Product assistant boundary" in orchestration_text
     assert "exact allowlisted read-only engine queries" in agents_text
     assert "may not send mutating/control commands" in orchestration_text
