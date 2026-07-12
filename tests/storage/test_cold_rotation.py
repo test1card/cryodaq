@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,7 +15,20 @@ import pytest
 pytest.importorskip("pyarrow")
 import pyarrow.parquet as pq  # noqa: E402
 
+from cryodaq.channels.descriptors import (  # noqa: E402
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1  # noqa: E402
+from cryodaq.storage.channel_descriptors import (  # noqa: E402
+    initialize_descriptor_storage,
+    install_catalog,
+)
 from cryodaq.storage.cold_rotation import ColdRotationService, RotationResult  # noqa: E402
+from cryodaq.storage.sqlite_writer import SCHEMA_READINGS  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,24 +40,10 @@ def _create_db(db_path: Path, rows: int, base_ts: float | None = None) -> None:
     if base_ts is None:
         base_ts = datetime(2026, 1, 15, tzinfo=UTC).timestamp()
     conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS readings ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  timestamp REAL NOT NULL,"
-        "  instrument_id TEXT NOT NULL,"
-        "  channel TEXT NOT NULL,"
-        "  value REAL NOT NULL,"
-        "  unit TEXT NOT NULL,"
-        "  status TEXT NOT NULL"
-        ")"
-    )
+    conn.execute(SCHEMA_READINGS)
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            (base_ts + i, "ls218s", f"Т{(i % 8) + 1}", 77.0 + i * 0.01, "K", "ok")
-            for i in range(rows)
-        ],
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
+        [(base_ts + i, "ls218s", f"Т{(i % 8) + 1}", 77.0 + i * 0.01, "K", "ok") for i in range(rows)],
     )
     conn.commit()
     conn.close()
@@ -57,6 +58,50 @@ def _old_db_name(days_ago: int, today: datetime | None = None) -> str:
 def _today_db_name(today: datetime | None = None) -> str:
     ref = today or datetime(2026, 4, 29, tzinfo=UTC)
     return f"data_{ref.date().isoformat()}.db"
+
+
+def _descriptor(**changes: object) -> ChannelDescriptorV1:
+    values: dict[str, object] = {
+        "schema_version": 1,
+        "channel_id": "sensor.main",
+        "instrument_id": "reference-thermometer",
+        "source_key": "input.1.temperature",
+        "quantity": ChannelQuantity.TEMPERATURE,
+        "unit": "K",
+        "role": ChannelRole.PRIMARY_MEASUREMENT,
+        "safety_class": ChannelSafetyClass.OBSERVATIONAL,
+        "display_group": "Cryostat",
+        "display_name": "Основной датчик",
+        "visible_by_default": True,
+        "display_order": 1,
+        "descriptor_revision": 1,
+    }
+    values.update(changes)
+    return ChannelDescriptorV1(**values)  # type: ignore[arg-type]
+
+
+def _add_descriptor_catalog(
+    db_path: Path,
+    descriptor: ChannelDescriptorV1 | None = None,
+) -> ChannelDescriptorV1:
+    descriptor = descriptor or _descriptor()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        initialize_descriptor_storage(conn)
+        install_catalog(conn, ChannelCatalog([descriptor]))
+        conn.execute(
+            "UPDATE readings SET instrument_id=?, channel=?, unit=?, descriptor_hash=?",
+            (
+                descriptor.instrument_id,
+                descriptor.channel_id,
+                descriptor.unit,
+                descriptor.descriptor_hash,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return descriptor
 
 
 # ---------------------------------------------------------------------------
@@ -339,12 +384,10 @@ def test_index_updated_on_rotation(tmp_path: Path) -> None:
 
     # Sizes must match actual files on disk, not just be > 0.
     assert entry["size_bytes_original"] == result.size_original, (
-        f"size_bytes_original {entry['size_bytes_original']} != "
-        f"RotationResult.size_original {result.size_original}"
+        f"size_bytes_original {entry['size_bytes_original']} != RotationResult.size_original {result.size_original}"
     )
     assert entry["size_bytes_archive"] == result.size_archive, (
-        f"size_bytes_archive {entry['size_bytes_archive']} != "
-        f"RotationResult.size_archive {result.size_archive}"
+        f"size_bytes_archive {entry['size_bytes_archive']} != RotationResult.size_archive {result.size_archive}"
     )
     assert result.size_original > 0
     assert result.size_archive > 0
@@ -475,12 +518,8 @@ def _add_operator_log(db_path: Path, rows: int, base_ts: float | None = None) ->
         ")"
     )
     conn.executemany(
-        "INSERT INTO operator_log (timestamp, experiment_id, author, source, message, tags) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            (base_ts + i, "EXP-1", "operator", "gui", f"note {i}", "[]")
-            for i in range(rows)
-        ],
+        "INSERT INTO operator_log (timestamp, experiment_id, author, source, message, tags) VALUES (?, ?, ?, ?, ?, ?)",
+        [(base_ts + i, "EXP-1", "operator", "gui", f"note {i}", "[]") for i in range(rows)],
     )
     conn.commit()
     conn.close()
@@ -664,9 +703,7 @@ def test_daemon_start_stop(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_failed_unlink_strands_then_swept_next_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failed_unlink_strands_then_swept_next_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """F5: index-before-unlink is the correct fail-safe, but a failed unlink
     (e.g. a Windows file lock) must not abort the pass or strand the hot DB.
 
@@ -782,8 +819,7 @@ def test_modified_stranded_hot_db_survives_sweep(
     new_ts = old_ts + 10_000
     conn = sqlite3.connect(str(data_dir / old_name))
     conn.execute(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         (new_ts, "ls218s", "Т1", 4.2, "K", "ok"),
     )
     conn.commit()
@@ -795,10 +831,9 @@ def test_modified_stranded_hot_db_survives_sweep(
         asyncio.run(service.run_once(now=today))
 
     assert (data_dir / old_name).exists(), "modified stranded DB must NOT be deleted (data loss)"
-    assert any(
-        old_name in rec.getMessage() and "KEEP" in rec.getMessage().upper()
-        for rec in caplog.records
-    ), "sweep must warn that the modified stranded DB is kept"
+    assert any(old_name in rec.getMessage() and "KEEP" in rec.getMessage().upper() for rec in caplog.records), (
+        "sweep must warn that the modified stranded DB is kept"
+    )
     # The new row survives and is visible via the overlap union (5 archived + 1 new).
     rows = reader.query_rows(None, None, None)
     assert len(rows) == 6, f"union must surface the new restored row: {len(rows)} rows"
@@ -811,9 +846,7 @@ def test_modified_stranded_hot_db_survives_sweep(
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_index_entry_without_source_md5_is_kept(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_legacy_index_entry_without_source_md5_is_kept(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """An index entry predating the source_md5 field cannot prove the hot DB is
     byte-identical to the archive, so the sweep must KEEP it, not delete it."""
     pytest.importorskip("pyarrow")
@@ -850,7 +883,7 @@ def test_legacy_index_entry_without_source_md5_is_kept(
 
 
 def test_rotation_records_source_md5(tmp_path: Path) -> None:
-    """New index entries carry source_md5 = MD5 of the archived source .db."""
+    """New entries bind source_md5 to the locked logical SQLite image (including WAL)."""
     import asyncio
 
     data_dir = tmp_path / "data"
@@ -861,25 +894,417 @@ def test_rotation_records_source_md5(tmp_path: Path) -> None:
     old_name = _old_db_name(40, today)
     db_path = data_dir / old_name
 
-    import hashlib as _hashlib
-
-    def _md5(path: Path) -> str:
-        h = _hashlib.md5()
-        with path.open("rb") as fh:
-            for block in iter(lambda: fh.read(65_536), b""):
-                h.update(block)
-        return h.hexdigest()
-
     _create_db(db_path, rows=30)
-    expected_source_md5 = _md5(db_path)
-
-    service = ColdRotationService(
-        data_dir=data_dir, archive_dir=archive_dir, age_days=30, enabled=True
-    )
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30, enabled=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        expected_source_md5 = service._logical_source_md5(conn)
+    finally:
+        conn.rollback()
+        conn.close()
     results = asyncio.run(service.run_once(now=today))
     assert len(results) == 1
 
     idx = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
     entry = idx["files"][0]
     assert entry.get("source_md5") == expected_source_md5
+    assert entry.get("source_md5_kind") == "logical_iterdump_v1"
     assert len(entry["source_md5"]) == 32
+
+
+def test_descriptor_rotation_writes_exact_referenced_sidecar(tmp_path: Path) -> None:
+    """Only referenced, canonical descriptor envelopes become indexed cold authority."""
+    import asyncio
+    import hashlib
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=3)
+    descriptor = _add_descriptor_catalog(db_path)
+    # A valid but unreferenced catalog row must not leak into the cold sidecar.
+    extra = _descriptor(
+        channel_id="sensor.spare",
+        source_key="input.2.temperature",
+        display_name="Запасной датчик",
+        display_order=2,
+    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        install_catalog(conn, ChannelCatalog([extra]))
+    finally:
+        conn.close()
+    envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
+
+    result = asyncio.run(ColdRotationService(data_dir=data_dir, archive_dir=archive_dir).run_once(now=today))
+    assert len(result) == 1
+    readings = pq.ParquetFile(result[0].archive_path).read()
+    assert readings.schema.names == [
+        "timestamp",
+        "instrument_id",
+        "channel",
+        "value",
+        "unit",
+        "status",
+        "descriptor_hash",
+    ]
+    assert set(readings["descriptor_hash"].to_pylist()) == {descriptor.descriptor_hash}
+
+    index = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    entry = index["files"][0]
+    sidecar = archive_dir / entry["channel_descriptors_path"]
+    table = pq.ParquetFile(sidecar).read()
+    assert table.schema.names == [
+        "descriptor_hash",
+        "channel_id",
+        "instrument_id",
+        "source_key",
+        "descriptor_revision",
+        "envelope_json",
+    ]
+    assert table.to_pylist() == [
+        {
+            "descriptor_hash": descriptor.descriptor_hash,
+            "channel_id": descriptor.channel_id,
+            "instrument_id": descriptor.instrument_id,
+            "source_key": descriptor.source_key,
+            "descriptor_revision": descriptor.descriptor_revision,
+            "envelope_json": envelope.canonical_json,
+        }
+    ]
+    assert entry["channel_descriptors_rows"] == 1
+    assert entry["channel_descriptors_size_bytes"] == sidecar.stat().st_size
+    assert entry["channel_descriptors_checksum"] == hashlib.md5(sidecar.read_bytes()).hexdigest()
+    assert not db_path.exists()
+
+
+def test_legacy_and_all_null_descriptor_rows_write_no_sidecar(tmp_path: Path) -> None:
+    """Absence remains the only legacy marker and does not invent a catalog artifact."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    initialize_conn = sqlite3.connect(str(db_path))
+    try:
+        initialize_descriptor_storage(initialize_conn)
+    finally:
+        initialize_conn.close()
+
+    results = asyncio.run(ColdRotationService(data_dir=data_dir, archive_dir=archive_dir).run_once(now=today))
+    assert len(results) == 1
+    assert pq.read_table(results[0].archive_path)["descriptor_hash"].to_pylist() == [None, None]
+    assert not list(archive_dir.rglob("*.channel_descriptors.parquet"))
+    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+    assert not any(key.startswith("channel_descriptors_") for key in entry)
+
+
+@pytest.mark.parametrize("failure", ["write", "reopen", "checksum", "index"])
+def test_descriptor_failure_matrix_preserves_hot_db_and_no_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Every pre-commit sidecar boundary fails closed and cleans only new outputs."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+
+    if failure == "write":
+        monkeypatch.setattr(service, "_write_descriptor_parquet", lambda *_: (_ for _ in ()).throw(OSError("disk")))
+    elif failure == "reopen":
+        monkeypatch.setattr(
+            service, "_verify_descriptor_sidecar", lambda *_: (_ for _ in ()).throw(RuntimeError("decode"))
+        )
+    elif failure == "checksum":
+        real_md5 = service._md5_hex
+
+        def fail_sidecar(path: Path) -> str:
+            if path.name.endswith(".channel_descriptors.parquet"):
+                raise OSError("checksum")
+            return real_md5(path)
+
+        monkeypatch.setattr(service, "_md5_hex", fail_sidecar)
+    else:
+        monkeypatch.setattr(service, "_update_index", lambda **_: (_ for _ in ()).throw(OSError("index")))
+
+    assert asyncio.run(service.run_once(now=today)) == []
+    assert db_path.exists()
+    assert not (archive_dir / "index.json").exists()
+    assert not list(archive_dir.rglob("*.parquet"))
+
+
+@pytest.mark.parametrize("corruption", ["missing", "blob", "orphan"])
+def test_missing_corrupt_or_orphan_catalog_never_indexes_or_deletes(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=1)
+    descriptor = _add_descriptor_catalog(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        if corruption == "missing":
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("DROP TRIGGER channel_descriptors_no_delete")
+            conn.execute("DELETE FROM channel_descriptors")
+        elif corruption == "blob":
+            conn.execute("DROP TRIGGER channel_descriptors_no_update")
+            conn.execute("UPDATE channel_descriptors SET envelope_json=X'00'")
+        else:
+            conn.execute(
+                "INSERT INTO channel_descriptors "
+                "(descriptor_hash, channel_id, instrument_id, source_key, descriptor_revision, envelope_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("sha256:" + "0" * 64, "orphan", "orphan", "input.2", 1, b"{}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert asyncio.run(ColdRotationService(data_dir=data_dir, archive_dir=archive_dir).run_once(now=today)) == []
+    assert db_path.exists()
+    assert not (archive_dir / "index.json").exists()
+    assert not list(archive_dir.rglob("*.parquet"))
+    assert descriptor.grants_control_authority is False
+
+
+def test_descriptor_bearing_gzip_rotates_with_same_sidecar_proof(tmp_path: Path) -> None:
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    descriptor = _add_descriptor_catalog(db_path)
+    gz_path = db_path.with_suffix(".db.gz")
+    with db_path.open("rb") as source, gzip.open(gz_path, "wb") as target:
+        shutil.copyfileobj(source, target)
+    db_path.unlink()
+
+    results = asyncio.run(ColdRotationService(data_dir=data_dir, archive_dir=archive_dir).run_once(now=today))
+    assert len(results) == 1
+    assert not gz_path.exists()
+    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+    sidecar = pq.ParquetFile(archive_dir / entry["channel_descriptors_path"]).read()
+    assert sidecar["descriptor_hash"].to_pylist() == [descriptor.descriptor_hash]
+
+
+def test_index_raise_after_atomic_replace_preserves_complete_archive(tmp_path: Path) -> None:
+    """A post-replace exception recognizes the committed index and never destroys its files."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_update = service._update_index
+
+    def committed_then_raises(**kwargs: object) -> None:
+        real_update(**kwargs)  # type: ignore[arg-type]
+        raise OSError("fault after atomic replace")
+
+    service._update_index = committed_then_raises  # type: ignore[method-assign]
+    results = asyncio.run(service.run_once(now=today))
+    assert len(results) == 1
+    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+    assert (archive_dir / entry["archive_path"]).is_file()
+    assert (archive_dir / entry["channel_descriptors_path"]).is_file()
+    assert not db_path.exists()
+
+
+def test_stranded_descriptor_db_requires_intact_sidecar_before_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing/corrupt descriptor sidecar blocks every Windows-style delete retry."""
+    import asyncio
+    import pathlib
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_unlink = pathlib.Path.unlink
+    locked = True
+
+    def windows_lock(path: Path, *args: object, **kwargs: object) -> None:
+        if locked and path == db_path:
+            raise PermissionError("sharing violation")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", windows_lock)
+    assert len(asyncio.run(service.run_once(now=today))) == 1
+    assert db_path.exists()
+    # Repeating while the Windows sharing violation persists performs no
+    # duplicate copy/index, and the intact sidecar passes the stranded proof.
+    asyncio.run(service.run_once(now=today))
+    assert db_path.exists()
+    assert len(json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"]) == 1
+    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+    descriptor_path = archive_dir / entry["channel_descriptors_path"]
+    real_unlink(descriptor_path)
+    locked = False
+    asyncio.run(service.run_once(now=today))
+    assert db_path.exists(), "missing descriptor authority must block stranded hot deletion"
+
+
+@pytest.mark.parametrize("boundary", range(1, 7))
+def test_source_mutation_at_each_archive_boundary_never_deletes_hot_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: int,
+) -> None:
+    """One locked logical source cut binds rows, descriptors and source_md5."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    _add_operator_log(db_path, rows=1)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_assert = service._assert_source_unchanged
+    calls = 0
+
+    def mutate_at_boundary(conn: sqlite3.Connection, expected: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == boundary:
+            conn.execute(
+                "INSERT INTO readings "
+                "(timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
+                "SELECT timestamp + 1000, instrument_id, channel, value, unit, status, descriptor_hash "
+                "FROM readings LIMIT 1"
+            )
+        real_assert(conn, expected)
+
+    monkeypatch.setattr(service, "_assert_source_unchanged", mutate_at_boundary)
+    assert asyncio.run(service.run_once(now=today)) == []
+    assert calls >= boundary
+    assert db_path.exists()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM readings").fetchone() == (2,)
+    finally:
+        conn.close()
+    if (archive_dir / "index.json").exists():
+        entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+        assert (archive_dir / entry["archive_path"]).exists()
+        assert (archive_dir / entry["channel_descriptors_path"]).exists()
+
+
+def test_stranded_sweep_infers_required_sidecar_from_readings_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing all optional sidecar fields cannot downgrade non-null hashes to legacy."""
+    import asyncio
+    import pathlib
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_unlink = pathlib.Path.unlink
+
+    def lock_hot(path: Path, *args: object, **kwargs: object) -> None:
+        if path == db_path:
+            raise PermissionError("sharing violation")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", lock_hot)
+    assert len(asyncio.run(service.run_once(now=today))) == 1
+    index_path = archive_dir / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    for key in tuple(index["files"][0]):
+        if key.startswith("channel_descriptors_"):
+            del index["files"][0][key]
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    asyncio.run(service.run_once(now=today))
+    assert db_path.exists()
+
+
+@pytest.mark.parametrize("artifact", ["readings", "descriptors"])
+def test_corruption_after_index_commit_preserves_hot_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    """Deletion requires reopening actual indexed bytes, not trusting index scalars."""
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_descriptor_catalog(db_path)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_verify = service._verify_committed_archive
+
+    def corrupt_then_verify(**kwargs: object) -> None:
+        relative = kwargs["archive_rel"] if artifact == "readings" else kwargs["descriptor_rel"]
+        assert isinstance(relative, str)
+        path = archive_dir / relative
+        payload = bytearray(path.read_bytes())
+        payload[len(payload) // 2] ^= 0x01
+        path.write_bytes(payload)
+        real_verify(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_verify_committed_archive", corrupt_then_verify)
+    assert asyncio.run(service.run_once(now=today)) == []
+    assert db_path.exists()
+    assert (archive_dir / "index.json").exists()
+
+
+def test_cold_rotation_imports_channel_contract_only_through_storage_adapter() -> None:
+    import ast
+    import inspect
+
+    import cryodaq.storage.cold_rotation as module
+
+    tree = ast.parse(inspect.getsource(module))
+    direct = [
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cryodaq.channels")
+    ]
+    assert direct == []

@@ -20,6 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from cryodaq.channels.descriptors import ChannelCatalog
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import (
@@ -27,6 +28,13 @@ from cryodaq.storage._sqlite import (
     SQLITE_BROKEN_RANGE,
     sqlite3,
     sqlite_version_info,
+)
+from cryodaq.storage.channel_descriptors import (
+    descriptor_hash_for_reading,
+    initialize_descriptor_storage,
+    install_catalog,
+    snapshot_catalog,
+    verify_descriptor_storage,
 )
 from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
@@ -179,6 +187,7 @@ class SQLiteWriter:
         *,
         flush_interval_s: float = 1.0,
         batch_size: int = 500,
+        channel_catalog: ChannelCatalog | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._flush_interval_s = flush_interval_s
@@ -192,6 +201,10 @@ class SQLiteWriter:
         self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
         # Periodic explicit WAL checkpoint counter (DEEP_AUDIT_CC.md D.1).
         self._checkpoint_counter = 0
+        # Optional F35 descriptor authority. Absence is explicit legacy
+        # compatibility; a configured catalog makes every persisted reading
+        # resolve exactly and fail closed on identity/unit mismatch.
+        self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
 
         # Disk-full graceful degradation (Phase 2a H.1).
         # When the writer thread detects disk-full from sqlite3.OperationalError,
@@ -294,8 +307,7 @@ class SQLiteWriter:
             return
         if exc is not None:
             logger.critical(
-                "Persistence-failure safety callback raised — disk-full fault "
-                "latch may NOT have fired: %s",
+                "Persistence-failure safety callback raised — disk-full fault latch may NOT have fired: %s",
                 exc,
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
@@ -313,6 +325,8 @@ class SQLiteWriter:
             except sqlite3.OperationalError as exc:
                 logger.warning("Final WAL checkpoint at rotation failed: %s", exc)
             self._conn.close()
+            self._conn = None
+            self._current_date = None
         db_path = self._db_path(day)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
@@ -340,6 +354,7 @@ class SQLiteWriter:
         conn.execute("PRAGMA wal_autocheckpoint=1000;")  # ~4 MB
         conn.execute("PRAGMA cache_size=-16384;")  # 16 MB cache
         conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA foreign_keys=ON;")
         conn.execute(SCHEMA_READINGS)
         conn.execute(SCHEMA_SOURCE_DATA)
         conn.execute(SCHEMA_OPERATOR_LOG)
@@ -349,6 +364,11 @@ class SQLiteWriter:
         conn.execute(INDEX_OPERATOR_LOG_TS)
         conn.execute(INDEX_OPERATOR_LOG_EXPERIMENT)
         conn.commit()
+        try:
+            initialize_descriptor_storage(conn)
+        except Exception:
+            conn.close()
+            raise
         self._conn = conn
         self._current_date = day
         logger.info("Открыта БД: %s", db_path)
@@ -434,6 +454,16 @@ class SQLiteWriter:
                 skipped += 1
                 continue
             stored_value, stored_status = encode(r.value, r.status)
+            descriptor_hash = (
+                None
+                if self._channel_catalog is None
+                else descriptor_hash_for_reading(
+                    self._channel_catalog,
+                    instrument_id=r.instrument_id,
+                    channel=r.channel,
+                    unit=r.unit,
+                )
+            )
             rows.append(
                 (
                     r.timestamp.timestamp(),
@@ -442,6 +472,7 @@ class SQLiteWriter:
                     stored_value,
                     r.unit,
                     stored_status,
+                    descriptor_hash,
                 )
             )
         if skipped:
@@ -453,16 +484,23 @@ class SQLiteWriter:
         if not rows:
             return True
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            if self._channel_catalog is not None:
+                install_catalog(conn, self._channel_catalog, within_transaction=True)
             conn.executemany(
-                "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-                "VALUES (?, ?, ?, ?, ?, ?);",
+                "INSERT INTO main.readings "
+                "(timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?);",
                 rows,
             )
+            if self._channel_catalog is not None:
+                verify_descriptor_storage(conn)
             conn.commit()
             # A successful write resets the locked-DB streak (roadmap A6).
             self._locked_failure_count = 0
             self._locked_failure_first_ts = None
         except sqlite3.OperationalError as exc:
+            conn.rollback()
             # Disk-full graceful degradation (Phase 2a H.1).
             # Detect by exact PHRASES to avoid false positives like
             # "database disk image is malformed" (SQLITE_CORRUPT) or
@@ -479,8 +517,7 @@ class SQLiteWriter:
             if any(phrase in msg for phrase in disk_full_phrases):
                 if not self._disk_full:
                     logger.critical(
-                        "DISK FULL detected in SQLite write: %s. "
-                        "Pausing polling, triggering safety fault.",
+                        "DISK FULL detected in SQLite write: %s. Pausing polling, triggering safety fault.",
                         exc,
                     )
                 self._disk_full = True
@@ -504,10 +541,7 @@ class SQLiteWriter:
                     self._locked_failure_first_ts = now
                 self._locked_failure_count += 1
                 span = now - self._locked_failure_first_ts
-                if (
-                    self._locked_failure_count >= _LOCKED_FAILURE_THRESHOLD
-                    and span >= _LOCKED_FAILURE_SPAN_S
-                ):
+                if self._locked_failure_count >= _LOCKED_FAILURE_THRESHOLD and span >= _LOCKED_FAILURE_SPAN_S:
                     logger.critical(
                         "LOCKED DB: %d consecutive database is locked/busy "
                         "failures spanning %.1fs. Triggering safety fault.",
@@ -535,6 +569,9 @@ class SQLiteWriter:
                 # disk-full above (avoid the historic tight CRITICAL-log loop).
                 return False
             # Any other OperationalError keeps the existing semantics.
+            raise
+        except Exception:
+            conn.rollback()
             raise
 
         # Periodic explicit PASSIVE checkpoint (~once per minute at 1 Hz batch
@@ -663,8 +700,7 @@ class SQLiteWriter:
             try:
                 conn.execute(SCHEMA_OPERATOR_LOG)
                 query = (
-                    "SELECT id, timestamp, experiment_id, author, source, message, tags "
-                    "FROM operator_log WHERE 1 = 1"
+                    "SELECT id, timestamp, experiment_id, author, source, message, tags FROM operator_log WHERE 1 = 1"
                 )
                 params: list[Any] = []
                 if experiment_id is not None:
@@ -705,17 +741,13 @@ class SQLiteWriter:
 
             # query_operator_log unions hot+cold; a hot day is scanned above, so
             # keep only cold-archived days (no hot .db) to avoid double-counting.
-            hot_days = {
-                p.stem.removeprefix("data_") for p in self._data_dir.glob("data_????-??-??.db")
-            }
+            hot_days = {p.stem.removeprefix("data_") for p in self._data_dir.glob("data_????-??-??.db")}
             reader = ArchiveReader(self._data_dir, archive_index.parent)
-            for raw_ts, raw_exp, author, source, message, raw_tags in reader.query_operator_log(
-                start_time, end_time
-            ):
+            for raw_ts, raw_exp, author, source, message, raw_tags in reader.query_operator_log(start_time, end_time):
                 entry_ts = _parse_timestamp(raw_ts)
                 utc_day = (
-                    entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=UTC)
-                ).astimezone(UTC).date().isoformat()
+                    (entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=UTC)).astimezone(UTC).date().isoformat()
+                )
                 if utc_day in hot_days:
                     continue
                 if experiment_id is not None and raw_exp != experiment_id:
@@ -848,9 +880,7 @@ class SQLiteWriter:
         """Запустить цикл записи (legacy, обратная совместимость)."""
         self._running = True
         self._task = asyncio.create_task(self._consume_loop(queue), name="sqlite_writer")
-        logger.info(
-            "SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size
-        )
+        logger.info("SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size)
 
     async def stop(self) -> None:
         """Остановить цикл, дождаться завершения, закрыть БД."""
@@ -950,9 +980,7 @@ class SQLiteWriter:
                             # NaN-доктрина: mask sentinel / error / legacy ±inf at
                             # the read boundary — the GUI-reconnect history feed
                             # must not surface a non-physical number.
-                            result[ch].append(
-                                (float(row["timestamp"]), decode(float(row["value"]), row["status"]))
-                            )
+                            result[ch].append((float(row["timestamp"]), decode(float(row["value"]), row["status"])))
 
                     if channels:
                         # Per-channel bounded query: each channel gets its own
@@ -1003,14 +1031,10 @@ class SQLiteWriter:
             # from_ts=None means unbounded past → the request ALWAYS reaches
             # archived days, so ALWAYS union when the index exists (a bounded
             # start only reaches cold days when it predates the oldest hot day).
-            from_day_req = (
-                datetime.fromtimestamp(from_ts, tz=UTC).date() if from_ts is not None else None
-            )
+            from_day_req = datetime.fromtimestamp(from_ts, tz=UTC).date() if from_ts is not None else None
             if from_day_req is None or oldest_hot is None or from_day_req < oldest_hot:
                 if oldest_hot is not None:
-                    boundary = datetime(
-                        oldest_hot.year, oldest_hot.month, oldest_hot.day, tzinfo=UTC
-                    ).timestamp()
+                    boundary = datetime(oldest_hot.year, oldest_hot.month, oldest_hot.day, tzinfo=UTC).timestamp()
                     cold_to = boundary - 1e-6
                     if to_ts is not None and to_ts < cold_to:
                         cold_to = to_ts
@@ -1031,9 +1055,7 @@ class SQLiteWriter:
                             continue
                     if archived_days:
                         earliest = min(archived_days)
-                        cold_from = datetime(
-                            earliest.year, earliest.month, earliest.day, tzinfo=UTC
-                        ).timestamp()
+                        cold_from = datetime(earliest.year, earliest.month, earliest.day, tzinfo=UTC).timestamp()
                     else:
                         cold_from = None
                 if cold_from is not None and cold_to >= cold_from:

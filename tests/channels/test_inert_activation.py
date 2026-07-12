@@ -4,22 +4,26 @@ import ast
 from pathlib import Path
 
 
-def test_no_existing_production_module_imports_or_activates_channel_contract() -> None:
+def test_only_bounded_storage_adapter_imports_channel_contract() -> None:
     source_root = Path(__file__).parents[2] / "src" / "cryodaq"
     channel_root = source_root / "channels"
-    offenders: list[str] = []
+    importers: set[str] = set()
     for path in source_root.rglob("*.py"):
         if path.is_relative_to(channel_root):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cryodaq.channels"):
-                offenders.append(str(path.relative_to(source_root)))
+                importers.add(str(path.relative_to(source_root)))
             elif isinstance(node, ast.Import) and any(
                 alias.name.startswith("cryodaq.channels") for alias in node.names
             ):
-                offenders.append(str(path.relative_to(source_root)))
-    assert offenders == []
+                importers.add(str(path.relative_to(source_root)))
+    assert importers == {
+        "storage/channel_descriptors.py",
+        "storage/descriptor_archive.py",
+        "storage/sqlite_writer.py",
+    }
 
 
 def test_channel_contract_has_no_product_subsystem_imports() -> None:

@@ -28,12 +28,18 @@ import pyarrow.parquet as pq
 
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.descriptor_archive import (
+    MAX_ARCHIVE_DESCRIPTORS,
+    ArchivedDescriptor,
+    load_referenced_descriptors,
+    verify_archived_descriptors,
+)
 
 logger = logging.getLogger(__name__)
 
 # Parquet schema for cold rotation: same columns as parquet_archive.py minus
 # experiment_id (cold rotation has no experiment context per F17 spec).
-_COLD_SCHEMA = pa.schema(
+_LEGACY_COLD_SCHEMA = pa.schema(
     [
         ("timestamp", pa.timestamp("us", tz="UTC")),
         ("instrument_id", pa.string()),
@@ -41,6 +47,23 @@ _COLD_SCHEMA = pa.schema(
         ("value", pa.float64()),
         ("unit", pa.string()),
         ("status", pa.string()),
+    ]
+)
+_COLD_SCHEMA = pa.schema(
+    [
+        *_LEGACY_COLD_SCHEMA,
+        ("descriptor_hash", pa.string()),
+    ]
+)
+
+_CHANNEL_DESCRIPTOR_SCHEMA = pa.schema(
+    [
+        ("descriptor_hash", pa.string()),
+        ("channel_id", pa.string()),
+        ("instrument_id", pa.string()),
+        ("source_key", pa.string()),
+        ("descriptor_revision", pa.int32()),
+        ("envelope_json", pa.binary()),
     ]
 )
 
@@ -196,6 +219,7 @@ class ColdRotationService:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._sweep_blocked: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -366,9 +390,7 @@ class ColdRotationService:
             canonical_name=db_path.name,
             result_path=db_path,
             today=today,
-            unlink_targets=tuple(
-                db_path.parent / (db_path.name + suffix) for suffix in ("", "-wal", "-shm")
-            ),
+            unlink_targets=tuple(db_path.parent / (db_path.name + suffix) for suffix in ("", "-wal", "-shm")),
         )
 
     def _rotate_readings_sync(
@@ -379,6 +401,39 @@ class ColdRotationService:
         result_path: Path,
         today: date,
         unlink_targets: tuple[Path, ...],
+    ) -> RotationResult | None:
+        """Acquire one SQLite source cut and hold its writer lock to commit."""
+        source_conn = sqlite3.connect(str(read_db), timeout=10)
+        try:
+            source_conn.execute("BEGIN IMMEDIATE")
+            source_md5 = self._logical_source_md5(source_conn)
+            return self._rotate_locked_sync(
+                read_db=read_db,
+                canonical_name=canonical_name,
+                result_path=result_path,
+                today=today,
+                unlink_targets=unlink_targets,
+                source_conn=source_conn,
+                expected_source_md5=source_md5,
+            )
+        except Exception:
+            logger.exception("Failed to acquire stable source cut for %s", canonical_name)
+            return None
+        finally:
+            if source_conn.in_transaction:
+                source_conn.rollback()
+            source_conn.close()
+
+    def _rotate_locked_sync(
+        self,
+        *,
+        read_db: Path,
+        canonical_name: str,
+        result_path: Path,
+        today: date,
+        unlink_targets: tuple[Path, ...],
+        source_conn: sqlite3.Connection,
+        expected_source_md5: str,
     ) -> RotationResult | None:
         """Archive one decompressed readings DB to Parquet + index it.
 
@@ -419,23 +474,39 @@ class ColdRotationService:
             )
             return None
 
-        # Step 1: Read all rows from SQLite
+        # Step 1: Read all rows and the exact referenced descriptor envelopes.
         try:
             rows = self._read_all_rows(read_db)
+            referenced_hashes = {descriptor_hash for *_, descriptor_hash in rows if descriptor_hash is not None}
+            descriptor_envelopes = load_referenced_descriptors(source_conn, referenced_hashes)
+            self._assert_source_unchanged(source_conn, expected_source_md5)
         except Exception:
             logger.exception("Failed to read SQLite %s — skipping rotation", canonical_name)
             return None
 
         expected_rows = len(rows)
 
+        descriptor_rel = f"year={day.year}/month={day.month:02d}/{stem}.channel_descriptors.parquet"
+        descriptor_path = self._archive_dir / descriptor_rel
+        # An unindexed artifact is not ours to overwrite or remove.  It may be
+        # evidence from an interrupted/manual recovery and must be adjudicated.
+        possible_outputs = (archive_path, descriptor_path)
+        if any(path.exists() for path in possible_outputs):
+            logger.error(
+                "Unindexed archive artifact already exists for %s — leaving it and SQLite untouched",
+                canonical_name,
+            )
+            return None
+
         # Step 2: Write Parquet (any exception → clean up partial file)
         archive_path.parent.mkdir(parents=True, exist_ok=True)
+        owned_outputs: set[Path] = {archive_path}
         try:
             self._write_parquet(archive_path, rows)
+            self._assert_source_unchanged(source_conn, expected_source_md5)
         except Exception:
             logger.exception("Failed to write Parquet for %s — leaving SQLite intact", canonical_name)
-            # Clean up any partial Parquet file
-            archive_path.unlink(missing_ok=True)
+            self._cleanup_owned(owned_outputs)
             return None
 
         # Step 3: Verify row count
@@ -446,7 +517,7 @@ class ColdRotationService:
                 "Cannot verify Parquet row count for %s — leaving SQLite intact",
                 canonical_name,
             )
-            archive_path.unlink(missing_ok=True)
+            self._cleanup_owned(owned_outputs)
             return None
 
         if actual_rows != expected_rows:
@@ -456,8 +527,46 @@ class ColdRotationService:
                 expected_rows,
                 actual_rows,
             )
-            archive_path.unlink(missing_ok=True)
+            self._cleanup_owned(owned_outputs)
             return None
+
+        try:
+            archived_hashes = self._read_parquet_descriptor_hashes(archive_path)
+            if archived_hashes != referenced_hashes:
+                raise RuntimeError("readings Parquet descriptor references changed during write")
+        except Exception:
+            logger.exception(
+                "Cannot verify Parquet descriptor references for %s — leaving SQLite intact",
+                canonical_name,
+            )
+            self._cleanup_owned(owned_outputs)
+            return None
+
+        descriptor_rows_count = 0
+        descriptor_checksum: str | None = None
+        descriptor_size_bytes: int | None = None
+        if referenced_hashes:
+            owned_outputs.add(descriptor_path)
+            try:
+                self._write_descriptor_parquet(descriptor_path, descriptor_envelopes)
+                self._verify_descriptor_sidecar(descriptor_path, archived_hashes)
+                descriptor_rows_count = len(descriptor_envelopes)
+                descriptor_size_bytes = descriptor_path.stat().st_size
+                descriptor_checksum = self._md5_hex(descriptor_path)
+                # Re-check after hashing: the indexed bytes must be the bytes
+                # that passed semantic verification.
+                if descriptor_path.stat().st_size != descriptor_size_bytes:
+                    raise RuntimeError("descriptor sidecar changed while checksumming")
+                if self._md5_hex(descriptor_path) != descriptor_checksum:
+                    raise RuntimeError("descriptor sidecar changed after verification")
+                self._assert_source_unchanged(source_conn, expected_source_md5)
+            except Exception:
+                logger.exception(
+                    "Failed to preserve channel descriptors for %s — leaving SQLite intact",
+                    canonical_name,
+                )
+                self._cleanup_owned(owned_outputs)
+                return None
 
         # Step 3.5: Preserve operator_log audit trail (CR-3). The daily DB also
         # holds operator_log; without this the whole audit trail is destroyed
@@ -471,13 +580,21 @@ class ColdRotationService:
                 "Failed to read operator_log from %s — leaving SQLite intact, cleaning up Parquet",
                 canonical_name,
             )
-            archive_path.unlink(missing_ok=True)
+            self._cleanup_owned(owned_outputs)
             return None
 
         if operator_log_rows:
             operator_log_rel = f"year={day.year}/month={day.month:02d}/{stem}.operator_log.parquet"
             operator_log_path = self._archive_dir / operator_log_rel
             operator_log_rows_count = len(operator_log_rows)
+            if operator_log_path.exists():
+                logger.error(
+                    "Unindexed operator-log artifact already exists for %s — leaving it and SQLite untouched",
+                    canonical_name,
+                )
+                self._cleanup_owned(owned_outputs)
+                return None
+            owned_outputs.add(operator_log_path)
             try:
                 self._write_operator_log_parquet(operator_log_path, operator_log_rows)
                 actual_ol = pq.read_metadata(str(operator_log_path)).num_rows
@@ -485,13 +602,13 @@ class ColdRotationService:
                     raise RuntimeError(
                         f"operator_log row count mismatch: expected {operator_log_rows_count}, got {actual_ol}"
                     )
+                self._assert_source_unchanged(source_conn, expected_source_md5)
             except Exception:
                 logger.exception(
                     "Failed to preserve operator_log for %s — leaving SQLite intact, cleaning up Parquet",
                     canonical_name,
                 )
-                operator_log_path.unlink(missing_ok=True)
-                archive_path.unlink(missing_ok=True)
+                self._cleanup_owned(owned_outputs)
                 return None
 
         # Step 4: Update index. Record the source .db's own MD5 alongside the
@@ -500,10 +617,20 @@ class ColdRotationService:
         # touches read_db between here and the Step-5 unlink, so this hash is
         # exactly what would be deleted (for a legacy .gz it is the decompressed
         # temp copy — the same bytes a future reader would decompress).
-        size_archive = archive_path.stat().st_size
-        checksum = self._md5_hex(archive_path)
-        source_md5 = self._md5_hex(read_db)
+        try:
+            self._assert_source_unchanged(source_conn, expected_source_md5)
+            size_archive = archive_path.stat().st_size
+            checksum = self._md5_hex(archive_path)
+            source_md5 = expected_source_md5
+        except Exception:
+            logger.exception(
+                "Failed to checksum archive inputs for %s — leaving SQLite intact",
+                canonical_name,
+            )
+            self._cleanup_owned(owned_outputs)
+            return None
         rotated_at = datetime.now(UTC)
+        index_committed = False
         try:
             self._update_index(
                 original_name=canonical_name,
@@ -513,18 +640,54 @@ class ColdRotationService:
                 size_archive=size_archive,
                 checksum=checksum,
                 source_md5=source_md5,
+                source_md5_kind="logical_iterdump_v1",
                 rotated_at=rotated_at,
                 operator_log_rel=operator_log_rel,
                 operator_log_rows=operator_log_rows_count,
+                descriptor_rel=descriptor_rel if referenced_hashes else None,
+                descriptor_rows=descriptor_rows_count,
+                descriptor_checksum=descriptor_checksum,
+                descriptor_size_bytes=descriptor_size_bytes,
+            )
+            index_committed = True
+        except Exception:
+            logger.exception(
+                "Failed to update index for %s — checking atomic commit state",
+                canonical_name,
+            )
+            index_committed = self._index_has_complete_entry(
+                original_name=canonical_name,
+                archive_rel=archive_rel,
+                row_count=expected_rows,
+                checksum=checksum,
+                descriptor_rel=descriptor_rel if referenced_hashes else None,
+                descriptor_rows=descriptor_rows_count,
+                descriptor_checksum=descriptor_checksum,
+                descriptor_size_bytes=descriptor_size_bytes,
+            )
+            if not index_committed:
+                self._cleanup_owned(owned_outputs)
+                return None
+
+        try:
+            self._assert_source_unchanged(source_conn, expected_source_md5)
+            self._verify_committed_archive(
+                original_name=canonical_name,
+                archive_rel=archive_rel,
+                row_count=expected_rows,
+                size_archive=size_archive,
+                checksum=checksum,
+                descriptor_rel=descriptor_rel if referenced_hashes else None,
+                descriptor_rows=descriptor_rows_count,
+                descriptor_checksum=descriptor_checksum,
+                descriptor_size_bytes=descriptor_size_bytes,
             )
         except Exception:
             logger.exception(
-                "Failed to update index for %s — leaving SQLite intact, cleaning up Parquet",
+                "Indexed archive verification failed for %s — preserving hot SQLite",
                 canonical_name,
             )
-            archive_path.unlink(missing_ok=True)
-            if operator_log_rel is not None:
-                (self._archive_dir / operator_log_rel).unlink(missing_ok=True)
+            self._sweep_blocked.add(canonical_name)
             return None
 
         # Step 5: Delete SQLite + sidecars. Safe now: readings and operator_log
@@ -570,25 +733,34 @@ class ColdRotationService:
     # SQLite read
     # ------------------------------------------------------------------
 
-    def _read_all_rows(self, db_path: Path) -> list[tuple[float, str, str, float, str, str]]:
+    def _read_all_rows(self, db_path: Path) -> list[tuple[float, str, str, float, str, str, str | None]]:
         """Return all rows from readings table as list of tuples."""
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         try:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+            descriptor_expression = "descriptor_hash" if "descriptor_hash" in columns else "NULL"
             cursor = conn.execute(
-                "SELECT timestamp, instrument_id, channel, value, unit, status FROM readings ORDER BY timestamp"
+                "SELECT timestamp, instrument_id, channel, value, unit, status, "
+                f"{descriptor_expression} AS descriptor_hash FROM readings ORDER BY timestamp"
             )
-            return [
-                (
-                    float(row["timestamp"]),
-                    str(row["instrument_id"]),
-                    str(row["channel"]),
-                    float(row["value"]),
-                    str(row["unit"]),
-                    str(row["status"]),
+            result = []
+            for row in cursor.fetchall():
+                descriptor_hash = row["descriptor_hash"]
+                if descriptor_hash is not None and type(descriptor_hash) is not str:
+                    raise RuntimeError("reading descriptor_hash is not an exact string")
+                result.append(
+                    (
+                        float(row["timestamp"]),
+                        str(row["instrument_id"]),
+                        str(row["channel"]),
+                        float(row["value"]),
+                        str(row["unit"]),
+                        str(row["status"]),
+                        descriptor_hash,
+                    )
                 )
-                for row in cursor.fetchall()
-            ]
+            return result
         finally:
             conn.close()
 
@@ -639,7 +811,11 @@ class ColdRotationService:
     # Parquet write
     # ------------------------------------------------------------------
 
-    def _write_parquet(self, archive_path: Path, rows: list[tuple[float, str, str, float, str, str]]) -> None:
+    def _write_parquet(
+        self,
+        archive_path: Path,
+        rows: list[tuple[float, str, str, float, str, str, str | None]],
+    ) -> None:
         """Stream rows to Parquet in chunks with Zstd compression."""
         writer = pq.ParquetWriter(
             str(archive_path),
@@ -659,14 +835,16 @@ class ColdRotationService:
                 values = []
                 units = []
                 statuses = []
+                descriptor_hashes: list[str | None] = []
 
-                for ts_epoch, inst, ch, val, unit, status in chunk:
+                for ts_epoch, inst, ch, val, unit, status, descriptor_hash in chunk:
                     timestamps.append(datetime.fromtimestamp(ts_epoch, tz=UTC))
                     instruments.append(inst)
                     channels.append(ch)
                     values.append(val)
                     units.append(unit)
                     statuses.append(status)
+                    descriptor_hashes.append(descriptor_hash)
 
                 batch = pa.table(
                     {
@@ -676,12 +854,90 @@ class ColdRotationService:
                         "value": pa.array(values, type=pa.float64()),
                         "unit": pa.array(units),
                         "status": pa.array(statuses),
+                        "descriptor_hash": pa.array(descriptor_hashes, type=pa.string()),
                     },
                     schema=_COLD_SCHEMA,
                 )
                 writer.write_table(batch)
         finally:
             writer.close()
+
+    def _write_descriptor_parquet(
+        self,
+        archive_path: Path,
+        envelopes: tuple[ArchivedDescriptor, ...],
+    ) -> None:
+        """Write the exact referenced descriptor envelopes in hash order."""
+        if not 0 < len(envelopes) <= MAX_ARCHIVE_DESCRIPTORS:
+            raise RuntimeError("descriptor sidecar row count is out of bounds")
+        ordered = tuple(sorted(envelopes, key=lambda item: item.descriptor_hash))
+        table = pa.table(
+            {
+                "descriptor_hash": pa.array([item.descriptor_hash for item in ordered], type=pa.string()),
+                "channel_id": pa.array([item.channel_id for item in ordered], type=pa.string()),
+                "instrument_id": pa.array([item.instrument_id for item in ordered], type=pa.string()),
+                "source_key": pa.array([item.source_key for item in ordered], type=pa.string()),
+                "descriptor_revision": pa.array([item.descriptor_revision for item in ordered], type=pa.int32()),
+                "envelope_json": pa.array([item.envelope_json for item in ordered], type=pa.binary()),
+            },
+            schema=_CHANNEL_DESCRIPTOR_SCHEMA,
+        )
+        pq.write_table(
+            table,
+            str(archive_path),
+            compression="zstd",
+            compression_level=self._zstd_level,
+        )
+
+    @staticmethod
+    def _read_parquet_descriptor_hashes(path: Path) -> set[str]:
+        metadata = pq.read_metadata(str(path))
+        if metadata.schema.to_arrow_schema() != _COLD_SCHEMA:
+            raise RuntimeError("readings Parquet schema mismatch")
+        values = pq.ParquetFile(str(path)).read(columns=["descriptor_hash"])["descriptor_hash"].to_pylist()
+        if any(value is not None and type(value) is not str for value in values):
+            raise RuntimeError("readings Parquet descriptor hash is not an exact string")
+        return {value for value in values if value is not None}
+
+    @staticmethod
+    def _read_indexed_parquet_descriptor_hashes(path: Path) -> set[str]:
+        """Feature-detect exact legacy/current readings schemas for recovery."""
+        parquet = pq.ParquetFile(str(path))
+        schema = parquet.schema_arrow
+        if schema == _LEGACY_COLD_SCHEMA:
+            return set()
+        if schema != _COLD_SCHEMA:
+            raise RuntimeError("indexed readings Parquet schema mismatch")
+        values = parquet.read(columns=["descriptor_hash"])["descriptor_hash"].to_pylist()
+        if any(value is not None and type(value) is not str for value in values):
+            raise RuntimeError("indexed readings descriptor hash is not an exact string")
+        return {value for value in values if value is not None}
+
+    def _verify_descriptor_sidecar(self, path: Path, referenced_hashes: set[str]) -> None:
+        """Reopen and prove a descriptor sidecar is exact, bounded and complete."""
+        metadata = pq.read_metadata(str(path))
+        if metadata.schema.to_arrow_schema() != _CHANNEL_DESCRIPTOR_SCHEMA:
+            raise RuntimeError("descriptor sidecar schema mismatch")
+        if not 0 < metadata.num_rows <= MAX_ARCHIVE_DESCRIPTORS:
+            raise RuntimeError("descriptor sidecar row count is out of bounds")
+        table = pq.ParquetFile(str(path)).read()
+        if table.schema != _CHANNEL_DESCRIPTOR_SCHEMA or table.num_rows != metadata.num_rows:
+            raise RuntimeError("descriptor sidecar reopen mismatch")
+        rows = table.to_pylist()
+        verify_archived_descriptors(
+            (
+                ArchivedDescriptor(
+                    descriptor_hash=row["descriptor_hash"],
+                    channel_id=row["channel_id"],
+                    instrument_id=row["instrument_id"],
+                    source_key=row["source_key"],
+                    descriptor_revision=row["descriptor_revision"],
+                    envelope_json=row["envelope_json"],
+                )
+                for row in rows
+            ),
+            referenced_hashes,
+        )
 
     def _write_operator_log_parquet(
         self,
@@ -748,18 +1004,90 @@ class ColdRotationService:
             archive_rel = entry.get("archive_path")
             if not name or not archive_rel:
                 continue
+            if name in self._sweep_blocked:
+                continue
             db_path = self._data_dir / name
             if not db_path.exists():
                 continue
             # Never delete the hot copy unless its Parquet is actually present.
             if not (self._archive_dir / archive_rel).exists():
                 logger.warning(
-                    "Stranded hot DB %s is indexed but Parquet %s is missing — "
-                    "NOT deleting (archive incomplete)",
+                    "Stranded hot DB %s is indexed but Parquet %s is missing — NOT deleting (archive incomplete)",
                     name,
                     archive_rel,
                 )
                 continue
+            archive_path = self._archive_dir / archive_rel
+            try:
+                row_count = entry.get("row_count")
+                archive_size = entry.get("size_bytes_archive")
+                archive_checksum = entry.get("checksum_md5")
+                if (
+                    type(row_count) is not int
+                    or row_count < 0
+                    or type(archive_size) is not int
+                    or archive_size <= 0
+                    or type(archive_checksum) is not str
+                    or archive_path.stat().st_size != archive_size
+                    or self._md5_hex(archive_path) != archive_checksum
+                    or pq.read_metadata(str(archive_path)).num_rows != row_count
+                ):
+                    raise RuntimeError("readings archive index mismatch")
+                referenced = self._read_indexed_parquet_descriptor_hashes(archive_path)
+            except Exception as exc:
+                logger.warning(
+                    "Stranded hot DB %s readings archive is corrupt — NOT deleting: %s",
+                    name,
+                    exc,
+                )
+                continue
+            descriptor_fields = (
+                entry.get("channel_descriptors_path"),
+                entry.get("channel_descriptors_rows"),
+                entry.get("channel_descriptors_checksum"),
+                entry.get("channel_descriptors_size_bytes"),
+            )
+            has_any_descriptor_field = any(value is not None for value in descriptor_fields)
+            if referenced and not has_any_descriptor_field:
+                logger.warning(
+                    "Stranded hot DB %s readings reference descriptors but index has no sidecar — NOT deleting",
+                    name,
+                )
+                continue
+            if has_any_descriptor_field:
+                if any(value is None for value in descriptor_fields):
+                    logger.warning(
+                        "Stranded hot DB %s has an incomplete descriptor-sidecar index — NOT deleting",
+                        name,
+                    )
+                    continue
+                descriptor_rel, descriptor_rows, descriptor_checksum, descriptor_size = descriptor_fields
+                expected_rel = archive_rel.removesuffix(".parquet") + ".channel_descriptors.parquet"
+                descriptor_path = self._archive_dir / str(descriptor_rel)
+                try:
+                    if (
+                        type(descriptor_rel) is not str
+                        or descriptor_rel != expected_rel
+                        or type(descriptor_rows) is not int
+                        or not 0 < descriptor_rows <= MAX_ARCHIVE_DESCRIPTORS
+                        or type(descriptor_checksum) is not str
+                        or type(descriptor_size) is not int
+                        or descriptor_size <= 0
+                        or not descriptor_path.is_file()
+                        or descriptor_path.stat().st_size != descriptor_size
+                        or self._md5_hex(descriptor_path) != descriptor_checksum
+                    ):
+                        raise RuntimeError("descriptor sidecar index mismatch")
+                    self._verify_descriptor_sidecar(descriptor_path, referenced)
+                    if pq.read_metadata(str(descriptor_path)).num_rows != descriptor_rows:
+                        raise RuntimeError("descriptor sidecar row count mismatch")
+                except Exception as exc:
+                    logger.warning(
+                        "Stranded hot DB %s descriptor sidecar is missing or corrupt — NOT deleting: %s",
+                        name,
+                        exc,
+                    )
+                    continue
             # Hash-gated delete: reclaim ONLY the genuine stranded original.
             # Parquet+index existence proves an archive exists — NOT that this
             # hot DB's contents are contained in it. A restored/backdated day may
@@ -778,9 +1106,22 @@ class ColdRotationService:
                     day,
                 )
                 continue
+            source_md5_kind = entry.get("source_md5_kind")
             try:
-                current_md5 = self._md5_hex(db_path)
-            except OSError as exc:
+                if source_md5_kind is None:
+                    current_md5 = self._md5_hex(db_path)
+                elif source_md5_kind == "logical_iterdump_v1":
+                    conn = sqlite3.connect(str(db_path), timeout=10)
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        current_md5 = self._logical_source_md5(conn)
+                    finally:
+                        if conn.in_transaction:
+                            conn.rollback()
+                        conn.close()
+                else:
+                    raise RuntimeError("unknown source_md5_kind")
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
                 logger.warning(
                     "Stranded hot DB %s (day %s): cannot hash — KEEPING: %s",
                     name,
@@ -862,8 +1203,13 @@ class ColdRotationService:
         checksum: str,
         rotated_at: datetime,
         source_md5: str | None = None,
+        source_md5_kind: str | None = None,
         operator_log_rel: str | None = None,
         operator_log_rows: int = 0,
+        descriptor_rel: str | None = None,
+        descriptor_rows: int = 0,
+        descriptor_checksum: str | None = None,
+        descriptor_size_bytes: int | None = None,
     ) -> None:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         idx = self._read_index()
@@ -878,9 +1224,18 @@ class ColdRotationService:
         }
         if source_md5 is not None:
             entry["source_md5"] = source_md5
+            if source_md5_kind is not None:
+                entry["source_md5_kind"] = source_md5_kind
         if operator_log_rel is not None:
             entry["operator_log_path"] = operator_log_rel
             entry["operator_log_rows"] = operator_log_rows
+        if descriptor_rel is not None:
+            if descriptor_checksum is None or descriptor_size_bytes is None:
+                raise RuntimeError("descriptor sidecar index metadata is incomplete")
+            entry["channel_descriptors_path"] = descriptor_rel
+            entry["channel_descriptors_rows"] = descriptor_rows
+            entry["channel_descriptors_checksum"] = descriptor_checksum
+            entry["channel_descriptors_size_bytes"] = descriptor_size_bytes
         idx["files"].append(entry)
         # Atomic write (temp + os.replace): a crash mid-write must never leave a
         # truncated index.json that bricks both rotation and ArchiveReader reads.
@@ -888,6 +1243,95 @@ class ColdRotationService:
             self._index_path(),
             json.dumps(idx, indent=2, ensure_ascii=False),
         )
+
+    def _index_has_complete_entry(
+        self,
+        *,
+        original_name: str,
+        archive_rel: str,
+        row_count: int,
+        checksum: str,
+        descriptor_rel: str | None,
+        descriptor_rows: int,
+        descriptor_checksum: str | None,
+        descriptor_size_bytes: int | None,
+    ) -> bool:
+        """Recognize an atomic index commit even if its caller raised afterward."""
+        try:
+            entries = self._read_index().get("files", [])
+        except RuntimeError:
+            return False
+        for entry in entries:
+            if (
+                entry.get("original_name") != original_name
+                or entry.get("archive_path") != archive_rel
+                or entry.get("row_count") != row_count
+                or entry.get("checksum_md5") != checksum
+            ):
+                continue
+            if descriptor_rel is None:
+                return not any(key.startswith("channel_descriptors_") for key in entry)
+            return (
+                entry.get("channel_descriptors_path") == descriptor_rel
+                and entry.get("channel_descriptors_rows") == descriptor_rows
+                and entry.get("channel_descriptors_checksum") == descriptor_checksum
+                and entry.get("channel_descriptors_size_bytes") == descriptor_size_bytes
+            )
+        return False
+
+    def _verify_committed_archive(
+        self,
+        *,
+        original_name: str,
+        archive_rel: str,
+        row_count: int,
+        size_archive: int,
+        checksum: str,
+        descriptor_rel: str | None,
+        descriptor_rows: int,
+        descriptor_checksum: str | None,
+        descriptor_size_bytes: int | None,
+    ) -> None:
+        """Reopen the actual indexed artifacts before permitting source deletion."""
+        matches = [
+            entry
+            for entry in self._read_index().get("files", [])
+            if entry.get("original_name") == original_name and entry.get("archive_path") == archive_rel
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("archive index commit is absent or ambiguous")
+        entry = matches[0]
+        archive_path = self._archive_dir / archive_rel
+        if (
+            entry.get("row_count") != row_count
+            or entry.get("size_bytes_archive") != size_archive
+            or entry.get("checksum_md5") != checksum
+            or not archive_path.is_file()
+            or archive_path.stat().st_size != size_archive
+            or self._md5_hex(archive_path) != checksum
+            or pq.read_metadata(str(archive_path)).num_rows != row_count
+        ):
+            raise RuntimeError("indexed readings artifact integrity mismatch")
+        referenced = self._read_parquet_descriptor_hashes(archive_path)
+        if descriptor_rel is None:
+            if referenced or any(key.startswith("channel_descriptors_") for key in entry):
+                raise RuntimeError("indexed readings require descriptor sidecar authority")
+            return
+        descriptor_path = self._archive_dir / descriptor_rel
+        if (
+            entry.get("channel_descriptors_path") != descriptor_rel
+            or entry.get("channel_descriptors_rows") != descriptor_rows
+            or entry.get("channel_descriptors_checksum") != descriptor_checksum
+            or entry.get("channel_descriptors_size_bytes") != descriptor_size_bytes
+            or descriptor_checksum is None
+            or descriptor_size_bytes is None
+            or not descriptor_path.is_file()
+            or descriptor_path.stat().st_size != descriptor_size_bytes
+            or self._md5_hex(descriptor_path) != descriptor_checksum
+            or pq.read_metadata(str(descriptor_path)).num_rows != descriptor_rows
+        ):
+            raise RuntimeError("indexed descriptor artifact integrity mismatch")
+        self._verify_descriptor_sidecar(descriptor_path, referenced)
 
     # ------------------------------------------------------------------
     # Utilities
@@ -901,3 +1345,26 @@ class ColdRotationService:
             for block in iter(lambda: fh.read(65_536), b""):
                 h.update(block)
         return h.hexdigest()
+
+    @staticmethod
+    def _logical_source_md5(conn: sqlite3.Connection) -> str:
+        """Hash one transactionally stable logical SQLite image, including WAL rows."""
+        digest = hashlib.md5()
+        for statement in conn.iterdump():
+            payload = statement.encode("utf-8")
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+
+    def _assert_source_unchanged(self, conn: sqlite3.Connection, expected_md5: str) -> None:
+        if self._logical_source_md5(conn) != expected_md5:
+            raise RuntimeError("SQLite source changed during archive construction")
+
+    @staticmethod
+    def _cleanup_owned(paths: set[Path]) -> None:
+        """Best-effort cleanup restricted to artifacts created by this pass."""
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove owned partial archive %s: %s", path, exc)

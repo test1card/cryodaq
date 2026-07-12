@@ -6,6 +6,7 @@ to determine which daily files have been rotated to Parquet cold storage.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import logging
@@ -24,10 +25,26 @@ from typing import BinaryIO
 from urllib.parse import quote
 
 from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    verify_descriptor_storage,
+)
+from cryodaq.storage.descriptor_archive import (
+    MAX_ARCHIVE_DESCRIPTOR_BYTES,
+    MAX_ARCHIVE_DESCRIPTORS,
+    ArchivedDescriptor,
+    DescriptorArchiveError,
+    ResolvedStorageDescriptor,
+    load_referenced_descriptors,
+    resolve_archived_descriptors,
+    resolve_legacy_descriptor,
+)
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+_MAX_DESCRIPTOR_REFERENCE_ROWS = 10_000_000
 
 
 def _ts_sort_key(raw: object) -> float:
@@ -76,6 +93,13 @@ class BoundedReadIssueCode(StrEnum):
     PARQUET_BATCH_OVERSIZE = "parquet_batch_oversize"
     PARQUET_READ = "parquet_read"
     INVALID_ROW = "invalid_row"
+    DESCRIPTOR_CATALOG_MISSING = "descriptor_catalog_missing"
+    DESCRIPTOR_INDEX_MISMATCH = "descriptor_index_mismatch"
+    DESCRIPTOR_SCHEMA_MISMATCH = "descriptor_schema_mismatch"
+    DESCRIPTOR_OVERSIZED = "descriptor_oversized"
+    DESCRIPTOR_ENVELOPE_CORRUPT = "descriptor_envelope_corrupt"
+    DESCRIPTOR_HASH_MISSING = "descriptor_hash_missing"
+    DESCRIPTOR_READING_MISMATCH = "descriptor_reading_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +116,7 @@ class BoundedReadingRow:
     value: float | None
     unit: str
     status: str
+    descriptor: ResolvedStorageDescriptor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +138,7 @@ class _BoundedSource:
     kind: str
     path: Path
     token: str
+    index_entry: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -126,6 +152,7 @@ class _CollectedRow:
     authority: tuple[int, int]
     token: int
     encoded_size: int
+    descriptor: ResolvedStorageDescriptor
 
     @property
     def key(self) -> tuple[int, str, str]:
@@ -146,12 +173,13 @@ def _canonical_row_size(row: BoundedReadingRow) -> int:
                 row.value,
                 row.unit,
                 row.status,
+                None if row.descriptor is None else row.descriptor.descriptor_hash,
             ],
             ensure_ascii=False,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    )
+    ) + (0 if row.descriptor is None or row.descriptor.envelope_json is None else len(row.descriptor.envelope_json))
 
 
 class _BoundedReadingCollector:
@@ -229,6 +257,7 @@ class _BoundedReadingCollector:
         unit: str,
         status: str,
         authority: tuple[int, int],
+        descriptor: ResolvedStorageDescriptor,
     ) -> None:
         public = BoundedReadingRow(
             timestamp=timestamp_us / 1_000_000.0,
@@ -237,6 +266,7 @@ class _BoundedReadingCollector:
             value=value,
             unit=unit,
             status=status,
+            descriptor=descriptor,
         )
         encoded_size = _canonical_row_size(public)
         if encoded_size > self._byte_cap:
@@ -262,6 +292,7 @@ class _BoundedReadingCollector:
             authority=authority,
             token=self._next_token,
             encoded_size=encoded_size,
+            descriptor=descriptor,
         )
         self._by_key[key] = row
         self.retained_encoded_bytes += encoded_size
@@ -287,6 +318,25 @@ class _BoundedReadingCollector:
     def note_examined(self) -> None:
         self.rows_examined += 1
 
+    def discard_if_current(
+        self,
+        *,
+        timestamp_us: int,
+        instrument_id: str,
+        channel: str,
+        authority: tuple[int, int],
+    ) -> None:
+        """Remove one just-offered row if it crossed an external deadline."""
+        key = (timestamp_us, instrument_id, channel)
+        row = self._by_key.get(key)
+        if row is None or row.authority != authority:
+            return
+        del self._by_key[key]
+        self._channel_counts[channel] -= 1
+        if self._channel_counts[channel] == 0:
+            del self._channel_counts[channel]
+        self.retained_encoded_bytes -= row.encoded_size
+
     def finish(self) -> tuple[BoundedReadingRow, ...]:
         ordered = sorted(self._by_key.values(), key=lambda row: row.rank)
         return tuple(
@@ -297,6 +347,7 @@ class _BoundedReadingCollector:
                 value=row.value,
                 unit=row.unit,
                 status=row.status,
+                descriptor=row.descriptor,
             )
             for row in ordered
         )
@@ -325,6 +376,12 @@ class _ParquetSchemaError(TypeError):
 
 class _IndexOversizeError(ValueError):
     pass
+
+
+class _DescriptorReadError(RuntimeError):
+    def __init__(self, code: BoundedReadIssueCode) -> None:
+        super().__init__(code.value)
+        self.code = code
 
 
 def _epoch_microseconds(value: datetime) -> int:
@@ -707,7 +764,7 @@ class ArchiveReader:
         deadline_monotonic: float,
         issues: _IssueLedger,
     ) -> tuple[_BoundedSource, ...] | None:
-        indexed: dict[str, str] = {}
+        indexed: dict[str, dict[str, object]] = {}
         index_path = self._archive_dir / "index.json"
         index_was_present = index_path.exists() or index_path.is_symlink()
         index_document: object | None = None
@@ -738,7 +795,7 @@ class ArchiveReader:
                         continue
                     if name in indexed:
                         raise ValueError("duplicate day authority")
-                    indexed[name] = archive_path
+                    indexed[name] = entry
             except _IndexOversizeError:
                 issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE, "index")
                 return None
@@ -753,8 +810,10 @@ class ArchiveReader:
                 issues.add(BoundedReadIssueCode.DEADLINE, current.isoformat())
                 return None
             name = f"data_{current.isoformat()}.db"
-            archive_rel = indexed.get(name)
-            if archive_rel is not None:
+            index_entry = indexed.get(name)
+            if index_entry is not None:
+                archive_rel = index_entry["archive_path"]
+                assert isinstance(archive_rel, str)
                 token = f"{current.isoformat()}:parquet:0"
                 try:
                     archive = self._contained_regular(self._archive_dir, archive_rel)
@@ -763,7 +822,7 @@ class ArchiveReader:
                 except OSError:
                     issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, token)
                 else:
-                    planned.append(_BoundedSource(current, "parquet", archive, token))
+                    planned.append(_BoundedSource(current, "parquet", archive, token, index_entry))
             hot = self._data_dir / name
             if hot.exists() or hot.is_symlink():
                 token = f"{current.isoformat()}:sqlite"
@@ -810,6 +869,17 @@ class ArchiveReader:
         if primary_code == getattr(sqlite3, "SQLITE_INTERRUPT", -4):
             return BoundedReadIssueCode.SQLITE_INTERRUPTED
         return BoundedReadIssueCode.SQLITE_READ
+
+    @staticmethod
+    def _descriptor_adapter_issue(exc: DescriptorArchiveError) -> BoundedReadIssueCode:
+        message = str(exc)
+        if "no descriptor catalog" in message:
+            return BoundedReadIssueCode.DESCRIPTOR_CATALOG_MISSING
+        if "missing descriptor" in message or "match referenced" in message:
+            return BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING
+        if "bound" in message or "exceeds" in message:
+            return BoundedReadIssueCode.DESCRIPTOR_OVERSIZED
+        return BoundedReadIssueCode.DESCRIPTOR_ENVELOPE_CORRUPT
 
     def _open_bounded_sqlite(
         self,
@@ -960,6 +1030,35 @@ class ArchiveReader:
         try:
             conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
             placeholders = ",".join("?" for _ in channels)
+            reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+            has_descriptor_hash = "descriptor_hash" in reading_columns
+            descriptor_map: dict[str, ResolvedStorageDescriptor] = {}
+            if has_descriptor_hash:
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='channel_descriptors'"
+                    ).fetchone()
+                    is None
+                ):
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_CATALOG_MISSING)
+                try:
+                    verify_descriptor_storage(conn)
+                except ChannelDescriptorStorageError as exc:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
+                descriptor_rows = conn.execute(
+                    "SELECT DISTINCT descriptor_hash FROM readings WHERE descriptor_hash IS NOT NULL LIMIT ?",
+                    (MAX_ARCHIVE_DESCRIPTORS + 1,),
+                ).fetchall()
+                if len(descriptor_rows) > MAX_ARCHIVE_DESCRIPTORS:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                referenced = {row[0] for row in descriptor_rows}
+                if any(type(value) is not str for value in referenced):
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_SCHEMA_MISMATCH)
+                try:
+                    raw_descriptors = load_referenced_descriptors(conn, referenced)
+                    descriptor_map = resolve_archived_descriptors(raw_descriptors, referenced)
+                except DescriptorArchiveError as exc:
+                    raise _DescriptorReadError(self._descriptor_adapter_issue(exc)) from exc
             legacy_sql = "SELECT 1 FROM readings WHERE typeof(timestamp) = 'text'"
             legacy_params: tuple[object, ...] = ()
             if channels:
@@ -981,8 +1080,9 @@ class ArchiveReader:
                         issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                         return False
                     sql = (
-                        "SELECT id, timestamp, instrument_id, channel, value, unit, status "
-                        "FROM readings WHERE typeof(timestamp) IN ('real','integer') "
+                        "SELECT id, timestamp, instrument_id, channel, value, unit, status, "
+                        + ("descriptor_hash " if has_descriptor_hash else "NULL AS descriptor_hash ")
+                        + "FROM readings WHERE typeof(timestamp) IN ('real','integer') "
                         "AND timestamp >= ? AND timestamp < ? AND channel = ?"
                     )
                     params: list[object] = [
@@ -1001,7 +1101,16 @@ class ArchiveReader:
                         for raw in cursor:
                             count += 1
                             collector.note_examined()
-                            row_id, timestamp, instrument, raw_channel, value, unit, status_value = raw
+                            (
+                                row_id,
+                                timestamp,
+                                instrument,
+                                raw_channel,
+                                value,
+                                unit,
+                                status_value,
+                                descriptor_hash,
+                            ) = raw
                             last = (float(timestamp), int(row_id))
                             try:
                                 timestamp_us = _sqlite_epoch_microseconds(timestamp)
@@ -1012,6 +1121,26 @@ class ArchiveReader:
                                 unit_text = _bounded_text(unit, minimum=0, maximum=64)
                                 status_text = _bounded_text(status_value, minimum=0, maximum=64)
                                 decoded = _bounded_value(value, status_text)
+                                if descriptor_hash is None:
+                                    descriptor = resolve_legacy_descriptor(
+                                        instrument_text,
+                                        channel_text,
+                                        unit_text,
+                                    )
+                                else:
+                                    descriptor = descriptor_map.get(descriptor_hash)
+                                    if descriptor is None:
+                                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
+                                    if (
+                                        descriptor.instrument_id != instrument_text
+                                        or descriptor.channel_id != channel_text
+                                        or descriptor.unit != unit_text
+                                    ):
+                                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_READING_MISMATCH)
+                            except _DescriptorReadError as exc:
+                                issues.add(exc.code, source.token)
+                                ok = False
+                                continue
                             except (ValueError, TypeError, OSError, OverflowError):
                                 issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
                                 ok = False
@@ -1024,11 +1153,15 @@ class ArchiveReader:
                                 unit=unit_text,
                                 status=status_text,
                                 authority=(1, int(row_id)),
+                                descriptor=descriptor,
                             )
                     finally:
                         cursor.close()
                     if count < batch_rows:
                         break
+        except _DescriptorReadError as exc:
+            issues.add(exc.code, source.token)
+            ok = False
         except Exception as exc:
             if expired[0]:
                 issues.add(BoundedReadIssueCode.SQLITE_INTERRUPTED, source.token)
@@ -1049,6 +1182,7 @@ class ArchiveReader:
         *,
         start_us: int,
         end_us: int,
+        deadline_monotonic: float,
     ) -> tuple[
         BinaryIO,
         object,
@@ -1063,6 +1197,8 @@ class ArchiveReader:
         import pyarrow.compute as pc
         import pyarrow.parquet as pq
 
+        if time.monotonic() >= deadline_monotonic:
+            raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
         path_identity = self._identity(source.path)
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(source.path, flags)
@@ -1095,6 +1231,8 @@ class ArchiveReader:
                 thrift_string_size_limit=1_048_576,
                 thrift_container_size_limit=1_000_000,
             )
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
             expected = pa.schema(
                 [
                     ("timestamp", pa.timestamp("us", tz="UTC")),
@@ -1106,10 +1244,13 @@ class ArchiveReader:
                 ]
             )
             schema = parquet.schema_arrow
-            if schema.names != expected.names or any(
+            allowed_names = (expected.names, [*expected.names, "descriptor_hash"])
+            if schema.names not in allowed_names or any(
                 schema.field(name).type != expected.field(name).type for name in expected.names
             ):
                 raise _ParquetSchemaError("unexpected Parquet schema")
+            if "descriptor_hash" in schema.names and schema.field("descriptor_hash").type != pa.string():
+                raise _ParquetSchemaError("unexpected descriptor_hash type")
             metadata = parquet.metadata
             if metadata.num_row_groups > 1_024:
                 raise _ParquetMetadataError("too many Parquet row groups")
@@ -1120,6 +1261,8 @@ class ArchiveReader:
             metadata_partial = False
             timestamp_column = schema.names.index("timestamp")
             for group_index in range(metadata.num_row_groups):
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                 starts.append(cursor)
                 group = metadata.row_group(group_index)
                 cursor += group.num_rows
@@ -1141,6 +1284,8 @@ class ArchiveReader:
                     if maximum < start_us or minimum >= end_us:
                         continue
                 eligible.append(group_index)
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
             chronological = all(
                 ranges[index][0] is not None
                 and ranges[index][1] is not None
@@ -1150,6 +1295,8 @@ class ArchiveReader:
             )
             if chronological:
                 eligible.reverse()
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
             return (
                 handle,
                 parquet,
@@ -1166,6 +1313,291 @@ class ArchiveReader:
             elif descriptor >= 0:
                 os.close(descriptor)
             raise
+
+    @staticmethod
+    def _hash_open_file(descriptor: int, *, deadline_monotonic: float) -> str:
+        digest = hashlib.md5()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            block = os.read(descriptor, 65_536)
+            if not block:
+                break
+            digest.update(block)
+        if time.monotonic() >= deadline_monotonic:
+            raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _read_descriptor_row_group(parquet: object, group_index: int) -> object:
+        return parquet.read_row_group(group_index, use_threads=False)
+
+    @staticmethod
+    def _next_descriptor_reference_batch(iterator: object) -> object:
+        return next(iterator)
+
+    @staticmethod
+    def _descriptor_reference_value(scalar: object) -> object:
+        return scalar.as_py()
+
+    @staticmethod
+    def _open_descriptor_file(path: Path, flags: int) -> int:
+        return os.open(path, flags)
+
+    @staticmethod
+    def _descriptor_metadata_group(metadata: object, group_index: int) -> object:
+        return metadata.row_group(group_index)
+
+    @staticmethod
+    def _next_bounded_parquet_batch(iterator: object) -> object:
+        return next(iterator)
+
+    @staticmethod
+    def _offer_bounded_collector(
+        collector: _BoundedReadingCollector,
+        **values: object,
+    ) -> None:
+        collector.offer(**values)
+
+    def _resolve_cold_descriptors(
+        self,
+        source: _BoundedSource,
+        parquet: object,
+        *,
+        batch_rows: int,
+        max_arrow_batch_bytes: int,
+        deadline_monotonic: float,
+    ) -> dict[str, ResolvedStorageDescriptor]:
+        """Verify an indexed sidecar against every non-null reading reference."""
+        schema = parquet.schema_arrow
+        has_hash = "descriptor_hash" in schema.names
+        fields = source.index_entry or {}
+        sidecar_keys = (
+            "channel_descriptors_path",
+            "channel_descriptors_rows",
+            "channel_descriptors_checksum",
+            "channel_descriptors_size_bytes",
+        )
+        sidecar_values = tuple(fields.get(key) for key in sidecar_keys)
+        if not has_hash:
+            if any(value is not None for value in sidecar_values):
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH)
+            return {}
+
+        referenced: set[str] = set()
+        rows_scanned = 0
+        try:
+            iterator = iter(
+                parquet.iter_batches(
+                    batch_size=batch_rows,
+                    columns=["descriptor_hash"],
+                    use_threads=False,
+                )
+            )
+            while True:
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                try:
+                    batch = self._next_descriptor_reference_batch(iterator)
+                except StopIteration:
+                    if time.monotonic() >= deadline_monotonic:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                    break
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                if batch.num_rows > batch_rows:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                rows_scanned += batch.num_rows
+                if rows_scanned > _MAX_DESCRIPTOR_REFERENCE_ROWS:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                if batch.nbytes > max_arrow_batch_bytes:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                for scalar in batch["descriptor_hash"]:
+                    if time.monotonic() >= deadline_monotonic:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                    value = self._descriptor_reference_value(scalar)
+                    if time.monotonic() >= deadline_monotonic:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                    if value is None:
+                        continue
+                    if type(value) is not str:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_SCHEMA_MISMATCH)
+                    referenced.add(value)
+                    if len(referenced) > MAX_ARCHIVE_DESCRIPTORS:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+        except _DescriptorReadError:
+            raise
+        except Exception as exc:
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_SCHEMA_MISMATCH) from exc
+        if not referenced:
+            if any(value is not None for value in sidecar_values):
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH)
+            return {}
+        if any(value is None for value in sidecar_values):
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_CATALOG_MISSING)
+
+        sidecar_rel, indexed_rows, indexed_checksum, indexed_size = sidecar_values
+        archive_rel = fields.get("archive_path")
+        expected_rel = (
+            archive_rel.removesuffix(".parquet") + ".channel_descriptors.parquet" if type(archive_rel) is str else None
+        )
+        if (
+            type(sidecar_rel) is not str
+            or sidecar_rel != expected_rel
+            or type(indexed_rows) is not int
+            or not 0 < indexed_rows <= MAX_ARCHIVE_DESCRIPTORS
+            or type(indexed_checksum) is not str
+            or type(indexed_size) is not int
+            or indexed_size <= 0
+            or indexed_size > MAX_ARCHIVE_DESCRIPTOR_BYTES + 8 * 1024 * 1024
+        ):
+            code = (
+                BoundedReadIssueCode.DESCRIPTOR_OVERSIZED
+                if type(indexed_size) is int and indexed_size > MAX_ARCHIVE_DESCRIPTOR_BYTES + 8 * 1024 * 1024
+                else BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH
+            )
+            raise _DescriptorReadError(code)
+        try:
+            sidecar = self._contained_regular(self._archive_dir, sidecar_rel)
+        except FileNotFoundError as exc:
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_CATALOG_MISSING) from exc
+        except OSError as exc:
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = -1
+        handle: BinaryIO | None = None
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            descriptor = self._open_descriptor_file(sidecar, flags)
+            opened = os.fstat(descriptor)
+            opened_identity = (
+                opened.st_dev,
+                opened.st_ino,
+                stat.S_IFMT(opened.st_mode),
+                opened.st_nlink,
+            )
+            if (
+                opened_identity != self._identity(sidecar)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_size != indexed_size
+                or self._hash_open_file(descriptor, deadline_monotonic=deadline_monotonic) != indexed_checksum
+            ):
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH)
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            handle = os.fdopen(os.dup(descriptor), "rb", closefd=True)
+            descriptor_parquet = pq.ParquetFile(
+                handle,
+                pre_buffer=False,
+                thrift_string_size_limit=1_048_576,
+                thrift_container_size_limit=100_000,
+            )
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            expected_schema = pa.schema(
+                [
+                    ("descriptor_hash", pa.string()),
+                    ("channel_id", pa.string()),
+                    ("instrument_id", pa.string()),
+                    ("source_key", pa.string()),
+                    ("descriptor_revision", pa.int32()),
+                    ("envelope_json", pa.binary()),
+                ]
+            )
+            if descriptor_parquet.schema_arrow != expected_schema:
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_SCHEMA_MISMATCH)
+            if descriptor_parquet.metadata.num_rows != indexed_rows:
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH)
+            metadata = descriptor_parquet.metadata
+            if metadata.num_row_groups > 1_024:
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+            arrow_cap = MAX_ARCHIVE_DESCRIPTOR_BYTES + 2 * 1024 * 1024
+            total_uncompressed = 0
+            total_compressed = 0
+            for group_index in range(metadata.num_row_groups):
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                group = self._descriptor_metadata_group(metadata, group_index)
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                total_uncompressed += group.total_byte_size
+                for column_index in range(group.num_columns):
+                    if time.monotonic() >= deadline_monotonic:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                    column = group.column(column_index)
+                    if time.monotonic() >= deadline_monotonic:
+                        raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                    total_compressed += column.total_compressed_size
+                if total_uncompressed > arrow_cap or total_compressed > indexed_size:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+            if time.monotonic() >= deadline_monotonic:
+                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            rows: list[ArchivedDescriptor] = []
+            decoded_bytes = 0
+            for group_index in range(metadata.num_row_groups):
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                table = self._read_descriptor_row_group(descriptor_parquet, group_index)
+                decoded_bytes += table.nbytes
+                if decoded_bytes > arrow_cap or len(rows) + table.num_rows > MAX_ARCHIVE_DESCRIPTORS:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_OVERSIZED)
+                rows.extend(
+                    ArchivedDescriptor(
+                        descriptor_hash=row["descriptor_hash"],
+                        channel_id=row["channel_id"],
+                        instrument_id=row["instrument_id"],
+                        source_key=row["source_key"],
+                        descriptor_revision=row["descriptor_revision"],
+                        envelope_json=row["envelope_json"],
+                    )
+                    for row in table.to_pylist()
+                )
+                if time.monotonic() >= deadline_monotonic:
+                    raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+            resolved = resolve_archived_descriptors(rows, referenced)
+            after = os.fstat(descriptor)
+            if (
+                (
+                    after.st_dev,
+                    after.st_ino,
+                    stat.S_IFMT(after.st_mode),
+                    after.st_nlink,
+                )
+                != opened_identity
+                or after.st_size != indexed_size
+                or self._hash_open_file(descriptor, deadline_monotonic=deadline_monotonic) != indexed_checksum
+                or self._identity(sidecar) != opened_identity
+            ):
+                raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH)
+            return resolved
+        except _DescriptorReadError:
+            raise
+        except DescriptorArchiveError as exc:
+            message = str(exc)
+            if "missing" in message or "match referenced" in message:
+                code = BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING
+            elif "bound" in message or "exceeds" in message:
+                code = BoundedReadIssueCode.DESCRIPTOR_OVERSIZED
+            else:
+                code = BoundedReadIssueCode.DESCRIPTOR_ENVELOPE_CORRUPT
+            raise _DescriptorReadError(code) from exc
+        except OSError as exc:
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
+        except Exception as exc:
+            raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_ENVELOPE_CORRUPT) from exc
+        finally:
+            if handle is not None:
+                handle.close()
+            if descriptor >= 0:
+                os.close(descriptor)
 
     def _discover_parquet_channels(
         self,
@@ -1193,10 +1625,22 @@ class ArchiveReader:
                 _starts,
                 identity,
                 metadata_partial,
-            ) = self._prepare_bounded_parquet(source, start_us=start_us, end_us=end_us)
+            ) = self._prepare_bounded_parquet(
+                source,
+                start_us=start_us,
+                end_us=end_us,
+                deadline_monotonic=deadline_monotonic,
+            )
             if metadata_partial:
                 issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
                 ok = False
+            self._resolve_cold_descriptors(
+                source,
+                parquet,
+                batch_rows=batch_rows,
+                max_arrow_batch_bytes=max_arrow_batch_bytes,
+                deadline_monotonic=deadline_monotonic,
+            )
             start_scalar = pa.scalar(
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
                 type=pa.timestamp("us", tz="UTC"),
@@ -1206,12 +1650,25 @@ class ArchiveReader:
                 type=pa.timestamp("us", tz="UTC"),
             )
             for group in groups:
-                for batch in parquet.iter_batches(
-                    batch_size=batch_rows,
-                    row_groups=[group],
-                    columns=["timestamp", "channel"],
-                    use_threads=False,
-                ):
+                iterator = iter(
+                    parquet.iter_batches(
+                        batch_size=batch_rows,
+                        row_groups=[group],
+                        columns=["timestamp", "channel"],
+                        use_threads=False,
+                    )
+                )
+                while True:
+                    if time.monotonic() >= deadline_monotonic:
+                        issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                        return False
+                    try:
+                        batch = self._next_bounded_parquet_batch(iterator)
+                    except StopIteration:
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
+                        break
                     if time.monotonic() >= deadline_monotonic:
                         issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                         return False
@@ -1233,11 +1690,20 @@ class ArchiveReader:
                     mask = pc.fill_null(mask, False)
                     filtered = batch.filter(mask)
                     for index in range(filtered.num_rows):
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
                         channel = _bounded_text(filtered["channel"][index].as_py(), minimum=1, maximum=256)
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
                         channels.add(channel)
                         if len(channels) > max_channels:
                             issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
                             return False
+        except _DescriptorReadError as exc:
+            issues.add(exc.code, source.token)
+            ok = False
         except _ParquetSchemaError:
             issues.add(BoundedReadIssueCode.PARQUET_SCHEMA, source.token)
             ok = False
@@ -1289,10 +1755,23 @@ class ArchiveReader:
                 starts,
                 identity,
                 metadata_partial,
-            ) = self._prepare_bounded_parquet(source, start_us=start_us, end_us=end_us)
+            ) = self._prepare_bounded_parquet(
+                source,
+                start_us=start_us,
+                end_us=end_us,
+                deadline_monotonic=deadline_monotonic,
+            )
             if metadata_partial:
                 issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
                 ok = False
+            descriptor_map = self._resolve_cold_descriptors(
+                source,
+                parquet,
+                batch_rows=batch_rows,
+                max_arrow_batch_bytes=max_arrow_batch_bytes,
+                deadline_monotonic=deadline_monotonic,
+            )
+            has_descriptor_hash = "descriptor_hash" in parquet.schema_arrow.names
             start_scalar = pa.scalar(
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
                 type=pa.timestamp("us", tz="UTC"),
@@ -1310,14 +1789,29 @@ class ArchiveReader:
                 "unit",
                 "status",
             ]
+            if has_descriptor_hash:
+                columns.append("descriptor_hash")
             for group in groups:
                 batch_start = 0
-                for batch in parquet.iter_batches(
-                    batch_size=batch_rows,
-                    row_groups=[group],
-                    columns=columns,
-                    use_threads=False,
-                ):
+                iterator = iter(
+                    parquet.iter_batches(
+                        batch_size=batch_rows,
+                        row_groups=[group],
+                        columns=columns,
+                        use_threads=False,
+                    )
+                )
+                while True:
+                    if time.monotonic() >= deadline_monotonic:
+                        issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                        return False
+                    try:
+                        batch = self._next_bounded_parquet_batch(iterator)
+                    except StopIteration:
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
+                        break
                     if time.monotonic() >= deadline_monotonic:
                         issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                         return False
@@ -1352,10 +1846,17 @@ class ArchiveReader:
                     filtered = batch.filter(mask)
                     filtered_ordinals = ordinals.filter(mask)
                     for index in range(filtered.num_rows):
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
                         collector.note_examined()
                         try:
                             timestamp = filtered["timestamp"][index].as_py()
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             timestamp_us = _epoch_microseconds(timestamp)
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             if not start_us <= timestamp_us < end_us:
                                 raise ValueError("timestamp outside normalized interval")
                             instrument = _bounded_text(
@@ -1363,30 +1864,85 @@ class ArchiveReader:
                                 minimum=1,
                                 maximum=256,
                             )
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             channel = _bounded_text(
                                 filtered["channel"][index].as_py(),
                                 minimum=1,
                                 maximum=256,
                             )
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             unit = _bounded_text(filtered["unit"][index].as_py(), minimum=0, maximum=64)
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             status_value = _bounded_text(filtered["status"][index].as_py(), minimum=0, maximum=64)
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             value = _bounded_value(filtered["value"][index].as_py(), status_value)
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                            descriptor_hash = (
+                                filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
+                            )
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+                            if descriptor_hash is None:
+                                descriptor = resolve_legacy_descriptor(instrument, channel, unit)
+                            else:
+                                descriptor = descriptor_map.get(descriptor_hash)
+                                if descriptor is None:
+                                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
+                                if (
+                                    descriptor.instrument_id != instrument
+                                    or descriptor.channel_id != channel
+                                    or descriptor.unit != unit
+                                ):
+                                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_READING_MISMATCH)
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             ordinal = filtered_ordinals[index].as_py()
+                            if time.monotonic() >= deadline_monotonic:
+                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             if isinstance(ordinal, bool) or not isinstance(ordinal, int):
                                 raise ValueError("invalid physical ordinal")
+                        except _DescriptorReadError as exc:
+                            issues.add(exc.code, source.token)
+                            ok = False
+                            if exc.code is BoundedReadIssueCode.DEADLINE:
+                                return False
+                            continue
                         except (ValueError, TypeError, OSError, OverflowError):
                             issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
                             ok = False
                             continue
-                        collector.offer(
+                        authority = (2, -ordinal)
+                        if time.monotonic() >= deadline_monotonic:
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
+                        self._offer_bounded_collector(
+                            collector,
                             timestamp_us=timestamp_us,
                             instrument_id=instrument,
                             channel=channel,
                             value=value,
                             unit=unit,
                             status=status_value,
-                            authority=(2, -ordinal),
+                            authority=authority,
+                            descriptor=descriptor,
                         )
+                        if time.monotonic() >= deadline_monotonic:
+                            collector.discard_if_current(
+                                timestamp_us=timestamp_us,
+                                instrument_id=instrument,
+                                channel=channel,
+                                authority=authority,
+                            )
+                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
+                            return False
+        except _DescriptorReadError as exc:
+            issues.add(exc.code, source.token)
+            ok = False
         except _ParquetSchemaError:
             issues.add(BoundedReadIssueCode.PARQUET_SCHEMA, source.token)
             ok = False
