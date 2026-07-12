@@ -1,13 +1,13 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-11 *(release baseline v0.64.1 + active pre-lab campaign note)*
+**Дата:** 2026-07-12 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
-**Активная campaign-ветка:** `feat/montana-phase-a` (candidate head меняется по мере independently reviewed slices)
+**Активная campaign-ветка:** `feat/montana-phase-a` (текущий pushed candidate `e2dd938`; новые independently reviewed slices двигают head)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI активного кандидата:** OPEN — исторический зелёный v0.64 не переносится на текущую feature-ветку. Нужен новый exact-SHA прогон Ubuntu + Windows после фикса, независимого ревью, commit и push всех принятых slices.
+**CI активного кандидата:** OPEN — exact-SHA run `29186167904` для `e2dd938` выполняется. Исторический зелёный v0.64 не переносится на текущую feature-ветку; гейт закроется только после PASS Ubuntu + Windows на одном финальном SHA.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -158,24 +158,32 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 До поездки в лабораторию закрываются безопасные software-side задачи:
 
 1. H3/H4: integrated runtime/lifecycle slice `026bf50` прошёл detached
-   clean-SHA gate (4 939 passed / 11 skipped / 1 deselected). Открыты H4 R3,
-   short soak, 72-hour soak и реальный Windows ONEDIR evidence.
-2. Persistence P1A: native round-5 PASS подтверждает FIFO, physical-cap и
-   integrity gates, receipt-authorized ack, cancellation и close settlement.
-   Slice пока не committed: обязательны deferred external review и финальная
-   acceptance перед публикацией.
+   clean-SHA gate (4 939 passed / 11 skipped / 1 deselected). H4 R3a
+   provider-neutral delivery receipt и durable state-v2 committed. H4 R3b
+   (launcher-owned socketpair, bounded PNG/caption frames, runner ledger before
+   ACK) остаётся в работе; short soak, 72-hour soak и реальный Windows ONEDIR
+   evidence открыты.
+2. Persistence P1A committed: FIFO, physical-cap и integrity gates,
+   receipt-authorized ack, cancellation и close settlement сохраняются.
 3. F35: F35.1 registry/capability foundation и F35.2 shared-bus
-   timing/recovery contracts
-   committed. F35.3A-1 ещё в repair/review; descriptor propagation,
-   conformance kit и passive reference-driver proof открыты.
-4. F36: F36.0 scenario/evidence contract и F36.1 immutable operator snapshots
-   committed. F36.2 under review и не committed; F36.3–F36.6 открыты.
+   timing/recovery contracts committed. Канонические descriptor envelope-ы
+   теперь сохраняются в hot SQLite, cold sidecar и bounded hot/cold archive
+   resolution. Downstream replay/report/UI descriptor threading, conformance
+   kit и passive reference-driver proof открыты.
+4. F36: committed dark foundation включает wire envelope, durable revision
+   allocator, typed authority receipts, ordered composer, replay-compatible
+   publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
+   и conservative live adapters. Mandatory live safety/data-integrity authority
+   пока unavailable, recording=`UNKNOWN`; optional F36.3-F36.5 authority не
+   синтезируется. Открыты server/live activation, atomic shell cutover, все 12
+   operator scenarios и связанные accessibility/performance gates.
    После интеграции frontend в реальный shell обязателен isolated mock/replay
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA
    проверяет operator scenarios, clipping, focus, stale/disconnected truth,
    non-color cues и соответствие design system; одни скриншоты gate не закрывают.
-5. Новый exact-SHA CI Ubuntu + Windows должен стать зелёным для текущего
-   кандидата; зелёный релизный v0.64 — только историческая baseline evidence.
+5. Exact-SHA CI run `29186167904` для `e2dd938` сейчас выполняется. Ubuntu +
+   Windows должны стать зелёными на одном финальном кандидате; зелёный релизный
+   v0.64 — только историческая baseline evidence.
 6. Готовые точные Windows/physical evidence procedures с thresholds,
    abort/rollback и ожидаемыми артефактами.
 

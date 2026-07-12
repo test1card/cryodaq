@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-07-11 for the software-side pre-lab
+> **Living document.** Updated 2026-07-12 for the software-side pre-lab
 > readiness campaign. `CHANGELOG.md`
 > is the authoritative shipped-history record; this file is only the forward
 > feature map.
@@ -63,8 +63,8 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — F35.1 registry/capabilities and F35.2 shared-bus timing/recovery contracts committed; F35.3 descriptor authority and downstream proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — F36.0 scenario contract and F36.1 immutable snapshots committed; F36.2 under review, F36.3-F36.6 open | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — registry/capabilities, shared-bus contracts, and hot/cold descriptor durability committed; downstream replay/report/UI threading and extension proof open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot wire/authority/composition/publication/ingress/store and conservative replay/live foundations committed; production authority and shell cutover open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -138,27 +138,36 @@ The irreducible hardware milestone then remains:
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
-### Active evidence checkpoint — 2026-07-11
+### Active evidence checkpoint — 2026-07-12
 
 This is feature-branch evidence, not shipped history and not a release claim:
 
 - The integrated H3/H4 runtime/lifecycle slice is committed at `026bf50`.
   Its detached clean-SHA gate completed with 4,939 passed, 11 skipped, and
-  1 deselected. This closes that software integration checkpoint only; H4 R3,
-  the short and 72-hour soaks, and real-Windows ONEDIR evidence remain open.
+  1 deselected. H4 R3a is also committed: periodic delivery now has a
+  provider-neutral receipt contract and durable state-v2 migration. H4 R3b
+  remains in active implementation for the launcher-owned socketpair,
+  bounded framed transfer, durable runner ledger, and ACK authority. The
+  short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
 - GitHub CI was historically green for the v0.64 release line on Ubuntu and
-  Windows. The current pre-lab candidate does **not** inherit that result: its
-  CI gate remains open until the exact newly reviewed SHA is pushed and both
-  jobs pass.
-- The persistence P1A spool foundation has a native round-5 PASS for FIFO,
-  physical-cap/integrity, receipt-authorized acknowledgement, cancellation,
-  and close settlement. It remains uncommitted pending the required deferred
-  external review and final slice acceptance.
-- F35.1 and F35.2 are committed. F35.3A-1 remains under repair/review;
-  descriptor propagation, the conformance kit, and passive reference-driver
-  end-to-end proof are still open.
-- F36.0 and F36.1 are committed. F36.2 is under review and not committed;
-  F36.3 through F36.6 remain open.
+  Windows. The exact candidate `e2dd938` is pushed, but Actions run
+  `29186167904` is still in progress; the active-candidate CI gate is not
+  green until both jobs pass on that exact SHA.
+- The bounded persistence spool is committed with FIFO, physical-cap and
+  integrity gates, receipt-authorized acknowledgement, cancellation, and
+  close settlement.
+- F35 now preserves frozen channel descriptors in the hot SQLite catalog,
+  cold-rotation sidecar, and bounded hot/cold archive resolution. Downstream
+  replay/report/UI descriptor threading, the conformance kit, and the passive
+  reference-driver end-to-end proof are still open.
+- F36 now has committed dark foundations for the snapshot wire contract,
+  durable revision allocation, typed common-cut authority receipts, ordered
+  composition, publication through the existing publisher, two-SUB bounded
+  ingress, one GUI-thread Store, conservative pure replay sessions, and
+  conservative live adapters. Live safety and data-integrity authorities are
+  intentionally unavailable, recording remains `UNKNOWN`, and optional
+  F36.3-F36.5 authorities are not synthesized. Server/live activation, atomic
+  shell cutover, all operator scenarios, and screenshot/visual QA remain open.
 - No software, mock, replay, CI, soak, or screenshot evidence closes a real
   Windows, dummy-load, independent-final-element, or physical-laboratory gate.
 
@@ -173,12 +182,15 @@ module boundary, but adding a new instrument type still requires central
 channel names. F35 turns that internal modularity into a supported extension
 contract for other ASC laboratories.
 
-Execution status: F35.1 (registry and narrow capability foundation) and F35.2
-(shared-bus timing/recovery contracts) are committed on the active feature branch.
-F35.3A-1 is still being repaired and independently reviewed. Until descriptor
-authority propagates through persistence/replay/reporting/GUI, the conformance
-kit passes, and the passive reference driver proves the whole path, F35 remains
-partial.
+Execution status: F35.1 (registry and narrow capability foundation), F35.2
+(shared-bus timing/recovery contracts), and the first F35.3 durability stack
+are committed on the active feature branch. The latter stores canonical
+descriptor envelopes in hot SQLite, writes and validates a cold-rotation
+descriptor sidecar, and resolves bounded hot/cold archive rows without
+downgrading corrupt descriptor-bearing data to legacy semantics. Until that
+descriptor authority is threaded through replay/reporting/generic GUI paths,
+the conformance kit passes, and the passive reference driver proves the whole
+path, F35 remains partial.
 
 Scope and acceptance criteria:
 
@@ -277,7 +289,17 @@ authority. Existing module panels remain usable as drill-down surfaces. The
 reviewed immutable snapshot contract is committed on the active feature branch;
 operator-surface acceptance remains a separate F36.2 gate.
 
-### F36.2 — Primary Operating Display, preflight, and recovery — 🔧 IN REVIEW
+The supporting snapshot data plane is also committed but remains deliberately
+dark: a bounded protocol envelope, durable global revision allocator, typed
+common-cut receipts, asynchronous ordered composer, replay-compatible
+publisher, separate readings/snapshot SUB paths, and one GUI-thread Store.
+Pure replay sessions and conservative live adapters preserve explicit
+unavailability rather than inventing authority. In particular, mandatory live
+safety and data-integrity authorities are not yet available, recording remains
+`UNKNOWN`, and the optional F36.3-F36.5 authorities remain unavailable until
+their real owners exist.
+
+### F36.2 — Primary Operating Display, preflight, and recovery — 🔧 PARTIAL
 
 Build a Shift Briefing / Preflight operating surface that prioritizes
 readiness, experiment state, top attention items, data integrity, and the next
@@ -301,6 +323,11 @@ together with the scripted operator scenarios for clipping, hierarchy,
 translation, focus, stale/disconnected truth, non-color cues, and design-system
 conformance. Screenshot approval is evidence input, not a substitute for the
 scenario, accessibility, performance, or backend-truth gates.
+
+Current boundary: the reusable operating-display, navigation, backend-truth
+models, snapshot transport, and Store foundations exist. Production server/live
+activation and the atomic shell cutover are still open, so the legacy shell is
+not yet retired and no screenshot or operator-scenario closure is claimed.
 
 ### F36.3 — Cooldown mission and durable attention history
 
