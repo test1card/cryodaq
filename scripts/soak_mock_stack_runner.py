@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import struct
+import subprocess
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -65,6 +68,7 @@ _FRAME_PREFIX: Final = struct.Struct("!I")
 _ARTIFACT_IO_TIMEOUT_S: Final = 10.0
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
+_LOCKED_PSUTIL_VERSION: Final = "7.2.2"
 
 
 class _RunnerFoundationError(ValueError):
@@ -176,6 +180,176 @@ class _ChildIdentityObserver(Protocol):
     """R2 adapter boundary; PID alone never identifies a process."""
 
     def identity_for_pid(self, pid: int) -> _ProcessIdentity: ...
+
+
+class _LockedPsutilObserver:
+    """Fail-closed PID/start observer used only by source qualification.
+
+    The module object is injected only to keep import-time product behavior
+    independent of the dev extra.  Runtime construction requires the exact
+    lockfile version and never skips access/identity errors.
+    """
+
+    __slots__ = ("_psutil",)
+
+    def __init__(self, psutil_module: Any) -> None:
+        if getattr(psutil_module, "__version__", None) != _LOCKED_PSUTIL_VERSION:
+            raise _RunnerActivationDisabled("locked psutil observer version is unavailable")
+        required = ("Process", "NoSuchProcess", "AccessDenied", "TimeoutExpired", "STATUS_ZOMBIE")
+        if any(not hasattr(psutil_module, name) for name in required):
+            raise _RunnerActivationDisabled("psutil observer API is incomplete")
+        self._psutil = psutil_module
+
+    def _process(self, pid: int) -> Any:
+        if type(pid) is not int or pid <= 0:
+            raise _RunnerFoundationError("observer PID is invalid")
+        try:
+            return self._psutil.Process(pid)
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied) as exc:
+            raise _RunnerFoundationError("process identity is unavailable") from exc
+
+    def _identity(self, process: Any) -> _ProcessIdentity:
+        try:
+            created = float(process.create_time())
+            status = process.status()
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+            raise _RunnerFoundationError("process start identity is unavailable") from exc
+        if not math.isfinite(created) or created <= 0 or status == self._psutil.STATUS_ZOMBIE:
+            raise _RunnerFoundationError("process start identity is not live")
+        started_ns = int(round(created * 1_000_000_000))
+        return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:ctime-ns={started_ns}")
+
+    def identity_for_pid(self, pid: int) -> _ProcessIdentity:
+        return self._identity(self._process(pid))
+
+    def _recheck(self, expected: _ProcessIdentity) -> Any:
+        if not isinstance(expected, _ProcessIdentity):
+            raise TypeError("expected identity must be a _ProcessIdentity")
+        process = self._process(expected.pid)
+        if self._identity(process) != expected:
+            raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
+        return process
+
+    def observe_assistant(self, pid: int, *, expected_launcher_pid: int) -> _AssistantProcessObservation:
+        process = self._process(pid)
+        identity = self._identity(process)
+        try:
+            parent_pid = int(process.ppid())
+            argv = tuple(process.cmdline())
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+            raise _RunnerFoundationError("assistant process observation is unavailable") from exc
+        role = _exact_child_role(argv)
+        observation = _AssistantProcessObservation(identity, parent_pid, role, True)
+        _bind_positive_assistant_identity(observation, expected_launcher_pid=expected_launcher_pid)
+        return observation
+
+    def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
+        if isinstance(signum, bool) or not isinstance(signum, int) or signum != signal.SIGTERM:
+            raise _RunnerFoundationError("qualification permits only exact-identity SIGTERM")
+        process = self._recheck(identity)
+        try:
+            process.send_signal(signum)
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
+            raise _RunnerFoundationError("exact-identity signal failed") from exc
+
+    def wait_gone(self, identity: _ProcessIdentity, *, timeout_s: float) -> None:
+        if type(timeout_s) not in {int, float} or not math.isfinite(float(timeout_s)) or not 0 < timeout_s <= 20:
+            raise _RunnerFoundationError("process wait timeout is outside the reviewed bound")
+        if not isinstance(identity, _ProcessIdentity):
+            raise TypeError("expected identity must be a _ProcessIdentity")
+        try:
+            process = self._psutil.Process(identity.pid)
+        except self._psutil.NoSuchProcess:
+            return
+        except self._psutil.AccessDenied as exc:
+            raise _RunnerFoundationError("process identity cannot be rechecked before wait") from exc
+        if self._identity(process) != identity:
+            raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
+        try:
+            process.wait(timeout=float(timeout_s))
+        except self._psutil.NoSuchProcess:
+            return
+        except (self._psutil.AccessDenied, self._psutil.TimeoutExpired, OSError) as exc:
+            raise _RunnerFoundationError("exact process identity did not settle") from exc
+        try:
+            current = self._psutil.Process(identity.pid)
+        except self._psutil.NoSuchProcess:
+            return
+        except self._psutil.AccessDenied as exc:
+            raise _RunnerFoundationError("settled process identity cannot be rechecked") from exc
+        if self._identity(current) == identity:
+            raise _RunnerFoundationError("exact process identity remains live after wait")
+
+
+# Whole-argv suffixes (everything after argv[0], the interpreter) allowlisted
+# per role. `_exact_child_role` requires an exact tuple match against one of
+# these — no extra, duplicate, leading, or trailing tokens tolerated.
+_ROLE_ARGV_SUFFIXES: Final = {
+    "assistant": (("-m", "cryodaq.agents.assistant_bootstrap"), ("--mode=assistant",)),
+    "engine": (
+        ("-m", "cryodaq.engine"),
+        ("--mode=engine",),
+        ("-m", "cryodaq.engine", "--mock"),
+        ("--mode=engine", "--mock"),
+    ),
+}
+
+
+def _exact_child_role(argv: tuple[str, ...]) -> str:
+    if not argv or any(type(item) is not str for item in argv):
+        raise _RunnerFoundationError("child argv is unavailable")
+    rest = argv[1:]
+    for role, suffixes in _ROLE_ARGV_SUFFIXES.items():
+        if rest in suffixes:
+            return role
+    raise _RunnerFoundationError("child argv is not an exact allowlisted role")
+
+
+class _CleanShaCollector:
+    """Collect ordered clean-SHA observations from fixed Git commands."""
+
+    __slots__ = ("_next", "_repo_root", "_sha")
+
+    def __init__(self, repo_root: Path) -> None:
+        root = Path(repo_root).resolve()
+        if not (root / ".git").exists():
+            raise _RunnerFoundationError("runner root is not a Git worktree")
+        self._repo_root = root
+        self._next = 0
+        self._sha: str | None = None
+
+    def observe(self, boundary: _ShaBoundary) -> _CleanShaObservation:
+        boundaries = tuple(_ShaBoundary)
+        if self._next >= len(boundaries) or boundary is not boundaries[self._next]:
+            raise _RunnerFoundationError("clean SHA boundary is out of order")
+        try:
+            sha = subprocess.run(
+                ("git", "rev-parse", "HEAD"),
+                cwd=self._repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            status = subprocess.run(
+                ("git", "status", "--porcelain=v1", "--untracked-files=all"),
+                cwd=self._repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise _RunnerFoundationError("clean SHA observation failed") from exc
+        observation = _CleanShaObservation(boundary, sha, not bool(status))
+        if not observation.clean:
+            raise _RunnerFoundationError("worktree drift is terminal")
+        if self._sha is None:
+            self._sha = sha
+        elif sha != self._sha:
+            raise _RunnerFoundationError("clean SHA changed across runner boundaries")
+        self._next += 1
+        return observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +879,213 @@ class _ArtifactReceiptSink:
         if self._dir_fd >= 0:
             os.close(self._dir_fd)
             self._dir_fd = -1
+
+
+@dataclass(frozen=True, slots=True)
+class _JoinedReceiptEvidence:
+    """One non-authoritative, fully joined local-delivery observation.
+
+    Construction proves agreement between independently collected evidence
+    surfaces.  It intentionally grants no terminal PASS authority: the future
+    executor must still bind this value to its owned process handles, exact-six
+    execution, clean-SHA chain, and cleanup result.
+    """
+
+    assistant: _ProcessIdentity
+    assistant_generation: int
+    sequence: int
+    slot_id: str
+    generation_id: str
+    owner_token: str
+    artifact_sha256: str
+    receipt_id: str
+    acknowledgement_sha256: str
+    ledger_record_sha256: str
+    destination_fingerprint: str
+    state_updated_at: float
+    health_updated_at: float
+
+
+def _validate_joined_receipt(
+    *,
+    ledger_record: dict[str, object],
+    state_payload: dict[str, object],
+    artifact_bytes: bytes,
+    assistant_observation: _AssistantProcessObservation,
+    expected_launcher_pid: int,
+) -> _JoinedReceiptEvidence:
+    """Join one ACK/file/ledger/process/state cut without accepting PASS.
+
+    The durable state must still expose the successful slot as ``active``.
+    ``last_terminal`` deliberately omits the owner token and therefore cannot
+    satisfy the preflight's exact owner join on its own.
+    """
+
+    from cryodaq.periodic_state import (
+        PeriodicStateDocument,
+        periodic_local_destination_fingerprint,
+    )
+
+    if type(ledger_record) is not dict or not _ArtifactReceiptSink._valid_ledger_record(ledger_record):
+        raise _RunnerFoundationError("receipt ledger record is not valid joined evidence")
+    if type(state_payload) is not dict:
+        raise _RunnerFoundationError("periodic state payload is not a mapping")
+    try:
+        state = PeriodicStateDocument(state_payload).payload
+    except (TypeError, ValueError) as exc:
+        raise _RunnerFoundationError("periodic state payload is invalid") from exc
+    if type(artifact_bytes) is not bytes:
+        raise TypeError("artifact_bytes must be exact bytes")
+
+    assistant = _bind_positive_assistant_identity(
+        assistant_observation,
+        expected_launcher_pid=expected_launcher_pid,
+    )
+    active = state["active"]
+    if type(active) is not dict or active["status"] != "SUCCEEDED":
+        raise _RunnerFoundationError("joined state must retain the successful active slot")
+    artifact = active["artifact"]
+    receipt = active["receipt"]
+    health = state["health"]
+    if type(artifact) is not dict or type(receipt) is not dict or type(health) is not dict:
+        raise _RunnerFoundationError("joined state lacks terminal artifact, receipt, or health evidence")
+
+    artifact_sha256 = f"sha256:{hashlib.sha256(artifact_bytes).hexdigest()}"
+    nonce = ledger_record["nonce"]
+    try:
+        destination = periodic_local_destination_fingerprint(nonce)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise _RunnerFoundationError("local destination evidence is invalid") from exc
+    state_updated = state["updated_at"]
+    health_updated = health["updated_at"]
+    finished_at = active["finished_at"]
+    if not all(type(value) in {int, float} for value in (state_updated, health_updated, finished_at)):
+        raise _RunnerFoundationError("joined state timestamps are invalid")
+    if (
+        float(state_updated) < float(finished_at)
+        or float(health_updated) < float(finished_at)
+        or health["status"] != "ready"
+        or health["error_code"] is not None
+        or health["error_text"] != ""
+    ):
+        raise _RunnerFoundationError("ready health evidence does not reach the delivery cut")
+
+    expected = {
+        "assistant_pid": assistant.pid,
+        "assistant_start_identity": assistant.start_identity,
+        "slot_id": active["slot_id"],
+        "generation_id": active["generation_id"],
+        "owner_token": active["owner_token"],
+        "artifact_sha256": artifact["sha256"],
+        "artifact_size": artifact["size"],
+        "receipt_id": receipt["receipt_id"],
+        "acknowledgement_sha256": receipt["acknowledgement_sha256"],
+    }
+    for field, value in expected.items():
+        if ledger_record[field] != value:
+            raise _RunnerFoundationError(f"ledger/state/process join mismatch: {field}")
+    if (
+        receipt["kind"] != "soak_local"
+        or active["destination_fingerprint"] != destination
+        or artifact_sha256 != ledger_record["artifact_sha256"]
+        or len(artifact_bytes) != ledger_record["artifact_size"]
+        or state["unresolved_delivery"] != []
+    ):
+        raise _RunnerFoundationError("local receipt/file/state authority does not agree")
+
+    return _JoinedReceiptEvidence(
+        assistant=assistant,
+        assistant_generation=ledger_record["assistant_generation"],  # type: ignore[arg-type]
+        sequence=ledger_record["sequence"],  # type: ignore[arg-type]
+        slot_id=ledger_record["slot_id"],  # type: ignore[arg-type]
+        generation_id=ledger_record["generation_id"],  # type: ignore[arg-type]
+        owner_token=ledger_record["owner_token"],  # type: ignore[arg-type]
+        artifact_sha256=ledger_record["artifact_sha256"],  # type: ignore[arg-type]
+        receipt_id=ledger_record["receipt_id"],  # type: ignore[arg-type]
+        acknowledgement_sha256=ledger_record["acknowledgement_sha256"],  # type: ignore[arg-type]
+        ledger_record_sha256="sha256:"
+        + hashlib.sha256(
+            json.dumps(ledger_record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest(),
+        destination_fingerprint=destination,
+        state_updated_at=float(state_updated),
+        health_updated_at=float(health_updated),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PrePostReceiptEvidence:
+    pre_fault: _JoinedReceiptEvidence
+    post_fault: _JoinedReceiptEvidence
+
+
+def _validate_pre_post_receipts(
+    *,
+    pre_ledger_record: dict[str, object],
+    pre_state_payload: dict[str, object],
+    pre_artifact_bytes: bytes,
+    pre_assistant_observation: _AssistantProcessObservation,
+    post_ledger_record: dict[str, object],
+    post_state_payload: dict[str, object],
+    post_artifact_bytes: bytes,
+    post_assistant_observation: _AssistantProcessObservation,
+    expected_launcher_pid: int,
+    ledger_records: tuple[dict[str, object], ...],
+) -> _PrePostReceiptEvidence:
+    """Build both joins internally, then require exact assistant replacement."""
+
+    pre_fault = _validate_joined_receipt(
+        ledger_record=pre_ledger_record,
+        state_payload=pre_state_payload,
+        artifact_bytes=pre_artifact_bytes,
+        assistant_observation=pre_assistant_observation,
+        expected_launcher_pid=expected_launcher_pid,
+    )
+    post_fault = _validate_joined_receipt(
+        ledger_record=post_ledger_record,
+        state_payload=post_state_payload,
+        artifact_bytes=post_artifact_bytes,
+        assistant_observation=post_assistant_observation,
+        expected_launcher_pid=expected_launcher_pid,
+    )
+    if (
+        pre_ledger_record["nonce"] != post_ledger_record["nonce"]
+        or pre_fault.destination_fingerprint != post_fault.destination_fingerprint
+    ):
+        raise _RunnerFoundationError("replacement assistant changed the retained local capability authority")
+    if len(ledger_records) != 2:
+        raise _RunnerFoundationError("qualification requires exactly two receipt ledger records")
+    if any(type(item) is not dict or not _ArtifactReceiptSink._valid_ledger_record(item) for item in ledger_records):
+        raise _RunnerFoundationError("qualification ledger contains invalid records")
+    expected_ids = (pre_fault.receipt_id, post_fault.receipt_id)
+    observed_hashes = tuple(
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+        for item in ledger_records
+    )
+    if (
+        tuple(item["receipt_id"] for item in ledger_records) != expected_ids
+        or observed_hashes != (pre_fault.ledger_record_sha256, post_fault.ledger_record_sha256)
+        or len(set(expected_ids)) != 2
+    ):
+        raise _RunnerFoundationError("qualification ledger is duplicate, reordered, or incomplete")
+    if (
+        post_fault.assistant == pre_fault.assistant
+        or pre_fault.sequence != 1
+        or post_fault.sequence != 1
+        or pre_fault.assistant_generation != 1
+        or post_fault.assistant_generation != 2
+        or post_fault.slot_id == pre_fault.slot_id
+        or post_fault.generation_id == pre_fault.generation_id
+        or post_fault.owner_token == pre_fault.owner_token
+        or post_fault.state_updated_at <= pre_fault.state_updated_at
+        or max(post_fault.health_updated_at, post_fault.state_updated_at)
+        <= max(pre_fault.health_updated_at, pre_fault.state_updated_at)
+    ):
+        raise _RunnerFoundationError("replacement assistant lacks a strictly newer joined authority cut")
+    return _PrePostReceiptEvidence(pre_fault, post_fault)
 
 
 @dataclass(frozen=True, slots=True)

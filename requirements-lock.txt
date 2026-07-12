@@ -149,6 +149,8 @@ pyinstaller-hooks-contrib==2026.4
     # via pyinstaller
 pyparsing==3.3.2
     # via matplotlib
+psutil==7.2.2
+    # via cryodaq (pyproject.toml)
 pypdf==5.9.0
     # via cryodaq (pyproject.toml)
 pyproject-hooks==1.2.0

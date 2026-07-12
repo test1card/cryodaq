@@ -78,6 +78,9 @@ dev = [
     # Was present incidentally in a long-lived local venv but never declared, so
     # a fresh install (CI included) failed at collection. See CI green-up.
     "httpx>=0.27",
+    # H4 source qualification locks every signal/reap to PID + OS creation
+    # time. Dev-only: it is not a shipped runtime or ONEDIR dependency.
+    "psutil>=7.2.2,<7.3",
 ]
 web = [
     "fastapi>=0.111",

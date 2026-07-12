@@ -234,8 +234,9 @@ def test_runner_activation_remains_hard_disabled_and_module_has_no_execution_imp
     imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names} | {
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
-    # R3b permits only an inherited AF_UNIX socketpair sink. Runner CLI,
-    # process execution, network transports, and terminal PASS stay fused.
-    assert not imports & {"argparse", "subprocess", "urllib", "requests", "httpx", "aiohttp"}
+    # The activation prerequisite may collect Git/process identity and perform
+    # exact-identity cleanup. CLI, network transports, and terminal PASS stay
+    # fused until the complete executor is accepted.
+    assert not imports & {"argparse", "urllib", "requests", "httpx", "aiohttp"}
     assert runner.__all__ == ()
     assert not hasattr(runner, "main")
