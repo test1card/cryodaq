@@ -1,45 +1,46 @@
-"""Подсистемные строители и рантайм-задачи движка CryoDAQ.
+"""Engine subsystem builders with lazy compatibility exports.
 
-Монолитный ``engine._run_engine`` развязан: вложенные замыкания вынесены
-в импортируемые модульные функции/классы, каждый берёт зависимости явно и
-тестируется в изоляции. Пакет НЕ импортирует ``cryodaq.agents`` и его
-RAG/LLM-зависимости (safety-процесс остаётся чистым, см. B1).
+Importing this package is intentionally inert.  Pure leaf contracts such as
+``operator_snapshot_authorities`` must not activate runtime-task imports (and
+their scheduler/driver dependency graph) merely because Python initializes the
+parent package.  Existing package-level names remain available through PEP 562
+lazy lookup.
 """
 
-from cryodaq.engine_wiring.runtime_tasks import (
-    alarm_ring_feed,
-    alarm_v2_feed_readings,
-    alarm_v2_tick,
-    assistant_event_relay_loop,
-    cold_rotation_scheduler,
-    cooldown_alarm_tick_loop,
-    leak_rate_feed,
-    sensor_diag_feed,
-    sensor_diag_tick,
-    track_runtime_signals,
-    vacuum_guard_tick_loop,
-    vacuum_trend_feed,
-    vacuum_trend_tick,
-)
-from cryodaq.engine_wiring.supervision import (
-    TaskSupervisor,
-    install_loop_exception_backstop,
-)
+from __future__ import annotations
 
-__all__ = [
-    "TaskSupervisor",
-    "alarm_ring_feed",
-    "alarm_v2_feed_readings",
-    "alarm_v2_tick",
-    "assistant_event_relay_loop",
-    "cold_rotation_scheduler",
-    "cooldown_alarm_tick_loop",
-    "install_loop_exception_backstop",
-    "leak_rate_feed",
-    "sensor_diag_feed",
-    "sensor_diag_tick",
-    "track_runtime_signals",
-    "vacuum_guard_tick_loop",
-    "vacuum_trend_feed",
-    "vacuum_trend_tick",
-]
+from importlib import import_module
+from typing import Any
+
+_EXPORT_MODULES = {
+    "TaskSupervisor": "cryodaq.engine_wiring.supervision",
+    "install_loop_exception_backstop": "cryodaq.engine_wiring.supervision",
+    "alarm_ring_feed": "cryodaq.engine_wiring.runtime_tasks",
+    "alarm_v2_feed_readings": "cryodaq.engine_wiring.runtime_tasks",
+    "alarm_v2_tick": "cryodaq.engine_wiring.runtime_tasks",
+    "assistant_event_relay_loop": "cryodaq.engine_wiring.runtime_tasks",
+    "cold_rotation_scheduler": "cryodaq.engine_wiring.runtime_tasks",
+    "cooldown_alarm_tick_loop": "cryodaq.engine_wiring.runtime_tasks",
+    "leak_rate_feed": "cryodaq.engine_wiring.runtime_tasks",
+    "sensor_diag_feed": "cryodaq.engine_wiring.runtime_tasks",
+    "sensor_diag_tick": "cryodaq.engine_wiring.runtime_tasks",
+    "track_runtime_signals": "cryodaq.engine_wiring.runtime_tasks",
+    "vacuum_guard_tick_loop": "cryodaq.engine_wiring.runtime_tasks",
+    "vacuum_trend_feed": "cryodaq.engine_wiring.runtime_tasks",
+    "vacuum_trend_tick": "cryodaq.engine_wiring.runtime_tasks",
+}
+
+__all__ = sorted(_EXPORT_MODULES)
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})
