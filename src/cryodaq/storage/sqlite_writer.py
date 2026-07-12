@@ -15,12 +15,15 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from cryodaq.channels.descriptors import ChannelCatalog
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import (
@@ -30,6 +33,8 @@ from cryodaq.storage._sqlite import (
     sqlite_version_info,
 )
 from cryodaq.storage.channel_descriptors import (
+    DescriptorBoundReading,
+    LiveChannelDescriptorCatalog,
     descriptor_hash_for_reading,
     initialize_descriptor_storage,
     install_catalog,
@@ -170,6 +175,92 @@ _LOCKED_FAILURE_THRESHOLD = 3
 _LOCKED_FAILURE_SPAN_S = 15.0
 
 
+_COMMIT_RECEIPT_PROVENANCE = object()
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class CommittedReadingReceipt:
+    """One persistence-owner-issued, wire-ready committed reading value.
+
+    The canonical descriptor envelope and its derived identity fields are
+    carried beside a fresh reading snapshot.  This is observational evidence,
+    never driver, credential, callback, or control authority.
+    """
+
+    _bound: DescriptorBoundReading
+    channel_id: str
+    descriptor_hash: str
+    descriptor_revision: int
+    descriptor_envelope: bytes
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("committed reading receipts are issued only by SQLiteWriter")
+
+    @classmethod
+    def _issue(cls, bound: DescriptorBoundReading) -> CommittedReadingReceipt:
+        descriptor = bound.descriptor
+        issued = object.__new__(cls)
+        object.__setattr__(issued, "_bound", bound)
+        object.__setattr__(issued, "channel_id", descriptor.channel_id)
+        object.__setattr__(issued, "descriptor_hash", descriptor.descriptor_hash)
+        object.__setattr__(issued, "descriptor_revision", descriptor.descriptor_revision)
+        object.__setattr__(
+            issued,
+            "descriptor_envelope",
+            PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json,
+        )
+        return issued
+
+    @property
+    def reading(self) -> Reading:
+        """Return a fresh owned Reading, including exact ``raw`` and metadata."""
+
+        return self._bound.reading
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
+class CommittedBatchReceipt:
+    """Atomic post-commit carrier issued by one exact SQLiteWriter owner."""
+
+    entries: tuple[CommittedReadingReceipt, ...]
+    _owner_key: object
+    _provenance: object
+    _integrity_token: object
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("committed batch receipts are issued only by SQLiteWriter")
+
+    @classmethod
+    def _issue(
+        cls,
+        entries: tuple[CommittedReadingReceipt, ...],
+        *,
+        owner_key: object,
+        integrity_token: object,
+    ) -> CommittedBatchReceipt:
+        issued = object.__new__(cls)
+        object.__setattr__(issued, "entries", entries)
+        object.__setattr__(issued, "_owner_key", owner_key)
+        object.__setattr__(issued, "_provenance", _COMMIT_RECEIPT_PROVENANCE)
+        object.__setattr__(issued, "_integrity_token", integrity_token)
+        return issued
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class _CommitReceiptIntegrity:
+    entries: tuple[CommittedReadingReceipt, ...]
+    entry_values: tuple[tuple[str, str, int, bytes, DescriptorBoundReading], ...]
+    token: object
+
+
 class SQLiteWriter:
     """Асинхронный писатель показаний в SQLite.
 
@@ -187,7 +278,7 @@ class SQLiteWriter:
         *,
         flush_interval_s: float = 1.0,
         batch_size: int = 500,
-        channel_catalog: ChannelCatalog | None = None,
+        channel_catalog: ChannelCatalog | LiveChannelDescriptorCatalog | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._flush_interval_s = flush_interval_s
@@ -201,10 +292,16 @@ class SQLiteWriter:
         self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
         # Periodic explicit WAL checkpoint counter (DEEP_AUDIT_CC.md D.1).
         self._checkpoint_counter = 0
-        # Optional F35 descriptor authority. Absence is explicit legacy
-        # compatibility; a configured catalog makes every persisted reading
-        # resolve exactly and fail closed on identity/unit mismatch.
-        self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
+        # Optional F35 descriptor authority.  A plain ChannelCatalog retains
+        # the explicit legacy bool API for tools/tests.  Production supplies a
+        # LiveChannelDescriptorCatalog and must use post-commit receipts.
+        self._live_channel_catalog = channel_catalog if type(channel_catalog) is LiveChannelDescriptorCatalog else None
+        if self._live_channel_catalog is not None:
+            self._channel_catalog = self._live_channel_catalog.storage_catalog_snapshot()
+        else:
+            self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
+        self._commit_owner_key = object()
+        self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
 
         # Disk-full graceful degradation (Phase 2a H.1).
         # When the writer thread detects disk-full from sqlite3.OperationalError,
@@ -239,6 +336,12 @@ class SQLiteWriter:
     def is_disk_full(self) -> bool:
         """True when the most recent write hit a disk-full / out-of-space error."""
         return self._disk_full
+
+    @property
+    def descriptor_authoritative(self) -> bool:
+        """Whether callers must use post-commit receipt publication."""
+
+        return self._live_channel_catalog is not None
 
     def clear_disk_full(self) -> None:
         """Clear the disk-full flag.
@@ -404,6 +507,116 @@ class SQLiteWriter:
             if not self._write_day_batch(conn, day_readings):
                 persisted = False
         return persisted
+
+    def _write_live_batch(
+        self,
+        batch: list[Reading],
+    ) -> tuple[DescriptorBoundReading, ...] | None:
+        """Bind and commit one descriptor-authoritative batch in the writer thread.
+
+        A descriptor-mode poll is one SQLite transaction and therefore cannot
+        span daily files.  Midnight-crossing input is refused before either
+        file is opened; a later scheduler poll may retry each coherent batch.
+        ``None`` means SQLite explicitly swallowed a disk-full/locked failure.
+        """
+
+        owner = self._live_channel_catalog
+        if owner is None:
+            raise RuntimeError("descriptor-authoritative commit requires a live catalog owner")
+        if not batch:
+            raise ValueError("descriptor-authoritative commit requires a non-empty batch")
+
+        bound = tuple(owner.bind(reading) for reading in batch)
+        days = {item.reading.timestamp.date() for item in bound}
+        if len(days) != 1:
+            raise ValueError("descriptor-authoritative batch cannot span daily SQLite files")
+
+        stable_readings: list[Reading] = []
+        for item in bound:
+            reading = item.reading
+            nonfinite = not math.isfinite(reading.value)
+            if nonfinite and reading.status is ChannelStatus.OK:
+                raise ValueError("descriptor-authoritative batch contains non-finite OK reading")
+            if not nonfinite and is_sentinel(reading.value) and reading.status is ChannelStatus.OK:
+                raise ValueError("descriptor-authoritative batch contains sentinel OK reading")
+            stable_readings.append(replace(reading, channel=item.descriptor.channel_id))
+
+        persisted = self._write_day_batch(
+            self._ensure_connection(next(iter(days))),
+            stable_readings,
+        )
+        return bound if persisted else None
+
+    @staticmethod
+    def _receipt_entry_value(
+        entry: CommittedReadingReceipt,
+    ) -> tuple[str, str, int, bytes, DescriptorBoundReading]:
+        return (
+            entry.channel_id,
+            entry.descriptor_hash,
+            entry.descriptor_revision,
+            entry.descriptor_envelope,
+            entry._bound,
+        )
+
+    def _issue_committed_batch(
+        self,
+        bound: tuple[DescriptorBoundReading, ...],
+    ) -> CommittedBatchReceipt:
+        owner = self._live_channel_catalog
+        if owner is None or not bound or any(not owner.owns(item) for item in bound):
+            raise RuntimeError("cannot issue a commit receipt for foreign descriptor bindings")
+        entries = tuple(CommittedReadingReceipt._issue(item) for item in bound)
+        token = object()
+        receipt = CommittedBatchReceipt._issue(
+            entries,
+            owner_key=self._commit_owner_key,
+            integrity_token=token,
+        )
+        self._issued_commits[receipt] = _CommitReceiptIntegrity(
+            entries=entries,
+            entry_values=tuple(self._receipt_entry_value(entry) for entry in entries),
+            token=token,
+        )
+        return receipt
+
+    def owns_commit(self, candidate: object) -> bool:
+        """Whether this exact writer issued this still-intact commit evidence."""
+
+        if type(candidate) is not CommittedBatchReceipt:
+            return False
+        integrity = self._issued_commits.get(candidate)
+        owner = self._live_channel_catalog
+        if integrity is None or owner is None:
+            return False
+        try:
+            return (
+                candidate._provenance is _COMMIT_RECEIPT_PROVENANCE
+                and candidate._owner_key is self._commit_owner_key
+                and candidate._integrity_token is integrity.token
+                and candidate.entries is integrity.entries
+                and candidate.entries
+                and tuple(self._receipt_entry_value(entry) for entry in candidate.entries) == integrity.entry_values
+                and all(owner.owns(entry._bound) for entry in candidate.entries)
+                and all(
+                    entry.descriptor_envelope
+                    == PersistedChannelEnvelopeV1.from_descriptor(entry._bound.descriptor).canonical_json
+                    and entry.descriptor_hash == entry._bound.descriptor.descriptor_hash
+                    and entry.descriptor_revision == entry._bound.descriptor.descriptor_revision
+                    and entry.channel_id == entry._bound.descriptor.channel_id
+                    for entry in candidate.entries
+                )
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def readings_from_commit(self, receipt: object) -> list[Reading]:
+        """Return fresh post-commit readings without descriptor re-resolution."""
+
+        if not self.owns_commit(receipt):
+            raise TypeError("commit receipt is foreign, forged, or mutated")
+        assert isinstance(receipt, CommittedBatchReceipt)
+        return [entry.reading for entry in receipt.entries]
 
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> bool:
         """Write a single day's readings to the given connection.
@@ -805,6 +1018,11 @@ class SQLiteWriter:
         writer share one executor and could otherwise clobber each other's
         outcome.
         """
+        if self._live_channel_catalog is not None:
+            raise RuntimeError(
+                "descriptor-authoritative writer requires write_committed(); "
+                "the legacy bool API cannot carry persistence authority"
+            )
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(self._executor, self._write_batch, readings)
@@ -814,6 +1032,35 @@ class SQLiteWriter:
                 len(readings),
             )
             raise
+
+    async def write_committed(
+        self,
+        readings: list[Reading],
+    ) -> CommittedBatchReceipt | None:
+        """Commit a live descriptor batch and issue evidence only afterward.
+
+        Binding, canonical descriptor validation, catalog installation and row
+        insertion all run on the writer executor.  Cancellation never creates
+        evidence: if the awaiting task is cancelled while SQLite settles, the
+        result is deliberately ambiguous and no receipt is issued.
+        """
+
+        if self._live_channel_catalog is None:
+            raise RuntimeError("write_committed() requires a live descriptor catalog owner")
+        loop = asyncio.get_running_loop()
+        try:
+            bound = await loop.run_in_executor(self._executor, self._write_live_batch, readings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.critical(
+                "CRITICAL: descriptor-authoritative commit failed (%d readings) — no receipt issued",
+                len(readings),
+            )
+            raise
+        if bound is None:
+            return None
+        return self._issue_committed_batch(bound)
 
     async def append_operator_log(
         self,
@@ -870,7 +1117,8 @@ class SQLiteWriter:
         """Инициализировать writer без очереди (persistence-first режим).
 
         Создаёт директорию данных и помечает writer как работающий.
-        Запись происходит через write_immediate(), вызываемый из Scheduler.
+        Legacy writers use ``write_immediate``; descriptor-authoritative
+        production uses ``write_committed`` and its post-commit receipt.
         """
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._running = True
@@ -878,6 +1126,11 @@ class SQLiteWriter:
 
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
         """Запустить цикл записи (legacy, обратная совместимость)."""
+        if self._live_channel_catalog is not None:
+            raise RuntimeError(
+                "descriptor-authoritative writer cannot use the legacy queue; "
+                "it would discard post-commit receipt authority"
+            )
         self._running = True
         self._task = asyncio.create_task(self._consume_loop(queue), name="sqlite_writer")
         logger.info("SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size)
