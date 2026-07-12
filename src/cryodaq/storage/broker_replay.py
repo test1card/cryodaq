@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,11 +19,181 @@ from typing import Any
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.archive_reader import ArchiveReader, _day_from_db_name
+from cryodaq.storage.archive_reader import (
+    ArchiveReader,
+    BoundedReadingQueryResult,
+    BoundedReadIssue,
+    BoundedReadIssueCode,
+    _day_from_db_name,
+)
+from cryodaq.storage.descriptor_archive import ResolvedStorageDescriptor
 from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class DescriptorReplayReading:
+    """One descriptor-qualified historical reading with no live authority.
+
+    This carrier deliberately does not inherit from :class:`Reading`.  The
+    current broker contract has only mutable metadata for extension fields,
+    which cannot safely own canonical descriptor identity.  A later reviewed
+    cutover may translate this value into the descriptor-aware wire contract;
+    until then it remains observational and cannot be published accidentally
+    through :class:`DataBroker`'s existing ``Reading`` API.
+    """
+
+    timestamp: datetime
+    instrument_id: str
+    channel_id: str
+    value: float | None
+    unit: str
+    status: str
+    descriptor: ResolvedStorageDescriptor
+
+    @property
+    def descriptor_envelope(self) -> bytes | None:
+        """Exact canonical persisted bytes, or ``None`` for explicit legacy."""
+
+        return self.descriptor.envelope_json
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class DescriptorReplayBatch:
+    """Bounded replay projection plus its fail-closed evidence ledger."""
+
+    readings: tuple[DescriptorReplayReading, ...]
+    complete: bool
+    truncated: bool
+    issues: tuple[BoundedReadIssue, ...]
+    issue_overflow: int
+    discovered_channels: tuple[str, ...]
+    rows_examined: int
+    rows_dropped_by_caps: int
+    retained_encoded_bytes: int
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+
+class DescriptorReplayReader:
+    """Read descriptor-qualified hot/cold/overlap history off the event loop.
+
+    The underlying bounded reader verifies canonical descriptor envelopes and
+    performs value+descriptor dedup as one retained row.  Descriptor-bearing
+    corruption is reported in ``issues`` and omitted; it is never converted to
+    a synthetic legacy descriptor.  Genuine pre-descriptor rows remain
+    explicit ``legacy_unknown`` values with no canonical envelope.
+    """
+
+    def __init__(self, data_dir: Path, archive_dir: Path | None = None) -> None:
+        self._reader = ArchiveReader(
+            data_dir,
+            archive_dir if archive_dir is not None else data_dir / "archive",
+        )
+
+    async def read_window(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        channels: Sequence[str] | None = None,
+        max_channels: int = 64,
+        max_points_per_channel: int = 100_000,
+        max_total_points: int = 500_000,
+        max_retained_bytes: int = 32 * 1024 * 1024,
+        deadline_seconds: float = 30.0,
+        batch_rows: int = 2048,
+        max_arrow_batch_bytes: int = 4 * 1024 * 1024,
+    ) -> DescriptorReplayBatch:
+        if isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, (int, float)):
+            raise TypeError("deadline_seconds must be numeric")
+        if not 0.0 < float(deadline_seconds) <= 300.0:
+            raise ValueError("deadline_seconds must be in (0, 300]")
+        query_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._reader.query_reading_rows_bounded,
+                start=start,
+                end=end,
+                channels=channels,
+                max_channels=max_channels,
+                max_points_per_channel=max_points_per_channel,
+                max_total_points=max_total_points,
+                max_retained_bytes=max_retained_bytes,
+                deadline_monotonic=time.monotonic() + float(deadline_seconds),
+                batch_rows=batch_rows,
+                max_arrow_batch_bytes=max_arrow_batch_bytes,
+            ),
+            name="descriptor-replay-bounded-query",
+        )
+        try:
+            await asyncio.wait({query_task})
+        except asyncio.CancelledError as cancellation:
+            # asyncio.to_thread cannot stop a running worker.  Keep ownership
+            # until its bounded query settles so cancellation cannot detach
+            # SQLite/Parquet handles.  Repeated cancel() calls are consumed
+            # only for settlement; the first caller cancellation remains the
+            # terminal outcome after the worker releases every resource.
+            while not query_task.done():
+                try:
+                    await asyncio.wait({query_task})
+                except asyncio.CancelledError:
+                    continue
+            try:
+                query_task.result()
+            except BaseException:
+                # The caller cancellation is dominant, but the worker outcome
+                # must be retrieved so neither Task nor loop handler owns it.
+                pass
+            raise cancellation
+        result = query_task.result()
+        return self._from_query_result(result)
+
+    @staticmethod
+    def _from_query_result(result: BoundedReadingQueryResult) -> DescriptorReplayBatch:
+        missing_descriptor = any(row.descriptor is None for row in result.rows)
+        readings = tuple(
+            DescriptorReplayReading(
+                timestamp=datetime.fromtimestamp(row.timestamp, tz=UTC),
+                instrument_id=row.instrument_id,
+                channel_id=row.channel,
+                value=row.value,
+                unit=row.unit,
+                status=row.status,
+                descriptor=row.descriptor,
+            )
+            for row in result.rows
+            if row.descriptor is not None
+        )
+        issues = result.issues
+        issue_overflow = result.issue_overflow
+        if missing_descriptor:
+            missing_issue = BoundedReadIssue(
+                code=BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING,
+                source="replay_adapter",
+            )
+            if len(issues) < 32:
+                issues = (*issues, missing_issue)
+            else:
+                issue_overflow += 1
+        return DescriptorReplayBatch(
+            readings=readings,
+            complete=result.complete and not missing_descriptor,
+            truncated=result.truncated,
+            issues=issues,
+            issue_overflow=issue_overflow,
+            discovered_channels=result.discovered_channels,
+            rows_examined=result.rows_examined,
+            rows_dropped_by_caps=result.rows_dropped_by_caps,
+            retained_encoded_bytes=result.retained_encoded_bytes,
+        )
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -221,7 +394,11 @@ class ReplaySource:
                 total += await self.play(ref, start=start, end=end, channels=channels)  # type: ignore[arg-type]
             else:
                 total += await self._play_archived_day(
-                    reader, ref, start=start, end=end, channels=channels  # type: ignore[arg-type]
+                    reader,
+                    ref,
+                    start=start,
+                    end=end,
+                    channels=channels,  # type: ignore[arg-type]
                 )
         return total
 
