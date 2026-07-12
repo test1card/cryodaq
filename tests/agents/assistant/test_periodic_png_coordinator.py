@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDeliveryContext,
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_png import (
     AlarmQueryResult,
     LiveSourceCut,
@@ -19,9 +26,15 @@ from cryodaq.agents.assistant.periodic_telegram import (
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
 from cryodaq.periodic_config import PeriodicPngConfig
-from cryodaq.periodic_state import PeriodicArtifact, load_periodic_state
+from cryodaq.periodic_state import (
+    PeriodicArtifact,
+    load_periodic_state,
+    periodic_telegram_destination_fingerprint,
+)
 from cryodaq.report_process import PeriodicRenderResult
 from cryodaq.storage.archive_reader import BoundedReadingQueryResult, BoundedReadingRow
+
+DESTINATION_FINGERPRINT = periodic_telegram_destination_fingerprint(1)
 
 
 def _config() -> PeriodicPngConfig:
@@ -155,9 +168,37 @@ class Runner:
 class Telegram:
     def __init__(self) -> None:
         self.closed = 0
+        self.contexts: list[PeriodicDeliveryContext] = []
 
     async def send_photo(self, _photo: bytes, _caption: str) -> TelegramDeliveryResult:
         return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 1, 200, None, None, "")
+
+    async def send_artifact(
+        self,
+        photo: bytes,
+        caption: str,
+        _context: PeriodicDeliveryContext,
+    ) -> PeriodicDeliveryResult:
+        self.contexts.append(_context)
+        result = await self.send_photo(photo, caption)
+        retryable = (
+            result.outcome is TelegramOutcome.REJECTED and result.error_code == "telegram_retryable_rejection"
+        ) or (
+            result.outcome is TelegramOutcome.NOT_SENT
+            and result.error_code in {"telegram_connect_failed", "client_busy"}
+        )
+        return PeriodicDeliveryResult(
+            PeriodicDeliveryOutcome(result.outcome.value),
+            (
+                PeriodicDeliveryReceipt("telegram", str(result.message_id), None)
+                if result.message_id is not None
+                else None
+            ),
+            retryable,
+            result.retry_after_s,
+            result.error_code,
+            result.error_text,
+        )
 
     async def close(self) -> None:
         self.closed += 1
@@ -202,7 +243,9 @@ async def test_start_uses_repeatable_barriers_before_hydration_and_alarm_truth(t
         alarm_query=Alarm(),
         archive_query=archive,
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(),
     )
 
@@ -230,10 +273,20 @@ def test_constructor_requires_every_external_authority(tmp_path: Path) -> None:
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(),
     )
-    for field in ("live_sources", "alarm_query", "archive_query", "runner", "telegram"):
+    for field in (
+        "live_sources",
+        "alarm_query",
+        "archive_query",
+        "runner",
+        "delivery",
+        "destination_fingerprint",
+        "expected_delivery_kind",
+    ):
         broken = dict(kwargs)
         broken[field] = None
         with pytest.raises((TypeError, ValueError)):
@@ -250,7 +303,9 @@ async def test_hydration_live_overlap_uses_exact_identity_and_live_priority(tmp_
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(),
     )
     await coordinator.start()
@@ -286,15 +341,12 @@ async def test_success_path_preserves_durable_side_effect_order(tmp_path: Path) 
 
     class SuccessTelegram(Telegram):
         async def send_photo(self, photo: bytes, caption: str) -> TelegramDeliveryResult:
-            observed.append(
-                ("send", load_periodic_state(tmp_path).payload["active"]["status"])
-            )
+            observed.append(("send", load_periodic_state(tmp_path).payload["active"]["status"]))
             assert photo == b"authorized-png"
             assert caption == "frozen caption"
-            return TelegramDeliveryResult(
-                TelegramOutcome.ACCEPTED, 77, 200, None, None, ""
-            )
+            return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 77, 200, None, None, "")
 
+    delivery = SuccessTelegram()
     coordinator = PeriodicPngCoordinator(
         data_dir=tmp_path,
         config=_config(),
@@ -302,7 +354,9 @@ async def test_success_path_preserves_durable_side_effect_order(tmp_path: Path) 
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=runner,
-        telegram=SuccessTelegram(),
+        delivery=delivery,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=artifact_reader,
         clock=clock,
         generation_factory=lambda: "4" * 32,
@@ -340,6 +394,17 @@ async def test_success_path_preserves_durable_side_effect_order(tmp_path: Path) 
         assert state["last_terminal"]["status"] == "SUCCEEDED"
         assert runner.statuses == ["RENDERING"]
         assert observed == [("read", "READY"), ("send", "DELIVERING")]
+        assert delivery.contexts == [
+            PeriodicDeliveryContext(
+                slot_id=load_periodic_state(tmp_path).payload["last_terminal"]["slot_id"],
+                generation_id="4" * 32,
+                owner_token="5" * 32,
+                artifact_sha256="sha256:" + "9" * 64,
+                artifact_size=100,
+                caption_sha256="sha256:" + hashlib.sha256(b"frozen caption").hexdigest(),
+                caption_size=len(b"frozen caption"),
+            )
+        ]
         assert clock.display_calls == 1
     finally:
         await coordinator.stop()
@@ -355,16 +420,16 @@ async def test_live_source_normal_return_is_critical(tmp_path: Path) -> None:
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
     live._wait.set()
     with pytest.raises(RuntimeError, match="live source|critical task"):
         await coordinator.wait()
-    assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-        "degraded_source"
-    )
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_source")
     await coordinator.stop()
 
 
@@ -377,7 +442,9 @@ async def test_disabled_tls_is_visible_as_degraded_health(tmp_path: Path) -> Non
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
@@ -404,7 +471,9 @@ async def test_hydration_failure_remains_honestly_incomplete(tmp_path: Path) -> 
         alarm_query=Alarm(),
         archive_query=failed_archive,
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
@@ -444,16 +513,16 @@ async def test_alarm_revision_mismatch_remains_honestly_incomplete(tmp_path: Pat
         alarm_query=MismatchedAlarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=NonBlockingClock(1.0),
     )
     await coordinator.start()
     try:
         snapshot = coordinator.projection_snapshot(window_start=-120.0, window_end=0.0)
         assert snapshot.alarm_state_complete is False
-        assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-            "degraded_projection"
-        )
+        assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_projection")
     finally:
         await coordinator.stop()
 
@@ -488,7 +557,9 @@ async def test_alarm_trigger_clear_round_trip_accepts_newer_equal_token_seal(
         alarm_query=_AlarmRevisionFive(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
@@ -524,16 +595,16 @@ async def test_alarm_seal_revision_regression_remains_incomplete(tmp_path: Path)
         alarm_query=_AlarmRevisionFive(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=RetryClock(1.0),
     )
     await coordinator.start()
     try:
         snapshot = coordinator.projection_snapshot(window_start=1.0, window_end=121.0)
         assert snapshot.alarm_state_complete is False
-        assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-            "degraded_projection"
-        )
+        assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_projection")
     finally:
         await coordinator.stop()
 
@@ -548,7 +619,9 @@ async def test_frozen_wall_health_heartbeat_advances_strictly(tmp_path: Path) ->
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=clock,
     )
     await coordinator.start()
@@ -591,7 +664,9 @@ async def test_heartbeat_rechecks_existing_cuts_without_minting_new_seal(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=clock,
     )
     await coordinator.start()
@@ -603,9 +678,7 @@ async def test_heartbeat_rechecks_existing_cuts_without_minting_new_seal(
         async with coordinator._reconcile_lock:
             await coordinator._refresh_periodic_authority_if_due()
         assert live.ready_calls == ready_calls
-        assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-            "degraded_projection"
-        )
+        assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_projection")
     finally:
         await coordinator.stop()
 
@@ -630,7 +703,9 @@ async def test_alarm_authority_resnapshots_only_at_240_seconds(tmp_path: Path) -
         alarm_query=alarm,
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=clock,
     )
     await coordinator.start()
@@ -661,7 +736,9 @@ async def test_fresh_source_graph_replaces_prior_degraded_source_with_newer_read
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await first.start()
@@ -679,7 +756,9 @@ async def test_fresh_source_graph_replaces_prior_degraded_source_with_newer_read
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await second.start()
@@ -719,7 +798,9 @@ async def test_stop_attempts_all_cleanup_and_preserves_first_error(tmp_path: Pat
         alarm_query=alarm,
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
@@ -757,7 +838,9 @@ async def test_repeated_stop_cancellation_waits_for_shared_cleanup(tmp_path: Pat
         alarm_query=alarm,
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     await coordinator.start()
@@ -811,7 +894,9 @@ async def test_repeated_start_cancellation_waits_for_shared_cleanup(tmp_path: Pa
         alarm_query=alarm,
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(1.0),
     )
     task = asyncio.create_task(coordinator.start())
@@ -864,7 +949,9 @@ async def test_ready_health_rechecks_live_failure_after_state_load_pause(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=clock,
         run_blocking=pausing_blocking,
     )
@@ -888,7 +975,5 @@ async def test_ready_health_rechecks_live_failure_after_state_load_pause(
     assert coordinator._live_source_failed is True
     load_release.set()
     await heartbeat
-    assert load_periodic_state(tmp_path).payload["health"]["status"] == (
-        "degraded_source"
-    )
+    assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_source")
     await coordinator.stop()

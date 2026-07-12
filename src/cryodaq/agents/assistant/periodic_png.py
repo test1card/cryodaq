@@ -8,6 +8,7 @@ runtime call site; H3.6 supplies those adapters atomically with the cutover.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import re
@@ -18,14 +19,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDelivery,
+    PeriodicDeliveryContext,
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_projection import (
     AlarmProjection,
     BoundedReadingProjection,
     ProjectionSnapshot,
-)
-from cryodaq.agents.assistant.periodic_telegram import (
-    TelegramDeliveryResult,
-    TelegramOutcome,
 )
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 from cryodaq.periodic_config import (
@@ -280,12 +284,6 @@ class PeriodicRunner(Protocol):
     ) -> PeriodicRenderResult | None: ...
 
 
-class PeriodicTelegram(Protocol):
-    async def send_photo(self, photo: bytes, caption: str) -> TelegramDeliveryResult: ...
-
-    async def close(self) -> None: ...
-
-
 class RunBlocking(Protocol):
     async def __call__(self, function: Callable[..., Any], /, *args: object, **kwargs: object) -> Any: ...
 
@@ -354,7 +352,9 @@ class PeriodicPngCoordinator:
         alarm_query: PeriodicAlarmQuery,
         archive_query: PeriodicArchiveQuery,
         runner: PeriodicRunner,
-        telegram: PeriodicTelegram,
+        delivery: PeriodicDelivery,
+        destination_fingerprint: str,
+        expected_delivery_kind: str,
         artifact_reader: Callable[[Path, PeriodicArtifact], bytes] = read_periodic_artifact_bytes,
         clock: Clock | None = None,
         generation_factory: Callable[[], str] | None = None,
@@ -368,7 +368,7 @@ class PeriodicPngCoordinator:
             "alarm_query": alarm_query,
             "archive_query": archive_query,
             "runner": runner,
-            "telegram": telegram,
+            "delivery": delivery,
             "artifact_reader": artifact_reader,
         }
         if any(value is None for value in required.values()):
@@ -379,7 +379,16 @@ class PeriodicPngCoordinator:
         self._alarm_query = alarm_query
         self._archive_query = archive_query
         self._runner = runner
-        self._telegram = telegram
+        self._delivery = delivery
+        if type(destination_fingerprint) is not str or _HASH.fullmatch(destination_fingerprint) is None:
+            raise ValueError("destination_fingerprint is invalid")
+        self._destination_fingerprint = destination_fingerprint
+        if type(expected_delivery_kind) is not str or expected_delivery_kind not in {
+            "telegram",
+            "soak_local",
+        }:
+            raise ValueError("expected_delivery_kind is invalid")
+        self._expected_delivery_kind = expected_delivery_kind
         self._artifact_reader = artifact_reader
         self._clock = clock or _SystemClock()
         self._generation_factory = generation_factory or (lambda: secrets.token_hex(16))
@@ -711,7 +720,7 @@ class PeriodicPngCoordinator:
         self._loop_task = None
         self._live_task = None
         await attempt(self._alarm_query.close())
-        await attempt(self._telegram.close())
+        await attempt(self._delivery.close())
         try:
             if self._readings is not None:
                 self._readings.clear()
@@ -729,7 +738,7 @@ class PeriodicPngCoordinator:
         for operation in (
             self._live.stop,
             self._alarm_query.close,
-            self._telegram.close,
+            self._delivery.close,
         ):
             try:
                 await operation()
@@ -852,6 +861,7 @@ class PeriodicPngCoordinator:
                 owner_token=self._owner_factory(),
                 display_time=self._clock.display_time(latest.slot_end),
                 now=now,
+                destination_fingerprint=self._destination_fingerprint,
             )
             await self._persist(state, pending)
             return True
@@ -878,7 +888,10 @@ class PeriodicPngCoordinator:
             # but this recovery pass performs no further slot work.
             return False
 
-        if active["config_fingerprint"] != self._config.config_fingerprint:
+        if (
+            active["config_fingerprint"] != self._config.config_fingerprint
+            or active["destination_fingerprint"] != self._destination_fingerprint
+        ):
             failure_phase = "config"
             certainty = "not_applicable"
             if status is PeriodicStatus.FAILED:
@@ -927,6 +940,7 @@ class PeriodicPngCoordinator:
                     owner_token=self._owner_factory(),
                     display_time=active["display_time"],
                     now=due_now,
+                    destination_fingerprint=self._destination_fingerprint,
                 )
                 await self._persist(state, pending)
                 return True
@@ -1297,6 +1311,7 @@ class PeriodicPngCoordinator:
             fresh_active["artifact"] != active["artifact"]
             or fresh_active["caption"] != active["caption"]
             or fresh_active["config_fingerprint"] != self._config.config_fingerprint
+            or fresh_active["destination_fingerprint"] != self._destination_fingerprint
         ):
             return False
         delivering = mark_delivering(
@@ -1321,16 +1336,46 @@ class PeriodicPngCoordinator:
 
     async def _delivery_transaction(self, active: dict[str, Any], photo: bytes, caption: str) -> None:
         try:
-            result = await self._telegram.send_photo(photo, caption)
+            artifact = active.get("artifact")
+            if not isinstance(artifact, Mapping):
+                raise PeriodicContractError("delivery lacks fenced artifact context")
+            caption_bytes = caption.encode("utf-8", errors="strict")
+            context = PeriodicDeliveryContext(
+                slot_id=str(active["slot_id"]),
+                generation_id=str(active["generation_id"]),
+                owner_token=str(active["owner_token"]),
+                artifact_sha256=str(artifact["sha256"]),
+                artifact_size=int(artifact["size"]),
+                caption_sha256="sha256:" + hashlib.sha256(caption_bytes).hexdigest(),
+                caption_size=len(caption_bytes),
+            )
+            result = await self._delivery.send_artifact(photo, caption, context)
+            if not isinstance(result, PeriodicDeliveryResult):
+                raise TypeError("delivery returned an invalid result")
+            receipt = result.receipt
+            if receipt is not None:
+                receipt = PeriodicDeliveryReceipt(
+                    kind=receipt.kind,
+                    receipt_id=receipt.receipt_id,
+                    acknowledgement_sha256=receipt.acknowledgement_sha256,
+                )
+            result = PeriodicDeliveryResult(
+                outcome=result.outcome,
+                receipt=receipt,
+                retryable=result.retryable,
+                retry_after_s=result.retry_after_s,
+                error_code=result.error_code,
+                error_text=result.error_text,
+            )
         except asyncio.CancelledError:
             await self._persist_unknown(
                 active,
-                "telegram_cancelled_unknown",
+                "delivery_cancelled_unknown",
                 "delivery was cancelled after invocation",
             )
             raise
         except Exception:
-            await self._persist_unknown(active, "telegram_internal_unknown", "delivery outcome is unknown")
+            await self._persist_unknown(active, "delivery_internal_unknown", "delivery outcome is unknown")
             return
         assert self._delivery_settlement_lock is not None
         async with self._delivery_settlement_lock:
@@ -1339,32 +1384,36 @@ class PeriodicPngCoordinator:
             if not self._same_active(active, current_active, expected_status=PeriodicStatus.DELIVERING):
                 raise PeriodicContractError("delivery state changed before result persistence")
             now = self._logical_now(current)
-            if result.outcome is TelegramOutcome.ACCEPTED:
-                assert result.message_id is not None
-                candidate = mark_succeeded(
-                    current,
-                    message_id=result.message_id,
-                    slot_id=active["slot_id"],
-                    owner_token=active["owner_token"],
-                    now=now,
-                )
-            elif result.outcome is TelegramOutcome.UNKNOWN:
+            if result.outcome is PeriodicDeliveryOutcome.ACCEPTED:
+                if result.receipt is None or result.receipt.kind != self._expected_delivery_kind:
+                    candidate = mark_delivery_unknown(
+                        current,
+                        code="delivery_receipt_kind_mismatch",
+                        text="accepted delivery receipt kind does not match destination authority",
+                        slot_id=active["slot_id"],
+                        owner_token=active["owner_token"],
+                        now=now,
+                    )
+                else:
+                    candidate = mark_succeeded(
+                        current,
+                        receipt=result.receipt,
+                        slot_id=active["slot_id"],
+                        owner_token=active["owner_token"],
+                        now=now,
+                    )
+            elif result.outcome is PeriodicDeliveryOutcome.UNKNOWN:
                 candidate = mark_delivery_unknown(
                     current,
-                    code=result.error_code or "telegram_internal_unknown",
+                    code=result.error_code or "delivery_internal_unknown",
                     text=result.error_text or "delivery outcome is unknown",
                     slot_id=active["slot_id"],
                     owner_token=active["owner_token"],
                     now=now,
                 )
             else:
-                retryable = (
-                    result.outcome is TelegramOutcome.REJECTED and result.error_code == "telegram_retryable_rejection"
-                ) or (
-                    result.outcome is TelegramOutcome.NOT_SENT
-                    and result.error_code in {"telegram_connect_failed", "client_busy"}
-                )
-                certainty = "rejected" if result.outcome is TelegramOutcome.REJECTED else "not_sent"
+                retryable = result.retryable
+                certainty = "rejected" if result.outcome is PeriodicDeliveryOutcome.REJECTED else "not_sent"
                 count = int(active["delivery_attempt_count"])
                 if retryable and count < int(active["max_delivery_attempts"]):
                     delay = (

@@ -28,13 +28,23 @@ import zmq
 import zmq.asyncio
 from zmq.utils.monitor import parse_monitor_message
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDelivery,
+    PeriodicDeliveryContext,
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_png import (
     AlarmQueryResult,
     LiveSourceCut,
     PeriodicPngCoordinator,
     PeriodicSourceUnavailable,
 )
-from cryodaq.agents.assistant.periodic_telegram import PeriodicTelegramClient
+from cryodaq.agents.assistant.periodic_telegram import (
+    PeriodicTelegramClient,
+    TelegramOutcome,
+)
 from cryodaq.core.zmq_bridge import (
     DEFAULT_CMD_ADDR,
     DEFAULT_PUB_ADDR,
@@ -51,6 +61,7 @@ from cryodaq.core.zmq_bridge import (
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.periodic_config import PeriodicPngConfig
+from cryodaq.periodic_state import periodic_telegram_destination_fingerprint
 from cryodaq.report_process import ReportProcessRunner
 from cryodaq.storage.archive_reader import ArchiveReader
 
@@ -1119,12 +1130,112 @@ class SequencedPeriodicLiveSources:
 
 
 type PeriodicCoordinatorFactory = Callable[[PeriodicPngConfig], PeriodicPngCoordinator]
+type PeriodicDeliveryFactory = Callable[[], PeriodicDelivery]
+
+
+class _DeliveryLeaseSlot:
+    """Bind a custom session lease only after the coordinator graph is complete."""
+
+    def __init__(self) -> None:
+        self._target: PeriodicDelivery | None = None
+
+    def bind(self, target: PeriodicDelivery) -> None:
+        if self._target is not None:
+            raise RuntimeError("periodic delivery lease is already bound")
+        if target is None:
+            raise TypeError("periodic delivery factory returned no session lease")
+        # The factory's PeriodicDelivery return type is its closed contract.
+        # Do not perform a fallible probe after session acquisition: binding
+        # this fresh slot is the final graph-construction operation.
+        self._target = target
+
+    async def send_artifact(
+        self,
+        photo: bytes,
+        caption: str,
+        context: PeriodicDeliveryContext,
+    ) -> PeriodicDeliveryResult:
+        target = self._target
+        if target is None:
+            raise RuntimeError("periodic delivery lease is not bound")
+        return await target.send_artifact(photo, caption, context)
+
+    async def close(self) -> None:
+        target = self._target
+        if target is not None:
+            await target.close()
+
+
+class _TelegramPeriodicDelivery:
+    """Map the accepted Telegram client to the provider-neutral delivery seam."""
+
+    def __init__(self, config: PeriodicPngConfig) -> None:
+        self._client = PeriodicTelegramClient(config)
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def send_artifact(
+        self,
+        photo: bytes,
+        caption: str,
+        context: PeriodicDeliveryContext,
+    ) -> PeriodicDeliveryResult:
+        try:
+            caption_bytes = caption.encode("utf-8", errors="strict")
+        except (AttributeError, UnicodeEncodeError):
+            caption_bytes = b""
+        if (
+            not isinstance(context, PeriodicDeliveryContext)
+            or type(photo) is not bytes
+            or (
+                len(photo) != context.artifact_size
+                or "sha256:" + hashlib.sha256(photo).hexdigest() != context.artifact_sha256
+                or len(caption_bytes) != context.caption_size
+                or "sha256:" + hashlib.sha256(caption_bytes).hexdigest() != context.caption_sha256
+            )
+        ):
+            return PeriodicDeliveryResult(
+                PeriodicDeliveryOutcome.NOT_SENT,
+                None,
+                False,
+                None,
+                "delivery_context_mismatch",
+                "periodic payload contradicts its fenced delivery context",
+            )
+        result = await self._client.send_photo(photo, caption)
+        outcome = PeriodicDeliveryOutcome(result.outcome.value)
+        receipt = (
+            PeriodicDeliveryReceipt("telegram", str(result.message_id), None)
+            if result.outcome is TelegramOutcome.ACCEPTED
+            else None
+        )
+        retryable = (
+            result.outcome is TelegramOutcome.REJECTED and result.error_code == "telegram_retryable_rejection"
+        ) or (
+            result.outcome is TelegramOutcome.NOT_SENT
+            and result.error_code in {"telegram_connect_failed", "client_busy"}
+        )
+        return PeriodicDeliveryResult(
+            outcome,
+            receipt,
+            retryable,
+            result.retry_after_s,
+            result.error_code,
+            result.error_text,
+        )
+
+    async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._client.close())
+        await asyncio.shield(self._close_task)
 
 
 def make_periodic_coordinator_factory(
     *,
     data_dir: Path,
     archive_dir: Path,
+    _delivery_factory: PeriodicDeliveryFactory | None = None,
+    _destination_fingerprint: str | None = None,
+    _delivery_kind: str | None = None,
 ) -> PeriodicCoordinatorFactory:
     """Return the resource-free H3 graph seam consumed by Slice F.
 
@@ -1134,6 +1245,14 @@ def make_periodic_coordinator_factory(
 
     resolved_data = Path(data_dir)
     resolved_archive = Path(archive_dir)
+    local_parts = (_delivery_factory, _destination_fingerprint, _delivery_kind)
+    if any(part is not None for part in local_parts) and not all(part is not None for part in local_parts):
+        raise ValueError("local delivery factory, destination fingerprint, and kind are mutually required")
+    if _delivery_factory is not None:
+        if type(_destination_fingerprint) is not str or _HASH.fullmatch(_destination_fingerprint) is None:
+            raise ValueError("local delivery destination fingerprint is invalid")
+        if type(_delivery_kind) is not str or _delivery_kind != "soak_local":
+            raise ValueError("custom periodic delivery kind must be soak_local")
 
     def build(config: PeriodicPngConfig) -> PeriodicPngCoordinator:
         if not isinstance(config, PeriodicPngConfig) or not config.enabled:
@@ -1143,16 +1262,34 @@ def make_periodic_coordinator_factory(
         live = SequencedPeriodicLiveSources(query, DEFAULT_PUB_ADDR)
         archive = ArchiveReader(resolved_data, resolved_archive)
         runner = ReportProcessRunner(resolved_data, timeout_s=config.render_timeout_s)
-        telegram = PeriodicTelegramClient(config)
-        return PeriodicPngCoordinator(
+        delivery: PeriodicDelivery
+        slot: _DeliveryLeaseSlot | None = None
+        if _delivery_factory is None:
+            delivery = _TelegramPeriodicDelivery(config)
+        else:
+            slot = _DeliveryLeaseSlot()
+            delivery = slot
+        coordinator = PeriodicPngCoordinator(
             data_dir=resolved_data,
             config=config,
             live_sources=live,
             alarm_query=alarm_query,
             archive_query=archive.query_reading_rows_bounded,
             runner=runner,
-            telegram=telegram,
+            delivery=delivery,
+            destination_fingerprint=(
+                periodic_telegram_destination_fingerprint(config.telegram_chat_id)
+                if _destination_fingerprint is None
+                else _destination_fingerprint
+            ),
+            expected_delivery_kind="telegram" if _delivery_kind is None else _delivery_kind,
         )
+        if slot is not None:
+            # This is deliberately the final operation in graph construction:
+            # a custom session lease cannot exist while a later constructor
+            # can still fail and orphan it.
+            slot.bind(_delivery_factory())
+        return coordinator
 
     return build
 

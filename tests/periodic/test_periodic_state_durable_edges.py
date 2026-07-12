@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryReceipt
 from cryodaq.periodic_config import load_periodic_png_config
 from cryodaq.periodic_state import (
     PeriodicArtifact,
@@ -61,9 +62,7 @@ def _variants(tmp_path: Path) -> dict[str, PeriodicStateDocument]:
         display_time=DISPLAY_TIME,
         now=7_201.0,
     )
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token="b" * 32, now=7_202.0
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token="b" * 32, now=7_202.0)
     ready = mark_ready(
         rendering,
         PeriodicArtifact(
@@ -79,12 +78,10 @@ def _variants(tmp_path: Path) -> dict[str, PeriodicStateDocument]:
         owner_token="b" * 32,
         now=7_203.0,
     )
-    delivering = mark_delivering(
-        ready, slot_id=slot.slot_id, owner_token="b" * 32, now=7_204.0
-    )
+    delivering = mark_delivering(ready, slot_id=slot.slot_id, owner_token="b" * 32, now=7_204.0)
     succeeded = mark_succeeded(
         delivering,
-        message_id=42,
+        receipt=PeriodicDeliveryReceipt("telegram", "42", None),
         slot_id=slot.slot_id,
         owner_token="b" * 32,
         now=7_205.0,
@@ -157,9 +154,7 @@ def _with_full_ledger(state: PeriodicStateDocument) -> PeriodicStateDocument:
     return PeriodicStateDocument(payload)
 
 
-def _write_edge(
-    data_dir: Path, current: PeriodicStateDocument, candidate: PeriodicStateDocument
-) -> None:
+def _write_edge(data_dir: Path, current: PeriodicStateDocument, candidate: PeriodicStateDocument) -> None:
     _install(data_dir, current)
     active = current.payload["active"]
     if isinstance(active, dict):
@@ -264,9 +259,7 @@ def test_forbidden_shortcuts_are_rejected_under_an_exact_current_fence(
         ("caption", "rebound caption"),
     ],
 )
-def test_same_status_authority_rebinding_is_rejected(
-    tmp_path: Path, field: str, value: object
-) -> None:
+def test_same_status_authority_rebinding_is_rejected(tmp_path: Path, field: str, value: object) -> None:
     ready = _variants(tmp_path)["READY"]
     payload = copy.deepcopy(ready.payload)
     payload["active"][field] = value
@@ -366,9 +359,7 @@ def test_representative_legitimate_helper_edges_remain_persistable(tmp_path: Pat
     )
     _write_edge(tmp_path / "health-edge", variants["READY"], health)
 
-    superseded = supersede_active(
-        variants["READY"], newer_slot_end=9_000, now=7_204.0
-    )
+    superseded = supersede_active(variants["READY"], newer_slot_end=9_000, now=7_204.0)
     _write_edge(tmp_path / "supersede-edge", variants["READY"], superseded)
 
     pending = variants["PENDING"]

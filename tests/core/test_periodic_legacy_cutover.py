@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import json
+import os
 import struct
 import subprocess
 import sys
@@ -12,21 +14,32 @@ from types import ModuleType
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDeliveryContext,
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_png import (
     AlarmQueryResult,
     LiveSourceCut,
     PeriodicPngCoordinator,
     PeriodicPngSupervisor,
 )
-from cryodaq.agents.assistant.periodic_telegram import (
-    PeriodicTelegramClient,
-    TelegramDeliveryResult,
-    TelegramOutcome,
-)
+from cryodaq.agents.assistant.periodic_telegram import TelegramDeliveryResult, TelegramOutcome
 from cryodaq.notifications._secrets import SecretStr
 from cryodaq.periodic_config import PeriodicPngConfig, PeriodicPngConfigLoad
-from cryodaq.periodic_state import PeriodicArtifact, load_periodic_state
-from cryodaq.report_process import PeriodicRenderResult, ReportProcessRunner
+from cryodaq.periodic_state import (
+    PeriodicArtifact,
+    load_periodic_state,
+    periodic_telegram_destination_fingerprint,
+)
+from cryodaq.report_process import (
+    PeriodicRenderResult,
+    ReportProcessError,
+    ReportProcessRunner,
+    read_periodic_artifact_bytes,
+)
 from cryodaq.storage.archive_reader import (
     ArchiveReader,
     BoundedReadingQueryResult,
@@ -34,6 +47,7 @@ from cryodaq.storage.archive_reader import (
 )
 
 ENGINE = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "engine.py"
+DESTINATION_FINGERPRINT = periodic_telegram_destination_fingerprint(-100123)
 
 
 def _install_windows_signal_double(
@@ -167,14 +181,14 @@ def test_real_h3_factory_builds_fixed_resource_free_private_graph(tmp_path: Path
     assert coordinator._archive_query.__self__._archive_dir == archive_dir
     assert type(coordinator._runner) is ReportProcessRunner
     assert coordinator._runner._data_dir == tmp_path.resolve()
-    assert type(coordinator._telegram) is PeriodicTelegramClient
+    assert type(coordinator._delivery) is periodic_runtime._TelegramPeriodicDelivery
 
     # Construction is intentionally inert: no socket/context, HTTP session,
     # child, background task, or runtime-state hierarchy exists before start.
     assert coordinator._live._context is None
     assert coordinator._live._socket is None
     assert coordinator._live._receive_task is None
-    assert coordinator._telegram._transport._session is None
+    assert coordinator._delivery._client._transport._session is None
     assert coordinator._loop_task is None
     assert coordinator._live_task is None
     assert not (tmp_path / "reporting").exists()
@@ -399,24 +413,77 @@ class _CompositionRunner:
         active = load_periodic_state(self._data_dir).payload["active"]
         assert isinstance(active, dict)
         raw = _immutable_png()
-        final = self._data_dir / "reporting" / "periodic" / "generations" / generation_id
-        final.mkdir(parents=True)
-        (final / "periodic.png").write_bytes(raw)
-        return PeriodicRenderResult(
+        root = self._data_dir / "reporting" / "periodic"
+        staging_parent = root / ".staging"
+        generations_parent = root / "generations"
+        staging_parent.mkdir(parents=True)
+        generations_parent.mkdir(parents=True)
+        staging = staging_parent / generation_id
+        staging.mkdir()
+        artifact = PeriodicArtifact(
+            path=f"periodic/generations/{generation_id}/periodic.png",
+            sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+            size=len(raw),
+            width=640,
+            height=480,
+            mime="image/png",
+        )
+        result = PeriodicRenderResult(
             generation_id=generation_id,
             owner_token=str(active["owner_token"]),
             slot_id=str(active["slot_id"]),
             config_fingerprint=str(active["config_fingerprint"]),
-            artifact=PeriodicArtifact(
-                path=f"periodic/generations/{generation_id}/periodic.png",
-                sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
-                size=len(raw),
-                width=640,
-                height=480,
-                mime="image/png",
-            ),
+            artifact=artifact,
             caption="immutable H3 cutover proof",
         )
+        (staging / "periodic.png").write_bytes(raw)
+        (staging / "result.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "ok": True,
+                    "generation_id": generation_id,
+                    "owner_token": result.owner_token,
+                    "slot_id": result.slot_id,
+                    "config_fingerprint": result.config_fingerprint,
+                    "artifact": {
+                        "path": artifact.path,
+                        "sha256": artifact.sha256,
+                        "size": artifact.size,
+                        "width": artifact.width,
+                        "height": artifact.height,
+                        "mime": artifact.mime,
+                    },
+                    "caption": result.caption,
+                    "error_code": None,
+                    "error_text": "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.rename(staging, generations_parent / generation_id)
+        return result
+
+
+class _DiagnosticArtifactReader:
+    """Retain bounded evidence without replacing the production reader."""
+
+    def __init__(self) -> None:
+        self.failures: list[tuple[str, str]] = []
+
+    def __call__(self, data_dir: Path, artifact: PeriodicArtifact) -> bytes:
+        try:
+            return read_periodic_artifact_bytes(data_dir, artifact)
+        except ReportProcessError as exc:
+            self.failures.append((exc.error_code, exc.error_text))
+            raise
+        except Exception as exc:
+            self.failures.append((type(exc).__name__, str(exc)[:512]))
+            raise
 
 
 class _CompositionTelegram:
@@ -433,6 +500,22 @@ class _CompositionTelegram:
             TelegramOutcome.ACCEPTED,
             77,
             200,
+            None,
+            None,
+            "",
+        )
+
+    async def send_artifact(
+        self,
+        photo: bytes,
+        caption: str,
+        _context: PeriodicDeliveryContext,
+    ) -> PeriodicDeliveryResult:
+        result = await self.send_photo(photo, caption)
+        return PeriodicDeliveryResult(
+            PeriodicDeliveryOutcome.ACCEPTED,
+            PeriodicDeliveryReceipt("telegram", str(result.message_id), None),
+            False,
             None,
             None,
             "",
@@ -455,6 +538,7 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
     archive = _CompositionArchive()
     runner = _CompositionRunner(tmp_path)
     telegram = _CompositionTelegram()
+    artifact_reader = _DiagnosticArtifactReader()
     constructed: list[PeriodicPngCoordinator] = []
 
     def coordinator_factory(observed: PeriodicPngConfig) -> PeriodicPngCoordinator:
@@ -466,7 +550,10 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
             alarm_query=periodic_runtime._PeriodicAlarmAdapter(query),
             archive_query=archive,
             runner=runner,
-            telegram=telegram,
+            delivery=telegram,
+            destination_fingerprint=DESTINATION_FINGERPRINT,
+            expected_delivery_kind="telegram",
+            artifact_reader=artifact_reader,
             clock=clock,
             generation_factory=lambda: "4" * 32,
             owner_factory=lambda: "5" * 32,
@@ -520,7 +607,7 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
             raise AssertionError(
                 f"H3 due slot did not deliver: constructed={len(constructed)}, "
                 f"runner_calls={runner.calls}, task_error={task_error!r}, "
-                f"state={state!r}"
+                f"artifact_failures={artifact_reader.failures!r}, state={state!r}"
             ) from exc
     finally:
         await supervisor.stop()
@@ -531,6 +618,7 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
     assert live.stops == 1
     assert archive.calls >= 1
     assert runner.calls == 1
+    assert artifact_reader.failures == []
     assert telegram.closed == 1
     assert telegram.deliveries == [(_immutable_png(), "immutable H3 cutover proof")]
     state = load_periodic_state(tmp_path).payload

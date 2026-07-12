@@ -15,6 +15,12 @@ from typing import Any
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDeliveryContext,
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_png import (
     AlarmQueryResult,
     LiveSourceCut,
@@ -41,6 +47,7 @@ from cryodaq.periodic_state import (
     PERIODIC_LEADER_LOCK,
     PeriodicArtifact,
     load_periodic_state,
+    periodic_telegram_destination_fingerprint,
 )
 from cryodaq.report_process import PeriodicRenderResult
 from cryodaq.storage.archive_reader import (
@@ -56,6 +63,7 @@ _H2_LOCK = ".report-locks/coordinator.lock"
 _PROJECTION_WINDOW_START = 0.0
 _PROJECTION_WINDOW_END = 239.0
 _LIVE_READING_TIMESTAMP = 150.0
+DESTINATION_FINGERPRINT = periodic_telegram_destination_fingerprint(-100123)
 
 
 def _config() -> PeriodicPngConfig:
@@ -406,6 +414,22 @@ class _Telegram:
         )
         return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 77, 200, None, None, "")
 
+    async def send_artifact(
+        self,
+        photo: bytes,
+        caption: str,
+        _context: PeriodicDeliveryContext,
+    ) -> PeriodicDeliveryResult:
+        result = await self.send_photo(photo, caption)
+        return PeriodicDeliveryResult(
+            PeriodicDeliveryOutcome.ACCEPTED,
+            PeriodicDeliveryReceipt("telegram", str(result.message_id), None),
+            False,
+            None,
+            None,
+            "",
+        )
+
     async def close(self) -> None:
         return None
 
@@ -433,7 +457,9 @@ async def _run_supervisor_child(
             alarm_query=_ProcessAlarm(),
             archive_query=_Archive(),
             runner=_Runner(data_dir, messages),
-            telegram=_Telegram(data_dir, messages),
+            delivery=_Telegram(data_dir, messages),
+            destination_fingerprint=DESTINATION_FINGERPRINT,
+            expected_delivery_kind="telegram",
             clock=clock,
         )
 
@@ -621,7 +647,9 @@ async def _hydration_adapter(
         alarm_query=periodic_runtime._PeriodicAlarmAdapter(query),
         archive_query=_BlockingArchive(archive_entered, archive_release),
         runner=_Runner(data_dir, messages),
-        telegram=_Telegram(data_dir, messages),
+        delivery=_Telegram(data_dir, messages),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=_Clock(),
     )
     await coordinator.start()

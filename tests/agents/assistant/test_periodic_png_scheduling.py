@@ -15,6 +15,7 @@ from cryodaq.periodic_state import (
     write_periodic_state,
 )
 from tests.agents.assistant.test_periodic_png_coordinator import (
+    DESTINATION_FINGERPRINT,
     Alarm,
     Archive,
     Clock,
@@ -115,15 +116,20 @@ def test_retry_deadline_cache_is_bounded_to_one_active_key(tmp_path: Path) -> No
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(0.0),
     )
     for index in range(1_000):
-        assert coordinator._retry_due(
-            {
-                "slot_id": f"slot-{index}",
-                "status": "FAILED",
-                "not_before": float(index + 1),
-            }
-        ) is False
+        assert (
+            coordinator._retry_due(
+                {
+                    "slot_id": f"slot-{index}",
+                    "status": "FAILED",
+                    "not_before": float(index + 1),
+                }
+            )
+            is False
+        )
         assert len(coordinator._retry_deadlines) == 1

@@ -24,8 +24,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from cryodaq.periodic_config import PeriodicPngConfig
+from cryodaq.periodic_delivery_receipt import PeriodicDeliveryReceipt
 
-PERIODIC_STATE_SCHEMA = 1
+PERIODIC_STATE_SCHEMA = 2
 PERIODIC_INPUT_SCHEMA = 1
 PERIODIC_RESULT_SCHEMA = 1
 PERIODIC_LEADER_LOCK = ".report-locks/periodic-coordinator.lock"
@@ -76,7 +77,7 @@ _ACTIVE_KEYS = {
     "not_before",
     "artifact",
     "caption",
-    "telegram_message_id",
+    "receipt",
     "failure_phase",
     "retryable",
     "certainty",
@@ -94,13 +95,16 @@ _TERMINAL_KEYS = {
     "status",
     "destination_fingerprint",
     "artifact_sha256",
-    "telegram_message_id",
+    "receipt",
     "failure_phase",
     "certainty",
     "error_code",
     "error_text",
     "finished_at",
 }
+_V1_ACTIVE_KEYS = (_ACTIVE_KEYS - {"receipt"}) | {"telegram_message_id"}
+_V1_TERMINAL_KEYS = (_TERMINAL_KEYS - {"receipt"}) | {"telegram_message_id"}
+_RECEIPT_KEYS = {"kind", "receipt_id", "acknowledgement_sha256"}
 _UNKNOWN_KEYS = {
     "slot_id",
     "slot_end",
@@ -310,6 +314,7 @@ def allocate_pending(
     owner_token: str,
     display_time: str,
     now: float,
+    destination_fingerprint: str | None = None,
 ) -> PeriodicStateDocument:
     """Allocate a newer slot, or a new render attempt for one retryable slot."""
 
@@ -345,9 +350,7 @@ def allocate_pending(
         delivery_count = active["delivery_attempt_count"]
         created_at = active["created_at"]
         if display != active["display_time"]:
-            raise PeriodicContractError(
-                "render retry display_time must match durable slot identity"
-            )
+            raise PeriodicContractError("render retry display_time must match durable slot identity")
     if retry:
         if high_water != slot.slot_end:
             raise PeriodicContractError("retry slot does not match high water")
@@ -358,7 +361,11 @@ def allocate_pending(
             raise PeriodicContractError("active periodic slot blocks allocation")
         payload["high_water_slot_end"] = slot.slot_end
 
-    destination_fingerprint = _destination_fingerprint(config.telegram_chat_id)
+    destination = (
+        periodic_telegram_destination_fingerprint(config.telegram_chat_id)
+        if destination_fingerprint is None
+        else _validated_hash(destination_fingerprint, "destination_fingerprint")
+    )
     payload["active"] = {
         "slot_id": slot.slot_id,
         "slot_start": slot.slot_start,
@@ -368,7 +375,7 @@ def allocate_pending(
         "window_end": slot.slot_end,
         "display_time": display,
         "config_fingerprint": config.config_fingerprint,
-        "destination_fingerprint": destination_fingerprint,
+        "destination_fingerprint": destination,
         "generation_id": generation,
         "owner_token": owner,
         "status": PeriodicStatus.PENDING.value,
@@ -379,7 +386,7 @@ def allocate_pending(
         "not_before": timestamp,
         "artifact": None,
         "caption": "",
-        "telegram_message_id": None,
+        "receipt": None,
         "failure_phase": None,
         "retryable": None,
         "certainty": None,
@@ -396,9 +403,7 @@ def allocate_pending(
 def mark_rendering(
     state: PeriodicStateDocument, *, slot_id: str, owner_token: str, now: float
 ) -> PeriodicStateDocument:
-    payload, active, timestamp = _transition_context(
-        state, slot_id, owner_token, now, allowed={PeriodicStatus.PENDING}
-    )
+    payload, active, timestamp = _transition_context(state, slot_id, owner_token, now, allowed={PeriodicStatus.PENDING})
     if active["render_attempt_count"] >= active["max_render_attempts"]:
         raise PeriodicContractError("render attempts are exhausted")
     active["status"] = PeriodicStatus.RENDERING.value
@@ -457,9 +462,7 @@ def mark_retryable_failure(
     if phase_value not in {"render", "delivery"}:
         raise PeriodicContractError("scheduler and config failures cannot be retryable")
     allowed = (
-        {PeriodicStatus.PENDING, PeriodicStatus.RENDERING}
-        if phase_value == "render"
-        else {PeriodicStatus.DELIVERING}
+        {PeriodicStatus.PENDING, PeriodicStatus.RENDERING} if phase_value == "render" else {PeriodicStatus.DELIVERING}
     )
     payload, active, timestamp = _transition_context(
         state,
@@ -474,12 +477,8 @@ def mark_retryable_failure(
         # this increment a repeated pre-child I/O failure could retry forever
         # while render_attempt_count remained zero.
         active["render_attempt_count"] += 1
-    attempt_count = (
-        active["render_attempt_count"] if phase_value == "render" else active["delivery_attempt_count"]
-    )
-    attempt_limit = (
-        active["max_render_attempts"] if phase_value == "render" else active["max_delivery_attempts"]
-    )
+    attempt_count = active["render_attempt_count"] if phase_value == "render" else active["delivery_attempt_count"]
+    attempt_limit = active["max_render_attempts"] if phase_value == "render" else active["max_delivery_attempts"]
     if attempt_count >= attempt_limit:
         raise PeriodicContractError("retry attempts are exhausted")
     retry_at = _finite_time(not_before, "not_before")
@@ -566,9 +565,7 @@ def mark_delivering(
         allowed={PeriodicStatus.READY, PeriodicStatus.FAILED},
     )
     if active["status"] == PeriodicStatus.FAILED.value and not (
-        active["retryable"] is True
-        and active["failure_phase"] == "delivery"
-        and timestamp >= active["not_before"]
+        active["retryable"] is True and active["failure_phase"] == "delivery" and timestamp >= active["not_before"]
     ):
         raise PeriodicContractError("only a due delivery failure can be redelivered")
     if active["artifact"] is None:
@@ -597,7 +594,7 @@ def mark_delivering(
 def mark_succeeded(
     state: PeriodicStateDocument,
     *,
-    message_id: int,
+    receipt: PeriodicDeliveryReceipt,
     slot_id: str,
     owner_token: str,
     now: float,
@@ -605,10 +602,10 @@ def mark_succeeded(
     payload, active, timestamp = _transition_context(
         state, slot_id, owner_token, now, allowed={PeriodicStatus.DELIVERING}
     )
-    if type(message_id) is not int or message_id <= 0:
-        raise PeriodicContractError("telegram message_id must be a positive integer")
+    if not isinstance(receipt, PeriodicDeliveryReceipt):
+        raise PeriodicContractError("a validated delivery receipt is required")
     active["status"] = PeriodicStatus.SUCCEEDED.value
-    active["telegram_message_id"] = message_id
+    active["receipt"] = receipt.as_dict()
     active["finished_at"] = timestamp
     _touch(payload, active, timestamp)
     return PeriodicStateDocument(payload)
@@ -658,9 +655,7 @@ def mark_delivery_unknown(
     return PeriodicStateDocument(payload)
 
 
-def supersede_active(
-    state: PeriodicStateDocument, *, newer_slot_end: int, now: float
-) -> PeriodicStateDocument:
+def supersede_active(state: PeriodicStateDocument, *, newer_slot_end: int, now: float) -> PeriodicStateDocument:
     payload = _copy_payload(state)
     active = payload["active"]
     timestamp = _transition_time(payload, now)
@@ -695,9 +690,7 @@ def supersede_active(
     return PeriodicStateDocument(payload)
 
 
-def rotate_terminal_active(
-    state: PeriodicStateDocument, *, now: float
-) -> PeriodicStateDocument:
+def rotate_terminal_active(state: PeriodicStateDocument, *, now: float) -> PeriodicStateDocument:
     payload = _copy_payload(state)
     active = payload["active"]
     timestamp = _transition_time(payload, now)
@@ -784,7 +777,11 @@ def _validate_document(value: Mapping[str, object]) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != _TOP_KEYS:
         raise PeriodicContractError("periodic state has an invalid top-level schema")
     payload = copy.deepcopy(dict(value))
-    if type(payload["schema"]) is not int or payload["schema"] != PERIODIC_STATE_SCHEMA:
+    if type(payload["schema"]) is not int:
+        raise PeriodicContractError("unsupported periodic state schema")
+    if payload["schema"] == 1:
+        payload = _migrate_v1_document(payload)
+    elif payload["schema"] != PERIODIC_STATE_SCHEMA:
         raise PeriodicContractError("unsupported periodic state schema")
     high_water = payload["high_water_slot_end"]
     if high_water is not None and (type(high_water) is not int or high_water < 0):
@@ -820,9 +817,7 @@ def _validate_document(value: Mapping[str, object]) -> dict[str, Any]:
             raise PeriodicContractError("unknown active state lacks durable evidence")
         _require_unknown_matches_active(payload["active"], evidence)
     if isinstance(payload["last_terminal"], dict) and payload["last_terminal"]["status"] == "DELIVERY_UNKNOWN":
-        evidence = _evidence_for_slot(
-            validated_ledger, payload["last_terminal"]["slot_id"]
-        )
+        evidence = _evidence_for_slot(validated_ledger, payload["last_terminal"]["slot_id"])
         if evidence is None:
             raise PeriodicContractError("unknown terminal summary lacks durable evidence")
         _require_unknown_matches_terminal(payload["last_terminal"], evidence)
@@ -840,6 +835,50 @@ def _validate_document(value: Mapping[str, object]) -> dict[str, Any]:
     return payload
 
 
+def _migrate_v1_document(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate the closed v1 shape and return its exact in-memory v2 meaning."""
+
+    migrated = copy.deepcopy(payload)
+    active = migrated["active"]
+    if active is not None:
+        if not isinstance(active, dict) or set(active) != _V1_ACTIVE_KEYS:
+            raise PeriodicContractError("v1 active periodic slot has an invalid schema")
+        message_id = active.pop("telegram_message_id")
+        active["receipt"] = _migrated_telegram_receipt(message_id)
+    terminal = migrated["last_terminal"]
+    if terminal is not None:
+        if not isinstance(terminal, dict) or set(terminal) != _V1_TERMINAL_KEYS:
+            raise PeriodicContractError("v1 terminal summary has an invalid schema")
+        message_id = terminal.pop("telegram_message_id")
+        terminal["receipt"] = _migrated_telegram_receipt(message_id)
+    migrated["schema"] = PERIODIC_STATE_SCHEMA
+    return migrated
+
+
+def _migrated_telegram_receipt(value: object) -> dict[str, str | None] | None:
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= 9_223_372_036_854_775_807:
+        raise PeriodicContractError("v1 Telegram message ID is invalid")
+    return PeriodicDeliveryReceipt("telegram", str(value), None).as_dict()
+
+
+def _validate_receipt(value: object) -> dict[str, str | None] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _RECEIPT_KEYS:
+        raise PeriodicContractError("delivery receipt has an invalid schema")
+    try:
+        receipt = PeriodicDeliveryReceipt(
+            kind=value["kind"],  # type: ignore[arg-type]
+            receipt_id=value["receipt_id"],  # type: ignore[arg-type]
+            acknowledgement_sha256=value["acknowledgement_sha256"],  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError):
+        raise PeriodicContractError("delivery receipt is invalid") from None
+    return receipt.as_dict()
+
+
 def _validate_active(value: object, high_water: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _ACTIVE_KEYS:
         raise PeriodicContractError("active periodic slot has an invalid schema")
@@ -852,9 +891,7 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
         raise PeriodicContractError("active slot interval is inconsistent")
     if slot_end % interval != 0:
         raise PeriodicContractError("active slot is not UTC epoch aligned")
-    expected_slot_id = "sha256:" + hashlib.sha256(
-        f"periodic-png/v1:{slot_end}".encode("ascii")
-    ).hexdigest()
+    expected_slot_id = "sha256:" + hashlib.sha256(f"periodic-png/v1:{slot_end}".encode("ascii")).hexdigest()
     if slot_id != expected_slot_id:
         raise PeriodicContractError("active slot identity is inconsistent")
     window_start = _exact_int(active["window_start"], "window_start")
@@ -865,12 +902,8 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
     if high_water is None or slot_end > high_water:
         raise PeriodicContractError("active slot exceeds periodic high water")
     active["slot_id"] = slot_id
-    active["config_fingerprint"] = _validated_hash(
-        active["config_fingerprint"], "config_fingerprint"
-    )
-    active["destination_fingerprint"] = _validated_hash(
-        active["destination_fingerprint"], "destination_fingerprint"
-    )
+    active["config_fingerprint"] = _validated_hash(active["config_fingerprint"], "config_fingerprint")
+    active["destination_fingerprint"] = _validated_hash(active["destination_fingerprint"], "destination_fingerprint")
     generation = _validated_token(active["generation_id"], "generation_id")
     active["generation_id"] = generation
     active["owner_token"] = _validated_token(active["owner_token"], "owner_token")
@@ -882,22 +915,18 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
         active[field] = _exact_int(active[field], field, minimum=0, maximum=10)
     for field in ("max_render_attempts", "max_delivery_attempts"):
         active[field] = _exact_int(active[field], field, minimum=1, maximum=10)
-    if active["render_attempt_count"] > active["max_render_attempts"] or active[
-        "delivery_attempt_count"
-    ] > active["max_delivery_attempts"]:
+    if (
+        active["render_attempt_count"] > active["max_render_attempts"]
+        or active["delivery_attempt_count"] > active["max_delivery_attempts"]
+    ):
         raise PeriodicContractError("periodic attempt count exceeds its limit")
     active["not_before"] = _finite_time(active["not_before"], "not_before")
     artifact = active["artifact"]
-    active["artifact"] = (
-        None if artifact is None else _validate_artifact(artifact, generation_id=generation)
-    )
+    active["artifact"] = None if artifact is None else _validate_artifact(artifact, generation_id=generation)
     active["caption"] = _validated_caption(active["caption"])
-    message = active["telegram_message_id"]
-    if message is not None and (type(message) is not int or message <= 0):
-        raise PeriodicContractError("invalid telegram message ID")
-    active["failure_phase"] = _optional_choice(
-        active["failure_phase"], _FAILURE_PHASES, "failure_phase"
-    )
+    receipt = _validate_receipt(active["receipt"])
+    active["receipt"] = receipt
+    active["failure_phase"] = _optional_choice(active["failure_phase"], _FAILURE_PHASES, "failure_phase")
     retryable = active["retryable"]
     if retryable is not None and type(retryable) is not bool:
         raise PeriodicContractError("retryable must be a boolean or null")
@@ -926,10 +955,10 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
     ):
         raise PeriodicContractError("pre-render state contains artifact evidence")
     if status is PeriodicStatus.SUCCEEDED:
-        if message is None or finished is None:
+        if receipt is None or finished is None:
             raise PeriodicContractError("SUCCEEDED state lacks terminal evidence")
-    elif message is not None:
-        raise PeriodicContractError("only SUCCEEDED may contain a message ID")
+    elif receipt is not None:
+        raise PeriodicContractError("only SUCCEEDED may contain a delivery receipt")
     if status is PeriodicStatus.FAILED:
         if (
             active["failure_phase"] is None
@@ -945,9 +974,7 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
             raise PeriodicContractError("terminal FAILED state lacks finished_at")
         if active["retryable"] is True:
             if active["failure_phase"] not in {"render", "delivery"}:
-                raise PeriodicContractError(
-                    "only render or delivery failures may be retryable"
-                )
+                raise PeriodicContractError("only render or delivery failures may be retryable")
             attempts = (
                 active["render_attempt_count"]
                 if active["failure_phase"] == "render"
@@ -969,27 +996,35 @@ def _validate_active(value: object, high_water: object) -> dict[str, Any]:
             and finished is not None
         ):
             raise PeriodicContractError("DELIVERY_UNKNOWN lacks exact ambiguity evidence")
-    elif any(
-        active[field] is not None
-        for field in ("failure_phase", "retryable", "certainty", "error_code")
-    ) or active["error_text"]:
+    elif (
+        any(active[field] is not None for field in ("failure_phase", "retryable", "certainty", "error_code"))
+        or active["error_text"]
+    ):
         raise PeriodicContractError("non-failure state contains failure evidence")
     if status not in {PeriodicStatus.SUCCEEDED, PeriodicStatus.FAILED, PeriodicStatus.DELIVERY_UNKNOWN}:
         if finished is not None:
             raise PeriodicContractError("nonterminal state contains finished_at")
-    if status in {
-        PeriodicStatus.RENDERING,
-        PeriodicStatus.READY,
-        PeriodicStatus.DELIVERING,
-        PeriodicStatus.SUCCEEDED,
-        PeriodicStatus.DELIVERY_UNKNOWN,
-    } and active["render_attempt_count"] < 1:
+    if (
+        status
+        in {
+            PeriodicStatus.RENDERING,
+            PeriodicStatus.READY,
+            PeriodicStatus.DELIVERING,
+            PeriodicStatus.SUCCEEDED,
+            PeriodicStatus.DELIVERY_UNKNOWN,
+        }
+        and active["render_attempt_count"] < 1
+    ):
         raise PeriodicContractError("active status lacks render-attempt evidence")
-    if status in {
-        PeriodicStatus.DELIVERING,
-        PeriodicStatus.SUCCEEDED,
-        PeriodicStatus.DELIVERY_UNKNOWN,
-    } and active["delivery_attempt_count"] < 1:
+    if (
+        status
+        in {
+            PeriodicStatus.DELIVERING,
+            PeriodicStatus.SUCCEEDED,
+            PeriodicStatus.DELIVERY_UNKNOWN,
+        }
+        and active["delivery_attempt_count"] < 1
+    ):
         raise PeriodicContractError("active status lacks delivery-attempt evidence")
     if status is PeriodicStatus.FAILED and active["failure_phase"] == "delivery":
         if active["delivery_attempt_count"] < 1:
@@ -1010,11 +1045,11 @@ def _validate_artifact(value: object, *, generation_id: str) -> dict[str, Any]:
     if artifact["path"] != expected_path:
         raise PeriodicContractError("periodic artifact path is not authoritative")
     artifact["sha256"] = _validated_hash(artifact["sha256"], "artifact sha256")
-    artifact["size"] = _exact_int(artifact["size"], "artifact size", minimum=1, maximum=_MAX_PNG_BYTES)
+    artifact["size"] = _exact_int(artifact["size"], "artifact size", minimum=33, maximum=_MAX_PNG_BYTES)
     artifact["width"] = _exact_int(artifact["width"], "artifact width", minimum=100, maximum=10_000)
     artifact["height"] = _exact_int(artifact["height"], "artifact height", minimum=100, maximum=10_000)
     if artifact["width"] + artifact["height"] > 10_000 or artifact["width"] * artifact["height"] > 50_000_000:
-        raise PeriodicContractError("periodic artifact dimensions exceed Telegram bounds")
+        raise PeriodicContractError("periodic artifact dimensions exceed delivery bounds")
     if artifact["mime"] != "image/png":
         raise PeriodicContractError("periodic artifact MIME type is invalid")
     return artifact
@@ -1037,16 +1072,15 @@ def _validate_terminal(value: object, high_water: object) -> dict[str, Any]:
     )
     if item["artifact_sha256"] is not None:
         item["artifact_sha256"] = _validated_hash(item["artifact_sha256"], "terminal artifact hash")
-    message = item["telegram_message_id"]
-    if message is not None and (type(message) is not int or message <= 0):
-        raise PeriodicContractError("last terminal message ID is invalid")
+    receipt = _validate_receipt(item["receipt"])
+    item["receipt"] = receipt
     item["failure_phase"] = _optional_choice(item["failure_phase"], _FAILURE_PHASES, "failure_phase")
     item["certainty"] = _optional_choice(item["certainty"], _CERTAINTIES, "certainty")
     item["error_code"] = _validated_code(item["error_code"], required=False)
     item["error_text"] = _validated_text(item["error_text"])
     item["finished_at"] = _finite_time(item["finished_at"], "finished_at")
     if item["status"] == "SUCCEEDED" and (
-        message is None
+        receipt is None
         or item["artifact_sha256"] is None
         or item["failure_phase"] is not None
         or item["certainty"] is not None
@@ -1054,8 +1088,8 @@ def _validate_terminal(value: object, high_water: object) -> dict[str, Any]:
         or item["error_text"]
     ):
         raise PeriodicContractError("SUCCEEDED terminal summary is inconsistent")
-    if item["status"] != "SUCCEEDED" and message is not None:
-        raise PeriodicContractError("failed terminal summary contains message ID")
+    if item["status"] != "SUCCEEDED" and receipt is not None:
+        raise PeriodicContractError("failed terminal summary contains delivery receipt")
     if item["status"] == "FAILED" and (
         item["failure_phase"] is None or item["certainty"] is None or item["error_code"] is None
     ):
@@ -1092,15 +1126,11 @@ def _validate_unknown(value: object, high_water: object) -> dict[str, Any]:
     return item
 
 
-def _evidence_for_slot(
-    ledger: list[dict[str, Any]], slot_id: str
-) -> dict[str, Any] | None:
+def _evidence_for_slot(ledger: list[dict[str, Any]], slot_id: str) -> dict[str, Any] | None:
     return next((item for item in ledger if item["slot_id"] == slot_id), None)
 
 
-def _require_unknown_matches_active(
-    active: Mapping[str, object], evidence: Mapping[str, object]
-) -> None:
+def _require_unknown_matches_active(active: Mapping[str, object], evidence: Mapping[str, object]) -> None:
     artifact = active["artifact"]
     if not isinstance(artifact, Mapping):
         raise PeriodicContractError("unknown active state lacks artifact evidence")
@@ -1118,9 +1148,7 @@ def _require_unknown_matches_active(
         raise PeriodicContractError("unknown active state does not match durable evidence")
 
 
-def _require_unknown_matches_terminal(
-    terminal: Mapping[str, object], evidence: Mapping[str, object]
-) -> None:
+def _require_unknown_matches_terminal(terminal: Mapping[str, object], evidence: Mapping[str, object]) -> None:
     expected = {
         "slot_id": terminal["slot_id"],
         "slot_end": terminal["slot_end"],
@@ -1161,7 +1189,7 @@ def _terminal_summary(active: dict[str, Any]) -> dict[str, Any]:
         "status": active["status"],
         "destination_fingerprint": active["destination_fingerprint"],
         "artifact_sha256": artifact["sha256"] if isinstance(artifact, dict) else None,
-        "telegram_message_id": active["telegram_message_id"],
+        "receipt": active["receipt"],
         "failure_phase": active["failure_phase"],
         "certainty": active["certainty"],
         "error_code": active["error_code"],
@@ -1176,7 +1204,7 @@ def _is_terminal(active: Mapping[str, object]) -> bool:
     )
 
 
-def _destination_fingerprint(chat_id: int | str) -> str:
+def periodic_telegram_destination_fingerprint(chat_id: int | str) -> str:
     canonical = json.dumps(
         {"schema": "periodic-png-destination/v1", "chat_id": chat_id},
         sort_keys=True,
@@ -1184,6 +1212,12 @@ def _destination_fingerprint(chat_id: int | str) -> str:
         ensure_ascii=False,
     )
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def periodic_local_destination_fingerprint(nonce: str) -> str:
+    if type(nonce) is not str or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+        raise PeriodicContractError("soak-local destination nonce is invalid")
+    return "sha256:" + hashlib.sha256(f"soak-local/v1:{nonce}".encode("ascii")).hexdigest()
 
 
 def _validate_slot(slot: PeriodicSlot) -> None:
@@ -1257,7 +1291,7 @@ def _validated_caption(value: object) -> str:
     except UnicodeEncodeError:
         raise PeriodicContractError("periodic caption is not valid UTF-8") from None
     if len(value) > _MAX_CAPTION_CODEPOINTS or len(encoded) > _MAX_CAPTION_BYTES:
-        raise PeriodicContractError("periodic caption exceeds Telegram bounds")
+        raise PeriodicContractError("periodic caption exceeds delivery bounds")
     if _BOT_URL.search(value) or _BOT_TOKEN_SHAPE.search(value):
         raise PeriodicContractError("sensitive text is not permitted in periodic caption")
     return value
@@ -1282,9 +1316,7 @@ def _require_phase_certainty(phase: str, certainty: str) -> None:
 
 
 def _require_slot_identity(slot_id: str, slot_end: int) -> None:
-    expected = "sha256:" + hashlib.sha256(
-        f"periodic-png/v1:{slot_end}".encode("ascii")
-    ).hexdigest()
+    expected = "sha256:" + hashlib.sha256(f"periodic-png/v1:{slot_end}".encode("ascii")).hexdigest()
     if slot_id != expected:
         raise PeriodicContractError("periodic slot identity does not match its end")
 
@@ -1349,21 +1381,18 @@ _ACTIVE_EDGE_DELTAS: dict[tuple[str, str], set[str]] = {
         "caption",
         "updated_at",
     },
-    ("RENDERING", "FAILED"): {"status", "not_before", "updated_at"}
-    | _FAILURE_DELTA_FIELDS,
+    ("RENDERING", "FAILED"): {"status", "not_before", "updated_at"} | _FAILURE_DELTA_FIELDS,
     ("READY", "READY"): {"not_before", "updated_at"},
     ("READY", "DELIVERING"): {"status", "delivery_attempt_count", "updated_at"},
     ("READY", "FAILED"): {"status", "updated_at"} | _FAILURE_DELTA_FIELDS,
     ("DELIVERING", "SUCCEEDED"): {
         "status",
-        "telegram_message_id",
+        "receipt",
         "updated_at",
         "finished_at",
     },
-    ("DELIVERING", "FAILED"): {"status", "not_before", "updated_at"}
-    | _FAILURE_DELTA_FIELDS,
-    ("DELIVERING", "DELIVERY_UNKNOWN"): {"status", "updated_at"}
-    | _FAILURE_DELTA_FIELDS,
+    ("DELIVERING", "FAILED"): {"status", "not_before", "updated_at"} | _FAILURE_DELTA_FIELDS,
+    ("DELIVERING", "DELIVERY_UNKNOWN"): {"status", "updated_at"} | _FAILURE_DELTA_FIELDS,
     ("FAILED", "PENDING"): {
         "window_start",
         "config_fingerprint",
@@ -1376,12 +1405,11 @@ _ACTIVE_EDGE_DELTAS: dict[tuple[str, str], set[str]] = {
         "not_before",
         "artifact",
         "caption",
-        "telegram_message_id",
+        "receipt",
         "updated_at",
     }
     | _FAILURE_DELTA_FIELDS,
-    ("FAILED", "READY"): {"status", "not_before", "updated_at"}
-    | _FAILURE_DELTA_FIELDS,
+    ("FAILED", "READY"): {"status", "not_before", "updated_at"} | _FAILURE_DELTA_FIELDS,
     ("FAILED", "DELIVERING"): {
         "status",
         "delivery_attempt_count",
@@ -1392,9 +1420,7 @@ _ACTIVE_EDGE_DELTAS: dict[tuple[str, str], set[str]] = {
 }
 
 
-def _enforce_durable_transition(
-    current: Mapping[str, object], candidate: Mapping[str, object]
-) -> None:
+def _enforce_durable_transition(current: Mapping[str, object], candidate: Mapping[str, object]) -> None:
     """Require candidate to be one exact pure-helper successor of current."""
 
     if candidate["updated_at"] < current["updated_at"]:
@@ -1409,9 +1435,7 @@ def _enforce_durable_transition(
         and candidate["active"]["status"] == PeriodicStatus.PENDING.value
         and candidate["active"]["slot_end"] == new_high
     ):
-        raise PeriodicContractError(
-            "periodic high water may advance only with a matching new PENDING slot"
-        )
+        raise PeriodicContractError("periodic high water may advance only with a matching new PENDING slot")
     old_entries = current["unresolved_delivery"]
     new_entries = candidate["unresolved_delivery"]
     assert isinstance(old_entries, list) and isinstance(new_entries, list)
@@ -1428,9 +1452,7 @@ def _enforce_durable_transition(
             and before["status"] == PeriodicStatus.DELIVERING.value
             and after["status"] == PeriodicStatus.DELIVERY_UNKNOWN.value
         ):
-            raise PeriodicContractError(
-                "unresolved delivery evidence requires exact DELIVERING recovery"
-            )
+            raise PeriodicContractError("unresolved delivery evidence requires exact DELIVERING recovery")
 
     if candidate == current:
         return
@@ -1448,9 +1470,7 @@ def _enforce_durable_transition(
         raise PeriodicContractError("periodic current active state is invalid")
     if after is None:
         if _is_terminal(before):
-            expected = rotate_terminal_active(
-                PeriodicStateDocument(current), now=candidate["updated_at"]
-            )
+            expected = rotate_terminal_active(PeriodicStateDocument(current), now=candidate["updated_at"])
             _require_exact_successor(expected.payload, candidate)
             return
         raise PeriodicContractError("only a terminal active slot may be rotated")
@@ -1465,13 +1485,8 @@ def _enforce_durable_transition(
     _require_replayed_active_edge(current, candidate, edge)
 
 
-def _matches_health_only_transition(
-    current: Mapping[str, object], candidate: Mapping[str, object]
-) -> bool:
-    if any(
-        current[key] != candidate[key]
-        for key in _TOP_KEYS - {"health", "updated_at"}
-    ):
+def _matches_health_only_transition(current: Mapping[str, object], candidate: Mapping[str, object]) -> bool:
+    if any(current[key] != candidate[key] for key in _TOP_KEYS - {"health", "updated_at"}):
         return False
     if current["health"] == candidate["health"]:
         return False
@@ -1488,9 +1503,7 @@ def _matches_health_only_transition(
     return True
 
 
-def _require_new_pending_transition(
-    current: Mapping[str, object], candidate: Mapping[str, object]
-) -> None:
+def _require_new_pending_transition(current: Mapping[str, object], candidate: Mapping[str, object]) -> None:
     _require_only_field_deltas(
         current,
         candidate,
@@ -1508,9 +1521,7 @@ def _require_new_pending_transition(
     _require_fresh_pending_shape(active, candidate["updated_at"], attempts=(0, 0))
 
 
-def _require_retry_pending_transition(
-    current: Mapping[str, object], candidate: Mapping[str, object]
-) -> None:
+def _require_retry_pending_transition(current: Mapping[str, object], candidate: Mapping[str, object]) -> None:
     _require_only_field_deltas(
         current,
         candidate,
@@ -1547,9 +1558,7 @@ def _require_retry_pending_transition(
     )
 
 
-def _require_fresh_pending_shape(
-    active: Mapping[str, object], now: object, *, attempts: tuple[object, object]
-) -> None:
+def _require_fresh_pending_shape(active: Mapping[str, object], now: object, *, attempts: tuple[object, object]) -> None:
     expected = {
         "status": PeriodicStatus.PENDING.value,
         "render_attempt_count": attempts[0],
@@ -1557,7 +1566,7 @@ def _require_fresh_pending_shape(
         "not_before": now,
         "artifact": None,
         "caption": "",
-        "telegram_message_id": None,
+        "receipt": None,
         "failure_phase": None,
         "retryable": None,
         "certainty": None,
@@ -1663,7 +1672,7 @@ def _require_replayed_active_edge(
         attempt(
             lambda: mark_succeeded(
                 document,
-                message_id=after["telegram_message_id"],  # type: ignore[arg-type]
+                receipt=PeriodicDeliveryReceipt(**after["receipt"]),  # type: ignore[arg-type]
                 slot_id=slot_id,
                 owner_token=owner_token,
                 now=now,
@@ -1693,9 +1702,7 @@ def _require_replayed_active_edge(
         raise PeriodicContractError(f"periodic durable edge {edge[0]}->{edge[1]} is not replayable")
 
     if not any(result.payload == candidate for result in candidates):
-        raise PeriodicContractError(
-            f"periodic durable edge {edge[0]}->{edge[1]} is not an exact helper transition"
-        )
+        raise PeriodicContractError(f"periodic durable edge {edge[0]}->{edge[1]} is not an exact helper transition")
 
 
 def _replay_terminal_failure(
@@ -1731,9 +1738,7 @@ def _require_only_field_deltas(
         raise PeriodicContractError(f"{context} changed forbidden fields: {names}")
 
 
-def _require_exact_successor(
-    expected: Mapping[str, object], candidate: Mapping[str, object]
-) -> None:
+def _require_exact_successor(expected: Mapping[str, object], candidate: Mapping[str, object]) -> None:
     if expected != candidate:
         raise PeriodicContractError("periodic candidate is not the exact helper successor")
 
@@ -1753,9 +1758,7 @@ def _enforce_initial_durable_state(candidate: Mapping[str, object]) -> None:
         and active["status"] == PeriodicStatus.PENDING.value
         and active["slot_end"] == high_water
     ):
-        raise PeriodicContractError(
-            "initial high water requires a matching new PENDING slot"
-        )
+        raise PeriodicContractError("initial high water requires a matching new PENDING slot")
     if candidate["health"] != baseline["health"]:
         raise PeriodicContractError("initial PENDING state changed health before persistence")
     _require_fresh_pending_shape(active, candidate["updated_at"], attempts=(0, 0))
@@ -1844,13 +1847,16 @@ def _reject_json_constant(_value: str) -> object:
 
 def _json_text(payload: Mapping[str, object]) -> str:
     try:
-        return json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ) + "\n"
+        return (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        )
     except (TypeError, ValueError):
         raise PeriodicContractError("periodic state is not JSON serializable") from None
 

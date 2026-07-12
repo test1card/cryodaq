@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import cryodaq.periodic_state as periodic_state_module
+from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryReceipt
 from cryodaq.agents.assistant.periodic_png import PeriodicPngCoordinator
 from cryodaq.agents.assistant.periodic_telegram import (
     TelegramDeliveryResult,
@@ -41,6 +42,7 @@ from cryodaq.reporting.periodic_input import (
     verify_periodic_file_fence,
 )
 from tests.agents.assistant.test_periodic_png_coordinator import (
+    DESTINATION_FINGERPRINT,
     Alarm,
     Archive,
     Clock,
@@ -295,7 +297,7 @@ def _succeeded(data_dir: Path) -> tuple[str, int]:
     delivering = load_periodic_state(data_dir)
     succeeded = mark_succeeded(
         delivering,
-        message_id=77,
+        receipt=PeriodicDeliveryReceipt("telegram", "77", None),
         slot_id=slot_id,
         owner_token=_OWNER,
         now=125.0,
@@ -415,7 +417,9 @@ def _coordinator(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=runner,
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=(
             artifact_reader if artifact_reader is not None else lambda _data, _artifact: b"authorized-png"
         ),
@@ -823,7 +827,11 @@ async def test_crash_after_succeeded_never_resends(tmp_path: Path) -> None:
     payload, terminal = _terminal_payload(tmp_path)
     assert terminal["status"] == "SUCCEEDED"
     assert terminal["slot_id"] == slot_id
-    assert terminal["telegram_message_id"] == 77
+    assert terminal["receipt"] == {
+        "kind": "telegram",
+        "receipt_id": "77",
+        "acknowledgement_sha256": None,
+    }
     assert payload["high_water_slot_end"] == slot_end
     assert telegram.calls == 0
 

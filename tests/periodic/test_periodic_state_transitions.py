@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryReceipt
 from cryodaq.periodic_config import load_periodic_png_config
 from cryodaq.periodic_state import (
     MAX_UNRESOLVED_DELIVERIES,
@@ -76,12 +77,8 @@ def _artifact(generation: str) -> PeriodicArtifact:
 
 
 def _ready(tmp_path: Path, state=None, *, slot_end: int = 7_200, serial: int = 1):
-    state, slot, owner, generation = _allocate(
-        tmp_path, state, slot_end=slot_end, serial=serial
-    )
-    state = mark_rendering(
-        state, slot_id=slot.slot_id, owner_token=owner, now=float(slot_end + 2)
-    )
+    state, slot, owner, generation = _allocate(tmp_path, state, slot_end=slot_end, serial=serial)
+    state = mark_rendering(state, slot_id=slot.slot_id, owner_token=owner, now=float(slot_end + 2))
     state = mark_ready(
         state,
         _artifact(generation),
@@ -112,13 +109,21 @@ def test_render_and_success_transitions_are_owner_status_fenced(tmp_path: Path) 
     state = mark_delivering(state, slot_id=slot.slot_id, owner_token=owner, now=7_204)
     assert state.payload["active"]["delivery_attempt_count"] == 1
     state = mark_succeeded(
-        state, message_id=42, slot_id=slot.slot_id, owner_token=owner, now=7_205
+        state,
+        receipt=PeriodicDeliveryReceipt("telegram", "42", None),
+        slot_id=slot.slot_id,
+        owner_token=owner,
+        now=7_205,
     )
     assert state.payload["active"]["status"] == "SUCCEEDED"
     state = rotate_terminal_active(state, now=7_206)
     assert state.payload["active"] is None
     assert "display_time" not in state.payload["last_terminal"]
-    assert state.payload["last_terminal"]["telegram_message_id"] == 42
+    assert state.payload["last_terminal"]["receipt"] == {
+        "kind": "telegram",
+        "receipt_id": "42",
+        "acknowledgement_sha256": None,
+    }
     assert state.payload["high_water_slot_end"] == 7_200
     malformed = copy.deepcopy(state.payload)
     malformed["last_terminal"]["certainty"] = "rejected"
@@ -231,9 +236,7 @@ def test_pending_render_failures_consume_attempts_and_exhaust(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("phase", ["scheduler", "config"])
-def test_scheduler_and_config_failures_cannot_create_retryable_bricks(
-    tmp_path: Path, phase: str
-) -> None:
+def test_scheduler_and_config_failures_cannot_create_retryable_bricks(tmp_path: Path, phase: str) -> None:
     state, slot, owner, _generation = _allocate(tmp_path)
     with pytest.raises(PeriodicContractError, match="cannot be retryable"):
         mark_retryable_failure(
@@ -267,18 +270,14 @@ def test_failure_phase_and_certainty_pairs_are_exact(tmp_path: Path) -> None:
 
 def test_loaded_status_requires_attempt_evidence(tmp_path: Path) -> None:
     state, slot, owner, _generation = _allocate(tmp_path)
-    rendering = mark_rendering(
-        state, slot_id=slot.slot_id, owner_token=owner, now=7_202
-    )
+    rendering = mark_rendering(state, slot_id=slot.slot_id, owner_token=owner, now=7_202)
     payload = copy.deepcopy(rendering.payload)
     payload["active"]["render_attempt_count"] = 0
     with pytest.raises(PeriodicContractError, match="render-attempt evidence"):
         PeriodicStateDocument(payload)
 
     delivering, slot, owner = _ready(tmp_path / "delivery")
-    delivering = mark_delivering(
-        delivering, slot_id=slot.slot_id, owner_token=owner, now=7_204
-    )
+    delivering = mark_delivering(delivering, slot_id=slot.slot_id, owner_token=owner, now=7_204)
     payload = copy.deepcopy(delivering.payload)
     payload["active"]["delivery_attempt_count"] = 0
     with pytest.raises(PeriodicContractError, match="delivery-attempt evidence"):
@@ -350,9 +349,7 @@ def test_unknown_rotation_allows_strictly_newer_slot_and_preserves_evidence(tmp_
     )
     state = rotate_terminal_active(state, now=7_206)
     evidence = dict(state.payload["unresolved_delivery"][0])
-    state, newer, _owner, _generation = _allocate(
-        tmp_path, state, slot_end=9_000, serial=2
-    )
+    state, newer, _owner, _generation = _allocate(tmp_path, state, slot_end=9_000, serial=2)
     assert state.payload["high_water_slot_end"] == newer.slot_end
     assert state.payload["unresolved_delivery"][0] == evidence
 
@@ -361,12 +358,8 @@ def test_full_unknown_ledger_pauses_ready_without_eviction_or_supersession(tmp_p
     state = None
     for index in range(MAX_UNRESOLVED_DELIVERIES):
         slot_end = 7_200 + index * 1_800
-        state, slot, owner = _ready(
-            tmp_path, state, slot_end=slot_end, serial=index + 1
-        )
-        state = mark_delivering(
-            state, slot_id=slot.slot_id, owner_token=owner, now=slot_end + 4
-        )
+        state, slot, owner = _ready(tmp_path, state, slot_end=slot_end, serial=index + 1)
+        state = mark_delivering(state, slot_id=slot.slot_id, owner_token=owner, now=slot_end + 4)
         state = mark_delivery_unknown(
             state,
             code="ambiguous",
@@ -379,12 +372,8 @@ def test_full_unknown_ledger_pauses_ready_without_eviction_or_supersession(tmp_p
     assert len(state.payload["unresolved_delivery"]) == MAX_UNRESOLVED_DELIVERIES
     first_evidence = dict(state.payload["unresolved_delivery"][0])
     slot_end = 7_200 + MAX_UNRESOLVED_DELIVERIES * 1_800
-    state, slot, owner = _ready(
-        tmp_path, state, slot_end=slot_end, serial=MAX_UNRESOLVED_DELIVERIES + 1
-    )
-    paused = mark_delivering(
-        state, slot_id=slot.slot_id, owner_token=owner, now=slot_end + 4
-    )
+    state, slot, owner = _ready(tmp_path, state, slot_end=slot_end, serial=MAX_UNRESOLVED_DELIVERIES + 1)
+    paused = mark_delivering(state, slot_id=slot.slot_id, owner_token=owner, now=slot_end + 4)
     assert paused.payload["active"]["status"] == "READY"
     assert paused.payload["health"]["status"] == "paused_unknown_capacity"
     assert len(paused.payload["unresolved_delivery"]) == MAX_UNRESOLVED_DELIVERIES

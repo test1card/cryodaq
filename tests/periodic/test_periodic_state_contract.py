@@ -39,11 +39,7 @@ def _config(tmp_path: Path):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
     (config_dir / "notifications.yaml").write_text(
-        "telegram:\n"
-        f"  bot_token: {TOKEN!r}\n"
-        "  chat_id: -100123\n"
-        "periodic_report:\n"
-        "  enabled: true\n",
+        f"telegram:\n  bot_token: {TOKEN!r}\n  chat_id: -100123\nperiodic_report:\n  enabled: true\n",
         encoding="utf-8",
     )
     loaded = load_periodic_png_config(config_dir)
@@ -102,7 +98,7 @@ def _unknown(tmp_path: Path) -> PeriodicStateDocument:
 def test_empty_state_is_pure_and_not_written(tmp_path: Path) -> None:
     data = tmp_path / "data"
     state = load_periodic_state(data)
-    assert state.payload["schema"] == 1
+    assert state.payload["schema"] == 2
     assert state.payload["high_water_slot_end"] is None
     assert state.payload["active"] is None
     assert not periodic_state_path(data).exists()
@@ -111,15 +107,9 @@ def test_empty_state_is_pure_and_not_written(tmp_path: Path) -> None:
 def test_periodic_paths_are_derived_from_validated_generation(tmp_path: Path) -> None:
     data = tmp_path / "data"
     generation = "a" * 32
-    assert periodic_input_path(data, generation).as_posix().endswith(
-        f"reporting/periodic/inputs/{generation}.json"
-    )
-    assert periodic_staging_dir(data, generation).as_posix().endswith(
-        f"reporting/periodic/.staging/{generation}"
-    )
-    assert periodic_generation_dir(data, generation).as_posix().endswith(
-        f"reporting/periodic/generations/{generation}"
-    )
+    assert periodic_input_path(data, generation).as_posix().endswith(f"reporting/periodic/inputs/{generation}.json")
+    assert periodic_staging_dir(data, generation).as_posix().endswith(f"reporting/periodic/.staging/{generation}")
+    assert periodic_generation_dir(data, generation).as_posix().endswith(f"reporting/periodic/generations/{generation}")
     for unsafe in ("../escape", "/absolute", "A" * 32, "a" * 31):
         with pytest.raises(PeriodicContractError):
             periodic_input_path(data, unsafe)
@@ -164,9 +154,7 @@ def test_write_reload_and_exact_fence(tmp_path: Path) -> None:
 def test_incomplete_write_fence_is_rejected(tmp_path: Path) -> None:
     state = _pending(tmp_path)
     with pytest.raises(PeriodicContractError, match="requires"):
-        write_periodic_state(
-            tmp_path / "data", state, expected_slot_id="sha256:" + "0" * 64
-        )
+        write_periodic_state(tmp_path / "data", state, expected_slot_id="sha256:" + "0" * 64)
 
     active = state.payload["active"]
     assert isinstance(active, dict)
@@ -184,7 +172,7 @@ def test_incomplete_write_fence_is_rejected(tmp_path: Path) -> None:
     "mutator",
     [
         lambda p: p.__setitem__("future", 1),
-        lambda p: p.__setitem__("schema", 2),
+        lambda p: p.__setitem__("schema", 3),
         lambda p: p.__setitem__("high_water_slot_end", True),
         lambda p: p.__setitem__("unknown_overflow_count", False),
         lambda p: p.__setitem__("updated_at", float("nan")),
@@ -224,9 +212,7 @@ def test_loader_rejects_duplicate_keys_and_nonfinite_json(tmp_path: Path) -> Non
         '{"schema":1,"nested":' + "[" * 2_000 + "0" + "]" * 2_000 + "}",
     ],
 )
-def test_hostile_bounded_state_json_normalizes_parser_failures(
-    tmp_path: Path, raw: str
-) -> None:
+def test_hostile_bounded_state_json_normalizes_parser_failures(tmp_path: Path, raw: str) -> None:
     data = tmp_path / "data"
     reporting = data / "reporting"
     reporting.mkdir(parents=True)
@@ -345,9 +331,7 @@ def test_high_water_advances_atomically_with_pending(tmp_path: Path) -> None:
         "10.07.2026 04:05\n",
     ],
 )
-def test_allocation_rejects_noncanonical_or_invalid_display_time(
-    tmp_path: Path, display_time: object
-) -> None:
+def test_allocation_rejects_noncanonical_or_invalid_display_time(tmp_path: Path, display_time: object) -> None:
     config = _config(tmp_path)
     slot = latest_completed_slot(7_201.0, config.interval_s)
     with pytest.raises(PeriodicContractError, match="display_time"):
@@ -499,9 +483,7 @@ def test_file_fsync_failure_is_not_reported_as_durable(tmp_path: Path, monkeypat
     assert not periodic_state_path(data).exists()
 
 
-def test_directory_fsync_failure_surfaces_after_valid_replace(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_directory_fsync_failure_surfaces_after_valid_replace(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "data"
     real_fsync = periodic_state_module.os.fsync
     calls = 0

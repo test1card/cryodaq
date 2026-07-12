@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.agents.assistant.periodic_delivery import (
+    PeriodicDeliveryOutcome,
+    PeriodicDeliveryReceipt,
+    PeriodicDeliveryResult,
+)
 from cryodaq.agents.assistant.periodic_png import (
     PeriodicContractError,
     PeriodicPngCoordinator,
@@ -35,6 +40,7 @@ from cryodaq.periodic_state import (
 )
 from cryodaq.report_process import ReportProcessError, write_periodic_input_file
 from tests.agents.assistant.test_periodic_png_coordinator import (
+    DESTINATION_FINGERPRINT,
     Alarm,
     Archive,
     Clock,
@@ -147,7 +153,9 @@ async def test_recovered_delivering_becomes_unknown_without_sender_call(tmp_path
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(130.0),
     )
     await coordinator.start()
@@ -184,7 +192,9 @@ async def test_artifact_reader_runs_before_delivering_and_failure_sends_nothing(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=failed_reader,
         clock=Clock(124.0),
     )
@@ -221,7 +231,9 @@ async def test_non_bytes_artifact_reader_terminalizes_ready_without_send(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: bytearray(b"mutable"),
         clock=Clock(124.0),
     )
@@ -302,7 +314,9 @@ async def test_due_delivery_failure_artifact_loss_preserves_phase_and_settles(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=missing_artifact,
         clock=Clock(124.0),
     )
@@ -340,9 +354,7 @@ async def test_config_change_terminalizes_retryable_failed_without_rewriting_pha
         now=121.0,
     )
     write_periodic_state(tmp_path, pending)
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token="7" * 32, now=122.0
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token="7" * 32, now=122.0)
     write_periodic_state(
         tmp_path,
         rendering,
@@ -376,7 +388,9 @@ async def test_config_change_terminalizes_retryable_failed_without_rewriting_pha
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(130.0),
     )
     await coordinator.start()
@@ -394,9 +408,7 @@ async def test_config_change_terminalizes_retryable_failed_without_rewriting_pha
         await coordinator.stop()
 
 
-def _persist_pre_delivery_status(
-    data_dir: Path, config, status: PeriodicStatus
-) -> None:
+def _persist_pre_delivery_status(data_dir: Path, config, status: PeriodicStatus) -> None:
     state = load_periodic_state(data_dir)
     slot = latest_completed_slot(121.0, 60)
     pending = allocate_pending(
@@ -411,9 +423,7 @@ def _persist_pre_delivery_status(
     write_periodic_state(data_dir, pending)
     if status is PeriodicStatus.PENDING:
         return
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token="b" * 32, now=122.0
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token="b" * 32, now=122.0)
     write_periodic_state(
         data_dir,
         rendering,
@@ -448,12 +458,8 @@ def _persist_pre_delivery_status(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "status", (PeriodicStatus.PENDING, PeriodicStatus.RENDERING, PeriodicStatus.READY)
-)
-async def test_config_change_terminalizes_each_pre_delivery_status(
-    tmp_path: Path, status: PeriodicStatus
-) -> None:
+@pytest.mark.parametrize("status", (PeriodicStatus.PENDING, PeriodicStatus.RENDERING, PeriodicStatus.READY))
+async def test_config_change_terminalizes_each_pre_delivery_status(tmp_path: Path, status: PeriodicStatus) -> None:
     original = _config()
     _persist_pre_delivery_status(tmp_path, original, status)
     changed = replace(original, config_fingerprint="sha256:" + "e" * 64)
@@ -472,7 +478,9 @@ async def test_config_change_terminalizes_each_pre_delivery_status(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     await coordinator.start()
@@ -513,7 +521,9 @@ async def test_config_change_during_delivering_preserves_unknown_no_resend(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(130.0),
     )
     await coordinator.start()
@@ -627,7 +637,9 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
     )
@@ -637,9 +649,7 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
             payload = (await _load_stable(tmp_path)).payload
             active = payload["active"]
             terminal = payload["last_terminal"]
-            if terminal is not None or (
-                isinstance(active, dict) and active["status"] == "FAILED"
-            ):
+            if terminal is not None or (isinstance(active, dict) and active["status"] == "FAILED"):
                 break
             await asyncio.sleep(0.001)
         payload = (await _load_stable(tmp_path)).payload
@@ -681,7 +691,9 @@ async def test_delivery_attempt_exhaustion_is_terminal(tmp_path: Path) -> None:
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Rejected(),
+        delivery=Rejected(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
     )
@@ -716,7 +728,9 @@ async def test_sender_exception_after_invocation_becomes_delivery_unknown(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=ExplodingTelegram(),
+        delivery=ExplodingTelegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
     )
@@ -731,8 +745,155 @@ async def test_sender_exception_after_invocation_becomes_delivery_unknown(
         payload = (await _load_stable(tmp_path)).payload
         observed = payload["last_terminal"] or payload["active"]
         assert observed["status"] == "DELIVERY_UNKNOWN"
-        assert observed["error_code"] == "telegram_internal_unknown"
+        assert observed["error_code"] == "delivery_internal_unknown"
         assert observed["certainty"] == "unknown"
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_malformed_provider_result_after_invocation_becomes_delivery_unknown(
+    tmp_path: Path,
+) -> None:
+    _persist_ready(tmp_path)
+
+    class MalformedDelivery(Telegram):
+        async def send_artifact(self, _photo, _caption, _context):
+            return object()
+
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=_config(),
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=MalformedDelivery(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        artifact_reader=lambda _data, _artifact: b"authorized",
+        clock=Clock(124.0),
+    )
+    await coordinator.start()
+    try:
+        for _ in range(100):
+            payload = (await _load_stable(tmp_path)).payload
+            observed = payload["last_terminal"] or payload["active"]
+            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
+                break
+            await asyncio.sleep(0.001)
+        assert observed["status"] == "DELIVERY_UNKNOWN"
+        assert observed["error_code"] == "delivery_internal_unknown"
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expected_kind", "receipt"),
+    (
+        (
+            "telegram",
+            PeriodicDeliveryReceipt("soak_local", "g1:s1", "sha256:" + "a" * 64),
+        ),
+        ("soak_local", PeriodicDeliveryReceipt("telegram", "42", None)),
+    ),
+)
+async def test_accepted_cross_kind_receipt_is_durable_unknown(
+    tmp_path: Path,
+    expected_kind: str,
+    receipt: PeriodicDeliveryReceipt,
+) -> None:
+    _persist_ready(tmp_path)
+
+    class CrossKindDelivery(Telegram):
+        async def send_artifact(self, _photo, _caption, _context):
+            return PeriodicDeliveryResult(
+                PeriodicDeliveryOutcome.ACCEPTED,
+                receipt,
+                False,
+                None,
+                None,
+                "",
+            )
+
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=_config(),
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=CrossKindDelivery(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind=expected_kind,
+        artifact_reader=lambda _data, _artifact: b"authorized",
+        clock=Clock(124.0),
+    )
+    await coordinator.start()
+    try:
+        for _ in range(100):
+            payload = (await _load_stable(tmp_path)).payload
+            observed = payload["last_terminal"] or payload["active"]
+            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
+                break
+            await asyncio.sleep(0.001)
+        assert observed["status"] == "DELIVERY_UNKNOWN"
+        assert observed["error_code"] == "delivery_receipt_kind_mismatch"
+        assert observed["receipt"] is None
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", ("result", "receipt"))
+async def test_post_construction_delivery_result_corruption_is_unknown(
+    tmp_path: Path,
+    corrupt: str,
+) -> None:
+    _persist_ready(tmp_path)
+
+    class CorruptDelivery(Telegram):
+        async def send_artifact(self, _photo, _caption, _context):
+            receipt = PeriodicDeliveryReceipt("telegram", "42", None)
+            result = PeriodicDeliveryResult(
+                PeriodicDeliveryOutcome.ACCEPTED,
+                receipt,
+                False,
+                None,
+                None,
+                "",
+            )
+            if corrupt == "result":
+                object.__setattr__(result, "retryable", True)
+            else:
+                object.__setattr__(receipt, "acknowledgement_sha256", "sha256:" + "a" * 64)
+            return result
+
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=_config(),
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=CorruptDelivery(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        artifact_reader=lambda _data, _artifact: b"authorized",
+        clock=Clock(124.0),
+    )
+    await coordinator.start()
+    try:
+        for _ in range(100):
+            payload = (await _load_stable(tmp_path)).payload
+            observed = payload["last_terminal"] or payload["active"]
+            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
+                break
+            await asyncio.sleep(0.001)
+        assert observed["status"] == "DELIVERY_UNKNOWN"
+        assert observed["error_code"] == "delivery_internal_unknown"
+        assert observed["receipt"] is None
     finally:
         await coordinator.stop()
 
@@ -761,7 +922,9 @@ async def test_retry_after_is_used_as_exact_durable_delivery_deadline(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=RetryAfterTelegram(),
+        delivery=RetryAfterTelegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
     )
@@ -817,9 +980,7 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
             self.calls += 1
             self.entered.set()
             await self.release.wait()
-            return TelegramDeliveryResult(
-                TelegramOutcome.ACCEPTED, 81, 200, None, None, ""
-            )
+            return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 81, 200, None, None, "")
 
     clock = PulseClock()
     telegram = BlockingTelegram()
@@ -830,7 +991,9 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=clock,
     )
@@ -845,9 +1008,7 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
                 await asyncio.sleep(0.001)
             clock.advance(30.0)
             for _ in range(100):
-                current = (await _load_stable(tmp_path)).payload["health"][
-                    "updated_at"
-                ]
+                current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
                 if current > previous:
                     break
                 await asyncio.sleep(0.001)
@@ -901,9 +1062,7 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
             self.calls += 1
             self.entered.set()
             await self.release.wait()
-            return TelegramDeliveryResult(
-                TelegramOutcome.ACCEPTED, 82, 200, None, None, ""
-            )
+            return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 82, 200, None, None, "")
 
     clock = PulseClock()
     telegram = RacingTelegram()
@@ -914,11 +1073,7 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
 
     async def pausing_blocking(fn, *args, **kwargs):
         nonlocal paused_once
-        if (
-            pause_health_load
-            and not paused_once
-            and fn.__name__ == "load_periodic_state"
-        ):
+        if pause_health_load and not paused_once and fn.__name__ == "load_periodic_state":
             paused_once = True
             load_entered.set()
             await load_release.wait()
@@ -931,7 +1086,9 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=clock,
         run_blocking=pausing_blocking,
@@ -979,9 +1136,7 @@ def _append_unknown_slot(data_dir: Path, config, end: int, index: int) -> None:
         now=float(end + 1),
     )
     write_periodic_state(data_dir, pending)
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token=owner, now=float(end + 2)
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token=owner, now=float(end + 2))
     write_periodic_state(
         data_dir,
         rendering,
@@ -1011,9 +1166,7 @@ def _append_unknown_slot(data_dir: Path, config, end: int, index: int) -> None:
         expected_owner_token=owner,
         expected_status=PeriodicStatus.RENDERING,
     )
-    delivering = mark_delivering(
-        ready, slot_id=slot.slot_id, owner_token=owner, now=float(end + 4)
-    )
+    delivering = mark_delivering(ready, slot_id=slot.slot_id, owner_token=owner, now=float(end + 4))
     write_periodic_state(
         data_dir,
         delivering,
@@ -1065,7 +1218,9 @@ async def test_full_unknown_ledger_pauses_ready_and_never_calls_sender(tmp_path:
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(float(_append_end + 4)),
     )
@@ -1085,9 +1240,7 @@ async def test_full_unknown_ledger_pauses_ready_and_never_calls_sender(tmp_path:
         assert coordinator._reconcile_lock is not None
         async with coordinator._reconcile_lock:
             await coordinator._refresh_periodic_authority_if_due()
-        assert (await _load_stable(tmp_path)).payload["health"]["status"] == (
-            "paused_unknown_capacity"
-        )
+        assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("paused_unknown_capacity")
     finally:
         await coordinator.stop()
 
@@ -1121,7 +1274,9 @@ async def test_newer_slot_with_full_ledger_persists_pause_without_send(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(float(active_end + config.interval_s + 4)),
     )
@@ -1157,9 +1312,7 @@ def _persist_ready_for_end(data_dir: Path, config, end: int) -> None:
         now=float(end + 1),
     )
     write_periodic_state(data_dir, pending)
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token=owner, now=float(end + 2)
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token=owner, now=float(end + 2))
     write_periodic_state(
         data_dir,
         rendering,
@@ -1232,7 +1385,9 @@ async def test_state_fence_change_during_artifact_read_prevents_send(tmp_path: P
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=racing_reader,
         clock=Clock(124.0),
     )
@@ -1266,9 +1421,7 @@ async def test_cancel_after_delivering_waits_for_result_persistence(tmp_path: Pa
         async def send_photo(self, _photo: bytes, _caption: str):
             self.entered.set()
             await self.release.wait()
-            return TelegramDeliveryResult(
-                TelegramOutcome.ACCEPTED, 42, 200, None, None, ""
-            )
+            return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, 42, 200, None, None, "")
 
     telegram = BlockingTelegram()
     coordinator = PeriodicPngCoordinator(
@@ -1278,7 +1431,9 @@ async def test_cancel_after_delivering_waits_for_result_persistence(tmp_path: Pa
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=clock,
     )
@@ -1310,9 +1465,7 @@ def _persist_rendering(data_dir: Path) -> None:
         now=121.0,
     )
     write_periodic_state(data_dir, pending)
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token="9" * 32, now=122.0
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token="9" * 32, now=122.0)
     write_periodic_state(
         data_dir,
         rendering,
@@ -1324,9 +1477,7 @@ def _persist_rendering(data_dir: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_site", ("recover", "generate", "post_recover"))
-async def test_state_and_fence_render_authority_errors_abort_without_attempt(
-    tmp_path: Path, failure_site: str
-) -> None:
+async def test_state_and_fence_render_authority_errors_abort_without_attempt(tmp_path: Path, failure_site: str) -> None:
     if failure_site == "recover":
         _persist_rendering(tmp_path)
     else:
@@ -1335,17 +1486,13 @@ async def test_state_and_fence_render_authority_errors_abort_without_attempt(
     class AuthorityRunner(Runner):
         def recover_periodic(self, *_args, **_kwargs):
             if failure_site in {"recover", "post_recover"}:
-                raise ReportProcessError(
-                    "periodic_fence_mismatch", "durable periodic fence changed"
-                )
+                raise ReportProcessError("periodic_fence_mismatch", "durable periodic fence changed")
             return None
 
         def generate_periodic(self, *_args, **_kwargs):
             if failure_site == "post_recover":
                 raise ReportProcessError("render_failed", "periodic renderer failed")
-            raise ReportProcessError(
-                "periodic_state_unavailable", "periodic state is unavailable"
-            )
+            raise ReportProcessError("periodic_state_unavailable", "periodic state is unavailable")
 
     coordinator = PeriodicPngCoordinator(
         data_dir=tmp_path,
@@ -1354,7 +1501,9 @@ async def test_state_and_fence_render_authority_errors_abort_without_attempt(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=AuthorityRunner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     await coordinator.start()
@@ -1387,7 +1536,9 @@ async def test_ordinary_generate_failure_recovers_then_consumes_fixed_attempt(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=OrdinaryFailureRunner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     await coordinator.start()
@@ -1427,7 +1578,9 @@ async def test_ordinary_generate_failure_adopts_promoted_final_before_retry(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=PromotedFinalRunner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
     )
@@ -1500,7 +1653,9 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
         alarm_query=alarm,
         archive_query=Archive(),
         runner=runner,
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=clock,
         run_blocking=blocking_seam,
     )
@@ -1517,9 +1672,7 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
                 await asyncio.sleep(0.001)
             clock.advance(30.0)
             for _ in range(100):
-                current = (await _load_stable(tmp_path)).payload["health"][
-                    "updated_at"
-                ]
+                current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
                 if current > previous:
                     break
                 await asyncio.sleep(0.001)
@@ -1546,9 +1699,7 @@ async def test_closed_input_publication_failure_consumes_known_render_attempt(
 
     async def authority_blocking(fn, *args, **kwargs):
         if fn.__name__ == "write_periodic_input_file":
-            raise ReportProcessError(
-                "unsafe_periodic_input", "periodic input path is unsafe"
-            )
+            raise ReportProcessError("unsafe_periodic_input", "periodic input path is unsafe")
         return await asyncio.to_thread(fn, *args, **kwargs)
 
     coordinator = PeriodicPngCoordinator(
@@ -1558,7 +1709,9 @@ async def test_closed_input_publication_failure_consumes_known_render_attempt(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
         run_blocking=authority_blocking,
     )
@@ -1579,9 +1732,7 @@ async def test_closed_input_publication_failure_consumes_known_render_attempt(
         await coordinator.stop()
 
 
-def _install_structurally_valid_mismatched_input(
-    data_dir: Path, mismatch: str
-) -> None:
+def _install_structurally_valid_mismatched_input(data_dir: Path, mismatch: str) -> None:
     active = load_periodic_state(data_dir).payload["active"]
     payload = {
         "schema": 1,
@@ -1607,9 +1758,7 @@ def _install_structurally_valid_mismatched_input(
             "bad_points": 0,
             "source_errors": [],
         },
-        "readings": [
-            {"ts": 100.0, "iid": "ls", "ch": "T", "v": 1.0, "u": "K", "st": "ok"}
-        ],
+        "readings": [{"ts": 100.0, "iid": "ls", "ch": "T", "v": 1.0, "u": "K", "st": "ok"}],
         "alarms": [],
     }
     if mismatch == "window":
@@ -1631,9 +1780,7 @@ def _install_structurally_valid_mismatched_input(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mismatch", ("window", "include", "points", "bytes"))
-async def test_existing_input_reuse_requires_every_deterministic_binding(
-    tmp_path: Path, mismatch: str
-) -> None:
+async def test_existing_input_reuse_requires_every_deterministic_binding(tmp_path: Path, mismatch: str) -> None:
     _persist_pre_delivery_status(tmp_path, _config(), PeriodicStatus.PENDING)
     _install_structurally_valid_mismatched_input(tmp_path, mismatch)
     coordinator = PeriodicPngCoordinator(
@@ -1643,7 +1790,9 @@ async def test_existing_input_reuse_requires_every_deterministic_binding(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     await coordinator.start()
@@ -1673,7 +1822,9 @@ async def test_rendering_without_live_owner_becomes_retryable_orphan_failure(
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     await coordinator.start()
@@ -1707,7 +1858,9 @@ async def test_rendering_with_held_lock_waits_without_state_mutation(tmp_path: P
         alarm_query=Alarm(),
         archive_query=Archive(),
         runner=Runner(),
-        telegram=Telegram(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     try:
@@ -1736,7 +1889,9 @@ async def test_corrupt_state_is_preserved_and_start_fails_closed(tmp_path: Path)
         alarm_query=alarm,
         archive_query=Archive(),
         runner=Runner(),
-        telegram=telegram,
+        delivery=telegram,
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
         clock=Clock(124.0),
     )
     with pytest.raises(PeriodicContractError):
