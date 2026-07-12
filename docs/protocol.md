@@ -10,6 +10,7 @@ no version negotiation handshake — see "The rule" below for why.
 |---|---|---|---|
 | Engine PUB | `tcp://127.0.0.1:5555`, topic `readings` | engine → GUI/subscribers | msgpack `Reading` dict: `ts,iid,ch,v,u,st,raw,meta` |
 | Engine PUB | `tcp://127.0.0.1:5555`, topic `events` | engine → assistant | JSON `EngineEvent` dict: `event_type,ts,payload,experiment_id` |
+| Engine PUB (reserved, not yet activated) | `tcp://127.0.0.1:5555`, topic `operator.snapshot` | future engine/replay → GUI | canonical UTF-8 JSON `cryodaq.operator-snapshot` envelope v1, exactly two bytes frames |
 | Engine REP | `tcp://127.0.0.1:5556` | GUI/web/assistant clients → engine | JSON command envelope, see below |
 | Assistant REP | `tcp://127.0.0.1:5557` | GUI (`assistant.*`/`rag.*` commands) → assistant | same JSON command envelope |
 | REST/web | `http://127.0.0.1:8080` (`/api/*`, `/api/v1/*`) | any HTTP client → web process | JSON over HTTP |
@@ -60,7 +61,7 @@ declaring its own constant — engine ZMQ, assistant ZMQ, and REST all ship
 from the same package build, so one number is honest. A REST-only breaking
 change still bumps the shared constant.
 
-## PUB stream (readings / events)
+## PUB stream (readings / events / operator snapshot)
 
 The PUB frames are **not** touched by this policy's `proto` injection —
 adding a field to a fixed-schema msgpack/JSON frame that subscribers unpack
@@ -68,6 +69,21 @@ positionally-by-key would itself be a compatibility question, not a free
 add. Topic names (`readings`, `events`) and the frame shapes listed above
 are frozen as part of proto v1; changing either is a v2 event (see "The
 rule").
+
+`operator.snapshot` is an additive, independent observational topic. Its
+multipart representation is exactly `[b"operator.snapshot", payload]`; both
+frames are built-in bytes and `payload` is exactly the canonical UTF-8 output
+of `dump_operator_snapshot`. The receiver enforces the 8 MiB protocol cap
+before UTF-8 or JSON decoding, then requires canonical byte equality. The
+envelope's own `schema` and `version` fields govern snapshot compatibility.
+The pure frame codec reserves this contract but does not activate a publisher,
+subscriber, engine, replay, or GUI route; those remain separate reviewed
+slices.
+Adding this independent topic does not alter either existing PUB frame and
+therefore does not bump the shared REP/REST `PROTOCOL_VERSION`. A change to its
+topic, frame count, canonical representation, schema, or semantics requires a
+reviewed snapshot-envelope version migration; publishers must not dual-send a
+fallback shape under the same topic.
 
 ## The rule
 

@@ -11,6 +11,11 @@
 
 ### Added
 
+- Добавлен неактивированный чистый wire-контракт для авторитетного
+  operator snapshot: отдельный observational PUB topic `operator.snapshot`,
+  ровно два bytes-frame и канонический UTF-8 JSON существующей строгой схемы
+  snapshot v1. Кодек не импортирует ZMQ/Qt/engine/replay, ограничивает payload
+  до 8 MiB перед декодированием и выдаёт стабильные bounded reason codes.
 - Добавлено версионирование ZMQ/REST-протокола (`PROTOCOL_VERSION = 1`):
   каждый REP-ответ получает дополнительное поле `proto`; read-only команда
   `protocol_version` возвращает `{ok, proto, server, app_version}`, а
